@@ -41,6 +41,7 @@ struct SinkState {
     /// A delegated task: its text updates the delegating turn's progress.
     delegated: bool,
     progress_at: Option<std::time::Instant>,
+    delivered_skills: Vec<Uuid>,
 }
 
 /// How often a delegated task's streamed text republishes its handoff.
@@ -78,6 +79,7 @@ impl SqliteSink {
                 delivered_waits: input.mcp_waits.iter().map(|w| w.id).collect(),
                 delegated: input.delegation.delegated_task,
                 progress_at: None,
+                delivered_skills: input.skill_installs.iter().map(|o| o.id).collect(),
                 delivered_questions: input.questions.iter().map(|o| o.id).collect(),
                 delivered_drafts: input
                     .outgoing_drafts
@@ -522,6 +524,7 @@ impl SinkState {
                     || !self.delivered_drafts.is_empty()
                     || !self.delivered_socials.is_empty()
                     || !self.delivered_waits.is_empty()
+                    || !self.delivered_skills.is_empty()
                 {
                     let marked = async {
                         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -565,6 +568,13 @@ impl SinkState {
                             crate::db::events::turn_changed(&mut tx, self.bot_id, self.turn_id)
                                 .await?;
                         }
+                        crate::db::skills::mark_delivered(
+                            &mut tx,
+                            self.turn_id,
+                            self.attempt,
+                            &self.delivered_skills,
+                        )
+                        .await?;
                         tx.commit().await
                     }
                     .await;

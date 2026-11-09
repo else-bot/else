@@ -160,6 +160,12 @@ pub struct TurnInput {
     /// The shared MCPs installed for every bot, for a turn that may use
     /// them; `None` when it may not or the library could not be read.
     pub mcps: Option<Vec<InstalledMcp>>,
+    /// The owner's answers to this turn's skill install cards that no
+    /// attempt has received yet.
+    pub skill_installs: Vec<crate::db::skills::Outcome>,
+    /// The installed skills this bot may use, for a turn that may use them;
+    /// `None` when it may not or the list could not be read.
+    pub skills: Option<Vec<crate::db::skills::SkillInfo>>,
     /// Set when this turn switches provider and the session missed turns.
     pub handoff: Option<HandoffContext>,
     /// The bot's active and unresolved guest jobs, given with any rebuilt

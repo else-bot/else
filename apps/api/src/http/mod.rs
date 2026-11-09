@@ -24,6 +24,7 @@ pub mod routines;
 pub mod rules;
 pub mod settings;
 mod shared_mcp;
+mod skills;
 mod social_tools;
 pub mod socials;
 pub mod task_secrets;
@@ -74,6 +75,8 @@ pub struct AppState {
     pub secret_key: Option<Arc<crate::credentials::SecretKey>>,
     pub backups: Option<crate::backup::service::Backups>,
     pub mcps: std::sync::OnceLock<crate::mcp::Library>,
+    /// Where `skill_install` fetches skills from.
+    pub skill_sources: crate::skills::Sources,
     pub connectors: Option<Arc<crate::connectors::ConnectorManager>>,
     pub socials: Option<Arc<crate::socials::Manager>>,
     /// Why bot computers or backups did not start, for `else_status`.
@@ -102,6 +105,7 @@ impl AppState {
             connectors: None,
             backups: None,
             mcps: std::sync::OnceLock::new(),
+            skill_sources: crate::skills::Sources::default(),
             socials: None,
             startup_faults: StartupFaults::default(),
             update_hold: crate::actor::Actor::default(),
@@ -183,6 +187,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(settings::routes())
         .merge(backups::routes())
         .merge(shared_mcp::routes())
+        .merge(skills::routes())
         .merge(task_secrets::routes())
         .merge(questions::routes())
         .merge(outgoing_drafts::routes())

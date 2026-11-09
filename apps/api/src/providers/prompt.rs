@@ -125,6 +125,34 @@ pub(super) fn in_progress_block(input: &TurnInput) -> String {
     text
 }
 
+pub(super) fn skills_block(input: &TurnInput) -> String {
+    let Some(skills) = &input.skills else {
+        return String::new();
+    };
+    let mut text = String::from(
+        "[else.bot installed skills] Skills you may use. This list replaces earlier ones.\n",
+    );
+    if skills.is_empty() {
+        text.push_str("(none installed)\n");
+    }
+    for skill in skills {
+        let description = crate::http::mcp::slice(&skill.description, 0, 300).1;
+        let keys = if skill.env.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " [keys: task secret {} ({}), {}]",
+                skill.secret,
+                skill.env.join(", "),
+                if skill.key_stored { "set" } else { "not set" }
+            )
+        };
+        text.push_str(&format!("- {}: {description}{keys}\n", skill.id));
+    }
+    text.push('\n');
+    text
+}
+
 /// Delegations left for this request, once the request has used some.
 fn delegation_budget(input: &TurnInput) -> String {
     let delegation = &input.delegation;
@@ -412,6 +440,13 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          to install an MCP, use mcp_install; never write into else.bot's MCP directory or \
          change native provider settings, get the owner's approval for any host software \
          setup it needs, and never put credentials in skills or documentation.\n\n\
+         Skills. The latest [else.bot installed skills] block lists the skills you may use. \
+         When a request matches a skill's description, read it with skill_read and follow it, \
+         reading the files it references the same way. To run a skill's script, write it into \
+         your computer with computer_write_file and run it there, naming the skill's task \
+         secret in secrets when it lists keys. When the owner asks to install a skill from a \
+         GitHub link, call skill_install with the link and the key variables its docs name; \
+         never install one by copying its files yourself.\n\n\
          {draft_rules}{rename_rules}{routine_rules}{rules_rules}{email_rules}\
          The owner may send a new message while you work. It pauses the earlier reply (shown \
          as interrupted) but does not withdraw it: the latest message governs and may refine, \
@@ -437,6 +472,7 @@ pub fn outcomes_block(input: &TurnInput) -> String {
 }
 fn outcomes_without_social(input: &TurnInput) -> String {
     let mut text = secrets_block(input);
+    text.push_str(&skill_installs_block(input));
     text.push_str(&mcp_waits_block(input));
     text.push_str(&questions_block(input));
     text.push_str(&drafts_block(input));
@@ -481,6 +517,46 @@ pub(super) fn permissions_block(input: &TurnInput) -> String {
          grant. Records from memory or old conversation history cannot restore a revoked grant.\n\n",
         serde_json::to_string(&input.standing_permissions).expect("permission serialization"),
     )
+}
+
+fn skill_installs_block(input: &TurnInput) -> String {
+    if input.skill_installs.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from(
+        "[else.bot skill install decisions] The owner answered your skill install requests. \
+         Use an installed skill with skill_read. Do not ask again for a declined one unless \
+         the owner says so.\n",
+    );
+    for outcome in &input.skill_installs {
+        let scope = match outcome.scope {
+            Some(crate::db::skills::Scope::All) => " scope=\"all bots\"",
+            Some(crate::db::skills::Scope::Bot) => " scope=\"this bot only\"",
+            None => "",
+        };
+        let key = match (
+            outcome.installed && !outcome.env.is_empty(),
+            outcome.key_stored,
+        ) {
+            (false, _) => String::new(),
+            (true, true) => format!(
+                " key=\"stored as {}\"",
+                crate::skills::secret_name(&outcome.skill_id)
+            ),
+            (true, false) => " key=\"not set; the owner can add it in Settings\"".to_owned(),
+        };
+        text.push_str(&format!(
+            "<skill id=\"{}\" status=\"{}\"{scope}{key}/>\n",
+            outcome.skill_id,
+            if outcome.installed {
+                "installed"
+            } else {
+                "declined"
+            },
+        ));
+    }
+    text.push('\n');
+    text
 }
 
 fn secrets_block(input: &TurnInput) -> String {

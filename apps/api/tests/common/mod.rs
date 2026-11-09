@@ -147,7 +147,15 @@ impl TestApp {
         registry: else_api::providers::Registry,
         computers: Option<std::sync::Arc<else_api::computers::ComputerManager>>,
     ) -> Self {
-        Self::build(db, max_active, registry, computers, None)
+        Self::build(db, max_active, registry, computers, None, None)
+    }
+
+    pub fn with_skill_sources(
+        db: std::sync::Arc<TestDb>,
+        registry: else_api::providers::Registry,
+        sources: else_api::skills::Sources,
+    ) -> Self {
+        Self::build(db, 4, registry, None, None, Some(sources))
     }
 
     pub fn with_mail(
@@ -156,7 +164,7 @@ impl TestApp {
         registry: else_api::providers::Registry,
         mail: std::sync::Arc<dyn else_api::connectors::types::MailTransport>,
     ) -> Self {
-        Self::build(db, max_active, registry, None, Some(mail))
+        Self::build(db, max_active, registry, None, Some(mail), None)
     }
 
     fn build(
@@ -165,6 +173,7 @@ impl TestApp {
         registry: else_api::providers::Registry,
         computers: Option<std::sync::Arc<else_api::computers::ComputerManager>>,
         mail: Option<std::sync::Arc<dyn else_api::connectors::types::MailTransport>>,
+        skill_sources: Option<else_api::skills::Sources>,
     ) -> Self {
         use std::sync::Arc;
         let _ = tracing_subscriber::fmt()
@@ -192,6 +201,9 @@ impl TestApp {
         );
         if let Some(computers) = computers {
             state = state.with_computers(computers);
+        }
+        if let Some(sources) = skill_sources {
+            state.skill_sources = sources;
         }
         let key = Arc::new(
             else_api::credentials::SecretKey::parse("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")

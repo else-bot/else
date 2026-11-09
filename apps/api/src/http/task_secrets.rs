@@ -39,7 +39,7 @@ struct Body {
     env: BTreeMap<String, String>,
 }
 
-fn error(err: SecretError) -> ApiError {
+pub(super) fn error(err: SecretError) -> ApiError {
     match err {
         SecretError::Invalid(message) => ApiError::bad_request("invalid_secret", message),
         SecretError::NoKey => ApiError::unavailable(

@@ -5,6 +5,7 @@ pub struct SidebarRow {
     question_kind: Option<String>,
     question_title: Option<String>,
     credential_reason: Option<String>,
+    skill_install_title: Option<String>,
     latest_turn_status: Option<String>,
     /// The owner read the latest turn's last reply in full, such as its
     /// failure notice.
@@ -30,6 +31,11 @@ impl SidebarRow {
                 SidebarStatus::WaitingForAnswer { preview }
             } else {
                 SidebarStatus::NeedsApproval { preview }
+            });
+        }
+        if let Some(title) = &self.skill_install_title {
+            return Some(SidebarStatus::NeedsApproval {
+                preview: super::super::reads::preview(title),
             });
         }
         if let Some(reason) = &self.credential_reason {
