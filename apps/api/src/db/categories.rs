@@ -29,6 +29,8 @@ pub const MAX_NAME: usize = 80;
 pub struct Category {
     pub id: Uuid,
     pub name: String,
+    /// The owner's sidebar place, or `None` when never placed.
+    pub position: Option<i64>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -91,7 +93,7 @@ async fn wake(conn: &mut sqlx::SqliteConnection) -> Result<(), sqlx::Error> {
 
 /// The visible categories (not those being deleted): placed ones by
 /// position, then the rest in the portable name order.
-pub const LIST: &str = "SELECT id, name, created_at, updated_at FROM bot_categories
+pub const LIST: &str = "SELECT id, name, position, created_at, updated_at FROM bot_categories
      WHERE NOT deleting ORDER BY position IS NULL, position, name_key COLLATE BINARY, id";
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<Category>, sqlx::Error> {
@@ -127,7 +129,7 @@ pub async fn create(
             return Err(CategoryError::RequestConflict);
         }
         let found: Option<Category> = sqlx::query_as(
-            "SELECT id, name, created_at, updated_at FROM bot_categories
+            "SELECT id, name, position, created_at, updated_at FROM bot_categories
              WHERE id = ?1 AND NOT deleting",
         )
         .bind(id)
@@ -139,7 +141,7 @@ pub async fn create(
     let id = Uuid::new_v4();
     let category: Category = sqlx::query_as(
         "INSERT INTO bot_categories (id, name, name_key) VALUES (?1, ?2, ?3)
-         RETURNING id, name, created_at, updated_at",
+         RETURNING id, name, position, created_at, updated_at",
     )
     .bind(id)
     .bind(&name)
@@ -166,7 +168,7 @@ pub async fn rename(pool: &SqlitePool, id: Uuid, name: &str) -> Result<Category,
     let category: Option<Category> = sqlx::query_as(
         "UPDATE bot_categories SET name = ?2, name_key = ?3, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1 AND NOT deleting
-         RETURNING id, name, created_at, updated_at",
+         RETURNING id, name, position, created_at, updated_at",
     )
     .bind(id)
     .bind(&name)

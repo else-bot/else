@@ -363,13 +363,19 @@ async fn the_owner_orders_categories_for_every_client_and_restart() {
         .await;
     assert_eq!(placed.status, StatusCode::OK, "{:?}", placed.body);
     assert_eq!(names(&placed.body), ["Gamma", "Alpha", "Beta"]);
-    assert_eq!(names(&listing(&app).await), ["Gamma", "Alpha", "Beta"]);
+    let listed = listing(&app).await;
+    assert_eq!(names(&listed), ["Gamma", "Alpha", "Beta"]);
+    assert_eq!(listed["categories"][2]["position"], 2);
 
     create(&app, Uuid::new_v4(), "Aardvark").await;
     assert_eq!(
         names(&listing(&app).await),
         ["Gamma", "Alpha", "Beta", "Aardvark"],
         "a new category follows the placed ones"
+    );
+    assert_eq!(
+        listing(&app).await["categories"][3]["position"],
+        Value::Null
     );
 
     let removed = ids["Alpha"].as_str().unwrap().to_owned();
