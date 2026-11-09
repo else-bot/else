@@ -28,8 +28,12 @@ pub(super) struct View {
 }
 
 impl View {
-    pub(super) fn has_unsaved_work(&self) -> bool {
+    pub(super) fn has_unsaved_work(&self, cx: &App) -> bool {
         self.busy
+            || self
+                .keys
+                .as_ref()
+                .is_some_and(|keys| !keys.read(cx).is_empty(cx))
     }
 
     fn clear_keys(&mut self, window: &mut Window, cx: &mut App) {
@@ -145,10 +149,7 @@ impl Shell {
                                 view.entries = Some(entries);
                                 view.poll_error = None;
                             }
-                            Err(error) => {
-                                view.clear_keys(window, cx);
-                                view.poll_error = Some(error.to_string());
-                            }
+                            Err(error) => view.poll_error = Some(error.to_string()),
                         }
                         cx.notify();
                     }

@@ -23,7 +23,7 @@ pub(super) struct SkillCard {
 
 impl ElseApp {
     pub(super) fn sync_skill_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.hidden || self.connection != Connection::Connected {
+        if self.connection != Connection::Connected {
             self.clear_skill_cards(window, cx);
             return;
         }
@@ -452,6 +452,16 @@ impl ElseApp {
         )
         .on_key_down(cx.listener(move |app, event: &KeyDownEvent, window, cx| {
             if event.keystroke.key == "escape" {
+                // Declining is final; Esc while typing a key would lose it.
+                let typing = app
+                    .view
+                    .as_ref()
+                    .and_then(|view| view.skill_cards.get(&id))
+                    .and_then(|card| card.keys.as_ref())
+                    .is_some_and(|keys| !keys.read(cx).is_empty(cx));
+                if typing {
+                    return;
+                }
                 app.answer_skill(id, false, window, cx);
                 cx.stop_propagation();
             } else if event.keystroke.key == "enter"

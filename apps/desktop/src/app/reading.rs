@@ -293,7 +293,6 @@ impl ElseApp {
     pub fn set_hidden(&mut self, hidden: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.hidden = hidden;
         if hidden {
-            self.clear_skill_cards(window, cx);
             self.computer = None;
             self._computer_layout = None;
             self.clear_social_forms(window, cx);

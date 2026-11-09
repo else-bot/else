@@ -70,6 +70,13 @@ impl SkillKeys {
         Ok(Some(env))
     }
 
+    /// Whether every field is still empty, so nothing typed would be lost.
+    pub fn is_empty(&self, cx: &App) -> bool {
+        self.fields
+            .iter()
+            .all(|field| field.captured.is_none() && field.input.read(cx).value().is_empty())
+    }
+
     pub fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for field in &mut self.fields {
             field.captured = None;
