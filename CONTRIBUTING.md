@@ -240,6 +240,16 @@ ELSE_VM_IMAGE=else-guest:3 ELSE_VM_DESKTOP=1 scripts/dev.py api
 
 Start the desktop in another terminal. The image builder uses the published base in `infra/guest-base.json`. Set `ELSE_GUEST_BASE` to a local Docker image to try unpublished base changes. The builder loads the resulting guest into this session's Microsandbox home.
 
+On macOS, a computer fails to start with `sandbox runtime socket path is too long` when the checkout path is long, as in a worktree. Microsandbox's socket paths add about 50 bytes to `<data dir>/microsandbox`, and macOS allows at most 103. This affects only development sessions: an installation's `~/.else/microsandbox` stays well under the limit. Put the session in a short directory with `--dir` and pass that data directory to the builder:
+
+```sh
+scripts/dev.py reset --dir /tmp/else-vm
+scripts/build-guest-image.sh /tmp/else-vm/data
+ELSE_VM_IMAGE=else-guest:3 ELSE_VM_DESKTOP=1 scripts/dev.py api --dir /tmp/else-vm
+```
+
+Pass the same `--dir` to `scripts/dev.py desktop`.
+
 ## Configure the API directly
 
 Prefer the session launcher for day-to-day development. For direct binary runs, copy `.env.example` to `.env` and set separate absolute data and project paths plus a free loopback address for your checkout. Process environment variables override `.env`.
