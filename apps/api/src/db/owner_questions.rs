@@ -512,6 +512,8 @@ pub enum SettleError {
     InvalidChoice,
     #[error("The routine task changed or was deleted. Approve once to allow only this action.")]
     RoutineChanged,
+    #[error("Sign in to the inbox before approving this connection.")]
+    InboxNotConnected,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -622,6 +624,24 @@ pub async fn answer(
             (Some(APPROVE_FOREVER), Scope::Bot) => {}
             (Some(APPROVE_FOREVER), _) => return Err(SettleError::InvalidChoice),
             _ => {}
+        }
+    }
+    // An inbox card approves only an account connected since it was asked,
+    // or the requested address: Google may authorize a different mailbox.
+    if choice == Some(APPROVE)
+        && let Some(Action::EmailConnection { email_connection }) = &question.action
+    {
+        let connected: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM connector_accounts WHERE state <> 'removed'
+                AND (lower(json_extract(config, '$.address')) = ?1
+                     OR created_at >= (SELECT created_at FROM owner_questions WHERE id = ?2)))",
+        )
+        .bind(email_connection.address.to_lowercase())
+        .bind(question.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !connected {
+            return Err(SettleError::InboxNotConnected);
         }
     }
     let row: Row = sqlx::query_as(sqlx::AssertSqlSafe(format!(

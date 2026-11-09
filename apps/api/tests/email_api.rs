@@ -1010,13 +1010,13 @@ async fn a_bot_asks_the_owner_to_sign_in_to_an_inbox_from_chat() {
         std::time::Duration::from_secs(30),
     )
     .await;
-    let answered = app
-        .owner(
-            "POST",
-            &format!("/v1/bots/{bot}/questions/{question}/answer"),
-            Some(json!({"choice":"approve"})),
-        )
-        .await;
+    let answer_path = format!("/v1/bots/{bot}/questions/{question}/answer");
+    let approve = || app.owner("POST", &answer_path, Some(json!({"choice":"approve"})));
+    let early = approve().await;
+    assert_eq!(early.status, StatusCode::CONFLICT, "{}", early.body);
+    assert_eq!(early.body["error"]["code"], "inbox_not_connected");
+    let other_mailbox = account(app).await;
+    let answered = approve().await;
     assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
     let token = h.continued(turn, &token).await;
     let packet = h.packets().await.into_iter().last().unwrap();
@@ -1031,7 +1031,6 @@ async fn a_bot_asks_the_owner_to_sign_in_to_an_inbox_from_chat() {
     .await;
     assert_eq!(resumed.result["status"], "connected", "{}", resumed.body);
 
-    let existing = account(app).await;
     let known = tool(
         app,
         &token,
@@ -1040,6 +1039,6 @@ async fn a_bot_asks_the_owner_to_sign_in_to_an_inbox_from_chat() {
     )
     .await;
     assert_eq!(known.result["status"], "connected", "{}", known.body);
-    assert_eq!(known.result["account_id"], existing.id.to_string());
+    assert_eq!(known.result["account_id"], other_mailbox.id.to_string());
     h.release(turn).await;
 }

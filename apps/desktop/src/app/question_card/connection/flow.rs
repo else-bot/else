@@ -147,17 +147,8 @@ impl Flow {
     pub async fn recover(&self) -> Result<Resolution, ClientError> {
         let consent = match &self.consent {
             Consent::Mcp(consent) => consent,
-            Consent::Email(consent) => {
-                let accounts = self.client.clone().email_accounts().await?;
-                return if accounts
-                    .iter()
-                    .any(|a| a.config.address.eq_ignore_ascii_case(&consent.address))
-                {
-                    self.confirm().await
-                } else {
-                    Ok(Resolution::Disconnected)
-                };
-            }
+            // The API approves an inbox card only once an account is connected.
+            Consent::Email(_) => return self.confirm().await,
         };
         let status = self
             .client
@@ -184,6 +175,9 @@ impl Flow {
         {
             Ok(()) => Ok(Resolution::Recorded),
             Err(ClientError::Unauthorized) => Err(ClientError::Unauthorized),
+            Err(error) if error.code() == Some("inbox_not_connected") => {
+                Ok(Resolution::Disconnected)
+            }
             Err(error) => Ok(Resolution::ConfirmationRequired(error.to_string())),
         }
     }

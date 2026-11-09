@@ -58,6 +58,11 @@ fn settle_error(err: SettleError) -> ApiError {
             "routine_changed",
             SettleError::RoutineChanged.to_string(),
         ),
+        SettleError::InboxNotConnected => ApiError::new(
+            StatusCode::CONFLICT,
+            "inbox_not_connected",
+            SettleError::InboxNotConnected.to_string(),
+        ),
         SettleError::Db(err) => err.into(),
     }
 }
