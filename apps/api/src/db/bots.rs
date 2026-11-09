@@ -507,6 +507,23 @@ pub async fn update(
     Ok(bot)
 }
 
+/// Refuse unless `turn_id` is running, rooted in an owner request, and its
+/// attempt has not handed off: the turns that may edit any bot.
+async fn may_edit_bots(conn: &mut sqlx::SqliteConnection, turn_id: Uuid) -> Result<(), BotError> {
+    let caller = super::turns::asking_caller(conn, turn_id)
+        .await?
+        .ok_or(Refusal::NotRunning)?;
+    if super::delegations::origin(conn, turn_id).await?
+        != crate::app::providers::Origin::OwnerRequest
+    {
+        return Err(Refusal::NotOwnerRequest.into());
+    }
+    if super::turns::attempt_parked(conn, turn_id, caller.attempt).await? {
+        return Err(Refusal::AttemptDelegated.into());
+    }
+    Ok(())
+}
+
 pub async fn rename_for_turn(
     pool: &SqlitePool,
     turn_id: Uuid,
@@ -514,17 +531,7 @@ pub async fn rename_for_turn(
     name: &BotName,
 ) -> Result<BotRecord, BotError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let caller = super::turns::asking_caller(&mut tx, turn_id)
-        .await?
-        .ok_or(Refusal::NotRunning)?;
-    if super::delegations::origin(&mut tx, turn_id).await?
-        != crate::app::providers::Origin::OwnerRequest
-    {
-        return Err(Refusal::NotOwnerRequest.into());
-    }
-    if super::turns::attempt_parked(&mut tx, turn_id, caller.attempt).await? {
-        return Err(Refusal::AttemptDelegated.into());
-    }
+    may_edit_bots(&mut tx, turn_id).await?;
     let bot = update_in(
         &mut tx,
         bot_id,
@@ -537,6 +544,35 @@ pub async fn rename_for_turn(
     .await?;
     tx.commit().await?;
     Ok(bot)
+}
+
+/// Save an active bot's own model (already validated by its provider's
+/// adapter) for a turn that may edit bots. Its next turn runs on it.
+pub async fn set_model_for_turn(
+    pool: &SqlitePool,
+    turn_id: Uuid,
+    bot_id: Uuid,
+    provider_id: &str,
+    profile: &Profile,
+) -> Result<super::bot_profiles::BotProfile, BotError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    may_edit_bots(&mut tx, turn_id).await?;
+    let current = find_in(&mut tx, bot_id).await?.ok_or(BotError::NotFound)?;
+    if current.status != BotStatus::Active {
+        return Err(BotError::Deleted);
+    }
+    let before = super::bot_profiles::own(&mut tx, bot_id).await?;
+    let saved = super::bot_profiles::put_in(&mut tx, bot_id, provider_id, profile)
+        .await
+        .map_err(|err| match err {
+            super::bot_profiles::BotProfileError::Db(err) => BotError::Db(err),
+            super::bot_profiles::BotProfileError::NotFound => BotError::Deleted,
+        })?;
+    if before.as_ref() != Some(&saved) {
+        super::events::bot_updated(&mut tx, bot_id).await?;
+    }
+    tx.commit().await?;
+    Ok(saved)
 }
 
 async fn update_in(

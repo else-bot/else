@@ -57,6 +57,7 @@ pub const DEFERRED_TOOLS: &[&str] = &[
     "list_bots",
     "create_bot",
     "rename_bot",
+    "set_bot_model",
     "confirm_permission",
     "confirm_draft_approval",
     "start_draft_send",

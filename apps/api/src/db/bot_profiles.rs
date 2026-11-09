@@ -25,7 +25,10 @@ pub async fn get(pool: &SqlitePool, bot_id: Uuid) -> Result<Option<BotProfile>, 
     own(&mut conn, bot_id).await
 }
 
-async fn own(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<Option<BotProfile>, sqlx::Error> {
+pub(super) async fn own(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+) -> Result<Option<BotProfile>, sqlx::Error> {
     let row: Option<(String, String, String, String, i64)> = sqlx::query_as(
         "SELECT provider_id, model, reasoning_effort, service_tier, revision
          FROM bot_profiles WHERE bot_id = ?1",

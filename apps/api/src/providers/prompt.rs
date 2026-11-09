@@ -229,9 +229,10 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
     let delegation_rules = delegation_rules(input);
     let rename_rules = if input.delegation.origin == crate::app::providers::Origin::OwnerRequest {
         format!(
-            "To rename an else.bot, call rename_bot with the exact target_bot_id from the \
-             registry, a task, or create_bot (your own bot_id is {}); ask which bot the owner \
-             means when it is ambiguous, and confirm the saved name from the result.\n\n",
+            "To rename an else.bot or change its model, effort, or tier, call rename_bot or \
+             set_bot_model with the exact target_bot_id from the registry, a task, or \
+             create_bot (your own bot_id is {}); ask when the bot is ambiguous, and confirm \
+             the saved values from the result.\n\n",
             input.bot_id
         )
     } else {
@@ -315,9 +316,8 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          have, call find_tool with its name or a few words about the need, then run it with \
          use_tool. Tool names may carry a provider prefix, such as mcp__elsebot__delegate: call \
          each by the name in your tool list. You have no native web tools. Do not \
-         spawn native sub-agents, teams, or agent sessions, or change models, reasoning \
-         effort, service tier, or agent settings. If a request needs a capability you lack, \
-         say so plainly.\n\n\
+         spawn native sub-agents, teams, or agent sessions, or change your CLI's own \
+         settings. If a request needs a capability you lack, say so plainly.\n\n\
          Your project directory is {project} on the host and ~/work in your computer: files \
          written in one are in the other. Keep your work there and do it in your computer by \
          default (code, scripts, background jobs, browsing); use the host tools on your \

@@ -490,7 +490,7 @@ fn turn_tools(delegation: &crate::app::providers::DelegationContext) -> Vec<Tool
         tools.push(Tool::CreateBot);
     }
     if delegation.origin == crate::app::providers::Origin::OwnerRequest {
-        tools.push(Tool::RenameBot);
+        tools.push(Tool::EditBot);
     }
     if delegation.can_manage_routines() {
         tools.extend([Tool::Routines, Tool::ManageMcp]);

@@ -702,3 +702,100 @@ async fn a_bot_is_not_created_on_a_model_that_is_not_available() {
     );
     finish(&h, turn).await;
 }
+
+#[tokio::test]
+async fn a_bot_sets_another_bots_model_and_its_next_turn_runs_on_it() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let dev = h.app.create_bot("Dev").await;
+    let profile = |bot: String| {
+        let app = &h.app;
+        async move {
+            app.owner("GET", &format!("/v1/bots/{bot}/profile"), None)
+                .await
+                .body["profile"]
+                .clone()
+        }
+    };
+    let before = profile(dev.clone()).await;
+    let (turn, token) = h.running(&main, GATE).await;
+
+    let unknown = tool(
+        &h.app,
+        &token,
+        "set_bot_model",
+        json!({ "target_bot_id": dev, "model": "Grok 4.7" }),
+    )
+    .await;
+    let text = unknown.result.as_str().unwrap_or_default();
+    assert!(text.starts_with("MODEL_NOT_AVAILABLE"), "{}", unknown.body);
+    assert!(
+        text.contains("gpt-6.1-sol"),
+        "the error lists models: {text}"
+    );
+    assert_eq!(profile(dev.clone()).await, before, "nothing was saved");
+
+    let args = json!({ "target_bot_id": dev, "model": "GPT 6.1 Sol",
+                       "reasoning_effort": "high", "service_tier": "default" });
+    let set = tool(&h.app, &token, "set_bot_model", args.clone()).await;
+    assert!(!set.error, "{}", set.body);
+    assert_eq!(set.result["bot_id"], dev);
+    assert_eq!(set.result["model"]["provider_id"], "codex");
+    assert_eq!(set.result["model"]["model"], "gpt-6.1-sol");
+    assert_eq!(set.result["model"]["reasoning_effort"], "high");
+    assert_eq!(set.result["model"]["service_tier"], "default");
+    let retry = tool(&h.app, &token, "set_bot_model", args).await;
+    assert_eq!(retry.result, set.result, "a retry changes nothing");
+    let saved = profile(dev.clone()).await;
+    assert_eq!(saved["own"], true, "{saved}");
+    assert_eq!(saved["model"], "gpt-6.1-sol");
+    assert_eq!(saved["revision"], 1, "the retry kept the revision");
+    let updated = || {
+        count(
+            &h.app,
+            "SELECT count(*) FROM bot_events WHERE bot_id = ?1 AND kind = 'bot.updated'",
+            &dev,
+        )
+    };
+    assert_eq!(updated().await, 1, "one change tells clients once");
+
+    let effort = tool(
+        &h.app,
+        &token,
+        "set_bot_model",
+        json!({ "target_bot_id": dev, "reasoning_effort": "low" }),
+    )
+    .await;
+    assert!(!effort.error, "{}", effort.body);
+    assert_eq!(
+        effort.result["model"]["model"], "gpt-6.1-sol",
+        "the model is kept"
+    );
+    assert_eq!(effort.result["model"]["reasoning_effort"], "low");
+    assert_eq!(effort.result["model"]["service_tier"], "default");
+    assert_eq!(updated().await, 2);
+
+    let own = tool(
+        &h.app,
+        &token,
+        "set_bot_model",
+        json!({ "target_bot_id": main, "model": "gpt-6-luna" }),
+    )
+    .await;
+    assert!(!own.error, "{}", own.body);
+    assert_eq!(profile(main.clone()).await["model"], "gpt-6-luna");
+    finish(&h, turn).await;
+
+    let next = h.send(&dev, "hello").await;
+    h.app.wait_turn(&next.to_string(), &["completed"]).await;
+    let (provider, used): (String, String) =
+        sqlx::query_as("SELECT provider_id, profile FROM turns WHERE id = ?1")
+            .bind(next)
+            .fetch_one(&h.app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(provider, "codex");
+    let used: Value = serde_json::from_str(&used).unwrap();
+    assert_eq!(used["model"], "gpt-6.1-sol");
+    assert_eq!(used["reasoning_effort"], "low");
+}

@@ -110,6 +110,12 @@ def run(runner):
                 "link-project-files": ([], "[CSV](hypertracker-evidence/cloudflare-only/daily_counts_utc.csv) · "
                                            "[Report](~/work/hypertracker-evidence/cloudflare-only/report.md)",
                                        "Both are in your artifact store: `daily_counts_utc.csv` and `report.md`."),
+                "set-other-bot-model": ([self.call("use_tool", {"name": "set_bot_model", "arguments": {
+                    "target_bot_id": "00000000-0000-0000-0000-000000000004", "model": "gpt-6.1-terra", "reasoning_effort": "low", "service_tier": "default"}}),
+                                         self.call("use_tool", {"name": "set_bot_model", "arguments": {
+                    "target_bot_id": "00000000-0000-0000-0000-000000000005", "model": "gpt-6.1-sol", "reasoning_effort": "high", "service_tier": "default"}})],
+                                        "Research now runs gpt-6.1-terra and GitHub gpt-6.1-sol.",
+                                        "I can't apply them directly. No settings have changed."),
                 "correction-saves-rule": ([self.call("rules_update", {"section": "Summaries", "content": "Never: headings.",
                                                                       "owner_words": "I never want headings in summaries."})], "Got it."),
             }

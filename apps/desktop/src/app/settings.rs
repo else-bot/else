@@ -300,6 +300,9 @@ impl TriggerSave {
 
 pub(super) struct BotSettings {
     details: Details,
+    /// The bot's `metadata_revision` when its profile was last loaded: a
+    /// bot can change another bot's model, which publishes `bot.updated`.
+    revision: Option<i64>,
     model: ModelState,
     routines: HashMap<Uuid, RoutineSave>,
     triggers: HashMap<Uuid, TriggerSave>,
@@ -370,6 +373,7 @@ impl ElseApp {
             bot.id,
             BotSettings {
                 details,
+                revision: bot.metadata_revision,
                 model: ModelState::Loading(Uuid::nil()),
                 routines: HashMap::new(),
                 triggers: HashMap::new(),
@@ -382,13 +386,21 @@ impl ElseApp {
         let bots = &self.bots;
         self.settings
             .retain(|id, _| bots.iter().any(|b| b.id == *id && b.is_active()));
+        let mut stale = Vec::new();
         for bot in &self.bots {
             if let Some(entry) = self.settings.get_mut(&bot.id) {
                 entry
                     .details
                     .sync
                     .remote(Metadata::of(bot), bot.metadata_revision);
+                if entry.revision != bot.metadata_revision {
+                    entry.revision = bot.metadata_revision;
+                    stale.push(bot.id);
+                }
             }
+        }
+        for bot in stale {
+            self.load_profile(bot, window, cx);
         }
         self.ensure_settings(window, cx);
     }
