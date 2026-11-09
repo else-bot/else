@@ -159,8 +159,18 @@ async fn reads_only_move_forward_and_must_point_into_a_reply() {
     let seq = second["item_seq"].as_i64().unwrap();
     let bytes = second["text_bytes"].as_i64().unwrap();
     let owner_seq = seq - 1;
+    let past_end = mark(
+        &app,
+        &bot,
+        through(&json!({ "item_seq": seq, "text_bytes": bytes + 1 })),
+    )
+    .await;
+    assert_eq!(past_end.status, StatusCode::OK, "{:?}", past_end.body);
+    assert_eq!(
+        past_end.body["bot"]["read_state"]["read_through"], second,
+        "a position past the end reads through the current end"
+    );
     for bad in [
-        json!({ "item_seq": seq, "text_bytes": bytes + 1 }),
         json!({ "item_seq": owner_seq, "text_bytes": 1 }),
         json!({ "item_seq": seq + 50, "text_bytes": 1 }),
         json!({ "item_seq": seq, "text_bytes": -1 }),
