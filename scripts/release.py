@@ -25,7 +25,6 @@ from guest_release import (Fail, GUEST, VERSION, cargo_version, cmd_check, cmd_p
 from release_binaries import BINARIES, PLATFORMS as BINARY_PLATFORMS, archive_name, release_assets
 
 BUMPS = ("patch", "minor", "major")
-CRATES = ("else-api", "else-desktop", "else-tailnet")
 RELEASE_FILES = ("Cargo.lock", "Cargo.toml", GUEST.manifest)
 
 
@@ -128,11 +127,12 @@ def bump_manifest(text, version):
 
 
 def bump_lock(text, current, version):
-    for name in CRATES:
-        text, count = re.subn(rf'(?m)^(name = "{name}"\nversion = )"{re.escape(current)}"$',
-                              lambda m: m[1] + f'"{version}"', text)
-        if count != 1:
-            raise Fail(f"expected one {name} {current} entry in Cargo.lock, found {count}")
+    """Bump every workspace package in Cargo.lock: the entries at CURRENT
+    without a `source`, so crates added to the workspace need no list."""
+    text, count = re.subn(rf'(?m)^(name = "[^"]+"\nversion = )"{re.escape(current)}"$(?!\nsource = )',
+                          lambda m: m[1] + f'"{version}"', text)
+    if not count:
+        raise Fail(f"expected workspace packages at {current} in Cargo.lock, found none")
     return text
 
 

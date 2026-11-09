@@ -348,6 +348,10 @@ class Archives(unittest.TestCase):
 
 
 IMAGE = "ghcr.io/else-bot/else-guest@sha256:" + "a" * 64
+CRATES = ("else-api", "else-desktop", "else-tailnet", "else-visual")
+# A crates.io package that happens to share the initial workspace version.
+REGISTRY_CRATE = ('\n[[package]]\nname = "registry-crate"\nversion = "0.0.1"\n'
+                  'source = "registry+https://github.com/rust-lang/crates.io-index"\n')
 
 
 class Publication(unittest.TestCase):
@@ -420,7 +424,7 @@ class Publication(unittest.TestCase):
     def commit_version(self, version):
         (self.repo / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{version}"\n')
         (self.repo / "Cargo.lock").write_text("version = 4\n" + "".join(
-            f'\n[[package]]\nname = "{name}"\nversion = "{version}"\n' for name in release.CRATES))
+            f'\n[[package]]\nname = "{name}"\nversion = "{version}"\n' for name in CRATES) + REGISTRY_CRATE)
         self.git("add", ".")
         self.git("commit", "-m", f"version {version}")
 
@@ -458,7 +462,9 @@ class Publication(unittest.TestCase):
         self.assertEqual(tomllib.loads(self.git("show", f"{candidate}:Cargo.toml"))["workspace"]["package"]["version"],
                          VERSION)
         lock = tomllib.loads(self.git("show", f"{candidate}:Cargo.lock"))
-        self.assertEqual({entry["version"] for entry in lock["package"]}, {VERSION})
+        self.assertEqual({entry["name"]: entry["version"] for entry in lock["package"]},
+                         {**dict.fromkeys(CRATES, VERSION), "registry-crate": "0.0.1"},
+                         "every workspace crate is bumped and registry crates are left alone")
         self.assertEqual(json.loads(self.git("show", f"{candidate}:infra/guest-image.json"))["image"], IMAGE)
         self.assertEqual(self.git("show", "-s", "--format=%s", candidate), f"chore(release): v{VERSION}")
         self.assertEqual(self.remote_ref(f"refs/heads/release/v{VERSION}"), candidate)
