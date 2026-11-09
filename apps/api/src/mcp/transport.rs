@@ -45,7 +45,7 @@ pub(super) async fn connect(
     let info =
         ClientConfig::default().with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE);
     let (service, process) = match config {
-        Transport::Http { url, headers } => {
+        Transport::Http { url, headers, .. } => {
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .retry(reqwest::retry::never())
@@ -502,6 +502,7 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let config = Transport::Http {
+            secrets: Vec::new(),
             url: format!("http://{address}/mcp"),
             headers: BTreeMap::from([("Authorization".into(), "Bearer mcp-test-token".into())]),
         };
@@ -555,6 +556,7 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
         let redirect_server =
             tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let config = Transport::Http {
+            secrets: Vec::new(),
             url: format!("http://{address}/mcp"),
             headers: BTreeMap::from([("Authorization".into(), "Bearer mcp-test-token".into())]),
         };
@@ -587,6 +589,7 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
             let address = listener.local_addr().unwrap();
             let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
             let config = Transport::Http {
+                secrets: Vec::new(),
                 url: format!("http://{address}/mcp"),
                 headers: BTreeMap::new(),
             };
@@ -634,6 +637,7 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let config = Transport::Http {
+            secrets: Vec::new(),
             url: format!("http://{address}/mcp"),
             headers: BTreeMap::new(),
         };
@@ -695,6 +699,7 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let config = Transport::Http {
+            secrets: Vec::new(),
             url: format!("http://{address}/mcp"),
             headers: BTreeMap::new(),
         };

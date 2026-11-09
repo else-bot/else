@@ -334,7 +334,10 @@ async fn bento(
         "tools/list" => {
             json!({"tools":[{"name":"bento_list_tags","description":"List tags","inputSchema":{"type":"object"}}]})
         }
-        _ => json!({"content":[{"type":"text","text":"tags"}]}),
+        _ => {
+            let echoed = format!("tags for site {}", BENTO_HEADERS[2].1);
+            json!({"content":[{"type":"text","text":echoed}]})
+        }
     };
     let body = json!({"jsonrpc":"2.0","id":message["id"],"result":result});
     (
@@ -413,6 +416,9 @@ async fn header_credentials_come_from_task_secrets_and_connect_without_oauth() {
     );
     assert_eq!(listed["result"]["tools"][0]["name"], "bento_list_tags");
     let called = result(&tool(&app, &token, "mcp_request", json!({"id":"bento","method":"tools/call","params":{"name":"bento_list_tags","arguments":{}},"effect":"local"})).await);
-    assert_eq!(called["result"]["content"][0]["text"], "tags");
+    assert_eq!(
+        called["result"]["content"][0]["text"],
+        "tags for site [secret BENTO_SITE_UUID]"
+    );
     server.abort();
 }
