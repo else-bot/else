@@ -741,28 +741,80 @@ impl ComputerManager {
             return Ok(());
         };
         let dir = format!("{JOBS_DIR}/{job_id}");
-        let note = match self.inspect_held(bot_id, KILL, &[&dir]).await? {
-            Inspect::Out(out) if out.stdout.trim_end().ends_with("stopped") => {
-                drop(op);
-                return self.finish_job(job_id, Outcome::Cancelled, "", lease).await;
-            }
-            Inspect::Out(out) => format!("cancellation not confirmed: {}", out.stdout.trim()),
-            Inspect::Gone => {
-                drop(op);
-                return self.finish_job(job_id, Outcome::Lost, "", lease).await;
-            }
-            Inspect::Paused if stop_paused => {
-                self.stop_held(bot_id, super::Reason::ForJobs).await?;
-                "the computer was paused; stopping it".into()
-            }
-            Inspect::Paused => "the computer is paused".into(),
-            Inspect::Unknown => "the computer did not answer".into(),
+        let mut resumed = false;
+        let note = loop {
+            break match self.inspect_held(bot_id, KILL, &[&dir]).await? {
+                Inspect::Out(out) if out.stdout.trim_end().ends_with("stopped") => {
+                    drop(op);
+                    return self.finish_job(job_id, Outcome::Cancelled, "", lease).await;
+                }
+                Inspect::Out(out) => format!("cancellation not confirmed: {}", out.stdout.trim()),
+                Inspect::Gone => {
+                    drop(op);
+                    return self.finish_job(job_id, Outcome::Lost, "", lease).await;
+                }
+                Inspect::Paused if stop_paused => {
+                    self.stop_held(bot_id, super::Reason::ForJobs).await?;
+                    "the computer was paused; stopping it".into()
+                }
+                Inspect::Paused if !resumed => match self.resume_to_kill(bot_id).await? {
+                    None => {
+                        resumed = true;
+                        continue;
+                    }
+                    Some(note) => note,
+                },
+                Inspect::Paused => "the computer is paused".into(),
+                Inspect::Unknown => "the computer did not answer".into(),
+            };
         };
         sqlx::query("UPDATE guest_jobs SET error = ?2 WHERE id = ?1")
             .bind(job_id)
             .bind(super::bounded(&note, 2000))
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Resume a paused computer so one job's process group can be killed
+    /// without stopping the computer, which would end the bot's other jobs.
+    /// Returns why it was not resumed. The caller holds the operation lock.
+    async fn resume_to_kill(&self, bot_id: Uuid) -> Result<Option<String>, ComputerError> {
+        let name: Option<String> = sqlx::query_scalar(
+            "SELECT runtime_name FROM bot_computers
+             WHERE bot_id = ?1 AND observed_state = 'paused' AND desired_state = 'auto'
+               AND NOT EXISTS (SELECT 1 FROM computer_upgrades WHERE bot_id = ?1 AND state = 'started')",
+        )
+        .bind(bot_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(name) = name else {
+            return Ok(Some("the computer is paused".into()));
+        };
+        match self.resume_held(bot_id, &name).await {
+            Ok(()) => Ok(None),
+            Err(err) => {
+                let note = format!("resuming the computer failed: {err}");
+                self.observe_after_failure(bot_id, &note).await?;
+                Ok(Some(note))
+            }
+        }
+    }
+
+    /// Retry the kill of each of the bot's `cancelling` jobs, for the
+    /// offline upgrade command, which runs no maintenance loop.
+    pub(super) async fn confirm_cancels(&self, bot_id: Uuid) -> Result<(), ComputerError> {
+        let jobs: Vec<(Uuid, Option<Uuid>, bool)> = sqlx::query_as(
+            "SELECT id, lease_id,
+                    (SELECT cancel_pending OR status <> 'active' FROM bots WHERE id = guest_jobs.bot_id)
+             FROM guest_jobs WHERE bot_id = ?1 AND status = 'cancelling'",
+        )
+        .bind(bot_id)
+        .fetch_all(&self.pool)
+        .await?;
+        for (job, lease, bot_stopping) in jobs {
+            self.kill_job(bot_id, job, lease, bot_stopping).await?;
+        }
         Ok(())
     }
 
