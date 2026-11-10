@@ -1,6 +1,6 @@
-//! Sidebar layout: the main bot pinned on top, then categories
-//! with their bots, then the unassigned bots. Pure, so the order is tested
-//! without a window.
+//! Sidebar layout: the main bot pinned on top, then the bots waiting on the
+//! owner, oldest request first, then categories with their bots, then the
+//! unassigned bots. Pure, so the order is tested without a window.
 //!
 //! Categories keep the server's order: the owner's placed order, shared by
 //! every desktop, then unplaced ones by name. Muted bots go last in their group. Bots are
@@ -72,13 +72,25 @@ pub struct Group<'a> {
 pub struct Layout<'a> {
     /// The main bot, above every group and in none of them.
     pub pinned: Option<&'a Bot>,
+    /// Other bots waiting on the owner, muted ones included, lifted out of
+    /// their groups until the request closes.
+    pub waiting: Vec<&'a Bot>,
     pub groups: Vec<Group<'a>>,
 }
 
 impl<'a> Layout<'a> {
     pub fn new(categories: &'a [Category], bots: &'a [Bot], main: Option<Uuid>) -> Self {
         let pinned = bots.iter().find(|b| Some(b.id) == main);
-        let others = || bots.iter().filter(move |b| Some(b.id) != main);
+        let lifted = move |b: &Bot| Some(b.id) != main && b.is_active() && b.waiting().is_some();
+        let mut waiting: Vec<&Bot> = bots.iter().filter(|b| lifted(b)).collect();
+        waiting.sort_by_key(|b| {
+            let since = b.waiting().and_then(|w| w.since);
+            (since.is_none(), since, fold(&b.name), b.id)
+        });
+        let others = || {
+            bots.iter()
+                .filter(move |b| Some(b.id) != main && !lifted(b))
+        };
         let mut groups: Vec<Group> = categories
             .iter()
             .map(|category| Group {
@@ -104,7 +116,11 @@ impl<'a> Layout<'a> {
                 )
             });
         }
-        Self { pinned, groups }
+        Self {
+            pinned,
+            waiting,
+            groups,
+        }
     }
 
     pub fn without_empty_unassigned(mut self) -> Self {
@@ -117,6 +133,7 @@ impl<'a> Layout<'a> {
         let grouped = self.groups.iter().any(|group| group.category.is_some());
         self.pinned
             .into_iter()
+            .chain(self.waiting.iter().copied())
             .chain(
                 self.groups
                     .iter()
@@ -190,6 +207,47 @@ mod tests {
         assert_eq!(
             layout.visible_order(&[None].into()),
             vec![Uuid::from_u128(10), Uuid::from_u128(11)]
+        );
+    }
+
+    #[test]
+    fn bots_waiting_on_the_owner_sit_below_the_main_bot_oldest_first() {
+        let categories = vec![category(1, "Growth")];
+        let waits = |id, name, category, minute| {
+            let mut b = bot(id, name, category);
+            b.muted = true;
+            b.sidebar_status = Some(crate::api::SidebarStatus::NeedsTakeover {
+                preview: "Inspect the open X conversation.".into(),
+                since: at(minute),
+            });
+            b
+        };
+        let mut main = waits(10, "Main", None, 1);
+        main.muted = false;
+        let bots = vec![
+            main,
+            bot(11, "Atlas", Some(1)),
+            waits(12, "Scout", Some(1), 5),
+            waits(13, "Ledger", None, 2),
+        ];
+        let mut prefs = crate::preferences::Preferences::default();
+        prefs.collapsed.insert(Some(Uuid::from_u128(1)));
+        let layout =
+            Layout::new(&categories, &bots, Some(Uuid::from_u128(10))).without_empty_unassigned();
+        assert_eq!(layout.pinned.map(|b| b.name.as_str()), Some("Main"));
+        assert_eq!(
+            layout
+                .waiting
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Ledger", "Scout"]
+        );
+        assert_eq!(shape(&layout), vec![(Some("Growth"), vec!["Atlas"])]);
+        assert_eq!(
+            layout.visible_order(&prefs.collapsed),
+            [10, 13, 12].map(Uuid::from_u128),
+            "a collapsed group does not hide a waiting bot"
         );
     }
 

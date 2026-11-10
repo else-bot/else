@@ -170,23 +170,53 @@ pub struct Cleanup {
     pub error: Option<serde_json::Value>,
 }
 
+/// `since` is when the open request was made; absent from older servers.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SidebarStatus {
     WaitingForAnswer {
         preview: String,
+        #[serde(default)]
+        since: Option<DateTime<Utc>>,
     },
     NeedsApproval {
         preview: String,
+        #[serde(default)]
+        since: Option<DateTime<Utc>>,
+    },
+    NeedsTakeover {
+        preview: String,
+        #[serde(default)]
+        since: Option<DateTime<Utc>>,
     },
     NeedsCredentials {
         preview: String,
+        #[serde(default)]
+        since: Option<DateTime<Utc>>,
     },
     Failed,
     Stopped,
     Uncertain,
     #[serde(other)]
     Unknown,
+}
+
+/// A request the bot waits on the owner to settle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Waiting {
+    pub since: Option<DateTime<Utc>>,
+}
+
+impl SidebarStatus {
+    pub fn waiting(&self) -> Option<Waiting> {
+        match self {
+            Self::WaitingForAnswer { since, .. }
+            | Self::NeedsApproval { since, .. }
+            | Self::NeedsTakeover { since, .. }
+            | Self::NeedsCredentials { since, .. } => Some(Waiting { since: *since }),
+            Self::Failed | Self::Stopped | Self::Uncertain | Self::Unknown => None,
+        }
+    }
 }
 
 /// An active bot, or a deletion receipt (`cleanup` set).
@@ -211,8 +241,8 @@ pub struct Bot {
     /// unassigned.
     #[serde(default)]
     pub category_id: Option<Uuid>,
-    /// The owner silenced it: never unread and never announced. Absent
-    /// from receipts and older servers.
+    /// The owner silenced it: unread and announced only while it waits on
+    /// the owner. Absent from receipts and older servers.
     #[serde(default)]
     pub muted: bool,
     /// Absent from receipts and older servers.
@@ -288,6 +318,16 @@ struct CategoryEnvelope {
 impl Bot {
     pub fn is_active(&self) -> bool {
         self.cleanup.is_none()
+    }
+
+    /// The open request this bot waits on the owner to settle, if any.
+    pub fn waiting(&self) -> Option<Waiting> {
+        self.sidebar_status.as_ref()?.waiting()
+    }
+
+    /// Muted and not waiting on the owner: never unread and never announced.
+    pub fn silenced(&self) -> bool {
+        self.muted && self.waiting().is_none()
     }
 }
 

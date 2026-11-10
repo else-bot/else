@@ -186,6 +186,19 @@ async fn sidebar_status(app: &TestApp, bot: &str) -> Value {
     .unwrap();
     let event: Value = serde_json::from_str(&data).unwrap();
     assert_eq!(event["bot"]["sidebar_status"], status);
+    without_since(status)
+}
+
+/// The status with its request time checked and removed.
+fn without_since(mut status: Value) -> Value {
+    if let Some(since) = status.as_object_mut().and_then(|f| f.remove("since")) {
+        assert!(
+            since
+                .as_str()
+                .is_some_and(|at| at.parse::<chrono::DateTime<chrono::Utc>>().is_ok()),
+            "{since}"
+        );
+    }
     status
 }
 

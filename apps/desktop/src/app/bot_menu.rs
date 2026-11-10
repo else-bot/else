@@ -32,6 +32,7 @@ impl ElseApp {
         let movable = !categories.is_empty() && app.movable_bot(id).is_some();
         let unread = app.is_unread(id);
         let muted = bot.muted;
+        let silenced = bot.silenced();
         let connected = app.connection == Connection::Connected;
         let deletable = app.default_bot_id != Some(id) && connected && !app.deleting.contains(&id);
         let delete_color = if deletable {
@@ -85,7 +86,7 @@ impl ElseApp {
                     .disabled(true),
             )
         };
-        let menu = if muted {
+        let menu = if silenced {
             menu
         } else {
             menu.item(

@@ -97,6 +97,32 @@ impl ElseApp {
         if let Some(main) = layout.pinned {
             list = list.child(self.render_bot_row(main, cx));
         }
+        if !layout.waiting.is_empty() {
+            let mut tray = v_flex()
+                .id("waiting-tray")
+                .mt_2()
+                .p_0p5()
+                .gap_0p5()
+                .rounded(theme.radius)
+                .border_1()
+                .border_color(theme.warning.opacity(0.35))
+                .bg(theme.warning.opacity(0.06))
+                .child(
+                    h_flex()
+                        .h(px(28.))
+                        .px_2()
+                        .items_center()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.warning)
+                        .child(div().flex_1().child("Needs you"))
+                        .child(layout.waiting.len().to_string()),
+                );
+            for bot in layout.waiting {
+                tray = tray.child(self.render_bot_row(bot, cx));
+            }
+            list = list.child(tray);
+        }
         for group in layout.groups {
             let destination = group.category.map(|c| c.id);
             let drop_owner = owner.clone();
@@ -342,6 +368,11 @@ impl ElseApp {
         let pending = !bot.is_active();
         let muted = bot.muted && !pending;
         let connected = self.connected();
+        let waited = bot
+            .waiting()
+            .and_then(|w| w.since)
+            .filter(|_| self.default_bot_id != Some(id))
+            .map(|since| crate::sidebar::status::waited(since, chrono::Utc::now()));
         let subtitle = Subtitle::new(bot, connected, self.stopping.contains(&id));
         let working = subtitle.kind == Kind::Working && connected;
         let color = if !connected {
@@ -349,7 +380,7 @@ impl ElseApp {
         } else {
             match subtitle.kind {
                 Kind::Working => theme.primary,
-                Kind::Answer | Kind::Approval | Kind::Credentials => theme.warning,
+                Kind::Answer | Kind::Approval | Kind::Takeover | Kind::Credentials => theme.warning,
                 Kind::Failed | Kind::Uncertain | Kind::Unavailable => theme.danger,
                 _ => theme.muted_foreground,
             }
@@ -360,6 +391,7 @@ impl ElseApp {
             Kind::Queued => Some(IconName::Clock),
             Kind::Answer => Some(IconName::CircleQuestionMark),
             Kind::Approval => Some(IconName::BadgeCheck),
+            Kind::Takeover => Some(IconName::Laptop),
             Kind::Credentials => Some(IconName::LockKeyhole),
             Kind::Stopping => Some(IconName::Square),
             Kind::Stopped => Some(IconName::Pause),
@@ -437,12 +469,23 @@ impl ElseApp {
                     )
                     .child(subtitle),
             )
+            .children(waited.map(|waited| {
+                div()
+                    .flex_none()
+                    .self_start()
+                    .mt_1p5()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(waited)
+            }))
             .children(unread.then(|| div().flex_none().size_2().rounded_full().bg(theme.primary)));
         if pending {
             row = row.opacity(0.5);
         } else {
             row = row
-                .when(muted && !selected, |row| row.opacity(0.5))
+                .when(bot.silenced() && !pending && !selected, |row| {
+                    row.opacity(0.5)
+                })
                 .cursor_pointer()
                 .hover(|style| style.bg(theme.sidebar_accent).opacity(1.))
                 .on_click(cx.listener(move |app, _, window, cx| app.open_bot(id, window, cx)));

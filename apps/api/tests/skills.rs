@@ -234,7 +234,18 @@ async fn an_approved_card_installs_the_reviewed_files_stores_the_key_and_continu
     );
     let listed = app.owner("GET", &format!("/v1/bots/{main}"), None).await;
     assert_eq!(
-        listed.body["bot"]["sidebar_status"],
+        {
+            let mut status = listed.body["bot"]["sidebar_status"].clone();
+            assert!(
+                status
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("since")
+                    .unwrap()
+                    .is_string()
+            );
+            status
+        },
         json!({ "kind": "needs_approval", "preview": "Install skill rea-growth" })
     );
 

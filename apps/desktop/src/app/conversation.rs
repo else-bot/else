@@ -560,7 +560,7 @@ impl ElseApp {
             return;
         };
         let bot = view.bot_id;
-        if self.bots.iter().any(|b| b.id == bot && b.muted) {
+        if self.bots.iter().any(|b| b.id == bot && b.silenced()) {
             view.unread_since = None;
         }
         let conversation = view.conversation.as_ref();

@@ -43,7 +43,8 @@ pub struct BotRecord {
     pub queued_count: i64,
     /// Its sidebar category, if any.
     pub category_id: Option<Uuid>,
-    /// The owner silenced it: no notifications or unread state.
+    /// The owner silenced it: no notifications or unread state while it
+    /// waits on nothing from the owner.
     pub muted: bool,
     /// When the newest owner or bot message in its owner conversation was
     /// created; `None` before the first message.
@@ -76,10 +77,11 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
         length(CAST(h.text AS BLOB)) AS head_bytes, substr(h.text, 1, 240) AS head_preview,
         a.id AS active_turn_id, a.status AS active_turn_status,
         question.kind AS question_kind, question.title AS question_title,
-        r.reason AS credential_reason,
-        (SELECT 'Install skill ' || p.name FROM skill_installs p JOIN turns t ON t.id = p.turn_id
-            WHERE p.bot_id = b.id AND p.status = 'pending' AND t.conversation_id = c.id
-            ORDER BY p.created_at, p.id LIMIT 1) AS skill_install_title,
+        question.created_at AS question_at,
+        handoff.reason AS handoff_reason, handoff.created_at AS handoff_at,
+        r.reason AS credential_reason, r.created_at AS credential_at,
+        'Install skill ' || install.name AS skill_install_title,
+        install.created_at AS skill_install_at,
         (SELECT t.status FROM turns t WHERE t.conversation_id = c.id
             ORDER BY t.turn_no DESC LIMIT 1) AS latest_turn_status,
         coalesce((SELECT (i.seq, length(CAST(i.text AS BLOB)))
@@ -98,6 +100,11 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
                                  AND x.kind = 'assistant' ORDER BY x.seq DESC LIMIT 1)
     LEFT JOIN owner_questions question ON question.id = (
         SELECT p.id FROM owner_questions p JOIN turns t ON t.id = p.turn_id
+        WHERE p.bot_id = b.id AND p.status = 'pending' AND t.conversation_id = c.id
+        ORDER BY p.created_at, p.id LIMIT 1)
+    LEFT JOIN computer_handoffs handoff ON handoff.bot_id = b.id AND handoff.status = 'pending'
+    LEFT JOIN skill_installs install ON install.id = (
+        SELECT p.id FROM skill_installs p JOIN turns t ON t.id = p.turn_id
         WHERE p.bot_id = b.id AND p.status = 'pending' AND t.conversation_id = c.id
         ORDER BY p.created_at, p.id LIMIT 1)
     LEFT JOIN secret_requests r ON r.id = (

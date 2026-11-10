@@ -1,4 +1,18 @@
+use chrono::{DateTime, Utc};
+
 use crate::api::{Bot, SidebarStatus};
+
+/// How long a request has waited, in its largest whole unit: `now`, `5m`,
+/// `2h`, `3d`.
+pub fn waited(since: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let minutes = (now - since).num_minutes().max(0);
+    match minutes {
+        0 => "now".to_owned(),
+        1..60 => format!("{minutes}m"),
+        60..1440 => format!("{}h", minutes / 60),
+        _ => format!("{}d", minutes / 1440),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -7,6 +21,7 @@ pub enum Kind {
     Queued,
     Answer,
     Approval,
+    Takeover,
     Credentials,
     Stopping,
     Stopped,
@@ -50,13 +65,16 @@ impl Subtitle {
             return label(Kind::Stopping, "Stopping…");
         }
         match &bot.sidebar_status {
-            Some(SidebarStatus::WaitingForAnswer { preview }) => {
+            Some(SidebarStatus::WaitingForAnswer { preview, .. }) => {
                 return label(Kind::Answer, &format!("Waiting for you · {preview}"));
             }
-            Some(SidebarStatus::NeedsApproval { preview }) => {
+            Some(SidebarStatus::NeedsApproval { preview, .. }) => {
                 return label(Kind::Approval, &format!("Needs approval · {preview}"));
             }
-            Some(SidebarStatus::NeedsCredentials { preview }) => {
+            Some(SidebarStatus::NeedsTakeover { preview, .. }) => {
+                return label(Kind::Takeover, &format!("Take over · {preview}"));
+            }
+            Some(SidebarStatus::NeedsCredentials { preview, .. }) => {
                 return label(Kind::Credentials, &format!("Needs credentials · {preview}"));
             }
             _ => {}
@@ -213,6 +231,7 @@ mod tests {
         for (status, kind, prefix) in [
             ("waiting_for_answer", Kind::Answer, "Waiting for you"),
             ("needs_approval", Kind::Approval, "Needs approval"),
+            ("needs_takeover", Kind::Takeover, "Take over"),
             ("needs_credentials", Kind::Credentials, "Needs credentials"),
         ] {
             let bot =
@@ -222,6 +241,21 @@ mod tests {
             assert_eq!(subtitle.text, format!("{prefix} · Which account?"));
             assert_eq!(Subtitle::new(&bot, true, true).kind, Kind::Stopping);
         }
+    }
+
+    #[test]
+    fn waits_read_in_their_largest_whole_unit() {
+        let now: DateTime<Utc> = "2026-11-10T12:00:00Z".parse().unwrap();
+        for (ago, text) in [
+            (0, "now"),
+            (59, "59m"),
+            (60, "1h"),
+            (1439, "23h"),
+            (2880, "2d"),
+        ] {
+            assert_eq!(waited(now - chrono::Duration::minutes(ago), now), text);
+        }
+        assert_eq!(waited(now + chrono::Duration::minutes(3), now), "now");
     }
 
     #[test]

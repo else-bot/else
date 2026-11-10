@@ -285,7 +285,18 @@ async fn an_answer_after_the_attempt_ends_stores_the_secret_and_continues_the_tu
     let shown = &waiting["secret_requests"][0];
     let listed = app.owner("GET", &format!("/v1/bots/{main}"), None).await;
     assert_eq!(
-        listed.body["bot"]["sidebar_status"],
+        {
+            let mut status = listed.body["bot"]["sidebar_status"].clone();
+            assert!(
+                status
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("since")
+                    .unwrap()
+                    .is_string()
+            );
+            status
+        },
         json!({ "kind": "needs_credentials", "preview": "Log in to the web server to deploy the site." })
     );
     assert_eq!(shown["id"], request.to_string());

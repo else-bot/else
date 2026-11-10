@@ -185,3 +185,36 @@ async fn a_pending_handoff_stays_in_the_snapshot_after_its_turn_leaves_the_page(
         .expect("the handoff's turn is in the snapshot");
     assert_eq!(shown["computer_handoffs"][0]["status"], "pending");
 }
+
+async fn sidebar_status(app: &TestApp, bot: &str) -> Value {
+    let list = app.owner("GET", "/v1/bots", None).await;
+    list.body["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == bot)
+        .unwrap()["sidebar_status"]
+        .clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pending_handoff_shows_in_the_sidebar_until_it_is_settled() {
+    let app = app().await;
+    let bot = app.main_bot().await;
+    let (_, token) = running(&app, &bot).await;
+    let handoff = hand_off(&app, &token, "Inspect the open X conversation.").await;
+
+    let shown = sidebar_status(&app, &bot).await;
+    assert_eq!(shown["kind"], "needs_takeover", "{shown}");
+    assert_eq!(shown["preview"], "Inspect the open X conversation.");
+    assert!(
+        shown["since"]
+            .as_str()
+            .is_some_and(|at| at.parse::<chrono::DateTime<chrono::Utc>>().is_ok()),
+        "{shown}"
+    );
+
+    let dismissed = settle(&app, &bot, &handoff["handoff_id"], "dismiss").await;
+    assert_eq!(dismissed.status, StatusCode::OK, "{}", dismissed.body);
+    assert_ne!(sidebar_status(&app, &bot).await["kind"], "needs_takeover");
+}
