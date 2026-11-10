@@ -797,10 +797,12 @@ pub async fn undelivered(
         status: String,
         result: Option<String>,
         error: Option<String>,
+        earlier_request: bool,
     }
     let rows: Vec<OutcomeRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT d.id, d.parent_bot_id, coalesce(d.takeover_turn_id, d.child_turn_id) AS turn,
-                d.target_bot_id, b.name AS target_name, d.task, d.status, d.result, d.error
+                d.target_bot_id, b.name AS target_name, d.task, d.status, d.result, d.error,
+                d.parent_attempt = 0 AS earlier_request
              FROM delegations d JOIN bots b ON b.id = d.target_bot_id
              WHERE d.root_turn_id = ?1 AND {READY}
              ORDER BY d.created_at"
@@ -835,6 +837,7 @@ pub async fn undelivered(
             result: row.result,
             error: row.error,
             files,
+            earlier_request: row.earlier_request,
         });
     }
     Ok(outcomes)

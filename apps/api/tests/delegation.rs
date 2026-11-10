@@ -2022,6 +2022,9 @@ async fn a_follow_up_receives_an_outcome_its_earlier_turn_had_not_seen() {
     let (main, root, child, delegation) = seed(&db).await;
     set_status(&db, root, "waiting").await;
     set_status(&db, child, "completed").await;
+    let own = undelivered(&db, root).await;
+    assert_eq!(own.len(), 1);
+    assert!(!own[0].earlier_request, "the delegating turn's own task");
     let follow = follow_up(&db, main).await;
     let (carrier, status, delivered, root_status): (Uuid, String, Option<i64>, String) =
         sqlx::query_as(
@@ -2039,6 +2042,19 @@ async fn a_follow_up_receives_an_outcome_its_earlier_turn_had_not_seen() {
         (follow, "completed", None),
         "the follow-up will receive the outcome"
     );
+    let carried = undelivered(&db, follow).await;
+    assert_eq!(carried.len(), 1);
+    assert!(
+        carried[0].earlier_request,
+        "the follow-up learns the task was started for an earlier message"
+    );
+}
+
+async fn undelivered(db: &TestDb, root: Uuid) -> Vec<else_api::db::delegations::Outcome> {
+    let mut conn = db.pool.acquire().await.unwrap();
+    else_api::db::delegations::undelivered(&mut conn, root)
+        .await
+        .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
