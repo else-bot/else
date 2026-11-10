@@ -206,6 +206,44 @@ async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_retried_job_is_not_reported_blocked_while_leased() {
+    let app = TestApp::installed().await;
+    small_recipe(&app).await;
+    let bot: Uuid = app.create_bot("Retry").await.parse().unwrap();
+    add(&app, bot, "long", &"long ".repeat(40)).await;
+    memory_worker::drain(&app.db.pool).await.unwrap();
+    let saved = memory_tree::load_view(&app.db.pool, bot).await.unwrap();
+    assert_eq!(saved.blocked, vec![("summary_unavailable".to_owned(), 1)]);
+
+    sqlx::query("UPDATE memory_job SET available_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')")
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let retry = memory_tree::claim(&app.db.pool, Duration::from_secs(60))
+        .await
+        .unwrap()
+        .unwrap();
+    let saved = memory_tree::load_view(&app.db.pool, bot).await.unwrap();
+    assert_eq!(
+        saved.blocked,
+        vec![],
+        "a leased job is being worked on, not blocked"
+    );
+
+    memory_tree::defer(
+        &app.db.pool,
+        &retry,
+        "waiting_for_summary",
+        None,
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    let saved = memory_tree::load_view(&app.db.pool, bot).await.unwrap();
+    assert_eq!(saved.blocked, vec![("waiting_for_summary".to_owned(), 1)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn replaced_leases_and_concurrent_workers_never_publish_twice() {
     let app = TestApp::installed().await;
     small_recipe(&app).await;
