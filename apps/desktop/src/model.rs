@@ -957,6 +957,34 @@ impl Conversation {
         }
     }
 
+    /// The owner message that skipped `question`. The server saves the
+    /// message and skips pending questions in one transaction, so it is the
+    /// owner message after the question's turn stamped closest to the moment
+    /// the question settled.
+    pub fn skipping_reply(&self, question: &Question) -> Option<&Item> {
+        let settled = question
+            .settled_at
+            .filter(|_| question.status == "skipped")?;
+        let turn = self
+            .turns
+            .values()
+            .find(|t| t.questions.iter().any(|q| q.id == question.id))?;
+        let after = self
+            .items
+            .values()
+            .filter(|item| item.turn_id == turn.id)
+            .map(|item| item.seq)
+            .max()?;
+        self.items
+            .range(after + 1..)
+            .map(|(_, item)| item)
+            .filter(|item| item.kind == "user")
+            .filter_map(|item| Some((item, (item.created_at? - settled).abs())))
+            .filter(|(_, gap)| *gap <= chrono::TimeDelta::seconds(2))
+            .min_by_key(|(_, gap)| *gap)
+            .map(|(item, _)| item)
+    }
+
     pub fn question_anchor(&self, turn: Uuid, settled_at: Option<DateTime<Utc>>) -> Option<Uuid> {
         self.items
             .values()
@@ -1084,6 +1112,51 @@ mod tests {
             "item.delta",
             json!({ "item_id": Uuid::from_u128(id), "offset_utf8": offset, "text": text }),
         )
+    }
+
+    #[test]
+    fn a_skipped_question_finds_the_owner_message_that_skipped_it() {
+        let stamped = |id, seq, kind, text, at: &str| {
+            let mut item = item(id, seq, kind, text);
+            item["turn_id"] = json!(Uuid::from_u128(9));
+            item["created_at"] = json!(at);
+            item
+        };
+        let mut answer = item(3, 3, "user", "Markdown, for Notion");
+        answer["created_at"] = json!("2026-11-02T00:00:01.500Z");
+        let mut c = Conversation::from_snapshot(snapshot(
+            3,
+            vec![
+                stamped(1, 1, "user", "make a digest", "2026-11-02T00:00:00.000Z"),
+                stamped(
+                    2,
+                    2,
+                    "assistant",
+                    "Which format?",
+                    "2026-11-02T00:00:00.500Z",
+                ),
+                answer,
+            ],
+            None,
+        ))
+        .unwrap();
+        let question = Uuid::from_u128(40);
+        let turn = |status: &str| {
+            json!({ "turn": {
+                "id": Uuid::from_u128(9), "request_id": Uuid::from_u128(8), "turn_no": 1,
+                "provider_id": "synthetic", "status": "completed", "error": null,
+                "effect_uncertain": false,
+                "questions": [{ "id": question, "kind": "choice", "title": "Which format?",
+                    "choices": [], "status": status,
+                    "settled_at": "2026-11-02T00:00:01.510Z" }],
+            }})
+        };
+        c.apply(&frame(4, "turn.updated", turn("skipped"))).unwrap();
+        let reply = c.skipping_reply(c.question(question).unwrap());
+        assert_eq!(reply.map(|i| i.text.as_str()), Some("Markdown, for Notion"));
+        c.apply(&frame(5, "turn.updated", turn("cancelled")))
+            .unwrap();
+        assert!(c.skipping_reply(c.question(question).unwrap()).is_none());
     }
 
     #[test]

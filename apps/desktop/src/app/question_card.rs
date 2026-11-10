@@ -195,19 +195,127 @@ impl ElseApp {
             return div().into_any_element();
         };
         let submit = view.question_submits.get(&id);
-        if !question.is_approval() {
-            return self.render_choice_card(question, submit, cx);
-        }
         let bot_name = self
             .bots
             .iter()
             .find(|b| b.id == view.bot_id)
             .map(|b| b.name.clone())
             .unwrap_or_default();
+        if !question.is_approval() {
+            return self.render_choice_card(question, submit, &bot_name, cx);
+        }
         if question.mcp_connection().is_some() || question.email_connection().is_some() {
             return self.render_connection_card(question, &bot_name, cx);
         }
         self.render_approval_card(question, submit, &bot_name, cx)
+    }
+}
+
+impl ElseApp {
+    /// The conversation rows of questions still waiting on the owner, in
+    /// timeline order.
+    fn waiting_question_rows(&self) -> Vec<usize> {
+        let Some(view) = self.view.as_ref() else {
+            return Vec::new();
+        };
+        view.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                let RowKey::Question(id) = row.key else {
+                    return false;
+                };
+                view.conversation
+                    .as_ref()
+                    .and_then(|c| c.question(id))
+                    .is_some_and(Question::is_pending)
+                    && !view
+                        .question_submits
+                        .get(&id)
+                        .is_some_and(QuestionForm::locks)
+            })
+            .map(|(ix, _)| ix)
+            .collect()
+    }
+
+    fn jump_to_question(&mut self, cx: &mut Context<Self>) {
+        let Some(ix) = self.waiting_question_rows().first().copied() else {
+            return;
+        };
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        view.list.scroll_to(ListOffset {
+            item_ix: ix,
+            offset_in_item: px(0.),
+        });
+        view.revealed = Some((view.rows[ix].key, std::time::Instant::now()));
+        cx.notify();
+    }
+
+    /// The strip above the composer while the bot waits on the owner, so the
+    /// pause stays visible after its card scrolls away.
+    pub(super) fn render_question_bar(
+        &self,
+        bot_name: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let waiting = self.waiting_question_rows().len();
+        if waiting == 0 {
+            return None;
+        }
+        let theme = cx.theme();
+        Some(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_3()
+                .items_center()
+                .px_3()
+                .py_1p5()
+                .rounded(theme.radius)
+                .bg(theme.warning.opacity(0.12))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.warning)
+                        .child(Icon::new(IconName::Pause).small()),
+                )
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1p5()
+                        .text_sm()
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_semibold()
+                                .child(format!("{bot_name} is paused")),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.muted_foreground)
+                                .child(if waiting == 1 {
+                                    "· waiting on your answer".to_owned()
+                                } else {
+                                    format!("· waiting on {waiting} answers")
+                                }),
+                        ),
+                )
+                .child(
+                    Button::new("jump-to-question")
+                        .focus_ring(false)
+                        .ghost()
+                        .small()
+                        .cursor_pointer()
+                        .label("Jump to question")
+                        .on_click(cx.listener(|app, _, _, cx| app.jump_to_question(cx))),
+                )
+                .into_any_element(),
+        )
     }
 }
 
