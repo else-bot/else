@@ -639,3 +639,32 @@ async fn a_job_ending_by_itself_during_a_stop_still_completes_the_stop() {
     manager.tick(&never()).await.unwrap();
     assert_eq!(receipt(&app, request).await, "done");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unconfirmed_job_cancel_is_retried_until_the_job_is_gone() {
+    let _serial = SERIAL.lock().await;
+    let app = TestApp::installed().await;
+    let guest = Arc::new(Guest::default());
+    let bot: Uuid = app.create_bot("A").await.parse().unwrap();
+    let manager = api(&app, &guest, 2).await;
+    let Started::Job(job) = manager
+        .start_job(bot, None, "work", Duration::from_secs(600))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    guest.kills_fail.store(true, SeqCst);
+    let state = manager.cancel_job(bot, job).await.unwrap().unwrap();
+    assert_eq!(state.status.to_string(), "cancelling");
+    assert_eq!(
+        job_leases(&app).await,
+        1,
+        "not released before the kill is confirmed"
+    );
+    guest.kills_fail.store(false, SeqCst);
+    manager.tick(&never()).await.unwrap();
+    assert_eq!(job_status(&app, job).await.0, "cancelled");
+    assert_eq!(job_leases(&app).await, 0);
+    assert_eq!(guest.kills.lock().unwrap().len(), 2);
+}
