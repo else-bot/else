@@ -56,7 +56,10 @@ impl InputProgress {
                 },
             ) if next_index == actions && reported == actions => Self::Completed,
             (Self::NotStarted, Event::Error { error }) => Self::Refused { error },
-            (Self::Started { .. }, Event::Error { error }) => Self::Failed { done, error },
+            (Self::Started { .. } | Self::Completed, Event::Error { error }) => {
+                Self::Failed { done, error }
+            }
+            (failed @ Self::Failed { .. }, Event::Error { .. }) => failed,
             _ => Self::ProtocolViolation {
                 done,
                 reason: "INPUT_PROTOCOL: out-of-order or inconsistent input helper event",
@@ -118,10 +121,19 @@ mod tests {
                 error: "STOPPED".into()
             }
         );
+        let owner = r#"{"error":"OWNER_USING_DESKTOP"}"#;
+        assert_eq!(
+            parse(&[STARTED, DONE_0, owner, ERROR]),
+            InputProgress::Failed {
+                done: 1,
+                error: "OWNER_USING_DESKTOP".into()
+            }
+        );
         for (events, done) in [
             (vec![STARTED, ERROR], 0),
             (vec![STARTED, DONE_0, ERROR], 1),
             (vec![STARTED, DONE_0, DONE_1, ERROR], 2),
+            (vec![STARTED, DONE_0, DONE_1, OK, ERROR], 2),
         ] {
             assert_eq!(
                 parse(&events),
@@ -149,7 +161,6 @@ mod tests {
             (&[STARTED, DONE_0, DONE_1, r#"{"done":2}"#], 2),
             (&[STARTED, DONE_0, DONE_1, OK, DONE_1], 2),
             (&[STARTED, DONE_0, DONE_1, OK, OK], 2),
-            (&[STARTED, DONE_0, DONE_1, OK, ERROR], 2),
             (&[ERROR, STARTED], 0),
             (&[ERROR, OK], 0),
             (&[STARTED, DONE_0, ERROR, OK], 1),

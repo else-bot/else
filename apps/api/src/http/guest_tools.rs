@@ -594,10 +594,10 @@ async fn input(
     let progress = InputProgress::parse(&out.stdout, actions.len());
     let done = progress.done(actions.len());
     let summary = summarize_input(actions);
-    if matches!(
-        progress,
-        InputProgress::NotStarted | InputProgress::Refused { .. }
-    ) {
+    let killed = out.exit_code.is_none_or(|code| code > 128);
+    if matches!(progress, InputProgress::Refused { .. })
+        || (matches!(progress, InputProgress::NotStarted) && !killed)
+    {
         return (
             tool_error(&format!(
                 "{} Nothing was done.",
