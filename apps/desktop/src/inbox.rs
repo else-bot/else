@@ -457,6 +457,45 @@ mod tests {
         assert!(!inbox.observe(&[second_message]), "same turn");
     }
 
+    fn working(mut bot: Bot, n: u128) -> Bot {
+        bot.activity = Some(crate::api::Activity {
+            phase: "working".into(),
+            active_turn_id: Some(turn(n)),
+            queued_count: 0,
+        });
+        bot
+    }
+
+    #[test]
+    fn progress_updates_wait_for_the_turn_to_end() {
+        let mut inbox = Inbox::default();
+        inbox.observe(&[working(bot(1, None, at(0, 0)), 1)]);
+        for position in [at(2, 7), at(3, 12)] {
+            let update = working(bot(1, Some((1, position)), at(0, 0)), 1);
+            assert!(!inbox.observe(std::slice::from_ref(&update)));
+            assert!(inbox.alerts(&[update], nobody).is_empty(), "still working");
+        }
+        let mut done = bot(1, Some((1, at(3, 12))), at(0, 0));
+        done.read_state.as_mut().unwrap().latest.as_mut().unwrap().preview = "Final".into();
+        assert!(inbox.observe(std::slice::from_ref(&done)), "turn ended");
+        let alerts = inbox.alerts(std::slice::from_ref(&done), nobody);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].body, "Final");
+        assert!(!inbox.observe(&[done]), "announced once");
+    }
+
+    #[test]
+    fn a_turn_waiting_on_the_owner_is_announced() {
+        let mut inbox = Inbox::default();
+        inbox.observe(&[working(bot(1, None, at(0, 0)), 1)]);
+        let mut asking = working(bot(1, Some((1, at(2, 7))), at(0, 0)), 1);
+        asking.sidebar_status = Some(crate::api::SidebarStatus::WaitingForAnswer {
+            preview: "Which one?".into(),
+        });
+        assert!(inbox.observe(std::slice::from_ref(&asking)));
+        assert_eq!(inbox.alerts(&[asking], nobody).len(), 1);
+    }
+
     #[test]
     fn a_new_turn_is_announced_while_an_older_reply_is_still_unread() {
         let mut inbox = Inbox::default();
