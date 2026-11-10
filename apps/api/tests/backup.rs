@@ -465,7 +465,8 @@ async fn recovery_completes_runs_whose_set_was_published() {
     let worker = worker(&app, key(1), config(dir.path()));
     let published = worker.run_once().await.unwrap();
     sqlx::query(
-        "UPDATE backup_runs SET local_status = 'running', finished_at = NULL WHERE set_id = ?1",
+        "UPDATE backup_runs SET local_status = 'running', finished_at = NULL,
+         ciphertext_bytes = NULL, coverage = NULL WHERE set_id = ?1",
     )
     .bind(&published.set_id)
     .execute(&app.db.pool)
