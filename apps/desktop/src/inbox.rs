@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use crate::api::{Bot, ReadCommand, ReplyPosition};
+use crate::api::{Bot, ReadCommand, ReplyPosition, SidebarStatus};
 
 /// The owner's explicit choice from the bot menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,7 +142,7 @@ pub struct Alert {
 
 #[derive(Debug)]
 struct Announcement {
-    turn: Uuid,
+    position: ReplyPosition,
     shown: bool,
 }
 
@@ -240,8 +240,9 @@ impl Inbox {
         }
     }
 
-    /// Note new replies in a bot list. Returns whether any await a
-    /// notification decision.
+    /// Note new replies in a bot list, and on the first list the replies of
+    /// turns still running. Returns whether any await a notification
+    /// decision now that their bot handed back.
     pub fn observe(&mut self, bots: &[Bot]) -> bool {
         let first = !self.baseline;
         self.baseline = true;
@@ -259,10 +260,14 @@ impl Inbox {
             let announced = attention
                 .announcement
                 .as_ref()
-                .is_some_and(|alert| alert.turn == latest.turn_id);
-            attention.due |=
-                !first && before.is_none_or(|position| latest.position > position) && !announced;
-            due |= attention.due;
+                .is_some_and(|alert| alert.position >= latest.position);
+            let news = if first {
+                !handed_back(bot)
+            } else {
+                before.is_none_or(|position| latest.position > position)
+            };
+            attention.due |= news && !announced;
+            due |= attention.due && handed_back(bot);
         }
         due
     }
@@ -275,9 +280,6 @@ impl Inbox {
             let Some(attention) = self.bots.get_mut(&bot.id) else {
                 continue;
             };
-            if !std::mem::take(&mut attention.due) {
-                continue;
-            }
             let Some(latest) = bot
                 .read_state
                 .as_ref()
@@ -285,11 +287,15 @@ impl Inbox {
             else {
                 continue;
             };
+            if !attention.due || !handed_back(bot) {
+                continue;
+            }
+            attention.due = false;
             if !unread(Some(&attention.read), bot) || viewing(bot.id) {
                 continue;
             }
             attention.announcement = Some(Announcement {
-                turn: latest.turn_id,
+                position: latest.position,
                 shown: true,
             });
             alerts.push(Alert {
@@ -337,6 +343,21 @@ impl Inbox {
                 .map(|_| *id)
         })
     }
+}
+
+/// The bot has nothing left to run, or waits on the owner. Replies before
+/// then are progress updates and stay silent; a turn continuing after its
+/// delegated tasks is queued, so it is not idle.
+fn handed_back(bot: &Bot) -> bool {
+    bot.activity.as_ref().is_none_or(|a| a.phase == "idle")
+        || matches!(
+            bot.sidebar_status,
+            Some(
+                SidebarStatus::WaitingForAnswer { .. }
+                    | SidebarStatus::NeedsApproval { .. }
+                    | SidebarStatus::NeedsCredentials { .. }
+            )
+        )
 }
 
 fn unread(sync: Option<&ReadSync>, bot: &Bot) -> bool {
@@ -430,31 +451,82 @@ mod tests {
         assert!(!inbox.observe(&[waiting]), "a repeated list is no news");
     }
 
+    fn busy(mut bot: Bot, phase: &str) -> Bot {
+        bot.activity = Some(crate::api::Activity {
+            phase: phase.into(),
+            active_turn_id: (phase == "working").then(|| turn(1)),
+            queued_count: u32::from(phase == "queued"),
+        });
+        bot
+    }
+
+    fn finished(mut bot: Bot, preview: &str) -> Bot {
+        bot.read_state
+            .as_mut()
+            .unwrap()
+            .latest
+            .as_mut()
+            .unwrap()
+            .preview = preview.into();
+        bot
+    }
+
     #[test]
-    fn a_streamed_reply_is_announced_once() {
+    fn progress_updates_wait_for_the_bot_to_finish() {
         let mut inbox = Inbox::default();
-        inbox.observe(&[bot(1, None, at(0, 0))]);
-        let started = bot(1, Some((1, at(2, 7))), at(0, 0));
-        assert!(inbox.observe(std::slice::from_ref(&started)));
-        let alerts = inbox.alerts(&[started], nobody);
+        inbox.observe(&[busy(bot(1, None, at(0, 0)), "working")]);
+        for (position, phase) in [
+            (at(2, 7), "working"),
+            (at(3, 12), "working"),
+            (at(3, 12), "queued"),
+        ] {
+            let update = busy(bot(1, Some((1, position)), at(0, 0)), phase);
+            assert!(!inbox.observe(std::slice::from_ref(&update)), "{phase}");
+            assert!(inbox.alerts(&[update], nobody).is_empty(), "{phase}");
+        }
+        let done = finished(bot(1, Some((1, at(3, 12))), at(0, 0)), "Final");
+        assert!(
+            inbox.observe(std::slice::from_ref(&done)),
+            "the bot went idle"
+        );
         assert_eq!(
-            alerts,
+            inbox.alerts(std::slice::from_ref(&done), nobody),
             [Alert {
                 bot: Uuid::from_u128(1),
                 title: "Bot 1".into(),
-                body: "Reply 1".into(),
+                body: "Final".into(),
             }]
         );
-        for bytes in [14, 21, 80] {
-            let more = bot(1, Some((1, at(2, bytes))), at(0, 0));
-            assert!(
-                !inbox.observe(std::slice::from_ref(&more)),
-                "one alert per reply"
-            );
-            assert!(inbox.alerts(&[more], nobody).is_empty());
-        }
-        let second_message = bot(1, Some((1, at(3, 5))), at(0, 0));
-        assert!(!inbox.observe(&[second_message]), "same turn");
+        assert!(!inbox.observe(&[done]), "announced once");
+    }
+
+    #[test]
+    fn a_question_is_announced_and_so_is_the_answer_it_led_to() {
+        let mut inbox = Inbox::default();
+        inbox.observe(&[busy(bot(1, None, at(0, 0)), "working")]);
+        let mut asking = busy(bot(1, Some((1, at(2, 7))), at(0, 0)), "working");
+        asking.sidebar_status = Some(crate::api::SidebarStatus::WaitingForAnswer {
+            preview: "Which one?".into(),
+        });
+        assert!(inbox.observe(std::slice::from_ref(&asking)));
+        assert_eq!(inbox.alerts(&[asking], nobody).len(), 1);
+        let resumed = busy(bot(1, Some((1, at(4, 9))), at(0, 0)), "working");
+        assert!(!inbox.observe(std::slice::from_ref(&resumed)));
+        let done = bot(1, Some((1, at(4, 9))), at(0, 0));
+        assert!(
+            inbox.observe(std::slice::from_ref(&done)),
+            "same turn, new reply"
+        );
+        assert_eq!(inbox.alerts(&[done], nobody).len(), 1);
+    }
+
+    #[test]
+    fn a_turn_running_at_startup_is_announced_when_it_finishes() {
+        let mut inbox = Inbox::default();
+        assert!(!inbox.observe(&[busy(bot(1, Some((1, at(2, 7))), at(0, 0)), "working")]));
+        let done = bot(1, Some((1, at(2, 7))), at(0, 0));
+        assert!(inbox.observe(std::slice::from_ref(&done)));
+        assert_eq!(inbox.alerts(&[done], nobody).len(), 1);
     }
 
     #[test]
