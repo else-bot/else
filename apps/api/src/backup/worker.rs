@@ -205,8 +205,9 @@ impl BackupWorker {
     }
 
     /// Startup housekeeping under the backup lock: runs left `running` by
-    /// an earlier process are failed, and staging or unfinished sets this
-    /// application made are removed. Skipped while a backup is running.
+    /// an earlier process are completed when their set was published and
+    /// failed otherwise, and staging or unfinished sets this application
+    /// made are removed. Skipped while a backup is running.
     pub async fn recover(&self) -> Result<usize, BackupError> {
         match super::try_lock(&self.config.dir)? {
             Some(_lock) => self.recover_locked().await,
@@ -215,6 +216,18 @@ impl BackupWorker {
     }
 
     async fn recover_locked(&self) -> Result<usize, BackupError> {
+        let dir = self.config.dir.clone();
+        let published = tokio::task::spawn_blocking(move || super::completed_sets(&dir))
+            .await
+            .map_err(|e| BackupError::Io(e.to_string()))??;
+        sqlx::query(
+            "UPDATE backup_runs SET local_status = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+                 error = NULL
+             WHERE local_status = 'running' AND set_id IN (SELECT value FROM json_each(?1))",
+        )
+        .bind(sqlx::types::Json(published))
+        .execute(&self.pool)
+        .await?;
         sqlx::query(
             "UPDATE backup_runs SET local_status = 'failed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
                  error = 'interrupted before it finished'
