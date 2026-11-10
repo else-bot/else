@@ -24,7 +24,9 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::events;
+use crate::app::messages::{Attachment, MessagePart};
 use crate::app::providers::Profile;
+use crate::providers::output_files::OutputFile;
 
 /// Child limit when accepting an individual delegation.
 pub const MAX_CHILDREN: i64 = 2;
@@ -141,15 +143,17 @@ pub async fn for_turns(
     Ok(by_turn)
 }
 
-/// Accept a delegation from the provider attempt of `turn_id`.
+/// Accept a delegation from the provider attempt of `turn_id`. The target
+/// receives its own copies of `files`, attached to the task message.
 pub async fn create(
     pool: &SqlitePool,
     turn_id: Uuid,
     target: Uuid,
     task: &str,
+    files: &[OutputFile],
 ) -> Result<Accepted, DelegateError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let accepted = create_in(&mut tx, turn_id, target, task, false).await?;
+    let accepted = create_in(&mut tx, turn_id, target, task, files, false).await?;
     tx.commit().await?;
     Ok(accepted)
 }
@@ -176,7 +180,7 @@ pub async fn council(
     let parked = super::turns::attempt_parked(&mut tx, turn_id, attempt).await?;
     let mut accepted = Vec::with_capacity(count);
     for target in targets {
-        let result = create_in(&mut tx, turn_id, target, task, true).await?;
+        let result = create_in(&mut tx, turn_id, target, task, &[], true).await?;
         if parked && result.created {
             return Err(DelegateError::AttemptParked);
         }
@@ -191,6 +195,7 @@ async fn create_in(
     turn_id: Uuid,
     target: Uuid,
     task: &str,
+    files: &[OutputFile],
     council: bool,
 ) -> Result<Accepted, DelegateError> {
     let task = task.trim();
@@ -238,6 +243,14 @@ async fn create_in(
     let mut hasher = Sha256::new();
     hasher.update(target.as_bytes());
     hasher.update(task.as_bytes());
+    // A task has no NUL, nor a file name, so NUL ends each one; a task
+    // without files keeps the hash it always had.
+    for file in files {
+        hasher.update(b"\0");
+        hasher.update(file.file.name.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(Sha256::digest(&file.data));
+    }
     let hash = hasher.finalize().to_vec();
     let existing: Option<(Uuid, Uuid, String, String, Option<String>)> = sqlx::query_as(
         "SELECT d.id, d.target_bot_id, b.name, d.status, coalesce(d.result, d.error)
@@ -316,6 +329,41 @@ async fn create_in(
     };
     let profile: Option<(i64, sqlx::types::Json<Profile>)> =
         crate::db::bot_profiles::effective(conn, target, &provider).await?;
+    let mut parts = Vec::with_capacity(files.len() + 1);
+    if !files.is_empty() {
+        parts.push(MessagePart::Text {
+            text: format!("{task}\n\n"),
+        });
+    }
+    for output in files {
+        let file = &output.file;
+        let (copy, _) = super::attachments::store_in(
+            conn,
+            target,
+            Uuid::new_v4(),
+            &file.name,
+            &file.media_type,
+            &output.data,
+        )
+        .await
+        .map_err(|err| match err {
+            super::attachments::StoreError::Db(err) => DelegateError::from(err),
+            _ => DelegateError::BotUnavailable,
+        })?;
+        parts.push(MessagePart::File { file: copy });
+    }
+    let (message, receipt) = if parts.is_empty() {
+        (task.to_owned(), task.to_owned())
+    } else {
+        let receipt = parts
+            .iter()
+            .map(|part| match part {
+                MessagePart::Text { text } => text.clone(),
+                MessagePart::File { file } => crate::providers::prompt::file_reference(file),
+            })
+            .collect();
+        (crate::app::messages::flatten(&parts), receipt)
+    };
     let delegation_id = Uuid::new_v4();
     let conversation_id = Uuid::new_v4();
     let child_turn = Uuid::new_v4();
@@ -357,13 +405,14 @@ async fn create_in(
     .execute(&mut *conn)
     .await?;
     sqlx::query(
-        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-         VALUES (?1, ?2, 1, ?3, 'user', ?4)",
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text, parts)
+         VALUES (?1, ?2, 1, ?3, 'user', ?4, ?5)",
     )
     .bind(item_id)
     .bind(conversation_id)
     .bind(child_turn)
-    .bind(task)
+    .bind(&message)
+    .bind((!parts.is_empty()).then_some(sqlx::types::Json(&parts)))
     .execute(&mut *conn)
     .await?;
     sqlx::query(
@@ -395,7 +444,7 @@ async fn create_in(
     .bind(receipt_seq)
     .bind(child_turn)
     .bind(format!(
-        "Received a task from {sender}. I'll take care of it for you.\n\n{task}"
+        "Received a task from {sender}. I'll take care of it for you.\n\n{receipt}"
     ))
     .execute(&mut *conn)
     .await?;
@@ -639,8 +688,8 @@ pub async fn cancel_for_root(conn: &mut SqliteConnection, root: Uuid) -> Result<
 /// which calls this, so the reply commits with the outcome and before the
 /// root resumes. Display only: provider history and memory skip it.
 pub async fn publish_reply(conn: &mut SqliteConnection, turn: Uuid) -> Result<(), sqlx::Error> {
-    let rows: Vec<(Uuid, Uuid, Uuid, Uuid, String)> = sqlx::query_as(
-        "SELECT d.id, d.parent_bot_id, d.root_turn_id, r.conversation_id,
+    let rows: Vec<(Uuid, Uuid, Uuid, Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT d.id, d.parent_bot_id, d.target_bot_id, d.root_turn_id, r.conversation_id,
                 coalesce(nullif(d.result, ''), nullif(c.error_message, ''),
                     CASE d.status WHEN 'failed' THEN 'Task failed before it could reply.'
                          WHEN 'cancelled' THEN 'Task stopped before it could reply.' ELSE '' END)
@@ -655,7 +704,20 @@ pub async fn publish_reply(conn: &mut SqliteConnection, turn: Uuid) -> Result<()
     .bind(turn)
     .fetch_all(&mut *conn)
     .await?;
-    for (id, parent, root, conversation, text) in rows {
+    for (id, parent, target, root, conversation, text) in rows {
+        for (source, copy) in returned_files(conn, id, turn).await? {
+            sqlx::query(
+                "INSERT OR IGNORE INTO attachments (id, bot_id, name, media_type, size, sha256, data)
+                 SELECT ?1, ?2, name, media_type, size, sha256, data FROM attachments
+                 WHERE id = ?3 AND bot_id = ?4",
+            )
+            .bind(copy)
+            .bind(parent)
+            .bind(source)
+            .bind(target)
+            .execute(&mut *conn)
+            .await?;
+        }
         let seq: i64 = sqlx::query_scalar(
             "UPDATE conversations SET last_item_seq = last_item_seq + 1 WHERE id = ?1
              RETURNING last_item_seq",
@@ -679,6 +741,44 @@ pub async fn publish_reply(conn: &mut SqliteConnection, turn: Uuid) -> Result<()
     Ok(())
 }
 
+/// The files a task's replies attached, at most a message's worth, each
+/// paired with the ID of the delegating bot's copy. The copy's ID derives
+/// from the delegation and the source, so copying twice is a no-op.
+async fn returned_files(
+    conn: &mut SqliteConnection,
+    delegation: Uuid,
+    turn: Uuid,
+) -> Result<Vec<(Uuid, Uuid)>, sqlx::Error> {
+    let replies: Vec<sqlx::types::Json<Vec<MessagePart>>> = sqlx::query_scalar(
+        "SELECT assistant_parts FROM items
+         WHERE turn_id = ?1 AND kind = 'assistant' AND assistant_parts IS NOT NULL ORDER BY seq",
+    )
+    .bind(turn)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut sources: Vec<Uuid> = Vec::new();
+    for part in replies.iter().flat_map(|parts| parts.0.iter()) {
+        if let MessagePart::File { file } = part
+            && !sources.contains(&file.id)
+            && sources.len() < crate::app::messages::MAX_MESSAGE_FILES
+        {
+            sources.push(file.id);
+        }
+    }
+    Ok(sources
+        .into_iter()
+        .map(|source| {
+            let digest = Sha256::new()
+                .chain_update(b"delegation-file")
+                .chain_update(delegation.as_bytes())
+                .chain_update(source.as_bytes())
+                .finalize();
+            let bytes: [u8; 16] = digest[..16].try_into().expect("digest has 16 bytes");
+            (source, uuid::Builder::from_random_bytes(bytes).into_uuid())
+        })
+        .collect())
+}
+
 pub use crate::app::providers::DelegationOutcome as Outcome;
 
 /// Outcomes of a root's settled batches not yet given to a parent attempt.
@@ -689,6 +789,8 @@ pub async fn undelivered(
     #[derive(sqlx::FromRow)]
     struct OutcomeRow {
         id: Uuid,
+        parent_bot_id: Uuid,
+        turn: Uuid,
         target_bot_id: Uuid,
         target_name: String,
         task: String,
@@ -697,7 +799,8 @@ pub async fn undelivered(
         error: Option<String>,
     }
     let rows: Vec<OutcomeRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT d.id, d.target_bot_id, b.name AS target_name, d.task, d.status, d.result, d.error
+        "SELECT d.id, d.parent_bot_id, coalesce(d.takeover_turn_id, d.child_turn_id) AS turn,
+                d.target_bot_id, b.name AS target_name, d.task, d.status, d.result, d.error
              FROM delegations d JOIN bots b ON b.id = d.target_bot_id
              WHERE d.root_turn_id = ?1 AND {READY}
              ORDER BY d.created_at"
@@ -705,9 +808,25 @@ pub async fn undelivered(
     .bind(root)
     .fetch_all(&mut *conn)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| Outcome {
+    let mut outcomes = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut files = Vec::new();
+        for (_, copy) in returned_files(conn, row.id, row.turn).await? {
+            let file: Option<(Uuid, String, String, i64)> = sqlx::query_as(
+                "SELECT id, name, media_type, size FROM attachments WHERE id = ?1 AND bot_id = ?2",
+            )
+            .bind(copy)
+            .bind(row.parent_bot_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            files.extend(file.map(|(id, name, media_type, size)| Attachment {
+                id,
+                name,
+                media_type,
+                size: size as u64,
+            }));
+        }
+        outcomes.push(Outcome {
             id: row.id,
             target_bot_id: row.target_bot_id,
             target_name: row.target_name,
@@ -715,8 +834,10 @@ pub async fn undelivered(
             status: row.status,
             result: row.result,
             error: row.error,
-        })
-        .collect())
+            files,
+        });
+    }
+    Ok(outcomes)
 }
 
 /// Record that `attempt` received these outcomes, and log each to the

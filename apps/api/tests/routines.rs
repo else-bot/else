@@ -650,7 +650,8 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
         );
     }
     assert_eq!(
-        else_api::db::delegations::create(&h.app.db.pool, child, main.parse().unwrap(), "x").await,
+        else_api::db::delegations::create(&h.app.db.pool, child, main.parse().unwrap(), "x", &[])
+            .await,
         Err(else_api::db::delegations::DelegateError::NotAllowed),
         "one hop, even with a forged grant"
     );

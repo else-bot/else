@@ -265,6 +265,11 @@ fn tool_list() -> Value {
                     "target_bot_id": { "type": "string", "format": "uuid" },
                     "task": { "type": "string", "minLength": 1, "maxLength": 4000,
                               "description": "What the other bot should do, self-contained." },
+                    "files": { "type": "array", "maxItems": crate::app::messages::MAX_MESSAGE_FILES,
+                               "items": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                               "description": "Project paths of files the other bot needs, up to 10 MiB \
+                                   each. It gets exact copies, never your project. Its replies can \
+                                   attach files back the same way you attach them for the owner." },
                 },
                 "required": ["target_bot_id", "task"],
                 "additionalProperties": false,
@@ -1017,7 +1022,72 @@ async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     let Some(task) = args["task"].as_str() else {
         return (tool_error("task is required."), None);
     };
-    match delegations::create(&state.db, grant.turn_id, target, task).await {
+    let paths: Vec<String> = match &args["files"] {
+        Value::Null => Vec::new(),
+        Value::Array(paths) if paths.len() <= crate::app::messages::MAX_MESSAGE_FILES => {
+            match paths
+                .iter()
+                .map(|p| p.as_str().map(str::to_owned))
+                .collect()
+            {
+                Some(paths) => paths,
+                None => return (tool_error("files must be project paths."), None),
+            }
+        }
+        _ => {
+            let max = crate::app::messages::MAX_MESSAGE_FILES;
+            return (
+                tool_error(&format!("files takes at most {max} paths.")),
+                None,
+            );
+        }
+    };
+    let files = if paths.is_empty() {
+        Vec::new()
+    } else {
+        let Some(project) = state
+            .scheduler
+            .registry()
+            .all()
+            .iter()
+            .find_map(|provider| provider.project_dir(grant.bot_id))
+        else {
+            return (tool_error("Your project directory is unavailable."), None);
+        };
+        let read = tokio::task::spawn_blocking(move || {
+            paths
+                .iter()
+                .map(|path| {
+                    crate::providers::output_files::read_linked(&project, path)
+                        .map_err(|message| format!("FILE_UNAVAILABLE: {path}: {message}"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .await;
+        match read {
+            Ok(Ok(files)) => files,
+            Ok(Err(message)) => {
+                return (
+                    tool_error(&message),
+                    Some("rejected FILE_UNAVAILABLE".into()),
+                );
+            }
+            Err(_) => return (tool_error("Reading the files failed."), None),
+        }
+    };
+    let sent: Vec<Value> = files
+        .iter()
+        .map(|output| {
+            use sha2::Digest;
+            json!({
+                "name": output.file.name,
+                "media_type": output.file.media_type,
+                "size": output.file.size,
+                "sha256": hex::encode(sha2::Sha256::digest(&output.data)),
+            })
+        })
+        .collect();
+    match delegations::create(&state.db, grant.turn_id, target, task, &files).await {
         Ok(accepted) if !matches!(accepted.status.as_str(), "queued" | "running") => {
             let log = format!("already {} {}", accepted.status, accepted.delegation_id);
             let result = json!({
@@ -1041,6 +1111,7 @@ async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 "parked": true,
                 "task_id": accepted.delegation_id,
                 "target": { "bot_id": accepted.target_bot_id, "name": accepted.target_name },
+                "files": sent,
                 "next": "Tell the owner it is in progress and end this attempt now. Do not wait, \
                          poll, or call more tools; the result arrives in a continuation.",
             });
