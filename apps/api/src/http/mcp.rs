@@ -120,7 +120,8 @@ pub async fn endpoint(
                 Some(name)
                     if name.starts_with("routine_")
                         || name.starts_with("webhook_")
-                        || name.starts_with("social_trigger_") =>
+                        || name.starts_with("social_trigger_")
+                        || name.starts_with("mail_trigger_") =>
                 {
                     Tool::Routines
                 }
@@ -576,9 +577,12 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "webhook_list" => super::webhooks::list(state, grant).await,
         "webhook_update" => super::webhooks::update(state, grant, args).await,
         "webhook_delete" => super::webhooks::delete(state, grant, args).await,
-        "mail_accounts" | "mail_connect" | "mail_action" | "mail_action_status" => {
-            super::connectors::call(state, grant, name, args).await
-        }
+        "mail_accounts"
+        | "mail_connect"
+        | "mail_action"
+        | "mail_action_status"
+        | "mail_trigger_set"
+        | "mail_trigger_delete" => super::connectors::call(state, grant, name, args).await,
         "computer_handoff" => super::owner_tools::computer_handoff(state, grant, args).await,
         name if name.starts_with("computer_") => {
             super::guest_tools::call(state, grant, name, args).await

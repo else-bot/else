@@ -193,6 +193,8 @@ pub struct Trigger {
     pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
+    /// When a message last woke the bot through this trigger.
+    pub last_woke_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

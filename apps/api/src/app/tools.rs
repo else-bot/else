@@ -25,6 +25,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "draft_email",
     "draft_message",
     "webhook_create",
+    "mail_trigger_set",
     "webhook_update",
     "social_connect",
     "social_action",
@@ -77,6 +78,7 @@ pub const DEFERRED_TOOLS: &[&str] = &[
     "social_trigger_set",
     "social_trigger_list",
     "social_trigger_delete",
+    "mail_trigger_delete",
     "computer_job_cancel",
     "computer_secrets",
 ];
@@ -97,6 +99,7 @@ pub const PARKING_TOOLS: &[&str] = &[
     "draft_email",
     "draft_message",
     "webhook_create",
+    "mail_trigger_set",
     "webhook_update",
     "computer_run",
     "computer_job_start",

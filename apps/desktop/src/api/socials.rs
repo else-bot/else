@@ -110,6 +110,8 @@ pub struct Trigger {
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub last_woke_at: Option<DateTime<Utc>>,
 }
 
 impl Trigger {

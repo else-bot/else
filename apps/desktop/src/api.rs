@@ -923,6 +923,38 @@ impl Client {
         .map(|_| ())
     }
 
+    /// Pause or resume a webhook. Pausing drops a wake it was waiting for.
+    pub async fn set_webhook_enabled(
+        self: Arc<Self>,
+        bot: Uuid,
+        webhook: Uuid,
+        enabled: bool,
+    ) -> Result<(), ClientError> {
+        self.call::<serde_json::Value>(
+            Method::PATCH,
+            format!("/v1/bots/{bot}/webhooks/{webhook}"),
+            Some(json!({ "enabled": enabled })),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Delete a webhook: its URL stops working at once. Deleting it again
+    /// succeeds.
+    pub async fn delete_webhook(
+        self: Arc<Self>,
+        bot: Uuid,
+        webhook: Uuid,
+    ) -> Result<(), ClientError> {
+        self.call::<serde_json::Value>(
+            Method::DELETE,
+            format!("/v1/bots/{bot}/webhooks/{webhook}"),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Change the owner's read state. Every command is safe to repeat.
     pub async fn read(self: Arc<Self>, bot: Uuid, command: ReadCommand) -> Result<(), ClientError> {
         self.call::<BotEnvelope>(

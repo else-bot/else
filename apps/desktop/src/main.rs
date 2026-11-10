@@ -90,7 +90,8 @@ gpui_kit::assets::icon_assets!(
         Star,
         RotateCw,
         Send,
-        ExternalLink
+        ExternalLink,
+        Webhook
     ]
 );
 

@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::AppState;
-use super::error::{ApiError, ApiPath};
+use super::error::{ApiError, ApiJson, ApiPath};
 use super::mcp::{Outcome, tool_error, tool_result};
 use crate::app::routines::{MAX_NAME_CHARS, MAX_PROMPT_BYTES, RoutineName, RoutinePrompt};
 use crate::app::webhooks::{
@@ -27,6 +27,55 @@ use crate::db::routines::{By, Caller};
 use crate::db::webhooks::{self, FireError, Fired, NewWebhook, Patch, WebhookError};
 use crate::grants::Grant;
 use crate::views::webhook_json;
+
+/// The owner's routes to pause, resume, and delete a bot's webhooks.
+pub fn routes() -> Router<Arc<AppState>> {
+    Router::new().route(
+        "/bots/{bot_id}/webhooks/{webhook_id}",
+        axum::routing::patch(owner_update).delete(owner_delete),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerPatch {
+    enabled: bool,
+}
+
+fn owner_error(err: WebhookError) -> ApiError {
+    match err {
+        WebhookError::NotFound => ApiError::not_found(),
+        WebhookError::BotDeleted => super::turns::bot_deleted(),
+        WebhookError::Db(err) => err.into(),
+        other => ApiError::new(StatusCode::CONFLICT, "conflict", other.to_string()),
+    }
+}
+
+async fn owner_update(
+    State(state): State<Arc<AppState>>,
+    ApiPath((bot_id, webhook_id)): ApiPath<(Uuid, Uuid)>,
+    ApiJson(body): ApiJson<OwnerPatch>,
+) -> Result<Json<Value>, ApiError> {
+    let patch = Patch {
+        enabled: Some(body.enabled),
+        ..Patch::default()
+    };
+    let (webhook, _) = webhooks::update(&state.db, By::Owner { bot_id }, webhook_id, patch)
+        .await
+        .map_err(owner_error)?;
+    Ok(Json(json!({ "webhook": webhook_json(&webhook) })))
+}
+
+async fn owner_delete(
+    State(state): State<Arc<AppState>>,
+    ApiPath((bot_id, webhook_id)): ApiPath<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    let now_deleted = webhooks::delete(&state.db, By::Owner { bot_id }, webhook_id)
+        .await
+        .map_err(owner_error)?;
+    Ok(Json(json!({ "webhook_id": webhook_id, "deleted": true,
+                    "already_deleted": !now_deleted })))
+}
 
 /// The trigger route, nested at `/webhooks/v1`.
 pub fn trigger_routes() -> Router<Arc<AppState>> {

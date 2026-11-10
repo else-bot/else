@@ -27,13 +27,18 @@ impl EmailProvider {
     }
 }
 
-/// An inbox a bot can read, and whether its new mail wakes the bot.
+/// A bot's trigger on an inbox: whether new mail wakes it, and what to do
+/// then. A trigger the inbox sign-in card turned on has no instructions.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MailTrigger {
     pub account_id: Uuid,
     pub address: String,
     pub state: String,
     pub wake: bool,
+    #[serde(default)]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub last_woke_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -190,6 +195,21 @@ impl Client {
             Method::PUT,
             format!("/v1/connectors/email/accounts/{account}/bots/{bot}/wake"),
             Some(json!({"wake":wake})),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Delete a bot's trigger on an inbox. The bot still reads the inbox.
+    pub async fn delete_email_trigger(
+        self: Arc<Self>,
+        account: Uuid,
+        bot: Uuid,
+    ) -> Result<(), ClientError> {
+        self.call::<Value>(
+            Method::DELETE,
+            format!("/v1/connectors/email/accounts/{account}/bots/{bot}/trigger"),
+            None,
         )
         .await
         .map(|_| ())

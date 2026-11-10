@@ -477,3 +477,54 @@ async fn an_update_never_restores_a_faster_pace_the_owner_did_not_approve_for_it
         "omitted fields keep the stored pace"
     );
 }
+
+#[tokio::test]
+async fn the_owner_sees_pauses_and_deletes_webhooks_in_the_sidebar() {
+    let h = harness().await;
+    let bot = h.app.main_bot().await;
+    let (setup, token) = h.running(&bot, GATE).await;
+    let created = tool(&h.app, &token, "webhook_create", watcher(json!({}))).await;
+    let id = created.result["webhook"]["id"].as_str().unwrap().to_owned();
+    let secret = created.result["token"].as_str().unwrap().to_owned();
+    h.release(setup).await;
+    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    let webhooks = || async {
+        h.app
+            .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+            .await
+            .body["webhooks"]
+            .clone()
+    };
+    let listed = webhooks().await;
+    assert_eq!(listed[0]["id"], id);
+    assert_eq!(listed[0]["prompt"], TASK);
+    assert_eq!(listed[0]["enabled"], true);
+    assert!(
+        !listed.to_string().contains(&secret),
+        "the snapshot never carries a token"
+    );
+    let path = format!("/v1/bots/{bot}/webhooks/{id}");
+    let paused = h
+        .app
+        .owner("PATCH", &path, Some(json!({ "enabled": false })))
+        .await;
+    assert_eq!(paused.status, StatusCode::OK, "{}", paused.body);
+    assert_eq!(webhooks().await[0]["enabled"], false);
+    assert_eq!(
+        trigger(&h.app, &id, &secret).await.status,
+        StatusCode::CONFLICT
+    );
+    let deleted = h.app.owner("DELETE", &path, None).await;
+    assert_eq!(deleted.status, StatusCode::OK, "{}", deleted.body);
+    assert_eq!(webhooks().await, json!([]));
+    assert_eq!(
+        trigger(&h.app, &id, &secret).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    let other = h.app.create_bot("Other").await;
+    let foreign = h
+        .app
+        .owner("DELETE", &format!("/v1/bots/{other}/webhooks/{id}"), None)
+        .await;
+    assert_eq!(foreign.status, StatusCode::NOT_FOUND, "{}", foreign.body);
+}

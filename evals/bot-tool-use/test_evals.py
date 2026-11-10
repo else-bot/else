@@ -80,6 +80,7 @@ def run(runner):
 
         def test_shipped_cases_accept_good_logs_and_reject_bad_logs(self):
             routine_id = "10000000-0000-0000-0000-000000000001"
+            inbox = "50000000-0000-0000-0000-000000000001"
             mcp_calls = [self.call("mcp_list", {"id": "github"}),
                          self.call("mcp_request", {"id": "github", "method": "tools/list", "params": {}}),
                          self.call("mcp_request", {"id": "github", "method": "tools/list", "params": {"names": ["list_pull_requests"]}}),
@@ -100,6 +101,17 @@ def run(runner):
                 "mcp-index-then-schema": (mcp_calls, "#17 Fix digest retry"),
                 "connect-gmail-from-chat": ([self.call("mail_connect", {"provider": "gmail", "address": "max@example.com"},
                                                        {"status": "pending_owner_auth", "parked": True})], "Sign in on the card above."),
+                "watch-connected-inbox": ([self.call("mail_accounts", {}), self.call("mail_trigger_set", {
+                    "account_id": inbox, "instructions": "Draft a reply asking for their W-9."},
+                    {"status": "pending", "parked": True})], "Approve the card and new invoices wake me."),
+                "connect-inbox-then-watch": ([self.call("mail_connect", {"provider": "gmail", "address": "max@example.com"}),
+                                              self.call("mail_trigger_set", {"account_id": inbox,
+                                                                             "instructions": "Triage new mail into folders."},
+                                                        {"status": "pending", "parked": True})],
+                                             "Connected. Approve the trigger card."),
+                "connect-inbox-for-a-routine": ([self.call("mail_connect", {"provider": "gmail", "address": "max@example.com"},
+                                                          {"status": "pending_owner_auth", "parked": True})],
+                                                "Sign in on the card."),
                 "browser-keeps-blocked-draft": ([self.call("computer_browser", {"action": "open", "url": "https://example.com/changelog"})],
                                                 "The X draft asked to confirm leaving, so I kept it open."),
                 "header-mcp-uses-task-secrets": ([self.call("mcp_install", {"id": "bento", "config": {

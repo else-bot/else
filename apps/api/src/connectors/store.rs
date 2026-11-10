@@ -613,6 +613,136 @@ pub async fn wake_if_readable_in(
     }
 }
 
+/// What a trigger does when wake was turned on without instructions.
+pub const DEFAULT_WAKE_INSTRUCTIONS: &str = "Handle new mail as the owner asked.";
+
+/// Wake the calling bot on new mail in an inbox it can read, with what to
+/// do then. Setting it again replaces the instructions and resumes it. Only
+/// a turn the owner asked for may: mail it was woken by must not add one.
+pub async fn set_trigger(
+    pool: &SqlitePool,
+    turn_id: Uuid,
+    account_id: Uuid,
+    instructions: &str,
+) -> Result<MailTrigger, StoreError> {
+    let instructions = wake_instructions(instructions)?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let bot_id = owner_request_bot(&mut tx, turn_id).await?;
+    let current = grant_in(&mut tx, account_id, bot_id)
+        .await?
+        .ok_or(StoreError::NotFound)?;
+    if !current.read {
+        return Err(StoreError::Forbidden);
+    }
+    let p = Permissions {
+        wake: true,
+        ..current
+    };
+    write_grant(&mut tx, account_id, bot_id, &p).await?;
+    sqlx::query(
+        "UPDATE connector_grants SET wake_instructions = ?3 WHERE account_id = ?1 AND bot_id = ?2",
+    )
+    .bind(account_id)
+    .bind(bot_id)
+    .bind(instructions)
+    .execute(&mut *tx)
+    .await?;
+    crate::db::events::bot_updated(&mut tx, bot_id).await?;
+    let trigger = mail_triggers(&mut tx, bot_id)
+        .await?
+        .into_iter()
+        .find(|trigger| trigger.account_id == account_id)
+        .ok_or(StoreError::NotFound)?;
+    tx.commit().await?;
+    Ok(trigger)
+}
+
+/// Delete the calling bot's trigger on an inbox, for an owner request.
+pub async fn delete_trigger(
+    pool: &SqlitePool,
+    turn_id: Uuid,
+    account_id: Uuid,
+) -> Result<bool, StoreError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let bot_id = owner_request_bot(&mut tx, turn_id).await?;
+    let deleted = clear_trigger(&mut tx, account_id, bot_id).await?;
+    tx.commit().await?;
+    Ok(deleted)
+}
+
+/// Delete a bot's trigger on an inbox from the owner's sidebar. The bot
+/// keeps reading the inbox. Returns whether there was one.
+pub async fn delete_trigger_by_owner(
+    pool: &SqlitePool,
+    account_id: Uuid,
+    bot_id: Uuid,
+) -> Result<bool, StoreError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let deleted = clear_trigger(&mut tx, account_id, bot_id).await?;
+    tx.commit().await?;
+    Ok(deleted)
+}
+
+async fn clear_trigger(
+    conn: &mut SqliteConnection,
+    account_id: Uuid,
+    bot_id: Uuid,
+) -> Result<bool, StoreError> {
+    let current = grant_in(conn, account_id, bot_id)
+        .await?
+        .ok_or(StoreError::NotFound)?;
+    let p = Permissions {
+        wake: false,
+        ..current
+    };
+    let woke = write_grant(conn, account_id, bot_id, &p).await?;
+    let cleared = sqlx::query(
+        "UPDATE connector_grants SET wake_instructions = NULL
+         WHERE account_id = ?1 AND bot_id = ?2 AND wake_instructions IS NOT NULL",
+    )
+    .bind(account_id)
+    .bind(bot_id)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected()
+        > 0;
+    if cleared {
+        crate::db::events::bot_updated(conn, bot_id).await?;
+    }
+    Ok(woke || cleared)
+}
+
+/// Trimmed trigger instructions, or why they can't be saved. They fit the
+/// owner's approval card with the inbox address.
+pub fn wake_instructions(instructions: &str) -> Result<&str, StoreError> {
+    let instructions = instructions.trim();
+    if instructions.is_empty() || instructions.len() > 3500 || instructions.contains('\0') {
+        return Err(StoreError::Invalid(
+            "Describe what to do on new mail in 1 to 3500 bytes.",
+        ));
+    }
+    Ok(instructions)
+}
+
+/// The bot of a turn that may change its own mail triggers: one the owner
+/// asked for in the bot's own chat, never a task another bot delegated.
+pub async fn trigger_manager(pool: &SqlitePool, turn_id: Uuid) -> Result<Uuid, StoreError> {
+    owner_request_bot(&mut *pool.acquire().await?, turn_id).await
+}
+
+async fn owner_request_bot(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Uuid, StoreError> {
+    let caller = crate::db::turns::asking_caller(conn, turn_id)
+        .await?
+        .ok_or(StoreError::NotRunning)?;
+    if !caller.owner_conversation
+        || crate::db::delegations::origin(conn, turn_id).await?
+            != crate::app::providers::Origin::OwnerRequest
+    {
+        return Err(StoreError::Forbidden);
+    }
+    Ok(caller.bot_id)
+}
+
 async fn write_grant(
     tx: &mut SqliteConnection,
     account_id: Uuid,
@@ -674,10 +804,14 @@ async fn write_grant(
         }
     };
     sqlx::query(sqlx::AssertSqlSafe(format!(
-        "INSERT INTO connector_grants (account_id, bot_id, binding_id, can_read, can_write, can_send, can_wake)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO connector_grants (account_id, bot_id, binding_id, can_read, can_write, can_send,
+             can_wake, wake_instructions)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CASE WHEN ?7 THEN ?8 END)
          ON CONFLICT (account_id, bot_id) DO UPDATE SET binding_id = ?3, can_read = ?4,
-             can_write = ?5, can_send = ?6, can_wake = ?7, updated_at = {NOW}"
+             can_write = ?5, can_send = ?6, can_wake = ?7,
+             wake_instructions = CASE WHEN ?7 THEN coalesce(wake_instructions, ?8)
+                                      ELSE wake_instructions END,
+             updated_at = {NOW}"
     )))
     .bind(account_id)
     .bind(bot_id)
@@ -686,23 +820,28 @@ async fn write_grant(
     .bind(p.write)
     .bind(p.send)
     .bind(p.wake)
+    .bind(DEFAULT_WAKE_INSTRUCTIONS)
     .execute(&mut *tx)
     .await?;
     crate::db::events::bot_updated(tx, bot_id).await?;
     Ok(true)
 }
 
-/// Every inbox one bot can read, and whether its new mail wakes the bot.
+/// One bot's mail triggers: each readable inbox with instructions, whether
+/// its new mail wakes the bot or the trigger is paused.
 pub async fn mail_triggers(
     conn: &mut SqliteConnection,
     bot_id: Uuid,
 ) -> Result<Vec<MailTrigger>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT a.id AS account_id, a.address, a.state, a.health,
-                coalesce(g.can_wake, 0) AS wake
+        "SELECT a.id AS account_id, a.address, a.state, a.health, g.can_wake AS wake,
+                g.wake_instructions AS instructions,
+                (SELECT max(d.settled_at) FROM connector_deliveries d
+                 WHERE d.account_id = a.id AND d.bot_id = ?1 AND d.status = 'delivered')
+                    AS last_woke_at
          FROM connector_accounts a
-         LEFT JOIN connector_grants g ON g.account_id = a.id AND g.bot_id = ?1
-         WHERE a.state <> 'removed' AND coalesce(g.can_read, 1)
+         JOIN connector_grants g ON g.account_id = a.id AND g.bot_id = ?1
+         WHERE a.state <> 'removed' AND g.can_read AND g.wake_instructions IS NOT NULL
          ORDER BY a.created_at, a.id",
     )
     .bind(bot_id)

@@ -18,8 +18,10 @@ pub struct Snapshot {
     pub routines: Vec<super::routines::Routine>,
     /// The bot's social triggers, at the same snapshot.
     pub social_triggers: Vec<crate::socials::types::Trigger>,
-    /// The inboxes the bot can read and whether each wakes it, at the same snapshot.
+    /// The bot's mail triggers, at the same snapshot.
     pub mail_triggers: Vec<crate::connectors::types::MailTrigger>,
+    /// The bot's webhooks, at the same snapshot.
+    pub webhooks: Vec<super::webhooks::Webhook>,
     /// The bot's current rules version, at the same snapshot.
     pub rules_version: i64,
 }
@@ -70,6 +72,7 @@ pub async fn snapshot(
     let routines = super::routines::list(&mut tx, bot_id).await?;
     let social_triggers = crate::socials::store::triggers(&mut tx, bot_id).await?;
     let mail_triggers = crate::connectors::store::mail_triggers(&mut tx, bot_id).await?;
+    let webhooks = super::webhooks::list(&mut tx, bot_id).await?;
     let rules_version = super::rules::version(&mut tx, bot_id).await?;
     tx.commit().await?;
     Ok(Some(Snapshot {
@@ -81,6 +84,7 @@ pub async fn snapshot(
         routines,
         social_triggers,
         mail_triggers,
+        webhooks,
         rules_version,
     }))
 }
