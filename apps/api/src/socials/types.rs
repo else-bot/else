@@ -81,6 +81,52 @@ impl Token {
         Ok(Self(value))
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+pub enum ConnectionState {
+    Active,
+    Paused,
+    Removed,
+}
+impl ConnectionState {
+    /// The state to write when the owner asks for `to`, or `None` when the
+    /// connection is already there. A removed connection never comes back.
+    pub fn transition(self, to: Self) -> Result<Option<Self>, Error> {
+        match self {
+            Self::Removed => Err(Error::NotFound),
+            from if from == to => Ok(None),
+            _ => Ok(Some(to)),
+        }
+    }
+    /// The health a connection reports on entering this state.
+    pub fn health(self) -> &'static str {
+        match self {
+            Self::Active => "connecting",
+            Self::Paused => "paused",
+            Self::Removed => "removed",
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+pub enum ActionStatus {
+    Dispatching,
+    Succeeded,
+    Failed,
+    /// The platform may or may not have applied the action.
+    Uncertain,
+}
+impl ActionStatus {
+    pub fn settled(result: &Result<Value, Error>) -> Self {
+        match result {
+            Ok(_) => Self::Succeeded,
+            Err(Error::Invalid(_) | Error::Unsupported | Error::Forbidden) => Self::Failed,
+            Err(_) => Self::Uncertain,
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Connection {
     pub id: Uuid,
@@ -88,7 +134,7 @@ pub struct Connection {
     pub remote_id: String,
     pub display_name: String,
     pub username: Option<String>,
-    pub state: String,
+    pub state: ConnectionState,
     pub health: String,
     pub generation: i64,
     pub instructions: String,

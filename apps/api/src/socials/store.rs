@@ -118,12 +118,31 @@ pub async fn replace(
     tx.commit().await?;
     Ok(())
 }
-pub async fn set_state(pool: &SqlitePool, id: Uuid, state: &str) -> Result<Connection, Error> {
-    let mut removed = connection(pool, id).await?;
+pub enum StateChange {
+    Changed(Connection),
+    Unchanged(Connection),
+}
+/// Move a connection to `to`. Only a real change advances the generation,
+/// revokes pending deliveries, and needs the worker to reload.
+pub async fn set_state(
+    pool: &SqlitePool,
+    id: Uuid,
+    to: ConnectionState,
+) -> Result<StateChange, Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let updated=sqlx::query("UPDATE social_connections SET state=?2,generation=generation+1,health=CASE WHEN ?2='active' THEN 'connecting' ELSE ?2 END,credential=CASE WHEN ?2='removed' THEN NULL ELSE credential END,credential_salt=CASE WHEN ?2='removed' THEN NULL ELSE credential_salt END WHERE id=?1 AND state<>'removed'").bind(id).bind(state).execute(&mut *tx).await?;
+    let from: ConnectionState =
+        sqlx::query_scalar("SELECT state FROM social_connections WHERE id=?1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(Error::NotFound)?;
+    let Some(to) = from.transition(to)? else {
+        return Ok(StateChange::Unchanged(stored(&mut tx, id).await?));
+    };
+    let removed = to == ConnectionState::Removed;
+    let updated=sqlx::query("UPDATE social_connections SET state=?3,generation=generation+1,health=?4,credential=CASE WHEN ?5 THEN NULL ELSE credential END,credential_salt=CASE WHEN ?5 THEN NULL ELSE credential_salt END WHERE id=?1 AND state=?2").bind(id).bind(from).bind(to).bind(to.health()).bind(removed).execute(&mut *tx).await?;
     if updated.rows_affected() == 0 {
-        return Err(Error::NotFound);
+        return Err(Error::Conflict);
     }
     sqlx::query(
         "UPDATE social_deliveries SET status='revoked' WHERE connection_id=?1 AND status='pending'",
@@ -131,7 +150,7 @@ pub async fn set_state(pool: &SqlitePool, id: Uuid, state: &str) -> Result<Conne
     .bind(id)
     .execute(&mut *tx)
     .await?;
-    if state == "removed" {
+    if removed {
         let bots: Vec<Uuid> = sqlx::query_scalar(
             "DELETE FROM social_triggers WHERE connection_id=?1 RETURNING bot_id",
         )
@@ -142,11 +161,17 @@ pub async fn set_state(pool: &SqlitePool, id: Uuid, state: &str) -> Result<Conne
             crate::db::events::bot_updated(&mut tx, bot).await?;
         }
     }
+    let connection = stored(&mut tx, id).await?;
     tx.commit().await?;
-    removed.state = state.into();
-    removed.generation += 1;
-    removed.health = state.into();
-    Ok(removed)
+    Ok(StateChange::Changed(connection))
+}
+async fn stored(conn: &mut SqliteConnection, id: Uuid) -> Result<Connection, sqlx::Error> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLUMNS} FROM social_connections WHERE id=?1"
+    )))
+    .bind(id)
+    .fetch_one(conn)
+    .await
 }
 const TRIGGER_COLUMNS: &str = "t.id,t.connection_id,t.bot_id,c.provider,c.display_name AS connection_name,c.username,t.destination,json_extract(d.info,'$.name') AS destination_name,t.wake,t.instructions,t.enabled,t.created_at,t.updated_at,(SELECT max(x.settled_at) FROM social_deliveries x WHERE x.trigger_id=t.id AND x.turn_id IS NOT NULL) AS last_woke_at FROM social_triggers t JOIN social_connections c ON c.id=t.connection_id AND c.state<>'removed' LEFT JOIN social_destinations d ON d.connection_id=t.connection_id AND d.id=t.destination";
 
@@ -447,7 +472,7 @@ pub async fn begin_action(
     let hash = h.finalize().to_vec();
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     authorize(&mut tx, c, bot, turn, Some(destination), true, send).await?;
-    let old:Option<(Vec<u8>,String,Option<Json<Value>>)>=sqlx::query_as("SELECT fingerprint,status,result FROM social_actions WHERE connection_id=?1 AND action_id=?2").bind(c.id).bind(id).fetch_optional(&mut *tx).await?;
+    let old:Option<(Vec<u8>,ActionStatus,Option<Json<Value>>)>=sqlx::query_as("SELECT fingerprint,status,result FROM social_actions WHERE connection_id=?1 AND action_id=?2").bind(c.id).bind(id).fetch_optional(&mut *tx).await?;
     if let Some((old, status, result)) = old {
         if old != hash {
             return Err(Error::Conflict);
@@ -460,26 +485,32 @@ pub async fn begin_action(
     tx.commit().await?;
     Ok(None)
 }
+/// Settle a dispatching action and return its stored receipt, which keeps
+/// an earlier settlement, such as recovery marking it uncertain.
 pub async fn finish_action(
     pool: &SqlitePool,
     connection: Uuid,
     action: Uuid,
     result: &Result<Value, Error>,
 ) -> Result<Value, Error> {
-    let status = match result {
-        Ok(_) => "succeeded",
-        Err(Error::Invalid(_) | Error::Unsupported | Error::Forbidden) => "failed",
-        Err(_) => "uncertain",
-    };
     let value = match result {
         Ok(v) => v.clone(),
         Err(e) => json!({"error":e.to_string()}),
     };
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    sqlx::query("UPDATE social_actions SET status=?3,result=?4 WHERE connection_id=?1 AND action_id=?2 AND status='dispatching'").bind(connection).bind(action).bind(status).bind(Json(&value)).execute(&mut *tx).await?;
-    announce_drafts(&mut tx, connection, Some(action)).await?;
+    let settled=sqlx::query("UPDATE social_actions SET status=?3,result=?4 WHERE connection_id=?1 AND action_id=?2 AND status=?5").bind(connection).bind(action).bind(ActionStatus::settled(result)).bind(Json(&value)).bind(ActionStatus::Dispatching).execute(&mut *tx).await?;
+    if settled.rows_affected() > 0 {
+        announce_drafts(&mut tx, connection, Some(action)).await?;
+    }
+    let (status, result): (ActionStatus, Option<Json<Value>>) = sqlx::query_as(
+        "SELECT status,result FROM social_actions WHERE connection_id=?1 AND action_id=?2",
+    )
+    .bind(connection)
+    .bind(action)
+    .fetch_one(&mut *tx)
+    .await?;
     tx.commit().await?;
-    Ok(json!({"action_id":action,"status":status,"result":value}))
+    Ok(json!({"action_id":action,"status":status,"result":result.map(|r|r.0)}))
 }
 pub async fn record(
     pool: &SqlitePool,

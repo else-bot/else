@@ -690,7 +690,9 @@ async fn changing_generation_cancels_inflight_sdk_wait_and_records_uncertainty()
     tokio::time::timeout(Duration::from_secs(2), fake.started.notified())
         .await
         .unwrap();
-    store::set_state(&db.pool, c.id, "paused").await.unwrap();
+    store::set_state(&db.pool, c.id, ConnectionState::Paused)
+        .await
+        .unwrap();
     manager.changed(c.id).await;
     assert!(
         tokio::time::timeout(Duration::from_secs(2), task)
@@ -768,9 +770,11 @@ async fn restored_connections_are_passive_and_credentials_are_removed_on_disconn
         .await
         .unwrap();
     let restored = store::connection(&db.pool, c.id).await.unwrap();
-    assert_eq!(restored.state, "paused");
+    assert_eq!(restored.state, ConnectionState::Paused);
     assert!(restored.generation > c.generation);
-    store::set_state(&db.pool, c.id, "removed").await.unwrap();
+    store::set_state(&db.pool, c.id, ConnectionState::Removed)
+        .await
+        .unwrap();
     let secret: Option<Vec<u8>> =
         sqlx::query_scalar("SELECT credential FROM social_connections WHERE id=?1")
             .bind(c.id)
@@ -1390,7 +1394,13 @@ async fn repeating_the_current_state_keeps_pending_deliveries_and_generation() {
     sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,trigger_id,destination,message_id) VALUES(?1,'pending',?2,?3,'100','1')")
         .bind(c.id).bind(bot).bind(trigger).execute(&db.pool).await.unwrap();
     let before = store::connection(&db.pool, c.id).await.unwrap();
-    let returned = store::set_state(&db.pool, c.id, "active").await.unwrap();
+    let store::StateChange::Unchanged(returned) =
+        store::set_state(&db.pool, c.id, ConnectionState::Active)
+            .await
+            .unwrap()
+    else {
+        panic!("an active connection stays as it is");
+    };
     let stored = store::connection(&db.pool, c.id).await.unwrap();
     assert_eq!(stored.generation, before.generation);
     assert_eq!(
@@ -1409,8 +1419,16 @@ async fn repeating_the_current_state_keeps_pending_deliveries_and_generation() {
 async fn resuming_reports_the_stored_connection() {
     let db = TestDb::migrated().await;
     let c = account(&db, "resume").await;
-    store::set_state(&db.pool, c.id, "paused").await.unwrap();
-    let returned = store::set_state(&db.pool, c.id, "active").await.unwrap();
+    store::set_state(&db.pool, c.id, ConnectionState::Paused)
+        .await
+        .unwrap();
+    let store::StateChange::Changed(returned) =
+        store::set_state(&db.pool, c.id, ConnectionState::Active)
+            .await
+            .unwrap()
+    else {
+        panic!("a paused connection resumes");
+    };
     let stored = store::connection(&db.pool, c.id).await.unwrap();
     assert_eq!(
         serde_json::to_value(&returned).unwrap(),
@@ -1453,4 +1471,16 @@ async fn finishing_an_action_after_recovery_returns_the_stored_receipt() {
             .await
             .unwrap();
     assert_eq!((status.as_str(), result.as_str()), ("uncertain", "{}"));
+}
+
+#[test]
+fn connection_state_transitions() {
+    use ConnectionState::*;
+    assert_eq!(Active.transition(Paused).unwrap(), Some(Paused));
+    assert_eq!(Paused.transition(Active).unwrap(), Some(Active));
+    assert_eq!(Paused.transition(Removed).unwrap(), Some(Removed));
+    assert_eq!(Active.transition(Active).unwrap(), None);
+    assert_eq!(Paused.transition(Paused).unwrap(), None);
+    assert!(matches!(Removed.transition(Active), Err(Error::NotFound)));
+    assert!(matches!(Removed.transition(Removed), Err(Error::NotFound)));
 }
