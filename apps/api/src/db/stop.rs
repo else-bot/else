@@ -73,13 +73,7 @@ pub async fn halt_accepted(
         events::turn_changed(conn, bot_id, *turn_id).await?;
     }
     crate::db::delegations::cancel_for_bot(conn, bot_id, boundary).await?;
-    sqlx::query(
-        "UPDATE guest_jobs SET status = 'cancelling'
-         WHERE bot_id = ?1 AND status IN ('starting', 'running')",
-    )
-    .bind(bot_id)
-    .execute(&mut *conn)
-    .await?;
+    crate::computers::jobs::request_cancel(&mut *conn, bot_id, None).await?;
     let active: Option<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'cancelling', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE bot_id = ?1 AND turn_no <= ?2 AND status IN ('preparing', 'sending', 'running')

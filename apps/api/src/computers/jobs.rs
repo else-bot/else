@@ -108,11 +108,95 @@ alive && /usr/bin/kill -s KILL -- "-$pg" 2>/dev/null
 for i in 1 2 3 4 5 6 7 8 9 10; do alive || break; sleep 0.2; done
 if alive; then echo alive; else [ -f "$1/exit" ] || echo 130 > "$1/exit"; settled; fi"#;
 
+/// Where a job is in its life, as stored in `guest_jobs.status`. A job is
+/// `starting` until the guest acknowledges the launch, and `cancelling`
+/// from a cancel request until the guest confirms its process group is
+/// gone. The last four are terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, sqlx::Type)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+pub enum JobStatus {
+    Starting,
+    Running,
+    Cancelling,
+    Completed,
+    Failed,
+    Cancelled,
+    Lost,
+}
+
+impl JobStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Cancelling => "cancelling",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Lost => "lost",
+        }
+    }
+}
+
+impl std::fmt::Display for JobStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// How a launched job ended, with the exit code each outcome records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Exited(Option<i32>),
+    Cancelled,
+    Lost,
+}
+
+impl Outcome {
+    fn status(self) -> JobStatus {
+        match self {
+            Self::Exited(Some(0)) => JobStatus::Completed,
+            Self::Exited(_) => JobStatus::Failed,
+            Self::Cancelled => JobStatus::Cancelled,
+            Self::Lost => JobStatus::Lost,
+        }
+    }
+
+    fn exit_code(self) -> Option<i32> {
+        match self {
+            Self::Exited(code) => code,
+            Self::Cancelled => Some(130),
+            Self::Lost => None,
+        }
+    }
+}
+
+/// Ask for a job's process group to be stopped: one job, or with `job_id`
+/// `None` every active job of the bot. The request is recorded before any
+/// kill is attempted, so maintenance retries the kill until the guest
+/// confirms it. Returns each job now `cancelling` with its lease.
+pub async fn request_cancel<'c>(
+    conn: impl sqlx::SqliteExecutor<'c>,
+    bot_id: Uuid,
+    job_id: Option<Uuid>,
+) -> Result<Vec<(Uuid, Option<Uuid>)>, sqlx::Error> {
+    sqlx::query_as(
+        "UPDATE guest_jobs SET status = 'cancelling'
+         WHERE bot_id = ?1 AND (?2 IS NULL OR id = ?2) AND status IN ('starting', 'running', 'cancelling')
+         RETURNING id, lease_id",
+    )
+    .bind(bot_id)
+    .bind(job_id)
+    .fetch_all(conn)
+    .await
+}
+
 /// What a tool learns about a job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobState {
     pub id: Uuid,
-    pub status: String,
+    pub status: JobStatus,
     pub exit_code: Option<i32>,
     pub output_tail: String,
     pub command: String,
@@ -466,7 +550,7 @@ impl ComputerManager {
 
     /// A job of this bot, refreshed from the guest while it runs.
     pub async fn job(&self, bot_id: Uuid, job_id: Uuid) -> Result<Option<JobState>, ComputerError> {
-        let found: Option<(String, Option<Uuid>)> =
+        let found: Option<(JobStatus, Option<Uuid>)> =
             sqlx::query_as("SELECT status, lease_id FROM guest_jobs WHERE id = ?1 AND bot_id = ?2")
                 .bind(job_id)
                 .bind(bot_id)
@@ -475,18 +559,23 @@ impl ComputerManager {
         let Some((status, lease)) = found else {
             return Ok(None);
         };
-        if let (true, Some(lease)) = (status == "running", lease) {
+        if let (JobStatus::Running, Some(lease)) = (status, lease) {
             self.probe_job(bot_id, job_id, lease).await?;
         }
-        self.load_job(job_id).await
+        self.load_job(bot_id, job_id).await
     }
 
-    async fn load_job(&self, job_id: Uuid) -> Result<Option<JobState>, ComputerError> {
+    async fn load_job(
+        &self,
+        bot_id: Uuid,
+        job_id: Uuid,
+    ) -> Result<Option<JobState>, ComputerError> {
         let row = sqlx::query(
             "SELECT id, status, exit_code, coalesce(output_tail, '') AS tail, command
-             FROM guest_jobs WHERE id = ?1",
+             FROM guest_jobs WHERE id = ?1 AND bot_id = ?2",
         )
         .bind(job_id)
+        .bind(bot_id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|r| JobState {
@@ -548,7 +637,7 @@ impl ComputerManager {
             Inspect::Out(out) => out,
             Inspect::Gone => {
                 drop(op);
-                return self.finish_job(job_id, "lost", None, "", Some(lease)).await;
+                return self.finish_job(job_id, Outcome::Lost, "", lease).await;
             }
             Inspect::Paused | Inspect::Unknown => return Ok(()),
         };
@@ -560,16 +649,10 @@ impl ComputerManager {
         let output = tail(&self.redact_job(job_id, rest).await?, JOB_TAIL);
         if let Some(code) = first.strip_prefix("done ") {
             let code = code.trim().parse::<i32>().ok();
-            let status = if code == Some(0) {
-                "completed"
-            } else {
-                "failed"
-            };
-            self.finish_job(job_id, status, code, &output, Some(lease))
+            self.finish_job(job_id, Outcome::Exited(code), &output, lease)
                 .await
         } else if first == "lost" {
-            self.finish_job(job_id, "lost", None, &output, Some(lease))
-                .await
+            self.finish_job(job_id, Outcome::Lost, &output, lease).await
         } else {
             sqlx::query(
                 "UPDATE guest_jobs SET output_tail = ?2 WHERE id = ?1 AND status = 'running'",
@@ -605,49 +688,38 @@ impl ComputerManager {
     async fn finish_job(
         &self,
         job_id: Uuid,
-        status: &str,
-        code: Option<i32>,
+        outcome: Outcome,
         output: &str,
-        lease: Option<Uuid>,
+        lease: Uuid,
     ) -> Result<(), ComputerError> {
         sqlx::query(
             "UPDATE guest_jobs SET status = ?2, exit_code = ?3, output_tail = ?4, finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
              WHERE id = ?1 AND status IN ('starting', 'running', 'cancelling')",
         )
         .bind(job_id)
-        .bind(status)
-        .bind(code)
+        .bind(outcome.status())
+        .bind(outcome.exit_code())
         .bind(output)
         .execute(&self.pool)
         .await?;
-        match lease {
-            Some(lease) => self.release(lease).await,
-            None => Ok(()),
-        }
+        self.release(lease).await
     }
 
     /// Stop a job (its whole process group). Recorded as cancelled only
     /// once the guest confirms nothing of it runs, or `lost` once its
-    /// computer is confirmed stopped; otherwise it keeps its status and
-    /// lease, and the error says so. A revoked lease is not evidence.
+    /// computer is confirmed stopped; otherwise it stays `cancelling` with
+    /// its lease, the error says why, and maintenance retries the kill. A
+    /// revoked lease is not evidence.
     pub async fn cancel_job(
         &self,
         bot_id: Uuid,
         job_id: Uuid,
     ) -> Result<Option<JobState>, ComputerError> {
-        let found: Option<(String, Option<Uuid>)> =
-            sqlx::query_as("SELECT status, lease_id FROM guest_jobs WHERE id = ?1 AND bot_id = ?2")
-                .bind(job_id)
-                .bind(bot_id)
-                .fetch_optional(&self.pool)
-                .await?;
-        let Some((status, lease)) = found else {
-            return Ok(None);
-        };
-        if matches!(status.as_str(), "starting" | "running" | "cancelling") {
+        let requested = request_cancel(&self.pool, bot_id, Some(job_id)).await?;
+        if let Some(&(_, lease)) = requested.first() {
             self.kill_job(bot_id, job_id, lease, false).await?;
         }
-        self.load_job(job_id).await
+        self.load_job(bot_id, job_id).await
     }
 
     async fn kill_job(
@@ -672,14 +744,12 @@ impl ComputerManager {
         let note = match self.inspect_held(bot_id, KILL, &[&dir]).await? {
             Inspect::Out(out) if out.stdout.trim_end().ends_with("stopped") => {
                 drop(op);
-                return self
-                    .finish_job(job_id, "cancelled", Some(130), "", Some(lease))
-                    .await;
+                return self.finish_job(job_id, Outcome::Cancelled, "", lease).await;
             }
             Inspect::Out(out) => format!("cancellation not confirmed: {}", out.stdout.trim()),
             Inspect::Gone => {
                 drop(op);
-                return self.finish_job(job_id, "lost", None, "", Some(lease)).await;
+                return self.finish_job(job_id, Outcome::Lost, "", lease).await;
             }
             Inspect::Paused if stop_paused => {
                 self.stop_held(bot_id, super::Reason::ForJobs).await?;
@@ -697,21 +767,23 @@ impl ComputerManager {
     }
 
     pub(super) async fn poll_jobs(&self, cancel: &CancellationToken) -> Result<(), ComputerError> {
-        let jobs: Vec<(Uuid, Uuid, Option<Uuid>, String, bool)> = sqlx::query_as(
-            "SELECT id, bot_id, lease_id, status, deadline < strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') FROM guest_jobs
+        let jobs: Vec<(Uuid, Uuid, Option<Uuid>, JobStatus, bool, bool)> = sqlx::query_as(
+            "SELECT id, bot_id, lease_id, status, deadline < strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+                    (SELECT cancel_pending OR status <> 'active' FROM bots WHERE id = guest_jobs.bot_id)
+             FROM guest_jobs
              WHERE status IN ('running', 'cancelling')
                 OR (status = 'starting' AND started_at < strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', -?1)))",
         )
         .bind(STALE_START.as_secs_f64())
         .fetch_all(&self.pool)
         .await?;
-        for (job, bot, lease, status, overdue) in jobs {
+        for (job, bot, lease, status, overdue, bot_stopping) in jobs {
             if cancel.is_cancelled() {
                 return Ok(());
             }
             let result = async {
-                if status == "cancelling" {
-                    return self.kill_job(bot, job, lease, true).await;
+                if status == JobStatus::Cancelling {
+                    return self.kill_job(bot, job, lease, bot_stopping).await;
                 }
                 let Some(lease) = lease else {
                     sqlx::query(
@@ -731,7 +803,7 @@ impl ComputerManager {
                         .await?;
                     self.kill_job(bot, job, Some(lease), false).await
                 } else {
-                    if status == "starting" {
+                    if status == JobStatus::Starting {
                         sqlx::query(
                             "UPDATE guest_jobs SET status = 'running' WHERE id = ?1 AND status = 'starting'",
                         )

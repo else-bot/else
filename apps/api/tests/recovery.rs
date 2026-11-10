@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use common::TestApp;
-use else_api::computers::jobs::Started;
+use else_api::computers::jobs::{JobStatus, Started};
 use else_api::computers::{
     Acquire, ComputerConfig, ComputerError, ComputerManager, ComputerRuntime, ExecOutput,
     RuntimeError, RuntimeState, Spec,
@@ -656,7 +656,7 @@ async fn an_unconfirmed_job_cancel_is_retried_until_the_job_is_gone() {
     };
     guest.kills_fail.store(true, SeqCst);
     let state = manager.cancel_job(bot, job).await.unwrap().unwrap();
-    assert_eq!(state.status.to_string(), "cancelling");
+    assert_eq!(state.status, JobStatus::Cancelling);
     assert_eq!(
         job_leases(&app).await,
         1,
@@ -667,4 +667,14 @@ async fn an_unconfirmed_job_cancel_is_retried_until_the_job_is_gone() {
     assert_eq!(job_status(&app, job).await.0, "cancelled");
     assert_eq!(job_leases(&app).await, 0);
     assert_eq!(guest.kills.lock().unwrap().len(), 2);
+    let again = manager.cancel_job(bot, job).await.unwrap().unwrap();
+    assert_eq!(
+        again.status,
+        JobStatus::Cancelled,
+        "a settled job stays settled"
+    );
+    assert_eq!(guest.kills.lock().unwrap().len(), 2);
+    let other: Uuid = app.create_bot("B").await.parse().unwrap();
+    assert_eq!(manager.cancel_job(other, job).await.unwrap(), None);
+    assert_eq!(job_status(&app, job).await.0, "cancelled");
 }

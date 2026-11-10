@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use common::TestApp;
-use else_api::computers::jobs::Started;
+use else_api::computers::jobs::{JobStatus, Started};
 use else_api::computers::{
     Acquire, ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, RuntimeError,
     RuntimeState, Spec,
@@ -334,8 +334,8 @@ async fn a_jobs_output_file_never_holds_a_secret() {
     );
     let state = manager.job(bot, job).await.unwrap().unwrap();
     assert_eq!(
-        (state.status.as_str(), state.exit_code),
-        ("failed", Some(3))
+        (state.status, state.exit_code),
+        (JobStatus::Failed, Some(3))
     );
     assert!(!state.output_tail.contains("0123456789"));
 }
@@ -383,8 +383,8 @@ printf '%s\n' "${t#"${t%????????????}"}" >&2; exit 3"#,
     );
     let state = manager.job(bot, job).await.unwrap().unwrap();
     assert_eq!(
-        (state.status.as_str(), state.exit_code),
-        ("failed", Some(3))
+        (state.status, state.exit_code),
+        (JobStatus::Failed, Some(3))
     );
     assert_eq!(state.output_tail, file, "stored as the guest masked it");
 }
