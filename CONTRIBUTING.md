@@ -29,7 +29,7 @@ git config core.hooksPath .githooks
 cargo build --workspace --locked
 ```
 
-The pre-commit hook runs `cargo fmt --all -- --check` and `scripts/check-clippy.sh`. The pre-push hook runs `cargo test --workspace --locked`. Fix failures before committing or pushing. Pull requests only need to be up to date with main to merge; CI still runs the slower checks but does not block on them, so these hooks are the gate. Git does not enable repository hooks on clone, so run the hook configuration command once per clone. It applies to every linked worktree of that clone, including agent worktrees.
+The pre-commit hook runs `cargo fmt --all -- --check` and `scripts/check-clippy.sh`, and skips both when a commit only touches `docs/`, `media/`, `.agents/`, `.github/`, or top-level Markdown. The pre-push hook runs the workspace tests with [cargo-nextest](https://nexte.st) when it is installed (`brew install cargo-nextest` or `cargo install cargo-nextest --locked`), and falls back to `cargo test --workspace --locked`. Nextest runs all test binaries in parallel, which makes the suite several times faster. Fix failures before committing or pushing. Pull requests only need to be up to date with main to merge; CI still runs the slower checks but does not block on them, so these hooks are the gate. Git does not enable repository hooks on clone, so run the hook configuration command once per clone. It applies to every linked worktree of that clone, including agent worktrees.
 
 For real provider replies, install Codex, Claude Code, or Grok Build and sign in as your development user. Set `ELSE_CODEX_BIN`, `ELSE_CLAUDE_BIN`, or `ELSE_GROK_BIN` if a CLI is outside `PATH`.
 
@@ -172,7 +172,7 @@ ELSE_LIVE_GROK=1 cargo test -p else-api --test grok_live --locked -- --nocapture
 
 This journey creates disposable bots and checks session reuse, host files, MCP calls, cancellation, and provider handoffs with the installed Grok CLI.
 
-Pull requests run two independent Rust jobs on GitHub-hosted Ubuntu runners. `cargo-check` runs formatting, checks all workspace targets, enforces strict Clippy, checks migration numbering, and tests bundled-icon coverage. `cargo-test` runs the full locked workspace suite, including API integration tests. Runtime assertions such as the memory tests can fail even when compilation passes, so the full suite also gates PRs. This costs another runner and test build per update. Separate caches and cancellation of superseded runs limit that cost without delaying the fast job behind the suite.
+Pull requests run two independent Rust jobs on GitHub-hosted Ubuntu runners. `cargo-check` runs formatting, strict Clippy over all workspace targets, and the migration numbering checks. `cargo-test` runs the full locked workspace suite with cargo-nextest, including API integration tests and bundled-icon coverage. Runtime assertions such as the memory tests can fail even when compilation passes, so the full suite also gates PRs. This costs another runner and test build per update. Both jobs cache dependencies with `Swatinem/rust-cache`. Caches are saved only from `main`, which pull requests can restore, so the workflow also runs on every push to `main`. Cancellation of superseded runs limits the remaining cost without delaying the fast job behind the suite.
 
 The release workflow calls `cargo-test` against every release commit. Manual runs check the selected branch with both jobs.
 

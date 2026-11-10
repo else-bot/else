@@ -3,5 +3,10 @@ set -eu
 for variable in $(git rev-parse --local-env-vars); do
 	unset "$variable"
 done
+# Rust never reads these paths, so commits that only touch them skip the Rust checks.
+if ! git diff --cached --name-only --no-renames |
+	grep -qvE '^(docs/|media/|\.agents/|\.claude/|\.github/|[^/]+\.md$)'; then
+	exit 0
+fi
 cargo fmt --all -- --check
 exec scripts/check-clippy.sh
