@@ -404,7 +404,11 @@ async fn both_providers_read_pixels_from_their_desktop() {
 
     note("== 1. the computer starts; the capture matches the display VNC serves");
     let turn = api
-        .send(&bot, "codex", "Run `else-desktop` with computer_run and reply OK.")
+        .send(
+            &bot,
+            "codex",
+            "Run `else-desktop` with computer_run and reply OK.",
+        )
         .await;
     let (status, _) = finish(&pool, turn, long).await;
     assert_eq!(status, "completed");

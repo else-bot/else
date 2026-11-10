@@ -247,6 +247,8 @@ pub struct DelegationOutcome {
     pub error: Option<String>,
     /// The delegating bot's copies of files the task's replies attached.
     pub files: Vec<crate::app::messages::Attachment>,
+    /// Started for an earlier owner message and carried into this turn.
+    pub earlier_request: bool,
 }
 
 /// The owner's answer to a secret request: which task secret and
