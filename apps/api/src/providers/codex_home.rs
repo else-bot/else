@@ -271,6 +271,10 @@ mod tests {
             assert!(text.contains(flag), "{flag}");
         }
         assert!(text.contains("web_search = \"disabled\""));
+        assert!(
+            text.contains("\nmodel_auto_compact_token_limit = 200000\n"),
+            "long threads compact well before the context window"
+        );
     }
 
     #[test]
