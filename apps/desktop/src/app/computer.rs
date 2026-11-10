@@ -60,6 +60,8 @@ pub(super) struct ComputerView {
     commands: Option<DesktopCommands>,
     mode: DesktopMode,
     mode_pending: bool,
+    /// The owner asked to take over before the screen was live.
+    control_on_live: bool,
     guest_cursor: Option<CursorStyle>,
     notice: Option<String>,
     pub expanded: bool,
@@ -119,6 +121,7 @@ impl ComputerView {
             commands: None,
             mode: DesktopMode::Watch,
             mode_pending: false,
+            control_on_live: false,
             guest_cursor: None,
             notice: None,
             expanded: false,
@@ -221,6 +224,16 @@ impl ComputerView {
                                     DesktopEvent::Frame(image) => {
                                         view.image = Some(image);
                                         view.screen = Screen::Live;
+                                        if std::mem::take(&mut view.control_on_live) {
+                                            view.release(cx);
+                                            view.mode_pending = true;
+                                            view.send(
+                                                DesktopCommand::Mode {
+                                                    mode: DesktopMode::Control,
+                                                },
+                                                cx,
+                                            );
+                                        }
                                     }
                                     DesktopEvent::Mode(mode) => {
                                         view.mode = mode;
@@ -266,18 +279,25 @@ impl ComputerView {
                         if !matches!(view.screen, Screen::Failed(_) | Screen::Asleep) {
                             view.fail("Connection closed. Click to reconnect.".into(), cx);
                         }
+                        if !wake && view.control_on_live && matches!(view.screen, Screen::Asleep) {
+                            view.wake_after_session(cx);
+                        }
                         cx.notify();
                     });
                     return;
                 }
-                if this
-                    .update(cx, |view, cx| {
-                        view.screen = Screen::Asleep;
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    return;
+                let wake = this.update(cx, |view, cx| {
+                    view.screen = Screen::Asleep;
+                    cx.notify();
+                    view.control_on_live
+                });
+                match wake {
+                    Err(_) => return,
+                    Ok(true) => {
+                        let _ = this.update(cx, |view, cx| view.wake_after_session(cx));
+                        return;
+                    }
+                    Ok(false) => {}
                 }
                 cx.background_executor().timer(Duration::from_secs(3)).await;
             }
@@ -472,7 +492,35 @@ impl ComputerView {
         cx.notify();
     }
 
+    /// Wake the computer for a pending take-over, in a new session that
+    /// starts once the current one has returned.
+    fn wake_after_session(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let _ = this.update(cx, |view, cx| view.monitor(true, cx));
+        })
+        .detach();
+    }
+
+    /// Expand the screen and take control as soon as it is live.
+    pub(super) fn take_over(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.screen, Screen::Asleep | Screen::Failed(_)) {
+            self.monitor(true, cx);
+        }
+        self.expanded = true;
+        if matches!(self.screen, Screen::Live) {
+            if self.mode != DesktopMode::Control {
+                self.set_mode(DesktopMode::Control, window, cx);
+            }
+        } else {
+            self.control_on_live = true;
+            self.focus.focus(window, cx);
+        }
+        cx.emit(LayoutChanged);
+        cx.notify();
+    }
+
     fn collapse(&mut self, cx: &mut Context<Self>) {
+        self.control_on_live = false;
         self.release(cx);
         if self.mode == DesktopMode::Control {
             self.send(

@@ -2,6 +2,7 @@ pub mod attachments;
 pub mod bot_profiles;
 pub mod bots;
 pub mod categories;
+pub mod computer_handoffs;
 pub mod conversation;
 pub mod delegations;
 pub mod events;

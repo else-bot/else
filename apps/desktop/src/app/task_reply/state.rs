@@ -131,7 +131,9 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
         })
         .collect();
     let mut seen_turns = HashSet::new();
+    let mut loaded = HashSet::new();
     for item in conversation.items() {
+        loaded.insert(item.turn_id);
         let Some(reply) = replies.get_mut(&item.turn_id) else {
             continue;
         };
@@ -171,9 +173,22 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             reply.anchor = Some(item.id);
         }
     }
+    // A finished turn kept only for its pending computer handoff has no
+    // history on this page; the composer bar shows it instead of a row.
+    let handoff_only: HashSet<Uuid> = conversation
+        .turns_in_order()
+        .into_iter()
+        .filter(|turn| !turn.computer_handoffs.is_empty() && !loaded.contains(&turn.id))
+        .map(|turn| turn.id)
+        .collect();
     replies.retain(|turn, reply| {
         let notice_only = reply.latest.is_none() && notice_turns.contains(turn);
+        let finished = matches!(
+            reply.state,
+            ReplyState::Complete | ReplyState::Stopped | ReplyState::Failed | ReplyState::Uncertain
+        );
         !notice_only
+            && !(finished && handoff_only.contains(turn))
             && (reply.state != ReplyState::Complete
                 || reply.latest.is_none()
                 || !reply.history.is_empty()
@@ -234,6 +249,25 @@ mod tests {
         }))
         .unwrap();
         Conversation::from_snapshot(snapshot).unwrap()
+    }
+
+    #[test]
+    fn a_finished_handoff_turn_off_the_page_leaves_no_task_row() {
+        for status in ["completed", "interrupted"] {
+            let mut off_page = turn(11, status);
+            off_page["computer_handoffs"] = json!([{"id": id(300), "reason": "X Chat is blank.",
+                "status": "pending", "created_at": "2026-11-05T10:05:00Z"}]);
+            let c = conversation(
+                vec![item(1, 10, "user"), item(2, 10, "assistant")],
+                vec![turn(10, "completed"), off_page],
+            );
+            assert!(
+                !task_replies(&c).contains_key(&id(11)),
+                "a {status} handoff turn without loaded items must not add a task row"
+            );
+            assert_eq!(c.pending_handoff().map(|h| h.id), Some(id(300)));
+            assert!(crate::app::conversation::request_rows(&c).is_empty());
+        }
     }
 
     #[test]

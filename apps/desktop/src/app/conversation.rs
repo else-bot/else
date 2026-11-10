@@ -24,6 +24,7 @@ pub(super) enum RowKey {
     SocialSetup(Uuid),
     /// The first task of a provider attempt's delegations.
     Handoff(Uuid),
+    ComputerHandoff(Uuid),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +96,9 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
             for delegation in &turn.delegations {
                 turns.insert(RowKey::Handoff(delegation.id), turn.id);
             }
+            for handoff in &turn.computer_handoffs {
+                turns.insert(RowKey::ComputerHandoff(handoff.id), turn.id);
+            }
         }
     }
     let turns: Vec<_> = rows
@@ -109,7 +113,8 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
             | RowKey::SecretRequest(_)
             | RowKey::Draft(_)
             | RowKey::SocialSetup(_)
-            | RowKey::Handoff(_) => turns.get(key).copied(),
+            | RowKey::Handoff(_)
+            | RowKey::ComputerHandoff(_) => turns.get(key).copied(),
             RowKey::Task(_) | RowKey::Pending(_) => None,
         })
         .collect();
@@ -126,7 +131,7 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
         .collect()
 }
 
-fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
+pub(super) fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
     c.turns_in_order()
         .into_iter()
         .flat_map(|turn| {
@@ -175,6 +180,12 @@ fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
                             shown.then_some((RowKey::Handoff(d.id), anchor))
                         }),
                 )
+                // A pending handoff of a turn outside the loaded page shows
+                // only in the composer bar.
+                .chain(turn.computer_handoffs.iter().filter_map(move |handoff| {
+                    let anchor = c.question_anchor(turn.id, None)?;
+                    Some((RowKey::ComputerHandoff(handoff.id), Some(anchor)))
+                }))
                 .chain(turn.social_setups.iter().map(move |setup| {
                     (
                         RowKey::SocialSetup(setup.id),
@@ -650,7 +661,8 @@ impl ElseApp {
                 | RowKey::Question(_)
                 | RowKey::Draft(_)
                 | RowKey::SocialSetup(_)
-                | RowKey::Handoff(_) => (None, None),
+                | RowKey::Handoff(_)
+                | RowKey::ComputerHandoff(_) => (None, None),
             })
             .collect();
         let unread_start =
@@ -686,6 +698,9 @@ impl ElseApp {
                     }
                     RowKey::SecretRequest(id) => c.secret_request(id).map(|r| r.status.clone()),
                     RowKey::SocialSetup(id) => c.social_setup(id).map(|s| s.status.clone()),
+                    RowKey::ComputerHandoff(id) => {
+                        c.computer_handoff(id).map(|h| format!("{:?}", h.status))
+                    }
                     RowKey::Handoff(id) => c.handoff(id).map(|(_, group)| {
                         format!("{:?}", group.iter().map(|d| d.status).collect::<Vec<_>>())
                     }),

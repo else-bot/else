@@ -128,6 +128,14 @@ def run(runner):
                 "use-installed-skill": ([self.call("skill_read", {"id": "rea-growth"})], "When it grew: 2024."),
                 "correction-saves-rule": ([self.call("rules_update", {"section": "Summaries", "content": "Never: headings.",
                                                                       "owner_words": "I never want headings in summaries."})], "Got it."),
+                "share-screenshot-in-reply": ([self.call("computer_screenshot", {"share": True})],
+                                              "A browser on X. ![screenshot](screens/30000000-0000-0000-0000-000000000001.png)",
+                                              "I took a screenshot; the screen shows a browser."),
+                "blocked-screen-hands-off": ([self.call("computer_browser", {"action": "open", "url": "https://x.com/messages"}),
+                                             self.call("computer_screenshot", {"share": True}),
+                                             self.call("computer_handoff", {"reason": "X Chat is blank at x.com/messages."})],
+                                            "X Chat is blank again. ![screenshot](screens/30000000-0000-0000-0000-000000000002.png)",
+                                            "X Chat is blank again. I left the page open for you."),
             }
             unscoped = [self.call("computer_run", {"command": "node unfollow.js @UST_mean", "effect": "external"},
                                   {"status": "pending", "parked": True})]

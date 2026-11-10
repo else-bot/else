@@ -359,6 +359,7 @@ fn tool_list() -> Value {
         super::rules::schema(),
         super::visual_tools::schema(),
         super::owner_tools::secret_schema(),
+        super::owner_tools::handoff_schema(),
         super::owner_tools::choice_schema(),
         super::owner_tools::permission_schema(),
         super::owner_tools::confirm_permission_schema(),
@@ -578,6 +579,7 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "mail_accounts" | "mail_connect" | "mail_action" | "mail_action_status" => {
             super::connectors::call(state, grant, name, args).await
         }
+        "computer_handoff" => super::owner_tools::computer_handoff(state, grant, args).await,
         name if name.starts_with("computer_") => {
             super::guest_tools::call(state, grant, name, args).await
         }

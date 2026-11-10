@@ -409,6 +409,7 @@ impl ElseApp {
                 side(false, self.render_social_card(id, cx)).into_any_element()
             }
             RowKey::Handoff(id) => self.render_handoff(id, cx),
+            RowKey::ComputerHandoff(id) => self.render_handoff_row(id, cx),
             RowKey::Pending(request_id) => {
                 let pending = self
                     .selected

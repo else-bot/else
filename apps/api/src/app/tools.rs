@@ -37,6 +37,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "computer_browser",
     "computer_screenshot",
     "computer_input",
+    "computer_handoff",
     "mail_accounts",
     "mail_connect",
     "mail_action",

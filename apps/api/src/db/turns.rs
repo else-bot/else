@@ -60,6 +60,9 @@ pub struct TurnRecord {
     /// The MCP jobs this turn waits on.
     #[sqlx(skip)]
     pub mcp_waits: Vec<crate::db::mcp_waits::Pending>,
+    /// The bot's requests that the owner take over its computer.
+    #[sqlx(skip)]
+    pub computer_handoffs: Vec<crate::db::computer_handoffs::Handoff>,
 }
 
 pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id, t.turn_no,
@@ -395,6 +398,7 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
         continue_waiting(&mut tx, task).await?;
         crate::db::events::turn_changed(&mut tx, req.bot_id, task).await?;
     }
+    crate::db::computer_handoffs::skip_pending(&mut tx, req.bot_id).await?;
     crate::db::delegations::carry_forward(&mut tx, conversation_id, turn_no, turn_id).await?;
     let superseded: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'interrupted', error_code = 'superseded',
@@ -457,7 +461,7 @@ pub async fn load_turn(
 }
 
 /// Fill in each turn's secret requests, owner questions, drafts, social
-/// setups, delegations, and pending MCP waits.
+/// setups, delegations, pending MCP waits, and computer handoffs.
 pub async fn attach_owner_requests(
     conn: &mut SqliteConnection,
     turns: &mut [TurnRecord],
@@ -470,6 +474,7 @@ pub async fn attach_owner_requests(
     let mut delegations = crate::db::delegations::for_turns(conn, &ids).await?;
     let mut mcp_waits = crate::db::mcp_waits::pending_for_turns(conn, &ids).await?;
     let mut skills = crate::db::skills::for_turns(conn, &ids).await?;
+    let mut handoffs = crate::db::computer_handoffs::for_turns(conn, &ids).await?;
     for turn in turns {
         turn.skill_installs = skills.remove(&turn.id).unwrap_or_default();
         turn.social_setups = socials.remove(&turn.id).unwrap_or_default();
@@ -478,6 +483,7 @@ pub async fn attach_owner_requests(
         turn.outgoing_drafts = drafts.remove(&turn.id).unwrap_or_default();
         turn.delegations = delegations.remove(&turn.id).unwrap_or_default();
         turn.mcp_waits = mcp_waits.remove(&turn.id).unwrap_or_default();
+        turn.computer_handoffs = handoffs.remove(&turn.id).unwrap_or_default();
     }
     Ok(())
 }
