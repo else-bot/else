@@ -13,6 +13,10 @@
 //! and either queues a turn whose source is a hidden `routine` item or
 //! records why it was skipped. Run status is the turn's own status.
 //!
+//! A reminder is a routine due once, at `run_at`. Admitting it leaves it
+//! with no due time; a run that completes deletes it, and one that fails or
+//! is skipped stays listed so the owner sees what happened.
+//!
 //! A routine either inherits the bot's live model or has its own. A run on
 //! its own model snapshots that profile into its turn, leaves the bot's
 //! profile alone, and keeps its native sessions in a lane of its own, so it
@@ -119,6 +123,8 @@ pub struct Routine {
     pub prompt: String,
     pub prompt_revision: i64,
     pub cron: String,
+    /// When a reminder runs; `None` for a routine on a cron schedule.
+    pub run_at: Option<DateTime<Utc>>,
     pub timezone: String,
     /// When runs may start; `None` is any time.
     pub active_hours: Option<ActiveHours>,
@@ -144,6 +150,7 @@ struct Row {
     prompt: String,
     prompt_revision: i64,
     cron: String,
+    run_at: Option<DateTime<Utc>>,
     timezone: String,
     #[sqlx(flatten)]
     active: ActiveColumns,
@@ -190,6 +197,7 @@ impl From<Row> for Routine {
             prompt: row.prompt,
             prompt_revision: row.prompt_revision,
             cron: row.cron,
+            run_at: row.run_at,
             timezone: row.timezone,
             active_hours: row.active.hours(),
             enabled: row.enabled,
@@ -245,7 +253,7 @@ fn columns(model: &ModelSetting) -> (Option<Json<&RoutineModel>>, Option<&str>) 
 }
 
 const SELECT: &str =
-    "SELECT r.id, r.bot_id, r.name, r.prompt, r.prompt_revision, r.cron, r.timezone,
+    "SELECT r.id, r.bot_id, r.name, r.prompt, r.prompt_revision, r.cron, r.run_at, r.timezone,
         r.active_days, r.active_start, r.active_end, r.enabled,
         r.model, r.requested_model, r.next_due_at, r.created_at, r.updated_at, r.deleted_at,
         r.failed_runs, r.paused_reason, lr.due_at AS run_due_at, lr.skip_reason, lr.turn_id, t.status AS turn_status,
@@ -338,6 +346,9 @@ pub struct NewRoutine<'a> {
     /// same request returns the same routine even if resolving would now
     /// differ.
     pub model_request: Option<&'a str>,
+    /// A reminder's time as the bot sent it (`in_minutes` resolves against
+    /// the clock, so a retry matches on the request).
+    pub when_request: Option<&'a str>,
 }
 
 fn create_hash(routine: &NewRoutine<'_>) -> Vec<u8> {
@@ -355,6 +366,7 @@ fn create_hash(routine: &NewRoutine<'_>) -> Vec<u8> {
     .into_iter()
     .chain(hours_key.as_deref())
     .chain(routine.model_request)
+    .chain(routine.when_request)
     {
         hasher.update(part.as_bytes());
         hasher.update([0]);
@@ -390,6 +402,7 @@ pub async fn create(
         tx.commit().await?;
         return Ok((routine, false));
     }
+    routine.schedule.check_due(now)?;
     let (count, taken): (i64, bool) = sqlx::query_as(
         "SELECT count(*), coalesce(max(name = ?2), false) FROM routines
          WHERE bot_id = ?1 AND deleted_at IS NULL",
@@ -410,8 +423,8 @@ pub async fn create(
     sqlx::query(
         "INSERT INTO routines (id, bot_id, conversation_id, name, prompt, cron, timezone,
              next_due_at, created_turn_id, created_name, request_hash, model, requested_model,
-             active_days, active_start, active_end)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?4, ?10, ?11, ?12, ?13, ?14, ?15)",
+             active_days, active_start, active_end, run_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?4, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
     )
     .bind(id)
     .bind(caller.bot_id)
@@ -428,6 +441,7 @@ pub async fn create(
     .bind(active.active_days)
     .bind(active.active_start)
     .bind(active.active_end)
+    .bind(routine.schedule.run_at().map(ts))
     .execute(&mut *tx)
     .await?;
     events::bot_updated(&mut tx, caller.bot_id).await?;
@@ -456,6 +470,7 @@ struct RoutineSettings {
     name: String,
     prompt: String,
     cron: String,
+    run_at: Option<DateTime<Utc>>,
     timezone: String,
     #[sqlx(flatten)]
     active: ActiveColumns,
@@ -480,8 +495,8 @@ pub async fn update(
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     authorize_by(&mut tx, by).await?;
     let current: Option<RoutineSettings> = sqlx::query_as(
-        "SELECT name, prompt, cron, timezone, active_days, active_start, active_end, enabled,
-             next_due_at, model, requested_model
+        "SELECT name, prompt, cron, run_at, timezone, active_days, active_start, active_end,
+             enabled, next_due_at, model, requested_model
          FROM routines WHERE id = ?1 AND bot_id = ?2 AND deleted_at IS NULL",
     )
     .bind(id)
@@ -492,6 +507,7 @@ pub async fn update(
         name,
         prompt,
         cron,
+        run_at,
         timezone,
         active,
         enabled,
@@ -503,12 +519,18 @@ pub async fn update(
         return Err(RoutineError::NotFound);
     };
     let hours = active.hours();
-    let schedule = Schedule::parse_due(
-        patch.cron.as_deref().unwrap_or(&cron),
-        Some(patch.timezone.as_deref().unwrap_or(&timezone)),
-        patch.active_hours.unwrap_or(hours),
-        now,
-    )?;
+    let reschedules =
+        patch.cron.is_some() || patch.timezone.is_some() || patch.active_hours.is_some();
+    let schedule = match run_at {
+        Some(_) if reschedules => return Err(InvalidRoutine::FixedTime.into()),
+        Some(_) => Schedule::stored(&cron, run_at, &timezone, None)?,
+        None => Schedule::parse_due(
+            patch.cron.as_deref().unwrap_or(&cron),
+            Some(patch.timezone.as_deref().unwrap_or(&timezone)),
+            patch.active_hours.unwrap_or(hours),
+            now,
+        )?,
+    };
     let new_name = patch.name.map_or(name.clone(), |n| n.as_str().to_owned());
     let new_prompt = patch
         .prompt
@@ -522,7 +544,11 @@ pub async fn update(
     let next_due = if !new_enabled {
         None
     } else if rescheduled || !enabled {
-        schedule.next_after(now).map(ts)
+        let next = schedule.next_after(now);
+        if next.is_none() && run_at.is_some() {
+            return Err(InvalidRoutine::Passed.into());
+        }
+        next.map(ts)
     } else {
         next_due
     };
@@ -592,7 +618,11 @@ pub async fn update(
             .bind(conversation)
             .bind(seq)
             .bind(caller.turn_id)
-            .bind(format!("Updated routine: {new_name}"))
+            .bind(if run_at.is_some() {
+                format!("Updated reminder: {new_name}")
+            } else {
+                format!("Updated routine: {new_name}")
+            })
             .bind(sqlx::types::Json(update))
             .execute(&mut *tx)
             .await?;
@@ -826,6 +856,7 @@ struct EndedRun {
     next_due_at: Option<DateTime<Utc>>,
     model: Option<Json<RoutineModel>>,
     failed_runs: i64,
+    reminder: bool,
     live: bool,
     may_retry: bool,
 }
@@ -843,7 +874,7 @@ async fn review(
                 t.status, t.error_code, t.error_message,
                 r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.timezone,
                 r.active_days, r.active_start, r.active_end,
-                r.enabled, r.next_due_at, r.model, r.failed_runs,
+                r.enabled, r.next_due_at, r.model, r.failed_runs, r.run_at IS NOT NULL AS reminder,
                 r.deleted_at IS NULL AND b.status = 'active' AS live,
                 NOT b.cancel_pending AND NOT EXISTS (
                     SELECT 1 FROM request_receipts s WHERE s.operation = 'cancel'
@@ -938,6 +969,19 @@ async fn review(
     }
     let paused = match reaction {
         Reaction::Retry | Reaction::Ignore => None,
+        Reaction::Reset if run.reminder => {
+            sqlx::query(
+                "UPDATE routines SET enabled = false, next_due_at = NULL,
+                     deleted_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                 WHERE id = ?1",
+            )
+            .bind(run.routine_id)
+            .execute(&mut *tx)
+            .await?;
+            events::bot_updated(&mut tx, run.bot_id).await?;
+            None
+        }
         Reaction::Reset => {
             let reset = sqlx::query(
                 "UPDATE routines SET failed_runs = 0, paused_reason = NULL
@@ -982,6 +1026,7 @@ async fn review(
                 next: run
                     .next_due_at
                     .map(|at| routine_failures::local_time(at, &run.timezone)),
+                reminder: run.reminder,
             },
             reaction,
         );
@@ -1078,6 +1123,7 @@ struct Due {
     prompt: String,
     prompt_revision: i64,
     cron: String,
+    run_at: Option<DateTime<Utc>>,
     timezone: String,
     #[sqlx(flatten)]
     active: ActiveColumns,
@@ -1216,8 +1262,8 @@ async fn admit(
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row: Option<Due> = sqlx::query_as(
-        "SELECT r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.cron, r.timezone,
-                r.active_days, r.active_start, r.active_end, r.model, r.next_due_at AS due_at
+        "SELECT r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.cron, r.run_at,
+                r.timezone, r.active_days, r.active_start, r.active_end, r.model, r.next_due_at AS due_at
          FROM routines r JOIN bots b ON b.id = r.bot_id
          WHERE r.id = ?1 AND r.next_due_at IS NOT NULL AND r.next_due_at <= ?2
            AND b.status = 'active' AND NOT b.cancel_pending
@@ -1236,6 +1282,7 @@ async fn admit(
         prompt,
         prompt_revision,
         cron,
+        run_at,
         timezone,
         active,
         model,
@@ -1244,7 +1291,7 @@ async fn admit(
     else {
         return Ok(false);
     };
-    let schedule = Schedule::parse(&cron, Some(&timezone), active.hours()).ok();
+    let schedule = Schedule::stored(&cron, run_at, &timezone, active.hours()).ok();
     let next = schedule.as_ref().and_then(|s| s.next_after(now));
     sqlx::query("UPDATE routines SET next_due_at = ?2 WHERE id = ?1")
         .bind(id)

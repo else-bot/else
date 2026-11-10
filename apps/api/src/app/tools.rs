@@ -73,6 +73,7 @@ pub const DEFERRED_TOOLS: &[&str] = &[
     "routine_update",
     "routine_delete",
     "routine_run",
+    "reminder_create",
     "webhook_list",
     "webhook_delete",
     "social_trigger_set",

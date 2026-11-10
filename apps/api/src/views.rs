@@ -152,6 +152,7 @@ pub fn routine_json(routine: &Routine) -> Value {
         "prompt": routine.prompt,
         "prompt_revision": routine.prompt_revision,
         "cron": routine.cron,
+        "run_at": routine.run_at,
         "timezone": routine.timezone,
         "active_hours": routine.active_hours.map(|hours| json!({
             "days": hours.days(),

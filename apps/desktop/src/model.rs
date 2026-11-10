@@ -497,13 +497,17 @@ pub struct ActiveHours {
     pub end: String,
 }
 
-/// A bot's saved task, run on a cron schedule in its conversation.
+/// A bot's saved task, run on a cron schedule in its conversation, or
+/// once at `run_at` for a reminder.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Routine {
     pub id: Uuid,
     pub name: String,
     pub prompt: String,
     pub cron: String,
+    /// When a reminder runs once; `None` for a routine on a cron schedule.
+    #[serde(default)]
+    pub run_at: Option<DateTime<Utc>>,
     pub timezone: String,
     /// When runs may start; `None` is any time.
     #[serde(default)]

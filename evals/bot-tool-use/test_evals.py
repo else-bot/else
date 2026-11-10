@@ -89,6 +89,10 @@ def run(runner):
             examples = {
                 "rerun-routine-now": ([self.call("find_tool", {"query": "routine_run"}), self.call("use_tool", {
                     "name": "routine_run", "arguments": {"routine_id": routine_id}})], "Queued."),
+                "one-off-check-is-a-reminder": ([self.call("find_tool", {"query": "reminder_create"}), self.call("use_tool", {
+                    "name": "reminder_create", "arguments": {"name": "Scout check", "in_minutes": 360,
+                                                             "prompt": "Check whether Scout sent 2-3 DMs."}})],
+                                                "I'll check on Scout at 23:39."),
                 "delegate-parks": ([self.call("delegate", {"target_bot_id": "00000000-0000-0000-0000-000000000004",
                                                           "task": "Research Reunion history"}, {"status": "pending", "parked": True})], "Handed it over."),
                 "delegate-attaches-project-file": ([self.call("delegate", {"target_bot_id": "00000000-0000-0000-0000-000000000004",

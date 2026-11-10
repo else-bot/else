@@ -21,7 +21,8 @@ use super::mcp::{Outcome, tool_error, tool_result};
 use crate::app::providers::{Availability, Profile, default_profiles};
 use crate::app::routines::{
     ActiveHours, DEFAULT_TIMEZONE, InvalidRoutine, MAX_NAME_CHARS, MAX_PER_BOT, MAX_PROMPT_BYTES,
-    ModelSetting, RoutineModel, RoutineName, RoutinePrompt, Schedule, match_model,
+    MAX_REMINDER_DAYS, ModelSetting, RoutineModel, RoutineName, RoutinePrompt, Schedule, When,
+    match_model,
 };
 use crate::db::routines::{self, By, Caller, NewRoutine, Patch, RoutineError};
 use crate::grants::Grant;
@@ -505,6 +506,40 @@ pub fn run_schema() -> Value {
     })
 }
 
+pub fn reminder_schema() -> Value {
+    json!({
+        "name": "reminder_create",
+        "description": "Save a one-off task that runs once at a set time in your conversation \
+            with the owner, such as \"in 6 hours, check on Scout\" or \"tomorrow at 9\". The \
+            run gives you the prompt; do it and report. It leaves the list once it succeeds. \
+            routine_list, routine_update, and routine_delete manage it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "minLength": 1, "maxLength": MAX_NAME_CHARS,
+                          "description": "Short display name, unique among your routines and \
+                              reminders." },
+                "prompt": { "type": "string", "minLength": 1, "maxLength": MAX_PROMPT_BYTES,
+                            "description": "The complete task to do then, self-contained: you \
+                                will read it later without this conversation." },
+                "in_minutes": { "type": "integer", "minimum": 1,
+                                "maximum": MAX_REMINDER_DAYS * 24 * 60,
+                                "description": "Minutes from now, for a delay such as in 6 \
+                                    hours (360). Pass this or at." },
+                "at": { "type": "string",
+                        "description": "Local date and time YYYY-MM-DDTHH:MM in timezone, for a \
+                            time such as tomorrow at 09:00. Pass this or in_minutes." },
+                "timezone": { "type": "string",
+                              "description": "IANA time zone for at, such as Europe/Paris. \
+                                  Omit it to use the owner's." },
+            },
+            "required": ["name", "prompt"],
+            "additionalProperties": false,
+        },
+        "annotations": annotations(false, false),
+    })
+}
+
 /// `active_hours` as a bot sends it.
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -612,6 +647,7 @@ pub async fn create(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         requested_timezone: args.timezone.as_deref(),
         model: &model,
         model_request: model_request.as_deref(),
+        when_request: None,
     };
     match routines::create(&state.db, caller(grant), new, now).await {
         Ok((routine, created)) => {
@@ -822,6 +858,100 @@ pub async fn run(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 "queued": queued,
                 "next": "The run starts after this reply and reports to the owner when it ends. \
                     Tell the owner it is queued; do not run its task yourself.",
+            });
+            (tool_result(result), Some(log))
+        }
+        Err(err) => reject(err),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReminderArgs {
+    name: String,
+    prompt: String,
+    in_minutes: Option<i64>,
+    at: Option<String>,
+    timezone: Option<String>,
+}
+
+impl ReminderArgs {
+    fn when(&self) -> Result<(When<'_>, String), InvalidRoutine> {
+        match (self.in_minutes, self.at.as_deref()) {
+            (Some(minutes), None) => Ok((When::InMinutes(minutes), format!("in {minutes}"))),
+            (None, Some(at)) => Ok((When::At(at), format!("at {}", at.trim()))),
+            _ => Err(InvalidRoutine::When),
+        }
+    }
+}
+
+pub async fn create_reminder(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    let Ok(args) = serde_json::from_value::<ReminderArgs>(args.clone()) else {
+        return invalid(
+            "pass name and prompt as strings, and in_minutes as a whole number or at as \
+             YYYY-MM-DDTHH:MM, and optionally timezone.",
+        );
+    };
+    let now = Utc::now();
+    let owner_timezone = match &args.timezone {
+        Some(_) => None,
+        None => match crate::db::installation::owner_timezone(&state.db).await {
+            Ok(zone) => zone,
+            Err(err) => return reject(err.into()),
+        },
+    };
+    let timezone = args.timezone.as_deref().or(owner_timezone.as_deref());
+    let parsed = (|| {
+        let (when, request) = args.when()?;
+        Ok::<_, InvalidRoutine>((
+            RoutineName::parse(&args.name)?,
+            RoutinePrompt::parse(&args.prompt)?,
+            Schedule::once(when, timezone, now)?,
+            request,
+        ))
+    })();
+    let (name, prompt, schedule, when_request) = match parsed {
+        Ok(parsed) => parsed,
+        Err(err) => return reject(err.into()),
+    };
+    let model = ModelSetting::Inherit { requested: None };
+    let new = NewRoutine {
+        name: &name,
+        prompt: &prompt,
+        schedule: &schedule,
+        requested_timezone: args.timezone.as_deref(),
+        model: &model,
+        model_request: None,
+        when_request: Some(&when_request),
+    };
+    match routines::create(&state.db, caller(grant), new, now).await {
+        Ok((reminder, created)) => {
+            let next = if reminder.deleted {
+                "This reminder already ran or was deleted; do not create it again unless the \
+                 owner asks."
+            } else if timezone.is_none() {
+                "Saved. Its time is shown in UTC because the owner's time zone is unknown; tell \
+                 the owner when it runs."
+            } else {
+                "Saved. Tell the owner when it runs, in their time zone."
+            };
+            let log = format!(
+                "{} reminder {} ({}) at {}",
+                if created { "created" } else { "existing" },
+                reminder.name,
+                reminder.id,
+                reminder
+                    .run_at
+                    .map(|at| at.to_rfc3339())
+                    .unwrap_or_default()
+            );
+            let result = json!({
+                "reminder": routine_json(&reminder),
+                "runs_at_local": reminder.run_at.map(|at| {
+                    crate::app::routine_failures::local_time(at, &reminder.timezone)
+                }),
+                "created": created,
+                "next": next,
             });
             (tool_result(result), Some(log))
         }
