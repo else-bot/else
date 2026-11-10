@@ -1379,3 +1379,78 @@ async fn completing_another_bots_setup_keeps_an_approved_send_running() {
     assert!(sent.is_ok(), "the other bot's send survives: {sent:?}");
     assert_eq!(fake.sends.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn repeating_the_current_state_keeps_pending_deliveries_and_generation() {
+    let db = TestDb::migrated().await;
+    let bot = bot(&db).await;
+    let c = account(&db, "same-state").await;
+    destinations(&db, c.id).await;
+    let trigger = trigger_row(&db, c.id, bot, Some("100"), "all").await;
+    sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,trigger_id,destination,message_id) VALUES(?1,'pending',?2,?3,'100','1')")
+        .bind(c.id).bind(bot).bind(trigger).execute(&db.pool).await.unwrap();
+    let before = store::connection(&db.pool, c.id).await.unwrap();
+    let returned = store::set_state(&db.pool, c.id, "active").await.unwrap();
+    let stored = store::connection(&db.pool, c.id).await.unwrap();
+    assert_eq!(stored.generation, before.generation);
+    assert_eq!(
+        (returned.generation, returned.health.as_str()),
+        (stored.generation, stored.health.as_str())
+    );
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM social_deliveries WHERE event_id='pending'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "pending");
+}
+
+#[tokio::test]
+async fn resuming_reports_the_stored_connection() {
+    let db = TestDb::migrated().await;
+    let c = account(&db, "resume").await;
+    store::set_state(&db.pool, c.id, "paused").await.unwrap();
+    let returned = store::set_state(&db.pool, c.id, "active").await.unwrap();
+    let stored = store::connection(&db.pool, c.id).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&returned).unwrap(),
+        serde_json::to_value(&stored).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn finishing_an_action_after_recovery_returns_the_stored_receipt() {
+    let db = TestDb::migrated().await;
+    let c = account(&db, "settled").await;
+    destinations(&db, c.id).await;
+    let bot = bot(&db).await;
+    let turn = turn(&db, bot, "user").await;
+    let id = Uuid::new_v4();
+    let payload = json!({"operation":"delete","destination":"100","message_id":"1"});
+    store::begin_action(
+        &db.pool,
+        &c,
+        store::Action {
+            bot,
+            turn,
+            id,
+            destination: "100",
+            payload: &payload,
+            send: false,
+        },
+    )
+    .await
+    .unwrap();
+    store::uncertain(&db.pool, c.id, Some(id)).await.unwrap();
+    let receipt = store::finish_action(&db.pool, c.id, id, &Ok(json!({"deleted":true})))
+        .await
+        .unwrap();
+    assert_eq!(receipt["status"], "uncertain");
+    let (status, result): (String, String) =
+        sqlx::query_as("SELECT status,result FROM social_actions WHERE action_id=?1")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!((status.as_str(), result.as_str()), ("uncertain", "{}"));
+}
