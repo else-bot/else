@@ -2,7 +2,10 @@
 //!
 //! Jobs are claimed with an opaque lease token; completion presents it in
 //! the same transaction that inserts the immutable node, so a worker whose
-//! lease expired and was replaced cannot publish. Nodes of the active
+//! lease expired and was replaced cannot publish. A job row is queued (no
+//! lease, no reason), deferred (no lease, a [`Wait`] reason), or leased (a
+//! token). Only `claim` leases a job, and it clears the reason; `defer`
+//! releases it with one; `complete` deletes it. Nodes of the active
 //! generation publish leaves strictly in sequence after `published_seq`;
 //! out-of-order completions wait. The view, watermark, and revision change
 //! together inside the immediate transaction. SQLite serializes writers; reads and computation stay outside write transactions.
@@ -10,6 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::types::Json;
@@ -17,6 +21,19 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::app::memory_tree::{self, Build, NodeId, Recipe, View};
+
+/// Why a released job waits, as stored in `memory_job.blocked_reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum Wait {
+    MissingInput,
+    SummaryUnavailable,
+    WaitingForSummary,
+    WaitingForCapacity,
+    SummaryFailed,
+    SummaryOversized,
+}
 
 /// A claimed job.
 #[derive(Debug, Clone)]
@@ -52,7 +69,7 @@ pub async fn claim(pool: &SqlitePool, lease: Duration) -> Result<Option<Job>, sq
     };
     let token = Uuid::new_v4();
     let attempts: i32 = sqlx::query_scalar(
-        "UPDATE memory_job SET lease_token = ?5, attempts = attempts + 1,
+        "UPDATE memory_job SET lease_token = ?5, blocked_reason = NULL, attempts = attempts + 1,
              lease_until = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', ?6))
          WHERE bot_id = ?1 AND generation = ?2 AND start_seq = ?3 AND span = ?4
          RETURNING attempts",
@@ -258,24 +275,23 @@ pub async fn complete(
 pub async fn defer(
     pool: &SqlitePool,
     job: &Job,
-    reason: &str,
+    reason: Wait,
     error: Option<&str>,
     retry_in: Duration,
-) -> Result<(), sqlx::Error> {
+) -> Result<Completion, sqlx::Error> {
     defer_counting(pool, job, reason, error, retry_in, false).await
 }
 
 /// Release a job; `failure` counts a provider failure toward its backoff.
-/// Returns the job's failure count afterwards.
 pub async fn defer_counting(
     pool: &SqlitePool,
     job: &Job,
-    reason: &str,
+    reason: Wait,
     error: Option<&str>,
     retry_in: Duration,
     failure: bool,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
+) -> Result<Completion, sqlx::Error> {
+    let released = sqlx::query(
         "UPDATE memory_job SET lease_token = NULL, lease_until = NULL, blocked_reason = ?6,
              last_error = substr(?7, 1, 1000), available_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', ?8)),
              failures = failures + ?9
@@ -291,6 +307,22 @@ pub async fn defer_counting(
     .bind(error)
     .bind(retry_in.as_secs_f64())
     .bind(i32::from(failure))
+    .execute(pool)
+    .await?;
+    Ok(if released.rows_affected() == 1 {
+        Completion::Done
+    } else {
+        Completion::Stale
+    })
+}
+
+/// Make every job deferred for `reason` claimable now.
+pub async fn wake(pool: &SqlitePool, reason: Wait) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE memory_job SET available_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE blocked_reason = ?1",
+    )
+    .bind(reason)
     .execute(pool)
     .await?;
     Ok(())
@@ -658,7 +690,7 @@ pub struct SavedView {
     /// all exist, and their generation exists.
     pub valid: bool,
     /// Jobs waiting, by reason (for example `summary_unavailable`).
-    pub blocked: Vec<(String, i64)>,
+    pub blocked: Vec<(Wait, i64)>,
 }
 
 /// Load the exact saved view. Nothing is recomputed; a damaged view is
@@ -735,7 +767,7 @@ pub async fn load_view(pool: &SqlitePool, bot_id: Uuid) -> Result<SavedView, sql
         && nodes.iter().all(|n| n.body.is_some())
         && memory_tree::covers(&context_ids, published_seq + 1)
         && context_ids.iter().all(|n| context_built.contains_key(n));
-    let blocked: Vec<(String, i64)> = sqlx::query_as(
+    let blocked: Vec<(Wait, i64)> = sqlx::query_as(
         "SELECT blocked_reason, count(*) FROM memory_job
          WHERE bot_id = ?1 AND blocked_reason IS NOT NULL AND generation = ?2
          GROUP BY blocked_reason ORDER BY blocked_reason",
