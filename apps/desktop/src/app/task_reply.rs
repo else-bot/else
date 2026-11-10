@@ -110,6 +110,9 @@ impl ElseApp {
             } else {
                 task.state.label()
             };
+            let pill = (error
+                || !matches!(task.state, ReplyState::Working | ReplyState::Waiting))
+            .then_some(label);
             let detail = (!error && summary != label).then(|| summary.clone());
             let updates = expandable.then(|| {
                 let count = history.len();
@@ -154,11 +157,9 @@ impl ElseApp {
                                         .truncate()
                                         .child(title.clone()),
                                 )
-                                .child(
-                                    h_flex()
+                                .children(pill.map(|label| {
+                                    div()
                                         .flex_none()
-                                        .items_center()
-                                        .gap_1()
                                         .px_2()
                                         .rounded_full()
                                         .border_1()
@@ -167,14 +168,7 @@ impl ElseApp {
                                         .text_xs()
                                         .text_color(color)
                                         .child(label)
-                                        .when(working, |pill| {
-                                            pill.child(super::view::working_dots(
-                                                task.turn,
-                                                color,
-                                                cx.reduce_motion(),
-                                            ))
-                                        }),
-                                ),
+                                })),
                         )
                         .children(detail.map(|detail| {
                             div()
