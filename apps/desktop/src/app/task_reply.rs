@@ -110,9 +110,8 @@ impl ElseApp {
             } else {
                 task.state.label()
             };
-            let pill = (error
-                || !matches!(task.state, ReplyState::Working | ReplyState::Waiting))
-            .then_some(label);
+            let pill = (error || !matches!(task.state, ReplyState::Working | ReplyState::Waiting))
+                .then_some(label);
             let detail = (!error && summary != label).then(|| summary.clone());
             let updates = expandable.then(|| {
                 let count = history.len();
