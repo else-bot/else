@@ -589,7 +589,10 @@ impl ElseApp {
         }
         self.image_viewer = None;
         if let Some(previous) = self.selected {
-            self.drafts.entry(previous).or_default().content = self.composer.read(cx).content();
+            self.drafts
+                .entry(previous)
+                .or_default()
+                .set_content(self.composer.read(cx).content());
         }
         self.computer = None;
         self._computer_layout = None;
@@ -657,7 +660,7 @@ impl ElseApp {
         let Some(bot) = self.selected else { return };
         self.settle_quote_editor(bot, window, cx);
         let draft = self.drafts.entry(bot).or_default();
-        draft.content = self.composer.read(cx).content();
+        draft.set_content(self.composer.read(cx).content());
         let Some(message) = draft.message() else {
             return;
         };

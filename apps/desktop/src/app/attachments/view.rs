@@ -224,20 +224,22 @@ pub(in crate::app) fn draft_chip(
     owner: WeakEntity<ElseApp>,
     cx: &App,
 ) -> AnyElement {
-    let Some(file) = crate::attachments::file_id(token.token().id()).and_then(|id| files.get(&id))
+    let Some((id, file)) = crate::attachments::file_id(token.token().id())
+        .and_then(|id| files.get(&id).map(|file| (id, file)))
     else {
         return div()
             .child(token.token().label().clone())
             .into_any_element();
     };
     let detail = match &file.state {
-        UploadState::Ready => file_size(file.file.size),
-        UploadState::Uploading => "Uploading…".into(),
-        UploadState::Failed(_) => "Failed".into(),
+        UploadState::Ready { file } => file_size(file.size),
+        UploadState::Preparing { .. } | UploadState::Uploading { .. } => "Uploading…".into(),
+        UploadState::Failed { .. } => "Failed".into(),
+        UploadState::Unconfirmed { .. } => "Unconfirmed".into(),
     };
     chip(
         token,
-        &file.file,
+        &file.preview_metadata(id),
         file.image.clone(),
         detail,
         Some(owner),

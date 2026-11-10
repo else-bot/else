@@ -696,7 +696,7 @@ impl ElseApp {
                 crate::attachments::file_id(span.token().id())
                     .and_then(|id| files.get(&id))
                     .is_some_and(|file| {
-                        matches!(file.state, super::attachments::UploadState::Ready)
+                        matches!(file.state, super::attachments::UploadState::Ready { .. })
                     })
             });
         let activity = self
@@ -757,11 +757,16 @@ impl ElseApp {
                         super::attachments::draft_chip(token, &files, owner.clone(), cx)
                     })
                     .on_token_click(move |event, window, cx| {
-                        if let Some(file) = crate::attachments::file_id(event.token().id())
-                            .and_then(|id| preview_files.get(&id))
+                        if let Some((id, file)) = crate::attachments::file_id(event.token().id())
+                            .and_then(|id| preview_files.get(&id).map(|file| (id, file)))
                         {
                             let _ = preview_owner.update(cx, |app, cx| {
-                                app.preview_attachment(bot_id, file.file.clone(), window, cx)
+                                app.preview_attachment(
+                                    bot_id,
+                                    file.preview_metadata(id),
+                                    window,
+                                    cx,
+                                )
                             });
                         }
                     })
