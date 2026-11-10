@@ -59,10 +59,13 @@ pub(super) fn group_activity(
         let activity = BotActivity {
             items: vec![item.id],
             answers: conversation
-                .and_then(|c| c.task_answer(item))
-                .map(|answer| answer.id)
-                .into_iter()
-                .collect(),
+                .map(|c| {
+                    c.task_answers(item)
+                        .iter()
+                        .map(|answer| answer.id)
+                        .collect()
+                })
+                .unwrap_or_default(),
             failed: (status == Some(BotReplyStatus::Failed))
                 .then_some(item.id)
                 .into_iter()
@@ -126,7 +129,7 @@ impl ElseApp {
         let count = activity.items.len() + activity.answers.len();
         let last = conversation.item(*activity.items.last()?)?;
         let me = self.bots.iter().find(|bot| bot.id == view.bot_id);
-        let answer = conversation.task_answer(last);
+        let answer = conversation.task_answers(last).pop();
         let (last_sender, last_text) = match (answer, me) {
             (Some(answer), Some(me)) => (me.name.as_str(), answer.text.as_str()),
             _ => (

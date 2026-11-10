@@ -162,8 +162,7 @@ impl ElseApp {
             .items
             .iter()
             .filter_map(|id| conversation.item(*id))
-            .flat_map(|item| [Some(item), conversation.task_answer(item)])
-            .flatten()
+            .flat_map(|item| std::iter::once(item).chain(conversation.task_answers(item)))
             .collect();
         let me = view.bot_id;
         let name = self

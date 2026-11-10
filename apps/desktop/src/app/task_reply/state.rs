@@ -413,10 +413,8 @@ mod tests {
                 "the owner's own turn keeps its card"
             );
             assert_eq!(c.delegated_turns(), [id(10)].into());
-            assert_eq!(
-                c.task_answer(c.item(id(1)).unwrap()).map(|a| a.id),
-                Some(id(2))
-            );
+            let answers = c.task_answers(c.item(id(1)).unwrap());
+            assert_eq!(answers.iter().map(|a| a.id).collect::<Vec<_>>(), [id(2)]);
         }
     }
 
