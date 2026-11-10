@@ -480,8 +480,13 @@ fn outcomes_without_social(input: &TurnInput) -> String {
          owner's request using them; do not delegate completed work again.\n",
     );
     for outcome in outcomes {
+        let files: String = outcome
+            .files
+            .iter()
+            .map(|file| format!("Returned {}\n", file_reference(file)))
+            .collect();
         text.push_str(&format!(
-            "<task id=\"{}\" bot=\"{}\" bot_id=\"{}\" status=\"{}\">\nTask: {}\nResult: {}\n</task>\n",
+            "<task id=\"{}\" bot=\"{}\" bot_id=\"{}\" status=\"{}\">\nTask: {}\nResult: {}\n{files}</task>\n",
             outcome.id,
             outcome.target_name,
             outcome.target_bot_id,

@@ -856,7 +856,41 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         },
     );
     let considered = session.as_ref().map_or(0, |s| s.considered_through_turn);
-    let files = input_files(&mut conn, turn.bot_id, &parts, &history, considered).await?;
+    let mut files = input_files(&mut conn, turn.bot_id, &parts, &history, considered).await?;
+    let mut delegation = crate::db::delegations::context(&mut conn, turn_id).await?;
+    let mut budget = HISTORY_FILE_BUDGET;
+    for outcome in &mut delegation.outcomes {
+        outcome.files.retain(|file| {
+            let fits = file.size as usize <= budget;
+            budget -= if fits { file.size as usize } else { 0 };
+            fits
+        });
+    }
+    // A chat turn that took tasks over answers them, so it needs their files.
+    let taken_over: Vec<Json<Vec<MessagePart>>> = sqlx::query_scalar(
+        "SELECT i.parts FROM delegations d JOIN turns c ON c.id = d.child_turn_id
+         JOIN items i ON i.id = c.owner_item_id
+         WHERE d.takeover_turn_id = ?1 AND i.parts IS NOT NULL",
+    )
+    .bind(turn_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let extra: Vec<Uuid> = taken_over
+        .iter()
+        .flat_map(|Json(parts)| parts)
+        .filter_map(|part| match part {
+            MessagePart::File { file } => Some(file.id),
+            MessagePart::Text { .. } => None,
+        })
+        .chain(
+            delegation
+                .outcomes
+                .iter()
+                .flat_map(|outcome| outcome.files.iter().map(|file| file.id)),
+        )
+        .filter(|id| !files.iter().any(|staged| staged.attachment.id == *id))
+        .collect();
+    files.extend(crate::db::attachments::load(&mut conn, turn.bot_id, &extra).await?);
     let mut input = TurnInput {
         bot_id: turn.bot_id,
         conversation_id: turn.conversation_id,
@@ -872,7 +906,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         tool_grant: None,
         memory: None,
         attempt: turn.attempt,
-        delegation: crate::db::delegations::context(&mut conn, turn_id).await?,
+        delegation,
         secrets: crate::db::secret_requests::undelivered(&mut conn, turn_id).await?,
         questions: crate::db::owner_questions::undelivered(&mut conn, turn_id).await?,
         standing_permissions: Vec::new(),

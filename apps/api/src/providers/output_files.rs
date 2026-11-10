@@ -16,7 +16,7 @@ use crate::app::messages::{
     validate_name,
 };
 
-pub(crate) struct OutputFile {
+pub struct OutputFile {
     pub file: Attachment,
     pub data: Vec<u8>,
 }
@@ -81,7 +81,7 @@ pub(crate) fn prepare(project: &Path, text: &str) -> Option<FileReply> {
             if files.len() == MAX_MESSAGE_FILES {
                 continue;
             }
-            let Some(output) = read_file(&root, &key, reference) else {
+            let Ok(output) = read_file(&root, &key, reference) else {
                 continue;
             };
             let file = output.file.clone();
@@ -200,28 +200,37 @@ fn open_beneath(root: &File, path: &Path) -> Option<File> {
     Some(directory)
 }
 
-fn read_file(root: &File, path: &Path, reference: Reference) -> Option<OutputFile> {
-    let name = path.file_name()?.to_str()?;
-    validate_name(name).ok()?;
-    let file = open_beneath(root, path)?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.is_file() || metadata.len() > MAX_ATTACHMENT_BYTES || metadata.nlink() != 1 {
-        return None;
+const NOT_FOUND: &str = "No regular file at that path in your project.";
+
+fn read_file(root: &File, path: &Path, reference: Reference) -> Result<OutputFile, &'static str> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(NOT_FOUND)?;
+    validate_name(name).map_err(|_| "That file name cannot be attached.")?;
+    let file = open_beneath(root, path).ok_or(NOT_FOUND)?;
+    let metadata = file.metadata().map_err(|_| NOT_FOUND)?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(NOT_FOUND);
+    }
+    const TOO_LARGE: &str = "The file is larger than 10 MiB.";
+    if metadata.len() > MAX_ATTACHMENT_BYTES {
+        return Err(TOO_LARGE);
     }
     let mut data = Vec::new();
     file.take(MAX_ATTACHMENT_BYTES + 1)
         .read_to_end(&mut data)
-        .ok()?;
+        .map_err(|_| NOT_FOUND)?;
     if data.len() as u64 > MAX_ATTACHMENT_BYTES {
-        return None;
+        return Err(TOO_LARGE);
     }
     let media_type = match (image_type(&data), reference) {
         (Some(image), _) => image.to_owned(),
         (None, Reference::Image) if is_visual(name, &data) => else_visual::MEDIA_TYPE.to_owned(),
-        (None, Reference::Image) => return None,
+        (None, Reference::Image) => return Err("Not an image."),
         (None, Reference::Link) => guessed_type(name),
     };
-    Some(OutputFile {
+    Ok(OutputFile {
         file: Attachment {
             id: Uuid::new_v4(),
             name: name.to_owned(),
@@ -230,6 +239,18 @@ fn read_file(root: &File, path: &Path, reference: Reference) -> Option<OutputFil
         },
         data,
     })
+}
+
+/// The file at `url` in `project`, exactly as a `[name](url)` link in a
+/// reply would attach it.
+pub(crate) fn read_linked(project: &Path, url: &str) -> Result<OutputFile, &'static str> {
+    let path = relative_path(project, url).ok_or("Give a path in your project.")?;
+    let root = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(project)
+        .map_err(|_| NOT_FOUND)?;
+    read_file(&root, path, Reference::Link)
 }
 
 /// Raster image types are reserved for bytes that decode, since the
@@ -244,7 +265,6 @@ fn guessed_type(name: &str) -> String {
 /// The source of the visual at `url` in `project`, as `![alt](url)` would
 /// attach it.
 pub(crate) fn read_visual(project: &Path, url: &str) -> Result<String, &'static str> {
-    const NOT_FOUND: &str = "No regular file at that path in your project.";
     let path = relative_path(project, url).ok_or("Give a path in your project.")?;
     if !is_html_name(path) {
         return Err("A visual is an .html file.");

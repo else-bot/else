@@ -245,6 +245,8 @@ pub struct DelegationOutcome {
     pub status: String,
     pub result: Option<String>,
     pub error: Option<String>,
+    /// The delegating bot's copies of files the task's replies attached.
+    pub files: Vec<crate::app::messages::Attachment>,
 }
 
 /// The owner's answer to a secret request: which task secret and
