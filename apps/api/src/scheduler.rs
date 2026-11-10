@@ -31,6 +31,10 @@ pub struct Scheduler {
     tasks: TaskTracker,
     grants: Arc<Grants>,
     slots: Arc<Semaphore>,
+    /// Background work (routines, connector events, summaries) also takes
+    /// one of these, so a slot stays free for the owner when the cap is
+    /// above 1.
+    background: Arc<Semaphore>,
     summaries: AtomicUsize,
     gate: Arc<crate::maintenance::Gate>,
     /// The shared MCP library's directory, set by the router.
@@ -40,7 +44,7 @@ pub struct Scheduler {
 /// A provider slot held by one memory summary. Released on drop.
 pub struct SummaryPermit {
     scheduler: Arc<Scheduler>,
-    slot: Option<OwnedSemaphorePermit>,
+    slot: Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)>,
     _admission: crate::maintenance::Admission,
 }
 
@@ -76,6 +80,7 @@ impl Scheduler {
             grants: Arc::new(Grants::default()),
             tasks: TaskTracker::new(),
             slots: Arc::new(Semaphore::new(max_active)),
+            background: Arc::new(Semaphore::new(max_active.saturating_sub(1).max(1))),
             summaries: AtomicUsize::new(0),
             gate: Arc::default(),
             mcp_root: std::sync::OnceLock::new(),
@@ -133,6 +138,7 @@ impl Scheduler {
     /// and at most `limit` run at once.
     pub fn try_begin_summary(self: &Arc<Self>, limit: usize) -> Option<SummaryPermit> {
         let admission = self.gate.enter()?;
+        let background = self.background.clone().try_acquire_owned().ok()?;
         let slot = self.slots.clone().try_acquire_owned().ok()?;
         self.summaries
             .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
@@ -141,7 +147,7 @@ impl Scheduler {
             .ok()?;
         Some(SummaryPermit {
             scheduler: self.clone(),
-            slot: Some(slot),
+            slot: Some((slot, background)),
             _admission: admission,
         })
     }
@@ -265,11 +271,12 @@ impl Scheduler {
             let Ok(slot) = self.slots.clone().try_acquire_owned() else {
                 break;
             };
-            let claimed = turns::claim_next(&self.pool, &live).await;
-            let turn_id = match claimed {
-                Ok(Some(turn_id)) => {
-                    live.push(turn_id);
-                    turn_id
+            let background = self.background.clone().try_acquire_owned().ok();
+            let claimed = turns::claim_next(&self.pool, &live, background.is_some()).await;
+            let (turn_id, background) = match claimed {
+                Ok(Some(claimed)) => {
+                    live.push(claimed.id);
+                    (claimed.id, background.filter(|_| claimed.background))
                 }
                 Ok(None) => {
                     break;
@@ -290,7 +297,7 @@ impl Scheduler {
                         this.running
                             .call(move |running| running.remove(&turn_id))
                             .await;
-                        drop(slot);
+                        drop((slot, background));
                         this.wake();
                     });
                 })

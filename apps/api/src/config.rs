@@ -55,7 +55,9 @@ pub struct Config {
     pub shutdown_grace: Duration,
     /// Expose the deterministic synthetic provider (tests and demos).
     pub synthetic_provider: bool,
-    /// Provider turns running at once across all bots.
+    /// Provider turns running at once across all bots. Background work
+    /// uses at most one fewer, so the owner's messages never wait on it
+    /// (except at 1, where everything shares the one slot).
     pub max_active_turns: usize,
     /// Explicit Codex CLI path; otherwise `codex` on `PATH`.
     pub codex_bin: Option<PathBuf>,
@@ -138,7 +140,7 @@ impl Config {
             120,
         )?);
         let synthetic_provider = parse_bool(source, "ELSE_SYNTHETIC_PROVIDER")?;
-        let max_active_turns = parse_number(source, "ELSE_MAX_ACTIVE_TURNS", 2, 1, 32)? as usize;
+        let max_active_turns = parse_number(source, "ELSE_MAX_ACTIVE_TURNS", 3, 1, 32)? as usize;
         let codex_bin = match source.get("ELSE_CODEX_BIN") {
             Some(path) => Some(absolute_path("ELSE_CODEX_BIN", path)?),
             None => None,

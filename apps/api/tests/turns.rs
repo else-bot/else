@@ -1043,16 +1043,18 @@ async fn a_turn_still_finishing_its_last_attempt_is_not_claimed_and_holds_its_bo
     }
     let busy = [queued[0]];
     assert_eq!(
-        else_api::db::turns::claim_next(&db.pool, &busy)
+        else_api::db::turns::claim_next(&db.pool, &busy, true)
             .await
-            .unwrap(),
+            .unwrap()
+            .map(|claimed| claimed.id),
         Some(queued[2]),
         "another bot's turn starts"
     );
     assert_eq!(
-        else_api::db::turns::claim_next(&db.pool, &busy)
+        else_api::db::turns::claim_next(&db.pool, &busy, true)
             .await
-            .unwrap(),
+            .unwrap()
+            .map(|claimed| claimed.id),
         None,
         "the finishing turn and the later turn of its bot both wait"
     );
@@ -1062,10 +1064,156 @@ async fn a_turn_still_finishing_its_last_attempt_is_not_claimed_and_holds_its_bo
         .await
         .unwrap();
     assert_eq!(
-        else_api::db::turns::claim_next(&db.pool, &[])
+        else_api::db::turns::claim_next(&db.pool, &[], true)
             .await
-            .unwrap(),
+            .unwrap()
+            .map(|claimed| claimed.id),
         Some(queued[0]),
         "once its task is gone the turn starts first in its bot's queue"
+    );
+}
+
+#[tokio::test]
+async fn an_owner_message_is_claimed_past_its_bots_queued_background_task() {
+    let db = TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let pool = &db.pool;
+    let bot = |name: &'static str| async move {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO bots (id, name) VALUES (?1, ?2)")
+            .bind(id)
+            .bind(name)
+            .execute(pool)
+            .await
+            .unwrap();
+        id
+    };
+    let conversation = |bot: Uuid, kind: &'static str| async move {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO conversations (id, bot_id, kind) VALUES (?1, ?2, ?3)")
+            .bind(id)
+            .bind(bot)
+            .bind(kind)
+            .execute(pool)
+            .await
+            .unwrap();
+        id
+    };
+    let turn = |bot: Uuid,
+                conversation: Uuid,
+                turn_no: i64,
+                kind: &'static str,
+                status: &'static str,
+                at: &'static str| async move {
+        let (id, item) = (Uuid::new_v4(), Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
+                                owner_item_id, provider_id, status, created_at)
+             VALUES (?1, ?2, ?3, ?1, zeroblob(32), ?4, ?5, 'synthetic', ?6, ?7)",
+        )
+        .bind(id)
+        .bind(bot)
+        .bind(conversation)
+        .bind(turn_no)
+        .bind(item)
+        .bind(status)
+        .bind(at)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO items (id, conversation_id, seq, turn_id, kind, text) VALUES (?1, ?2, ?3, ?4, ?5, 'x')")
+            .bind(item)
+            .bind(conversation)
+            .bind(turn_no)
+            .bind(id)
+            .bind(kind)
+            .execute(pool)
+            .await
+            .unwrap();
+        id
+    };
+
+    let scout = bot("Scout").await;
+    let scout_owner = conversation(scout, "owner").await;
+    let routine = turn(
+        scout,
+        scout_owner,
+        1,
+        "routine",
+        "waiting",
+        "2026-01-01T00:00:00.000+00:00",
+    )
+    .await;
+    let bento = bot("Bento").await;
+    let task = conversation(bento, "task").await;
+    let delegated = turn(
+        bento,
+        task,
+        1,
+        "user",
+        "queued",
+        "2026-01-01T00:00:01.000+00:00",
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO delegations (id, root_turn_id, parent_attempt, parent_bot_id, target_bot_id,
+                                  task, task_hash, conversation_id, child_turn_id)
+         VALUES (?1, ?2, 1, ?3, ?4, 'sweep', zeroblob(32), ?5, ?6)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(routine)
+    .bind(scout)
+    .bind(bento)
+    .bind(task)
+    .bind(delegated)
+    .execute(pool)
+    .await
+    .unwrap();
+    let bento_owner = conversation(bento, "owner").await;
+    let message = turn(
+        bento,
+        bento_owner,
+        2,
+        "user",
+        "queued",
+        "2026-01-01T00:00:02.000+00:00",
+    )
+    .await;
+    let auto = bot("Auto").await;
+    let auto_owner = conversation(auto, "owner").await;
+    turn(
+        auto,
+        auto_owner,
+        1,
+        "routine",
+        "queued",
+        "2026-01-01T00:00:03.000+00:00",
+    )
+    .await;
+    turn(
+        auto,
+        auto_owner,
+        2,
+        "user",
+        "queued",
+        "2026-01-01T00:00:04.000+00:00",
+    )
+    .await;
+
+    let claim = || async {
+        else_api::db::turns::claim_next(pool, &[], false)
+            .await
+            .unwrap()
+            .map(|claimed| claimed.id)
+    };
+    assert_eq!(
+        claim().await,
+        Some(message),
+        "the owner message skips the bot's queued background task"
+    );
+    assert_eq!(
+        claim().await,
+        None,
+        "a message stays behind an earlier routine turn in its own conversation"
     );
 }

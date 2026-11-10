@@ -385,6 +385,7 @@ pub fn api_command(db: &TestDb, data_dir: &std::path::Path, port: u16) -> std::p
         .env("ELSE_DATA_DIR", data_dir)
         .env("ELSE_API_BIND", format!("127.0.0.1:{port}"))
         .env("ELSE_SYNTHETIC_PROVIDER", "1")
+        .env("ELSE_MAX_ACTIVE_TURNS", "2")
         .env("ELSE_SHUTDOWN_GRACE_SECS", "2")
         .env("ELSE_BACKUP_INTERVAL_SECS", "0")
         .env("RUST_LOG", "warn")
