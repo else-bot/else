@@ -80,6 +80,9 @@ impl PendingSend {
     }
 
     pub(super) fn on_send_failure(&mut self, failure: Failure) {
+        if self.delivery != Delivery::Sending {
+            return;
+        }
         self.delivery = match failure {
             Failure::Unknown(reason) => Delivery::Unknown { reason },
             Failure::Rejected(reason) => Delivery::Rejected { reason },
@@ -87,17 +90,35 @@ impl PendingSend {
     }
 
     pub(super) fn begin_resolution(&mut self) -> bool {
-        matches!(self.delivery, Delivery::Unknown { .. })
+        let Delivery::Unknown { reason } = &mut self.delivery else {
+            return false;
+        };
+        let reason = std::mem::take(reason);
+        self.delivery = Delivery::Resolving { reason };
+        true
     }
 
     pub(super) fn on_lookup(&mut self, lookup: Lookup) -> Option<SendRequest> {
+        let Delivery::Resolving { reason } = &mut self.delivery else {
+            return None;
+        };
         match lookup {
-            Lookup::Missing => self.retry(),
-            Lookup::Failed => None,
+            Lookup::Missing => {
+                self.delivery = Delivery::Sending;
+                Some(self.request())
+            }
+            Lookup::Failed => {
+                let reason = std::mem::take(reason);
+                self.delivery = Delivery::Unknown { reason };
+                None
+            }
         }
     }
 
     pub(super) fn retry(&mut self) -> Option<SendRequest> {
+        if !matches!(self.delivery, Delivery::Unknown { .. }) {
+            return None;
+        }
         self.delivery = Delivery::Sending;
         Some(self.request())
     }
