@@ -331,6 +331,32 @@ impl Palette {
             .into_iter()
             .map(|(key, color)| (key.to_owned(), color.hex().into()))
             .collect();
+        let syntax: serde_json::Map<_, _> = [
+            ("keyword", p.magenta),
+            ("string", p.green),
+            ("string.escape", p.cyan),
+            ("string.regex", p.cyan),
+            ("number", p.yellow),
+            ("boolean", p.yellow),
+            ("constant", p.yellow),
+            ("function", p.blue),
+            ("type", p.cyan),
+            ("constructor", p.cyan),
+            ("attribute", p.cyan),
+            ("tag", p.red),
+            ("variable.special", p.red),
+            ("title", p.blue),
+            ("link_uri", p.accent),
+            ("comment", p.muted_foreground),
+        ]
+        .into_iter()
+        .map(|(key, color)| {
+            (
+                key.to_owned(),
+                serde_json::json!({ "color": readable(color).hex() }),
+            )
+        })
+        .collect();
         serde_json::from_value(serde_json::json!({
             "name": name,
             "mode": if dark { "dark" } else { "light" },
@@ -338,6 +364,7 @@ impl Palette {
             "radius.lg": style.radius_lg,
             "shadow": style.shadow,
             "colors": colors,
+            "highlight": { "syntax": syntax },
         }))
         .expect("every palette projects onto a theme")
     }

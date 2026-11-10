@@ -17,7 +17,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["serde", "c
 chrono-tz = "0.10.4"
 dotenvy = "0.15.7"
 futures-util = "0.3.34"
-gpui-kit = "=0.9.0"
+gpui-kit = { version = "=0.9.0", features = ["syntect"] }
 iana-time-zone = "0.1.65"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "ico"] }
 libc = "0.2.191"

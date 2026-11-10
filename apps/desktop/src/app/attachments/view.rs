@@ -3,7 +3,7 @@ use crate::app::ElseApp;
 use crate::attachments::{Attachment, file_size};
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::InlineTokenContext;
+use gpui_kit::component::input::{Editor, EditorState, InlineTokenContext};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -35,9 +35,30 @@ pub(super) fn show_preview(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let code = match &preview {
+        Preview::Text(text) => {
+            let language = std::path::Path::new(&file.name)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or("text")
+                .to_ascii_lowercase();
+            let text = text.clone();
+            Some(cx.new(|cx| {
+                EditorState::new(window, cx)
+                    .language(language)
+                    .default_value(text)
+            }))
+        }
+        _ => None,
+    };
     window.open_dialog(cx, move |dialog, _, _| {
-        let content = match &preview {
-            Preview::Image(image) => div()
+        let content = match (&preview, &code) {
+            (_, Some(code)) => Editor::new(code)
+                .readonly(true)
+                .h(px(520.))
+                .aria_label(file.name.clone())
+                .into_any_element(),
+            (Preview::Image(image), _) => div()
                 .w_full()
                 .child(
                     img(image.clone())
@@ -46,19 +67,13 @@ pub(super) fn show_preview(
                         .object_fit(ObjectFit::Contain),
                 )
                 .into_any_element(),
-            Preview::Text(text) => div()
-                .id("file-preview-text")
-                .max_h(px(440.))
-                .overflow_y_scroll()
-                .text_sm()
-                .child(text.clone())
-                .into_any_element(),
-            Preview::Binary => div()
+            _ => div()
                 .text_sm()
                 .child("Preview is not available for this file type.")
                 .into_any_element(),
         };
         dialog
+            .when(code.is_some(), |dialog| dialog.w(px(880.)))
             .title(file.name.clone())
             .child(
                 div()
