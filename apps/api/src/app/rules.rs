@@ -6,24 +6,39 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_TITLE_CHARS: usize = 80;
-pub const MAX_BODY_BYTES: usize = 8_000;
+/// Instructions outside ``` fences. The bot rereads every rule each turn, so
+/// a rule already longer than this may change but not grow.
+pub const MAX_PROSE_CHARS: usize = 800;
+/// Text inside ``` fences, which the bot sends verbatim.
+pub const MAX_VERBATIM_CHARS: usize = 1_500;
+/// Outer bound on one rule, so a long older rule can still be resent whole.
+pub const MAX_BODY_CHARS: usize = 4_000;
+/// Matches the `bot_rules.markdown` CHECK constraint.
 pub const MAX_DOCUMENT_BYTES: usize = 32_000;
-pub const MAX_SECTIONS: usize = 50;
+pub const MAX_SECTIONS: usize = 20;
 pub const MAX_OWNER_WORDS_CHARS: usize = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InvalidRules {
     #[error("section must be 1 to 80 characters on one line, without a leading '#'.")]
     Title,
-    #[error("content must be at most 8000 bytes.")]
+    #[error("content must be at most 4000 characters.")]
     BodyTooLong,
+    #[error(
+        "the rule's text outside ``` fences is {chars} characters; the limit is {limit}. Keep \
+         only what the owner asked, and drop approvals, limits, and permissions else.bot \
+         already enforces."
+    )]
+    ProseTooLong { chars: usize, limit: usize },
+    #[error("the rule's text inside ``` fences is {chars} characters; the limit is {limit}.")]
+    VerbatimTooLong { chars: usize, limit: usize },
     #[error("content must not contain a line starting with '## '; each section is one rule.")]
     NestedSection,
     #[error("owner_words must quote the owner's request in 1 to 1000 characters.")]
     OwnerWords,
-    #[error("the rules would exceed 32000 bytes; shorten or merge sections first.")]
+    #[error("the rules would exceed 32000 bytes; shorten or merge rules first.")]
     DocumentTooLong,
-    #[error("the rules would exceed 50 sections; merge related rules first.")]
+    #[error("the rules would exceed 20 sections; fold this into a related rule.")]
     TooManySections,
     #[error("there is no section with that title to remove.")]
     NoSuchSection,
@@ -108,11 +123,18 @@ impl Edit {
             return Err(InvalidRules::Title);
         }
         let body = trim_blank_lines(body);
-        if body.len() > MAX_BODY_BYTES {
+        if body.chars().count() > MAX_BODY_CHARS {
             return Err(InvalidRules::BodyTooLong);
         }
         if body.lines().any(starts_section) {
             return Err(InvalidRules::NestedSection);
+        }
+        let verbatim = Lengths::of(&body).verbatim;
+        if verbatim > MAX_VERBATIM_CHARS {
+            return Err(InvalidRules::VerbatimTooLong {
+                chars: verbatim,
+                limit: MAX_VERBATIM_CHARS,
+            });
         }
         Ok(Self {
             title: title.to_owned(),
@@ -142,6 +164,37 @@ pub enum Applied {
         change: ChangeKind,
         diff: Vec<DiffLine>,
     },
+}
+
+/// Characters inside and outside ``` fences. An unclosed fence counts as
+/// instructions, so it cannot hide a rule's text from the prose limit.
+struct Lengths {
+    prose: usize,
+    verbatim: usize,
+}
+
+impl Lengths {
+    fn of(body: &str) -> Self {
+        let (mut prose, mut verbatim, mut open) = (0, 0, None::<usize>);
+        for line in body.lines() {
+            let chars = line.chars().count();
+            if line.starts_with("```") {
+                match open.take() {
+                    Some(fenced) => verbatim += fenced,
+                    None => open = Some(0),
+                }
+                prose += chars;
+            } else if let Some(fenced) = open.as_mut() {
+                *fenced += chars;
+            } else {
+                prose += chars;
+            }
+        }
+        Self {
+            prose: prose + open.unwrap_or(0),
+            verbatim,
+        }
+    }
 }
 
 fn starts_section(line: &str) -> bool {
@@ -225,6 +278,7 @@ impl Rules {
                 if old.body == edit.body {
                     return Ok(Applied::Unchanged);
                 }
+                check_prose(&edit.body, Lengths::of(&old.body).prose)?;
                 let new = Section {
                     title: old.title.clone(),
                     body: edit.body.clone(),
@@ -237,6 +291,7 @@ impl Rules {
                 if self.sections.len() >= MAX_SECTIONS {
                     return Err(InvalidRules::TooManySections);
                 }
+                check_prose(&edit.body, 0)?;
                 let new = Section {
                     title: edit.title.clone(),
                     body: edit.body.clone(),
@@ -259,6 +314,17 @@ impl Rules {
             diff,
         })
     }
+}
+
+/// A rule's instructions stay within the limit, or within its earlier length
+/// when it was saved before the limit.
+fn check_prose(body: &str, old_prose: usize) -> Result<(), InvalidRules> {
+    let limit = MAX_PROSE_CHARS.max(old_prose);
+    let chars = Lengths::of(body).prose;
+    if chars > limit {
+        return Err(InvalidRules::ProseTooLong { chars, limit });
+    }
+    Ok(())
 }
 
 fn section_lines(section: Option<&Section>) -> Vec<String> {
@@ -483,6 +549,86 @@ mod tests {
         );
         assert!(Edit::parse("Tone", "### Detail\nok").is_ok());
         assert_eq!(Edit::parse("# Tone", "x"), Err(InvalidRules::Title));
+    }
+
+    #[test]
+    fn instructions_are_capped_but_fenced_text_to_send_has_its_own_allowance() {
+        let rules = Rules::default();
+        assert!(
+            rules
+                .apply(&edit("Tone", &"é".repeat(MAX_PROSE_CHARS)))
+                .is_ok()
+        );
+        assert_eq!(
+            rules.apply(&edit("Tone", &"a".repeat(MAX_PROSE_CHARS + 1))),
+            Err(InvalidRules::ProseTooLong {
+                chars: MAX_PROSE_CHARS + 1,
+                limit: MAX_PROSE_CHARS
+            })
+        );
+        let template = format!("Send:\n```\n{}\n```", "t".repeat(MAX_VERBATIM_CHARS));
+        assert!(rules.apply(&edit("Reply", &template)).is_ok());
+        assert!(matches!(
+            Edit::parse(
+                "Reply",
+                &format!("```\n{}\n```", "t".repeat(MAX_VERBATIM_CHARS + 1))
+            ),
+            Err(InvalidRules::VerbatimTooLong { .. })
+        ));
+        let unclosed = format!("```\n{}", "a".repeat(MAX_PROSE_CHARS));
+        assert!(matches!(
+            rules.apply(&edit("Hidden", &unclosed)),
+            Err(InvalidRules::ProseTooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn a_rule_saved_before_the_limit_may_change_but_not_grow() {
+        let old = "a".repeat(MAX_PROSE_CHARS + 200);
+        let rules = Rules::parse(&format!("## Scouting\n{old}\n"));
+        assert!(
+            rules
+                .apply(&edit("Scouting", &"b".repeat(MAX_PROSE_CHARS + 200)))
+                .is_ok()
+        );
+        assert!(
+            rules
+                .apply(&edit("Scouting", &"b".repeat(MAX_PROSE_CHARS + 50)))
+                .is_ok()
+        );
+        assert!(matches!(
+            rules.apply(&edit("Scouting", &format!("{old}b"))),
+            Err(InvalidRules::ProseTooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn a_full_file_refuses_new_rules_by_count_and_by_size() {
+        let full = Rules {
+            sections: (0..MAX_SECTIONS)
+                .map(|i| Section {
+                    title: format!("Rule {i}"),
+                    body: "x".into(),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            full.apply(&edit("Another", "y")),
+            Err(InvalidRules::TooManySections)
+        );
+        assert!(full.apply(&edit("Rule 0", "y")).is_ok());
+        let big = Rules {
+            sections: (0..MAX_SECTIONS - 1)
+                .map(|i| Section {
+                    title: format!("Rule {i}"),
+                    body: "é".repeat(MAX_PROSE_CHARS),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            big.apply(&edit("Another", &"é".repeat(MAX_PROSE_CHARS))),
+            Err(InvalidRules::DocumentTooLong)
+        );
     }
 
     #[test]

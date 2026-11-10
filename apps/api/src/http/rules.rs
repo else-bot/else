@@ -16,7 +16,7 @@ use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
 use super::mcp::{Outcome, tool_error, tool_result};
 use crate::app::rules::{
-    Edit, MAX_BODY_BYTES, MAX_OWNER_WORDS_CHARS, MAX_TITLE_CHARS, Rules, parse_owner_words,
+    Edit, MAX_BODY_CHARS, MAX_OWNER_WORDS_CHARS, MAX_TITLE_CHARS, Rules, parse_owner_words,
 };
 use crate::db::rules::{self, Caller, RulesError, Saved};
 use crate::grants::Grant;
@@ -45,18 +45,19 @@ pub(super) fn schema() -> Value {
         "name": "rules_update",
         "description": "Set one section of your rules file, which reaches you at the start of \
             every turn, routine, webhook, and event turns included. Pass the section's whole new \
-            text; other sections stay. Keep text the owner wants sent or typed exactly as they \
-            wrote it, in backticks, with placeholders such as {ISSUE_ID}. Empty content removes \
-            the section. The owner sees each change as a card.",
+            text; other sections stay. Put text the owner wants sent or typed exactly in backticks, \
+            or a ``` fence when multi-line, with placeholders such as {ISSUE_ID}. Empty content \
+            removes the section. The owner sees each change as a card.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "section": { "type": "string", "minLength": 1, "maxLength": MAX_TITLE_CHARS,
                              "description": "Short rule title, such as \"New Linear issue\". \
-                                 Reuse an existing title to change that rule." },
-                "content": { "type": "string", "maxLength": MAX_BODY_BYTES,
-                             "description": "The complete rule in markdown, for example \
-                                 \"When: ...\\nDo: ...\\nNever: ...\". No '## ' headings." },
+                                 Reuse an existing title to change or extend that rule." },
+                "content": { "type": "string", "maxLength": MAX_BODY_CHARS,
+                             "description": "The whole rule, aim under 400 characters outside ``` \
+                                 fences: \"When: ...\\nDo: ...\". Don't restate approvals, \
+                                 limits, or permissions else.bot enforces. No '## '." },
                 "owner_words": { "type": "string", "minLength": 1,
                                  "maxLength": MAX_OWNER_WORDS_CHARS,
                                  "description": "The owner's own words this change follows, \
