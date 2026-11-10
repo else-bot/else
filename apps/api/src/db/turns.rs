@@ -646,6 +646,20 @@ const TASK_OR_NO_WAITING_OWNER: &str = "(EXISTS (SELECT 1 FROM conversations k
           OR NOT EXISTS (SELECT 1 FROM turns w
                          WHERE w.conversation_id = t.conversation_id AND w.status = 'waiting'))";
 
+/// Whether turn `t` is background work: a routine run or connector event, or
+/// a task delegated from one. Matches `delegations::origin`.
+const BACKGROUND: &str = "coalesce((SELECT CASE c.kind WHEN 'owner' THEN i.kind ELSE ri.kind END
+          FROM conversations c JOIN items i ON i.id = t.owner_item_id
+          LEFT JOIN delegations d ON d.child_turn_id = t.id
+          LEFT JOIN turns r ON r.id = d.root_turn_id
+          LEFT JOIN items ri ON ri.id = r.owner_item_id
+          WHERE c.id = t.conversation_id), '') IN ('routine', 'connector')";
+
+pub struct Claimed {
+    pub id: Uuid,
+    pub background: bool,
+}
+
 /// Claim the oldest queued turn of the next eligible bot, oldest first
 /// across bots. A bot's owner message that took over its delegated work goes
 /// ahead of the bot's other queued turns, so the steer is not left behind. A bot is eligible when it is active, not stopping work, and
@@ -655,11 +669,16 @@ const TASK_OR_NO_WAITING_OWNER: &str = "(EXISTS (SELECT 1 FROM conversations k
 /// again, so a later failure never strands an already committed claim. A
 /// turn in `busy` still has a task finishing its previous attempt, whose
 /// cleanup would end a new attempt's grants; it and the rest of its bot's
-/// queue wait for that task to wake the scheduler again.
-pub async fn claim_next(pool: &SqlitePool, busy: &[Uuid]) -> Result<Option<Uuid>, sqlx::Error> {
-    let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT id, bot_id FROM (
-            SELECT t.id, t.bot_id, t.created_at,
+/// queue wait for that task to wake the scheduler again. Without
+/// `background`, a bot whose next turn is background work is skipped.
+pub async fn claim_next(
+    pool: &SqlitePool,
+    busy: &[Uuid],
+    background: bool,
+) -> Result<Option<Claimed>, sqlx::Error> {
+    let candidates: Vec<(Uuid, Uuid, bool)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT id, bot_id, background FROM (
+            SELECT t.id, t.bot_id, t.created_at, {BACKGROUND} AS background,
                    row_number() OVER (
                        PARTITION BY t.bot_id
                        ORDER BY EXISTS (SELECT 1 FROM delegations d
@@ -673,12 +692,14 @@ pub async fn claim_next(pool: &SqlitePool, busy: &[Uuid]) -> Result<Option<Uuid>
               AND {TASK_OR_NO_WAITING_OWNER}
          ) oldest WHERE queue_rank = 1
            AND NOT (lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?1)))
+           AND (?2 OR NOT background)
          ORDER BY created_at, id LIMIT 8"
     )))
     .bind(sqlx::types::Json(busy))
+    .bind(background)
     .fetch_all(pool)
     .await?;
-    for (turn_id, bot_id) in candidates {
+    for (turn_id, bot_id, background) in candidates {
         let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
         let eligible: Option<bool> = sqlx::query_scalar(
             "SELECT status = 'active' AND NOT cancel_pending FROM bots WHERE id = ?1",
@@ -705,7 +726,10 @@ pub async fn claim_next(pool: &SqlitePool, busy: &[Uuid]) -> Result<Option<Uuid>
         if updated == 1 {
             crate::db::events::turn_changed(&mut tx, bot_id, turn_id).await?;
             tx.commit().await?;
-            return Ok(Some(turn_id));
+            return Ok(Some(Claimed {
+                id: turn_id,
+                background,
+            }));
         }
     }
     Ok(None)

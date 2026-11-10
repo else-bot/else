@@ -432,9 +432,10 @@ async fn capacity_waits_do_not_lengthen_the_failure_backoff() {
     let fake = Arc::new(Scripted::default());
     let worker = compactor(&app, fake.clone());
     let mut held = Vec::new();
-    while held.len() < 4 {
-        held.push(summary_slot(&app, 4).await);
+    while let Some(permit) = app.scheduler.try_begin_summary(4) {
+        held.push(permit);
     }
+    assert!(!held.is_empty());
     for _ in 0..10 {
         sqlx::query("UPDATE memory_job SET available_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE bot_id = ?1")
             .bind(bot)

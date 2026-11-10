@@ -1043,16 +1043,18 @@ async fn a_turn_still_finishing_its_last_attempt_is_not_claimed_and_holds_its_bo
     }
     let busy = [queued[0]];
     assert_eq!(
-        else_api::db::turns::claim_next(&db.pool, &busy)
+        else_api::db::turns::claim_next(&db.pool, &busy, true)
             .await
-            .unwrap(),
+            .unwrap()
+            .map(|claimed| claimed.id),
         Some(queued[2]),
         "another bot's turn starts"
     );
     assert_eq!(
-        else_api::db::turns::claim_next(&db.pool, &busy)
+        else_api::db::turns::claim_next(&db.pool, &busy, true)
             .await
-            .unwrap(),
+            .unwrap()
+            .map(|claimed| claimed.id),
         None,
         "the finishing turn and the later turn of its bot both wait"
     );
@@ -1062,9 +1064,10 @@ async fn a_turn_still_finishing_its_last_attempt_is_not_claimed_and_holds_its_bo
         .await
         .unwrap();
     assert_eq!(
-        else_api::db::turns::claim_next(&db.pool, &[])
+        else_api::db::turns::claim_next(&db.pool, &[], true)
             .await
-            .unwrap(),
+            .unwrap()
+            .map(|claimed| claimed.id),
         Some(queued[0]),
         "once its task is gone the turn starts first in its bot's queue"
     );
