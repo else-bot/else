@@ -412,7 +412,10 @@ async fn duplicate_input_progress_never_reports_success() {
     let text = error(&reply);
     assert!(text.starts_with("UNCERTAIN: 1 of 2"), "{text}");
     assert!(text.contains("INPUT_PROTOCOL"), "{text}");
-    assert!(text.contains("Take a screenshot before repeating"), "{text}");
+    assert!(
+        text.contains("Take a screenshot before repeating"),
+        "{text}"
+    );
     assert_eq!(guest.inputs.lock().unwrap().len(), 1, "nothing replayed");
 }
 

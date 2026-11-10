@@ -20,9 +20,11 @@ use crate::db::task_secrets::{self, Env};
 use crate::grants::Grant;
 
 pub(crate) mod approval;
+mod input_progress;
 
 pub use approval::call;
 use approval::{EFFECT_ADVERTISED, MAX_PURPOSE};
+use input_progress::InputProgress;
 
 pub const TOOL_NAMES: &[&str] = &[
     "computer_run",
@@ -589,28 +591,24 @@ async fn input(
             );
         }
     };
-    let lines: Vec<Value> = out
-        .stdout
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    let started = lines.iter().any(|l| l["started"] == true);
-    let done = lines.iter().filter(|l| l.get("done").is_some()).count();
-    let finished_ok = lines.iter().any(|l| l["ok"] == true);
-    let error = lines
-        .iter()
-        .find_map(|l| l["error"].as_str().map(str::to_owned));
+    let progress = InputProgress::parse(&out.stdout, actions.len());
+    let done = progress.done(actions.len());
     let summary = summarize_input(actions);
-    if !started {
+    if matches!(
+        progress,
+        InputProgress::NotStarted | InputProgress::Refused { .. }
+    ) {
         return (
             tool_error(&format!(
                 "{} Nothing was done.",
-                error.unwrap_or_else(|| "INPUT_FAILED: the input helper did not start.".into())
+                progress
+                    .error()
+                    .unwrap_or("INPUT_FAILED: the input helper did not start.")
             )),
             None,
         );
     }
-    if out.exit_code == Some(0) && finished_ok && done == actions.len() {
+    if out.exit_code == Some(0) && matches!(progress, InputProgress::Completed) {
         return (
             tool_result(json!({ "done": done, "of": actions.len(),
                 "next": "take a screenshot to see the result" })),
@@ -622,7 +620,7 @@ async fn input(
             "UNCERTAIN: {done} of {} actions completed; the next may or may not have happened \
              ({}). Take a screenshot before repeating anything.",
             actions.len(),
-            error.unwrap_or_else(|| "the input was cut off".into())
+            progress.error().unwrap_or("the input was cut off")
         )),
         Some(format!(
             "input cut off after {done}/{} actions: {summary}",
