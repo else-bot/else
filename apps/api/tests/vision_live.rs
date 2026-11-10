@@ -13,6 +13,11 @@ fn live() -> bool {
     std::env::var("ELSE_LIVE_VISION").as_deref() == Ok("1")
 }
 
+/// The model a provider runs, from `ELSE_LIVE_VISION_<PROVIDER>_MODEL`.
+fn model(provider: &str, default: &str) -> String {
+    std::env::var(format!("ELSE_LIVE_VISION_{provider}_MODEL")).unwrap_or_else(|_| default.into())
+}
+
 fn msb() -> String {
     format!("{}/.microsandbox/bin/msb", std::env::var("HOME").unwrap())
 }
@@ -368,10 +373,13 @@ async fn both_providers_read_pixels_from_their_desktop() {
     let api = install.serve().await;
     let pool = db.pool.clone();
     for (provider, body) in [
-        ("codex", json!({ "reasoning_effort": "low" })),
+        (
+            "codex",
+            json!({ "model": model("CODEX", "gpt-6.1-sol"), "reasoning_effort": "low", "service_tier": "default" }),
+        ),
         (
             "claude",
-            json!({ "model": "claude-haiku-5-5", "reasoning_effort": "low", "service_tier": "default" }),
+            json!({ "model": model("CLAUDE", "claude-haiku-5-5"), "reasoning_effort": "low", "service_tier": "default" }),
         ),
     ] {
         let (status, body) = api
@@ -396,7 +404,7 @@ async fn both_providers_read_pixels_from_their_desktop() {
 
     note("== 1. the computer starts; the capture matches the display VNC serves");
     let turn = api
-        .send(&bot, "codex", "Run `true` with computer_run and reply OK.")
+        .send(&bot, "codex", "Run `else-desktop` with computer_run and reply OK.")
         .await;
     let (status, _) = finish(&pool, turn, long).await;
     assert_eq!(status, "completed");

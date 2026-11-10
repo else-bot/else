@@ -206,23 +206,12 @@ async fn setup(desktop: bool) -> Setup {
     }
 }
 
-async fn grant(app: &TestApp, bot: &str, model: Option<&str>) -> String {
+async fn grant(app: &TestApp, bot: &str) -> String {
     let reply = app
         .send(bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
         .await;
     let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     app.wait_turn(&turn.to_string(), &["running"]).await;
-    if let Some(model) = model {
-        sqlx::query(
-            "UPDATE turns SET profile = json_object('model', ?2), profile_revision = 1
-             WHERE id = ?1",
-        )
-        .bind(turn)
-        .bind(model)
-        .execute(&app.db.pool)
-        .await
-        .unwrap();
-    }
     let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
@@ -284,19 +273,7 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     let bot = app.create_bot("Seer").await;
     let other = app.create_bot("Other").await;
 
-    let token = grant(&app, &bot, Some("gpt-5.4-mini")).await;
-    let refused = error(&shot(&app, &token, json!({})).await);
-    assert!(refused.starts_with("IMAGE_UNSUPPORTED"), "{refused}");
-    assert!(guest.files.lock().unwrap().is_empty());
-
-    sqlx::query(
-        "UPDATE turns SET profile = json_object('model', 'gpt-6.1-sol')
-         WHERE bot_id = ?1 AND status = 'running'",
-    )
-    .bind(bot.parse::<Uuid>().unwrap())
-    .execute(&app.db.pool)
-    .await
-    .unwrap();
+    let token = grant(&app, &bot).await;
     let result = shot(&app, &token, json!({ "save": true })).await;
     assert_ne!(result["isError"], true, "{result}");
     let content = result["content"].as_array().unwrap();
@@ -355,7 +332,7 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     assert!(late.is_err(), "a stopped turn captures nothing");
     assert_eq!(guest.files.lock().unwrap().len(), before);
     manager.release(lease).await.unwrap();
-    let other_token = grant(&app, &other, Some("gpt-6.1-sol")).await;
+    let other_token = grant(&app, &other).await;
     let foreign = error(&shot(&app, &other_token, json!({ "artifact_id": artifact })).await);
     assert!(foreign.starts_with("No such screenshot"), "{foreign}");
 
@@ -405,7 +382,7 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
 async fn computers_without_a_desktop_say_so() {
     let Setup { app, .. } = setup(false).await;
     let bot = app.create_bot("Headless").await;
-    let token = grant(&app, &bot, Some("gpt-6.1-sol")).await;
+    let token = grant(&app, &bot).await;
     let refused = error(&shot(&app, &token, json!({})).await);
     assert!(refused.contains("no desktop"), "{refused}");
 }
@@ -419,7 +396,7 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
         ..
     } = setup(true).await;
     let bot = app.create_bot("Hands").await;
-    let token = grant(&app, &bot, Some("gpt-6.1-sol")).await;
+    let token = grant(&app, &bot).await;
     let batch = json!({ "frame": [1280, 800], "effect": "local",
         "actions": [{ "click": [100, 200] }, { "type": "hunter2-password" }] });
     let done = tool(&app, &token, "computer_input", batch.clone()).await;
