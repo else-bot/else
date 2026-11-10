@@ -203,7 +203,7 @@ impl Session {
                     };
                     return Err(Error::AuthRequired(Box::new(self.status())));
                 }
-                Err(error @ (Error::Connection | Error::Timeout)) => {
+                Err(error @ (Error::Connection | Error::Http(_) | Error::Timeout)) => {
                     self.close().await;
                     return Err(error);
                 }

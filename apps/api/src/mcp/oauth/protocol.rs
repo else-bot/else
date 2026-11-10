@@ -116,6 +116,7 @@ pub(super) fn authorization_endpoint(value: &str) -> Result<Url, Error> {
 
 fn client() -> Result<reqwest::Client, Error> {
     reqwest::Client::builder()
+        .user_agent(crate::mcp::USER_AGENT)
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .connect_timeout(Duration::from_secs(10))

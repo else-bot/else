@@ -195,7 +195,10 @@ async fn check(
         Err(Error::Paused) => None,
         Err(error) => Some(Check::Failed {
             message: error.to_string(),
-            permanent: !matches!(error, Error::Connection | Error::Timeout | Error::Io(_)),
+            permanent: !matches!(
+                error,
+                Error::Connection | Error::Http(_) | Error::Timeout | Error::Io(_)
+            ),
         }),
     }
 }
@@ -262,7 +265,10 @@ async fn qualify(library: &Library, mcp_id: &str, tool: &str) -> Result<(), Refu
         Err(Error::Paused) => Err(Refusal::Paused),
         Err(error) => Err(refuse(
             format!("Listing the MCP's tools failed: {error}"),
-            !matches!(error, Error::Connection | Error::Timeout | Error::Io(_)),
+            !matches!(
+                error,
+                Error::Connection | Error::Http(_) | Error::Timeout | Error::Io(_)
+            ),
         )),
     }
 }
