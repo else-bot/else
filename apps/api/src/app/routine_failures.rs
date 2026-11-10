@@ -200,6 +200,8 @@ pub struct Notice<'a> {
     pub failed_runs: i64,
     /// The next scheduled run, in the routine's time zone.
     pub next: Option<String>,
+    /// The routine is a reminder, due once.
+    pub reminder: bool,
 }
 
 /// The bot's message about a failed run; `reaction` is `Report` or `Pause`.
@@ -218,9 +220,23 @@ pub fn notice(notice: &Notice<'_>, reaction: Reaction) -> String {
             notice.message.unwrap_or("uncertain").to_owned(),
         ),
     };
-    let fix = "Ask me to look into it. Once it is fixed, turn the routine back on with its \
-               switch in this bot's settings.";
+    let (kind, fix) = if notice.reminder {
+        (
+            "reminder",
+            "Ask me to look into it and run the reminder again.",
+        )
+    } else {
+        (
+            "routine",
+            "Ask me to look into it. Once it is fixed, turn the routine back on with its switch \
+             in this bot's settings.",
+        )
+    };
     let body = match reaction {
+        Reaction::Pause(Pause::NeedsAction) if notice.reminder => format!(
+            "The reminder **{name}** failed because {what}. Retrying won't fix this: its \
+             instructions, its model, or else.bot itself needs a change first. {fix}"
+        ),
         Reaction::Pause(Pause::NeedsAction) => format!(
             "I paused the routine **{name}** because {what}. Retrying won't fix this: the \
              routine's instructions, its model, or else.bot itself needs a change first. {fix}"
@@ -237,6 +253,7 @@ pub fn notice(notice: &Notice<'_>, reaction: Reaction) -> String {
                 _ => "I couldn't retry it right away.",
             };
             let next = match (&notice.next, notice.enabled) {
+                _ if notice.reminder => "It won't run again unless you ask.".to_owned(),
                 (_, false) => {
                     "The routine is switched off, so it won't run again until you turn it back on."
                         .to_owned()
@@ -244,7 +261,7 @@ pub fn notice(notice: &Notice<'_>, reaction: Reaction) -> String {
                 (Some(next), true) => format!("I'll try again at the next scheduled run, {next}."),
                 (None, true) => "It has no further scheduled runs.".to_owned(),
             };
-            format!("The routine **{name}** failed because {what}. {retry} {next}")
+            format!("The {kind} **{name}** failed because {what}. {retry} {next}")
         }
     };
     format!("{body}\n\nError: {error}")
@@ -344,12 +361,26 @@ mod tests {
             enabled: true,
             failed_runs: 1,
             next: Some("Sun 8 Nov, 04:00".into()),
+            reminder: false,
         };
         let text = notice(&base, Reaction::Report);
         assert!(text.starts_with("The routine **Update tickets** failed because the AI provider"));
         assert!(text.contains("I retried it right away and it failed again."));
         assert!(text.contains("next scheduled run, Sun 8 Nov, 04:00."));
         assert!(text.ends_with("Error: `provider_unavailable`: the provider process exited"));
+        let once = notice(
+            &Notice {
+                reminder: true,
+                next: None,
+                ..base
+            },
+            Reaction::Report,
+        );
+        assert!(once.starts_with("The reminder **Update tickets** failed because"));
+        assert!(
+            once.contains("It won't run again unless you ask."),
+            "{once}"
+        );
         let paused = notice(
             &Notice {
                 failed_runs: 3,

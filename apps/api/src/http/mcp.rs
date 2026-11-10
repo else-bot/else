@@ -119,6 +119,7 @@ pub async fn endpoint(
                 Some(name) if super::outgoing_tools::TOOL_NAMES.contains(&name) => Tool::AskOwner,
                 Some(name)
                     if name.starts_with("routine_")
+                        || name.starts_with("reminder_")
                         || name.starts_with("webhook_")
                         || name.starts_with("social_trigger_")
                         || name.starts_with("mail_trigger_") =>
@@ -374,6 +375,7 @@ fn tool_list() -> Value {
         super::routines::update_schema(),
         super::routines::delete_schema(),
         super::routines::run_schema(),
+        super::routines::reminder_schema(),
         super::webhooks::create_schema(),
         super::webhooks::list_schema(),
         super::webhooks::update_schema(),
@@ -576,6 +578,7 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "routine_update" => super::routines::update(state, grant, args).await,
         "routine_delete" => super::routines::delete(state, grant, args).await,
         "routine_run" => super::routines::run(state, grant, args).await,
+        "reminder_create" => super::routines::create_reminder(state, grant, args).await,
         "rules_update" => super::rules::update(state, grant, args).await,
         super::visual_tools::NAME => super::visual_tools::call(state, grant, args).await,
         "webhook_create" => super::webhooks::create(state, grant, args).await,

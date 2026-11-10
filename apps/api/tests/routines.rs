@@ -3,7 +3,7 @@ mod common;
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use common::recorder::{self, GATE, GATE_EVERY_ATTEMPT, Harness, tool};
 use common::{TestApp, TestDb};
 use else_api::grants::{DEFAULT_TTL, Tool};
@@ -2083,4 +2083,104 @@ async fn the_failures_migration_keeps_a_failed_last_run_visible_and_never_review
         ["Pending"],
         "an unfinished run is reviewed when it ends"
     );
+}
+
+#[tokio::test]
+async fn a_reminder_runs_once_then_leaves_the_list() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let (setup, token) = h.owner_turn(&main).await;
+    let args = json!({ "name": "Scout check", "prompt": "Check how many DMs Scout sent.",
+                       "in_minutes": 360 });
+    let before = Utc::now();
+    let called = tool(&h.app, &token, "reminder_create", args.clone()).await;
+    assert!(!called.error, "{}", called.body);
+    let reminder = called.result["reminder"].clone();
+    let id = reminder["id"].as_str().unwrap().to_owned();
+    let run_at = at(&reminder["run_at"]);
+    let six_hours = chrono::Duration::minutes(360);
+    assert!(run_at >= before.trunc_subsecs(0) + six_hours && run_at <= Utc::now() + six_hours);
+    assert_eq!(at(&reminder["next_run_at"]), run_at);
+    assert_eq!(reminder["cron"], "once");
+    assert!(
+        reminder["active_hours"].is_null(),
+        "a reminder runs at any hour"
+    );
+
+    let again = tool(&h.app, &token, "reminder_create", args).await;
+    assert_eq!(
+        again.result["reminder"]["id"],
+        id.as_str(),
+        "a retry returns it"
+    );
+    assert_eq!(again.result["created"], false);
+    assert_eq!(at(&again.result["reminder"]["run_at"]), run_at);
+
+    let paris = chrono_tz::Europe::Paris;
+    let local = (Utc::now() + chrono::Duration::days(2)).with_timezone(&paris);
+    let nine = local.format("%Y-%m-%dT09:00").to_string();
+    let dated = tool(
+        &h.app,
+        &token,
+        "reminder_create",
+        json!({ "name": "Paris check", "prompt": "Check the launch.", "at": nine,
+                "timezone": "Europe/Paris" }),
+    )
+    .await;
+    assert!(!dated.error, "{}", dated.body);
+    let dated_at = at(&dated.result["reminder"]["run_at"]).with_timezone(&paris);
+    assert_eq!(dated_at.format("%Y-%m-%dT%H:%M").to_string(), nine);
+
+    for (bad, code) in [
+        (
+            json!({ "in_minutes": 5, "at": "2030-01-01T09:00" }),
+            "INVALID_ROUTINE",
+        ),
+        (json!({}), "INVALID_ROUTINE"),
+        (json!({ "at": "2020-01-01T09:00" }), "INVALID_ROUTINE"),
+        (json!({ "in_minutes": 0 }), "INVALID_ROUTINE"),
+    ] {
+        let mut args = json!({ "name": "Bad", "prompt": "Nothing." });
+        args.as_object_mut()
+            .unwrap()
+            .extend(bad.as_object().unwrap().clone());
+        let refused = tool(&h.app, &token, "reminder_create", args).await;
+        assert!(refused.error, "{}", refused.body);
+        assert!(refused.body.to_string().contains(code), "{}", refused.body);
+    }
+    let moved = tool(
+        &h.app,
+        &token,
+        "routine_update",
+        json!({ "routine_id": id, "cron": "0 9 * * *" }),
+    )
+    .await;
+    assert!(moved.error, "a reminder's time is fixed: {}", moved.body);
+    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+
+    assert_eq!(
+        set_enabled(&h.app, &main, &id, false).await.status,
+        StatusCode::OK
+    );
+    let resumed = set_enabled(&h.app, &main, &id, true).await;
+    assert_eq!(resumed.status, StatusCode::OK, "{}", resumed.body);
+    assert_eq!(at(&resumed.body["routine"]["next_run_at"]), run_at);
+
+    assert_eq!(fire(&h.app, run_at - chrono::Duration::seconds(1)).await, 0);
+    assert_eq!(fire(&h.app, run_at).await, 1);
+    assert_eq!(fire(&h.app, run_at + six_hours).await, 0, "it runs once");
+    let run = runs(&h.app, &id).await;
+    assert_eq!(run.len(), 1);
+    h.app
+        .wait_turn(&run[0].0.unwrap().to_string(), &["completed"])
+        .await;
+    for _ in 0..400 {
+        let listed = owner_routines(&h.app, &main).await;
+        if listed.iter().all(|r| r["id"] != id.as_str()) {
+            assert_eq!(listed.len(), 1, "the other reminder stays: {listed:?}");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the reminder stayed listed after its run completed");
 }

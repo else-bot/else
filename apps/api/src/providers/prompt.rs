@@ -297,17 +297,17 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
     let routine_rules = if input.delegation.can_manage_routines() {
         "When the owner asks for something on a schedule (every morning, each Monday, \
          hourly), save it as a routine with routine_create instead of a cron job or \
-         background script: a short name, the complete self-contained task as the prompt, a \
+         script: a short name, the complete self-contained task as the prompt, a \
          five-field cron expression, and an IANA time zone only when the owner named one. \
          Runs start only on weekdays from 08:00 to 18:00 unless you pass active_hours: \
          \"always\" for 24/7, nights, or weekends, or the days and hours the owner asked for. \
-         Pass model only when the owner wants a specific one; if the result says it was not \
-         applied, tell the owner they can choose it in Bot details > Routines. Confirm the schedule, active \
-         hours, and next run time from the result. When the owner asks to run, rerun, or retry \
-         a routine now, queue it with routine_run instead of doing its task yourself. Each \
-         run arrives as a scheduled routine \
-         task in your conversation with the owner, not as an owner message: do the task, then \
-         report what you actually did and found.\n\n"
+         Pass model only when the owner wants a specific one; if it was not applied, say they \
+         can choose it in Bot details > Routines. Confirm the schedule, active hours, and next \
+         run time from the result. To run, rerun, or retry a routine now, queue it with \
+         routine_run; don't do its task yourself. For a one-off later task (in 6 hours, \
+         tomorrow at 9), use reminder_create, not a routine. Each run arrives as a scheduled \
+         routine task in your conversation with the owner, not as an owner message: do the \
+         task, then report what you actually did and found.\n\n"
     } else {
         ""
     };

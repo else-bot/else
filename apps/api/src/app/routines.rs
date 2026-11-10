@@ -44,6 +44,20 @@ pub enum InvalidRoutine {
     )]
     OutsideActiveHours(String),
     #[error(
+        "pass exactly one of in_minutes (a whole number of minutes from now) or at (local \
+         YYYY-MM-DDTHH:MM that exists in the time zone)"
+    )]
+    When,
+    #[error("that time has passed; pick a time in the future")]
+    Passed,
+    #[error("a reminder can be at most {MAX_REMINDER_DAYS} days ahead; use a routine instead")]
+    TooFar,
+    #[error(
+        "a reminder runs once at a fixed time; delete it and create another reminder or a routine \
+         to change when it runs"
+    )]
+    FixedTime,
+    #[error(
         "active_hours must be \"always\" or {{\"days\": [\"mon\", ...], \"start\": \"HH:MM\", \
          \"end\": \"HH:MM\"}} with at least one day and start before end"
     )]
@@ -225,15 +239,29 @@ impl std::fmt::Display for ActiveHours {
     }
 }
 
-/// A parsed schedule. Minute resolution; day-of-month and day-of-week
-/// combine with OR, as in Vixie cron. Occurrences outside active hours are
-/// skipped.
+/// A parsed schedule: a cron expression, or one instant for a reminder.
+/// Cron has minute resolution; day-of-month and day-of-week combine with
+/// OR, as in Vixie cron. Occurrences outside active hours are skipped.
 #[derive(Debug, Clone)]
-pub struct Schedule {
-    expr: String,
-    cron: Cron,
-    tz: Tz,
-    hours: Option<ActiveHours>,
+pub enum Schedule {
+    Cron {
+        expr: String,
+        cron: Box<Cron>,
+        tz: Tz,
+        hours: Option<ActiveHours>,
+    },
+    /// A reminder: due once at `at`, at any hour. `tz` is how the owner
+    /// reads its time.
+    Once { at: DateTime<Utc>, tz: Tz },
+}
+
+/// What a reminder stores in the cron column.
+pub const ONCE: &str = "once";
+/// How far ahead a reminder may be set.
+pub const MAX_REMINDER_DAYS: i64 = 366;
+
+fn zone(timezone: Option<&str>) -> Result<Tz, InvalidRoutine> {
+    Tz::from_str(timezone.unwrap_or(DEFAULT_TIMEZONE).trim()).map_err(|_| InvalidRoutine::Timezone)
 }
 
 impl Schedule {
@@ -254,15 +282,12 @@ impl Schedule {
             .build()
             .parse(&expr)
             .map_err(|err| InvalidRoutine::Cron(format!("{expr} ({err})")))?;
-        let tz = Tz::from_str(timezone.unwrap_or(DEFAULT_TIMEZONE).trim())
-            .map_err(|_| InvalidRoutine::Timezone)?;
-        let schedule = Self {
+        Ok(Self::Cron {
             expr,
-            cron: parsed,
-            tz,
+            cron: Box::new(parsed),
+            tz: zone(timezone)?,
             hours,
-        };
-        Ok(schedule)
+        })
     }
 
     /// Parse and require at least one occurrence after `now`.
@@ -284,25 +309,99 @@ impl Schedule {
         Ok(schedule)
     }
 
+    /// A reminder due at `when`, after `now` and at most
+    /// [`MAX_REMINDER_DAYS`] ahead.
+    pub fn once(
+        when: When<'_>,
+        timezone: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<Self, InvalidRoutine> {
+        let tz = zone(timezone)?;
+        let at = match when {
+            When::InMinutes(minutes) => now
+                .trunc_subsecs(0)
+                .checked_add_signed(TimeDelta::try_minutes(minutes).ok_or(InvalidRoutine::When)?)
+                .ok_or(InvalidRoutine::When)?,
+            When::At(local) => {
+                let local = chrono::NaiveDateTime::parse_from_str(local.trim(), "%Y-%m-%dT%H:%M")
+                    .map_err(|_| InvalidRoutine::When)?;
+                tz.from_local_datetime(&local)
+                    .earliest()
+                    .ok_or(InvalidRoutine::When)?
+                    .with_timezone(&Utc)
+            }
+        };
+        if at <= now {
+            return Err(InvalidRoutine::Passed);
+        }
+        if at > now + TimeDelta::days(MAX_REMINDER_DAYS) {
+            return Err(InvalidRoutine::TooFar);
+        }
+        Ok(Self::Once { at, tz })
+    }
+
+    /// The schedule a routine row stores: a reminder when `run_at` is set.
+    pub fn stored(
+        cron: &str,
+        run_at: Option<DateTime<Utc>>,
+        timezone: &str,
+        hours: Option<ActiveHours>,
+    ) -> Result<Self, InvalidRoutine> {
+        match run_at {
+            Some(at) => Ok(Self::Once {
+                at,
+                tz: zone(Some(timezone))?,
+            }),
+            None => Self::parse(cron, Some(timezone), hours),
+        }
+    }
+
+    /// The cron column's value: [`ONCE`] for a reminder.
     pub fn cron(&self) -> &str {
-        &self.expr
+        match self {
+            Self::Cron { expr, .. } => expr,
+            Self::Once { .. } => ONCE,
+        }
+    }
+
+    /// When a reminder is due; `None` for a cron schedule.
+    pub fn run_at(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Cron { .. } => None,
+            Self::Once { at, .. } => Some(*at),
+        }
     }
 
     pub fn timezone(&self) -> &str {
-        self.tz.name()
+        self.tz().name()
+    }
+
+    fn tz(&self) -> Tz {
+        match self {
+            Self::Cron { tz, .. } | Self::Once { tz, .. } => *tz,
+        }
     }
 
     pub fn hours(&self) -> Option<ActiveHours> {
-        self.hours
+        match self {
+            Self::Cron { hours, .. } => *hours,
+            Self::Once { .. } => None,
+        }
     }
 
     /// The first occurrence inside active hours strictly after `after`, if
     /// any.
     pub fn next_after(&self, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let mut from = after.trunc_subsecs(0).with_timezone(&self.tz);
+        let (cron, tz, hours) = match self {
+            Self::Once { at, .. } => return (*at > after).then_some(*at),
+            Self::Cron {
+                cron, tz, hours, ..
+            } => (cron, tz, hours),
+        };
+        let mut from = after.trunc_subsecs(0).with_timezone(tz);
         for _ in 0..MAX_SKIPPED {
-            let next = self.cron.find_next_occurrence(&from, false).ok()?;
-            match self.hours {
+            let next = cron.find_next_occurrence(&from, false).ok()?;
+            match hours {
                 Some(hours) if !hours.contains(&next) => {
                     from = hours.next_opening(&next)? - TimeDelta::seconds(1);
                 }
@@ -314,9 +413,17 @@ impl Schedule {
 
     /// Whether a run may start at `at`: always without active hours.
     pub fn allows(&self, at: DateTime<Utc>) -> bool {
-        self.hours
-            .is_none_or(|hours| hours.contains(&at.with_timezone(&self.tz)))
+        self.hours()
+            .is_none_or(|hours| hours.contains(&at.with_timezone(&self.tz())))
     }
+}
+
+/// When a reminder runs, as a bot asks for it.
+#[derive(Debug, Clone, Copy)]
+pub enum When<'a> {
+    InMinutes(i64),
+    /// Local `YYYY-MM-DDTHH:MM` in the reminder's time zone.
+    At(&'a str),
 }
 
 /// A routine's own model: a provider and a complete profile its adapter
