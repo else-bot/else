@@ -28,6 +28,7 @@ struct Fake {
     fail_unpack: std::sync::atomic::AtomicBool,
     fail_close: std::sync::atomic::AtomicBool,
     fail_configure: std::sync::atomic::AtomicBool,
+    fail_desktop: std::sync::atomic::AtomicBool,
     specs: Mutex<Vec<Spec>>,
     packages: Mutex<Vec<String>>,
     reinstalled: Mutex<Vec<String>>,
@@ -214,6 +215,17 @@ impl ComputerRuntime for Fake {
                     report += &format!("{package}\n");
                 }
                 report
+            }
+            "/bin/sh"
+                if args[1] == else_api::computers::GUEST_DESKTOP
+                    && self.fail_desktop.load(std::sync::atomic::Ordering::SeqCst) =>
+            {
+                return Ok(ExecOutput {
+                    status: Some(1),
+                    stdout: String::new(),
+                    stderr: "Xvfb did not start".into(),
+                    truncated: false,
+                });
             }
             "/bin/sh" if close && self.fail_close.load(std::sync::atomic::Ordering::SeqCst) => {
                 return Ok(ExecOutput {
@@ -1245,6 +1257,62 @@ async fn desktop_computers_boot_small_and_grow_only_for_the_screen() {
         1,
         "a restart starts no desktop"
     );
+}
+
+/// A desktop whose startup fails is not admitted: the use is told to try
+/// again, the failure is recorded, and the next use starts it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_desktop_startup_is_not_reported_ready() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let dir = tempfile::tempdir().unwrap();
+    let desktop = ComputerConfig {
+        desktop: true,
+        state_dir: dir.path().to_owned(),
+        ..config(2)
+    };
+    let manager = manager(&app, &fake, desktop).await;
+    let bot: Uuid = app.create_bot("Blank").await.parse().unwrap();
+    let (_lease, name) = ready(&manager, bot, "test:screen").await;
+
+    fake.fail_desktop.store(true, SeqCst);
+    let refused = manager.acquire_desktop(bot, "test:screen").await.unwrap();
+    assert!(
+        matches!(&refused, Acquire::Queued { reason } if reason.contains("Xvfb did not start")),
+        "{refused:?}"
+    );
+    let input = manager
+        .run_input(
+            bot,
+            "test:screen",
+            "true",
+            Duration::from_secs(1),
+            &else_api::db::task_secrets::Env::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(input, Err(Acquire::Queued { .. })), "{input:?}");
+    let error: Option<String> =
+        sqlx::query_scalar("SELECT last_error FROM bot_computers WHERE bot_id = ?1")
+            .bind(bot)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert!(
+        error.is_some_and(|e| e.contains("Xvfb did not start")),
+        "the failure is recorded"
+    );
+
+    fake.fail_desktop.store(false, SeqCst);
+    let started = manager.acquire_desktop(bot, "test:screen").await.unwrap();
+    assert!(matches!(started, Acquire::Ready { .. }), "{started:?}");
+    let starts = fake
+        .calls()
+        .iter()
+        .filter(|c| **c == format!("desktop {name}"))
+        .count();
+    assert_eq!(starts, 3, "each use retries until the desktop starts");
 }
 
 /// A computer that grew is counted at its maximum until a reset of its boot
