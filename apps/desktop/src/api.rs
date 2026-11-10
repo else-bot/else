@@ -324,6 +324,11 @@ impl Bot {
     pub fn waiting(&self) -> Option<Waiting> {
         self.sidebar_status.as_ref()?.waiting()
     }
+
+    /// Muted and not waiting on the owner: never unread and never announced.
+    pub fn silenced(&self) -> bool {
+        self.muted && self.waiting().is_none()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

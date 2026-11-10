@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use crate::api::{Bot, ReadCommand, ReplyPosition};
+use crate::api::{Bot, ReadCommand, ReplyPosition, SidebarStatus};
 
 /// The owner's explicit choice from the bot menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,16 +345,24 @@ impl Inbox {
     }
 }
 
-/// The bot has nothing left to run, or waits on the owner. Replies before
-/// then are progress updates and stay silent; a turn continuing after its
-/// delegated tasks is queued, so it is not idle.
+/// The bot has nothing left to run, or its turn is parked on the owner.
+/// Replies before then are progress updates and stay silent; a turn
+/// continuing after its delegated tasks is queued, so it is not idle. A
+/// takeover request leaves its turn running, so its reply waits for idle.
 fn handed_back(bot: &Bot) -> bool {
-    bot.activity.as_ref().is_none_or(|a| a.phase == "idle") || bot.waiting().is_some()
+    bot.activity.as_ref().is_none_or(|a| a.phase == "idle")
+        || matches!(
+            bot.sidebar_status,
+            Some(
+                SidebarStatus::WaitingForAnswer { .. }
+                    | SidebarStatus::NeedsApproval { .. }
+                    | SidebarStatus::NeedsCredentials { .. }
+            )
+        )
 }
 
-/// Mute silences a bot except while it waits on the owner.
 fn unread(sync: Option<&ReadSync>, bot: &Bot) -> bool {
-    if bot.muted && bot.waiting().is_none() {
+    if bot.silenced() {
         return false;
     }
     let mark = sync.and_then(ReadSync::mark);
@@ -590,12 +598,22 @@ mod tests {
     fn a_muted_bot_waiting_on_the_owner_is_announced_until_the_request_closes() {
         let mut inbox = Inbox::default();
         inbox.observe(&[busy(bot(1, None, at(0, 0)), "working")]);
+        let takeover = || {
+            Some(SidebarStatus::NeedsTakeover {
+                preview: "Inspect the open X conversation.".into(),
+                since: None,
+            })
+        };
+        let mut streaming = busy(bot(1, Some((1, at(2, 4))), at(0, 0)), "working");
+        streaming.muted = true;
+        streaming.sidebar_status = takeover();
+        assert!(
+            !inbox.observe(std::slice::from_ref(&streaming)),
+            "a takeover request leaves the turn running; its reply is still streaming"
+        );
         let mut waiting = bot(1, Some((1, at(2, 9))), at(0, 0));
         waiting.muted = true;
-        waiting.sidebar_status = Some(crate::api::SidebarStatus::NeedsTakeover {
-            preview: "Inspect the open X conversation.".into(),
-            since: None,
-        });
+        waiting.sidebar_status = takeover();
         assert!(inbox.observe(std::slice::from_ref(&waiting)));
         assert!(inbox.is_unread(&waiting));
         assert_eq!(

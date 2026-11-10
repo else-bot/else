@@ -43,7 +43,8 @@ pub struct BotRecord {
     pub queued_count: i64,
     /// Its sidebar category, if any.
     pub category_id: Option<Uuid>,
-    /// The owner silenced it: no notifications or unread state.
+    /// The owner silenced it: no notifications or unread state while it
+    /// waits on nothing from the owner.
     pub muted: bool,
     /// When the newest owner or bot message in its owner conversation was
     /// created; `None` before the first message.

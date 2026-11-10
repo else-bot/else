@@ -368,8 +368,8 @@ impl ElseApp {
         let pending = !bot.is_active();
         let muted = bot.muted && !pending;
         let connected = self.connected();
-        let waiting = bot.waiting();
-        let waited = waiting
+        let waited = bot
+            .waiting()
             .and_then(|w| w.since)
             .filter(|_| self.default_bot_id != Some(id))
             .map(|since| crate::sidebar::status::waited(since, chrono::Utc::now()));
@@ -483,7 +483,7 @@ impl ElseApp {
             row = row.opacity(0.5);
         } else {
             row = row
-                .when(muted && waiting.is_none() && !selected, |row| {
+                .when(bot.silenced() && !pending && !selected, |row| {
                     row.opacity(0.5)
                 })
                 .cursor_pointer()
