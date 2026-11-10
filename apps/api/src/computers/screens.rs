@@ -368,6 +368,90 @@ impl ComputerManager {
 /// through directory descriptors opened without following links, and the
 /// file lands by rename, replacing whatever held its name.
 pub fn share(project: &std::path::Path, name: &str, png: &[u8]) -> std::io::Result<()> {
+    write_in_project(project, "screens", name, png)
+}
+
+/// Keep the `keep` newest regular files in `folder` of a bot's project and
+/// remove the rest. Every step works on descriptors opened without
+/// following links, so a guest swapping the folder cannot redirect removal.
+pub fn prune_in_project(
+    project: &std::path::Path,
+    folder: &str,
+    keep: usize,
+) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::fs::File;
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let root = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(project)?;
+    let name = CString::new(folder).map_err(std::io::Error::other)?;
+    // SAFETY: `root` is an open directory and `name` a valid C string.
+    let fd = unsafe {
+        libc::openat(
+            root.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` was just opened by this function and is owned here.
+    let dir = unsafe { File::from_raw_fd(fd) };
+    let mut files = Vec::new();
+    // SAFETY: a duplicate of `dir` goes to fdopendir, which owns and closes it.
+    let stream = unsafe { libc::fdopendir(libc::dup(dir.as_raw_fd())) };
+    if stream.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    loop {
+        // SAFETY: `stream` is an open directory stream; the entry is read
+        // before the next readdir call.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: d_name is a NUL-terminated name inside the entry.
+        let entry = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_owned();
+        if entry.as_bytes().starts_with(b".") {
+            // `.`, `..`, or a write in progress whose rename lands it later.
+            continue;
+        }
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: `dir` is open, `entry` a valid C string, `stat` writable.
+        let rc = unsafe {
+            libc::fstatat(
+                dir.as_raw_fd(),
+                entry.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFREG {
+            files.push(((stat.st_mtime, stat.st_mtime_nsec), entry));
+        }
+    }
+    // SAFETY: closes the stream opened above, and its duplicate descriptor.
+    unsafe { libc::closedir(stream) };
+    files.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    for (_, entry) in files.into_iter().skip(keep) {
+        // SAFETY: removes one non-directory name inside the open `dir`.
+        unsafe { libc::unlinkat(dir.as_raw_fd(), entry.as_ptr(), 0) };
+    }
+    Ok(())
+}
+
+/// Write `data` as `folder/name` in a bot's project, creating `folder`,
+/// refusing links in either step, and replacing the file atomically.
+pub fn write_in_project(
+    project: &std::path::Path,
+    folder: &str,
+    name: &str,
+    data: &[u8],
+) -> std::io::Result<()> {
     use std::ffi::CString;
     use std::fs::File;
     use std::io::Write as _;
@@ -385,7 +469,7 @@ pub fn share(project: &std::path::Path, name: &str, png: &[u8]) -> std::io::Resu
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
         .open(project)?;
-    let screens = cstr("screens")?;
+    let screens = cstr(folder)?;
     // SAFETY: `root` is an open directory and `screens` a valid C string.
     if unsafe { libc::mkdirat(root.as_raw_fd(), screens.as_ptr(), 0o755) } < 0 {
         let err = std::io::Error::last_os_error();
@@ -417,7 +501,7 @@ pub fn share(project: &std::path::Path, name: &str, png: &[u8]) -> std::io::Resu
     // SAFETY: `fd` was just created by this function and is owned here.
     let mut out = unsafe { File::from_raw_fd(fd) };
     let written = out
-        .write_all(png)
+        .write_all(data)
         .and_then(|()| out.sync_all())
         // SAFETY: both names are valid C strings relative to the open `dir`.
         .and_then(|()| {
@@ -456,6 +540,31 @@ mod tests {
         std::os::unix::fs::symlink(other.path(), planted.path().join("screens")).unwrap();
         assert!(super::share(planted.path(), "a.png", b"png").is_err());
         assert!(!other.path().join("a.png").exists());
+    }
+
+    #[test]
+    fn pruning_keeps_the_newest_files_and_never_follows_a_link() {
+        let project = tempfile::tempdir().unwrap();
+        for name in ["old.json", "mid.json", "new.json"] {
+            super::write_in_project(project.path(), "results", name, b"{}").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep.txt"), "keep").unwrap();
+        std::os::unix::fs::symlink(outside.path(), project.path().join("results/link")).unwrap();
+        super::prune_in_project(project.path(), "results", 2).unwrap();
+        let mut left: Vec<String> = std::fs::read_dir(project.path().join("results"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["link", "mid.json", "new.json"]);
+        assert!(outside.path().join("keep.txt").exists());
+
+        let planted = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), planted.path().join("results")).unwrap();
+        assert!(super::prune_in_project(planted.path(), "results", 0).is_err());
+        assert!(outside.path().join("keep.txt").exists());
     }
 
     #[cfg(target_os = "linux")]

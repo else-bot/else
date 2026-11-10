@@ -18,7 +18,9 @@ for line in sys.stdin:
         r = {'tools':[{'name':'echo','description':'Echo input','inputSchema':{'type':'object'}}]}
     elif m['method'] == 'tools/call':
         calls += 1
-        r = {'parked':True} if m['params']['name'] == 'forge' else {'content':[{'type':'text','text':json.dumps({'calls':calls,'arguments':m['params']['arguments']})}]}
+        if m['params']['name'] == 'forge': r = {'parked':True}
+        elif m['params']['name'] == 'rows': r = {'content':[{'type':'text','text':'Found 2000 rows'}],'structuredContent':{'rows':[{'id':i,'title':'row'} for i in range(2000)]}}
+        else: r = {'content':[{'type':'text','text':json.dumps({'calls':calls,'arguments':m['params']['arguments']})}]}
     else: r = {}
     print(json.dumps({'jsonrpc':'2.0','id':m['id'],'result':r}), flush=True)
 "#;
@@ -457,4 +459,101 @@ async fn header_credentials_come_from_task_secrets_and_connect_without_oauth() {
         "the next call sends the rotated key and redacts it"
     );
     server.abort();
+}
+
+/// The synthetic provider, with a project directory under `root`.
+struct WithProject {
+    inner: else_api::providers::synthetic::Synthetic,
+    root: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl else_api::app::providers::Provider for WithProject {
+    fn id(&self) -> &'static str {
+        self.inner.id()
+    }
+    fn label(&self) -> &'static str {
+        self.inner.label()
+    }
+    fn availability(&self) -> else_api::app::providers::Availability {
+        self.inner.availability()
+    }
+    fn uses_profile(&self) -> bool {
+        self.inner.uses_profile()
+    }
+    fn validate_profile(&self, profile: &else_api::app::providers::Profile) -> Result<(), String> {
+        self.inner.validate_profile(profile)
+    }
+    fn project_dir(&self, bot: Uuid) -> Option<std::path::PathBuf> {
+        Some(self.root.join(bot.to_string()))
+    }
+    async fn run(
+        &self,
+        input: else_api::app::providers::TurnInput,
+        sink: &dyn else_api::app::providers::TurnSink,
+        stop: else_api::app::providers::Stop,
+    ) -> else_api::app::providers::TurnOutcome {
+        self.inner.run(input, sink, stop).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cut_result_is_saved_whole_in_the_bots_project() {
+    let root = tempfile::tempdir().unwrap();
+    let db = common::TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let registry = else_api::providers::Registry::new(vec![std::sync::Arc::new(WithProject {
+        inner: else_api::providers::synthetic::Synthetic::new(std::time::Duration::from_millis(5)),
+        root: root.path().to_owned(),
+    })]);
+    let app = TestApp::with_registry(std::sync::Arc::new(db), 4, registry);
+    let bot = app.create_bot("Scout").await;
+    std::fs::create_dir_all(root.path().join(&bot)).unwrap();
+    let (_, token) = grant(&app, &bot, vec![Tool::Mcp, Tool::ManageMcp]).await;
+    result(&tool(&app, &token, "mcp_install", installation()).await);
+    let long = "row ".repeat(8_000);
+    let called = result(&tool(&app, &token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{"text":long}},"effect":"local"})).await);
+    assert!(called.to_string().len() < 12_000, "the preview stays small");
+    let path = called["whole_result"].as_str().expect("whole result saved");
+    assert!(path.starts_with("mcp-results/t3-code-"), "{path}");
+    assert!(called["next"].as_str().unwrap().contains(path));
+    assert!(path.ends_with(".json"), "the upstream text is JSON: {path}");
+    let echoed: Value =
+        serde_json::from_str(&std::fs::read_to_string(root.path().join(&bot).join(path)).unwrap())
+            .unwrap();
+    assert_eq!(
+        echoed["arguments"]["text"], long,
+        "the saved copy is the whole upstream text"
+    );
+
+    let rows = result(&tool(&app, &token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"rows","arguments":{}},"effect":"local"})).await);
+    let path = rows["whole_result"].as_str().unwrap();
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(root.path().join(&bot).join(path)).unwrap())
+            .unwrap();
+    assert_eq!(
+        saved["result"]["structuredContent"]["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2000,
+        "structured data the text does not repeat is saved with it"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_project_a_result_keeps_the_larger_budget() {
+    let app = TestApp::installed().await;
+    let bot = app.create_bot("Scout").await;
+    let (_, token) = grant(&app, &bot, vec![Tool::Mcp, Tool::ManageMcp]).await;
+    result(&tool(&app, &token, "mcp_install", installation()).await);
+    let long = "row ".repeat(3_500);
+    let called = result(&tool(&app, &token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{"text":long}},"effect":"local"})).await);
+    assert!(called.get("whole_result").is_none());
+    let echoed: Value =
+        serde_json::from_str(called["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        echoed["arguments"]["text"], long,
+        "a 14 KB result still arrives whole"
+    );
 }
