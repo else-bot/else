@@ -56,7 +56,8 @@ pub struct Config {
     /// Expose the deterministic synthetic provider (tests and demos).
     pub synthetic_provider: bool,
     /// Provider turns running at once across all bots. Background work
-    /// uses at most one fewer, so the owner's messages never wait on it.
+    /// uses at most one fewer, so the owner's messages never wait on it
+    /// (except at 1, where everything shares the one slot).
     pub max_active_turns: usize,
     /// Explicit Codex CLI path; otherwise `codex` on `PATH`.
     pub codex_bin: Option<PathBuf>,

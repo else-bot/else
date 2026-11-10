@@ -1498,11 +1498,13 @@ async fn an_owner_message_starts_while_routines_fill_the_other_slots() {
         )
         .await;
         h.app.wait_turn(&setup.to_string(), &["completed"]).await;
-        sqlx::query("UPDATE routines SET next_due_at = '2030-01-01T00:00:00.000+00:00' WHERE id = ?1")
-            .bind(routine["id"].as_str().unwrap().parse::<Uuid>().unwrap())
-            .execute(&h.app.db.pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE routines SET next_due_at = '2030-01-01T00:00:00.000+00:00' WHERE id = ?1",
+        )
+        .bind(routine["id"].as_str().unwrap().parse::<Uuid>().unwrap())
+        .execute(&h.app.db.pool)
+        .await
+        .unwrap();
     }
     assert_eq!(fire(&h.app, due).await, 2);
     let first = loop {

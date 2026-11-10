@@ -32,7 +32,8 @@ pub struct Scheduler {
     grants: Arc<Grants>,
     slots: Arc<Semaphore>,
     /// Background work (routines, connector events, summaries) also takes
-    /// one of these, so a slot stays free for the owner.
+    /// one of these, so a slot stays free for the owner when the cap is
+    /// above 1.
     background: Arc<Semaphore>,
     summaries: AtomicUsize,
     gate: Arc<crate::maintenance::Gate>,

@@ -670,7 +670,8 @@ pub struct Claimed {
 /// turn in `busy` still has a task finishing its previous attempt, whose
 /// cleanup would end a new attempt's grants; it and the rest of its bot's
 /// queue wait for that task to wake the scheduler again. Without
-/// `background`, a bot whose next turn is background work is skipped.
+/// `background`, only owner work is claimed: it goes ahead of its bot's
+/// background work in other conversations, never earlier turns in its own.
 pub async fn claim_next(
     pool: &SqlitePool,
     busy: &[Uuid],
@@ -690,9 +691,15 @@ pub async fn claim_next(
               AND NOT EXISTS (SELECT 1 FROM turns a
                               WHERE a.bot_id = t.bot_id AND a.status IN {ACTIVE_STATUSES})
               AND {TASK_OR_NO_WAITING_OWNER}
+              AND (?2 OR (NOT {BACKGROUND}
+                   AND NOT EXISTS (SELECT 1 FROM turns q
+                                   WHERE q.conversation_id = t.conversation_id
+                                     AND q.status = 'queued' AND q.turn_no < t.turn_no)
+                   AND NOT EXISTS (SELECT 1 FROM turns q
+                                   WHERE q.bot_id = t.bot_id
+                                     AND lower(hex(q.id)) IN (SELECT replace(value, '-', '') FROM json_each(?1)))))
          ) oldest WHERE queue_rank = 1
            AND NOT (lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?1)))
-           AND (?2 OR NOT background)
          ORDER BY created_at, id LIMIT 8"
     )))
     .bind(sqlx::types::Json(busy))
