@@ -1,10 +1,9 @@
 use super::layout::{CategoryDrag, SidebarEdge};
 use super::mentions::MentionAction;
-use super::reply::{Author, MessageReference};
 use super::{
-    APP_CONTEXT, COMPOSER_CONTEXT, Connection, DeleteBot, ElseApp, FocusComposer, FocusSidebar,
-    LoadOlder, MoveBot, NewBot, NewCategory, SIDEBAR_CONTEXT, SelectNext, SelectPrev, StopWork,
-    TakeOverComputer, ToggleSettings,
+    APP_CONTEXT, COMPOSER_CONTEXT, CommentSelection, Connection, DeleteBot, ElseApp, FocusComposer,
+    FocusSidebar, LoadOlder, MoveBot, NewBot, NewCategory, QuoteSelection, SIDEBAR_CONTEXT,
+    SelectNext, SelectPrev, StopWork, TakeOverComputer, ToggleSettings,
 };
 use crate::api::Bot;
 use crate::avatar::bot_avatar;
@@ -687,8 +686,12 @@ impl ElseApp {
             .unwrap_or_default();
         let preview_files = files.clone();
         let bot_id = bot.id;
+        let commented = self
+            .drafts
+            .get(&bot.id)
+            .is_some_and(|d| d.quotes.iter().any(|q| !q.comment.trim().is_empty()));
         let can_send = self.connection == Connection::Connected
-            && !self.composer.read(cx).value().trim().is_empty()
+            && (commented || !self.composer.read(cx).value().trim().is_empty())
             && self.composer.read(cx).tokens().iter().all(|span| {
                 crate::attachments::file_id(span.token().id())
                     .and_then(|id| files.get(&id))
@@ -743,12 +746,8 @@ impl ElseApp {
             .border_1()
             .border_color(theme.border)
             .bg(theme.popover);
-        if let Some(reference) = self.drafts.get(&bot.id).and_then(|d| d.reply_to.as_ref()) {
-            frame = frame.child(
-                div()
-                    .pt_1()
-                    .child(self.render_reply_strip(bot, reference, cx)),
-            );
+        if let Some(quotes) = self.render_quote_stack(bot.id, &bot.name, cx) {
+            frame = frame.child(quotes);
         }
         frame = frame
             .child(
@@ -839,70 +838,6 @@ impl ElseApp {
             .child(self.render_header(bot, cx))
             .child(transcript)
             .child(footer)
-    }
-
-    fn render_reply_strip(
-        &self,
-        bot: &Bot,
-        reference: &MessageReference,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-        let bot_id = bot.id;
-        let author = match reference.author {
-            Author::Owner => "yourself".to_owned(),
-            Author::Bot => bot.name.clone(),
-        };
-        let preview = reference
-            .text
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        h_flex()
-            .id(SharedString::from(format!("reply-{}", reference.item)))
-            .min_w_0()
-            .gap_2()
-            .items_center()
-            .pl_3()
-            .pr_1()
-            .py_1()
-            .rounded(theme.radius)
-            .border_l_2()
-            .border_color(theme.primary)
-            .bg(theme.muted)
-            .text_sm()
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(relative(0.5))
-                    .min_w_0()
-                    .truncate()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(format!("Replying to {author}")),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(theme.muted_foreground)
-                    .child(preview),
-            )
-            .child(
-                Button::new("cancel-reply")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .flex_none()
-                    .icon(IconName::Close)
-                    .xsmall()
-                    .ghost()
-                    .accessibility_label("Cancel reply")
-                    .on_click(
-                        cx.listener(move |app, _, window, cx| {
-                            app.dismiss_reply(bot_id, window, cx)
-                        }),
-                    ),
-            )
     }
 
     fn render_main(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1066,12 +1001,31 @@ impl Render for ElseApp {
             .on_action(
                 cx.listener(|app, _: &ToggleSettings, window, cx| app.toggle_settings(window, cx)),
             )
+            .on_action(cx.listener(|app, _: &QuoteSelection, window, cx| {
+                app.quote_selection(false, window, cx)
+            }))
+            .on_action(cx.listener(|app, _: &CommentSelection, window, cx| {
+                app.quote_selection(true, window, cx)
+            }))
+            .capture_any_mouse_down(cx.listener(|app, event: &MouseDownEvent, _, _| {
+                if event.button == MouseButton::Left {
+                    app.quote_press = Some(event.position);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|app, event: &MouseUpEvent, window, cx| {
+                    app.offer_quote(event.position, window, cx)
+                }),
+            )
             .size_full()
             .text_color(theme.foreground)
             .children((!crowded).then(|| self.render_sidebar(window, cx)))
             .child(self.render_main(window, cx))
             .children(settings.map(|bot| self.render_settings(&bot, width, cx)))
             .children(self.image_viewer.clone())
+            .children(self.render_quote_prompt(window, cx))
+            .children(self.render_quote_editor(cx))
             .into_any_element()
     }
 }

@@ -19,6 +19,7 @@ mod mentions;
 mod message_menu;
 mod message_row;
 mod question_card;
+mod quotes;
 mod reading;
 mod reply;
 mod row_text;
@@ -68,6 +69,8 @@ actions!(
         MoveBot,
         ToggleSettings,
         TakeOverComputer,
+        QuoteSelection,
+        CommentSelection,
         Quit,
         CloseWindow,
         Hide,
@@ -112,6 +115,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(primary!("shift-m"), MoveBot, Some(APP_CONTEXT)),
         KeyBinding::new(primary!("shift-b"), ToggleSettings, Some(APP_CONTEXT)),
         KeyBinding::new(primary!("shift-t"), TakeOverComputer, Some(APP_CONTEXT)),
+        KeyBinding::new(primary!("shift-e"), QuoteSelection, Some(APP_CONTEXT)),
+        KeyBinding::new(primary!("shift-c"), CommentSelection, Some(APP_CONTEXT)),
         KeyBinding::new(
             primary!(","),
             crate::connection::OpenAppSettings,
@@ -271,6 +276,10 @@ pub struct ElseApp {
     clipboard_read: Option<Task<()>>,
     mentions: mentions::MentionMenu,
     drafts: HashMap<Uuid, Draft>,
+    quote_prompt: Option<quotes::QuotePrompt>,
+    quote_press: Option<Point<Pixels>>,
+    quote_editor: Option<quotes::QuoteEditor>,
+    expanded_quotes: HashSet<Uuid>,
     pending: HashMap<Uuid, Vec<PendingSend>>,
     stopping: HashSet<Uuid>,
     inbox: crate::inbox::Inbox,
@@ -365,6 +374,10 @@ impl ElseApp {
             clipboard_read: None,
             mentions: Default::default(),
             drafts: HashMap::new(),
+            quote_prompt: None,
+            quote_press: None,
+            quote_editor: None,
+            expanded_quotes: HashSet::new(),
             pending: HashMap::new(),
             stopping: HashSet::new(),
             inbox: Default::default(),
@@ -671,6 +684,7 @@ impl ElseApp {
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.drafts.remove(&bot);
+        self.paint_quotes(cx);
     }
 
     fn enqueue(

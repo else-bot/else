@@ -479,8 +479,7 @@ impl ElseApp {
             .rev()
             .filter(|item| before.is_none_or(|seq| item.seq < seq))
             .find(|item| {
-                Author::of(&item.kind) == Some(author)
-                    && item.text.trim_end().lines().eq(original.lines())
+                Author::of(&item.kind) == Some(author) && super::reply::quotes(&item.text, original)
             })
             .map(|item| item.id);
         if let Some(target) = target
@@ -868,6 +867,9 @@ impl ElseApp {
             }
         }
         view.rows = rows;
+        if created {
+            super::quotes::paint_view(view, &self.drafts, cx);
+        }
         let ticking = tasks.values().any(|reply| reply.state.ticking())
             || view
                 .conversation
