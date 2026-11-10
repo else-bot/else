@@ -223,6 +223,14 @@ def stream(turn, latest, packet, stopped):
                 'Do: start a T3 Code thread in `else` with exactly `fix issue {ISSUE_ID}`\n'
                 'Never: add words, a title, or context to that message.'),
         }
+        if latest == '[ui:reminder]':
+            for name, minutes in (('Scout check', 360), ('Launch follow-up', 1500)):
+                outgoing_tool('use_tool', {'name': 'reminder_create', 'arguments': {
+                    'name': name, 'prompt': name + ': report what changed.', 'in_minutes': minutes}})
+        if latest == '[ui:routine]':
+            outgoing_tool('use_tool', {'name': 'routine_create', 'arguments': {
+                'name': 'Morning digest', 'prompt': 'Summarize overnight activity.',
+                'cron': '0 9 * * 1-5'}})
         rule = next((marker for marker in rules if packet.rstrip().endswith(marker)), None)
         if rule:
             words, content = rules[rule]
