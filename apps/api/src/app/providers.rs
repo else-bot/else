@@ -362,6 +362,16 @@ impl DelegationContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryContext {
     pub revision: i64,
+    /// The whole view block, for a session that holds none of it.
+    pub text: String,
+    /// The view's lines, oldest first; empty when the saved view is damaged.
+    pub lines: Vec<MemoryLine>,
+}
+
+/// One rendered view line and the end of the entry range it covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryLine {
+    pub end: i64,
     pub text: String,
 }
 

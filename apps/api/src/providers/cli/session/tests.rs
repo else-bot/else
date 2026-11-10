@@ -38,6 +38,7 @@ pub(crate) fn input() -> TurnInput {
         memory: Some(MemoryContext {
             revision: 5,
             text: "[saved memory] likes tea".into(),
+            lines: Vec::new(),
         }),
         attempt: 1,
         delegation: Default::default(),
@@ -225,6 +226,66 @@ async fn a_warm_session_gets_only_what_it_lacks() {
     assert!(
         changed.packet.contains("likes tea"),
         "a new memory revision"
+    );
+}
+
+#[tokio::test]
+async fn a_warm_session_gets_only_memory_lines_past_its_receipt() {
+    use crate::app::providers::MemoryLine;
+    let view = |revision, lines: &[(i64, &str)]| MemoryContext {
+        revision,
+        text: format!("[full view {revision}]"),
+        lines: lines
+            .iter()
+            .map(|(end, text)| MemoryLine {
+                end: *end,
+                text: format!("{text}\n"),
+            })
+            .collect(),
+    };
+    let mut input = input();
+    input.memory = Some(view(5, &[(4, "0+4|likes tea"), (5, "4+1|moved to Lyon")]));
+    let sink = Log::default();
+    let mut fresh = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n1".into()));
+    assert!(fresh.packet.contains("[full view 5]"));
+    fresh.accept(&sink, &json!({}), "t").await.unwrap();
+    let session = sink.sessions.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(session.context.get(prompt::MEMORY_RECEIPT).unwrap(), "5");
+
+    input.turn_no = 4;
+    input.memory = Some(view(
+        6,
+        &[
+            (4, "0+4|likes tea"),
+            (5, "4+1|moved to Lyon"),
+            (6, "5+1|prefers trains"),
+        ],
+    ));
+    let mut warm = PreparedTurn::new(&input, "fp".into(), Opened::Resumed(&session));
+    assert!(!warm.packet.contains("[full view"), "{}", warm.packet);
+    assert!(warm.packet.contains("5+1|prefers trains"));
+    assert!(!warm.packet.contains("likes tea") && !warm.packet.contains("moved to Lyon"));
+    warm.accept(&sink, &json!({}), "t").await.unwrap();
+    let session = sink.sessions.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(session.memory_revision, Some(6));
+    assert_eq!(session.context.get(prompt::MEMORY_RECEIPT).unwrap(), "6");
+
+    input.memory = Some(view(
+        7,
+        &[(6, "0+6|likes tea, lives in Lyon, prefers trains")],
+    ));
+    let merged = PreparedTurn::new(&input, "fp".into(), Opened::Resumed(&session));
+    assert!(
+        !merged.packet.contains("[else.bot memory]") && !merged.packet.contains("[full view"),
+        "a summary over held entries adds nothing: {}",
+        merged.packet
+    );
+
+    input.memory = Some(view(8, &[(2, "0+2|likes tea")]));
+    let rebuilt = PreparedTurn::new(&input, "fp".into(), Opened::Resumed(&session));
+    assert!(
+        rebuilt.packet.contains("[full view 8]"),
+        "a shorter view is sent whole"
     );
 }
 

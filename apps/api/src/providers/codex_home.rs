@@ -62,6 +62,13 @@ pub const DISABLED_FEATURES: &[&str] = &[
     "workspace_dependencies",
 ];
 
+/// Input tokens at which Codex compacts a thread. Its default sits near the
+/// 475k window, so long bot threads reread 200k to 450k tokens on every
+/// model request; replaying production rollouts at this limit cut input by
+/// about a fifth with one compaction per 14 threads. else.bot resends its
+/// memory, skills, and context blocks after a compaction.
+pub const AUTO_COMPACT_TOKENS: u32 = 200_000;
+
 /// The sandbox mode for a session: full host access with host tools,
 /// otherwise read-only.
 pub fn sandbox_mode(host_tools: bool) -> &'static str {
@@ -82,6 +89,7 @@ pub fn config_toml(tool_url: Option<&str>, host_tools: bool) -> String {
          web_search = \"disabled\"\n\
          project_doc_max_bytes = 0\n\
          check_for_update_on_startup = false\n\
+         model_auto_compact_token_limit = {AUTO_COMPACT_TOKENS}\n\
          \n\
          [agents]\n\
          enabled = false\n\
@@ -263,6 +271,10 @@ mod tests {
             assert!(text.contains(flag), "{flag}");
         }
         assert!(text.contains("web_search = \"disabled\""));
+        assert!(
+            text.contains("\nmodel_auto_compact_token_limit = 200000\n"),
+            "long threads compact well before the context window"
+        );
     }
 
     #[test]

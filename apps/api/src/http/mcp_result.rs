@@ -6,13 +6,18 @@ use serde_json::{Value, json};
 
 use super::mcp::slice;
 
-/// Bytes of one `mcp_request` result, before the MCP envelope.
-pub const RESULT_BUDGET: usize = 20_000;
+/// Bytes of one `mcp_request` result, before the MCP envelope. A cut
+/// result's whole copy is saved in the bot's project, so the preview stays
+/// small: bots reread every result on each later model request.
+pub const RESULT_BUDGET: usize = 10_000;
+/// Bytes of a result whose whole copy could not be saved.
+pub const UNSAVED_BUDGET: usize = 20_000;
 /// Characters of a tool description in the index.
 const INDEX_DESCRIPTION: usize = 160;
 
-/// Bytes of tool entries in one index page.
-const INDEX_BUDGET: usize = 16_000;
+/// Bytes of tool entries in one index page; below [`RESULT_BUDGET`], which
+/// also bounds the page.
+const INDEX_BUDGET: usize = 9_000;
 /// Bytes of named tool schemas in one response; one schema alone may use
 /// up to [`SCHEMA_CAP`].
 const SCHEMA_CAP: usize = 64 * 1024;
@@ -306,7 +311,7 @@ enum Cut {
     List(String),
 }
 
-fn drop_structured_copy(value: &mut Value) -> bool {
+pub fn drop_structured_copy(value: &mut Value) -> bool {
     let Some(result) = value.get_mut("result").and_then(Value::as_object_mut) else {
         return false;
     };
@@ -412,7 +417,7 @@ mod tests {
 
     #[test]
     fn a_structured_copy_goes_only_when_the_text_carries_the_same_json() {
-        let rows: Vec<Value> = (0..500)
+        let rows: Vec<Value> = (0..250)
             .map(|i| json!({ "id": i, "title": "row" }))
             .collect();
         let text = serde_json::to_string(&json!({ "rows": rows })).unwrap();

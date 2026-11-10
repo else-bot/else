@@ -326,9 +326,23 @@ async fn work_in_another_conversation_refreshes_a_warm_session() {
     assert!(after.text.contains("older than 90 days"), "{}", after.text);
     let given = else_api::providers::prompt::memory_for(Some(&after), Some(&warm));
     assert_eq!(
-        given,
+        given.as_ref(),
         Some(&after),
-        "the warm session gets the new revision"
+        "a warm session without a line receipt gets the whole new revision"
+    );
+
+    let mut held = warm.clone();
+    held.context.insert(
+        else_api::providers::prompt::MEMORY_RECEIPT.into(),
+        before.lines.last().unwrap().end.to_string(),
+    );
+    let delta = else_api::providers::prompt::memory_for(Some(&after), Some(&held)).unwrap();
+    assert_eq!(delta.revision, after.revision);
+    assert!(delta.text.contains("older than 90 days"), "{}", delta.text);
+    assert!(
+        !delta.text.contains("Keep the repositories tidy."),
+        "a line the session holds is not sent again: {}",
+        delta.text
     );
 }
 

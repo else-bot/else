@@ -80,7 +80,7 @@ pub fn schemas() -> Vec<Value> {
         json!({"name":"mcp_request","description":"Call an installed shared MCP; read its skill with mcp_list first. tools/list gives \
             names and short descriptions; params {\"names\":[...]} returns the schemas you need. \
             tools/call takes {name,arguments} and effect; destructive and external calls may \
-            park. Results over 20 KB are cut, marked. Never repeat a mutation after a timeout. \
+            park. Results over 10 KB are cut, the whole one saved as a file. Never repeat a mutation after a timeout. \
             Use mcp_wait for jobs that keep running.".to_owned(),"inputSchema":{"type":"object","properties":{"id":id,"method":{"type":"string","enum":["tools/list","tools/call","resources/list","resources/templates/list","resources/read","prompts/list","prompts/get"]},"params":{"type":"object"},"effect":{"type":"string","enum":["local","destructive","external"]},"purpose":{"type":"string","maxLength":300},"context":{"type":"string","maxLength":4000}},"required":["id","method","params"],"additionalProperties":false},"annotations":{"readOnlyHint":false}}),
     ]
 }
@@ -276,10 +276,32 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                 }
             }
             match list_or_request(state, &request.id, request.method, request.params).await {
-                Ok((result, true)) => Ok(super::mcp_result::fit(
-                    json!({"mcp_id": request.id, "result": result}),
-                    super::mcp_result::RESULT_BUDGET,
-                )),
+                Ok((result, true)) => {
+                    let mut value = json!({"mcp_id": request.id, "result": result});
+                    super::mcp_result::drop_structured_copy(&mut value);
+                    let cut = value.to_string().len() > super::mcp_result::RESULT_BUDGET;
+                    let saved = if cut {
+                        save_whole(state, grant, &request.id, &value).await
+                    } else {
+                        None
+                    };
+                    // Without a saved copy the preview is all the bot gets.
+                    let budget = if saved.is_some() {
+                        super::mcp_result::RESULT_BUDGET
+                    } else {
+                        super::mcp_result::UNSAVED_BUDGET
+                    };
+                    let mut fitted = super::mcp_result::fit(value, budget);
+                    if let Some(path) = saved {
+                        fitted["whole_result"] = json!(path);
+                        fitted["next"] = json!(format!(
+                            "This is a cut preview. The whole upstream result is saved as {path} \
+                             in your project (~/work/{path} in your computer): query it with jq, \
+                             grep or computer_read_file instead of repeating the request."
+                        ));
+                    }
+                    Ok(fitted)
+                }
                 Ok((result, false)) => Ok(json!({"mcp_id": request.id, "result": result})),
                 Err(Error::AuthRequired(connection)) => {
                     return auth_required(
@@ -309,6 +331,80 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
         ),
     }
 }
+
+/// Bytes of a whole result saved for a bot to query; larger ones keep only
+/// the preview.
+const SAVED_RESULT_CAP: usize = 2 << 20;
+/// Saved results kept per bot; older ones are removed as new ones land.
+const SAVED_RESULTS: usize = 50;
+
+/// Save a result too large for one response in the bot's project: the
+/// upstream text when the result is only text blocks, else the result's
+/// JSON. Each save gets its own name, so parallel calls never replace or
+/// prune a file another call just named. Returns its project-relative path,
+/// or None when it cannot be saved.
+async fn save_whole(
+    state: &AppState,
+    grant: &Grant,
+    id: &PackageId,
+    whole: &Value,
+) -> Option<String> {
+    let only_content = whole["result"].as_object().is_some_and(|r| {
+        r.keys()
+            .all(|k| k == "content" || k == "structuredContent_omitted")
+    });
+    let blocks = whole["result"]["content"]
+        .as_array()
+        .filter(|_| only_content);
+    let text = blocks
+        .filter(|b| !b.is_empty() && b.iter().all(|b| b["type"] == "text"))
+        .map(|b| {
+            b.iter()
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+    let (body, extension) = match text {
+        Some(text) if serde_json::from_str::<Value>(&text).is_ok() => (text, "json"),
+        Some(text) => (text, "txt"),
+        None => (whole.to_string(), "json"),
+    };
+    if body.len() > SAVED_RESULT_CAP {
+        return None;
+    }
+    let project = state
+        .scheduler
+        .registry()
+        .all()
+        .iter()
+        .find_map(|provider| provider.project_dir(grant.bot_id))?;
+    let name = format!(
+        "{}-{}.{extension}",
+        String::from(id.clone()),
+        Uuid::new_v4().simple()
+    );
+    let path = format!("{RESULTS_DIR}/{name}");
+    let written = tokio::task::spawn_blocking(move || {
+        crate::computers::screens::write_in_project(&project, RESULTS_DIR, &name, body.as_bytes())?;
+        if let Err(error) =
+            crate::computers::screens::prune_in_project(&project, RESULTS_DIR, SAVED_RESULTS)
+        {
+            tracing::warn!(%error, "pruning saved MCP results failed");
+        }
+        Ok::<_, std::io::Error>(())
+    })
+    .await;
+    match written {
+        Ok(Ok(())) => Some(path),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "saving a whole MCP result failed");
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+const RESULTS_DIR: &str = "mcp-results";
 
 enum Install {
     Done(Result<Value, Error>),

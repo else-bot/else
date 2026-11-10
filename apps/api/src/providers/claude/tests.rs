@@ -463,6 +463,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
             revision: 7,
             text: "[else.bot memory] Owner correction: rebase branches, never merge them.\n\n"
                 .into(),
+            lines: Vec::new(),
         }),
         attempt: 1,
         delegation: Default::default(),

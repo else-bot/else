@@ -761,6 +761,7 @@ async fn a_warm_thread_receives_only_changed_memory_and_default_skills() {
             revision: 7,
             text: "[else.bot memory] Owner correction: rebase branches, never merge them.\n\n"
                 .into(),
+            lines: Vec::new(),
         }),
         bot_id: Uuid::from_u128(7),
         ..input(Vec::new())

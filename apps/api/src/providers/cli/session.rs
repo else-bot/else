@@ -61,15 +61,24 @@ impl<'a> PreparedTurn<'a> {
         };
         let memory = prompt::memory_for(input.memory.as_ref(), resumed);
         let skills = default_skills::for_session(resumed);
-        let context = context::for_session(input, resumed);
+        let mut context = context::for_session(input, resumed);
         let (segments, selection) = prompt::turn_content(
             input,
             session.considered_through_turn,
-            memory,
+            memory.as_ref(),
             &skills,
             &context,
         );
         let packet = prompt::segments_text(&segments);
+        let given = memory
+            .is_some()
+            .then(|| input.memory.as_ref()?.lines.last())
+            .flatten();
+        if let Some(line) = given {
+            context
+                .applied
+                .insert(prompt::MEMORY_RECEIPT.to_owned(), line.end.to_string());
+        }
         let advance = Advance {
             through: input.turn_no,
             memory_revision: memory.map(|m| m.revision).or(session.memory_revision),

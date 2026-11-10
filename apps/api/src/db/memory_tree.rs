@@ -903,8 +903,20 @@ pub async fn session_context(
             "<chat>\n(the saved view is damaged; use memory_search and memory_read)\n</chat>".into()
         },
     );
+    let lines = if saved.valid {
+        chosen
+            .iter()
+            .map(|(node, body)| crate::app::providers::MemoryLine {
+                end: node.end(),
+                text: memory_tree::line(*node, body),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok(Some(crate::app::providers::MemoryContext {
         revision: saved.revision,
         text,
+        lines,
     }))
 }
