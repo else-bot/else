@@ -1,6 +1,8 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Sizable as _, StyledExt as _,
     h_flex, v_flex,
@@ -12,7 +14,77 @@ use uuid::Uuid;
 use super::{Connection, ElseApp, QuestionForm, RowKey, SubmitState, letter};
 use crate::model::{Question, QuestionAnswer};
 
+/// The field under a pending single-choice card's options for an answer the
+/// options don't cover. Its text is sent as an owner message, which skips the
+/// card and continues the conversation like a reply in the composer.
+pub(in crate::app) struct WriteIn {
+    input: Entity<InputState>,
+    _enter: Subscription,
+}
+
+fn takes_write_in(question: &Question) -> bool {
+    question.is_pending()
+        && !question.is_approval()
+        && !question.multiple
+        && !question.choices.is_empty()
+}
+
 impl ElseApp {
+    pub(in crate::app) fn sync_write_ins(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        let open: Vec<Uuid> = view
+            .conversation
+            .iter()
+            .flat_map(|c| c.questions())
+            .filter(|q| takes_write_in(q))
+            .map(|q| q.id)
+            .collect();
+        view.write_ins.retain(|id, _| open.contains(id));
+        for id in open {
+            view.write_ins.entry(id).or_insert_with(|| {
+                let input =
+                    cx.new(|cx| InputState::new(window, cx).placeholder("Type your own answer"));
+                let _enter = cx.subscribe_in(
+                    &input,
+                    window,
+                    move |app, _, event: &InputEvent, window, cx| match event {
+                        InputEvent::PressEnter { .. } => app.send_write_in(id, window, cx),
+                        InputEvent::Change => app.remeasure_row(RowKey::Question(id), cx),
+                        _ => {}
+                    },
+                );
+                WriteIn { input, _enter }
+            });
+        }
+    }
+
+    fn send_write_in(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.view.as_ref() else {
+            return;
+        };
+        let open = view
+            .conversation
+            .as_ref()
+            .and_then(|c| c.question(id))
+            .is_some_and(takes_write_in)
+            && !view
+                .question_submits
+                .get(&id)
+                .is_some_and(QuestionForm::locks);
+        let Some(input) = view.write_ins.get(&id).map(|w| w.input.clone()) else {
+            return;
+        };
+        let text = input.read(cx).value().trim().to_owned();
+        if !open || text.is_empty() {
+            return;
+        }
+        if self.enqueue(view.bot_id, text, Vec::new(), None, window, cx) {
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+        }
+    }
+
     fn toggle_question_choice(&mut self, id: Uuid, choice: &str, cx: &mut Context<Self>) {
         let Some(view) = self.view.as_mut() else {
             return;
@@ -61,6 +133,11 @@ impl ElseApp {
         let submitted = form.is_some_and(QuestionForm::locks);
         let completed = !question.is_pending() || submitted;
         let locked = completed || self.connection != Connection::Connected;
+        let view_write_in = self
+            .view
+            .as_ref()
+            .and_then(|v| v.write_ins.get(&id))
+            .filter(|_| takes_write_in(question));
         let answer = question.answer.as_ref().or_else(|| form.map(|f| &f.answer));
         let selected: Vec<_> = question
             .choices
@@ -241,12 +318,15 @@ impl ElseApp {
                     );
                 }
             }
+            if let Some(write_in) = view_write_in {
+                rows = rows.child(self.render_write_in(id, question, write_in, locked, cx));
+            }
             let hint = if question.multiple {
                 "Choose one or more, then click Done."
             } else if question.choices.is_empty() {
                 "Reply in chat to answer this question."
             } else {
-                "Choose an answer, or reply in chat."
+                "Choose an answer, or type your own."
             };
             let mut footer = h_flex().w_full().gap_3().flex_wrap().child(
                 div()
@@ -284,5 +364,68 @@ impl ElseApp {
             );
         }
         card.into_any_element()
+    }
+
+    fn render_write_in(
+        &self,
+        id: Uuid,
+        question: &Question,
+        write_in: &WriteIn,
+        locked: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let next = question
+            .choices
+            .last()
+            .and_then(|c| c.id.chars().next())
+            .and_then(|c| char::from_u32(c as u32 + 1))
+            .map(|c| letter(&c.to_string()))
+            .unwrap_or_default();
+        let empty = write_in.input.read(cx).value().trim().is_empty();
+        let disabled = locked || empty;
+        h_flex()
+            .w_full()
+            .gap_2p5()
+            .px_2()
+            .py_1()
+            .child(
+                h_flex()
+                    .size_6()
+                    .flex_shrink_0()
+                    .justify_center()
+                    .rounded(theme.radius)
+                    .bg(theme.muted)
+                    .text_color(theme.muted_foreground)
+                    .text_xs()
+                    .child(next),
+            )
+            .child(
+                div().flex_1().min_w_0().child(
+                    Input::new(&write_in.input)
+                        .focus_ring(false)
+                        .small()
+                        .aria_label("Your own answer")
+                        .disabled(locked),
+                ),
+            )
+            .child(
+                Button::new(SharedString::from(format!("question-{id}-write-in")))
+                    .focus_ring(false)
+                    .primary()
+                    .small()
+                    .disabled(disabled)
+                    .when(!disabled, |button| button.cursor_pointer())
+                    .label("Send")
+                    .children(Keystroke::parse("enter").ok().map(|key| {
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .child(Kbd::new(key).appearance(false))
+                    }))
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.send_write_in(id, window, cx);
+                    })),
+            )
     }
 }

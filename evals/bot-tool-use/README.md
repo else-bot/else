@@ -73,7 +73,7 @@ For example, this mock parks delegation:
 - Every sample also fails on a call to a tool name the CLI does not offer, such as a bare `delegate` instead of `mcp__elsebot__delegate`: it never reaches else.bot and costs a round trip.
 - `maxFinalWords`: optional word limit for short acknowledgments.
 
-A selector is a tool name string or an object with `name`, optional `arguments`, and optional `absent`. Argument objects match partially and recursively. Dotted keys traverse nested objects. Strings beginning with `~` match a case-insensitive substring; other values match exactly. Arrays match in order with equal length. `absent` lists argument paths that must be missing, which distinguishes `mcp_list` with no id from reading an MCP's skill.
+A selector is a tool name string or an object with `name`, optional `arguments`, and optional `absent`. Argument objects match partially and recursively. Dotted keys traverse nested objects. Strings beginning with `~` match a case-insensitive substring, or any element of an array; other values match exactly. Arrays match in order with equal length. `absent` lists argument paths that must be missing, which distinguishes `mcp_list` with no id from reading an MCP's skill.
 
 ```json
 {"name":"use_tool","arguments":{"name":"routine_run","arguments.routine_id":"10000000-0000-0000-0000-000000000001"}}

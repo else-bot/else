@@ -36,6 +36,8 @@ def run(runner):
             self.assertFalse(mock.partial(True, 1))
             self.assertTrue(mock.partial(["Else.Bot"], ["~bot"]))
             self.assertFalse(mock.partial([1, 2], [1]))
+            self.assertTrue(mock.partial(["9 a.m.", "Another time"], "~another"))
+            self.assertFalse(mock.partial(["9 a.m.", "10 a.m."], "~another"))
 
         def test_forbidden_missing_id(self):
             expect = {"callsMustNot": [{"name": "mcp_list", "absent": ["id"]}]}
@@ -136,7 +138,19 @@ def run(runner):
                                              self.call("computer_handoff", {"reason": "X Chat is blank at x.com/messages."})],
                                             "X Chat is blank again. ![screenshot](screens/30000000-0000-0000-0000-000000000002.png)",
                                             "X Chat is blank again. I left the page open for you."),
+                "choice-without-write-in-option": ([self.call("ask_owner", {
+                    "question": "What time and time zone should the weekday whale callout run?",
+                    "choices": ["9:00 a.m. New York", "10:00 a.m. New York"]},
+                    {"status": "pending", "parked": True})], "Pick a time on the card."),
             }
+            write_in_case = next(c for c in runner.load_cases() if c["id"] == "choice-without-write-in-option")
+            for bad_args in ({"choices": ["9:00 a.m. New York", "10:00 a.m. New York", "I'll specify another time"]},
+                             {"choices": ["9:00 a.m. New York", "10:00 a.m. New York", "I'll type a time"]},
+                             {"choices": ["9:00 a.m. New York", "10:00 a.m. New York"], "multiple": True}):
+                with self.subTest(write_in=bad_args):
+                    self.assertFalse(self.passed(write_in_case["expect"], [self.call("ask_owner", {
+                        "question": "What time and time zone should the weekday whale callout run?", **bad_args},
+                        {"status": "pending", "parked": True})], "Pick a time on the card."))
             unscoped = [self.call("computer_run", {"command": "node unfollow.js @UST_mean", "effect": "external"},
                                   {"status": "pending", "parked": True})]
             scoped_case = next(c for c in runner.load_cases() if c["id"] == "recurring-external-batch-declares-task-scope")

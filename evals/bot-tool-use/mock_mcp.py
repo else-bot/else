@@ -21,6 +21,8 @@ def at(value, path):
 
 def partial(actual, expected):
     if isinstance(expected, str) and expected.startswith("~"):
+        if isinstance(actual, list):
+            return any(partial(item, expected) for item in actual)
         return isinstance(actual, str) and expected[1:].casefold() in actual.casefold()
     if isinstance(expected, dict):
         return isinstance(actual, dict) and all(
