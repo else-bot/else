@@ -46,6 +46,9 @@ const KEY_ID_PURPOSE: &[u8] = b"else.bot/key-id/v1";
 pub const COMPLETE: &str = "complete.json";
 pub const MANIFEST: &str = "manifest.json.age";
 pub const DATABASE: &str = "database.dump.age";
+/// Database-only sets the installer takes before migrations, kept under the
+/// backup directory but outside its schedule, retention, and replication.
+pub const BEFORE_UPDATE_DIR: &str = "before-update";
 const STAGING_PREFIX: &str = ".staging-";
 /// Bootstrap and manifest size caps: anything larger is not ours.
 pub const MAX_COMPLETE_BYTES: u64 = 16 * 1024;

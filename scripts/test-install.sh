@@ -162,7 +162,7 @@ wait_status "$done_before" completed
 wait_health 0.0.2
 [ -d $H/versions/0.0.1 ] || fail "the previous release was not kept"
 grep -q "Backup before the database changes" /tmp/update.log || fail "no backup before the migration"
-ls $H/data/backups/*/complete.json >/dev/null || fail "no completed backup set"
+ls $H/data/backups/before-update/*/complete.json >/dev/null || fail "no database backup before the migration"
 [ "$(turn_status "$done_before")" = completed ] || fail "history was lost"
 [ "$(api $URL/v1/bots | jq '[.bots[] | select(.name == "Worker")] | length')" = 1 ] || fail "the bot was lost"
 after="$(send 'on the new version')"

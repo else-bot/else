@@ -1197,8 +1197,12 @@ backup_if_migrating() {
 	added="$(git -C "$SRC" diff --name-only --diff-filter=A "$(source_ref "$from")" "$(source_ref "$to")" -- apps/api/migrations 2>/dev/null || echo unknown)"
 	[ -z "$added" ] && return 0
 	step "Backup before the database changes"
-	local log="$LOGS/backup-before-$to.log"
-	if (cd "$CONFIG" && "$SERVER_CURRENT/bin/else-api" backup) >"$log" 2>&1; then
+	local log="$LOGS/backup-before-$to.log" scope=""
+	# Releases without --database-only archive every bot computer here, which takes minutes.
+	case "$("$SERVER_CURRENT/bin/else-api" help 2>/dev/null || true)" in
+	*"backup --database-only"*) scope=--database-only ;;
+	esac
+	if (cd "$CONFIG" && "$SERVER_CURRENT/bin/else-api" backup $scope) >"$log" 2>&1; then
 		ok "$(sed -n 's/^backup set: //p' "$log" | tail -1)"
 	else
 		tail -10 "$log" >&2
