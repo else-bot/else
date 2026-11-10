@@ -686,7 +686,7 @@ impl ElseApp {
                     .and_then(|list| list.iter().find(|p| p.request_id == request))
                     .map_or((None, None), |p| {
                         let author =
-                            (p.rejected.is_none() && p.reaction.is_none()).then_some(Author::Owner);
+                            (!p.is_rejected() && p.reaction.is_none()).then_some(Author::Owner);
                         (author, Some(p.sent_at))
                     }),
                 RowKey::SkillInstall(_)

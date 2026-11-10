@@ -1,3 +1,4 @@
+use super::pending_send::Delivery;
 use super::reply::Author;
 use super::row_text::RowText;
 use super::{ElseApp, RowKey};
@@ -429,56 +430,51 @@ impl ElseApp {
                         .children(footer.map(|at| beside(true, note(at, false))));
                 }
                 let subject = mark.map_or_else(String::new, |mark| format!("{mark} "));
-                if let Some(reason) = &pending.rejected {
-                    return Some(
-                        column
-                            .child(note(format!("{subject}Not sent. {reason}"), true).w_full())
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .justify_end()
-                                    .gap_2()
-                                    .children(mark.is_none().then(|| {
-                                        Button::new(SharedString::from(format!(
-                                            "restore-{request_id}"
-                                        )))
+                column = match pending.delivery() {
+                    Delivery::Rejected { reason } => column
+                        .child(note(format!("{subject}Not sent. {reason}"), true).w_full())
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_end()
+                                .gap_2()
+                                .children(mark.is_none().then(|| {
+                                    Button::new(SharedString::from(format!("restore-{request_id}")))
                                         .focus_ring(false)
                                         .cursor_pointer()
                                         .label("Restore to composer")
                                         .xsmall()
-                                        .on_click(
-                                            cx.listener(move |app, _, window, cx| {
-                                                app.take_rejected(request_id, true, window, cx)
-                                            }),
-                                        )
-                                    }))
-                                    .child(
-                                        Button::new(SharedString::from(format!(
-                                            "dismiss-{request_id}"
-                                        )))
-                                        .focus_ring(false)
-                                        .cursor_pointer()
-                                        .label("Dismiss")
-                                        .xsmall()
-                                        .ghost()
-                                        .on_click(
-                                            cx.listener(move |app, _, window, cx| {
-                                                app.take_rejected(request_id, false, window, cx)
-                                            }),
-                                        ),
-                                    ),
-                            )
-                            .into_any_element(),
-                    );
-                }
-                column = match &pending.unknown {
-                    None => column.child(
+                                        .on_click(cx.listener(move |app, _, window, cx| {
+                                            app.take_rejected(request_id, true, window, cx)
+                                        }))
+                                }))
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "dismiss-{request_id}"
+                                    )))
+                                    .focus_ring(false)
+                                    .cursor_pointer()
+                                    .label("Dismiss")
+                                    .xsmall()
+                                    .ghost()
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        app.take_rejected(request_id, false, window, cx)
+                                    })),
+                                ),
+                        ),
+                    Delivery::Sending => column.child(
                         h_flex()
                             .w_full()
                             .justify_end()
                             .child(note(format!("{subject}Sending…"), false)),
                     ),
-                    Some(reason) => column
+                    Delivery::Resolving { .. } => column.child(
+                        h_flex()
+                            .w_full()
+                            .justify_end()
+                            .child(note(format!("{subject}Checking delivery…"), false)),
+                    ),
+                    Delivery::Unknown { reason } => column
                         .child(note(format!("{subject}Not confirmed. {reason}"), true).w_full())
                         .child(
                             h_flex().w_full().justify_end().gap_2().child(
