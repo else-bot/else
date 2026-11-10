@@ -4,7 +4,9 @@
   lume.py run --base NAME --base-storage PATH --api-binary PATH --desktop-binary PATH
               [--age-i18n PATH] [--output PATH] [--session work] [--welcome] [--cpu 4] [--memory 8GB]
   lume.py snapshot|click|type|key --run PATH --name NAME [--x X --y Y | --label L | --value V] [--role R]
-              [--text T] [--key K --mod M] [--window-title T]
+              [--text T] [--key K --mod M] [--foreground] [--window-title T]
+  lume.py drag --run PATH --name NAME --from-x X --from-y Y --to-x X --to-y Y [--steps 30] [--foreground]
+  lume.py scroll --run PATH --name NAME --x X --y Y --direction up|down|left|right [--amount 3]
   lume.py probe --run PATH [--path /v1/bots] [--method GET] [--body JSON] [--expected 200] [--name NAME]
   lume.py down --run PATH
 
@@ -265,6 +267,11 @@ def native_binary(path):
     return path
 
 
+def host_triple():
+    version = subprocess.check_output(["rustc", "-vV"], text=True, timeout=30)
+    return next(line.split(":", 1)[1].strip() for line in version.splitlines() if line.startswith("host:"))
+
+
 def age_resources(api, explicit):
     """The age i18n directory the debug API reads from its compile-time absolute path, or None."""
     binary = api.read_bytes()
@@ -279,7 +286,9 @@ def age_resources(api, explicit):
     else:
         try:
             metadata = json.loads(subprocess.check_output(
-                ["cargo", "metadata", "--locked", "--offline", "--format-version", "1"],
+                # Unfiltered, offline metadata fails on other platforms' undownloaded crates.
+                ["cargo", "metadata", "--locked", "--offline", "--format-version", "1",
+                 "--filter-platform", host_triple()],
                 cwd=ROOT, text=True, timeout=120, stderr=subprocess.DEVNULL))
             age = next(p for p in metadata["packages"] if p["name"] == "age")
             chosen = str(Path(age["manifest_path"]).parent / "i18n")
@@ -646,6 +655,9 @@ def act(args):
     require(args.command != "click" or point or selector, "click needs --x/--y or --label/--value")
     require(args.command != "type" or args.text is not None, "type needs --text")
     require(args.command != "key" or not point, "key takes a selector, not --x/--y")
+    require(args.command != "scroll" or point, "scroll needs --x/--y")
+    require(args.command not in ("drag", "scroll") or not selector, f"{args.command} takes pixels, not a selector")
+    require(not args.foreground or point or args.command == "drag", "--foreground needs pixel coordinates")
     base = live_guest(run, manifest)
     evidence = run.evidence / args.name
     run.evidence.mkdir(mode=0o700, exist_ok=True)
@@ -658,12 +670,21 @@ def act(args):
     window, before = snapshot(mcp, pid, args.window_title, evidence, "before" if args.command != "snapshot" else "snapshot")
     if args.command == "snapshot":
         return 0
-    background = {"delivery_mode": "background"}
+    # Foreground moves the guest's pointer; GPUI mouse handlers ignore the background AX press.
+    delivery = {"delivery_mode": "foreground" if args.foreground else "background"}
     target = {"kind": "window", "pid": pid, "window_id": window["window_id"]}
     if args.command == "click":
         request = ({"pid": pid, "window_id": window["window_id"], "x": args.x, "y": args.y,
                     "capture_id": before["capture_id"]} if point else {"element_token": element(args, before)})
         tool = "click"
+    elif args.command == "drag":
+        request = {"pid": pid, "window_id": window["window_id"], "from_x": args.from_x, "from_y": args.from_y,
+                   "to_x": args.to_x, "to_y": args.to_y, "steps": args.steps}
+        tool = "drag"
+    elif args.command == "scroll":
+        request = {"pid": pid, "window_id": window["window_id"], "x": args.x, "y": args.y,
+                   "direction": args.direction, "amount": args.amount}
+        tool = "scroll"
     elif args.command == "type":
         request = {"text": args.text, **({"element_token": element(args, before)} if selector else
                                          {"target": target, **({"x": args.x, "y": args.y} if point else {})})}
@@ -672,7 +693,7 @@ def act(args):
         request = {"key": args.key, **({"element_token": element(args, before)} if selector else {"target": target}),
                    **({"modifiers": args.mod} if args.mod else {})}
         tool = "press_key"
-    result = mcp.call(tool, {**request, **background})
+    result = mcp.call(tool, {**request, **delivery})
     result.pop("images")
     save(evidence / "action.json", result)
     print(json.dumps({k: result[k] for k in ("tool", "is_error", "text")}, ensure_ascii=False), flush=True)
@@ -723,19 +744,31 @@ def parser():
     start.add_argument("--welcome", action="store_true", help="leave onboarding to the desktop")
     start.add_argument("--cpu", type=int, default=4)
     start.add_argument("--memory", default="8GB")
-    for verb in ("snapshot", "click", "type", "key"):
+    for verb in ("snapshot", "click", "type", "key", "drag", "scroll"):
         action = commands.add_parser(verb, help=f"{verb} in the guest desktop, saving before/action/after evidence")
         action.add_argument("--run", type=Path, required=True)
         action.add_argument("--name", required=True, help="new evidence directory name; never overwritten")
         action.add_argument("--window-title", help="pick this window when the app shows several")
         if verb == "snapshot":
             continue
+        action.add_argument("--settle", type=float, default=1.5)
+        if verb in ("click", "drag"):
+            action.add_argument("--foreground", action="store_true",
+                                help="move the guest pointer; for controls that ignore background input")
+        if verb == "drag":
+            for edge in ("--from-x", "--from-y", "--to-x", "--to-y"):
+                action.add_argument(edge, type=float, required=True, help="window screenshot pixel")
+            action.add_argument("--steps", type=int, default=30)
+            continue
         action.add_argument("--x", type=float, help="screenshot pixel, bound to the fresh capture")
         action.add_argument("--y", type=float)
+        if verb == "scroll":
+            action.add_argument("--direction", choices=["up", "down", "left", "right"], required=True)
+            action.add_argument("--amount", type=int, default=3, help="wheel notches")
+            continue
         action.add_argument("--label", help="exactly one AX element with this label")
         action.add_argument("--value", help="exactly one AX element with this value")
         action.add_argument("--role", help="narrow --label/--value to this AX role")
-        action.add_argument("--settle", type=float, default=1.5)
         if verb == "type":
             action.add_argument("--text", required=True)
         if verb == "key":
@@ -757,6 +790,7 @@ def main(argv=None):
     args = parser().parse_args(argv)
     for name in ("text", "key", "label", "value", "role", "x", "y"):
         vars(args).setdefault(name, None)
+    vars(args).setdefault("foreground", False)
 
     def interrupted(number, _frame):
         if not CLEANING.is_set():
