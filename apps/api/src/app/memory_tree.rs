@@ -172,15 +172,15 @@ pub fn line_bytes(node: NodeId, body: &str) -> usize {
 /// The `<chat>` wrapper around the lines.
 pub const WRAPPER_BYTES: usize = "<chat>\n</chat>".len();
 
+/// One view line: `start+span|text` with newlines flattened, newline ended.
+pub fn line(node: NodeId, body: &str) -> String {
+    format!("{}+{}|{}\n", node.start, node.span, body.replace('\n', " "))
+}
+
 pub fn render(view: &[(NodeId, &str)]) -> String {
     let mut text = String::from("<chat>\n");
     for (node, body) in view {
-        text.push_str(&format!(
-            "{}+{}|{}\n",
-            node.start,
-            node.span,
-            body.replace('\n', " ")
-        ));
+        text.push_str(&line(*node, body));
     }
     text.push_str("</chat>");
     text
