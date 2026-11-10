@@ -20,6 +20,9 @@ use crate::actor::Actor;
 use crate::db::task_secrets;
 
 const MAX_TEXT: usize = 64 * 1024;
+/// Sent on every MCP and OAuth request, because some firewalls block
+/// clients that send none.
+const USER_AGENT: &str = concat!("else.bot/", env!("ELSE_VERSION"));
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

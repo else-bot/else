@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use zeroize::Zeroizing;
 
-use super::{Error, Transport};
+use super::{Error, Transport, USER_AGENT};
 use crate::db::task_secrets::{self, Redact};
 use crate::providers::host::{Host, MARKER_VAR, Supervised};
 
@@ -72,6 +72,7 @@ pub(super) async fn connect(
     let (service, process) = match config {
         Transport::Http { url, headers, .. } => {
             let client = reqwest::Client::builder()
+                .user_agent(USER_AGENT)
                 .redirect(reqwest::redirect::Policy::none())
                 .retry(reqwest::retry::never())
                 .connect_timeout(CONNECT_TIMEOUT)
@@ -203,15 +204,22 @@ fn transport_error(error: &(dyn std::error::Error + 'static)) -> Error {
     while let Some(error) = source {
         if let Some(error) = error.downcast_ref::<StreamableHttpError<reqwest::Error>>() {
             match error {
-                StreamableHttpError::Client(http)
-                    if http.status() == Some(reqwest::StatusCode::UNAUTHORIZED) =>
-                {
-                    return Error::AuthChallenge(String::new());
+                StreamableHttpError::Client(http) => {
+                    if let Some(status) = http.status() {
+                        return status_error(status.as_u16());
+                    }
                 }
-                StreamableHttpError::UnexpectedServerResponse(message)
-                    if message.starts_with("HTTP 401 Unauthorized:") =>
-                {
-                    return Error::AuthChallenge(String::new());
+                StreamableHttpError::HttpStatus(http) => return status_error(http.status),
+                // rmcp keeps the status only in this message, followed by
+                // the body, which can echo credentials and is left out.
+                StreamableHttpError::UnexpectedServerResponse(message) => {
+                    if let Some(status) = message
+                        .strip_prefix("HTTP ")
+                        .and_then(|rest| rest.get(..3))
+                        .and_then(|code| code.parse().ok())
+                    {
+                        return status_error(status);
+                    }
                 }
                 _ => {}
             }
@@ -222,14 +230,23 @@ fn transport_error(error: &(dyn std::error::Error + 'static)) -> Error {
         if let Some(auth) = error.downcast_ref::<InsufficientScopeError>() {
             return Error::AuthChallenge(auth.www_authenticate_header.clone());
         }
-        if let Some(http) = error.downcast_ref::<reqwest::Error>()
-            && http.status() == Some(reqwest::StatusCode::UNAUTHORIZED)
+        if let Some(status) = error
+            .downcast_ref::<reqwest::Error>()
+            .and_then(reqwest::Error::status)
         {
-            return Error::AuthChallenge(String::new());
+            return status_error(status.as_u16());
         }
         source = error.source();
     }
     Error::Connection
+}
+
+fn status_error(status: u16) -> Error {
+    if status == reqwest::StatusCode::UNAUTHORIZED.as_u16() {
+        Error::AuthChallenge(String::new())
+    } else {
+        Error::Http(status)
+    }
 }
 
 fn initialize_error(error: rmcp::service::ClientInitializeError) -> Error {
@@ -596,7 +613,7 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(
             connect(&config, dir.path(), dir.path()).await,
-            Err(Error::Connection)
+            Err(Error::Http(307))
         ));
         assert_eq!(state.calls.load(Ordering::SeqCst), 0);
         redirect_server.abort();
@@ -868,10 +885,7 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
         let (url, server) = serve(axum::Router::new().route("/mcp", post(bento))).await;
         let config = Transport::Http {
             url,
-            headers: BTreeMap::from([(
-                "X-Bento-Secret-Key".into(),
-                "bento-secret-value".into(),
-            )]),
+            headers: BTreeMap::from([("X-Bento-Secret-Key".into(), "bento-secret-value".into())]),
             secrets: Vec::new(),
         };
         let dir = tempfile::tempdir().unwrap();
