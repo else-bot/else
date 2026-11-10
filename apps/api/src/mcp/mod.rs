@@ -37,6 +37,10 @@ pub enum Error {
         "The MCP connection failed. Check its setup; do not repeat a mutation whose outcome is unknown."
     )]
     Connection,
+    #[error(
+        "The MCP server answered HTTP {0}. Check its URL and headers; do not repeat a mutation whose outcome is unknown."
+    )]
+    Http(u16),
     #[error("The owner needs to sign in to this MCP.")]
     AuthRequired(Box<oauth::ConnectionStatus>),
     #[error("The MCP requires OAuth authorization.")]

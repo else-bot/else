@@ -821,4 +821,89 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
         );
         assert!(!logged.contains("private-token"), "{logged}");
     }
+
+    /// Bento's endpoint sits behind a Cloudflare rule that blocks requests
+    /// without a User-Agent with an HTML 403 page.
+    async fn bento(headers: HeaderMap, Json(message): Json<Value>) -> Response {
+        if headers.get("user-agent").is_none() {
+            return (
+                StatusCode::FORBIDDEN,
+                [("content-type", "text/html")],
+                "<title>Attention Required! | Cloudflare</title>",
+            )
+                .into_response();
+        }
+        assert_eq!(headers["x-bento-secret-key"], "bento-secret-value");
+        let Some(id) = message.get("id") else {
+            return StatusCode::ACCEPTED.into_response();
+        };
+        let result = match message["method"].as_str().unwrap() {
+            "initialize" => json!({
+                "protocolVersion":"2024-11-05",
+                "capabilities":{"tools":{}},
+                "serverInfo":{"name":"bento-mcp-worker","version":"0.1.0"},
+            }),
+            "tools/list" => {
+                json!({"tools":[{"name":"bento_list_tags","inputSchema":{"type":"object"}}]})
+            }
+            other => panic!("unexpected {other}"),
+        };
+        let event = json!({"jsonrpc":"2.0","id":id,"result":result});
+        (
+            [("content-type", "text/event-stream")],
+            format!("event: message\ndata: {event}\n\n"),
+        )
+            .into_response()
+    }
+
+    async fn serve(router: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (format!("http://{address}/mcp"), server)
+    }
+
+    #[tokio::test]
+    async fn http_identifies_itself_to_a_server_that_blocks_anonymous_clients() {
+        let (url, server) = serve(axum::Router::new().route("/mcp", post(bento))).await;
+        let config = Transport::Http {
+            url,
+            headers: BTreeMap::from([(
+                "X-Bento-Secret-Key".into(),
+                "bento-secret-value".into(),
+            )]),
+            secrets: Vec::new(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut connection = connect(&config, dir.path(), dir.path()).await.unwrap();
+        let listed = connection
+            .request("tools/list".into(), json!({}))
+            .await
+            .unwrap();
+        assert_eq!(listed["tools"][0]["name"], "bento_list_tags");
+        connection.shutdown().await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_refused_http_connection_reports_its_status() {
+        let router = axum::Router::new().route(
+            "/mcp",
+            post(|| async { (StatusCode::FORBIDDEN, "blocked").into_response() }),
+        );
+        let (url, server) = serve(router).await;
+        let config = Transport::Http {
+            url,
+            headers: BTreeMap::new(),
+            secrets: Vec::new(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let error = connect(&config, dir.path(), dir.path())
+            .await
+            .err()
+            .expect("the server refuses every request");
+        assert!(matches!(error, Error::Http(403)), "{error}");
+        assert!(error.to_string().contains("HTTP 403"), "{error}");
+        server.abort();
+    }
 }
