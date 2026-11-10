@@ -148,6 +148,9 @@ def run(runner):
                 "share-screenshot-in-reply": ([self.call("computer_screenshot", {"share": True})],
                                               "A browser on X. ![screenshot](screens/30000000-0000-0000-0000-000000000001.png)",
                                               "I took a screenshot; the screen shows a browser."),
+                "carried-result-keeps-current-request-status": (
+                    [], "Issue https://github.com/else-bot/else/issues/260 is filed, as I said. Twitter saved draft 7 without the chart; it is not posted.",
+                    "Twitter saved draft 7 without the chart; it is not posted."),
                 "blocked-screen-hands-off": ([self.call("computer_browser", {"action": "open", "url": "https://x.com/messages"}),
                                              self.call("computer_screenshot", {"share": True}),
                                              self.call("computer_handoff", {"reason": "X Chat is blank at x.com/messages."})],
@@ -205,6 +208,12 @@ def run(runner):
             self.assertIn("[turn 1, interrupted] Owner: before", text)
             self.assertIn("[turn 2] Assistant: old reply", text)
             self.assertTrue(text.endswith("Owner's latest message:\nnow"))
+
+        def test_continuation_follows_history_without_an_owner_label(self):
+            text = runner.packet({"prompt": "results", "continuation": True, "prior": [
+                {"kind": "user", "text": "file it"}, {"kind": "assistant", "text": "filed"}]})
+            self.assertTrue(text.endswith("[turn 2] Assistant: filed\n</history>\n\nresults"))
+            self.assertNotIn("Owner's latest message", text)
 
         def context(self):
             return {"instructions": "Real instructions stand here in this transport test.",
