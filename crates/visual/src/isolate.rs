@@ -162,7 +162,7 @@ fn run_child(executable: &Path, request: Vec<u8>) -> Result<Rendered, Error> {
         .arg(WORKER_ARG)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| Error::Render(format!("the render worker did not start: {e}")))?;
     let mut stdin = child.stdin.take().expect("piped stdin");
@@ -174,6 +174,8 @@ fn run_child(executable: &Path, request: Vec<u8>) -> Result<Rendered, Error> {
         let mut output = Vec::new();
         stdout.read_to_end(&mut output).map(|_| output)
     });
+    let stderr = child.stderr.take().expect("piped stderr");
+    let diagnostics = std::thread::spawn(move || read_bounded(stderr));
     let started = Instant::now();
     let limit = loop {
         match child.try_wait() {
@@ -188,10 +190,7 @@ fn run_child(executable: &Path, request: Vec<u8>) -> Result<Rendered, Error> {
             )));
         }
         if resident_bytes(child.id()).is_some_and(|bytes| bytes > MEMORY_LIMIT) {
-            break Some(Error::Limit(format!(
-                "rendering used more than {} MiB",
-                MEMORY_LIMIT / 1024 / 1024
-            )));
+            break Some(memory_limit());
         }
         std::thread::sleep(Duration::from_millis(5));
     };
@@ -200,6 +199,7 @@ fn run_child(executable: &Path, request: Vec<u8>) -> Result<Rendered, Error> {
         let _ = child.wait();
         let _ = writer.join();
         let _ = reader.join();
+        let _ = diagnostics.join();
         return Err(error);
     }
     let _ = writer.join();
@@ -207,7 +207,39 @@ fn run_child(executable: &Path, request: Vec<u8>) -> Result<Rendered, Error> {
         .join()
         .map_err(|_| Error::Render("reading the render failed".into()))?
         .map_err(|e| Error::Render(e.to_string()))?;
-    decode(&output)
+    let diagnostics = diagnostics.join().unwrap_or_default();
+    decode(&output).map_err(|error| match error {
+        Error::Render(_) if ran_out_of_memory(&diagnostics) => memory_limit(),
+        error => error,
+    })
+}
+
+fn memory_limit() -> Error {
+    Error::Limit(format!(
+        "rendering used more than {} MiB",
+        MEMORY_LIMIT / 1024 / 1024
+    ))
+}
+
+/// The worker's address-space cap makes a large allocation fail before its
+/// resident size crosses [`MEMORY_LIMIT`]; std then aborts with this message.
+fn ran_out_of_memory(diagnostics: &[u8]) -> bool {
+    diagnostics
+        .windows(OUT_OF_MEMORY.len())
+        .any(|window| window == OUT_OF_MEMORY)
+}
+
+const OUT_OF_MEMORY: &[u8] = b"memory allocation of ";
+const DIAGNOSTICS: u64 = 16 * 1024;
+
+/// Keep the start of the worker's stderr and drain the rest, so a chatty
+/// worker never blocks on a full pipe.
+fn read_bounded(stderr: impl std::io::Read) -> Vec<u8> {
+    let mut kept = Vec::new();
+    let mut stderr = stderr;
+    let _ = (&mut stderr).take(DIAGNOSTICS).read_to_end(&mut kept);
+    let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+    kept
 }
 
 fn decode(output: &[u8]) -> Result<Rendered, Error> {
