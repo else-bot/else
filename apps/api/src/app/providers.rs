@@ -50,8 +50,7 @@ pub struct HistoryEntry {
     pub turn_no: i64,
     pub kind: String,
     pub text: String,
-    /// The owner turn's recorded status (`completed`, `interrupted`, ...).
-    pub status: String,
+    pub status: crate::db::turns::TurnStatus,
     /// Why a failed or uncertain turn ended that way.
     pub error: Option<String>,
     /// A conversation message's ordered parts; empty for plain text.

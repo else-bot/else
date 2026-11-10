@@ -3,6 +3,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::app::messages::MAX_QUEUED_TURNS;
+use crate::db::turns::UNFINISHED_STATUSES;
 use crate::db::{bot_profiles, events};
 use crate::providers::Registry;
 
@@ -12,7 +13,6 @@ pub const ADMIT_BATCH: i64 = 8;
 pub const MAX_PER_TURN: i64 = 16;
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')";
-const UNFINISHED: &str = "('queued', 'preparing', 'sending', 'running', 'cancelling', 'waiting')";
 
 /// Queue turns for up to `limit` bot and connection pairs with pending messages.
 /// Returns how many turns were queued. The caller holds a maintenance
@@ -33,7 +33,7 @@ pub async fn admit_pending(
            AND (SELECT count(*) FROM turns t WHERE t.bot_id = d.bot_id AND t.status = 'queued') < ?2
            AND NOT EXISTS (SELECT 1 FROM social_deliveries x JOIN turns t ON t.id = x.turn_id
                            WHERE x.bot_id = d.bot_id AND x.connection_id = d.connection_id
-                             AND t.status IN {UNFINISHED})
+                             AND t.status IN {UNFINISHED_STATUSES})
          GROUP BY d.bot_id, d.connection_id ORDER BY min(d.created_at), d.bot_id, d.connection_id
          LIMIT ?1"
     )))
@@ -114,7 +114,7 @@ async fn admit(
     };
     let busy: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT EXISTS (SELECT 1 FROM social_deliveries x JOIN turns t ON t.id = x.turn_id
-                        WHERE x.bot_id = ?1 AND x.connection_id = ?2 AND t.status IN {UNFINISHED})
+                        WHERE x.bot_id = ?1 AND x.connection_id = ?2 AND t.status IN {UNFINISHED_STATUSES})
              OR (SELECT count(*) FROM turns WHERE bot_id = ?1 AND status = 'queued') >= ?3"
     )))
     .bind(bot_id)

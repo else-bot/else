@@ -36,6 +36,7 @@ use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::actor::Actor;
+use crate::db::turns::UNFINISHED_STATUSES;
 
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -338,10 +339,9 @@ impl ComputerManager {
             .call_async(move |batches| {
                 Box::pin(async move {
                     if batches.len() >= 10_000 {
-                        let live: Vec<Uuid> = sqlx::query_scalar(
-                            "SELECT id FROM turns WHERE status IN
-                         ('queued', 'preparing', 'sending', 'running', 'cancelling', 'waiting')",
-                        )
+                        let live: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                            "SELECT id FROM turns WHERE status IN {UNFINISHED_STATUSES}"
+                        )))
                         .fetch_all(&pool)
                         .await?;
                         let live: std::collections::HashSet<_> = live.into_iter().collect();

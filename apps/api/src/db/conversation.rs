@@ -2,7 +2,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use super::bots::{self, BotRecord};
-use super::turns::{ITEM_COLUMNS, ItemRecord, TURN_COLUMNS, TurnRecord};
+use super::turns::{ITEM_COLUMNS, ItemRecord, TURN_COLUMNS, TurnRecord, UNFINISHED_STATUSES};
 
 pub struct Snapshot {
     pub bot: BotRecord,
@@ -60,7 +60,7 @@ pub async fn snapshot(
     let mut turns: Vec<TurnRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {TURN_COLUMNS} FROM turns t
          WHERE t.bot_id = ?1
-           AND (lower(hex(t.id)) IN (SELECT replace(value, '-', '') FROM json_each(?2)) OR t.status IN ('queued', 'preparing', 'sending', 'running', 'cancelling', 'waiting')
+           AND (lower(hex(t.id)) IN (SELECT replace(value, '-', '') FROM json_each(?2)) OR t.status IN {UNFINISHED_STATUSES}
                 OR EXISTS (SELECT 1 FROM computer_handoffs h WHERE h.turn_id = t.id AND h.status = 'pending'))
          ORDER BY t.turn_no"
     )))

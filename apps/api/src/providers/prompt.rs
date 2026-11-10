@@ -22,6 +22,7 @@ use crate::app::providers::{
 use crate::app::questions::{
     APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, Action, DENY,
 };
+use crate::db::turns::TurnStatus;
 
 /// Byte budget for rebuilt history in one packet.
 pub const HISTORY_BUDGET: usize = 32 * 1024;
@@ -955,10 +956,10 @@ fn render(entry: &HistoryEntry) -> String {
         "status" => "Delegated task (another bot's request, not an owner message)",
         _ => "Assistant",
     };
-    let status = match (entry.status.as_str(), &entry.error) {
-        ("completed" | "", _) => String::new(),
-        (other, Some(error)) => format!(", {other}: {error}"),
-        (other, None) => format!(", {other}"),
+    let status = match (entry.status, &entry.error) {
+        (TurnStatus::Completed, _) => String::new(),
+        (other, Some(error)) => format!(", {}: {error}", other.as_str()),
+        (other, None) => format!(", {}", other.as_str()),
     };
     format!(
         "[turn {}{status}] {who}: {}\n",

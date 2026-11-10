@@ -12,6 +12,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use super::installation::insert_bot;
+use super::turns::TurnStatus;
 use crate::app::bots::{Avatar, AvatarColor, AvatarShape, BotName, BotPurpose};
 use crate::app::providers::Profile;
 
@@ -39,7 +40,7 @@ pub struct BotRecord {
     pub selected_provider_id: Option<String>,
     pub cancel_pending: bool,
     pub active_turn_id: Option<Uuid>,
-    pub active_turn_status: Option<String>,
+    pub active_turn_status: Option<TurnStatus>,
     pub queued_count: i64,
     /// Its sidebar category, if any.
     pub category_id: Option<Uuid>,

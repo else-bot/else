@@ -28,6 +28,7 @@ use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
+use super::turns::{ENDED_STATUSES, Phase, TurnStatus};
 use super::{bot_profiles, events};
 use crate::app::messages::MAX_QUEUED_TURNS;
 use crate::app::providers::{Availability, Origin, Profile, RoutineRun};
@@ -166,7 +167,7 @@ struct Row {
     run_due_at: Option<DateTime<Utc>>,
     skip_reason: Option<String>,
     turn_id: Option<Uuid>,
-    turn_status: Option<String>,
+    turn_status: Option<TurnStatus>,
     error_code: Option<String>,
     error_message: Option<String>,
     finished_at: Option<DateTime<Utc>>,
@@ -176,14 +177,12 @@ impl From<Row> for Routine {
     fn from(row: Row) -> Self {
         let last_run = row.run_due_at.map(|due_at| LastRun {
             due_at,
-            status: match row.turn_status.as_deref() {
-                None => "skipped".to_owned(),
-                Some("queued") => "queued".to_owned(),
-                Some("preparing" | "sending" | "running" | "cancelling" | "waiting") => {
-                    "running".to_owned()
-                }
-                Some(other) => other.to_owned(),
-            },
+            status: match row.turn_status.map(|status| (status, status.phase())) {
+                None => "skipped",
+                Some((_, Phase::Active | Phase::Waiting)) => "running",
+                Some((status, Phase::Queued | Phase::Ended)) => status.as_str(),
+            }
+            .to_owned(),
             skip_reason: row.skip_reason,
             turn_id: row.turn_id,
             error_code: row.error_code,
@@ -292,7 +291,7 @@ pub(crate) async fn authorized_owner_conversation(
     conn: &mut SqliteConnection,
     caller: Caller,
 ) -> Result<Uuid, RoutineError> {
-    let row: Option<(Uuid, Uuid, String, String, Uuid)> = sqlx::query_as(
+    let row: Option<(Uuid, Uuid, TurnStatus, String, Uuid)> = sqlx::query_as(
         "SELECT t.bot_id, t.conversation_id, t.status, b.status, o.id
          FROM turns t JOIN bots b ON b.id = t.bot_id
          JOIN conversations o ON o.bot_id = t.bot_id AND o.kind = 'owner'
@@ -310,7 +309,7 @@ pub(crate) async fn authorized_owner_conversation(
     if super::delegations::origin(conn, caller.turn_id).await? != Origin::OwnerRequest {
         return Err(RoutineError::NotAllowed);
     }
-    if !matches!(status.as_str(), "sending" | "running") || bot_status != "active" {
+    if !status.serves_tools() || bot_status != "active" {
         return Err(RoutineError::NotRunning);
     }
     Ok(owner_conversation)
@@ -703,16 +702,16 @@ pub async fn run_now(
             .try_into()
             .expect("a SHA-256 digest has 16 bytes"),
     );
-    let row: Option<OnDemand> = sqlx::query_as(
+    let row: Option<OnDemand> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT r.conversation_id, r.name, r.prompt, r.prompt_revision, r.model,
                 EXISTS (SELECT 1 FROM routine_runs WHERE id = ?3) AS queued,
                 EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
                         WHERE rr.routine_id = r.id
-                          AND (t.status NOT IN ('completed', 'interrupted', 'failed', 'uncertain')
+                          AND (t.status NOT IN {ENDED_STATUSES}
                                OR NOT rr.reviewed)) AS busy,
                 (SELECT max(due_at) FROM routine_runs WHERE routine_id = r.id) AS last_due_at
-         FROM routines r WHERE r.id = ?1 AND r.bot_id = ?2 AND r.deleted_at IS NULL",
-    )
+         FROM routines r WHERE r.id = ?1 AND r.bot_id = ?2 AND r.deleted_at IS NULL"
+    )))
     .bind(id)
     .bind(caller.bot_id)
     .bind(run_id)
@@ -816,12 +815,12 @@ pub async fn review_ended(
     now: DateTime<Utc>,
     limit: i64,
 ) -> Result<usize, sqlx::Error> {
-    let ended: Vec<Uuid> = sqlx::query_scalar(
+    let ended: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT rr.id FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
          WHERE NOT rr.reviewed AND rr.turn_id IS NOT NULL
-           AND t.status IN ('completed', 'interrupted', 'failed', 'uncertain')
-         ORDER BY rr.due_at, rr.id LIMIT ?1",
-    )
+           AND t.status IN {ENDED_STATUSES}
+         ORDER BY rr.due_at, rr.id LIMIT ?1"
+    )))
     .bind(limit)
     .fetch_all(pool)
     .await?;
@@ -841,7 +840,7 @@ struct EndedRun {
     turn_no: i64,
     due_at: DateTime<Utc>,
     retry: bool,
-    status: String,
+    status: TurnStatus,
     error_code: Option<String>,
     error_message: Option<String>,
     bot_id: Uuid,
@@ -869,7 +868,7 @@ async fn review(
 ) -> Result<bool, sqlx::Error> {
     use crate::app::routine_failures::{self, Ended, Notice, Pause, Reaction, Run};
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let row: Option<EndedRun> = sqlx::query_as(
+    let row: Option<EndedRun> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT rr.routine_id, rr.turn_id, t.turn_no, rr.due_at, rr.retry_of IS NOT NULL AS retry,
                 t.status, t.error_code, t.error_message,
                 r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.timezone,
@@ -882,19 +881,19 @@ async fn review(
                 AND NOT EXISTS (
                     SELECT 1 FROM routine_runs x JOIN turns u ON u.id = x.turn_id
                     WHERE x.routine_id = r.id AND x.id <> rr.id
-                      AND u.status NOT IN ('completed', 'interrupted', 'failed', 'uncertain'))
+                      AND u.status NOT IN {ENDED_STATUSES})
                     AS may_retry
          FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
          JOIN routines r ON r.id = rr.routine_id JOIN bots b ON b.id = r.bot_id
-         WHERE rr.id = ?1 AND NOT rr.reviewed",
-    )
+         WHERE rr.id = ?1 AND NOT rr.reviewed"
+    )))
     .bind(run_id)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(run) = row else {
         return Ok(false);
     };
-    let Some(ended) = Ended::of(&run.status, run.error_code.as_deref()) else {
+    let Some(ended) = Ended::of(run.status, run.error_code.as_deref()) else {
         return Ok(false);
     };
     sqlx::query("UPDATE routine_runs SET reviewed = true WHERE id = ?1")
@@ -1075,15 +1074,15 @@ pub async fn admit_due(
     now: DateTime<Utc>,
     limit: i64,
 ) -> Result<usize, sqlx::Error> {
-    let due: Vec<Uuid> = sqlx::query_scalar(
+    let due: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT r.id FROM routines r JOIN bots b ON b.id = r.bot_id
          WHERE r.next_due_at IS NOT NULL AND r.next_due_at <= ?1
            AND b.status = 'active' AND NOT b.cancel_pending
            AND NOT EXISTS (SELECT 1 FROM routine_runs x JOIN turns u ON u.id = x.turn_id
                            WHERE x.routine_id = r.id AND NOT x.reviewed
-                             AND u.status IN ('completed', 'interrupted', 'failed', 'uncertain'))
-         ORDER BY r.next_due_at, r.id LIMIT ?2",
-    )
+                             AND u.status IN {ENDED_STATUSES})
+         ORDER BY r.next_due_at, r.id LIMIT ?2"
+    )))
     .bind(ts(now))
     .bind(limit)
     .fetch_all(pool)
@@ -1262,15 +1261,15 @@ async fn admit(
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row: Option<Due> = sqlx::query_as(
-        "SELECT r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.cron, r.run_at,
+        sqlx::AssertSqlSafe(format!("SELECT r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.cron, r.run_at,
                 r.timezone, r.active_days, r.active_start, r.active_end, r.model, r.next_due_at AS due_at
          FROM routines r JOIN bots b ON b.id = r.bot_id
          WHERE r.id = ?1 AND r.next_due_at IS NOT NULL AND r.next_due_at <= ?2
            AND b.status = 'active' AND NOT b.cancel_pending
            AND NOT EXISTS (SELECT 1 FROM routine_runs x JOIN turns u ON u.id = x.turn_id
                            WHERE x.routine_id = r.id AND NOT x.reviewed
-                             AND u.status IN ('completed', 'interrupted', 'failed', 'uncertain'))",
-    )
+                             AND u.status IN {ENDED_STATUSES})"
+    )))
     .bind(id)
     .bind(ts(now))
     .fetch_optional(&mut *tx)
@@ -1315,11 +1314,11 @@ async fn admit(
         tx.commit().await?;
         return Ok(false);
     }
-    let unfinished: bool = sqlx::query_scalar(
+    let unfinished: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
                         WHERE rr.routine_id = ?1
-                          AND t.status NOT IN ('completed', 'interrupted', 'failed', 'uncertain'))",
-    )
+                          AND t.status NOT IN {ENDED_STATUSES})"
+    )))
     .bind(id)
     .fetch_one(&mut *tx)
     .await?;

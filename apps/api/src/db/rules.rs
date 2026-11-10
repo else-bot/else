@@ -9,6 +9,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::events;
+use super::turns::TurnStatus;
 use crate::app::providers::Origin;
 use crate::app::rules::{Applied, ChangeKind, DiffLine, Edit, InvalidRules, Rules, RulesUpdate};
 
@@ -90,7 +91,7 @@ pub async fn history(
 }
 
 async fn authorize_turn(conn: &mut SqliteConnection, caller: Caller) -> Result<(), RulesError> {
-    let row: Option<(Uuid, String, String, Uuid)> = sqlx::query_as(
+    let row: Option<(Uuid, TurnStatus, String, Uuid)> = sqlx::query_as(
         "SELECT t.bot_id, t.status, b.status, o.id
          FROM turns t JOIN bots b ON b.id = t.bot_id
          JOIN conversations o ON o.bot_id = t.bot_id AND o.kind = 'owner'
@@ -109,7 +110,7 @@ async fn authorize_turn(conn: &mut SqliteConnection, caller: Caller) -> Result<(
     if super::delegations::origin(conn, caller.turn_id).await? != Origin::OwnerRequest {
         return Err(RulesError::NotAllowed);
     }
-    if !matches!(status.as_str(), "sending" | "running") || bot_status != "active" {
+    if !status.serves_tools() || bot_status != "active" {
         return Err(RulesError::NotRunning);
     }
     Ok(())

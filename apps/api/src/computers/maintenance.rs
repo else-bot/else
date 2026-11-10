@@ -1,6 +1,7 @@
 use super::{
     ComputerError, ComputerManager, GUEST_CHECKPOINT, IdleAction, Ordering, Reason, RuntimeState,
 };
+use crate::db::turns::ACTIVE_STATUSES;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -284,10 +285,10 @@ impl ComputerManager {
         };
         match kind {
             "turn" => {
-                sqlx::query_scalar(
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
                     "SELECT EXISTS (SELECT 1 FROM turns WHERE id = ?1
-                                AND status IN ('preparing', 'sending', 'running', 'cancelling'))",
-                )
+                                AND status IN {ACTIVE_STATUSES})"
+                )))
                 .bind(id)
                 .fetch_one(&self.pool)
                 .await
