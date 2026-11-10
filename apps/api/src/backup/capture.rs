@@ -32,7 +32,7 @@ pub struct SetSummary {
     pub manifest: Manifest,
     /// Replication after this capture, when a bucket is configured: the
     /// local set is complete either way.
-    pub remote: Option<Result<super::replicate::Stats, String>>,
+    pub remote: Option<Result<super::replicate::Stats, std::sync::Arc<BackupError>>>,
 }
 
 fn now() -> String {

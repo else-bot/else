@@ -237,9 +237,9 @@ impl Shell {
                             &theme,
                         ))
                         .child(metric(
-                            "Latest verified upload",
+                            "Uploaded last run",
                             latest
-                                .and_then(|run| run.bytes)
+                                .and_then(|run| run.uploaded_bytes.or(run.bytes))
                                 .map(bytes)
                                 .unwrap_or_else(|| "None yet".into()),
                             latest
@@ -252,7 +252,7 @@ impl Shell {
                             "Remote copies",
                             format!("{} copies", snapshot.remote_count),
                             format!(
-                                "Keep target {} · {} stored",
+                                "Keep target {} · {} in the bucket",
                                 snapshot.keep,
                                 bytes(snapshot.remote_bytes)
                             ),
@@ -406,11 +406,11 @@ impl Shell {
             );
         }
         content = content.when(view.editor.is_none(), |content| content.child(v_flex().gap_2().p_4().rounded(theme.radius).bg(theme.secondary.opacity(0.45))
-            .child(div().text_xs().text_color(theme.muted_foreground).child("Estimated upload per backup"))
+            .child(div().text_xs().text_color(theme.muted_foreground).child("Estimated first upload"))
             .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(snapshot.estimate.as_ref().map(|e| bytes(e.bytes)).unwrap_or_else(|| "Not available yet".into())))
             .when_some(snapshot.estimate.as_ref(), |content, estimate| content
                 .child(div().text_xs().text_color(theme.muted_foreground).child(estimate.basis.clone()))
-                .child(div().text_xs().text_color(theme.muted_foreground).child(format!("About {} for {} copies at this size. Actual uploads and storage may vary.", bytes(estimate.bytes.saturating_mul(snapshot.keep as u64)), snapshot.keep))))));
+                .child(div().text_xs().text_color(theme.muted_foreground).child("Later backups upload only what changed since the previous one. Copies share unchanged data in the bucket.")))));
         let mut history = v_flex().gap_3().child(
             div()
                 .text_sm()
@@ -450,13 +450,13 @@ impl Shell {
                                         .unwrap_or_else(|| run.set_id.clone()),
                                 ),
                             )
-                            .child(
-                                div().text_xs().text_color(theme.muted_foreground).child(
-                                    run.bytes
-                                        .map(bytes)
-                                        .unwrap_or_else(|| "Size pending".into()),
-                                ),
-                            )
+                            .child(div().text_xs().text_color(theme.muted_foreground).child(
+                                match (run.uploaded_bytes, run.bytes) {
+                                    (Some(uploaded), _) => format!("{} uploaded", bytes(uploaded)),
+                                    (None, Some(size)) => bytes(size),
+                                    (None, None) => "Size pending".into(),
+                                },
+                            ))
                             .child(
                                 div()
                                     .text_xs()

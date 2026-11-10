@@ -340,8 +340,8 @@ impl Drop for Cleanup {
                         }
                     }
                     if let Ok(objects) = s3.list(&s3.key("")).await {
-                        for (key, _) in objects {
-                            let _ = s3.delete(&key).await;
+                        for object in objects {
+                            let _ = s3.delete(&object.key).await;
                         }
                     }
                 })

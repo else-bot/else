@@ -49,6 +49,14 @@ impl std::fmt::Debug for S3Config {
     }
 }
 
+/// One listed object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Object {
+    pub key: String,
+    pub size: u64,
+    pub modified: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// The outcome of a create-only put.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Put {
@@ -495,8 +503,8 @@ impl S3 {
             .collect())
     }
 
-    /// Every object under `prefix`: (key, size), following pagination.
-    pub async fn list(&self, prefix: &str) -> Result<Vec<(String, u64)>, S3Error> {
+    /// Every object under `prefix`, following pagination.
+    pub async fn list(&self, prefix: &str) -> Result<Vec<Object>, S3Error> {
         let mut out = Vec::new();
         let mut token: Option<String> = None;
         loop {
@@ -513,10 +521,15 @@ impl S3 {
                 .map_err(|e| S3Error::Transport(e.to_string()))?;
             for contents in tags(&body, "Contents") {
                 if let Some(key) = tag(&contents, "Key") {
-                    let size = tag(&contents, "Size")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    out.push((key, size));
+                    out.push(Object {
+                        key,
+                        size: tag(&contents, "Size")
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0),
+                        modified: tag(&contents, "LastModified")
+                            .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
+                            .map(|t| t.with_timezone(&chrono::Utc)),
+                    });
                 }
             }
             if tag(&body, "IsTruncated").as_deref() != Some("true") {
@@ -529,6 +542,48 @@ impl S3 {
         }
     }
 
+    /// Replace the bucket's lifecycle rules (test use; the worker never
+    /// changes them).
+    pub async fn put_lifecycle(&self, xml: &str) -> Result<(), S3Error> {
+        let digest = Sha256::digest(xml.as_bytes());
+        let headers = [(
+            "x-amz-checksum-sha256",
+            base64::engine::general_purpose::STANDARD.encode(digest),
+        )];
+        let builder = self
+            .request(
+                reqwest::Method::PUT,
+                "",
+                &[("lifecycle", "")],
+                &headers,
+                &hex::encode(digest),
+            )
+            .body(xml.to_owned());
+        self.send(builder).await.map(|_| ())
+    }
+
+    /// The ID of an enabled lifecycle rule that expires objects under
+    /// `prefix`, if the bucket has one. A rule limited to tagged objects
+    /// never matches: nothing here is tagged.
+    pub async fn expiring_rule(&self, prefix: &str) -> Result<Option<String>, S3Error> {
+        let builder = self.request(
+            reqwest::Method::GET,
+            "",
+            &[("lifecycle", "")],
+            &[],
+            EMPTY_SHA256,
+        );
+        let body = match self.send(builder).await {
+            Ok(response) => response
+                .text()
+                .await
+                .map_err(|e| S3Error::Transport(e.to_string()))?,
+            Err(S3Error::Status { status: 404, .. }) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        Ok(expiring_rule(&body, prefix))
+    }
+
     pub async fn delete(&self, key: &str) -> Result<(), S3Error> {
         let builder = self.request(reqwest::Method::DELETE, key, &[], &[], EMPTY_SHA256);
         match self.send(builder).await {
@@ -536,6 +591,21 @@ impl S3 {
             Err(err) => Err(err),
         }
     }
+}
+
+fn expiring_rule(xml: &str, prefix: &str) -> Option<String> {
+    tags(xml, "Rule").into_iter().find_map(|rule| {
+        let enabled = tag(&rule, "Status").as_deref() == Some("Enabled");
+        let expires =
+            tag(&rule, "Expiration").is_some_and(|e| e.contains("<Days>") || e.contains("<Date>"));
+        let filter = tag(&rule, "Filter").unwrap_or_default();
+        let rule_prefix = tag(&filter, "Prefix")
+            .or_else(|| tag(&rule, "Prefix"))
+            .unwrap_or_default();
+        let overlaps = prefix.starts_with(&rule_prefix) || rule_prefix.starts_with(prefix);
+        (enabled && expires && overlaps && !filter.contains("<Tag>"))
+            .then(|| tag(&rule, "ID").unwrap_or_else(|| "unnamed".into()))
+    })
 }
 
 #[cfg(test)]
@@ -570,6 +640,43 @@ mod tests {
             uploads,
             [("p/x&y".into(), "u1".into()), ("q".into(), "u2".into())]
         );
+    }
+
+    #[test]
+    fn expiring_rules_are_found_by_prefix() {
+        let rule = |id: &str, body: &str| {
+            format!(
+                "<Rule><ID>{id}</ID><Status>Enabled</Status>{body}<Expiration><Days>30</Days></Expiration></Rule>"
+            )
+        };
+        let config = |rules: &[String]| {
+            format!(
+                "<LifecycleConfiguration>{}</LifecycleConfiguration>",
+                rules.concat()
+            )
+        };
+        let whole = config(&[rule("all", "<Filter></Filter>")]);
+        assert_eq!(expiring_rule(&whole, "else/chunks/"), Some("all".into()));
+        let other = config(&[rule("logs", "<Filter><Prefix>logs/</Prefix></Filter>")]);
+        assert_eq!(expiring_rule(&other, "else/chunks/"), None);
+        let ours = config(&[rule("x", "<Filter><Prefix>else/ch</Prefix></Filter>")]);
+        assert_eq!(expiring_rule(&ours, "else/chunks/"), Some("x".into()));
+        let inside = config(&[rule(
+            "y",
+            "<Filter><Prefix>else/chunks/ab</Prefix></Filter>",
+        )]);
+        assert_eq!(expiring_rule(&inside, "else/chunks/"), Some("y".into()));
+        let legacy = config(&[rule("z", "<Prefix></Prefix>")]);
+        assert_eq!(expiring_rule(&legacy, "else/chunks/"), Some("z".into()));
+        let tagged = config(&[rule(
+            "t",
+            "<Filter><And><Prefix>else/</Prefix><Tag><Key>k</Key><Value>v</Value></Tag></And></Filter>",
+        )]);
+        assert_eq!(expiring_rule(&tagged, "else/chunks/"), None);
+        let disabled = whole.replace("Enabled", "Disabled");
+        assert_eq!(expiring_rule(&disabled, "else/chunks/"), None);
+        let abort = "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Filter></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>";
+        assert_eq!(expiring_rule(abort, "else/chunks/"), None);
     }
 
     #[test]

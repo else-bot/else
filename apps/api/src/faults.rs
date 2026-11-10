@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static POINTS: [(&str, AtomicUsize); 8] = [
     ("backup.snapshot", AtomicUsize::new(0)),
     ("backup.before_complete", AtomicUsize::new(0)),
-    ("replication.after_part", AtomicUsize::new(0)),
+    ("replication.after_chunk", AtomicUsize::new(0)),
     ("job.after_insert", AtomicUsize::new(0)),
     ("job.after_launch", AtomicUsize::new(0)),
     ("computer.after_start_decision", AtomicUsize::new(0)),

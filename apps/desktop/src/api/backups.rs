@@ -72,6 +72,7 @@ pub struct BackupRun {
     pub set_id: String,
     pub finished_at: Option<String>,
     pub bytes: Option<u64>,
+    pub uploaded_bytes: Option<u64>,
     pub local_status: String,
     pub remote_status: Option<String>,
     pub error: Option<String>,
