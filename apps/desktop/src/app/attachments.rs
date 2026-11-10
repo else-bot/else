@@ -94,29 +94,27 @@ pub(super) enum UploadState {
 }
 
 impl UploadState {
-    fn begin_upload(&mut self) -> Option<PasteSource> {
+    fn retry(&mut self) -> Option<PasteSource> {
         let source = match self {
-            Self::Preparing { source }
-            | Self::Failed { source, .. }
-            | Self::Unconfirmed { source, .. } => source.clone(),
-            Self::Uploading { .. } | Self::Ready { .. } => return None,
+            Self::Failed { source, .. } | Self::Unconfirmed { source, .. } => source.clone(),
+            Self::Preparing { .. } | Self::Uploading { .. } | Self::Ready { .. } => return None,
         };
-        *self = Self::Uploading {
+        *self = Self::Preparing {
             source: source.clone(),
         };
         Some(source)
     }
 
     fn loaded(&mut self, snapshot: PasteSource) -> bool {
-        let Self::Uploading { source } = self else {
+        if !matches!(self, Self::Preparing { .. }) {
             return false;
-        };
-        *source = snapshot;
+        }
+        *self = Self::Uploading { source: snapshot };
         true
     }
 
     fn fail(&mut self, error: String) -> bool {
-        let Self::Uploading { source } = self else {
+        let Self::Preparing { source } = self else {
             return false;
         };
         *self = Self::Failed {
@@ -239,7 +237,7 @@ pub(super) fn parts(
             }
             UploadState::Unconfirmed { error, .. } => {
                 return Err(format!(
-                    "{} upload is unconfirmed: {error}. Retry the upload.",
+                    "{} upload is unconfirmed. Retry the upload. {error}",
                     file.name
                 ));
             }
@@ -465,12 +463,11 @@ impl ElseApp {
                 break;
             }
             let id = file.id;
-            self.drafts
-                .entry(bot)
-                .or_default()
-                .files
-                .insert(id, DraftFile::preparing(file.name, file.media_type, source));
-            self.upload_file(bot, id, window, cx);
+            self.drafts.entry(bot).or_default().files.insert(
+                id,
+                DraftFile::preparing(file.name, file.media_type, source.clone()),
+            );
+            self.load_and_upload(bot, id, source, window, cx);
         }
         let content = self.composer.read(cx).content();
         if let Some(draft) = self.drafts.get_mut(&bot) {
@@ -484,9 +481,20 @@ impl ElseApp {
         let Some(file) = self.drafts.get_mut(&bot).and_then(|d| d.files.get_mut(&id)) else {
             return;
         };
-        let Some(source) = file.state.begin_upload() else {
+        let Some(source) = file.state.retry() else {
             return;
         };
+        self.load_and_upload(bot, id, source, window, cx);
+    }
+
+    fn load_and_upload(
+        &mut self,
+        bot: Uuid,
+        id: Uuid,
+        source: PasteSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let loaded = cx
@@ -690,12 +698,11 @@ mod tests {
             &file.fallback(),
             &[MessagePart::File { file: file.clone() }],
         );
-        let mut entry = DraftFile::preparing(
+        let entry = DraftFile::preparing(
             file.name.clone(),
             file.media_type.clone(),
             PasteSource::Bytes(std::sync::Arc::new(vec![42])),
         );
-        entry.state.begin_upload().unwrap();
         let mut files = [(file.id, entry)]
             .into_iter()
             .collect::<std::collections::HashMap<_, _>>();
@@ -771,18 +778,18 @@ mod tests {
             source: PasteSource::Bytes(std::sync::Arc::new(vec![42; 42])),
         };
         assert!(!state.complete(Ok(file.clone())));
-        assert!(!state.fail("not started".into()));
-        let source = state.begin_upload().unwrap();
-        assert!(state.begin_upload().is_none());
+        assert!(state.retry().is_none());
         assert!(state.fail("could not read file".into()));
-        let (bytes, snapshot) = state.begin_upload().unwrap().load().unwrap();
-        assert_eq!(source.read().unwrap().as_slice(), bytes.as_slice());
-        assert!(state.loaded(snapshot));
+        let source = state.retry().unwrap();
+        assert!(state.retry().is_none());
+        let (bytes, snapshot) = source.load().unwrap();
+        assert!(state.loaded(snapshot.clone()));
+        assert!(!state.loaded(snapshot));
+        assert!(!state.fail("late load failure".into()));
         assert!(state.complete(Err(crate::api::ClientError::Unauthorized)));
-        assert_eq!(
-            state.begin_upload().unwrap().read().unwrap().as_slice(),
-            bytes.as_slice()
-        );
+        let source = state.retry().unwrap();
+        assert_eq!(source.clone().read().unwrap().as_slice(), bytes.as_slice());
+        assert!(state.loaded(source));
         assert!(state.complete(Err(crate::api::ClientError::Unreachable {
             origin: "http://127.0.0.1:8080".into(),
             cause: "connection closed".into(),
@@ -794,12 +801,11 @@ mod tests {
         assert!(matches!(state, UploadState::Unconfirmed { .. }));
         assert!(parts(&content, &files).unwrap_err().contains("unconfirmed"));
         let state = &mut files.get_mut(&file.id).unwrap().state;
-        assert_eq!(
-            state.begin_upload().unwrap().read().unwrap().as_slice(),
-            bytes.as_slice()
-        );
+        let source = state.retry().unwrap();
+        assert_eq!(source.clone().read().unwrap().as_slice(), bytes.as_slice());
+        assert!(state.loaded(source));
         assert!(state.complete(Ok(file.clone())));
-        assert!(state.begin_upload().is_none());
+        assert!(state.retry().is_none());
         assert!(!state.loaded(PasteSource::Bytes(bytes)));
         assert!(!state.complete(Err(crate::api::ClientError::Unauthorized)));
         assert!(!state.fail("late failure".into()));
