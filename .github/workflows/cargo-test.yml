@@ -3,7 +3,7 @@ name: cargo-test
 on:
   pull_request:
     branches: [main]
-  # Pull requests can only restore caches saved on main.
+  # Caches are saved only on main, where every pull request can restore them.
   push:
     branches: [main]
   workflow_dispatch:
@@ -97,7 +97,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build workspace tests
         run: cargo nextest run --workspace --locked --no-run
-      # Nextest runs every test binary at once; cargo test runs them one by one.
+      # Nextest runs tests from every binary in parallel; cargo test runs binaries one by one.
       - name: Run workspace tests
         run: cargo nextest run --workspace --locked --no-fail-fast
       - name: Run doc tests

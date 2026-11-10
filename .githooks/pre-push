@@ -3,7 +3,7 @@ set -eu
 for variable in $(git rev-parse --local-env-vars); do
 	unset "$variable"
 done
-# Nextest runs every test binary at once; cargo test runs them one by one.
+# Nextest runs tests from every binary in parallel; cargo test runs binaries one by one.
 if command -v cargo-nextest >/dev/null 2>&1; then
 	cargo nextest run --workspace --locked
 	exec cargo test --workspace --locked --doc
