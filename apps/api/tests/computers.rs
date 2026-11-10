@@ -1315,6 +1315,66 @@ async fn a_failed_desktop_startup_is_not_reported_ready() {
     assert_eq!(starts, 3, "each use retries until the desktop starts");
 }
 
+/// An owner or viewer request refused because the desktop did not start
+/// holds no lease, so it neither blocks the bot's input as an open owner
+/// session nor keeps the computer awake; both work once the desktop starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_desktop_request_refused_at_startup_holds_no_lease() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let dir = tempfile::tempdir().unwrap();
+    let desktop = ComputerConfig {
+        desktop: true,
+        state_dir: dir.path().to_owned(),
+        ..config(2)
+    };
+    let manager = manager(&app, &fake, desktop).await;
+    let bot: Uuid = app.create_bot("Blank").await.parse().unwrap();
+    ready(&manager, bot, "test:screen").await;
+    let held = |holder: String| {
+        let pool = app.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM computer_leases
+                 WHERE bot_id = ?1 AND holder = ?2 AND released_at IS NULL",
+            )
+            .bind(bot)
+            .bind(holder)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    fake.fail_desktop.store(true, SeqCst);
+    assert!(manager.desktop(bot).await.unwrap().is_err());
+    assert_eq!(held(format!("desktop:{bot}")).await, 0, "owner lease");
+    let viewer = manager.viewer(bot, "stream:test", true).await.unwrap();
+    assert!(viewer.is_err(), "{viewer:?}");
+    assert_eq!(held("stream:test".into()).await, 0, "viewer lease");
+
+    fake.fail_desktop.store(false, SeqCst);
+    let input = manager
+        .run_input(
+            bot,
+            "test:screen",
+            "true",
+            Duration::from_secs(1),
+            &else_api::db::task_secrets::Env::default(),
+        )
+        .await;
+    assert!(matches!(input, Ok(Ok(_))), "{input:?}");
+    assert!(manager.desktop(bot).await.unwrap().is_ok());
+    assert!(
+        manager
+            .viewer(bot, "stream:test", true)
+            .await
+            .unwrap()
+            .is_ok()
+    );
+}
+
 /// A computer that grew is counted at its maximum until a reset of its boot
 /// size succeeds: through a failed stop, and on a restart whose reset failed,
 /// which waits for room for its maximum.

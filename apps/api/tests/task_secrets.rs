@@ -29,6 +29,7 @@ struct Guest {
     killed: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>,
     started: tokio::sync::Notify,
     stalled: Mutex<Vec<String>>,
+    fail_desktop: std::sync::atomic::AtomicBool,
 }
 
 impl Guest {
@@ -126,6 +127,16 @@ impl ComputerRuntime for Guest {
         });
         let at = args.iter().position(|a| *a == "-c").map_or(0, |i| i + 1);
         let script = args.get(at).copied().unwrap_or_default();
+        if script == else_api::computers::GUEST_DESKTOP
+            && self.fail_desktop.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(ExecOutput {
+                status: Some(1),
+                stdout: String::new(),
+                stderr: "Xvfb did not start".into(),
+                truncated: false,
+            });
+        }
         let stdout = if script.contains("wait $pg; c=$?") {
             if args.get(at + 2).is_some_and(|c| c.contains("HANG")) {
                 self.started.notify_one();
@@ -692,6 +703,44 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
             .all(|Exec { args, .. }| args.iter().all(|a| !a.contains("should-not-run"))),
         "the queued command never reached the guest"
     );
+}
+
+/// While the desktop fails to start, shell commands that name the browser
+/// still run, so the bot can diagnose and repair it; screen tools refuse
+/// with the startup error and say how to inspect it.
+#[tokio::test(flavor = "multi_thread")]
+async fn shell_commands_run_while_the_desktop_fails_to_start() {
+    let Setup { app, guest, .. } = setup().await;
+    let bot = app.create_bot("Fixer").await;
+    let (_, token) = grant(&app, &bot).await;
+    guest
+        .fail_desktop
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let ran = tool(
+        &app,
+        &token,
+        "computer_run",
+        json!({ "command": "pgrep -af chromium", "effect": "local" }),
+    )
+    .await;
+    assert_eq!(ran["exit_code"], 0, "{ran}");
+    let job = tool(
+        &app,
+        &token,
+        "computer_job_start",
+        json!({ "command": "chromium --version", "effect": "local" }),
+    )
+    .await;
+    assert!(job["job_id"].is_string(), "{job}");
+
+    let shot = tool(&app, &token, "computer_screenshot", json!({})).await;
+    let error = shot["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("Xvfb did not start") && error.contains("computer_run"),
+        "{shot}"
+    );
+    assert!(!error.contains("Try again shortly"), "{shot}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
