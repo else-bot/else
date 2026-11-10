@@ -1,4 +1,4 @@
-use super::reply::{Author, MessageReference};
+use super::reply::{Author, MessageReference, Quote};
 use super::{Connection, ElseApp, RowKey};
 use crate::model::{Reaction, ReactionKind};
 use gpui_kit::assets::IconName;
@@ -154,19 +154,7 @@ impl ElseApp {
         let Some(reference) = self.reference(bot, item) else {
             return;
         };
-        self.drafts.entry(bot).or_default().reply_to = Some(reference);
-        self.composer.read(cx).focus_handle(cx).focus(window, cx);
-        cx.notify();
-    }
-
-    pub(super) fn dismiss_reply(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(draft) = self.drafts.get_mut(&bot) {
-            draft.reply_to = None;
-        }
-        if self.selected == Some(bot) {
-            self.composer.read(cx).focus_handle(cx).focus(window, cx);
-        }
-        cx.notify();
+        self.add_quote(bot, Quote::new(reference, None), window, cx);
     }
 
     fn react(

@@ -1,12 +1,14 @@
 use super::bot_mention::{BotMention, MentionDisplay, MentionPlugin, MentionRegistry};
 use super::images::{MessageImages, UnavailableImage, without_images};
 use super::link_target::LinkTarget;
-use super::reply::{Author, QuotedReply};
+use super::reply::{Author, Passage, QuotedReply};
 use super::{ElseApp, RowKey};
 use crate::attachments::{Attachment, MessagePart, file_id, file_size, input_content};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::FocusableExt;
-use gpui_kit::base::text::{MarkdownExtensions, TextView, TextViewStyle};
+use gpui_kit::base::text::{
+    MarkdownExtensions, RangeHighlight, RenderedText, TextView, TextViewStyle,
+};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::InputContent;
 use gpui_kit::component::input::{Textarea, TextareaState};
@@ -15,6 +17,7 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, WindowExt, h_flex};
 use gpui_kit::*;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -73,6 +76,60 @@ impl RowFormat {
             Vec::new()
         }
     }
+
+    /// Display edits that fold each quoted passage of a multi-passage reply
+    /// into one linked line, with the line breaks to keep around them.
+    /// Mentions inside the folded quotes are dropped.
+    fn passages(
+        self,
+        source: &str,
+        mentions: &mut Vec<BotMention>,
+    ) -> (Vec<(Range<usize>, String)>, Vec<usize>) {
+        let breaks = self.hard_breaks(source);
+        let Some((header, passages)) = (self == Self::OwnerMarkdown)
+            .then(|| Passage::parse_all(source))
+            .flatten()
+        else {
+            return (Vec::new(), breaks);
+        };
+        let mut edits = vec![(header, String::new())];
+        edits.extend(passages.iter().enumerate().map(|(ix, passage)| {
+            let mut excerpt: String = passage.excerpt().chars().take(PASSAGE_EXCERPT).collect();
+            if excerpt.len() < passage.excerpt().len() {
+                excerpt.push('…');
+            }
+            (
+                passage.block.clone(),
+                format!(
+                    "> **{}** · [{}]({QUOTE_LINK}{})",
+                    ix + 1,
+                    escape_markdown(&excerpt),
+                    ix + 1
+                ),
+            )
+        }));
+        let folded = |at: usize| {
+            edits
+                .iter()
+                .any(|(range, _)| range.start <= at && at <= range.end)
+        };
+        mentions.retain(|mention| !folded(mention.range.start) && !folded(mention.range.end));
+        let breaks = breaks.into_iter().filter(|at| !folded(*at)).collect();
+        (edits, breaks)
+    }
+}
+
+const PASSAGE_EXCERPT: usize = 110;
+
+fn escape_markdown(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            c.is_ascii_punctuation()
+                .then_some('\\')
+                .into_iter()
+                .chain([c])
+        })
+        .collect()
 }
 
 pub(super) struct RowSource {
@@ -111,6 +168,8 @@ impl RowSource {
 
 pub(super) struct RowText {
     source: String,
+    /// The highlights last painted, and the rendered text they fit.
+    painted: Option<(RenderedText, Vec<Range<usize>>)>,
     mentions: Vec<BotMention>,
     bots: Arc<MentionRegistry>,
     display: MentionDisplay,
@@ -162,13 +221,14 @@ impl RowText {
         let (visible, visible_parts) = without_images(&body.text, &body.parts);
         let format = body.format;
         let mut mentions = format.mentions(&visible, bots);
+        let (passages, breaks) = format.passages(&visible, &mut mentions);
         let content = plain_content(&visible, &visible_parts, &mut mentions);
         let files = file_map(&parts);
         let display = MentionDisplay::new(
             &visible,
             &mentions,
-            &file_links(&content, &files),
-            &format.hard_breaks(&visible),
+            &[file_links(&content, &files), passages].concat(),
+            &breaks,
         );
         let widget = match format {
             RowFormat::Plain | RowFormat::Quoted { .. } => Widget::Plain(cx.new(|cx| {
@@ -190,6 +250,10 @@ impl RowText {
                     if current != Some(&state) {
                         return;
                     }
+                    app.paint_row_quotes(key, cx);
+                    let Some(view) = app.view.as_ref() else {
+                        return;
+                    };
                     if let Some(ix) = view.row_index(key) {
                         view.list.remeasure_items(ix..ix + 1);
                         app.check_reading(window, cx);
@@ -205,6 +269,7 @@ impl RowText {
             ElseApp::message_visuals(client, key, bot, &parts, window, cx);
         Self {
             source,
+            painted: None,
             mentions,
             bots: bots.clone(),
             display,
@@ -256,6 +321,55 @@ impl RowText {
         }
     }
 
+    /// The selected text and its range in the rendered text, when the
+    /// selection lies in this row's Markdown.
+    pub(super) fn selection(&self, cx: &App) -> Option<(String, Option<Range<usize>>)> {
+        let Widget::Markdown { state, .. } = &self.widget else {
+            return None;
+        };
+        let state = state.read(cx);
+        let text = state.selected_text();
+        if text.trim().is_empty() {
+            return None;
+        }
+        let range = state
+            .selected_source_range()
+            .and_then(|source| state.rendered_text().range_for_source(source));
+        Some((text, range))
+    }
+
+    /// Highlights `ranges` of the rendered text. Ranges that do not fit,
+    /// as before the Markdown has parsed, are tried again on the next call.
+    pub(super) fn highlight(&mut self, ranges: Vec<Range<usize>>, color: Hsla, cx: &mut App) {
+        let Widget::Markdown { state, .. } = &self.widget else {
+            return;
+        };
+        let rendered = state.read(cx).rendered_text();
+        if self
+            .painted
+            .as_ref()
+            .is_some_and(|(text, painted)| *text == rendered && *painted == ranges)
+        {
+            return;
+        }
+        let painted = state.update(cx, |state, cx| {
+            let painted = ranges.is_empty()
+                || state
+                    .set_range_highlights(
+                        ranges
+                            .iter()
+                            .map(|range| RangeHighlight::new(range.clone(), color)),
+                        cx,
+                    )
+                    .is_ok();
+            if ranges.is_empty() || !painted {
+                state.clear_range_highlights(cx);
+            }
+            painted
+        });
+        self.painted = painted.then_some((rendered, ranges));
+    }
+
     pub(super) fn copy_text(&self, cx: &App) -> String {
         let selected = match &self.widget {
             Widget::Plain(state) => state.read(cx).selected_value().to_string(),
@@ -298,6 +412,7 @@ impl RowText {
         self.visuals
             .update(cx, |visuals, cx| visuals.sync(&parts, cx));
         let mut mentions = self.format.mentions(&visible, bots);
+        let (passages, breaks) = self.format.passages(&visible, &mut mentions);
         self.bots = bots.clone();
         let content = plain_content(&visible, &visible_parts, &mut mentions);
         if self.source == source
@@ -311,8 +426,8 @@ impl RowText {
         let display = MentionDisplay::new(
             &visible,
             &mentions,
-            &file_links(&content, &files),
-            &self.format.hard_breaks(&visible),
+            &[file_links(&content, &files), passages].concat(),
+            &breaks,
         );
         match &self.widget {
             Widget::Plain(state) => {
@@ -340,6 +455,10 @@ impl RowText {
         let owner = self.owner.clone();
         let link_owner = owner.clone();
         let bot = self.bot;
+        let key = self.key;
+        let passages = Passage::parse_all(&self.source)
+            .map(|(_, passages)| passages)
+            .unwrap_or_default();
         let body = match &self.widget {
             Widget::Plain(state) => Textarea::new(state)
                 .readonly(true)
@@ -429,7 +548,19 @@ impl RowText {
                     if !activates_link(event) {
                         return;
                     }
-                    if let Some(file) = linked_file(url).and_then(|id| link_files.get(&id)) {
+                    if let Some(passage) = quoted_passage(url).and_then(|n| passages.get(n)) {
+                        let passage = passage.clone();
+                        let _ = link_owner.update(cx, |app, cx| {
+                            app.reveal_quoted(
+                                bot,
+                                key,
+                                passage.author,
+                                &passage.original,
+                                window,
+                                cx,
+                            )
+                        });
+                    } else if let Some(file) = linked_file(url).and_then(|id| link_files.get(&id)) {
                         let file = file.clone();
                         let _ = link_owner
                             .update(cx, |app, cx| app.preview_attachment(bot, file, window, cx));
@@ -438,10 +569,14 @@ impl RowText {
                     }
                 })
                 .link_tooltip(move |url, window, cx| {
-                    let destination = match linked_file(url).and_then(|id| tooltip_files.get(&id)) {
-                        Some(file) => format!("{} · {}", file.name, file_size(file.size)),
-                        None => LinkTarget::parse(url)
-                            .map_or_else(|| url.to_string(), |target| target.destination()),
+                    let destination = if quoted_passage(url).is_some() {
+                        "Go to the original message".to_owned()
+                    } else {
+                        match linked_file(url).and_then(|id| tooltip_files.get(&id)) {
+                            Some(file) => format!("{} · {}", file.name, file_size(file.size)),
+                            None => LinkTarget::parse(url)
+                                .map_or_else(|| url.to_string(), |target| target.destination()),
+                        }
                     };
                     Tooltip::element(move |_, _| div().max_w(rems(32.)).child(destination.clone()))
                         .build(window, cx)
@@ -544,6 +679,15 @@ fn file_map(parts: &[MessagePart]) -> HashMap<Uuid, Attachment> {
 }
 
 const FILE_LINK: &str = "else-file:";
+const QUOTE_LINK: &str = "else-quote:";
+
+/// The index of the passage a folded quote links to.
+fn quoted_passage(url: &str) -> Option<usize> {
+    url.strip_prefix(QUOTE_LINK)?
+        .parse::<usize>()
+        .ok()?
+        .checked_sub(1)
+}
 
 /// Files as Markdown links, since a Markdown row cannot show file chips.
 fn file_links(
@@ -636,10 +780,45 @@ mod tests {
     use crate::api::Bot;
     use crate::app::bot_mention::MentionDisplay;
     use crate::app::bot_mention::{BotMention, MentionRegistry};
-    use crate::app::reply::{Author, Draft, MessageReference};
+    use crate::app::reply::{Author, Draft, MessageReference, Quote};
     use crate::attachments::{Attachment, MessagePart, file_id};
     use gpui_kit::component::input::InputContent;
     use uuid::Uuid;
+
+    #[test]
+    fn a_multi_passage_reply_folds_each_quote_into_one_linked_line() {
+        let quote = |text: &str, comment: &str| Quote {
+            comment: comment.to_owned(),
+            ..Quote::new(
+                MessageReference {
+                    item: Uuid::nil(),
+                    author: Author::Bot,
+                    text: text.to_owned(),
+                },
+                None,
+            )
+        };
+        let long = "word ".repeat(60);
+        let text = Draft {
+            content: InputContent::new("Then ship it.\nThanks"),
+            quotes: vec![quote(&long, "Too long."), quote("Use *tabs*.\nAlways.", "")],
+            ..Draft::default()
+        }
+        .message()
+        .unwrap();
+        assert_eq!(RowFormat::for_owner(&text, &[]), RowFormat::OwnerMarkdown);
+        let (edits, breaks) = RowFormat::OwnerMarkdown.passages(&text, &mut Vec::new());
+        let display = MentionDisplay::new(&text, &[], &edits, &breaks);
+        let first = display.text.lines().next().unwrap();
+        assert!(first.starts_with("> **1** · [word word"));
+        assert!(first.ends_with("…](else-quote:1)"));
+        assert!(display.text.contains(
+            "\n\nToo long.\n\n> **2** · [Use \\*tabs\\*\\. Always\\.](else-quote:2)\n\n---"
+        ));
+        assert!(display.text.ends_with("Then ship it.  \nThanks"));
+        assert_eq!(super::quoted_passage("else-quote:2"), Some(1));
+        assert_eq!(super::quoted_passage("else-quote:0"), None);
+    }
 
     #[test]
     fn owner_messages_render_markdown_unless_they_carry_file_chips() {
@@ -689,10 +868,10 @@ mod tests {
         for author in [Author::Owner, Author::Bot] {
             let draft = Draft {
                 content: InputContent::new("You can already mark it as always approved."),
-                reply_to: Some(MessageReference {
+                quotes: vec![Quote::new(MessageReference {
                     item: Uuid::nil(), author,
                     text: "Created the routine for **04:00 Europe/Paris**.\n\nPreserve `main`.\n> An earlier quote.".into(),
-                }),
+                }, None)],
                 ..Draft::default()
             };
             let text = draft.message().unwrap();
@@ -782,11 +961,14 @@ mod tests {
         let body = format!("{lead}{}", file.fallback());
         let message = Draft {
             content: InputContent::new(body.clone()),
-            reply_to: Some(MessageReference {
-                item: Uuid::nil(),
-                author: Author::Bot,
-                text: "**Résumé**\n\nPreserve `main`.".into(),
-            }),
+            quotes: vec![Quote::new(
+                MessageReference {
+                    item: Uuid::nil(),
+                    author: Author::Bot,
+                    text: "**Résumé**\n\nPreserve `main`.".into(),
+                },
+                None,
+            )],
             ..Draft::default()
         }
         .message()

@@ -2,6 +2,7 @@ use super::attachments::DraftFile;
 use crate::model::ReactionKind;
 use gpui_kit::component::input::InputContent;
 use std::collections::HashMap;
+use std::ops::Range;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +30,11 @@ pub(super) struct MessageReference {
 
 impl MessageReference {
     fn subject(&self) -> &'static str {
-        match self.author {
+        Self::subject_of(self.author)
+    }
+
+    fn subject_of(author: Author) -> &'static str {
+        match author {
             Author::Owner => "my earlier message",
             Author::Bot => "your earlier message",
         }
@@ -51,11 +56,37 @@ impl MessageReference {
     }
 }
 
+/// A passage of an earlier message the owner is answering, with what they
+/// want to say about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Quote {
+    pub(super) id: Uuid,
+    pub(super) source: MessageReference,
+    /// The quoted span in the source row's rendered text, for highlighting.
+    pub(super) highlight: Option<Range<usize>>,
+    pub(super) comment: String,
+}
+
+impl Quote {
+    pub(super) fn new(source: MessageReference, highlight: Option<Range<usize>>) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            source,
+            highlight,
+            comment: String::new(),
+        }
+    }
+
+    pub(super) fn excerpt(&self) -> String {
+        flatten(&self.source.text)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct Draft {
     pub(super) content: InputContent,
     pub(super) files: HashMap<Uuid, DraftFile>,
-    pub(super) reply_to: Option<MessageReference>,
+    pub(super) quotes: Vec<Quote>,
 }
 
 impl Default for Draft {
@@ -63,26 +94,177 @@ impl Default for Draft {
         Self {
             content: InputContent::new(""),
             files: HashMap::new(),
-            reply_to: None,
+            quotes: Vec::new(),
         }
     }
 }
 
 impl Draft {
+    /// The text to send, which always ends with the composer's own text so
+    /// file parts can be laid after the quoted prefix.
     pub(super) fn message(&self) -> Option<String> {
-        if self.content.text().trim().is_empty() {
-            return None;
+        let note = self.content.text();
+        let has_note = !note.trim().is_empty();
+        match self.quotes.as_slice() {
+            [] => has_note.then(|| note.to_string()),
+            [quote] => {
+                let comment = quote.comment.trim();
+                let body = match (comment.is_empty(), has_note) {
+                    (true, false) => return None,
+                    (true, true) => note.to_string(),
+                    (false, false) => comment.to_owned(),
+                    (false, true) => format!("{comment}\n\n{note}"),
+                };
+                Some(format!(
+                    "Replying to {}:\n{}\n\n{body}",
+                    quote.source.subject(),
+                    quote.source.quote()
+                ))
+            }
+            quotes => {
+                if !has_note && quotes.iter().all(|q| q.comment.trim().is_empty()) {
+                    return None;
+                }
+                let mut message = format!("Replying to {} passages:", quotes.len());
+                for (ix, quote) in quotes.iter().enumerate() {
+                    message.push_str(&format!(
+                        "\n\n[{}] From {}:\n{}",
+                        ix + 1,
+                        quote.source.subject(),
+                        quote.source.quote()
+                    ));
+                    let comment = quote.comment.trim();
+                    if !comment.is_empty() {
+                        message.push_str("\n\n");
+                        message.push_str(comment);
+                    }
+                }
+                if has_note {
+                    message.push_str("\n\n---\n\n");
+                    message.push_str(note);
+                }
+                Some(message)
+            }
         }
-        Some(match &self.reply_to {
-            None => self.content.text().to_string(),
-            Some(reference) => format!(
-                "Replying to {}:\n{}\n\n{}",
-                reference.subject(),
-                reference.quote(),
-                self.content.text()
-            ),
-        })
     }
+}
+
+pub(super) fn flatten(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// One quoted passage of a sent multi-passage reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Passage {
+    pub author: Author,
+    /// The header line through the last quoted line.
+    pub block: Range<usize>,
+    pub original: String,
+}
+
+impl Passage {
+    /// Every quoted passage of a sent reply, with the span before the first
+    /// one (the "Replying to N passages:" line and its blank line), or `None`
+    /// for any other message.
+    pub(super) fn parse_all(message: &str) -> Option<(Range<usize>, Vec<Self>)> {
+        let first = message.split_once('\n').map_or(message, |(line, _)| line);
+        let count: usize = first
+            .strip_prefix("Replying to ")?
+            .strip_suffix(" passages:")?
+            .parse()
+            .ok()
+            // Each passage takes several bytes, so a larger count is not one.
+            .filter(|count| (2..=message.len()).contains(count))?;
+        let mut passages = Vec::new();
+        let mut at = first.len();
+        for number in 1..=count {
+            let mut header = None;
+            for author in [Author::Bot, Author::Owner] {
+                let line = format!(
+                    "\n\n[{number}] From {}:\n",
+                    MessageReference::subject_of(author)
+                );
+                if let Some(offset) = message[at..].find(&line) {
+                    header = header.filter(|(earlier, _, _)| *earlier < offset).or(Some((
+                        offset,
+                        line.len(),
+                        author,
+                    )));
+                }
+            }
+            let (offset, len, author) = header.filter(|(offset, ..)| number > 1 || *offset == 0)?;
+            let start = at + offset + 2;
+            let mut end = at + offset + len;
+            let mut original = Vec::new();
+            for line in message[end..].split('\n') {
+                let Some(quoted) = line.strip_prefix('>') else {
+                    break;
+                };
+                original.push(quoted.strip_prefix(' ').unwrap_or(quoted));
+                end += line.len() + 1;
+            }
+            if original.is_empty() {
+                return None;
+            }
+            end = end.min(message.len());
+            if message.as_bytes()[end - 1] == b'\n' {
+                end -= 1;
+            }
+            passages.push(Self {
+                author,
+                block: start..end,
+                original: original.join("\n"),
+            });
+            at = end;
+        }
+        Some((0..passages[0].block.start, passages))
+    }
+
+    pub(super) fn excerpt(&self) -> String {
+        flatten(&self.original)
+    }
+}
+
+/// Whether `original` is all of `text`, an earlier message.
+pub(super) fn quotes_whole(text: &str, original: &str) -> bool {
+    text.trim_end().lines().eq(original.lines())
+}
+
+/// Whether `text`, an earlier message, shows `original`, a part of it as the
+/// owner selected it on screen: without Markdown, ignoring spacing and
+/// punctuation.
+pub(super) fn quotes_part(text: &str, original: &str) -> bool {
+    fn letters(text: &str) -> String {
+        text.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+    let needle = letters(original);
+    !needle.is_empty() && letters(&rendered(text)).contains(&needle)
+}
+
+/// The text a Markdown message shows, without link destinations or markup.
+fn rendered(text: &str) -> String {
+    fn visit(node: &markdown::mdast::Node, out: &mut String) {
+        use markdown::mdast::Node;
+        match node {
+            Node::Text(t) => out.push_str(&t.value),
+            Node::InlineCode(c) => out.push_str(&c.value),
+            Node::Code(c) => out.push_str(&c.value),
+            _ => {}
+        }
+        for child in node.children().into_iter().flatten() {
+            visit(child, out);
+        }
+        out.push(' ');
+    }
+    let Ok(root) = markdown::to_mdast(text, &markdown::ParseOptions::gfm()) else {
+        return text.to_owned();
+    };
+    let mut out = String::new();
+    visit(&root, &mut out);
+    out
 }
 
 pub(super) struct QuotedReply<'a> {
@@ -127,13 +309,15 @@ impl<'a> QuotedReply<'a> {
     }
 
     pub(super) fn excerpt(&self) -> String {
-        self.quote
-            .lines()
-            .skip(1)
-            .filter_map(|line| line.strip_prefix('>'))
-            .flat_map(str::split_whitespace)
-            .collect::<Vec<_>>()
-            .join(" ")
+        flatten(
+            &self
+                .quote
+                .lines()
+                .skip(1)
+                .filter_map(|line| line.strip_prefix('>'))
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
     }
 }
 
@@ -191,8 +375,121 @@ mod tests {
         Draft {
             content: InputContent::new(text.to_owned()),
             files: HashMap::new(),
-            reply_to,
+            quotes: reply_to.map(|r| Quote::new(r, None)).into_iter().collect(),
         }
+    }
+
+    fn passages(note: &str, quotes: &[(Author, &str, &str)]) -> Draft {
+        Draft {
+            content: InputContent::new(note.to_owned()),
+            files: HashMap::new(),
+            quotes: quotes
+                .iter()
+                .map(|(author, text, comment)| Quote {
+                    comment: (*comment).to_owned(),
+                    ..Quote::new(reference(*author, text), None)
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn one_commented_passage_is_sent_as_a_plain_reply() {
+        let message = passages("", &[(Author::Bot, "run it first", "On dev.")])
+            .message()
+            .unwrap();
+        assert_eq!(
+            message,
+            "Replying to your earlier message:\n> run it first\n\nOn dev."
+        );
+        assert_eq!(QuotedReply::parse(&message).unwrap().body, "On dev.");
+        let both = passages("Thanks", &[(Author::Bot, "run it first", "On dev.")])
+            .message()
+            .unwrap();
+        assert!(both.ends_with("\n\nOn dev.\n\nThanks"));
+    }
+
+    #[test]
+    fn several_passages_number_each_quote_and_end_with_the_note() {
+        let draft = passages(
+            "Ship it after.",
+            &[
+                (
+                    Author::Bot,
+                    "Hide internal rows.\nKeep counts.",
+                    "Only on hover.",
+                ),
+                (Author::Owner, "Use tabs.", ""),
+            ],
+        );
+        let message = draft.message().unwrap();
+        assert_eq!(
+            message,
+            "Replying to 2 passages:\n\n\
+             [1] From your earlier message:\n\
+             > Hide internal rows.\n\
+             > Keep counts.\n\n\
+             Only on hover.\n\n\
+             [2] From my earlier message:\n\
+             > Use tabs.\n\n\
+             ---\n\n\
+             Ship it after."
+        );
+        let (header, found) = Passage::parse_all(&message).unwrap();
+        assert_eq!(&message[header], "Replying to 2 passages:\n\n");
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].author, Author::Bot);
+        assert_eq!(found[0].original, "Hide internal rows.\nKeep counts.");
+        assert_eq!(
+            &message[found[0].block.clone()],
+            "[1] From your earlier message:\n> Hide internal rows.\n> Keep counts."
+        );
+        assert_eq!(found[1].author, Author::Owner);
+        assert_eq!(
+            &message[found[1].block.clone()],
+            "[2] From my earlier message:\n> Use tabs."
+        );
+    }
+
+    #[test]
+    fn several_passages_need_a_comment_or_a_note() {
+        let bare = [(Author::Bot, "a", ""), (Author::Bot, "b", "")];
+        assert_eq!(passages(" ", &bare).message(), None);
+        assert!(passages("why?", &bare).message().is_some());
+        assert_eq!(passages("", &[(Author::Bot, "a", "  ")]).message(), None);
+    }
+
+    #[test]
+    fn a_passage_reply_that_ends_on_a_quote_still_parses() {
+        let message = passages("", &[(Author::Bot, "a", "x"), (Author::Bot, "b", "")])
+            .message()
+            .unwrap();
+        let (_, found) = Passage::parse_all(&message).unwrap();
+        assert_eq!(
+            &message[found[1].block.clone()],
+            "[2] From your earlier message:\n> b"
+        );
+        assert!(
+            Passage::parse_all("Replying to 2 passages:\n\n[1] From your earlier message:\n> a")
+                .is_none()
+        );
+        assert!(Passage::parse_all("Replying to your earlier message:\n> a\n\nb").is_none());
+        let shifted = message.replacen("passages:\n\n", "passages:\n🥔\n\n", 1);
+        assert!(Passage::parse_all(&shifted).is_none());
+        let huge = message.replacen("2 passages", &format!("{} passages", usize::MAX), 1);
+        assert!(Passage::parse_all(&huge).is_none());
+    }
+
+    #[test]
+    fn a_quote_matches_its_message_without_markdown_or_line_breaks() {
+        let message = "Plan:\n\n- **Hide** the rows,\n  then count them.";
+        assert!(quotes_part(message, "Hide the rows, then count"));
+        assert!(quotes_whole(message, message));
+        assert!(!quotes_whole("Not done.", "Done."));
+        assert!(!quotes_part(message, "Show the rows"));
+        assert!(!quotes_part(message, "…"));
+        let linked = "Click [settings](https://example.com) to continue.";
+        assert!(quotes_part(linked, "Click settings to continue."));
     }
 
     #[test]
