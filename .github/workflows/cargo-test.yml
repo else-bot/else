@@ -37,9 +37,13 @@ jobs:
       - name: Test migration numbering check
         run: python3 scripts/test-migrations.py
       - name: Install build dependencies
+        timeout-minutes: 10
+        # Fail a stalled mirror fast and retry instead of hanging until the job limit.
+        env:
+          APT_OPTIONS: -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get $APT_OPTIONS update
+          sudo apt-get $APT_OPTIONS install -y --no-install-recommends \
             build-essential pkg-config sqlite3 libssl-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev \
             libx11-xcb-dev libx11-dev libfontconfig-dev libfreetype-dev libvulkan1 libzstd-dev
@@ -90,9 +94,13 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
       - name: Install build dependencies
+        timeout-minutes: 10
+        # Fail a stalled mirror fast and retry instead of hanging until the job limit.
+        env:
+          APT_OPTIONS: -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get $APT_OPTIONS update
+          sudo apt-get $APT_OPTIONS install -y --no-install-recommends \
             build-essential pkg-config sqlite3 libssl-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev \
             libx11-xcb-dev libx11-dev libfontconfig-dev libfreetype-dev libvulkan1 libzstd-dev
