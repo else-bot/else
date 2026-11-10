@@ -1047,6 +1047,23 @@ impl Conversation {
             })
     }
 
+    /// Turns that ran a task another bot sent. The sender's chat shows their
+    /// replies, so this chat keeps only the exchange row.
+    pub fn delegated_turns(&self) -> std::collections::HashSet<Uuid> {
+        self.items()
+            .filter(|item| item.bot_task.is_some())
+            .map(|item| item.turn_id)
+            .collect()
+    }
+
+    /// The latest reply to the task whose receipt is `task`.
+    pub fn task_answer(&self, task: &Item) -> Option<&Item> {
+        task.bot_task.as_ref()?;
+        self.items()
+            .rev()
+            .find(|item| item.turn_id == task.turn_id && item.kind == "assistant")
+    }
+
     pub fn is_feedback_acknowledgement(&self, item: &Item) -> bool {
         item.kind == "assistant"
             && self.reaction_in(item.turn_id).is_some()

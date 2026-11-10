@@ -1,7 +1,7 @@
 //! A bot-to-bot exchange read as a chat: the open conversation's bot on the
 //! right, the bots it talked to on the left, one bubble per message. A reply
 //! carries the task it answers, so the task shows as this bot's bubble just
-//! before the reply.
+//! before the reply. A task this bot received is followed by its own reply.
 
 use super::{ElseApp, RowKey};
 use crate::avatar::bot_avatar;
@@ -49,6 +49,19 @@ pub(super) fn bubbles(items: &[&Item], me: Uuid, my_name: &str) -> Vec<Bubble> {
                 at: item.created_at,
                 mine: task.sender_bot_id == me,
                 body: if task.prompt.trim().is_empty() {
+                    Body::Empty
+                } else {
+                    Body::Item(item.id)
+                },
+            });
+        } else if item.kind == "assistant" {
+            bubbles.push(Bubble {
+                sender: me,
+                name: my_name.to_owned(),
+                kind: "Reply",
+                at: item.created_at,
+                mine: true,
+                body: if item.text.trim().is_empty() {
                     Body::Empty
                 } else {
                     Body::Item(item.id)
@@ -149,6 +162,8 @@ impl ElseApp {
             .items
             .iter()
             .filter_map(|id| conversation.item(*id))
+            .flat_map(|item| [Some(item), conversation.task_answer(item)])
+            .flatten()
             .collect();
         let me = view.bot_id;
         let name = self
@@ -310,6 +325,34 @@ mod tests {
         );
         assert_eq!(bubbles[1].body, Body::Item(reply.id));
         assert_eq!(bubbles[2].body, Body::Item(task.id));
+    }
+
+    #[test]
+    fn a_received_task_reads_as_the_senders_task_then_this_bots_answer() {
+        let me = Uuid::from_u128(1);
+        let task = item(
+            10,
+            json!({"kind": "status", "bot_task": {
+                "sender_bot_id": Uuid::from_u128(2), "sender_name": "Proliquid",
+                "prompt": "List your routines."
+            }}),
+        );
+        let answer = item(
+            11,
+            json!({"kind": "assistant", "text": "Release has no routines."}),
+        );
+        let bubbles = bubbles(&[&task, &answer], me, "Release");
+        let shape: Vec<_> = bubbles
+            .iter()
+            .map(|b| (b.name.as_str(), b.kind, b.mine, &b.body))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("Proliquid", "Task", false, &Body::Item(task.id)),
+                ("Release", "Reply", true, &Body::Item(answer.id)),
+            ]
+        );
     }
 
     #[test]

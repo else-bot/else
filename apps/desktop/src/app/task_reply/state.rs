@@ -86,10 +86,11 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
         .collect();
     let mut task_turns = HashSet::new();
     let mut notice_turns = HashSet::new();
+    let delegated = conversation.delegated_turns();
     let mut replies: HashMap<_, _> = conversation
         .turns_in_order()
         .into_iter()
-        .filter(|turn| conversation.reaction_in(turn.id).is_none())
+        .filter(|turn| conversation.reaction_in(turn.id).is_none() && !delegated.contains(&turn.id))
         .filter_map(|turn| {
             let state = match turn.status.as_str() {
                 "queued" => ReplyState::Queued,
@@ -375,23 +376,47 @@ mod tests {
             );
             assert!(task_replies(&c).contains_key(&id(10)), "{field} stays rich");
         }
-        for (field, value) in [
-            (
-                "bot_task",
-                json!({"sender_bot_id": id(20), "sender_name": "Researcher", "prompt": "Find a source"}),
-            ),
-            (
-                "bot_reply",
-                json!({"sender_bot_id": id(20), "sender_name": "Researcher", "prompt": "Find a source", "status": "completed"}),
-            ),
-        ] {
-            let mut handoff = item(1, 10, "status");
-            handoff[field] = value;
+        let mut handoff = item(1, 10, "status");
+        handoff["bot_reply"] = json!({"sender_bot_id": id(20), "sender_name": "Researcher",
+            "prompt": "Find a source", "status": "completed"});
+        let c = conversation(
+            vec![handoff, item(2, 10, "assistant")],
+            vec![turn(10, "completed")],
+        );
+        assert!(
+            task_replies(&c).contains_key(&id(10)),
+            "bot_reply stays rich"
+        );
+    }
+
+    #[test]
+    fn a_task_from_another_bot_leaves_its_reply_to_the_exchange_row() {
+        let mut receipt = item(1, 10, "status");
+        receipt["bot_task"] = json!({"sender_bot_id": id(20), "sender_name": "Proliquid",
+            "prompt": "List your routines"});
+        for status in ["running", "completed", "failed"] {
             let c = conversation(
-                vec![handoff, item(2, 10, "assistant")],
-                vec![turn(10, "completed")],
+                vec![
+                    receipt.clone(),
+                    item(2, 10, "assistant"),
+                    item(3, 11, "user"),
+                ],
+                vec![turn(10, status), turn(11, "queued")],
             );
-            assert!(task_replies(&c).contains_key(&id(10)), "{field} stays rich");
+            let replies = task_replies(&c);
+            assert!(
+                !replies.contains_key(&id(10)),
+                "a {status} task shows no card"
+            );
+            assert!(
+                replies.contains_key(&id(11)),
+                "the owner's own turn keeps its card"
+            );
+            assert_eq!(c.delegated_turns(), [id(10)].into());
+            assert_eq!(
+                c.task_answer(c.item(id(1)).unwrap()).map(|a| a.id),
+                Some(id(2))
+            );
         }
     }
 

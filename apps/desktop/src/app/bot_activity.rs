@@ -1,8 +1,9 @@
-use super::conversation::TranscriptRow;
+use super::conversation::{ReplyLayout, TranscriptRow};
 use super::{ElseApp, RowKey};
 use crate::avatar::bot_avatar;
 use crate::model::{BotCreated, BotReplyStatus, Conversation, Item};
 use gpui_kit::assets::IconName;
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
@@ -13,8 +14,30 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BotActivity {
     pub(super) items: Vec<Uuid>,
+    /// This bot's latest reply to each task it received, hidden from the transcript.
+    pub(super) answers: Vec<Uuid>,
     failed: Vec<Uuid>,
     stopped: Vec<Uuid>,
+}
+
+impl BotActivity {
+    pub(super) fn contains(&self, id: Uuid) -> bool {
+        self.items.contains(&id) || self.answers.contains(&id)
+    }
+}
+
+/// How the exchange `item` ended: a delegated bot's reply carries it, and a
+/// received task takes it from the turn that ran it.
+fn outcome(item: &Item, conversation: Option<&Conversation>) -> Option<BotReplyStatus> {
+    if let Some(reply) = &item.bot_reply {
+        return Some(reply.status);
+    }
+    item.bot_task.as_ref()?;
+    match conversation?.turn(item.turn_id)?.status.as_str() {
+        "failed" => Some(BotReplyStatus::Failed),
+        "interrupted" => Some(BotReplyStatus::Cancelled),
+        _ => None,
+    }
 }
 
 pub(super) fn group_activity(
@@ -32,9 +55,14 @@ pub(super) fn group_activity(
             grouped.push(row);
             continue;
         };
-        let status = item.bot_reply.as_ref().map(|reply| reply.status);
+        let status = outcome(item, conversation);
         let activity = BotActivity {
             items: vec![item.id],
+            answers: conversation
+                .and_then(|c| c.task_answer(item))
+                .map(|answer| answer.id)
+                .into_iter()
+                .collect(),
             failed: (status == Some(BotReplyStatus::Failed))
                 .then_some(item.id)
                 .into_iter()
@@ -51,6 +79,7 @@ pub(super) fn group_activity(
             && let Some(group) = previous.activity.as_mut()
         {
             group.items.extend(activity.items);
+            group.answers.extend(activity.answers);
             group.failed.extend(activity.failed);
             group.stopped.extend(activity.stopped);
             previous.footer_stamp = row.footer_stamp;
@@ -94,29 +123,42 @@ impl ElseApp {
             .map(|(_, name)| *name)
             .collect::<Vec<_>>()
             .join(" & ");
-        let count = activity.items.len();
+        let count = activity.items.len() + activity.answers.len();
         let last = conversation.item(*activity.items.last()?)?;
-        let (_, last_sender, _) = exchange_sender(last)?;
-        let last_text = last
-            .bot_task
-            .as_ref()
-            .map_or(last.text.as_str(), |task| task.prompt.as_str())
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let me = self.bots.iter().find(|bot| bot.id == view.bot_id);
+        let answer = conversation.task_answer(last);
+        let (last_sender, last_text) = match (answer, me) {
+            (Some(answer), Some(me)) => (me.name.as_str(), answer.text.as_str()),
+            _ => (
+                exchange_sender(last)?.1,
+                last.bot_task
+                    .as_ref()
+                    .map_or(last.text.as_str(), |task| task.prompt.as_str()),
+            ),
+        };
+        let last_text = last_text.split_whitespace().collect::<Vec<_>>().join(" ");
         let preview = if last_text.is_empty() {
             format!("{last_sender} finished without a reply.")
         } else {
             format!("{last_sender}: {last_text}")
         };
+        let task_status = last
+            .bot_task
+            .as_ref()
+            .and_then(|_| conversation.turn(last.turn_id))
+            .map(|turn| turn.status.as_str());
         let status = if !activity.failed.is_empty() {
             format!("{} failed", activity.failed.len())
         } else if !activity.stopped.is_empty() {
             format!("{} stopped", activity.stopped.len())
-        } else if last.bot_reply.is_some() {
+        } else if last.bot_reply.is_some() || task_status == Some("completed") {
             "Replied".to_owned()
-        } else {
+        } else if task_status.is_none_or(|status| status == "queued") {
             "Task received".to_owned()
+        } else if task_status == Some("uncertain") {
+            "Unknown result".to_owned()
+        } else {
+            "Working".to_owned()
         };
         let messages = format!(
             "{count} {}",
@@ -220,9 +262,17 @@ impl ElseApp {
         ] {
             for id in ids {
                 let item = conversation.item(*id)?;
-                let (_, name, _) = exchange_sender(item)?;
-                let detail = item
-                    .text
+                let (name, text) = match (&item.bot_task, me) {
+                    (Some(_), Some(me)) => (
+                        me.name.as_str(),
+                        conversation
+                            .turn(item.turn_id)
+                            .and_then(|turn| turn.error.as_ref()?.message.as_deref())
+                            .unwrap_or_default(),
+                    ),
+                    _ => (exchange_sender(item)?.1, item.text.as_str()),
+                };
+                let detail = text
                     .lines()
                     .find(|line| !line.trim().is_empty())
                     .unwrap_or("No reply text.");
@@ -239,6 +289,24 @@ impl ElseApp {
         }
         if noted {
             card = card.child(notes);
+        }
+        if let Some(latest) = conversation
+            .latest_reply()
+            .filter(|reply| activity.answers.contains(&reply.id))
+        {
+            let owner = cx.entity().downgrade();
+            let bot = view.bot_id;
+            let position = crate::api::ReplyPosition {
+                item_seq: latest.seq,
+                text_bytes: latest.text.len() as i64,
+            };
+            card = card.on_prepaint(move |bounds, window, cx| {
+                window.defer(cx, move |window, cx| {
+                    let _ = owner.update(cx, |app, cx| {
+                        app.reply_laid_out(bot, ReplyLayout { position, bounds }, window, cx)
+                    });
+                });
+            });
         }
         Some(card.into_any_element())
     }
