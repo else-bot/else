@@ -146,12 +146,11 @@ impl ComputerManager {
         holder: &str,
     ) -> Result<Acquire, ComputerError> {
         let acquired = self.acquire(bot_id, holder).await?;
-        if let Acquire::Ready { lease_id, .. } = &acquired
-            && let Err(waiting) = self.ensure_desktop(bot_id, *lease_id).await?
-        {
-            return Ok(waiting);
-        }
-        Ok(acquired)
+        let Acquire::Ready { lease_id, .. } = &acquired else {
+            return Ok(acquired);
+        };
+        let refusal = self.ensure_desktop(bot_id, *lease_id).await?.refusal();
+        Ok(refusal.map_or(acquired, |reason| Acquire::Queued { reason }))
     }
 
     /// Start the desktop of the computer `lease` holds, once per boot, and
@@ -163,9 +162,9 @@ impl ComputerManager {
         &self,
         bot_id: Uuid,
         lease_id: Uuid,
-    ) -> Result<Result<(), Acquire>, ComputerError> {
+    ) -> Result<DesktopStart, ComputerError> {
         if !self.config.desktop {
-            return Ok(Ok(()));
+            return Ok(DesktopStart::Running);
         }
         let _op = self.op(bot_id).await;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -183,9 +182,7 @@ impl ComputerManager {
         .fetch_optional(&mut *tx)
         .await?;
         let Some((name, generation, started, grown)) = current else {
-            return Ok(Err(Acquire::Queued {
-                reason: "the computer restarted; try again".into(),
-            }));
+            return Ok(DesktopStart::StaleLease);
         };
         let row = Self::row(&mut tx, bot_id).await?.expect("leased");
         let (max_cpus, max_memory) = row.max();
@@ -193,7 +190,7 @@ impl ComputerManager {
             && (max_cpus, max_memory) != (row.cpus as u32, row.memory_mib as u32)
             && self.admits(&mut tx, bot_id, max_cpus, max_memory).await?;
         if started && !grows {
-            return Ok(Ok(()));
+            return Ok(DesktopStart::Running);
         }
         if grows {
             sqlx::query("UPDATE bot_computers SET grown = 1 WHERE bot_id = ?1")
@@ -206,7 +203,7 @@ impl ComputerManager {
             tracing::warn!(bot = %bot_id, error = %err, "the desktop runs at the boot size");
         }
         if started {
-            return Ok(Ok(()));
+            return Ok(DesktopStart::Running);
         }
         self.ensure_services(bot_id, &name).await?;
         let started = self
@@ -227,6 +224,7 @@ impl ComputerManager {
                 .bind(generation)
                 .execute(&self.pool)
                 .await?;
+                Ok(DesktopStart::Running)
             }
             other => {
                 let error = match other {
@@ -239,9 +237,9 @@ impl ComputerManager {
                     .bind(bounded(&error, 2000))
                     .execute(&self.pool)
                     .await?;
+                Ok(DesktopStart::Failed(error))
             }
         }
-        Ok(Ok(()))
     }
 
     /// The zone the guest's clock uses: the owner's device zone, else this
@@ -302,6 +300,27 @@ impl ComputerManager {
             }
         }
         Ok(())
+    }
+}
+
+/// What starting the desktop of a lease's boot came to. Only `Running`
+/// admits a desktop use; the others leave readiness stale, so a later use
+/// starts it again.
+pub(super) enum DesktopStart {
+    Running,
+    /// The lease is from an earlier boot, or the computer stopped.
+    StaleLease,
+    /// The guest's desktop startup failed; `last_error` records it.
+    Failed(String),
+}
+
+impl DesktopStart {
+    fn refusal(self) -> Option<String> {
+        match self {
+            Self::Running => None,
+            Self::StaleLease => Some("the computer restarted; try again".into()),
+            Self::Failed(error) => Some(error),
+        }
     }
 }
 
@@ -385,7 +404,7 @@ impl ComputerManager {
             .fetch_one(&self.pool)
             .await?;
         if !ready && port.is_some() {
-            if let Err(Acquire::Queued { reason }) = self.ensure_desktop(bot_id, lease_id).await? {
+            if let Some(reason) = self.ensure_desktop(bot_id, lease_id).await?.refusal() {
                 self.release(lease_id).await?;
                 return Ok(Err(ViewerRefusal::Unavailable(reason)));
             }
