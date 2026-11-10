@@ -3,6 +3,15 @@
 - Keep coordination lock-free where possible; shard any necessary locks by the resource they protect.
 - Own shared mutable state in actors and communicate through bounded messages with backpressure.
 - Run independent async calls concurrently with `tokio::join!` in Rust; keep dependent or order-sensitive calls sequential.
+- When you add or change lifecycle logic, represent its mutually exclusive states as one enum and put state-dependent data in the variants, like the private `Phase` behind `Lifecycle` in `apps/api/src/providers/cli/attempt.rs`; use consuming typestates instead when each state owns a resource, like `StagedSet` in `apps/api/src/backup/capture.rs`.
+- Replace booleans or `Option`s that must change together with that enum.
+- Keep a lifecycle's runtime transitions in its owning module; callers request a transition by name and never write a state directly. Count database triggers as part of that lifecycle's transitions.
+- Store persisted states through a typed enum that keeps the existing stored strings, like `Status` in `apps/api/src/app/outgoing.rs`. Migrations, tests and read queries may still use the strings.
+- Make each persisted transition atomic and check its allowed source states, with a guarded `WHERE status IN (...)` or a check inside a `BEGIN IMMEDIATE` transaction. Check the affected or returned rows, handle a rejected transition explicitly, and return state read back from the database.
+- Identify a retried request by a stable request ID or version. Return the existing result for a safe retry, and reject an unsafe repeat or a conflicting request.
+- Give an unknown or unconfirmed outcome its own state; never fold it into success or failure.
+- Commit durable intent, such as cancelling or stopping, before an external effect that must survive a restart. Recovery may repeat the effect only when repeating is safe or the receiver deduplicates by a stable ID; otherwise reconcile the outcome first.
+- Test each transition a change adds or alters, plus at least one rejected transition.
 - In recorder test fixtures, use `started(turn)` before calling tools and `continued(turn, previous_token)` after resuming an attempt; a recorded grant alone does not prove that the turn is ready.
 - Read and follow `.agents/rules/*.md` before using the repository's shared skills and agents.
 - Before opening a PR, run `cargo clippy --workspace --all-targets --locked -- -D warnings` or `scripts/check-clippy.sh` and fix every finding, including findings in untouched files.
