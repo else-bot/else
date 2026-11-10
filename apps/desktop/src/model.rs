@@ -841,6 +841,10 @@ impl Conversation {
             .find(|r| r.id == id)
     }
 
+    pub fn questions(&self) -> impl Iterator<Item = &Question> {
+        self.turns.values().flat_map(|t| &t.questions)
+    }
+
     pub fn question(&self, id: Uuid) -> Option<&Question> {
         self.turns
             .values()

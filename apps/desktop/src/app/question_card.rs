@@ -26,6 +26,8 @@ mod approval;
 mod choice;
 pub(super) mod connection;
 
+pub(super) use choice::WriteIn;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct QuestionForm {
     pub(super) answer: QuestionAnswer,
