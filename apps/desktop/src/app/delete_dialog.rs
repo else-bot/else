@@ -10,7 +10,8 @@ pub(super) enum DeleteTarget {
     Bot(String),
     Category { name: String, bots: usize },
     Routine(String),
-    SocialTrigger(String),
+    Trigger(String),
+    Webhook(String),
 }
 
 struct Consequence {
@@ -112,7 +113,24 @@ impl ElseApp {
                 ],
                 Some("Bots, conversations, memory, and files are kept."),
             ),
-            DeleteTarget::SocialTrigger(name) => (
+            DeleteTarget::Webhook(name) => (
+                name,
+                "webhook",
+                [
+                    Consequence::new(
+                        IconName::Pause,
+                        "Its URL stops working",
+                        "Calls to it are refused and won't wake the bot again.",
+                    ),
+                    Consequence::new(
+                        IconName::Clock,
+                        "Current work finishes",
+                        "Work already in progress won't be stopped.",
+                    ),
+                ],
+                None,
+            ),
+            DeleteTarget::Trigger(name) => (
                 name,
                 "trigger",
                 [

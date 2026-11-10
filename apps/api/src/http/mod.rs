@@ -192,6 +192,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(questions::routes())
         .merge(outgoing_drafts::routes())
         .merge(routines::routes())
+        .merge(webhooks::routes())
         .merge(rules::routes())
         .merge(maintenance::routes())
         .merge(onboarding::routes())

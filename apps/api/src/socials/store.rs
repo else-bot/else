@@ -148,7 +148,7 @@ pub async fn set_state(pool: &SqlitePool, id: Uuid, state: &str) -> Result<Conne
     removed.health = state.into();
     Ok(removed)
 }
-const TRIGGER_COLUMNS: &str = "t.id,t.connection_id,t.bot_id,c.provider,c.display_name AS connection_name,c.username,t.destination,json_extract(d.info,'$.name') AS destination_name,t.wake,t.instructions,t.enabled,t.created_at,t.updated_at FROM social_triggers t JOIN social_connections c ON c.id=t.connection_id AND c.state<>'removed' LEFT JOIN social_destinations d ON d.connection_id=t.connection_id AND d.id=t.destination";
+const TRIGGER_COLUMNS: &str = "t.id,t.connection_id,t.bot_id,c.provider,c.display_name AS connection_name,c.username,t.destination,json_extract(d.info,'$.name') AS destination_name,t.wake,t.instructions,t.enabled,t.created_at,t.updated_at,(SELECT max(x.settled_at) FROM social_deliveries x WHERE x.trigger_id=t.id AND x.turn_id IS NOT NULL) AS last_woke_at FROM social_triggers t JOIN social_connections c ON c.id=t.connection_id AND c.state<>'removed' LEFT JOIN social_destinations d ON d.connection_id=t.connection_id AND d.id=t.destination";
 
 /// The bot's triggers, oldest first.
 pub async fn triggers(conn: &mut SqliteConnection, bot: Uuid) -> Result<Vec<Trigger>, sqlx::Error> {

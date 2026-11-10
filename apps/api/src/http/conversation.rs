@@ -79,6 +79,7 @@ async fn snapshot(
         "routines": snapshot.routines.iter().map(routine_json).collect::<Vec<_>>(),
         "social_triggers": snapshot.social_triggers,
         "mail_triggers": snapshot.mail_triggers,
+        "webhooks": snapshot.webhooks.iter().map(crate::views::webhook_json).collect::<Vec<_>>(),
         "rules_version": snapshot.rules_version,
     })))
 }

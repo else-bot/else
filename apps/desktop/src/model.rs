@@ -524,6 +524,23 @@ pub struct Routine {
     pub paused_reason: Option<String>,
 }
 
+/// A bot's webhook: an authenticated call to its URL wakes the bot with
+/// `prompt`, at most as often as its pace allows.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Webhook {
+    pub id: Uuid,
+    pub name: String,
+    pub prompt: String,
+    pub min_interval_minutes: i64,
+    pub enabled: bool,
+    pub last_wake: Option<WebhookWake>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct WebhookWake {
+    pub woke_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Snapshot {
     pub selected_provider_id: Option<String>,
@@ -540,6 +557,9 @@ pub struct Snapshot {
     /// Absent from servers without email wake-ups.
     #[serde(default)]
     pub mail_triggers: Vec<MailTrigger>,
+    /// Absent from servers that don't list webhooks in the snapshot.
+    #[serde(default)]
+    pub webhooks: Vec<Webhook>,
     /// Absent from servers without rules.
     #[serde(default)]
     pub rules_version: i64,
@@ -582,6 +602,7 @@ pub struct Conversation {
     routines: Vec<Routine>,
     social_triggers: Vec<Trigger>,
     mail_triggers: Vec<MailTrigger>,
+    webhooks: Vec<Webhook>,
     rules_version: i64,
 }
 
@@ -605,6 +626,7 @@ impl Conversation {
             routines: snapshot.routines,
             social_triggers: snapshot.social_triggers,
             mail_triggers: snapshot.mail_triggers,
+            webhooks: snapshot.webhooks,
             rules_version: snapshot.rules_version,
         };
         for item in snapshot.items {
@@ -698,6 +720,12 @@ impl Conversation {
                 self.mail_triggers = data
                     .get("mail_triggers")
                     .map(|triggers| serde_json::from_value(triggers.clone()))
+                    .transpose()
+                    .map_err(|_| Reset::Malformed)?
+                    .unwrap_or_default();
+                self.webhooks = data
+                    .get("webhooks")
+                    .map(|webhooks| serde_json::from_value(webhooks.clone()))
                     .transpose()
                     .map_err(|_| Reset::Malformed)?
                     .unwrap_or_default();
@@ -947,6 +975,10 @@ impl Conversation {
 
     pub fn mail_triggers(&self) -> &[MailTrigger] {
         &self.mail_triggers
+    }
+
+    pub fn webhooks(&self) -> &[Webhook] {
+        &self.webhooks
     }
 
     pub fn routines(&self) -> &[Routine] {
@@ -1558,7 +1590,8 @@ mod tests {
         let inbox = |wake| {
             json!({
                 "account_id": Uuid::from_u128(90), "address": "owner@example.com",
-                "state": "active", "health": "connected", "wake": wake
+                "state": "active", "health": "connected", "wake": wake,
+                "instructions": "Flag invoices.", "last_woke_at": "2026-11-02T08:00:00.000+00:00"
             })
         };
         let first: Snapshot = serde_json::from_value(json!({
@@ -1572,6 +1605,8 @@ mod tests {
         assert_eq!(trigger.account_id, Uuid::from_u128(90));
         assert_eq!(trigger.address, "owner@example.com");
         assert!(trigger.wake);
+        assert_eq!(trigger.instructions.as_deref(), Some("Flag invoices."));
+        assert!(trigger.last_woke_at.is_some());
         let update = |seq, triggers| {
             frame(
                 seq,
@@ -1588,6 +1623,43 @@ mod tests {
             conversation.mail_triggers().is_empty(),
             "removed inboxes leave the list"
         );
+    }
+
+    #[test]
+    fn webhooks_parse_from_snapshots_and_bot_updates() {
+        let webhook = |enabled| {
+            json!({
+                "id": Uuid::from_u128(91), "bot_id": bot(), "name": "Deploys",
+                "prompt": "Open an issue when a deploy fails.", "min_interval_minutes": 15,
+                "daily_limit": 24, "enabled": enabled, "requested_at": null,
+                "wake_not_before": null, "created_at": "2026-11-01T00:00:00Z",
+                "updated_at": "2026-11-01T00:00:00Z",
+                "last_wake": { "woke_at": "2026-11-02T08:00:00Z", "status": "completed",
+                               "turn_id": Uuid::from_u128(92) }
+            })
+        };
+        let mut first = snapshot(1, vec![], None);
+        first.webhooks = vec![serde_json::from_value(webhook(true)).unwrap()];
+        let mut conversation = Conversation::from_snapshot(first).unwrap();
+        let listed = &conversation.webhooks()[0];
+        assert_eq!(listed.name, "Deploys");
+        assert_eq!(
+            listed.last_wake.as_ref().unwrap().woke_at.to_rfc3339(),
+            "2026-11-02T08:00:00+00:00"
+        );
+        let update = |seq, webhooks| {
+            frame(
+                seq,
+                "bot.updated",
+                json!({ "bot": { "id": bot(), "name": "Assistant" }, "webhooks": webhooks }),
+            )
+        };
+        conversation
+            .apply(&update(2, json!([webhook(false)])))
+            .unwrap();
+        assert!(!conversation.webhooks()[0].enabled);
+        conversation.apply(&update(3, json!([]))).unwrap();
+        assert!(conversation.webhooks().is_empty());
     }
 
     #[test]

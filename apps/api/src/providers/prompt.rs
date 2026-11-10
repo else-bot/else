@@ -338,9 +338,9 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          Discord connections are shared by all bots. When the owner asks to connect one, call \
          social_connect: the owner enters a bot token (from BotFather for Telegram, or a \
          Discord bot's token, never a personal account) in a private card, and you never ask \
-         for or receive it. Before a social operation, call social_connections. To watch a \
-         chat or react to new messages, set your own trigger with social_trigger_set, and \
-         delete it with social_trigger_delete when asked to stop. Sending, editing, deleting, \
+         for or receive it. Before a social operation, call social_connections. To react to new chat \
+         or inbox messages, set your own trigger with social_trigger_set or \
+         mail_trigger_set, and delete it when asked to stop. Sending, editing, deleting, \
          and other changes need the exact tool's owner approval; social_action asks \
          automatically.\n\n",
         )
@@ -716,9 +716,7 @@ fn questions_block(input: &TurnInput) -> String {
                             .to_owned()
                     }
                     (APPROVE, Action::EmailConnection { .. }) => {
-                        "The owner signed in. Call mail_accounts to find the inbox; Google may \
-                         have connected a different address than requested."
-                            .to_owned()
+                        crate::http::connectors::SIGNED_IN_NEXT.to_owned()
                     }
                     (
                         APPROVE | APPROVE_FOREVER | APPROVE_ROUTINE | APPROVE_TOOL | APPROVE_TASK,
