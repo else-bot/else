@@ -469,12 +469,7 @@ impl ElseApp {
         .into_any_element()
     }
 
-    fn render_header(
-        &self,
-        bot: &Bot,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_header(&self, bot: &Bot, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let unshown_status = self
             .view
@@ -482,32 +477,7 @@ impl ElseApp {
             .and_then(|view| view.conversation.as_ref())
             .and_then(|conversation| conversation.latest_unshown_turn())
             .and_then(|turn| self.render_turn_status(turn, bot.id, cx));
-        let activity = self
-            .view
-            .as_ref()
-            .and_then(|v| v.conversation.as_ref())
-            .and_then(|c| c.activity.clone())
-            .or(bot.activity.clone());
-        let busy = activity.as_ref().is_some_and(|a| a.phase != "idle");
-        let stopping = self.stopping.contains(&bot.id)
-            || activity.as_ref().is_some_and(|a| a.phase == "cancelling");
         let mut actions = h_flex().flex_none().gap_1().items_center();
-        if busy || stopping {
-            actions = actions.child(
-                Button::new("stop-work")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .label(if stopping { "Stopping…" } else { "Stop work" })
-                    .small()
-                    .ghost()
-                    .disabled(stopping)
-                    .children(
-                        Kbd::binding_for_action(&StopWork, Some(APP_CONTEXT), window)
-                            .map(|kbd| div().flex_none().text_xs().child(kbd.appearance(false))),
-                    )
-                    .on_click(cx.listener(|app, _, window, cx| app.stop_work(window, cx))),
-            );
-        }
         if !self.settings_open {
             actions = actions.child(
                 Button::new("toggle-settings")
@@ -683,6 +653,15 @@ impl ElseApp {
                         matches!(file.state, super::attachments::UploadState::Ready)
                     })
             });
+        let activity = self
+            .view
+            .as_ref()
+            .and_then(|v| v.conversation.as_ref())
+            .and_then(|c| c.activity.clone())
+            .or(bot.activity.clone());
+        let requested_stop = self.stopping.contains(&bot.id);
+        let working = requested_stop || activity.as_ref().is_some_and(|a| a.phase != "idle");
+        let stopping = requested_stop || activity.as_ref().is_some_and(|a| a.phase == "cancelling");
         let mut frame = v_flex()
             .key_context(COMPOSER_CONTEXT)
             .capture_action(
@@ -747,17 +726,47 @@ impl ElseApp {
                     .aria_label(format!("Message {}", bot.name)),
             )
             .child(
-                h_flex().gap_2().items_center().child(div().flex_1()).child(
-                    Button::new("send")
-                        .focus_ring(false)
-                        .when(can_send, |button| button.cursor_pointer())
-                        .icon(IconName::ArrowUp)
-                        .primary()
-                        .small()
-                        .accessibility_label("Send message")
-                        .disabled(!can_send)
-                        .on_click(cx.listener(|app, _, window, cx| app.send(window, cx))),
-                ),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().flex_1())
+                    .when(!working || can_send, |row| {
+                        row.child(
+                            Button::new("send")
+                                .focus_ring(false)
+                                .when(can_send, |button| button.cursor_pointer())
+                                .icon(IconName::ArrowUp)
+                                .primary()
+                                .small()
+                                .accessibility_label("Send message")
+                                .disabled(!can_send)
+                                .on_click(cx.listener(|app, _, window, cx| app.send(window, cx))),
+                        )
+                    })
+                    .when(working, |row| {
+                        row.child(
+                            Button::new("stop-work")
+                                .focus_ring(false)
+                                .when(!stopping, |button| button.cursor_pointer())
+                                .icon(IconName::Square)
+                                .danger()
+                                .small()
+                                .accessibility_label(if stopping {
+                                    "Stopping work"
+                                } else {
+                                    "Stop work"
+                                })
+                                .tooltip_with_action(
+                                    if stopping { "Stopping…" } else { "Stop work" },
+                                    &StopWork,
+                                    Some(APP_CONTEXT),
+                                )
+                                .loading(stopping)
+                                .on_click(
+                                    cx.listener(|app, _, window, cx| app.stop_work(window, cx)),
+                                ),
+                        )
+                    }),
             );
         let footer = reading_column()
             .flex_none()
@@ -783,7 +792,7 @@ impl ElseApp {
         v_flex()
             .size_full()
             .min_w_0()
-            .child(self.render_header(bot, window, cx))
+            .child(self.render_header(bot, cx))
             .child(transcript)
             .child(footer)
     }
