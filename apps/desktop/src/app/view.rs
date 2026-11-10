@@ -775,6 +775,7 @@ impl ElseApp {
             .pb_3()
             .child(notices)
             .children(self.render_waiting_tray(cx))
+            .children(self.render_question_bar(&bot.name, cx))
             .children(self.render_handoff_bar(bot, window, cx))
             .child(
                 div()

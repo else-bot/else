@@ -957,6 +957,22 @@ impl Conversation {
         }
     }
 
+    /// The owner message that skipped `question`. The server saves the
+    /// message and skips pending questions in one transaction, so it is the
+    /// first owner message stamped at the moment the question settled.
+    pub fn skipping_reply(&self, question: &Question) -> Option<&Item> {
+        let settled = question
+            .settled_at
+            .filter(|_| question.status == "skipped")?;
+        self.items
+            .values()
+            .filter(|item| item.kind == "user")
+            .find(|item| {
+                item.created_at
+                    .is_some_and(|at| (at - settled).abs() <= chrono::TimeDelta::seconds(2))
+            })
+    }
+
     pub fn question_anchor(&self, turn: Uuid, settled_at: Option<DateTime<Utc>>) -> Option<Uuid> {
         self.items
             .values()
@@ -1084,6 +1100,31 @@ mod tests {
             "item.delta",
             json!({ "item_id": Uuid::from_u128(id), "offset_utf8": offset, "text": text }),
         )
+    }
+
+    #[test]
+    fn a_skipped_question_finds_the_owner_message_that_skipped_it() {
+        let mut earlier = item(1, 1, "user", "make a digest");
+        earlier["created_at"] = json!("2026-11-02T00:00:00Z");
+        let mut answer = item(3, 3, "user", "Markdown, for Notion");
+        answer["created_at"] = json!("2026-11-02T00:05:00.200Z");
+        let c = Conversation::from_snapshot(snapshot(
+            3,
+            vec![earlier, item(2, 2, "assistant", "Which format?"), answer],
+            None,
+        ))
+        .unwrap();
+        let mut question: Question = serde_json::from_value(json!({
+            "id": Uuid::from_u128(40), "kind": "choice", "title": "Which format?",
+            "choices": [], "status": "skipped", "settled_at": "2026-11-02T00:05:00.300Z",
+        }))
+        .unwrap();
+        assert_eq!(
+            c.skipping_reply(&question).map(|i| i.text.as_str()),
+            Some("Markdown, for Notion")
+        );
+        question.status = "cancelled".into();
+        assert!(c.skipping_reply(&question).is_none());
     }
 
     #[test]
