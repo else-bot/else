@@ -163,16 +163,19 @@ pub(super) struct Passage {
 }
 
 impl Passage {
-    /// Every quoted passage of a sent reply, with the leading
-    /// "Replying to N passages:" line, or `None` for any other message.
+    /// Every quoted passage of a sent reply, with the span before the first
+    /// one (the "Replying to N passages:" line and its blank line), or `None`
+    /// for any other message.
     pub(super) fn parse_all(message: &str) -> Option<(Range<usize>, Vec<Self>)> {
         let first = message.split_once('\n').map_or(message, |(line, _)| line);
         let count: usize = first
             .strip_prefix("Replying to ")?
             .strip_suffix(" passages:")?
             .parse()
-            .ok()?;
-        let mut passages = Vec::with_capacity(count);
+            .ok()
+            // Each passage takes several bytes, so a larger count is not one.
+            .filter(|count| (2..=message.len()).contains(count))?;
+        let mut passages = Vec::new();
         let mut at = first.len();
         for number in 1..=count {
             let mut header = None;
@@ -189,7 +192,7 @@ impl Passage {
                     )));
                 }
             }
-            let (offset, len, author) = header?;
+            let (offset, len, author) = header.filter(|(offset, ..)| number > 1 || *offset == 0)?;
             let start = at + offset + 2;
             let mut end = at + offset + len;
             let mut original = Vec::new();
@@ -214,7 +217,7 @@ impl Passage {
             });
             at = end;
         }
-        Some((0..first.len(), passages))
+        Some((0..passages[0].block.start, passages))
     }
 
     pub(super) fn excerpt(&self) -> String {
@@ -222,20 +225,46 @@ impl Passage {
     }
 }
 
-/// Whether `text`, an earlier message, holds `original`, a quote of all or
-/// part of it as the owner selected it on screen, without its Markdown.
-pub(super) fn quotes(text: &str, original: &str) -> bool {
+/// Whether `original` is all of `text`, an earlier message.
+pub(super) fn quotes_whole(text: &str, original: &str) -> bool {
+    text.trim_end().lines().eq(original.lines())
+}
+
+/// Whether `text`, an earlier message, shows `original`, a part of it as the
+/// owner selected it on screen: without Markdown, ignoring spacing and
+/// punctuation.
+pub(super) fn quotes_part(text: &str, original: &str) -> bool {
     fn letters(text: &str) -> String {
         text.chars()
             .filter(|c| c.is_alphanumeric())
             .flat_map(char::to_lowercase)
             .collect()
     }
-    if text.trim_end().lines().eq(original.lines()) {
-        return true;
-    }
     let needle = letters(original);
-    !needle.is_empty() && letters(text).contains(&needle)
+    !needle.is_empty() && letters(&rendered(text)).contains(&needle)
+}
+
+/// The text a Markdown message shows, without link destinations or markup.
+fn rendered(text: &str) -> String {
+    fn visit(node: &markdown::mdast::Node, out: &mut String) {
+        use markdown::mdast::Node;
+        match node {
+            Node::Text(t) => out.push_str(&t.value),
+            Node::InlineCode(c) => out.push_str(&c.value),
+            Node::Code(c) => out.push_str(&c.value),
+            _ => {}
+        }
+        for child in node.children().into_iter().flatten() {
+            visit(child, out);
+        }
+        out.push(' ');
+    }
+    let Ok(root) = markdown::to_mdast(text, &markdown::ParseOptions::gfm()) else {
+        return text.to_owned();
+    };
+    let mut out = String::new();
+    visit(&root, &mut out);
+    out
 }
 
 pub(super) struct QuotedReply<'a> {
@@ -407,7 +436,7 @@ mod tests {
              Ship it after."
         );
         let (header, found) = Passage::parse_all(&message).unwrap();
-        assert_eq!(&message[header], "Replying to 2 passages:");
+        assert_eq!(&message[header], "Replying to 2 passages:\n\n");
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].author, Author::Bot);
         assert_eq!(found[0].original, "Hide internal rows.\nKeep counts.");
@@ -445,15 +474,22 @@ mod tests {
                 .is_none()
         );
         assert!(Passage::parse_all("Replying to your earlier message:\n> a\n\nb").is_none());
+        let shifted = message.replacen("passages:\n\n", "passages:\n🥔\n\n", 1);
+        assert!(Passage::parse_all(&shifted).is_none());
+        let huge = message.replacen("2 passages", &format!("{} passages", usize::MAX), 1);
+        assert!(Passage::parse_all(&huge).is_none());
     }
 
     #[test]
     fn a_quote_matches_its_message_without_markdown_or_line_breaks() {
         let message = "Plan:\n\n- **Hide** the rows,\n  then count them.";
-        assert!(quotes(message, "Hide the rows, then count"));
-        assert!(quotes(message, message));
-        assert!(!quotes(message, "Show the rows"));
-        assert!(!quotes(message, "…"));
+        assert!(quotes_part(message, "Hide the rows, then count"));
+        assert!(quotes_whole(message, message));
+        assert!(!quotes_whole("Not done.", "Done."));
+        assert!(!quotes_part(message, "Show the rows"));
+        assert!(!quotes_part(message, "…"));
+        let linked = "Click [settings](https://example.com) to continue.";
+        assert!(quotes_part(linked, "Click settings to continue."));
     }
 
     #[test]

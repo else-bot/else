@@ -49,8 +49,9 @@ pub(super) struct QuoteEditor {
     _events: Subscription,
 }
 
-const LONG_EXCERPT: usize = 90;
-const LONG_COMMENT: usize = 220;
+// Past these, a card's one-line quote or three-line comment may be cut off.
+const LONG_EXCERPT: usize = 40;
+const LONG_COMMENT: usize = 150;
 
 impl ElseApp {
     /// After a left click ends, offers to quote a selection made inside one
@@ -112,7 +113,11 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(prompt) = self.quote_prompt.take() else {
+        let Some(prompt) = self
+            .quote_prompt
+            .take()
+            .filter(|prompt| self.selected == Some(prompt.bot))
+        else {
             return;
         };
         TextSelection::clear(window, cx);
@@ -215,6 +220,23 @@ impl ElseApp {
         cx.notify();
     }
 
+    /// Saves the comment being written for `bot`'s draft, so sending the
+    /// draft neither drops it nor leaves the editor pointing at sent quotes.
+    pub(super) fn settle_quote_editor(
+        &mut self,
+        bot: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .quote_editor
+            .as_ref()
+            .is_some_and(|editor| editor.bot == bot)
+        {
+            self.save_quote_comment(window, cx);
+        }
+    }
+
     fn save_quote_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.quote_editor.take() else {
             return;
@@ -251,13 +273,23 @@ impl ElseApp {
 
     /// Paints every quote of the open conversation's draft over the message
     /// it came from.
-    pub(super) fn paint_quotes(&self, cx: &mut App) {
-        if let Some(view) = self.view.as_ref() {
-            let quotes = self
-                .drafts
-                .get(&view.bot_id)
-                .map_or(&[][..], |d| &d.quotes[..]);
-            paint(view, quotes, cx);
+    pub(super) fn paint_quotes(&mut self, cx: &mut App) {
+        if let Some(view) = self.view.as_mut() {
+            paint_view(view, &self.drafts, cx);
+        }
+    }
+
+    /// Paints the quotes on one row, as when its Markdown finishes parsing.
+    pub(super) fn paint_row_quotes(&mut self, key: RowKey, cx: &mut App) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        let quotes = self
+            .drafts
+            .get(&view.bot_id)
+            .map_or(&[][..], |d| &d.quotes[..]);
+        if let Some(text) = view.texts.get_mut(&key) {
+            text.highlight(ranges(quotes, key), highlight_color(cx), cx);
         }
     }
 
@@ -343,7 +375,7 @@ impl ElseApp {
         }
         let theme = cx.theme();
         let excerpt = editor.quote.source.text.clone();
-        let long = excerpt.len() > LONG_EXCERPT * 2 || excerpt.lines().count() > 3;
+        let long = excerpt.chars().count() > LONG_COMMENT || excerpt.lines().count() > 3;
         let quote = div()
             .id("quote-editor-excerpt")
             .pl_2()
@@ -486,7 +518,7 @@ impl ElseApp {
             let excerpt = quote.excerpt();
             let long = excerpt.chars().count() > LONG_EXCERPT
                 || quote.comment.chars().count() > LONG_COMMENT
-                || quote.comment.lines().count() > 3;
+                || quote.comment.lines().count() > 1;
             let author = match quote.source.author {
                 Author::Owner => "You".to_owned(),
                 Author::Bot => bot_name.to_owned(),
@@ -670,24 +702,26 @@ fn shortcut(keys: &'static str) -> impl IntoElement {
     div().flex_none().text_xs().opacity(0.7).child(keys)
 }
 
-fn paint(view: &ConversationView, quotes: &[Quote], cx: &mut App) {
-    let color = cx.theme().primary.opacity(0.22);
-    for (key, text) in &view.texts {
-        let RowKey::Item(item) = key else { continue };
-        let ranges = quotes
-            .iter()
-            .filter(|quote| quote.source.item == *item)
-            .filter_map(|quote| quote.highlight.clone())
-            .collect();
-        text.highlight(ranges, color, cx);
-    }
+fn highlight_color(cx: &App) -> Hsla {
+    cx.theme().primary.opacity(0.22)
+}
+
+fn ranges(quotes: &[Quote], key: RowKey) -> Vec<Range<usize>> {
+    quotes
+        .iter()
+        .filter(|quote| RowKey::Item(quote.source.item) == key)
+        .filter_map(|quote| quote.highlight.clone())
+        .collect()
 }
 
 pub(super) fn paint_view(
-    view: &ConversationView,
+    view: &mut ConversationView,
     drafts: &std::collections::HashMap<Uuid, super::reply::Draft>,
     cx: &mut App,
 ) {
     let quotes = drafts.get(&view.bot_id).map_or(&[][..], |d| &d.quotes[..]);
-    paint(view, quotes, cx);
+    let color = highlight_color(cx);
+    for (key, text) in view.texts.iter_mut() {
+        text.highlight(ranges(quotes, *key), color, cx);
+    }
 }

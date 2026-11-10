@@ -474,12 +474,17 @@ impl ElseApp {
             RowKey::Item(id) => conversation.item(id).map(|item| item.seq),
             _ => None,
         };
-        let target = conversation
-            .items()
-            .rev()
-            .filter(|item| before.is_none_or(|seq| item.seq < seq))
-            .find(|item| {
-                Author::of(&item.kind) == Some(author) && super::reply::quotes(&item.text, original)
+        // A whole-message match anywhere beats a partial one in a later message.
+        let target = [super::reply::quotes_whole, super::reply::quotes_part]
+            .into_iter()
+            .find_map(|quotes| {
+                conversation
+                    .items()
+                    .rev()
+                    .filter(|item| before.is_none_or(|seq| item.seq < seq))
+                    .find(|item| {
+                        Author::of(&item.kind) == Some(author) && quotes(&item.text, original)
+                    })
             })
             .map(|item| item.id);
         if let Some(target) = target

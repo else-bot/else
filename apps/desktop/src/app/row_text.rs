@@ -6,7 +6,9 @@ use super::{ElseApp, RowKey};
 use crate::attachments::{Attachment, MessagePart, file_id, file_size, input_content};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::FocusableExt;
-use gpui_kit::base::text::{MarkdownExtensions, RangeHighlight, TextView, TextViewStyle};
+use gpui_kit::base::text::{
+    MarkdownExtensions, RangeHighlight, RenderedText, TextView, TextViewStyle,
+};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::InputContent;
 use gpui_kit::component::input::{Textarea, TextareaState};
@@ -90,7 +92,6 @@ impl RowFormat {
         else {
             return (Vec::new(), breaks);
         };
-        let header = header.start..header.end + source[header.end..].len().min(2);
         let mut edits = vec![(header, String::new())];
         edits.extend(passages.iter().enumerate().map(|(ix, passage)| {
             let mut excerpt: String = passage.excerpt().chars().take(PASSAGE_EXCERPT).collect();
@@ -167,6 +168,8 @@ impl RowSource {
 
 pub(super) struct RowText {
     source: String,
+    /// The highlights last painted, and the rendered text they fit.
+    painted: Option<(RenderedText, Vec<Range<usize>>)>,
     mentions: Vec<BotMention>,
     bots: Arc<MentionRegistry>,
     display: MentionDisplay,
@@ -247,6 +250,10 @@ impl RowText {
                     if current != Some(&state) {
                         return;
                     }
+                    app.paint_row_quotes(key, cx);
+                    let Some(view) = app.view.as_ref() else {
+                        return;
+                    };
                     if let Some(ix) = view.row_index(key) {
                         view.list.remeasure_items(ix..ix + 1);
                         app.check_reading(window, cx);
@@ -262,6 +269,7 @@ impl RowText {
             ElseApp::message_visuals(client, key, bot, &parts, window, cx);
         Self {
             source,
+            painted: None,
             mentions,
             bots: bots.clone(),
             display,
@@ -330,25 +338,36 @@ impl RowText {
         Some((text, range))
     }
 
-    pub(super) fn highlight(&self, ranges: Vec<Range<usize>>, color: Hsla, cx: &mut App) {
+    /// Highlights `ranges` of the rendered text. Ranges that do not fit,
+    /// as before the Markdown has parsed, are tried again on the next call.
+    pub(super) fn highlight(&mut self, ranges: Vec<Range<usize>>, color: Hsla, cx: &mut App) {
         let Widget::Markdown { state, .. } = &self.widget else {
             return;
         };
-        state.update(cx, |state, cx| {
-            // A range from before the text changed no longer fits; drop it.
-            if ranges.is_empty()
+        let rendered = state.read(cx).rendered_text();
+        if self
+            .painted
+            .as_ref()
+            .is_some_and(|(text, painted)| *text == rendered && *painted == ranges)
+        {
+            return;
+        }
+        let painted = state.update(cx, |state, cx| {
+            let painted = ranges.is_empty()
                 || state
                     .set_range_highlights(
                         ranges
-                            .into_iter()
-                            .map(|range| RangeHighlight::new(range, color)),
+                            .iter()
+                            .map(|range| RangeHighlight::new(range.clone(), color)),
                         cx,
                     )
-                    .is_err()
-            {
+                    .is_ok();
+            if ranges.is_empty() || !painted {
                 state.clear_range_highlights(cx);
             }
+            painted
         });
+        self.painted = painted.then_some((rendered, ranges));
     }
 
     pub(super) fn copy_text(&self, cx: &App) -> String {

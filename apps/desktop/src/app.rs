@@ -595,6 +595,7 @@ impl ElseApp {
         self._computer_layout = None;
         self.selected = id;
         self.mentions = Default::default();
+        self.quote_prompt = None;
         let draft = id
             .and_then(|id| self.drafts.get(&id))
             .map(|draft| draft.content.clone())
@@ -654,6 +655,7 @@ impl ElseApp {
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bot) = self.selected else { return };
+        self.settle_quote_editor(bot, window, cx);
         let draft = self.drafts.entry(bot).or_default();
         draft.content = self.composer.read(cx).content();
         let Some(message) = draft.message() else {
