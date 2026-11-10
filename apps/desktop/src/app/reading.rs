@@ -276,9 +276,7 @@ impl ElseApp {
 
     pub(crate) fn has_unsaved_work(&self, cx: &App) -> bool {
         !self.composer.read(cx).value().trim().is_empty()
-            || self.drafts.values().any(|draft| {
-                draft.message().is_some() || !draft.files.is_empty() || !draft.quotes.is_empty()
-            })
+            || self.drafts.values().any(super::Draft::has_unsaved_work)
             || self.pending.values().any(|list| !list.is_empty())
     }
 

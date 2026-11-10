@@ -538,6 +538,33 @@ mod tests {
     }
 
     #[test]
+    fn removing_the_last_file_token_leaves_no_unsaved_work_and_preserves_undo() {
+        let file = file();
+        let content = input_content(
+            &file.fallback(),
+            &[MessagePart::File { file: file.clone() }],
+        );
+        let mut draft = crate::app::reply::Draft {
+            content: content.clone(),
+            files: [(file.id, DraftFile::ready(file.clone()))].into(),
+            ..Default::default()
+        };
+        assert!(draft.has_unsaved_work());
+        draft.content = InputContent::new("");
+        assert!(
+            !draft.has_unsaved_work(),
+            "removing the last file token must clear the draft's unsaved work"
+        );
+        assert!(parts(&draft.content, &draft.files).unwrap().is_empty());
+        draft.content = content;
+        assert!(draft.has_unsaved_work());
+        assert_eq!(
+            parts(&draft.content, &draft.files).unwrap(),
+            vec![MessagePart::File { file }]
+        );
+    }
+
+    #[test]
     fn sending_uses_token_identity_and_preserves_unicode_and_whitespace() {
         let file = file();
         let expected = vec![
