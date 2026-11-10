@@ -678,3 +678,64 @@ async fn an_unconfirmed_job_cancel_is_retried_until_the_job_is_gone() {
     assert_eq!(manager.cancel_job(other, job).await.unwrap(), None);
     assert_eq!(job_status(&app, job).await.0, "cancelled");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_cancel_on_a_paused_computer_resumes_it_and_stops_only_that_job() {
+    let _serial = SERIAL.lock().await;
+    let app = TestApp::installed().await;
+    let guest = Arc::new(Guest::default());
+    let bot: Uuid = app.create_bot("A").await.parse().unwrap();
+    let manager = api(&app, &guest, 2).await;
+    let mut jobs = Vec::new();
+    for _ in 0..2 {
+        let Started::Job(job) = manager
+            .start_job(bot, None, "work", Duration::from_secs(600))
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        jobs.push(job);
+    }
+    let (cancelled, kept) = (jobs[0], jobs[1]);
+    guest
+        .set(&ComputerManager::runtime_name(bot), RuntimeState::Paused)
+        .unwrap();
+    sqlx::query("UPDATE bot_computers SET observed_state = 'paused' WHERE bot_id = ?1")
+        .bind(bot)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    manager.cancel_job(bot, cancelled).await.unwrap().unwrap();
+    manager.tick(&never()).await.unwrap();
+    assert_eq!(job_status(&app, cancelled).await.0, "cancelled");
+    assert_eq!(job_status(&app, kept).await.0, "running");
+    assert_eq!(observed(&app, bot).await, "running");
+    assert_eq!(job_leases(&app).await, 1, "only the cancelled job's lease ends");
+    assert_eq!(guest.kills.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn offline_settlement_confirms_a_pending_job_cancel() {
+    let _serial = SERIAL.lock().await;
+    let app = TestApp::installed().await;
+    let guest = Arc::new(Guest::default());
+    let bot: Uuid = app.create_bot("A").await.parse().unwrap();
+    let manager = api(&app, &guest, 2).await;
+    let Started::Job(job) = manager
+        .start_job(bot, None, "work", Duration::from_secs(600))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    guest.kills_fail.store(true, SeqCst);
+    manager.cancel_job(bot, job).await.unwrap().unwrap();
+    drop(manager);
+    guest.kills_fail.store(false, SeqCst);
+    guest.finish(job, 0);
+    let offline = api(&app, &guest, 2).await;
+    offline.settle_offline(bot).await.unwrap();
+    assert_eq!(job_status(&app, job).await.0, "cancelled");
+    assert_eq!(job_leases(&app).await, 0);
+}
