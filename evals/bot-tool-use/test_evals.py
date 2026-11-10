@@ -149,6 +149,18 @@ def run(runner):
                 "use-installed-skill": ([self.call("skill_read", {"id": "rea-growth"})], "When it grew: 2024."),
                 "correction-saves-rule": ([self.call("rules_update", {"section": "Summaries", "content": "Never: headings.",
                                                                       "owner_words": "I never want headings in summaries."})], "Got it."),
+                "verbose-instruction-saves-short-rule": ([self.call("rules_update", {"section": "Friday changelog",
+                                                                                     "content": "When: Friday changelog in #releases\nDo: version first, one-line user-facing bullets; if none, post \"No user-facing changes this week\"",
+                                                                                     "owner_words": "every Friday when you post the changelog"})], "Saved."),
+                "related-instruction-extends-existing-rule": ([self.call("rules_update", {"section": "Summaries",
+                                                                                          "content": "Do: issue number first.\nNever: headings.",
+                                                                                          "owner_words": "always put the issue number first"})], "Saved."),
+                "multi-line-template-stays-fenced": ([self.call("rules_update", {"section": "Proliquid invite", "content":
+                    "When: asked for an invite\nSend:\n```\nHey {name}, here's your invite: app.proliquid.xyz/join/{code}\n"
+                    "Shout if anything breaks and I'll fix it the same day.\n```", "owner_words": "reply with exactly this"})], "Saved."),
+                "extend-long-rule-keeps-its-terms": ([self.call("rules_update", {"section": "X scouting pace", "content":
+                    "Skip accounts under 500 followers. Follow at most ten leads and like at most 20 posts per run.",
+                    "owner_words": "never like more than 20 posts per scouting run"})], "Saved."),
                 "share-screenshot-in-reply": ([self.call("computer_screenshot", {"share": True})],
                                               "A browser on X. ![screenshot](screens/30000000-0000-0000-0000-000000000001.png)",
                                               "I took a screenshot; the screen shows a browser."),
@@ -315,6 +327,15 @@ def run(runner):
             self.assertEqual((final, rejected), ("ok", ["delegate"]))
             self.assertFalse(all(c["pass"] for c in runner.grade({}, [], "ok", rejected)))
             self.assertTrue(all(c["pass"] for c in runner.grade({}, [], "ok", [])))
+
+        def test_a_string_over_its_max_length_is_a_tool_error(self):
+            context = self.context()
+            context["listed_tools"].append({"name": "rules_update", "inputSchema": {
+                "type": "object", "properties": {"content": {"type": "string", "maxLength": 5}}}})
+            with tempfile.TemporaryDirectory() as temp:
+                server = mock.Server(context, {"setup": {}}, Path(temp) / "log")
+                self.assertTrue(server.dispatch("rules_update", {"content": "too long"})["isError"])
+                self.assertNotIn("isError", server.dispatch("rules_update", {"content": "short"}))
 
         def test_production_fidelity(self):
             server = mock.Server(self.context(), {"setup": {"mocks": [

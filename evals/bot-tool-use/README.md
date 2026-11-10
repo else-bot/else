@@ -89,7 +89,7 @@ The self-test feeds passing and failing fake logs through the grader and drives 
 
 ## Limits
 
-This checks model choices under a fake owner request, not backend permissions, cards, credentials, remote servers, scheduling, or side effects. Mocks return static results and do not validate every JSON Schema constraint. No native host tools, default skills, memory, attachments, compaction, or resumed CLI sessions are exercised. History is synthetic text, not a native session replay. Substring checks cannot detect every possible misleading chat response.
+This checks model choices under a fake owner request, not backend permissions, cards, credentials, remote servers, scheduling, or side effects. Mocks return static results and check only declared argument names and top-level string `maxLength`, not other JSON Schema constraints or server-side checks such as the rules prose limit. No native host tools, default skills, memory, attachments, compaction, or resumed CLI sessions are exercised. History is synthetic text, not a native session replay. Substring checks cannot detect every possible misleading chat response.
 
 Byte counts describe the exported instructions and compact schema JSON. Dry runs also count the packet and stdin. `initial_context` adds instructions, listed schemas, and packet; deferred schemas enter only through discovery results. These counts exclude the CLI's own protocol text and model-specific schema serialization. They are not token estimates. Live result rows preserve the CLI's reported usage.
 

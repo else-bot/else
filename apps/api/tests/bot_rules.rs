@@ -297,7 +297,8 @@ async fn invalid_rules_are_refused_without_a_version() {
         update("# Tone", "Short.", "x"),
         update("Tone", "Short.\n## Other\nx", "x"),
         update("Tone", "Short.", "   "),
-        update("Tone", &"a".repeat(8_001), "x"),
+        update("Tone", &"a".repeat(4_001), "x"),
+        update("Tone", &"a".repeat(801), "x"),
         update("Missing", "", "remove it"),
     ] {
         let called = tool(&h.app, &token, "rules_update", args.clone()).await;

@@ -68,6 +68,15 @@ def find(deferred, query, listed=()):
     }
 
 
+def too_long(schema, arguments):
+    """Names the first string argument over its schema maxLength, as production rejects it."""
+    for key, prop in schema.get("inputSchema", {}).get("properties", {}).items():
+        value, limit = arguments.get(key), prop.get("maxLength")
+        if isinstance(value, str) and limit is not None and len(value) > limit:
+            return key
+    return None
+
+
 def tool_result(value, error=False):
     result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}]}
     if error:
@@ -100,6 +109,9 @@ class Server:
                 return tool_result("Name a deferred tool and give its arguments as an object.", True)
             if arguments.keys() - schema["inputSchema"].get("properties", {}).keys():
                 return tool_result("Use only arguments declared by find_tool's schema.", True)
+        schema = self.deferred.get(name) or self.listed.get(name, {})
+        if key := too_long(schema, arguments):
+            return tool_result(f"{key} exceeds maxLength {schema['inputSchema']['properties'][key]['maxLength']}.", True)
         call = {"name": name, "arguments": arguments}
         for mock in self.mocks:
             if matches(call, {k: v for k, v in mock.items() if k != "result"}):
