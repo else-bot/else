@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use crate::api::{Bot, ReadCommand, ReplyPosition, SidebarStatus};
+use crate::api::{Bot, ReadCommand, ReplyPosition};
 
 /// The owner's explicit choice from the bot menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,19 +349,12 @@ impl Inbox {
 /// then are progress updates and stay silent; a turn continuing after its
 /// delegated tasks is queued, so it is not idle.
 fn handed_back(bot: &Bot) -> bool {
-    bot.activity.as_ref().is_none_or(|a| a.phase == "idle")
-        || matches!(
-            bot.sidebar_status,
-            Some(
-                SidebarStatus::WaitingForAnswer { .. }
-                    | SidebarStatus::NeedsApproval { .. }
-                    | SidebarStatus::NeedsCredentials { .. }
-            )
-        )
+    bot.activity.as_ref().is_none_or(|a| a.phase == "idle") || bot.waiting().is_some()
 }
 
+/// Mute silences a bot except while it waits on the owner.
 fn unread(sync: Option<&ReadSync>, bot: &Bot) -> bool {
-    if bot.muted {
+    if bot.muted && bot.waiting().is_none() {
         return false;
     }
     let mark = sync.and_then(ReadSync::mark);
@@ -507,6 +500,7 @@ mod tests {
         let mut asking = busy(bot(1, Some((1, at(2, 7))), at(0, 0)), "working");
         asking.sidebar_status = Some(crate::api::SidebarStatus::WaitingForAnswer {
             preview: "Which one?".into(),
+            since: None,
         });
         assert!(inbox.observe(std::slice::from_ref(&asking)));
         assert_eq!(inbox.alerts(&[asking], nobody).len(), 1);
@@ -590,6 +584,29 @@ mod tests {
         assert_eq!(inbox.settle(&[quiet, muted.clone()]), [muted.id]);
         muted.muted = false;
         assert!(inbox.is_unread(&muted), "unmuting shows what is unread");
+    }
+
+    #[test]
+    fn a_muted_bot_waiting_on_the_owner_is_announced_until_the_request_closes() {
+        let mut inbox = Inbox::default();
+        inbox.observe(&[busy(bot(1, None, at(0, 0)), "working")]);
+        let mut waiting = bot(1, Some((1, at(2, 9))), at(0, 0));
+        waiting.muted = true;
+        waiting.sidebar_status = Some(crate::api::SidebarStatus::NeedsTakeover {
+            preview: "Inspect the open X conversation.".into(),
+            since: None,
+        });
+        assert!(inbox.observe(std::slice::from_ref(&waiting)));
+        assert!(inbox.is_unread(&waiting));
+        assert_eq!(
+            inbox.alerts(std::slice::from_ref(&waiting), nobody).len(),
+            1
+        );
+
+        let mut settled = waiting;
+        settled.sidebar_status = None;
+        assert!(!inbox.is_unread(&settled), "mute applies again");
+        assert_eq!(inbox.settle(&[settled.clone()]), [settled.id]);
     }
 
     #[test]
