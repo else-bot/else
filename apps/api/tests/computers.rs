@@ -1259,8 +1259,8 @@ async fn desktop_computers_boot_small_and_grow_only_for_the_screen() {
     );
 }
 
-/// A desktop whose startup fails is not admitted: the use is told to try
-/// again, the failure is recorded, and the next use starts it again.
+/// A desktop whose startup fails is not admitted: the use is told it
+/// failed, the failure is recorded, and the next use starts it again.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_desktop_startup_is_not_reported_ready() {
     use std::sync::atomic::Ordering::SeqCst;
@@ -1279,7 +1279,7 @@ async fn a_failed_desktop_startup_is_not_reported_ready() {
     fake.fail_desktop.store(true, SeqCst);
     let refused = manager.acquire_desktop(bot, "test:screen").await.unwrap();
     assert!(
-        matches!(&refused, Acquire::Queued { reason } if reason.contains("Xvfb did not start")),
+        matches!(&refused, Acquire::DesktopFailed { reason } if reason.contains("Xvfb did not start")),
         "{refused:?}"
     );
     let input = manager
@@ -1292,7 +1292,10 @@ async fn a_failed_desktop_startup_is_not_reported_ready() {
         )
         .await
         .unwrap();
-    assert!(matches!(input, Err(Acquire::Queued { .. })), "{input:?}");
+    assert!(
+        matches!(input, Err(Acquire::DesktopFailed { .. })),
+        "{input:?}"
+    );
     let error: Option<String> =
         sqlx::query_scalar("SELECT last_error FROM bot_computers WHERE bot_id = ?1")
             .bind(bot)
