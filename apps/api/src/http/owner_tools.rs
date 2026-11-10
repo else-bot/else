@@ -35,8 +35,8 @@ pub(super) fn choice_schema() -> Value {
     json!({
         "name": "ask_owner",
         "description": "Ask the owner a question in a card: 2 to 5 descriptive choices when a pick settles \
-            it, or no choices for an open question answered in chat. The card always takes a typed \
-            answer too, so list only real options. A new owner message skips the card. At most one per attempt.",
+            it, or no choices for an open question answered in chat. Without multiple, the card also \
+            takes a typed answer, so list only real options. A new owner message skips the card. At most one per attempt.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -47,7 +47,7 @@ pub(super) fn choice_schema() -> Value {
                              "maxItems": crate::app::questions::MAX_CHOICES, "uniqueItems": true,
                              "items": { "type": "string", "minLength": 1,
                                         "maxLength": crate::app::questions::MAX_CHOICE_LABEL },
-                             "description": "2 to 5 short labels, in the order shown. The card ends with a field to type any other answer, so never add an \"Other\" or \"Another time\" choice. Omit or leave empty for a chat answer." },
+                             "description": "2 to 5 short labels, in the order shown. Unless multiple, the card ends with a field to type any other answer: never add an \"Other\" or \"Another time\" choice. Omit or leave empty for a chat answer." },
                 "multiple": { "type": "boolean", "default": false,
                               "description": "False or omitted: one choice, submitted on click. True: several, confirmed with \
                                   Done; requires choices. Never approves destructive or external actions." },
