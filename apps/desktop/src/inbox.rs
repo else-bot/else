@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use crate::api::{Bot, ReadCommand, ReplyPosition};
+use crate::api::{Bot, ReadCommand, ReplyPosition, SidebarStatus};
 
 /// The owner's explicit choice from the bot menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,7 +241,7 @@ impl Inbox {
     }
 
     /// Note new replies in a bot list. Returns whether any await a
-    /// notification decision.
+    /// notification decision now that their turn handed back.
     pub fn observe(&mut self, bots: &[Bot]) -> bool {
         let first = !self.baseline;
         self.baseline = true;
@@ -262,7 +262,7 @@ impl Inbox {
                 .is_some_and(|alert| alert.turn == latest.turn_id);
             attention.due |=
                 !first && before.is_none_or(|position| latest.position > position) && !announced;
-            due |= attention.due;
+            due |= attention.due && handed_back(bot, latest.turn_id);
         }
         due
     }
@@ -275,9 +275,6 @@ impl Inbox {
             let Some(attention) = self.bots.get_mut(&bot.id) else {
                 continue;
             };
-            if !std::mem::take(&mut attention.due) {
-                continue;
-            }
             let Some(latest) = bot
                 .read_state
                 .as_ref()
@@ -285,6 +282,10 @@ impl Inbox {
             else {
                 continue;
             };
+            if !attention.due || !handed_back(bot, latest.turn_id) {
+                continue;
+            }
+            attention.due = false;
             if !unread(Some(&attention.read), bot) || viewing(bot.id) {
                 continue;
             }
@@ -337,6 +338,20 @@ impl Inbox {
                 .map(|_| *id)
         })
     }
+}
+
+/// The bot is done with `turn` for now: it ended, or it waits on the owner.
+/// Replies before then are progress updates and stay silent.
+fn handed_back(bot: &Bot, turn: Uuid) -> bool {
+    bot.activity.as_ref().and_then(|a| a.active_turn_id) != Some(turn)
+        || matches!(
+            bot.sidebar_status,
+            Some(
+                SidebarStatus::WaitingForAnswer { .. }
+                    | SidebarStatus::NeedsApproval { .. }
+                    | SidebarStatus::NeedsCredentials { .. }
+            )
+        )
 }
 
 fn unread(sync: Option<&ReadSync>, bot: &Bot) -> bool {
