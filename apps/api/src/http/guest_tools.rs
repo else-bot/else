@@ -42,15 +42,6 @@ pub const TOOL_NAMES: &[&str] = &[
 /// bot asks the owner to continue beyond this).
 pub const MAX_INPUT_BATCHES: u32 = 40;
 
-/// Models verified to receive MCP image results. Another model
-/// gets an explicit refusal; nothing switches models.
-pub const VISION_MODELS: &[&str] = &[
-    "gpt-6.1-sol",
-    "claude-haiku-5-5",
-    "claude-sonnet-5-5",
-    "claude-opus-5-5",
-];
-
 const MAX_ARTIFACT: u64 = 10 * 1024 * 1024;
 const READ_CHUNK: u64 = 12_000;
 pub fn tool_list() -> Vec<Value> {
@@ -379,29 +370,6 @@ fn job_json(job: &crate::computers::jobs::JobState) -> Value {
     })
 }
 
-async fn vision(state: &AppState, grant: &Grant) -> Result<(), String> {
-    let model: Option<String> =
-        sqlx::query_scalar("SELECT profile->>'model' FROM turns WHERE id = ?1")
-            .bind(grant.turn_id)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
-    match model {
-        Some(m) if VISION_MODELS.contains(&m.as_str()) => Ok(()),
-        Some(m) => Err(format!(
-            "IMAGE_UNSUPPORTED: the model {m} is not verified to receive images; the owner can \
-             choose one that is ({}). Nothing was captured.",
-            VISION_MODELS.join(", ")
-        )),
-        None => Err(
-            "IMAGE_UNSUPPORTED: this turn's model is not verified to receive images. \
-                     Nothing was captured."
-                .into(),
-        ),
-    }
-}
-
 async fn screenshot(
     state: &AppState,
     grant: &Grant,
@@ -409,9 +377,6 @@ async fn screenshot(
     computers: &std::sync::Arc<crate::computers::ComputerManager>,
 ) -> Outcome {
     use crate::computers::screens::ScreenRefusal;
-    if let Err(message) = vision(state, grant).await {
-        return (tool_error(&message), None);
-    }
     let refusal = |r: ScreenRefusal| -> Outcome {
         (
             tool_error(&match r {
