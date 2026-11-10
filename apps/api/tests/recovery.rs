@@ -739,3 +739,73 @@ async fn offline_settlement_confirms_a_pending_job_cancel() {
     assert_eq!(job_status(&app, job).await.0, "cancelled");
     assert_eq!(job_leases(&app).await, 0);
 }
+
+async fn pause_with_bot_stop(app: &TestApp, guest: &Guest, bot: Uuid) {
+    guest
+        .set(&ComputerManager::runtime_name(bot), RuntimeState::Paused)
+        .unwrap();
+    sqlx::query("UPDATE bot_computers SET observed_state = 'paused' WHERE bot_id = ?1")
+        .bind(bot)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE bots SET cancel_pending = 1 WHERE id = ?1")
+        .bind(bot)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    else_api::computers::jobs::request_cancel(&app.db.pool, bot, None)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_cancel_racing_a_bot_stop_does_not_resume_its_paused_work() {
+    let _serial = SERIAL.lock().await;
+    let app = TestApp::installed().await;
+    let guest = Arc::new(Guest::default());
+    let bot: Uuid = app.create_bot("A").await.parse().unwrap();
+    let manager = api(&app, &guest, 2).await;
+    let mut jobs = Vec::new();
+    for _ in 0..2 {
+        let Started::Job(job) = manager
+            .start_job(bot, None, "work", Duration::from_secs(600))
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        jobs.push(job);
+    }
+    pause_with_bot_stop(&app, &guest, bot).await;
+    manager.cancel_job(bot, jobs[0]).await.unwrap().unwrap();
+    assert_eq!(observed(&app, bot).await, "stopped");
+    assert!(guest.kills.lock().unwrap().is_empty());
+    for job in jobs {
+        assert_eq!(job_status(&app, job).await.0, "cancelled");
+    }
+    assert_eq!(job_leases(&app).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn offline_settlement_settles_cancels_ended_by_a_bot_stop() {
+    let _serial = SERIAL.lock().await;
+    let app = TestApp::installed().await;
+    let guest = Arc::new(Guest::default());
+    let bot: Uuid = app.create_bot("A").await.parse().unwrap();
+    let manager = api(&app, &guest, 2).await;
+    let Started::Job(job) = manager
+        .start_job(bot, None, "work", Duration::from_secs(600))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    drop(manager);
+    pause_with_bot_stop(&app, &guest, bot).await;
+    let offline = api(&app, &guest, 2).await;
+    offline.settle_offline(bot).await.unwrap();
+    assert_eq!(observed(&app, bot).await, "stopped");
+    assert_eq!(job_status(&app, job).await.0, "cancelled");
+    assert_eq!(job_leases(&app).await, 0);
+}
