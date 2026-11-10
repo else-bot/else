@@ -1047,6 +1047,46 @@ impl Conversation {
             })
     }
 
+    /// Turns that ran a task another bot sent. The sender's chat shows their
+    /// replies, so this chat keeps only the exchange row.
+    pub fn delegated_turns(&self) -> std::collections::HashSet<Uuid> {
+        self.items()
+            .filter(|item| item.bot_task.is_some())
+            .map(|item| item.turn_id)
+            .collect()
+    }
+
+    /// This bot's replies to the task whose receipt is `task`: each one
+    /// carrying a file, then the latest, in order.
+    pub fn task_answers(&self, task: &Item) -> Vec<&Item> {
+        if task.bot_task.is_none() {
+            return Vec::new();
+        }
+        let replies: Vec<_> = self
+            .items()
+            .filter(|item| item.turn_id == task.turn_id && item.kind == "assistant")
+            .collect();
+        let last = replies.len().saturating_sub(1);
+        replies
+            .into_iter()
+            .enumerate()
+            .filter(|(ix, item)| {
+                *ix == last
+                    || item
+                        .parts
+                        .iter()
+                        .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }))
+            })
+            .map(|(_, item)| item)
+            .collect()
+    }
+
+    /// The receipt of the task another bot sent, for a turn that ran it.
+    pub fn task_receipt(&self, turn: Uuid) -> Option<&Item> {
+        self.items()
+            .find(|item| item.turn_id == turn && item.bot_task.is_some())
+    }
+
     pub fn is_feedback_acknowledgement(&self, item: &Item) -> bool {
         item.kind == "assistant"
             && self.reaction_in(item.turn_id).is_some()

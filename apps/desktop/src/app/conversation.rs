@@ -43,7 +43,7 @@ pub(super) struct TranscriptRow {
 impl TranscriptRow {
     pub(super) fn contains(&self, key: RowKey) -> bool {
         self.key == key
-            || matches!(key, RowKey::Item(id) if self.activity.as_ref().is_some_and(|activity| activity.items.contains(&id)))
+            || matches!(key, RowKey::Item(id) if self.activity.as_ref().is_some_and(|activity| activity.contains(id)))
     }
 }
 
@@ -62,7 +62,16 @@ fn first_unread_row(
                     text_bytes: item.text.len() as i64,
                 } > read_through
         })
-        .flat_map(|item| [RowKey::Item(item.id), RowKey::Task(item.turn_id)])
+        .flat_map(|item| {
+            [
+                Some(RowKey::Item(item.id)),
+                Some(RowKey::Task(item.turn_id)),
+                conversation
+                    .task_receipt(item.turn_id)
+                    .map(|receipt| RowKey::Item(receipt.id)),
+            ]
+        })
+        .flatten()
         .collect();
     rows.iter().copied().find(|key| unread.contains(key))
 }
@@ -580,9 +589,26 @@ impl ElseApp {
                 })
         }));
         let items: Vec<_> = conversation.into_iter().flat_map(|c| c.items()).collect();
+        let delegated = conversation
+            .map(Conversation::delegated_turns)
+            .unwrap_or_default();
+        // A received task's row sits where its latest answer landed, like a task card.
+        let answered: HashMap<Uuid, Uuid> = items
+            .iter()
+            .filter(|item| item.kind == "assistant" && delegated.contains(&item.turn_id))
+            .map(|item| (item.turn_id, item.id))
+            .collect();
         for item in &items {
-            if item.reaction.is_none()
-                && (item.kind != "assistant" || !tasks.contains_key(&item.turn_id))
+            if item.kind == "assistant" && answered.get(&item.turn_id) == Some(&item.id) {
+                rows.extend(
+                    conversation
+                        .and_then(|c| c.task_receipt(item.turn_id))
+                        .map(|receipt| RowKey::Item(receipt.id)),
+                );
+            } else if item.reaction.is_none()
+                && !(item.bot_task.is_some() && answered.contains_key(&item.turn_id))
+                && (item.kind != "assistant"
+                    || !(tasks.contains_key(&item.turn_id) || delegated.contains(&item.turn_id)))
             {
                 rows.push(RowKey::Item(item.id));
             }
@@ -1229,6 +1255,58 @@ mod tests {
         assert_eq!(view.row_index(item(2)), Some(0));
         assert_eq!(view.row_index(item(5)), Some(2));
         assert_eq!(view.row_index(item(6)), Some(3));
+    }
+
+    #[test]
+    fn a_received_task_row_holds_this_bots_answer() {
+        let c = Conversation::from_snapshot(serde_json::from_value(json!({
+            "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+            "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+            "items": [
+                {"id": Uuid::from_u128(1), "seq": 1, "turn_id": Uuid::from_u128(10), "kind": "status",
+                 "text": "Received a task", "bot_task": {"sender_bot_id": Uuid::from_u128(90),
+                 "sender_name": "Proliquid", "prompt": "List your routines"}},
+                {"id": Uuid::from_u128(2), "seq": 2, "turn_id": Uuid::from_u128(10),
+                 "kind": "assistant", "text": "Report attached.",
+                 "parts": [{"type": "file", "file": {"id": Uuid::from_u128(50),
+                     "name": "report.txt", "media_type": "text/plain", "size": 12}}]},
+                {"id": Uuid::from_u128(3), "seq": 3, "turn_id": Uuid::from_u128(11),
+                 "kind": "user", "text": "Hi"},
+                {"id": Uuid::from_u128(4), "seq": 4, "turn_id": Uuid::from_u128(10),
+                 "kind": "assistant", "text": "Progress note."},
+                {"id": Uuid::from_u128(5), "seq": 5, "turn_id": Uuid::from_u128(10),
+                 "kind": "assistant", "text": "No routines."}
+            ],
+            "turns": [{"id": Uuid::from_u128(10), "request_id": Uuid::from_u128(110), "turn_no": 1,
+                       "provider_id": "codex", "status": "completed", "effect_uncertain": false}],
+            "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
+        })).unwrap()).unwrap();
+        assert_eq!(
+            first_unread_row(
+                &[item(3), item(1)],
+                &c,
+                ReplyPosition {
+                    item_seq: 3,
+                    text_bytes: 0
+                }
+            ),
+            Some(item(1)),
+            "an unread answer marks its exchange row"
+        );
+        let rows = super::group_activity(vec![transcript_row(item(1))], Some(&c));
+        assert_eq!(
+            rows[0].activity.as_ref().unwrap().answers,
+            [Uuid::from_u128(2), Uuid::from_u128(5)],
+            "the file reply and the final answer stay reachable"
+        );
+        let mut view = ConversationView::new(Uuid::from_u128(80));
+        view.conversation = Some(c);
+        view.rows = rows;
+        assert_eq!(
+            view.row_index(item(5)),
+            Some(0),
+            "the answer scrolls to its exchange row"
+        );
     }
 
     #[test]
