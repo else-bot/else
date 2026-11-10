@@ -117,6 +117,23 @@ the trial, despite reporting delivery.
 	--label 'Message… (Enter to send, Shift+Enter for a new line)' --key return
 ```
 
+Select text with `drag`, scroll with `scroll`, and send a shortcut to the
+window by omitting the selector from `key`. Coordinates are pixels in the
+fresh window capture.
+
+```sh
+.else-dev/lume-client/bin/python .agents/skills/verify-else/lume.py drag \
+	--run "$RUN" --name select --from-x 290 --from-y 294 --to-x 470 --to-y 394
+.else-dev/lume-client/bin/python .agents/skills/verify-else/lume.py key \
+	--run "$RUN" --name quote --key e --mod cmd --mod shift
+.else-dev/lume-client/bin/python .agents/skills/verify-else/lume.py scroll \
+	--run "$RUN" --name older --x 600 --y 300 --direction up --amount 10
+```
+
+Links in message text and hover-only icons have no AX element or ignore the
+background AX press, while the driver still reports success. Click them with
+`--x`, `--y`, and `--foreground`, which moves only the guest's pointer.
+
 Use the exact label from the fresh tree if it differs. Never retry a mutation
 because a driver reports an uncertain effect. Inspect the after screenshot
 and probe the API first. The successful message must appear in both the
