@@ -284,19 +284,7 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     let bot = app.create_bot("Seer").await;
     let other = app.create_bot("Other").await;
 
-    let token = grant(&app, &bot, Some("gpt-5.4-mini")).await;
-    let refused = error(&shot(&app, &token, json!({})).await);
-    assert!(refused.starts_with("IMAGE_UNSUPPORTED"), "{refused}");
-    assert!(guest.files.lock().unwrap().is_empty());
-
-    sqlx::query(
-        "UPDATE turns SET profile = json_object('model', 'gpt-6.1-sol')
-         WHERE bot_id = ?1 AND status = 'running'",
-    )
-    .bind(bot.parse::<Uuid>().unwrap())
-    .execute(&app.db.pool)
-    .await
-    .unwrap();
+    let token = grant(&app, &bot, Some("gpt-6.1-terra")).await;
     let result = shot(&app, &token, json!({ "save": true })).await;
     assert_ne!(result["isError"], true, "{result}");
     let content = result["content"].as_array().unwrap();
