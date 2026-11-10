@@ -711,7 +711,11 @@ async fn a_job_cancel_on_a_paused_computer_resumes_it_and_stops_only_that_job() 
     assert_eq!(job_status(&app, cancelled).await.0, "cancelled");
     assert_eq!(job_status(&app, kept).await.0, "running");
     assert_eq!(observed(&app, bot).await, "running");
-    assert_eq!(job_leases(&app).await, 1, "only the cancelled job's lease ends");
+    assert_eq!(
+        job_leases(&app).await,
+        1,
+        "only the cancelled job's lease ends"
+    );
     assert_eq!(guest.kills.lock().unwrap().len(), 1);
 }
 
