@@ -664,6 +664,20 @@ impl Client {
             .map(|_| ())
     }
 
+    /// Settle a bot's request to take over its computer: taken or dismissed.
+    pub async fn settle_handoff(
+        self: Arc<Self>,
+        bot: Uuid,
+        handoff: Uuid,
+        take: bool,
+    ) -> Result<(), ClientError> {
+        let action = if take { "take" } else { "dismiss" };
+        let path = format!("/v1/bots/{bot}/computer-handoffs/{handoff}/{action}");
+        self.call::<serde_json::Value>(Method::POST, path, None)
+            .await
+            .map(|_| ())
+    }
+
     /// Answer a bot's question by its selected choice ids. A stale card gets
     /// 409 `question_settled` from the server and never changes anything.
     pub async fn answer_question(

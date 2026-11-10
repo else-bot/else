@@ -10,7 +10,7 @@ pub struct Snapshot {
     /// Ascending by `seq`.
     pub items: Vec<ItemRecord>,
     /// Turns of the returned items plus every unfinished turn of the bot,
-    /// delegated tasks included.
+    /// delegated tasks included, and any turn with a pending computer handoff.
     pub turns: Vec<TurnRecord>,
     /// Pass as `before_seq` to load the previous page; `None` at the start.
     pub older_before_seq: Option<i64>,
@@ -58,7 +58,8 @@ pub async fn snapshot(
     let mut turns: Vec<TurnRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {TURN_COLUMNS} FROM turns t
          WHERE t.bot_id = ?1
-           AND (lower(hex(t.id)) IN (SELECT replace(value, '-', '') FROM json_each(?2)) OR t.status IN ('queued', 'preparing', 'sending', 'running', 'cancelling', 'waiting'))
+           AND (lower(hex(t.id)) IN (SELECT replace(value, '-', '') FROM json_each(?2)) OR t.status IN ('queued', 'preparing', 'sending', 'running', 'cancelling', 'waiting')
+                OR EXISTS (SELECT 1 FROM computer_handoffs h WHERE h.turn_id = t.id AND h.status = 'pending'))
          ORDER BY t.turn_no"
     )))
     .bind(bot_id)

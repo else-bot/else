@@ -5,6 +5,7 @@ mod bot_mention;
 mod bot_menu;
 mod categories;
 mod computer;
+mod computer_handoff;
 mod conversation;
 mod create_bot;
 mod delete_dialog;
@@ -66,6 +67,7 @@ actions!(
         NewCategory,
         MoveBot,
         ToggleSettings,
+        TakeOverComputer,
         Quit,
         CloseWindow,
         Hide,
@@ -109,6 +111,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(primary!("shift-g"), NewCategory, Some(APP_CONTEXT)),
         KeyBinding::new(primary!("shift-m"), MoveBot, Some(APP_CONTEXT)),
         KeyBinding::new(primary!("shift-b"), ToggleSettings, Some(APP_CONTEXT)),
+        KeyBinding::new(primary!("shift-t"), TakeOverComputer, Some(APP_CONTEXT)),
         KeyBinding::new(
             primary!(","),
             crate::connection::OpenAppSettings,

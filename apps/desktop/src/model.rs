@@ -216,6 +216,26 @@ impl SecretRequest {
     }
 }
 
+/// A bot's request that the owner take over its computer. It holds no turn.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ComputerHandoff {
+    pub id: Uuid,
+    pub reason: String,
+    pub status: HandoffStatus,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub settled_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HandoffStatus {
+    Pending,
+    Taken,
+    Dismissed,
+    Skipped,
+}
+
 pub const APPROVE: &str = "approve";
 pub const DENY: &str = "deny";
 pub const APPROVE_FOREVER: &str = "approve_forever";
@@ -389,6 +409,9 @@ pub struct Turn {
     /// MCP jobs this turn waits on. Absent from older servers.
     #[serde(default)]
     pub mcp_waits: Vec<McpWait>,
+    /// Requests that the owner take over the computer. Absent from older servers.
+    #[serde(default)]
+    pub computer_handoffs: Vec<ComputerHandoff>,
 }
 
 /// A job in an installed MCP that a waiting turn rechecks until it ends.
@@ -793,6 +816,22 @@ impl Conversation {
                 return;
             }
         }
+    }
+
+    pub fn computer_handoff(&self, id: Uuid) -> Option<&ComputerHandoff> {
+        self.turns
+            .values()
+            .flat_map(|t| &t.computer_handoffs)
+            .find(|h| h.id == id)
+    }
+
+    /// The bot's open request to take over its computer (at most one).
+    pub fn pending_handoff(&self) -> Option<&ComputerHandoff> {
+        self.turns
+            .values()
+            .flat_map(|t| &t.computer_handoffs)
+            .filter(|h| h.status == HandoffStatus::Pending)
+            .max_by_key(|h| h.created_at)
     }
 
     pub fn secret_request(&self, id: Uuid) -> Option<&SecretRequest> {

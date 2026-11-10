@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::computers::ComputerError;
 use crate::computers::upgrade::UpgradeStatus;
+use crate::db::computer_handoffs as handoffs;
 
 use super::AppState;
 use super::error::{ApiError, ApiPath};
@@ -29,6 +30,52 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/bots/{bot_id}/desktop/stream",
             get(super::desktop_stream::stream),
         )
+        .route(
+            "/bots/{bot_id}/computer-handoffs/{handoff_id}/take",
+            post(take_handoff),
+        )
+        .route(
+            "/bots/{bot_id}/computer-handoffs/{handoff_id}/dismiss",
+            post(dismiss_handoff),
+        )
+}
+
+async fn take_handoff(
+    State(state): State<Arc<AppState>>,
+    ApiPath((bot_id, handoff_id)): ApiPath<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    settle_handoff(&state, bot_id, handoff_id, handoffs::Status::Taken).await
+}
+
+async fn dismiss_handoff(
+    State(state): State<Arc<AppState>>,
+    ApiPath((bot_id, handoff_id)): ApiPath<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    settle_handoff(&state, bot_id, handoff_id, handoffs::Status::Dismissed).await
+}
+
+async fn settle_handoff(
+    state: &AppState,
+    bot_id: Uuid,
+    handoff_id: Uuid,
+    status: handoffs::Status,
+) -> Result<Json<Value>, ApiError> {
+    match handoffs::settle(&state.db, bot_id, handoff_id, status).await {
+        Ok(handoff) => Ok(Json(json!({ "handoff": handoff }))),
+        Err(handoffs::SettleError::NotFound) => Err(ApiError::not_found()),
+        Err(handoffs::SettleError::Settled(handoff)) => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "computer_handoff_settled",
+            format!(
+                "This request was already {}.",
+                serde_json::to_value(handoff.status)
+                    .unwrap_or_default()
+                    .as_str()
+                    .unwrap_or_default()
+            ),
+        )),
+        Err(handoffs::SettleError::Db(err)) => Err(err.into()),
+    }
 }
 
 pub(super) fn manager(

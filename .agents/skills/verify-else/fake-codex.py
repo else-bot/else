@@ -177,6 +177,13 @@ def stream(turn, latest, packet, stopped):
     try:
         if handoff(turn, packet, stopped):
             return
+        if latest == '[ui:handoff]':
+            outgoing_tool('computer_handoff', {'reason': 'X Chat is blank at x.com/messages.'})
+            event('item/agentMessage/delta', {'threadId': thread_id, 'turnId': turn,
+                  'itemId': 'fixture-computer-handoff',
+                  'delta': 'Please take over my computer to inspect the blank X Chat page.'})
+            finish(turn, stopped, 'completed')
+            return
         if packet.rstrip().endswith('[ui:permission]') and '[else.bot owner answers]' not in packet:
             result = outgoing_tool('ask_permission', {
                 'kind': 'destructive',

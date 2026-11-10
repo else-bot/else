@@ -4,7 +4,7 @@ use super::reply::{Author, MessageReference};
 use super::{
     APP_CONTEXT, COMPOSER_CONTEXT, Connection, DeleteBot, ElseApp, FocusComposer, FocusSidebar,
     LoadOlder, MoveBot, NewBot, NewCategory, SIDEBAR_CONTEXT, SelectNext, SelectPrev, StopWork,
-    ToggleSettings,
+    TakeOverComputer, ToggleSettings,
 };
 use crate::api::Bot;
 use crate::avatar::bot_avatar;
@@ -766,6 +766,7 @@ impl ElseApp {
             .pb_3()
             .child(notices)
             .children(self.render_waiting_tray(cx))
+            .children(self.render_handoff_bar(bot, window, cx))
             .child(
                 div()
                     .relative()
@@ -984,6 +985,9 @@ impl Render for ElseApp {
                 if app.connection == Connection::Connected {
                     app.open_create_dialog(window, cx);
                 }
+            }))
+            .on_action(cx.listener(|app, _: &TakeOverComputer, window, cx| {
+                app.take_over_computer(window, cx);
             }))
             .on_action(cx.listener(|app, _: &StopWork, window, cx| {
                 if app.selected_bot().is_some_and(|b| b.is_active()) {
