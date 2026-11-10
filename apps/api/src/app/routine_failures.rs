@@ -253,6 +253,9 @@ pub fn notice(notice: &Notice<'_>, reaction: Reaction) -> String {
                 _ => "I couldn't retry it right away.",
             };
             let next = match (&notice.next, notice.enabled) {
+                (Some(next), true) if notice.reminder => {
+                    format!("It still runs at its set time, {next}.")
+                }
                 _ if notice.reminder => "It won't run again unless you ask.".to_owned(),
                 (_, false) => {
                     "The routine is switched off, so it won't run again until you turn it back on."
@@ -377,6 +380,18 @@ mod tests {
             Reaction::Report,
         );
         assert!(once.starts_with("The reminder **Update tickets** failed because"));
+        let early = notice(
+            &Notice {
+                reminder: true,
+                next: base.next.clone(),
+                ..base
+            },
+            Reaction::Report,
+        );
+        assert!(
+            early.contains("It still runs at its set time, Sun 8 Nov, 04:00."),
+            "{early}"
+        );
         assert!(
             once.contains("It won't run again unless you ask."),
             "{once}"

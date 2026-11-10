@@ -402,6 +402,7 @@ pub async fn create(
         tx.commit().await?;
         return Ok((routine, false));
     }
+    routine.schedule.check_due(now)?;
     let (count, taken): (i64, bool) = sqlx::query_as(
         "SELECT count(*), coalesce(max(name = ?2), false) FROM routines
          WHERE bot_id = ?1 AND deleted_at IS NULL",

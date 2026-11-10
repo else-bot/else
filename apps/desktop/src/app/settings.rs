@@ -1679,7 +1679,6 @@ impl ElseApp {
             Some(RoutineSave::Saving { enabled, .. }) => *enabled,
             _ => routine.enabled,
         };
-        // A reminder whose time has passed cannot be switched back on.
         let passed = !checked && routine.run_at.is_some_and(|at| at <= Utc::now());
         let switch = Switch::new(ElementId::Name(format!("routine-{id}").into()))
             .focus_ring(false)

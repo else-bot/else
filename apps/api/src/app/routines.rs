@@ -309,8 +309,9 @@ impl Schedule {
         Ok(schedule)
     }
 
-    /// A reminder due at `when`, after `now` and at most
-    /// [`MAX_REMINDER_DAYS`] ahead.
+    /// A reminder due at `when`. A wall-clock time repeated by a
+    /// daylight-saving fall-back is its first occurrence after `now`.
+    /// [`Self::check_due`] bounds it.
     pub fn once(
         when: When<'_>,
         timezone: Option<&str>,
@@ -325,19 +326,33 @@ impl Schedule {
             When::At(local) => {
                 let local = chrono::NaiveDateTime::parse_from_str(local.trim(), "%Y-%m-%dT%H:%M")
                     .map_err(|_| InvalidRoutine::When)?;
-                tz.from_local_datetime(&local)
-                    .earliest()
-                    .ok_or(InvalidRoutine::When)?
-                    .with_timezone(&Utc)
+                match tz.from_local_datetime(&local) {
+                    chrono::LocalResult::Single(at) => at,
+                    chrono::LocalResult::Ambiguous(first, second) => {
+                        if first > now {
+                            first
+                        } else {
+                            second
+                        }
+                    }
+                    chrono::LocalResult::None => return Err(InvalidRoutine::When),
+                }
+                .with_timezone(&Utc)
             }
         };
-        if at <= now {
-            return Err(InvalidRoutine::Passed);
-        }
-        if at > now + TimeDelta::days(MAX_REMINDER_DAYS) {
-            return Err(InvalidRoutine::TooFar);
-        }
         Ok(Self::Once { at, tz })
+    }
+
+    /// A reminder must be due after `now` and at most
+    /// [`MAX_REMINDER_DAYS`] ahead; a cron schedule always passes.
+    pub fn check_due(&self, now: DateTime<Utc>) -> Result<(), InvalidRoutine> {
+        match self.run_at() {
+            Some(at) if at <= now => Err(InvalidRoutine::Passed),
+            Some(at) if at > now + TimeDelta::days(MAX_REMINDER_DAYS) => {
+                Err(InvalidRoutine::TooFar)
+            }
+            _ => Ok(()),
+        }
     }
 
     /// The schedule a routine row stores: a reminder when `run_at` is set.
@@ -748,5 +763,51 @@ mod tests {
         );
         assert_eq!(found("Gemini 3"), None);
         assert_eq!(found("  "), None);
+    }
+
+    #[test]
+    fn a_reminder_takes_the_next_occurrence_of_a_repeated_local_time() {
+        let now = at("2026-11-01T06:10:00Z");
+        let ny = Some("America/New_York");
+        let repeated = Schedule::once(When::At("2026-11-01T01:30"), ny, now).unwrap();
+        assert_eq!(
+            repeated.run_at(),
+            Some(at("2026-11-01T06:30:00Z")),
+            "the EST 01:30"
+        );
+        let early = at("2026-11-01T04:00:00Z");
+        let first = Schedule::once(When::At("2026-11-01T01:30"), ny, early).unwrap();
+        assert_eq!(
+            first.run_at(),
+            Some(at("2026-11-01T05:30:00Z")),
+            "the EDT 01:30"
+        );
+        assert_eq!(
+            Schedule::once(When::At("2026-03-08T02:30"), ny, early).unwrap_err(),
+            InvalidRoutine::When,
+            "a time skipped by spring-forward never occurs"
+        );
+    }
+
+    #[test]
+    fn a_reminder_is_due_after_now_and_within_a_year() {
+        let now = at("2026-11-10T12:00:00Z");
+        let check = |when| Schedule::once(when, None, now).unwrap().check_due(now);
+        assert_eq!(check(When::InMinutes(360)), Ok(()));
+        assert_eq!(
+            check(When::At("2026-11-10T11:59")),
+            Err(InvalidRoutine::Passed)
+        );
+        assert_eq!(check(When::InMinutes(0)), Err(InvalidRoutine::Passed));
+        assert_eq!(
+            check(When::InMinutes((MAX_REMINDER_DAYS + 1) * 24 * 60)),
+            Err(InvalidRoutine::TooFar)
+        );
+        assert!(
+            Schedule::parse("0 9 * * *", None, None)
+                .unwrap()
+                .check_due(now)
+                .is_ok()
+        );
     }
 }
