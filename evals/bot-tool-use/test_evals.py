@@ -171,6 +171,10 @@ def run(runner):
                         {"status": "pending", "parked": True})], "Pick a time on the card."))
             unscoped = [self.call("computer_run", {"command": "node unfollow.js @UST_mean", "effect": "external"},
                                   {"status": "pending", "parked": True})]
+            carried = next(c for c in runner.load_cases() if c["id"] == "carried-result-keeps-current-request-status")
+            for wrong in ("Issue https://github.com/else-bot/else/issues/260 is filed. Twitter successfully posted the callout.",
+                          "Issue https://github.com/else-bot/else/issues/260 still needs filing. Twitter saved draft 7."):
+                self.assertFalse(self.passed(carried["expect"], [], wrong), wrong)
             scoped_case = next(c for c in runner.load_cases() if c["id"] == "recurring-external-batch-declares-task-scope")
             self.assertFalse(self.passed(scoped_case["expect"], unscoped, "Approve the card."))
             for case in runner.load_cases():
