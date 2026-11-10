@@ -165,11 +165,11 @@ fn classify(result: &Value, pointer: &str, running: &[Value]) -> Check {
         };
     }
     match status_at(result, pointer) {
+        Some(status) if running.contains(&status) => Check::Running(text),
         None | Some(Value::Null) => Check::Unreadable(format!(
             "UNREADABLE_STATUS: the result has no status at {pointer}, so whether the job \
              still runs is unknown. Result: {text}"
         )),
-        Some(status) if running.contains(&status) => Check::Running(text),
         Some(_) => Check::Finished(text),
     }
 }
@@ -514,6 +514,23 @@ mod tests {
                 "{unreadable}"
             );
         }
+        let null_running = [Value::Null, json!("working")];
+        assert!(matches!(
+            classify(
+                &json!({ "structuredContent": { "workState": null } }),
+                "/workState",
+                &null_running
+            ),
+            Check::Running(_)
+        ));
+        assert!(matches!(
+            classify(
+                &json!({ "structuredContent": {} }),
+                "/workState",
+                &null_running
+            ),
+            Check::Unreadable(_)
+        ));
         let error = json!({ "isError": true, "content": [] });
         assert!(matches!(
             classify(&error, "/workState", &running),
