@@ -29,6 +29,9 @@ struct Fake {
     fail_close: std::sync::atomic::AtomicBool,
     fail_configure: std::sync::atomic::AtomicBool,
     fail_desktop: std::sync::atomic::AtomicBool,
+    hold_desktop: std::sync::atomic::AtomicBool,
+    desktop_entered: tokio::sync::Notify,
+    desktop_resume: tokio::sync::Notify,
     specs: Mutex<Vec<Spec>>,
     packages: Mutex<Vec<String>>,
     reinstalled: Mutex<Vec<String>>,
@@ -191,6 +194,12 @@ impl ComputerRuntime for Fake {
         } else if program == "/bin/sh" && args[1] == else_api::computers::GUEST_DESKTOP {
             self.log(format!("desktop {name}"));
         }
+        let desktop = program == "/bin/sh" && args[1] == else_api::computers::GUEST_DESKTOP;
+        let fail_desktop = desktop && self.fail_desktop.load(std::sync::atomic::Ordering::SeqCst);
+        if desktop && self.hold_desktop.load(std::sync::atomic::Ordering::SeqCst) {
+            self.desktop_entered.notify_one();
+            self.desktop_resume.notified().await;
+        }
         let mut computers = self.computers.lock().unwrap();
         let Computer { state, files } = computers.get_mut(name).expect("exists");
         assert_eq!(
@@ -216,10 +225,7 @@ impl ComputerRuntime for Fake {
                 }
                 report
             }
-            "/bin/sh"
-                if args[1] == else_api::computers::GUEST_DESKTOP
-                    && self.fail_desktop.load(std::sync::atomic::Ordering::SeqCst) =>
-            {
+            "/bin/sh" if fail_desktop => {
                 return Ok(ExecOutput {
                     status: Some(1),
                     stdout: String::new(),
@@ -1376,6 +1382,58 @@ async fn a_desktop_request_refused_at_startup_holds_no_lease() {
             .unwrap()
             .is_ok()
     );
+}
+
+/// An owner request whose desktop failed to start releases the shared
+/// `desktop:` lease before the next owner request can reuse it, so a request
+/// admitted after it keeps its lease (the input exclusion) live.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_owner_request_never_releases_a_later_requests_lease() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let dir = tempfile::tempdir().unwrap();
+    let desktop = ComputerConfig {
+        desktop: true,
+        state_dir: dir.path().to_owned(),
+        ..config(2)
+    };
+    let manager = Arc::new(manager(&app, &fake, desktop).await);
+    let bot: Uuid = app.create_bot("Blank").await.parse().unwrap();
+    ready(&manager, bot, "test:screen").await;
+
+    fake.fail_desktop.store(true, SeqCst);
+    fake.hold_desktop.store(true, SeqCst);
+    let failing = tokio::spawn({
+        let manager = manager.clone();
+        async move { manager.desktop(bot).await.unwrap() }
+    });
+    fake.desktop_entered.notified().await;
+    fake.fail_desktop.store(false, SeqCst);
+    let mut later = tokio::spawn({
+        let manager = manager.clone();
+        async move { manager.desktop(bot).await.unwrap() }
+    });
+    fake.desktop_resume.notify_one();
+    tokio::select! {
+        () = fake.desktop_entered.notified() => {}
+        refused = &mut later => panic!("the later request never started the desktop: {refused:?}"),
+    }
+    let failed = failing.await.unwrap();
+    assert!(
+        matches!(failed, Err(Acquire::DesktopFailed { .. })),
+        "{failed:?}"
+    );
+    fake.hold_desktop.store(false, SeqCst);
+    fake.desktop_resume.notify_one();
+    let admitted = later.await.unwrap().expect("the later request is admitted");
+    let live: bool =
+        sqlx::query_scalar("SELECT released_at IS NULL FROM computer_leases WHERE id = ?1")
+            .bind(admitted.lease_id)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert!(live, "the admitted owner request still holds its lease");
 }
 
 /// A computer that grew is counted at its maximum until a reset of its boot

@@ -256,6 +256,16 @@ fn holder(grant: &Grant) -> String {
 }
 
 fn not_ready(acquired: &Acquire) -> Value {
+    if let Acquire::DesktopFailed { reason } = acquired {
+        let mut result = tool_result(json!({
+            "error": format!("DESKTOP_FAILED: {reason}. Nothing was done."),
+            "next": "Screen, input and browser tools need the desktop. computer_run still \
+                works: inspect the guest (its processes or logs), then retry, which starts \
+                the desktop again.",
+        }));
+        result["isError"] = json!(true);
+        return result;
+    }
     tool_error(&match acquired {
         Acquire::OwnerStopped => {
             "COMPUTER_STOPPED: the owner stopped this computer; it does not start until resumed."
@@ -264,12 +274,7 @@ fn not_ready(acquired: &Acquire) -> Value {
         Acquire::Queued { reason } => format!("COMPUTER_BUSY: {reason}. Try again shortly."),
         Acquire::Unavailable { reason } => format!("COMPUTER_UNAVAILABLE: {reason}"),
         Acquire::BotInactive => "COMPUTER_UNAVAILABLE: this bot is not active.".to_owned(),
-        Acquire::DesktopFailed { reason } => format!(
-            "DESKTOP_FAILED: {reason}. Nothing was done. Screen, input and browser tools \
-             need the desktop; computer_run still works, so inspect the guest (for example \
-             its processes or logs) and retry, which starts the desktop again."
-        ),
-        Acquire::Ready { .. } => "unexpected".to_owned(),
+        Acquire::DesktopFailed { .. } | Acquire::Ready { .. } => "unexpected".to_owned(),
     })
 }
 

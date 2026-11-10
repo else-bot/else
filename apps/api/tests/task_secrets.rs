@@ -735,12 +735,18 @@ async fn shell_commands_run_while_the_desktop_fails_to_start() {
     assert!(job["job_id"].is_string(), "{job}");
 
     let shot = tool(&app, &token, "computer_screenshot", json!({})).await;
-    let error = shot["error"].as_str().unwrap_or_default();
+    let refusal: Value = serde_json::from_str(shot["error"].as_str().unwrap()).unwrap();
+    let error = refusal["error"].as_str().unwrap();
     assert!(
-        error.contains("Xvfb did not start") && error.contains("computer_run"),
-        "{shot}"
+        error.starts_with("DESKTOP_FAILED:") && error.contains("Xvfb did not start"),
+        "{refusal}"
     );
-    assert!(!error.contains("Try again shortly"), "{shot}");
+    assert!(
+        refusal["next"]
+            .as_str()
+            .is_some_and(|next| next.contains("computer_run")),
+        "{refusal}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
