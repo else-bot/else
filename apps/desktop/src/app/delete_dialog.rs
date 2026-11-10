@@ -10,6 +10,7 @@ pub(super) enum DeleteTarget {
     Bot(String),
     Category { name: String, bots: usize },
     Routine(String),
+    Reminder(String),
     Trigger(String),
     Webhook(String),
 }
@@ -146,6 +147,23 @@ impl ElseApp {
                     ),
                 ],
                 Some("The connection stays available when you ask the bot to use it."),
+            ),
+            DeleteTarget::Reminder(name) => (
+                name,
+                "reminder",
+                [
+                    Consequence::new(
+                        IconName::CalendarX,
+                        "It won't run",
+                        "The reminder leaves this list and its task won't run.",
+                    ),
+                    Consequence::new(
+                        IconName::Clock,
+                        "A current run finishes",
+                        "A run already in progress won't be stopped.",
+                    ),
+                ],
+                None,
             ),
             DeleteTarget::Routine(name) => (
                 name,

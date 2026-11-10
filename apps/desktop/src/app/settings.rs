@@ -628,20 +628,18 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(name) = self
+        let Some(target) = self
             .changeable_routine(bot, routine)
-            .map(|r| r.name.clone())
+            .map(|r| match r.run_at {
+                Some(_) => DeleteTarget::Reminder(r.name.clone()),
+                None => DeleteTarget::Routine(r.name.clone()),
+            })
         else {
             return;
         };
-        self.open_delete_confirmation(
-            DeleteTarget::Routine(name),
-            window,
-            cx,
-            move |app, window, cx| {
-                app.delete_routine(bot, routine, window, cx);
-            },
-        );
+        self.open_delete_confirmation(target, window, cx, move |app, window, cx| {
+            app.delete_routine(bot, routine, window, cx);
+        });
     }
 
     fn delete_routine(
@@ -1100,6 +1098,7 @@ impl ElseApp {
                     .child(self.render_model(bot.id, &entry.model, cx))
                     .child(self.render_rules_section(bot.id, cx))
                     .child(self.render_routines(bot.id, &entry.routines, cx))
+                    .child(self.render_reminders(bot.id, &entry.routines, cx))
                     .child(self.render_triggers(bot.id, entry, cx));
             } else {
                 body = body.child(muted("Loading…", cx));
@@ -1607,7 +1606,11 @@ impl ElseApp {
         else {
             return body.child(muted("Loading…", cx)).into_any_element();
         };
-        let routines = conversation.routines();
+        let routines: Vec<&Routine> = conversation
+            .routines()
+            .iter()
+            .filter(|routine| routine.run_at.is_none())
+            .collect();
         if routines.is_empty() {
             return body
                 .child(muted(
@@ -1619,8 +1622,45 @@ impl ElseApp {
                 .into_any_element();
         }
         let connected = self.connection == Connection::Connected;
-        body.children(routines.iter().map(|routine| {
+        body.children(routines.into_iter().map(|routine| {
             self.render_routine(bot, routine, saves.get(&routine.id), connected, cx)
+        }))
+        .into_any_element()
+    }
+
+    fn render_reminders(
+        &self,
+        bot: Uuid,
+        saves: &HashMap<Uuid, RoutineSave>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let body = section("Reminders", cx);
+        let Some(conversation) = self
+            .view
+            .as_ref()
+            .filter(|view| view.bot_id == bot)
+            .and_then(|view| view.conversation.as_ref())
+        else {
+            return body.child(muted("Loading…", cx)).into_any_element();
+        };
+        let mut reminders: Vec<&Routine> = conversation
+            .routines()
+            .iter()
+            .filter(|routine| routine.run_at.is_some())
+            .collect();
+        if reminders.is_empty() {
+            return body
+                .child(muted(
+                    "No reminders. Ask the bot to do something once, later, for example \
+                     \"in 6 hours, check how Scout is doing\". It appears here until it runs.",
+                    cx,
+                ))
+                .into_any_element();
+        }
+        reminders.sort_by_key(|reminder| (reminder.run_at, reminder.id));
+        let connected = self.connection == Connection::Connected;
+        body.children(reminders.into_iter().map(|reminder| {
+            self.render_routine(bot, reminder, saves.get(&reminder.id), connected, cx)
         }))
         .into_any_element()
     }
@@ -1639,13 +1679,15 @@ impl ElseApp {
             Some(RoutineSave::Saving { enabled, .. }) => *enabled,
             _ => routine.enabled,
         };
+        // A reminder whose time has passed cannot be switched back on.
+        let passed = !checked && routine.run_at.is_some_and(|at| at <= Utc::now());
         let switch = Switch::new(ElementId::Name(format!("routine-{id}").into()))
             .focus_ring(false)
             .cursor_pointer()
             .checked(checked)
             .small()
             .accessibility_label(format!("Run {}", routine.name))
-            .disabled(busy || !connected)
+            .disabled(busy || !connected || passed)
             .on_click(cx.listener(move |app, enabled: &bool, window, cx| {
                 app.set_routine(bot, id, *enabled, window, cx)
             }));
@@ -1675,14 +1717,19 @@ impl ElseApp {
                     app.dismiss_routine_failures(bot, id, window, cx)
                 }))
         });
-        let schedule = match &routine.active_hours {
-            Some(hours) => format!(
+        let schedule = match (routine.run_at, &routine.active_hours) {
+            (Some(at), _) => format!(
+                "Once · {} · {}",
+                local_time(at, &routine.timezone),
+                routine.timezone
+            ),
+            (None, Some(hours)) => format!(
                 "{} · {} · {}",
                 describe_cron(&routine.cron),
                 describe_hours(hours),
                 routine.timezone
             ),
-            None => format!("{} · {}", describe_cron(&routine.cron), routine.timezone),
+            (None, None) => format!("{} · {}", describe_cron(&routine.cron), routine.timezone),
         };
         let last = last_run(routine);
         let problem = match save {
@@ -1780,6 +1827,7 @@ impl ElseApp {
         let prompt = routine.prompt.clone();
         let next = match (routine.enabled, routine.next_run_at) {
             (false, _) => None,
+            _ if routine.run_at.is_some() => None,
             (true, Some(at)) => Some(format!("Next run {}", local_time(at, &routine.timezone))),
             (true, None) => Some("No further runs".to_owned()),
         };
@@ -1895,8 +1943,10 @@ impl ElseApp {
             .children(
                 warning.map(|warning| div().text_xs().text_color(theme.warning).child(warning)),
             )
-            .child(div().w_full().h(px(1.)).bg(theme.sidebar_border))
-            .child(model_control)
+            .when(routine.run_at.is_none(), |card| {
+                card.child(div().w_full().h(px(1.)).bg(theme.sidebar_border))
+                    .child(model_control)
+            })
             .into_any_element()
     }
 }
