@@ -717,7 +717,7 @@ impl ComputerManager {
     ) -> Result<Option<JobState>, ComputerError> {
         let requested = request_cancel(&self.pool, bot_id, Some(job_id)).await?;
         if let Some(&(_, lease)) = requested.first() {
-            self.kill_job(bot_id, job_id, lease, false).await?;
+            self.kill_job(bot_id, job_id, lease).await?;
         }
         self.load_job(bot_id, job_id).await
     }
@@ -727,7 +727,6 @@ impl ComputerManager {
         bot_id: Uuid,
         job_id: Uuid,
         lease: Option<Uuid>,
-        stop_paused: bool,
     ) -> Result<(), ComputerError> {
         let op = self.op(bot_id).await;
         let Some(lease) = lease else {
@@ -753,9 +752,11 @@ impl ComputerManager {
                     drop(op);
                     return self.finish_job(job_id, Outcome::Lost, "", lease).await;
                 }
-                Inspect::Paused if stop_paused => {
-                    self.stop_held(bot_id, super::Reason::ForJobs).await?;
-                    "the computer was paused; stopping it".into()
+                Inspect::Paused if self.bot_stopping(bot_id).await? => {
+                    if self.stop_held(bot_id, super::Reason::ForJobs).await? {
+                        return self.settle_stopped(bot_id, job_id).await;
+                    }
+                    "the computer is paused and could not be stopped".into()
                 }
                 Inspect::Paused if !resumed => match self.resume_to_kill(bot_id).await? {
                     None => {
@@ -776,6 +777,34 @@ impl ComputerManager {
         Ok(())
     }
 
+    async fn bot_stopping(&self, bot_id: Uuid) -> Result<bool, ComputerError> {
+        let active: Option<bool> = sqlx::query_scalar(
+            "SELECT status = 'active' AND NOT cancel_pending FROM bots WHERE id = ?1",
+        )
+        .bind(bot_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(active != Some(true))
+    }
+
+    /// Record the job and every `cancelling` job of the bot as cancelled
+    /// once its computer is confirmed stopped.
+    async fn settle_stopped(&self, bot_id: Uuid, job_id: Uuid) -> Result<(), ComputerError> {
+        let jobs: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT id, lease_id FROM guest_jobs
+             WHERE bot_id = ?1 AND lease_id IS NOT NULL AND (id = ?2 OR status = 'cancelling')
+               AND status IN ('starting', 'running', 'cancelling')",
+        )
+        .bind(bot_id)
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await?;
+        for (job, lease) in jobs {
+            self.finish_job(job, Outcome::Cancelled, "", lease).await?;
+        }
+        Ok(())
+    }
+
     /// Resume a paused computer so one job's process group can be killed
     /// without stopping the computer, which would end the bot's other jobs.
     /// Returns why it was not resumed. The caller holds the operation lock.
@@ -792,7 +821,10 @@ impl ComputerManager {
             return Ok(Some("the computer is paused".into()));
         };
         match self.resume_held(bot_id, &name).await {
-            Ok(()) => Ok(None),
+            Ok(()) => {
+                self.stop_held(bot_id, super::Reason::MustStop).await?;
+                Ok(None)
+            }
             Err(err) => {
                 let note = format!("resuming the computer failed: {err}");
                 self.observe_after_failure(bot_id, &note).await?;
@@ -804,24 +836,21 @@ impl ComputerManager {
     /// Retry the kill of each of the bot's `cancelling` jobs, for the
     /// offline upgrade command, which runs no maintenance loop.
     pub(super) async fn confirm_cancels(&self, bot_id: Uuid) -> Result<(), ComputerError> {
-        let jobs: Vec<(Uuid, Option<Uuid>, bool)> = sqlx::query_as(
-            "SELECT id, lease_id,
-                    (SELECT cancel_pending OR status <> 'active' FROM bots WHERE id = guest_jobs.bot_id)
-             FROM guest_jobs WHERE bot_id = ?1 AND status = 'cancelling'",
+        let jobs: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
+            "SELECT id, lease_id FROM guest_jobs WHERE bot_id = ?1 AND status = 'cancelling'",
         )
         .bind(bot_id)
         .fetch_all(&self.pool)
         .await?;
-        for (job, lease, bot_stopping) in jobs {
-            self.kill_job(bot_id, job, lease, bot_stopping).await?;
+        for (job, lease) in jobs {
+            self.kill_job(bot_id, job, lease).await?;
         }
         Ok(())
     }
 
     pub(super) async fn poll_jobs(&self, cancel: &CancellationToken) -> Result<(), ComputerError> {
-        let jobs: Vec<(Uuid, Uuid, Option<Uuid>, JobStatus, bool, bool)> = sqlx::query_as(
-            "SELECT id, bot_id, lease_id, status, deadline < strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
-                    (SELECT cancel_pending OR status <> 'active' FROM bots WHERE id = guest_jobs.bot_id)
+        let jobs: Vec<(Uuid, Uuid, Option<Uuid>, JobStatus, bool)> = sqlx::query_as(
+            "SELECT id, bot_id, lease_id, status, deadline < strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
              FROM guest_jobs
              WHERE status IN ('running', 'cancelling')
                 OR (status = 'starting' AND started_at < strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', -?1)))",
@@ -829,13 +858,13 @@ impl ComputerManager {
         .bind(STALE_START.as_secs_f64())
         .fetch_all(&self.pool)
         .await?;
-        for (job, bot, lease, status, overdue, bot_stopping) in jobs {
+        for (job, bot, lease, status, overdue) in jobs {
             if cancel.is_cancelled() {
                 return Ok(());
             }
             let result = async {
                 if status == JobStatus::Cancelling {
-                    return self.kill_job(bot, job, lease, bot_stopping).await;
+                    return self.kill_job(bot, job, lease).await;
                 }
                 let Some(lease) = lease else {
                     sqlx::query(
@@ -853,7 +882,7 @@ impl ComputerManager {
                         .bind(job)
                         .execute(&self.pool)
                         .await?;
-                    self.kill_job(bot, job, Some(lease), false).await
+                    self.kill_job(bot, job, Some(lease)).await
                 } else {
                     if status == JobStatus::Starting {
                         sqlx::query(
