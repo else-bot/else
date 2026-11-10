@@ -165,8 +165,12 @@ fn classify(result: &Value, pointer: &str, running: &[Value]) -> Check {
         };
     }
     match status_at(result, pointer) {
+        None | Some(Value::Null) => Check::Unreadable(format!(
+            "UNREADABLE_STATUS: the result has no status at {pointer}, so whether the job \
+             still runs is unknown. Result: {text}"
+        )),
         Some(status) if running.contains(&status) => Check::Running(text),
-        _ => Check::Finished(text),
+        Some(_) => Check::Finished(text),
     }
 }
 
@@ -337,6 +341,16 @@ pub async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 Some(format!("{log} failed{note}")),
             );
         }
+        Some(Check::Unreadable(message)) => {
+            return (
+                tool_error(&format!(
+                    "{} Nothing waits. Point status_pointer at the status in this result and call \
+                     mcp_wait again.",
+                    mcp_waits::bounded(&message)
+                )),
+                Some(format!("{log} unreadable{note}")),
+            );
+        }
         Some(Check::Finished(result)) => {
             let result = serde_json::from_str(&result).unwrap_or(Value::String(result));
             return (
@@ -486,11 +500,20 @@ mod tests {
             classify(&text, "/workState", &running),
             Check::Finished(_)
         ));
-        let missing = json!({ "content": [{ "type": "text", "text": "no json" }] });
-        assert!(matches!(
-            classify(&missing, "/workState", &running),
-            Check::Finished(_)
-        ));
+        for unreadable in [
+            json!({ "content": [{ "type": "text", "text": "no json" }] }),
+            json!({ "structuredContent": {} }),
+            json!({ "structuredContent": { "workState": null } }),
+            json!({ "structuredContent": { "work_state": "working" } }),
+        ] {
+            assert!(
+                matches!(
+                    classify(&unreadable, "/workState", &running),
+                    Check::Unreadable(ref message) if message.starts_with("UNREADABLE_STATUS")
+                ),
+                "{unreadable}"
+            );
+        }
         let error = json!({ "isError": true, "content": [] });
         assert!(matches!(
             classify(&error, "/workState", &running),

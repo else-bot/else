@@ -4,9 +4,9 @@
 //! mean the job still runs. It then ends and its turn waits with no
 //! provider process. The watcher repeats the status call on the API host
 //! and settles the wait once the status leaves those values, the checks
-//! keep failing, or the deadline passes; settling requeues the turn as a
-//! continuation that receives the last result. Ending the turn for any
-//! reason withdraws a pending wait (a trigger).
+//! keep failing or report no status, or the deadline passes; settling
+//! requeues the turn as a continuation that receives the last result.
+//! Ending the turn for any reason withdraws a pending wait (a trigger).
 
 use serde_json::Value;
 use sqlx::types::Json;
@@ -54,6 +54,9 @@ pub struct Due {
 pub enum Check {
     Running(String),
     Finished(String),
+    /// A result with no status at the pointer, so whether the job still
+    /// runs is unknown. It counts as a failed check, never as finished.
+    Unreadable(String),
     /// A failed call; `permanent` ends the wait at once.
     Failed {
         message: String,
@@ -206,6 +209,7 @@ pub async fn record(pool: &SqlitePool, id: Uuid, check: &Check) -> Result<bool, 
     let (result, finished, failed, permanent) = match check {
         Check::Running(result) => (result.as_str(), false, false, false),
         Check::Finished(result) => (result.as_str(), true, false, false),
+        Check::Unreadable(message) => (message.as_str(), false, true, false),
         Check::Failed { message, permanent } => (message.as_str(), false, true, *permanent),
     };
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
