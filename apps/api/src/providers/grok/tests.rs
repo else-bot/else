@@ -284,6 +284,20 @@ fn only_elsebot_mcp_calls_are_allowed_and_parking_is_preserved() {
 }
 
 #[test]
+fn a_claude_spelled_elsebot_tool_is_left_to_grok_to_reject() {
+    let mut t = tracker(false);
+    t.on(&init(false)).unwrap();
+    t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c1","name":"use_tool","input":{"tool_name":"mcp__elsebot__mcp_list","tool_input":{}}}]}})).unwrap();
+    assert_eq!(
+        t.on(&json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"{\"error\":\"tool_execution_failed\",\"message\":\"Tool not found: mcp__elsebot__mcp_list\"}","is_error":true}]}})),
+        Ok(vec![])
+    );
+    for name in ["mcp__other__mcp_list", "mcp__elsebot__not_real"] {
+        assert!(t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c2","name":"use_tool","input":{"tool_name":name}}]}})).is_err());
+    }
+}
+
+#[test]
 fn profiles_reject_settings_the_cli_cannot_apply() {
     let profile = Profile {
         model: "grok-4.7".into(),
@@ -381,6 +395,7 @@ fn provider_homes_link_login_and_keep_grants_out_of_config() {
     );
     let config = std::fs::read_to_string(dirs.provider_home.join("config.toml")).unwrap();
     assert!(config.contains("${ELSE_TASK_GRANT}"));
+    assert!(config.contains(r#"allow = ["MCPTool(elsebot__*)", "MCPTool(mcp__elsebot__*)"]"#));
     assert_eq!(
         std::fs::metadata(dirs.provider_home.join("config.toml"))
             .unwrap()

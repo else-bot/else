@@ -118,8 +118,11 @@ pub fn prepare(
 ) -> std::io::Result<()> {
     link_login(&dirs.provider_home, "auth.json", &login.join("auth.json"))?;
     let mut config = CONFIG.to_owned();
+    // Grok checks permission on the requested name before resolving it, so a
+    // headless turn cancels on mcp__elsebot__<tool> unless that spelling is
+    // allowed through to Grok's own "Tool not found" reply.
     config.push_str(&format!(
-        "\n[permission]\nallow = [\"MCPTool({SERVER_NAME}__*)\"]\n"
+        "\n[permission]\nallow = [\"MCPTool({SERVER_NAME}__*)\", \"MCPTool(mcp__{SERVER_NAME}__*)\"]\n"
     ));
     if !host_tools {
         config.push_str("deny = [\"Read(**)\"]\n");

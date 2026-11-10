@@ -167,7 +167,11 @@ impl Tracker {
             let id = required(&block["id"], "tool call")?;
             let tool = if name == "use_tool" {
                 let target = required(&block["input"]["tool_name"], "use_tool call")?;
-                Some(self.mcp_tool(target).ok_or_else(|| {
+                // Memory from Claude turns spells tools mcp__elsebot__<tool>.
+                // Grok answers that name with "Tool not found" and the model
+                // can retry with the catalog name, so it is not a policy breach.
+                let catalog = target.strip_prefix("mcp__").unwrap_or(target);
+                Some(self.mcp_tool(catalog).ok_or_else(|| {
                     Violation::policy(format!(
                         "Grok called an MCP tool outside else.bot: {target}"
                     ))
