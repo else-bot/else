@@ -1483,6 +1483,54 @@ async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
 }
 
 #[tokio::test]
+async fn an_owner_message_starts_while_routines_fill_the_other_slots() {
+    let h = recorder::harness(2).await;
+    let main = h.app.main_bot().await;
+    let due = at(&json!("2030-01-01T00:00:00Z"));
+    for name in ["Scout", "Auto"] {
+        let bot = h.app.create_bot(name).await;
+        let (setup, token) = h.owner_turn(&bot).await;
+        let routine = create(
+            &h.app,
+            &token,
+            json!({ "name": "Hourly", "prompt": "[synthetic:hang] an hourly sweep that keeps running.",
+                    "cron": "0 * * * *", "active_hours": "always" }),
+        )
+        .await;
+        h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+        sqlx::query("UPDATE routines SET next_due_at = '2030-01-01T00:00:00.000+00:00' WHERE id = ?1")
+            .bind(routine["id"].as_str().unwrap().parse::<Uuid>().unwrap())
+            .execute(&h.app.db.pool)
+            .await
+            .unwrap();
+    }
+    assert_eq!(fire(&h.app, due).await, 2);
+    let first = loop {
+        let running: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM turns WHERE status = 'running' AND id IN (SELECT turn_id FROM routine_runs)",
+        )
+        .fetch_optional(&h.app.db.pool)
+        .await
+        .unwrap();
+        if let Some(turn) = running {
+            break turn;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+
+    let owner = h.send(&main, "[synthetic] are you there?").await;
+    assert_eq!(
+        h.app.wait_turn(&owner.to_string(), &["completed"]).await,
+        "completed",
+        "the owner message ran while routines held the other slot"
+    );
+    assert_eq!(
+        h.app.wait_turn(&first.to_string(), &["running"]).await,
+        "running"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pausing_stops_future_runs_and_resuming_counts_from_now() {
     let h = harness().await;
     let main = h.app.main_bot().await;
