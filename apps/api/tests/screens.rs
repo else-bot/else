@@ -388,6 +388,38 @@ async fn computers_without_a_desktop_say_so() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn duplicate_input_progress_never_reports_success() {
+    let Setup { app, guest, .. } = setup(true).await;
+    let bot = app.create_bot("Hands").await;
+    let token = grant(&app, &bot).await;
+    *guest.input_reply.lock().unwrap() = (
+        0,
+        vec![
+            r#"{"started": true}"#.into(),
+            r#"{"done": 0}"#.into(),
+            r#"{"done": 0}"#.into(),
+            r#"{"ok": true, "actions": 2}"#.into(),
+        ],
+    );
+    let reply = tool(
+        &app,
+        &token,
+        "computer_input",
+        json!({ "frame": [1280, 800], "effect": "local",
+            "actions": [{ "click": [100, 200] }, { "key": "Enter" }] }),
+    )
+    .await;
+    let text = error(&reply);
+    assert!(text.starts_with("UNCERTAIN: 1 of 2"), "{text}");
+    assert!(text.contains("INPUT_PROTOCOL"), "{text}");
+    assert!(
+        text.contains("Take a screenshot before repeating"),
+        "{text}"
+    );
+    assert_eq!(guest.inputs.lock().unwrap().len(), 1, "nothing replayed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     let Setup {
         app,
