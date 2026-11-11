@@ -1347,28 +1347,28 @@ mod tests {
         let rows = super::group_activity(vec![first.clone(), second], Some(&c));
         assert_eq!(rows.len(), 2);
         assert!(rows[1].unread_start);
-        let mut routine = transcript_row(item(2));
+        let mut routine = transcript_row(item(4));
         routine.routine = Some(RoutineRow {
-            turn: Uuid::from_u128(102),
+            turn: Uuid::from_u128(104),
             first: true,
             last: true,
         });
         let rows = super::group_activity(vec![first, routine], Some(&c));
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[1].routine.unwrap().turn, Uuid::from_u128(102));
+        assert_eq!(rows[1].routine.unwrap().turn, Uuid::from_u128(104));
         assert_eq!(
             rows[1].activity.as_ref().unwrap().items,
-            [Uuid::from_u128(2)]
+            [Uuid::from_u128(4)]
         );
         let mut first = transcript_row(item(1));
         first.routine = Some(RoutineRow {
-            turn: Uuid::from_u128(102),
+            turn: Uuid::from_u128(101),
             first: true,
             last: false,
         });
         let mut second = transcript_row(item(2));
         second.routine = Some(RoutineRow {
-            turn: Uuid::from_u128(102),
+            turn: Uuid::from_u128(101),
             first: false,
             last: true,
         });
@@ -1377,7 +1377,7 @@ mod tests {
         assert_eq!(
             rows[0].routine,
             Some(RoutineRow {
-                turn: Uuid::from_u128(102),
+                turn: Uuid::from_u128(101),
                 first: true,
                 last: true
             })
