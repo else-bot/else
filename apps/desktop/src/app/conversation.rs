@@ -1039,6 +1039,18 @@ mod tests {
     }
 
     #[test]
+    fn a_draft_sent_before_any_visible_item_of_its_turn_stays_shown() {
+        let c = Conversation::from_snapshot(draft_page("sent", 1, "2026-11-02T00:00:00Z")).unwrap();
+        assert_eq!(
+            request_rows(&c),
+            [(
+                RowKey::Draft(Uuid::from_u128(310)),
+                Some(Uuid::from_u128(1))
+            )]
+        );
+    }
+
+    #[test]
     fn closed_questions_wait_for_their_history_page() {
         for status in ["cancelled", "answered", "skipped"] {
             let mut c =
