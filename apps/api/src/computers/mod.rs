@@ -148,6 +148,9 @@ pub enum Acquire {
     Unavailable { reason: String },
     /// The bot is deleted or being deleted.
     BotInactive,
+    /// The computer runs, but its desktop did not start; `last_error` records
+    /// it and the next desktop use starts it again.
+    DesktopFailed { reason: String },
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -85,7 +85,7 @@ impl ComputerManager {
             }));
         }
         let acquired = self
-            .acquire_desktop(bot_id, &format!("desktop:{bot_id}"))
+            .admit_desktop(bot_id, &format!("desktop:{bot_id}"), Refused::Release)
             .await?;
         let Acquire::Ready { lease_id, .. } = acquired else {
             return Ok(Err(acquired));
@@ -145,13 +145,28 @@ impl ComputerManager {
         bot_id: Uuid,
         holder: &str,
     ) -> Result<Acquire, ComputerError> {
+        self.admit_desktop(bot_id, holder, Refused::Keep).await
+    }
+
+    async fn admit_desktop(
+        &self,
+        bot_id: Uuid,
+        holder: &str,
+        refused: Refused,
+    ) -> Result<Acquire, ComputerError> {
         let acquired = self.acquire(bot_id, holder).await?;
-        if let Acquire::Ready { lease_id, .. } = &acquired
-            && let Err(waiting) = self.ensure_desktop(bot_id, *lease_id).await?
-        {
-            return Ok(waiting);
-        }
-        Ok(acquired)
+        let Acquire::Ready { lease_id, .. } = acquired else {
+            return Ok(acquired);
+        };
+        Ok(
+            match self.ensure_desktop(bot_id, lease_id, refused).await? {
+                DesktopStart::Running => acquired,
+                DesktopStart::StaleLease => Acquire::Queued {
+                    reason: RESTARTED.into(),
+                },
+                DesktopStart::Failed(reason) => Acquire::DesktopFailed { reason },
+            },
+        )
     }
 
     /// Start the desktop of the computer `lease` holds, once per boot, and
@@ -159,15 +174,32 @@ impl ComputerManager {
     /// keeps that size, and its reservation, until it stops. Without room the
     /// desktop runs at the boot size, and a later use grows it once room
     /// frees. A lease from an earlier boot starts nothing.
+    ///
+    /// With [`Refused::Release`], a refused lease ends before the bot's
+    /// operation lock drops: a holder's uses share one lease, so releasing it
+    /// later could end the lease of a use admitted in between.
     pub(super) async fn ensure_desktop(
         &self,
         bot_id: Uuid,
         lease_id: Uuid,
-    ) -> Result<Result<(), Acquire>, ComputerError> {
+        refused: Refused,
+    ) -> Result<DesktopStart, ComputerError> {
         if !self.config.desktop {
-            return Ok(Ok(()));
+            return Ok(DesktopStart::Running);
         }
         let _op = self.op(bot_id).await;
+        let start = self.start_desktop(bot_id, lease_id).await?;
+        if !matches!(start, DesktopStart::Running) && matches!(refused, Refused::Release) {
+            self.release(lease_id).await?;
+        }
+        Ok(start)
+    }
+
+    async fn start_desktop(
+        &self,
+        bot_id: Uuid,
+        lease_id: Uuid,
+    ) -> Result<DesktopStart, ComputerError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let current: Option<(String, i64, bool, bool)> = sqlx::query_as(
             "SELECT c.runtime_name, c.generation,
@@ -183,9 +215,7 @@ impl ComputerManager {
         .fetch_optional(&mut *tx)
         .await?;
         let Some((name, generation, started, grown)) = current else {
-            return Ok(Err(Acquire::Queued {
-                reason: "the computer restarted; try again".into(),
-            }));
+            return Ok(DesktopStart::StaleLease);
         };
         let row = Self::row(&mut tx, bot_id).await?.expect("leased");
         let (max_cpus, max_memory) = row.max();
@@ -193,7 +223,7 @@ impl ComputerManager {
             && (max_cpus, max_memory) != (row.cpus as u32, row.memory_mib as u32)
             && self.admits(&mut tx, bot_id, max_cpus, max_memory).await?;
         if started && !grows {
-            return Ok(Ok(()));
+            return Ok(DesktopStart::Running);
         }
         if grows {
             sqlx::query("UPDATE bot_computers SET grown = 1 WHERE bot_id = ?1")
@@ -206,7 +236,7 @@ impl ComputerManager {
             tracing::warn!(bot = %bot_id, error = %err, "the desktop runs at the boot size");
         }
         if started {
-            return Ok(Ok(()));
+            return Ok(DesktopStart::Running);
         }
         self.ensure_services(bot_id, &name).await?;
         let started = self
@@ -227,6 +257,7 @@ impl ComputerManager {
                 .bind(generation)
                 .execute(&self.pool)
                 .await?;
+                Ok(DesktopStart::Running)
             }
             other => {
                 let error = match other {
@@ -239,9 +270,9 @@ impl ComputerManager {
                     .bind(bounded(&error, 2000))
                     .execute(&self.pool)
                     .await?;
+                Ok(DesktopStart::Failed(error))
             }
         }
-        Ok(Ok(()))
     }
 
     /// The zone the guest's clock uses: the owner's device zone, else this
@@ -305,6 +336,37 @@ impl ComputerManager {
     }
 }
 
+/// What becomes of a lease whose desktop use is refused. A desktop-only
+/// holder releases it; a turn's lease also covers its other work.
+#[derive(Clone, Copy)]
+pub(super) enum Refused {
+    Keep,
+    Release,
+}
+
+const RESTARTED: &str = "the computer restarted; try again";
+
+/// What starting the desktop of a lease's boot came to. Only `Running`
+/// admits a desktop use; the others leave readiness stale, so a later use
+/// starts it again.
+pub(super) enum DesktopStart {
+    Running,
+    /// The lease is from an earlier boot, or the computer stopped.
+    StaleLease,
+    /// The guest's desktop startup failed; `last_error` records it.
+    Failed(String),
+}
+
+impl DesktopStart {
+    fn refusal(self) -> Option<String> {
+        match self {
+            Self::Running => None,
+            Self::StaleLease => Some(RESTARTED.into()),
+            Self::Failed(error) => Some(error),
+        }
+    }
+}
+
 /// Where the API's own viewer reaches a desktop. It stays inside the API:
 /// the owner's client gets frames, never this address or password.
 pub struct ViewerTarget {
@@ -364,11 +426,13 @@ impl ComputerManager {
             return Ok(Err(ViewerRefusal::NoDesktop));
         }
         let lease_id = if wake {
-            match self.acquire_desktop(bot_id, holder).await? {
+            match self.admit_desktop(bot_id, holder, Refused::Release).await? {
                 Acquire::Ready { lease_id, .. } => lease_id,
                 Acquire::OwnerStopped => return Ok(Err(ViewerRefusal::OwnerStopped)),
                 Acquire::BotInactive => return Ok(Err(ViewerRefusal::BotInactive)),
-                Acquire::Queued { reason } | Acquire::Unavailable { reason } => {
+                Acquire::Queued { reason }
+                | Acquire::Unavailable { reason }
+                | Acquire::DesktopFailed { reason } => {
                     return Ok(Err(ViewerRefusal::Unavailable(reason)));
                 }
             }
@@ -385,8 +449,11 @@ impl ComputerManager {
             .fetch_one(&self.pool)
             .await?;
         if !ready && port.is_some() {
-            if let Err(Acquire::Queued { reason }) = self.ensure_desktop(bot_id, lease_id).await? {
-                self.release(lease_id).await?;
+            if let Some(reason) = self
+                .ensure_desktop(bot_id, lease_id, Refused::Release)
+                .await?
+                .refusal()
+            {
                 return Ok(Err(ViewerRefusal::Unavailable(reason)));
             }
             (port, ready) = sqlx::query_as(ready_query)

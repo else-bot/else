@@ -256,6 +256,16 @@ fn holder(grant: &Grant) -> String {
 }
 
 fn not_ready(acquired: &Acquire) -> Value {
+    if let Acquire::DesktopFailed { reason } = acquired {
+        let mut result = tool_result(json!({
+            "error": format!("DESKTOP_FAILED: {reason}. Nothing was done."),
+            "next": "Screen, input and browser tools need the desktop. computer_run still \
+                works: inspect the guest (its processes or logs), then retry, which starts \
+                the desktop again.",
+        }));
+        result["isError"] = json!(true);
+        return result;
+    }
     tool_error(&match acquired {
         Acquire::OwnerStopped => {
             "COMPUTER_STOPPED: the owner stopped this computer; it does not start until resumed."
@@ -264,7 +274,7 @@ fn not_ready(acquired: &Acquire) -> Value {
         Acquire::Queued { reason } => format!("COMPUTER_BUSY: {reason}. Try again shortly."),
         Acquire::Unavailable { reason } => format!("COMPUTER_UNAVAILABLE: {reason}"),
         Acquire::BotInactive => "COMPUTER_UNAVAILABLE: this bot is not active.".to_owned(),
-        Acquire::Ready { .. } => "unexpected".to_owned(),
+        Acquire::DesktopFailed { .. } | Acquire::Ready { .. } => "unexpected".to_owned(),
     })
 }
 
@@ -340,6 +350,22 @@ async fn lease(state: &AppState, grant: &Grant, desktop: bool) -> Result<Uuid, O
     };
     match acquired {
         Ok(Acquire::Ready { lease_id, .. }) => Ok(lease_id),
+        Ok(other) => Err((not_ready(&other), None)),
+        Err(err) => Err(failure(err)),
+    }
+}
+
+/// Start the desktop for a shell command that names its helpers, as a best
+/// effort: a failed startup lets the command run, so it can diagnose it.
+async fn prepare_desktop(
+    computers: &crate::computers::ComputerManager,
+    grant: &Grant,
+) -> Result<(), Outcome> {
+    match computers
+        .acquire_desktop(grant.bot_id, &holder(grant))
+        .await
+    {
+        Ok(Acquire::Ready { .. } | Acquire::DesktopFailed { .. }) => Ok(()),
         Ok(other) => Err((not_ready(&other), None)),
         Err(err) => Err(failure(err)),
     }
@@ -761,7 +787,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
             };
             let timeout = args["timeout_secs"].as_u64().unwrap_or(60).clamp(1, 300);
             if wants_desktop(&command)
-                && let Err(outcome) = lease(state, grant, true).await
+                && let Err(outcome) = prepare_desktop(&computers, grant).await
             {
                 return outcome;
             }
@@ -843,7 +869,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                 },
             };
             if wants_desktop(&command)
-                && let Err(outcome) = lease(state, grant, true).await
+                && let Err(outcome) = prepare_desktop(&computers, grant).await
             {
                 return outcome;
             }

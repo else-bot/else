@@ -28,6 +28,10 @@ struct Fake {
     fail_unpack: std::sync::atomic::AtomicBool,
     fail_close: std::sync::atomic::AtomicBool,
     fail_configure: std::sync::atomic::AtomicBool,
+    fail_desktop: std::sync::atomic::AtomicBool,
+    hold_desktop: std::sync::atomic::AtomicBool,
+    desktop_entered: tokio::sync::Notify,
+    desktop_resume: tokio::sync::Notify,
     specs: Mutex<Vec<Spec>>,
     packages: Mutex<Vec<String>>,
     reinstalled: Mutex<Vec<String>>,
@@ -190,6 +194,12 @@ impl ComputerRuntime for Fake {
         } else if program == "/bin/sh" && args[1] == else_api::computers::GUEST_DESKTOP {
             self.log(format!("desktop {name}"));
         }
+        let desktop = program == "/bin/sh" && args[1] == else_api::computers::GUEST_DESKTOP;
+        let fail_desktop = desktop && self.fail_desktop.load(std::sync::atomic::Ordering::SeqCst);
+        if desktop && self.hold_desktop.load(std::sync::atomic::Ordering::SeqCst) {
+            self.desktop_entered.notify_one();
+            self.desktop_resume.notified().await;
+        }
         let mut computers = self.computers.lock().unwrap();
         let Computer { state, files } = computers.get_mut(name).expect("exists");
         assert_eq!(
@@ -214,6 +224,14 @@ impl ComputerRuntime for Fake {
                     report += &format!("{package}\n");
                 }
                 report
+            }
+            "/bin/sh" if fail_desktop => {
+                return Ok(ExecOutput {
+                    status: Some(1),
+                    stdout: String::new(),
+                    stderr: "Xvfb did not start".into(),
+                    truncated: false,
+                });
             }
             "/bin/sh" if close && self.fail_close.load(std::sync::atomic::Ordering::SeqCst) => {
                 return Ok(ExecOutput {
@@ -1245,6 +1263,177 @@ async fn desktop_computers_boot_small_and_grow_only_for_the_screen() {
         1,
         "a restart starts no desktop"
     );
+}
+
+/// A desktop whose startup fails is not admitted: the use is told it
+/// failed, the failure is recorded, and the next use starts it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_desktop_startup_is_not_reported_ready() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let dir = tempfile::tempdir().unwrap();
+    let desktop = ComputerConfig {
+        desktop: true,
+        state_dir: dir.path().to_owned(),
+        ..config(2)
+    };
+    let manager = manager(&app, &fake, desktop).await;
+    let bot: Uuid = app.create_bot("Blank").await.parse().unwrap();
+    let (_lease, name) = ready(&manager, bot, "test:screen").await;
+
+    fake.fail_desktop.store(true, SeqCst);
+    let refused = manager.acquire_desktop(bot, "test:screen").await.unwrap();
+    assert!(
+        matches!(&refused, Acquire::DesktopFailed { reason } if reason.contains("Xvfb did not start")),
+        "{refused:?}"
+    );
+    let input = manager
+        .run_input(
+            bot,
+            "test:screen",
+            "true",
+            Duration::from_secs(1),
+            &else_api::db::task_secrets::Env::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(input, Err(Acquire::DesktopFailed { .. })),
+        "{input:?}"
+    );
+    let error: Option<String> =
+        sqlx::query_scalar("SELECT last_error FROM bot_computers WHERE bot_id = ?1")
+            .bind(bot)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert!(
+        error.is_some_and(|e| e.contains("Xvfb did not start")),
+        "the failure is recorded"
+    );
+
+    fake.fail_desktop.store(false, SeqCst);
+    let started = manager.acquire_desktop(bot, "test:screen").await.unwrap();
+    assert!(matches!(started, Acquire::Ready { .. }), "{started:?}");
+    let starts = fake
+        .calls()
+        .iter()
+        .filter(|c| **c == format!("desktop {name}"))
+        .count();
+    assert_eq!(starts, 3, "each use retries until the desktop starts");
+}
+
+/// An owner or viewer request refused because the desktop did not start
+/// holds no lease, so it neither blocks the bot's input as an open owner
+/// session nor keeps the computer awake; both work once the desktop starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_desktop_request_refused_at_startup_holds_no_lease() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let dir = tempfile::tempdir().unwrap();
+    let desktop = ComputerConfig {
+        desktop: true,
+        state_dir: dir.path().to_owned(),
+        ..config(2)
+    };
+    let manager = manager(&app, &fake, desktop).await;
+    let bot: Uuid = app.create_bot("Blank").await.parse().unwrap();
+    ready(&manager, bot, "test:screen").await;
+    let held = |holder: String| {
+        let pool = app.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM computer_leases
+                 WHERE bot_id = ?1 AND holder = ?2 AND released_at IS NULL",
+            )
+            .bind(bot)
+            .bind(holder)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    fake.fail_desktop.store(true, SeqCst);
+    assert!(manager.desktop(bot).await.unwrap().is_err());
+    assert_eq!(held(format!("desktop:{bot}")).await, 0, "owner lease");
+    let viewer = manager.viewer(bot, "stream:test", true).await.unwrap();
+    assert!(viewer.is_err(), "{viewer:?}");
+    assert_eq!(held("stream:test".into()).await, 0, "viewer lease");
+
+    fake.fail_desktop.store(false, SeqCst);
+    let input = manager
+        .run_input(
+            bot,
+            "test:screen",
+            "true",
+            Duration::from_secs(1),
+            &else_api::db::task_secrets::Env::default(),
+        )
+        .await;
+    assert!(matches!(input, Ok(Ok(_))), "{input:?}");
+    assert!(manager.desktop(bot).await.unwrap().is_ok());
+    assert!(
+        manager
+            .viewer(bot, "stream:test", true)
+            .await
+            .unwrap()
+            .is_ok()
+    );
+}
+
+/// An owner request whose desktop failed to start releases the shared
+/// `desktop:` lease before the next owner request can reuse it, so a request
+/// admitted after it keeps its lease (the input exclusion) live.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_owner_request_never_releases_a_later_requests_lease() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let dir = tempfile::tempdir().unwrap();
+    let desktop = ComputerConfig {
+        desktop: true,
+        state_dir: dir.path().to_owned(),
+        ..config(2)
+    };
+    let manager = Arc::new(manager(&app, &fake, desktop).await);
+    let bot: Uuid = app.create_bot("Blank").await.parse().unwrap();
+    ready(&manager, bot, "test:screen").await;
+
+    fake.fail_desktop.store(true, SeqCst);
+    fake.hold_desktop.store(true, SeqCst);
+    let failing = tokio::spawn({
+        let manager = manager.clone();
+        async move { manager.desktop(bot).await.unwrap() }
+    });
+    fake.desktop_entered.notified().await;
+    fake.fail_desktop.store(false, SeqCst);
+    let mut later = tokio::spawn({
+        let manager = manager.clone();
+        async move { manager.desktop(bot).await.unwrap() }
+    });
+    fake.desktop_resume.notify_one();
+    tokio::select! {
+        () = fake.desktop_entered.notified() => {}
+        refused = &mut later => panic!("the later request never started the desktop: {refused:?}"),
+    }
+    let failed = failing.await.unwrap();
+    assert!(
+        matches!(failed, Err(Acquire::DesktopFailed { .. })),
+        "{failed:?}"
+    );
+    fake.hold_desktop.store(false, SeqCst);
+    fake.desktop_resume.notify_one();
+    let admitted = later.await.unwrap().expect("the later request is admitted");
+    let live: bool =
+        sqlx::query_scalar("SELECT released_at IS NULL FROM computer_leases WHERE id = ?1")
+            .bind(admitted.lease_id)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert!(live, "the admitted owner request still holds its lease");
 }
 
 /// A computer that grew is counted at its maximum until a reset of its boot
