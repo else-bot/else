@@ -3,7 +3,8 @@ use gpui_kit::component::FocusableExt as _;
 use view::{Preview, show_preview};
 pub(super) use view::{chip, draft_chip};
 
-use super::ElseApp;
+use super::{Draft, ElseApp};
+use crate::api::ClientError;
 use crate::attachments::{Attachment, MAX_FILE_BYTES, MAX_FILES, MessagePart};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::InputContent;
@@ -18,7 +19,10 @@ use uuid::Uuid;
 pub(super) enum PasteSource {
     Path(PathBuf),
     Bytes(Arc<Vec<u8>>),
-    Snapshot(Arc<tempfile::NamedTempFile>),
+    Snapshot {
+        file: Arc<tempfile::NamedTempFile>,
+        size: u64,
+    },
 }
 
 impl PasteSource {
@@ -31,7 +35,7 @@ impl PasteSource {
                     Err("Files must be at most 10 MB.".into())
                 };
             }
-            Self::Snapshot(file) => return Self::Path(file.path().to_owned()).read(),
+            Self::Snapshot { file, .. } => return Self::Path(file.path().to_owned()).read(),
             Self::Path(path) => {
                 let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
                 if !file.metadata().map_err(|e| e.to_string())?.is_file() {
@@ -52,7 +56,7 @@ impl PasteSource {
 
     fn load(self) -> Result<(Arc<Vec<u8>>, Self), String> {
         let existing = match &self {
-            Self::Snapshot(file) => Some(file.clone()),
+            Self::Snapshot { file, .. } => Some(file.clone()),
             _ => None,
         };
         let bytes = self.read()?;
@@ -64,33 +68,148 @@ impl PasteSource {
                 Arc::new(file)
             }
         };
-        Ok((bytes, Self::Snapshot(snapshot)))
+        let source = Self::Snapshot {
+            file: snapshot,
+            size: bytes.len() as u64,
+        };
+        Ok((bytes, source))
+    }
+
+    fn size(&self) -> u64 {
+        match self {
+            Self::Path(_) => 0,
+            Self::Bytes(bytes) => bytes.len() as u64,
+            Self::Snapshot { size, .. } => *size,
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub(super) enum UploadState {
-    Uploading,
-    Ready,
-    Failed(String),
+    Preparing { source: PasteSource },
+    Uploading { source: PasteSource },
+    Ready { file: Attachment },
+    Failed { source: PasteSource, error: String },
+    Unconfirmed { source: PasteSource, error: String },
+}
+
+impl UploadState {
+    fn retry(&mut self) -> Option<PasteSource> {
+        let source = match self {
+            Self::Failed { source, .. } | Self::Unconfirmed { source, .. } => source.clone(),
+            Self::Preparing { .. } | Self::Uploading { .. } | Self::Ready { .. } => return None,
+        };
+        *self = Self::Preparing {
+            source: source.clone(),
+        };
+        Some(source)
+    }
+
+    fn loaded(&mut self, snapshot: PasteSource) -> bool {
+        if !matches!(self, Self::Preparing { .. }) {
+            return false;
+        }
+        *self = Self::Uploading { source: snapshot };
+        true
+    }
+
+    fn fail(&mut self, error: String) -> bool {
+        let Self::Preparing { source } = self else {
+            return false;
+        };
+        *self = Self::Failed {
+            source: source.clone(),
+            error,
+        };
+        true
+    }
+
+    fn complete(&mut self, result: Result<Attachment, ClientError>) -> bool {
+        let Self::Uploading { source } = self else {
+            return false;
+        };
+        *self = match result {
+            Ok(file) => Self::Ready { file },
+            Err(error) if error.outcome_unknown() => Self::Unconfirmed {
+                source: source.clone(),
+                error: error.to_string(),
+            },
+            Err(error) => Self::Failed {
+                source: source.clone(),
+                error: error.to_string(),
+            },
+        };
+        true
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct DraftFile {
-    pub(super) file: Attachment,
+    name: String,
+    media_type: String,
     pub(super) state: UploadState,
-    source: Option<PasteSource>,
     image: Option<Arc<Image>>,
 }
 
 impl DraftFile {
-    pub(super) fn ready(file: Attachment) -> Self {
+    fn preparing(name: String, media_type: String, source: PasteSource) -> Self {
         Self {
-            file,
-            state: UploadState::Ready,
-            source: None,
+            name,
+            media_type,
+            state: UploadState::Preparing { source },
             image: None,
         }
+    }
+
+    pub(super) fn ready(file: Attachment) -> Self {
+        Self {
+            name: file.name.clone(),
+            media_type: file.media_type.clone(),
+            state: UploadState::Ready { file },
+            image: None,
+        }
+    }
+
+    fn metadata(&self, id: Uuid, size: u64) -> Attachment {
+        Attachment {
+            id,
+            name: self.name.clone(),
+            media_type: self.media_type.clone(),
+            size,
+        }
+    }
+
+    pub(super) fn preview_metadata(&self, id: Uuid) -> Attachment {
+        match &self.state {
+            UploadState::Ready { file } => file.clone(),
+            UploadState::Preparing { source }
+            | UploadState::Uploading { source }
+            | UploadState::Failed { source, .. }
+            | UploadState::Unconfirmed { source, .. } => self.metadata(id, source.size()),
+        }
+    }
+}
+
+pub(super) fn active_file_ids(content: &InputContent) -> impl Iterator<Item = Uuid> + '_ {
+    content
+        .tokens()
+        .iter()
+        .filter_map(|span| crate::attachments::file_id(span.token().id()))
+}
+
+impl Draft {
+    pub(super) fn set_content(&mut self, content: InputContent) -> bool {
+        let changed = !active_file_ids(&content).eq(active_file_ids(&self.content));
+        self.content = content;
+        if changed {
+            let active: std::collections::HashSet<_> = active_file_ids(&self.content).collect();
+            for (id, file) in &mut self.files {
+                if !active.contains(id) {
+                    file.image = None;
+                }
+            }
+        }
+        changed
     }
 }
 
@@ -108,13 +227,21 @@ pub(super) fn parts(
         let file = files
             .get(&id)
             .ok_or("The attached file is no longer available. Paste it again.")?;
-        match &file.state {
-            UploadState::Ready => {}
-            UploadState::Uploading => return Err("Wait for the files to finish uploading.".into()),
-            UploadState::Failed(error) => {
-                return Err(format!("{} could not upload: {error}", file.file.name));
+        let attachment = match &file.state {
+            UploadState::Ready { file } => file,
+            UploadState::Preparing { .. } | UploadState::Uploading { .. } => {
+                return Err("Wait for the files to finish uploading.".into());
             }
-        }
+            UploadState::Failed { error, .. } => {
+                return Err(format!("{} could not upload: {error}", file.name));
+            }
+            UploadState::Unconfirmed { error, .. } => {
+                return Err(format!(
+                    "{} upload is unconfirmed. Retry the upload. {error}",
+                    file.name
+                ));
+            }
+        };
         let range = span.range();
         if offset < range.start {
             parts.push(MessagePart::Text {
@@ -122,7 +249,7 @@ pub(super) fn parts(
             });
         }
         parts.push(MessagePart::File {
-            file: file.file.clone(),
+            file: attachment.clone(),
         });
         offset = range.end;
     }
@@ -164,25 +291,9 @@ impl ElseApp {
         };
         let content = self.composer.read(cx).content();
         let draft = self.drafts.entry(bot).or_default();
-        let changed = !content.tokens().iter().map(|s| s.token().id()).eq(draft
-            .content
-            .tokens()
-            .iter()
-            .map(|s| s.token().id()));
-        if changed {
-            let active: std::collections::HashSet<_> = content
-                .tokens()
-                .iter()
-                .filter_map(|s| crate::attachments::file_id(s.token().id()))
-                .collect();
-            for (id, file) in &mut draft.files {
-                if !active.contains(id) {
-                    file.image = None;
-                }
-            }
+        if draft.set_content(content) {
             cx.notify();
         }
-        draft.content = content;
     }
 
     pub(super) fn paste_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -312,7 +423,12 @@ impl ElseApp {
             .drafts
             .values()
             .flat_map(|draft| draft.files.values())
-            .filter(|file| matches!(file.state, UploadState::Uploading))
+            .filter(|file| {
+                matches!(
+                    file.state,
+                    UploadState::Preparing { .. } | UploadState::Uploading { .. }
+                )
+            })
             .count();
         if uploading + incoming.len() > MAX_FILES {
             self.notice = Some("Wait for the current uploads before pasting more files.".into());
@@ -349,28 +465,13 @@ impl ElseApp {
             let id = file.id;
             self.drafts.entry(bot).or_default().files.insert(
                 id,
-                DraftFile {
-                    file,
-                    state: UploadState::Uploading,
-                    source: Some(source),
-                    image: None,
-                },
+                DraftFile::preparing(file.name, file.media_type, source.clone()),
             );
-            self.upload_file(bot, id, window, cx);
+            self.load_and_upload(bot, id, source, window, cx);
         }
-        let active: std::collections::HashSet<_> = self
-            .composer
-            .read(cx)
-            .tokens()
-            .iter()
-            .filter_map(|span| crate::attachments::file_id(span.token().id()))
-            .collect();
+        let content = self.composer.read(cx).content();
         if let Some(draft) = self.drafts.get_mut(&bot) {
-            for (id, file) in &mut draft.files {
-                if !active.contains(id) && matches!(file.state, UploadState::Ready) {
-                    file.image = None;
-                }
-            }
+            draft.set_content(content);
         }
         cx.notify();
         true
@@ -380,10 +481,20 @@ impl ElseApp {
         let Some(file) = self.drafts.get_mut(&bot).and_then(|d| d.files.get_mut(&id)) else {
             return;
         };
-        let Some(source) = file.source.clone() else {
+        let Some(source) = file.state.retry() else {
             return;
         };
-        file.state = UploadState::Uploading;
+        self.load_and_upload(bot, id, source, window, cx);
+    }
+
+    fn load_and_upload(
+        &mut self,
+        bot: Uuid,
+        id: Uuid,
+        source: PasteSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let loaded = cx
@@ -397,10 +508,7 @@ impl ElseApp {
                         if let Some(file) =
                             app.drafts.get_mut(&bot).and_then(|d| d.files.get_mut(&id))
                         {
-                            if matches!(file.source, Some(PasteSource::Bytes(_))) {
-                                file.source = None;
-                            }
-                            file.state = UploadState::Failed(error);
+                            file.state.fail(error);
                         }
                         cx.notify();
                     });
@@ -414,19 +522,17 @@ impl ElseApp {
                     } else {
                         app.drafts.get(&bot)?.content.clone()
                     };
-                    let active = content
-                        .tokens()
-                        .iter()
-                        .any(|span| crate::attachments::file_id(span.token().id()) == Some(id));
+                    let active = active_file_ids(&content).any(|active| active == id);
                     let file = app.drafts.get_mut(&bot)?.files.get_mut(&id)?;
-                    file.file.size = loaded.len() as u64;
-                    file.source = Some(snapshot);
+                    if !file.state.loaded(snapshot) {
+                        return None;
+                    }
                     file.image = active
-                        .then(|| ImageFormat::from_mime_type(&file.file.media_type))
+                        .then(|| ImageFormat::from_mime_type(&file.media_type))
                         .flatten()
                         .map(|format| Arc::new(Image::from_bytes(format, loaded.as_ref().clone())));
                     cx.notify();
-                    Some(file.file.clone())
+                    Some(file.metadata(id, loaded.len() as u64))
                 })
                 .ok()
                 .flatten();
@@ -436,14 +542,7 @@ impl ElseApp {
             let result = client.upload_attachment(bot, file, loaded).await;
             let _ = this.update(cx, |app, cx| {
                 if let Some(file) = app.drafts.get_mut(&bot).and_then(|d| d.files.get_mut(&id)) {
-                    match result {
-                        Ok(metadata) => {
-                            file.file = metadata;
-                            file.state = UploadState::Ready;
-                            file.source = None;
-                        }
-                        Err(error) => file.state = UploadState::Failed(error.to_string()),
-                    }
+                    file.state.complete(result);
                 }
                 cx.notify();
             });
@@ -459,16 +558,16 @@ impl ElseApp {
         cx: &mut Context<Self>,
     ) {
         if let Some(draft_file) = self.drafts.get(&bot).and_then(|d| d.files.get(&file.id)) {
-            if let UploadState::Failed(error) = &draft_file.state {
+            let error = match &draft_file.state {
+                UploadState::Failed { error, .. } => Some(error.clone()),
+                UploadState::Unconfirmed { error, .. } => Some(format!(
+                    "The upload may have completed. Retry to confirm it. {error}"
+                )),
+                _ => None,
+            };
+            if let Some(error) = error {
                 let owner = cx.entity().downgrade();
-                if draft_file.source.is_none() {
-                    let error = format!("{error} Paste the file again to retry.");
-                    window.open_dialog(cx, move |dialog, _, _| {
-                        dialog.title(file.name.clone()).child(error.clone())
-                    });
-                    return;
-                }
-                let (error, name, id) = (error.clone(), file.name.clone(), file.id);
+                let (name, id) = (file.name.clone(), file.id);
                 window.open_dialog(cx, move |dialog, _, _| {
                     let owner = owner.clone();
                     dialog.title(name.clone()).child(error.clone()).footer(
@@ -491,12 +590,21 @@ impl ElseApp {
                 show_preview(file, Preview::Image(image.clone()), None, window, cx);
                 return;
             }
-            if let Some(PasteSource::Bytes(bytes)) = &draft_file.source {
+            if let UploadState::Preparing {
+                source: PasteSource::Bytes(bytes),
+            }
+            | UploadState::Uploading {
+                source: PasteSource::Bytes(bytes),
+            } = &draft_file.state
+            {
                 let preview = Preview::from_bytes(&file, bytes.as_ref().clone());
                 show_preview(file, preview, Some(bytes.clone()), window, cx);
                 return;
             }
-            if matches!(draft_file.state, UploadState::Uploading) {
+            if matches!(
+                draft_file.state,
+                UploadState::Preparing { .. } | UploadState::Uploading { .. }
+            ) {
                 self.notice = Some("The file is still loading.".into());
                 cx.notify();
                 return;
@@ -538,6 +646,33 @@ mod tests {
     }
 
     #[test]
+    fn removing_the_last_file_token_leaves_no_unsaved_work_and_preserves_undo() {
+        let file = file();
+        let content = input_content(
+            &file.fallback(),
+            &[MessagePart::File { file: file.clone() }],
+        );
+        let mut draft = crate::app::reply::Draft {
+            content: content.clone(),
+            files: [(file.id, DraftFile::ready(file.clone()))].into(),
+            ..Default::default()
+        };
+        assert!(draft.has_unsaved_work());
+        draft.set_content(InputContent::new(""));
+        assert!(
+            !draft.has_unsaved_work(),
+            "removing the last file token must clear the draft's unsaved work"
+        );
+        assert!(parts(&draft.content, &draft.files).unwrap().is_empty());
+        draft.set_content(content);
+        assert!(draft.has_unsaved_work());
+        assert_eq!(
+            parts(&draft.content, &draft.files).unwrap(),
+            vec![MessagePart::File { file }]
+        );
+    }
+
+    #[test]
     fn sending_uses_token_identity_and_preserves_unicode_and_whitespace() {
         let file = file();
         let expected = vec![
@@ -563,8 +698,11 @@ mod tests {
             &file.fallback(),
             &[MessagePart::File { file: file.clone() }],
         );
-        let mut entry = DraftFile::ready(file.clone());
-        entry.state = UploadState::Uploading;
+        let entry = DraftFile::preparing(
+            file.name.clone(),
+            file.media_type.clone(),
+            PasteSource::Bytes(std::sync::Arc::new(vec![42])),
+        );
         let mut files = [(file.id, entry)]
             .into_iter()
             .collect::<std::collections::HashMap<_, _>>();
@@ -573,7 +711,11 @@ mod tests {
                 .unwrap_err()
                 .contains("finish uploading")
         );
-        files.get_mut(&file.id).unwrap().state = UploadState::Failed("offline".into());
+        files
+            .get_mut(&file.id)
+            .unwrap()
+            .state
+            .fail("offline".into());
         assert!(parts(&content, &files).unwrap_err().contains("offline"));
         files.clear();
         assert!(parts(&content, &files).is_err());
@@ -623,6 +765,104 @@ mod tests {
         std::fs::write(path, "changed").unwrap();
         assert_eq!(bytes.as_slice(), b"original");
         assert_eq!(snapshot.read().unwrap().as_slice(), b"original");
+    }
+
+    #[test]
+    fn upload_transitions_keep_retry_sources_and_require_confirmation_before_sending() {
+        let file = file();
+        let content = input_content(
+            &file.fallback(),
+            &[MessagePart::File { file: file.clone() }],
+        );
+        let mut state = UploadState::Preparing {
+            source: PasteSource::Bytes(std::sync::Arc::new(vec![42; 42])),
+        };
+        assert!(!state.complete(Ok(file.clone())));
+        assert!(state.retry().is_none());
+        assert!(state.fail("could not read file".into()));
+        let source = state.retry().unwrap();
+        assert!(state.retry().is_none());
+        let (bytes, snapshot) = source.load().unwrap();
+        assert!(state.loaded(snapshot.clone()));
+        assert!(!state.loaded(snapshot));
+        assert!(!state.fail("late load failure".into()));
+        assert!(state.complete(Err(crate::api::ClientError::Unauthorized)));
+        let source = state.retry().unwrap();
+        assert_eq!(source.clone().read().unwrap().as_slice(), bytes.as_slice());
+        assert!(state.loaded(source));
+        assert!(state.complete(Err(crate::api::ClientError::Unreachable {
+            origin: "http://127.0.0.1:8080".into(),
+            cause: "connection closed".into(),
+        })));
+        let mut entry = DraftFile::ready(file.clone());
+        entry.state = state;
+        let mut files = std::collections::HashMap::from([(file.id, entry)]);
+        let state = &mut files.get_mut(&file.id).unwrap().state;
+        assert!(matches!(state, UploadState::Unconfirmed { .. }));
+        assert!(parts(&content, &files).unwrap_err().contains("unconfirmed"));
+        let state = &mut files.get_mut(&file.id).unwrap().state;
+        let source = state.retry().unwrap();
+        assert_eq!(source.clone().read().unwrap().as_slice(), bytes.as_slice());
+        assert!(state.loaded(source));
+        assert!(state.complete(Ok(file.clone())));
+        assert!(state.retry().is_none());
+        assert!(!state.loaded(PasteSource::Bytes(bytes)));
+        assert!(!state.complete(Err(crate::api::ClientError::Unauthorized)));
+        assert!(!state.fail("late failure".into()));
+        assert_eq!(
+            parts(&content, &files).unwrap(),
+            vec![MessagePart::File { file }]
+        );
+    }
+
+    #[test]
+    fn removing_tokens_clears_only_inactive_previews_and_undo_restores_files() {
+        let first = file();
+        let second = file();
+        let first_part = MessagePart::File {
+            file: first.clone(),
+        };
+        let second_part = MessagePart::File {
+            file: second.clone(),
+        };
+        let content = input_content(
+            &format!("{}{}", first.fallback(), second.fallback()),
+            &[first_part.clone(), second_part.clone()],
+        );
+        let mut draft = crate::app::reply::Draft {
+            content: content.clone(),
+            files: [
+                (first.id, DraftFile::ready(first.clone())),
+                (second.id, DraftFile::ready(second.clone())),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        for file in draft.files.values_mut() {
+            file.image = Some(std::sync::Arc::new(gpui_kit::Image::from_bytes(
+                gpui_kit::ImageFormat::Png,
+                vec![42],
+            )));
+        }
+        draft.set_content(input_content(
+            &second.fallback(),
+            std::slice::from_ref(&second_part),
+        ));
+        assert!(draft.has_unsaved_work());
+        assert!(draft.files[&first.id].image.is_none());
+        assert!(draft.files[&second.id].image.is_some());
+        assert_eq!(
+            parts(&draft.content, &draft.files).unwrap(),
+            vec![second_part.clone()]
+        );
+        draft.set_content(InputContent::new(""));
+        assert!(!draft.has_unsaved_work());
+        assert!(draft.files.values().all(|file| file.image.is_none()));
+        draft.set_content(content);
+        assert_eq!(
+            parts(&draft.content, &draft.files).unwrap(),
+            vec![first_part, second_part]
+        );
     }
 
     #[test]

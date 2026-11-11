@@ -100,6 +100,14 @@ impl Default for Draft {
 }
 
 impl Draft {
+    pub(super) fn has_unsaved_work(&self) -> bool {
+        self.message().is_some()
+            || super::attachments::active_file_ids(&self.content)
+                .next()
+                .is_some()
+            || !self.quotes.is_empty()
+    }
+
     /// The text to send, which always ends with the composer's own text so
     /// file parts can be laid after the quoted prefix.
     pub(super) fn message(&self) -> Option<String> {
