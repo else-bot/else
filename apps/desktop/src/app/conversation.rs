@@ -205,11 +205,10 @@ pub(super) fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
                     turn.outgoing_drafts
                         .iter()
                         .filter(|d| d.status != crate::model::DraftStatus::Superseded)
-                        .map(move |draft| {
-                            (
-                                RowKey::Draft(draft.id),
-                                c.question_anchor(turn.id, draft.settled_at),
-                            )
+                        .filter_map(move |draft| {
+                            let anchor = c.question_anchor(turn.id, draft.settled_at);
+                            (draft.settled_at.is_none() || anchor.is_some())
+                                .then_some((RowKey::Draft(draft.id), anchor))
                         }),
                 )
         })
