@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::TestApp;
-use else_api::computers::jobs::Started;
+use else_api::computers::jobs::{JobStatus, Started};
 use else_api::computers::runtime::Msb;
 use else_api::computers::{Acquire, ComputerConfig, ComputerManager, ComputerRuntime};
 use serde_json::Value;
@@ -302,7 +302,7 @@ async fn wait_job(
     let started = Instant::now();
     loop {
         let state = manager.job(bot, job).await.unwrap().unwrap();
-        if !matches!(state.status.as_str(), "starting" | "running") {
+        if !matches!(state.status, JobStatus::Starting | JobStatus::Running) {
             return state;
         }
         assert!(
@@ -494,7 +494,7 @@ async fn scripts_drive_the_visible_browser_safely() {
         assert_eq!(restarted.status, Some(0), "{}", restarted.stderr);
         let done = wait_job(&manager, bot, job).await;
         eprintln!("restart ({command}): {}", done.output_tail);
-        assert_eq!(done.status, "completed", "{}", done.output_tail);
+        assert_eq!(done.status, JobStatus::Completed, "{}", done.output_tail);
         let restart: Value =
             serde_json::from_str(done.output_tail.trim().lines().last().unwrap()).unwrap();
         assert_eq!(restart["order"], "Uncertain");
@@ -529,7 +529,7 @@ async fn scripts_drive_the_visible_browser_safely() {
     let tabs_before = ok(&manager, bot, "curl -s http://127.0.0.1:9222/json/list", 30).await;
     assert!(tabs_before.contains("/order"));
     let cancelled = manager.cancel_job(bot, job).await.unwrap().unwrap();
-    assert_eq!(cancelled.status, "cancelled");
+    assert_eq!(cancelled.status, JobStatus::Cancelled);
     let tabs_after = ok(&manager, bot, "curl -s http://127.0.0.1:9222/json/list", 30).await;
     assert!(
         !tabs_after.contains("/order"),
@@ -617,7 +617,7 @@ async fn scripts_drive_the_visible_browser_safely() {
         "{busy:?}"
     );
     let cancelled = manager.cancel_job(bot, holder).await.unwrap().unwrap();
-    assert_eq!(cancelled.status, "cancelled");
+    assert_eq!(cancelled.status, JobStatus::Cancelled);
     let free = manager.browser(lease_id, &["title"]).await.unwrap();
     assert!(free.stdout.contains("\"title\""), "{free:?}");
     manager.release(lease_id).await.unwrap();

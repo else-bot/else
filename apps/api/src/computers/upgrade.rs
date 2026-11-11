@@ -350,8 +350,8 @@ impl ComputerManager {
     /// singleton lock, so no turn, desktop, or tool call can be live): end
     /// this bot's leases other than background jobs', and ask the guest
     /// about each running job so a job that finished while the API was
-    /// down no longer blocks the upgrade. A job still running keeps its
-    /// lease, and the upgrade is refused.
+    /// down no longer blocks the upgrade, and retry each pending cancel. A
+    /// job still running keeps its lease, and the upgrade is refused.
     pub async fn settle_offline(&self, bot_id: Uuid) -> Result<(), ComputerError> {
         sqlx::query(
             "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'expired'
@@ -369,7 +369,7 @@ impl ComputerManager {
         for job in running {
             self.job(bot_id, job).await?;
         }
-        Ok(())
+        self.confirm_cancels(bot_id).await
     }
 
     async fn clear_interrupted_upgrades(&self, bot_id: Uuid) -> Result<(), ComputerError> {
@@ -472,10 +472,7 @@ impl ComputerManager {
             }
         }
         if row.observed_state == "paused" {
-            self.runtime.resume(&row.runtime_name).await?;
-            let mut conn = self.pool.acquire().await?;
-            self.set_state(&mut conn, bot_id, "running", None, None)
-                .await?;
+            self.resume_held(bot_id, &row.runtime_name).await?;
             row.observed_state = "running".into();
         }
         let out = self

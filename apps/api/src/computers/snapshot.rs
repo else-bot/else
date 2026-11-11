@@ -103,10 +103,7 @@ impl ComputerManager {
                 }
                 if self.config.desktop {
                     if row.observed_state == "paused" {
-                        self.runtime.resume(&row.runtime_name).await?;
-                        let mut conn = self.pool.acquire().await?;
-                        self.set_state(&mut conn, bot_id, "running", None, None)
-                            .await?;
+                        self.resume_held(bot_id, &row.runtime_name).await?;
                     }
                     let out = self
                         .runtime

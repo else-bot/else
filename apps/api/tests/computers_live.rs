@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::TestApp;
+use else_api::computers::jobs::JobStatus;
 use else_api::computers::runtime::Msb;
 use else_api::computers::{
     Acquire, ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, IdleAction,
@@ -325,7 +326,7 @@ async fn guest_tools_desktop_and_isolation() {
     let mut done = None;
     for _ in 0..30 {
         let state = manager.job(bot, job).await.unwrap().unwrap();
-        if state.status != "running" {
+        if state.status != JobStatus::Running {
             done = Some(state);
             break;
         }
@@ -333,8 +334,8 @@ async fn guest_tools_desktop_and_isolation() {
     }
     let done = done.expect("the job finished");
     assert_eq!(
-        (done.status.as_str(), done.exit_code),
-        ("completed", Some(0))
+        (done.status, done.exit_code),
+        (JobStatus::Completed, Some(0))
     );
 
     let (lease, _) = ready(&manager, bot, "test:turn2").await;
@@ -388,7 +389,7 @@ async fn guest_tools_desktop_and_isolation() {
     };
     tokio::time::sleep(Duration::from_secs(1)).await;
     let cancelled = manager.cancel_job(bot, long).await.unwrap().unwrap();
-    assert_eq!(cancelled.status, "cancelled");
+    assert_eq!(cancelled.status, JobStatus::Cancelled);
     let left = manager
         .run_command(
             bot,

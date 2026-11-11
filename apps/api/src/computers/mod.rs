@@ -672,6 +672,16 @@ impl ComputerManager {
         Ok(())
     }
 
+    /// Resume a paused computer in place. The caller holds the bot's
+    /// operation lock. The guest's processes and the leases on it carry over.
+    async fn resume_held(&self, bot_id: Uuid, name: &str) -> Result<(), ComputerError> {
+        self.runtime.resume(name).await?;
+        let mut conn = self.pool.acquire().await?;
+        self.set_state(&mut conn, bot_id, "running", None, None)
+            .await?;
+        Ok(())
+    }
+
     async fn observe(&self, bot_id: Uuid) -> Result<(), ComputerError> {
         let row: Option<(String, String)> = sqlx::query_as(
             "SELECT runtime_name, observed_state FROM bot_computers WHERE bot_id = ?1",

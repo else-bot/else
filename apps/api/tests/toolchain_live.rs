@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::TestApp;
-use else_api::computers::jobs::Started;
+use else_api::computers::jobs::{JobStatus, Started};
 use else_api::computers::runtime::Msb;
 use else_api::computers::{
     Acquire, ComputerConfig, ComputerManager, ComputerRuntime, RuntimeState, Spec,
@@ -310,7 +310,7 @@ async fn toolchain_projects_persist_and_restore() {
     let started = Instant::now();
     let done = loop {
         let state = manager.job(bot, job).await.unwrap().unwrap();
-        if !matches!(state.status.as_str(), "starting" | "running") {
+        if !matches!(state.status, JobStatus::Starting | JobStatus::Running) {
             break state;
         }
         assert!(
@@ -325,8 +325,8 @@ async fn toolchain_projects_persist_and_restore() {
         done.output_tail
     );
     assert_eq!(
-        (done.status.as_str(), done.exit_code),
-        ("completed", Some(0)),
+        (done.status, done.exit_code),
+        (JobStatus::Completed, Some(0)),
         "{}",
         done.output_tail
     );
