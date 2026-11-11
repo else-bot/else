@@ -418,6 +418,91 @@ async fn producer_failures_interruptions_and_overruns_leave_no_completed_set() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_set_id_collision_keeps_the_existing_set() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let params = DatabaseParams::parse(app.db.url.expose()).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let coordinator = else_api::backup::capture::Coordinator::default();
+    let set_id = backup::new_set_id();
+    let key = key(1);
+    let create = || {
+        else_api::backup::capture::create_set(
+            &app.db.pool,
+            &params,
+            &key,
+            &cfg,
+            &set_id,
+            &cancel,
+            &coordinator,
+        )
+    };
+    let first = create().await.unwrap();
+    let again = create().await;
+    assert!(matches!(again, Err(BackupError::Io(_))), "{again:?}");
+    assert_eq!(
+        backup::completed_sets(&cfg.dir).unwrap(),
+        std::slice::from_ref(&set_id)
+    );
+    assert_eq!(
+        entries(&cfg.dir),
+        1,
+        "the second attempt's staging is removed"
+    );
+    let target = Target::new(&app);
+    restore_into(&app, &first.path, &key, &target, &dir.path().join("s"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_completes_runs_whose_set_was_published() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let dir = tempfile::tempdir().unwrap();
+    let worker = worker(&app, key(1), config(dir.path()));
+    let published = worker.run_once().await.unwrap();
+    sqlx::query(
+        "UPDATE backup_runs SET local_status = 'running', finished_at = NULL,
+         ciphertext_bytes = NULL, coverage = NULL WHERE set_id = ?1",
+    )
+    .bind(&published.set_id)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO backup_runs (id, set_id) VALUES (?1, 'crashed')")
+        .bind(Uuid::new_v4())
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    worker.recover().await.unwrap();
+    let runs: Vec<(String, String, Option<String>, bool)> = sqlx::query_as(
+        "SELECT set_id, local_status, error, finished_at IS NOT NULL FROM backup_runs ORDER BY set_id",
+    )
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        runs,
+        [
+            (published.set_id.clone(), "completed".to_owned(), None, true),
+            (
+                "crashed".to_owned(),
+                "failed".to_owned(),
+                Some("interrupted before it finished".to_owned()),
+                true
+            ),
+        ]
+    );
+    assert_eq!(
+        backup::completed_sets(&dir.path().join("backups")).unwrap(),
+        [published.set_id]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn scheduling_serializes_runs_and_keeps_the_newest_sets() {
     let _serial = SERIAL.lock().await;
     let app = populated().await;

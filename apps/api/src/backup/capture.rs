@@ -115,6 +115,59 @@ fn publish_completion(set_dir: &Path, completion: &Completion) -> Result<(), Bac
     super::sync_dir(set_dir)
 }
 
+/// A staging directory this attempt created and marked as its own.
+struct StagedSet(PathBuf);
+
+/// A set directory this attempt renamed into place, not yet complete.
+struct OwnedFinalSet(PathBuf);
+
+impl StagedSet {
+    fn create(dir: &Path, set_id: &str) -> Result<Self, BackupError> {
+        let staging = super::staging_path(dir, set_id);
+        super::private_dir(&staging)?;
+        let staged = Self(staging);
+        match super::mark_owned(&staged.0) {
+            Ok(()) => Ok(staged),
+            Err(err) => Err(staged.discard(err)),
+        }
+    }
+
+    fn discard(self, err: BackupError) -> BackupError {
+        let _ = std::fs::remove_dir_all(&self.0);
+        err
+    }
+
+    /// A failed rename never touches the destination: another set may own it.
+    fn move_into(self, dir: &Path, set_id: &str) -> Result<OwnedFinalSet, BackupError> {
+        let final_dir = dir.join(set_id);
+        if let Err(err) = super::rename_noreplace(&self.0, &final_dir) {
+            return Err(self.discard(err));
+        }
+        let owned = OwnedFinalSet(final_dir);
+        match super::sync_dir(dir) {
+            Ok(()) => Ok(owned),
+            Err(err) => Err(owned.discard(err)),
+        }
+    }
+}
+
+impl OwnedFinalSet {
+    fn discard(self, err: BackupError) -> BackupError {
+        let _ = std::fs::remove_dir_all(&self.0);
+        err
+    }
+
+    fn publish(self, completion: &Completion) -> Result<PathBuf, BackupError> {
+        if crate::faults::hit("backup.before_complete") {
+            return Err(BackupError::Interrupted);
+        }
+        match publish_completion(&self.0, completion) {
+            Ok(()) => Ok(self.0),
+            Err(err) => Err(self.discard(err)),
+        }
+    }
+}
+
 /// Capture, encrypt, and publish a set with the configured checkpoint sources.
 pub async fn create_set(
     pool: &SqlitePool,
@@ -129,55 +182,31 @@ pub async fn create_set(
         return Err(BackupError::Invalid("not a set ID".into()));
     }
     super::ensure_private_dir(&config.dir)?;
-    let set_id = set_id.to_owned();
-    let staging = super::staging_path(&config.dir, &set_id);
-    super::private_dir(&staging)?;
-    let result = match super::mark_owned(&staging) {
-        Ok(()) => {
-            capture_into(
-                pool,
-                params,
-                key,
-                config,
-                &set_id,
-                &staging,
-                cancel,
-                coordinator,
-            )
-            .await
-        }
-        Err(err) => Err(err),
+    let staged = StagedSet::create(&config.dir, set_id)?;
+    let captured = capture_into(
+        pool,
+        params,
+        key,
+        config,
+        set_id,
+        &staged.0,
+        cancel,
+        coordinator,
+    )
+    .await;
+    let (manifest, completion) = match captured {
+        Ok(captured) => captured,
+        Err(err) => return Err(staged.discard(err)),
     };
-    match result {
-        Ok((manifest, completion)) => {
-            let final_dir = config.dir.join(&set_id);
-            let published = (|| {
-                super::rename_noreplace(&staging, &final_dir)?;
-                super::sync_dir(&config.dir)?;
-                if crate::faults::hit("backup.before_complete") {
-                    return Err(BackupError::Interrupted);
-                }
-                publish_completion(&final_dir, &completion)
-            })();
-            if let Err(err) = published {
-                let _ = std::fs::remove_dir_all(&staging);
-                if !matches!(err, BackupError::Interrupted) {
-                    let _ = std::fs::remove_dir_all(&final_dir);
-                }
-                return Err(err);
-            }
-            Ok(SetSummary {
-                set_id,
-                path: final_dir,
-                manifest,
-                remote: None,
-            })
-        }
-        Err(err) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            Err(err)
-        }
-    }
+    let path = staged
+        .move_into(&config.dir, set_id)?
+        .publish(&completion)?;
+    Ok(SetSummary {
+        set_id: set_id.to_owned(),
+        path,
+        manifest,
+        remote: None,
+    })
 }
 
 /// What a coordinated capture may use: the scheduler's gate and drain, and
