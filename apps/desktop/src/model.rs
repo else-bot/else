@@ -1008,14 +1008,27 @@ impl Conversation {
             .map(|(item, _)| item)
     }
 
+    /// The turn's last loaded item from before the card settled. A settled
+    /// card with none (a mail event's source item never loads) follows the
+    /// last earlier item of any turn. It has no anchor when that item may be
+    /// on an unloaded older page.
     pub fn question_anchor(&self, turn: Uuid, settled_at: Option<DateTime<Utc>>) -> Option<Uuid> {
+        if let Some(item) = self.items.values().rev().find(|item| {
+            item.turn_id == turn
+                && settled_at.is_none_or(|at| item.created_at.is_none_or(|created| created <= at))
+        }) {
+            return Some(item.id);
+        }
+        let at = settled_at?;
         self.items
             .values()
             .rev()
-            .find(|item| {
-                item.turn_id == turn
-                    && settled_at
-                        .is_none_or(|at| item.created_at.is_none_or(|created| created <= at))
+            .find(|item| item.created_at.is_some_and(|created| created <= at))
+            .or_else(|| {
+                self.older_before_seq
+                    .is_none()
+                    .then(|| self.items.values().next())
+                    .flatten()
             })
             .map(|item| item.id)
     }

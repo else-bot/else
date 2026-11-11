@@ -152,11 +152,10 @@ pub(super) fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
                         c.question_anchor(turn.id, None),
                     )
                 })
-                .chain(turn.skill_installs.iter().map(move |install| {
-                    (
-                        RowKey::SkillInstall(install.id),
-                        c.question_anchor(turn.id, install.settled_at),
-                    )
+                .chain(turn.skill_installs.iter().filter_map(move |install| {
+                    let anchor = c.question_anchor(turn.id, install.settled_at);
+                    (install.settled_at.is_none() || anchor.is_some())
+                        .then_some((RowKey::SkillInstall(install.id), anchor))
                 }))
                 .chain(turn.questions.iter().filter_map(move |question| {
                     let anchor = c.question_anchor(turn.id, question.settled_at);
@@ -205,11 +204,10 @@ pub(super) fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
                     turn.outgoing_drafts
                         .iter()
                         .filter(|d| d.status != crate::model::DraftStatus::Superseded)
-                        .map(move |draft| {
-                            (
-                                RowKey::Draft(draft.id),
-                                c.question_anchor(turn.id, draft.settled_at),
-                            )
+                        .filter_map(move |draft| {
+                            let anchor = c.question_anchor(turn.id, draft.settled_at);
+                            (draft.settled_at.is_none() || anchor.is_some())
+                                .then_some((RowKey::Draft(draft.id), anchor))
                         }),
                 )
         })
@@ -987,6 +985,124 @@ mod tests {
             }],
             "activity":{"phase":"idle", "active_turn_id":null, "queued_count":0}
         })).unwrap()
+    }
+
+    fn draft_page(status: &str, seq: i64, created_at: &str) -> Snapshot {
+        let items = json!([{"id": Uuid::from_u128(seq as u128), "seq": seq,
+            "turn_id": Uuid::from_u128(10), "kind": "assistant", "text": "Edward's reply",
+            "created_at": created_at}]);
+        serde_json::from_value(card_page(status, items, (seq > 1).then_some(seq))).unwrap()
+    }
+
+    fn card_page(status: &str, items: serde_json::Value, older: Option<i64>) -> serde_json::Value {
+        let settled = status == "sent";
+        json!({
+            "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+            "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+            "older_before_seq": older,
+            "items": items,
+            "turns": [{
+                "id":Uuid::from_u128(10), "request_id":Uuid::from_u128(110), "turn_no":1,
+                "provider_id":"codex", "status":if settled { "interrupted" } else { "waiting" },
+                "effect_uncertain":false,
+                "outgoing_drafts": [{"id": Uuid::from_u128(310), "lineage_id": Uuid::from_u128(311),
+                    "revision": 1, "content": {"channel":"email", "from": "main@example.invalid",
+                    "to": ["edward@example.invalid"], "cc": [], "bcc": [], "subject": "Re: help",
+                    "body": "Hello"}, "version": 1, "status": status, "can_approve": !settled,
+                    "result_detail": null, "updated_at": "2026-11-01T00:00:01Z",
+                    "settled_at": if settled { Some("2026-11-01T00:00:01Z") } else { None }}]
+            }],
+            "activity":{"phase":"idle", "active_turn_id":null, "queued_count":0}
+        })
+    }
+
+    fn card_rows(page: serde_json::Value) -> Vec<(RowKey, Option<Uuid>)> {
+        request_rows(&Conversation::from_snapshot(serde_json::from_value(page).unwrap()).unwrap())
+    }
+
+    #[test]
+    fn a_draft_sent_by_a_turn_without_visible_items_follows_earlier_history() {
+        let earlier = json!([{"id": Uuid::from_u128(1), "seq": 1, "turn_id": Uuid::from_u128(20),
+            "kind": "user", "text": "Earlier request", "created_at": "2026-11-01T00:00:00Z"}]);
+        assert_eq!(
+            card_rows(card_page("sent", earlier, None)),
+            [(
+                RowKey::Draft(Uuid::from_u128(310)),
+                Some(Uuid::from_u128(1))
+            )]
+        );
+    }
+
+    #[test]
+    fn an_undated_item_does_not_pull_a_sent_draft_to_the_tail() {
+        let items = json!([
+            {"id": Uuid::from_u128(1), "seq": 1, "turn_id": Uuid::from_u128(10),
+                "kind": "assistant", "text": "Sent it.", "created_at": "2026-11-02T00:00:00Z"},
+            {"id": Uuid::from_u128(2), "seq": 2, "turn_id": Uuid::from_u128(20),
+                "kind": "user", "text": "Later request", "created_at": null},
+        ]);
+        assert_eq!(
+            card_rows(card_page("sent", items, None)),
+            [(
+                RowKey::Draft(Uuid::from_u128(310)),
+                Some(Uuid::from_u128(1))
+            )]
+        );
+    }
+
+    #[test]
+    fn settled_skill_installs_wait_for_their_history_page() {
+        let items = json!([{"id": Uuid::from_u128(2), "seq": 2, "turn_id": Uuid::from_u128(10),
+            "kind": "assistant", "text": "Installed.", "created_at": "2026-11-02T00:00:00Z"}]);
+        let mut page = card_page("pending", items, Some(2));
+        page["turns"][0]["outgoing_drafts"] = json!([]);
+        page["turns"][0]["skill_installs"] = json!([{"id": Uuid::from_u128(320),
+            "skill_id": "growth", "name": "growth", "description": "Analyze growth",
+            "reason": "Review the site", "source": {"url": "https://github.com/example/repo",
+                "repo": "example/repo", "path": "skills/growth", "commit": "a41c9e2ffff"},
+            "files": [], "env": [], "secret": "skill-growth", "status": "installed",
+            "scope": null, "key_stored": false, "created_at": "2026-11-01T00:00:00Z",
+            "settled_at": "2026-11-01T00:00:01Z"}]);
+        assert_eq!(card_rows(page), []);
+    }
+
+    #[test]
+    fn sent_drafts_wait_for_their_history_page() {
+        let mut c =
+            Conversation::from_snapshot(draft_page("sent", 2, "2026-11-02T00:00:00Z")).unwrap();
+        assert!(
+            request_rows(&c).is_empty(),
+            "a sent draft must not reappear at the conversation tail"
+        );
+        c.merge_older(draft_page("sent", 1, "2026-11-01T00:00:00Z"));
+        assert_eq!(
+            request_rows(&c),
+            [(
+                RowKey::Draft(Uuid::from_u128(310)),
+                Some(Uuid::from_u128(1))
+            )]
+        );
+        let pending =
+            Conversation::from_snapshot(draft_page("pending", 2, "2026-11-02T00:00:00Z")).unwrap();
+        assert_eq!(
+            request_rows(&pending),
+            [(
+                RowKey::Draft(Uuid::from_u128(310)),
+                Some(Uuid::from_u128(2))
+            )]
+        );
+    }
+
+    #[test]
+    fn a_draft_sent_before_any_visible_item_of_its_turn_stays_shown() {
+        let c = Conversation::from_snapshot(draft_page("sent", 1, "2026-11-02T00:00:00Z")).unwrap();
+        assert_eq!(
+            request_rows(&c),
+            [(
+                RowKey::Draft(Uuid::from_u128(310)),
+                Some(Uuid::from_u128(1))
+            )]
+        );
     }
 
     #[test]
