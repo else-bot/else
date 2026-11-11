@@ -6,7 +6,7 @@
 - When you add or change lifecycle logic, represent its mutually exclusive states as one enum and put state-dependent data in the variants, like the private `Phase` behind `Lifecycle` in `apps/api/src/providers/cli/attempt.rs`; use consuming typestates instead when each state owns a resource, like `StagedSet` in `apps/api/src/backup/capture.rs`.
 - Replace booleans or `Option`s that must change together with that enum.
 - Keep a lifecycle's runtime transitions in its owning module; callers request a transition by name and never write a state directly. Count database triggers as part of that lifecycle's transitions.
-- Store persisted states through a typed enum that keeps the existing stored strings, like `Status` in `apps/api/src/app/outgoing.rs`. Migrations, tests and read queries may still use the strings.
+- Type each persisted state as an enum that keeps the existing stored strings, like `Status` in `apps/api/src/app/outgoing.rs`, and decode rows into it before Rust code branches on the state. SQL text, migrations and tests may still spell the strings.
 - Make each persisted transition atomic and check its allowed source states, with a guarded `WHERE status IN (...)` or a check inside a `BEGIN IMMEDIATE` transaction. Check the affected or returned rows, handle a rejected transition explicitly, and return state read back from the database.
 - Identify a retried request by a stable request ID or version. Return the existing result for a safe retry, and reject an unsafe repeat or a conflicting request.
 - Give an unknown or unconfirmed outcome its own state; never fold it into success or failure.
