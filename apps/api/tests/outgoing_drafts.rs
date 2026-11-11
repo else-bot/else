@@ -1746,3 +1746,184 @@ async fn a_reply_that_moves_on_closes_the_draft_it_was_sent_with() {
     .await;
     assert_eq!(late.body["error"]["code"], "draft_settled", "{}", late.body);
 }
+
+async fn granted(app: &TestApp, bot: &str) -> Value {
+    app.owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+        .await
+        .body["draft_grants"]
+        .clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let reply = draft(
+        &app,
+        &token,
+        json!({ "platform": "x", "account": "@Proliquid_xyz", "body": "Agreed.",
+                "destination": "https://x.com/someone/status/1" }),
+    )
+    .await;
+    wait(&app, turn, "waiting").await;
+    assert_eq!(shown(&app, &main, turn).await[0]["kind"], Value::Null);
+    let refused = owner_action(
+        &app,
+        &main,
+        reply,
+        "approve",
+        json!({ "version": 1, "always": true }),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{}", refused.body);
+    assert_eq!(refused.body["error"]["code"], "no_kind");
+    assert_eq!(
+        shown(&app, &main, turn).await[0]["status"],
+        "pending",
+        "an X reply cannot be approved always, and the refusal approves nothing"
+    );
+    let discarded = owner_action(&app, &main, reply, "discard", json!({})).await;
+    assert_eq!(discarded.body["requeued"], true, "{}", discarded.body);
+
+    wait(&app, turn, "running").await;
+    let post = |body: &str| json!({ "platform": "x", "account": "@Proliquid_xyz", "body": body });
+    let first = draft(
+        &app,
+        &grant(&app, turn).await,
+        post("A whale flipped long."),
+    )
+    .await;
+    wait(&app, turn, "waiting").await;
+    let card = shown(&app, &main, turn).await[1].clone();
+    assert_eq!(
+        card["kind"],
+        json!({ "platform": "x", "account_id": null, "account": "@proliquid_xyz",
+                "destination": null })
+    );
+    assert_eq!(granted(&app, &main).await, json!([]));
+    let approved = owner_action(
+        &app,
+        &main,
+        first,
+        "approve",
+        json!({ "version": 1, "always": true }),
+    )
+    .await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    assert_eq!(approved.body["draft"]["status"], "approved");
+    assert_eq!(approved.body["draft"]["approval_source"], "button");
+    assert_eq!(
+        granted(&app, &main).await,
+        json!([{ "platform": "x", "account_id": null, "account": "@proliquid_xyz",
+                 "destination": null }])
+    );
+    let replay = owner_action(
+        &app,
+        &main,
+        first,
+        "approve",
+        json!({ "version": 1, "always": true }),
+    )
+    .await;
+    assert_eq!(replay.status, StatusCode::OK, "{}", replay.body);
+    assert_eq!(replay.body["requeued"], false);
+
+    wait(&app, turn, "running").await;
+    let token = grant(&app, turn).await;
+    let drafted = tool(
+        &app,
+        &token,
+        "draft_message",
+        json!({ "platform": "x", "account": "@PROLIQUID_XYZ", "body": "A whale flipped short." }),
+    )
+    .await;
+    let result = tool_text(&drafted);
+    assert_eq!(result["status"], "approved", "{}", drafted.body);
+    assert!(result.get("parked").is_none(), "nothing waits on the owner");
+    assert!(
+        result["next"]
+            .as_str()
+            .unwrap()
+            .contains("approves X post like this always"),
+        "{result}"
+    );
+    let second: Uuid = result["draft"]["draft_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let card = journaled(&app, &main, second).await;
+    assert_eq!(card["approval_source"], "standing");
+    assert_eq!(card["can_approve"], false);
+    let claimed = tool(
+        &app,
+        &token,
+        "start_draft_send",
+        json!({ "draft_id": second }),
+    )
+    .await;
+    assert_eq!(tool_text(&claimed)["status"], "sending", "{}", claimed.body);
+    let sent = tool(
+        &app,
+        &token,
+        "report_draft_send",
+        json!({ "draft_id": second, "status": "sent", "detail": "post id 7" }),
+    )
+    .await;
+    assert_eq!(tool_text(&sent)["status"], "sent", "{}", sent.body);
+    let third = tool(&app, &token, "draft_message", post("A third whale.")).await;
+    assert_eq!(
+        tool_text(&third)["status"],
+        "approved",
+        "an approved-always draft parks nothing, so the request can send more: {}",
+        third.body
+    );
+    let reply = tool(
+        &app,
+        &token,
+        "draft_message",
+        json!({ "platform": "x", "account": "@proliquid_xyz", "reply_to": "1890",
+                "body": "Thanks!" }),
+    )
+    .await;
+    assert_eq!(
+        tool_text(&reply)["status"],
+        "pending",
+        "an X reply named only by reply_to is not a post: {}",
+        reply.body
+    );
+    let reply: Uuid = tool_text(&reply)["draft"]["draft_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait(&app, turn, "waiting").await;
+    let discarded = owner_action(&app, &main, reply, "discard", json!({})).await;
+    assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
+
+    let stop = format!("/v1/bots/{main}/outgoing-drafts/{second}/always");
+    let stopped = app.owner("DELETE", &stop, None).await;
+    assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);
+    assert_eq!(granted(&app, &main).await, json!([]));
+    assert_eq!(
+        stopped.body["draft"]["status"], "sent",
+        "a sent post stays sent"
+    );
+    let again = app.owner("DELETE", &stop, None).await;
+    assert_eq!(
+        again.status,
+        StatusCode::OK,
+        "stopping twice changes nothing"
+    );
+
+    wait(&app, turn, "completed").await;
+    let (next, token) = running(&app, &main, SLOW, None).await;
+    draft(&app, &token, post("Another whale.")).await;
+    wait(&app, next, "waiting").await;
+    assert_eq!(
+        shown(&app, &main, next).await[0]["status"],
+        "pending",
+        "after stopping, the kind waits for approval again"
+    );
+}

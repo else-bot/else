@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::{post, put};
+use axum::routing::{delete, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -28,6 +28,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/bots/{bot_id}/outgoing-drafts/{draft_id}/discard",
             post(discard),
         )
+        .route(
+            "/bots/{bot_id}/outgoing-drafts/{draft_id}/always",
+            delete(stop_always),
+        )
 }
 
 #[derive(Deserialize)]
@@ -38,6 +42,9 @@ struct VersionedEdits {
     subject: Option<String>,
     #[serde(default)]
     body: Option<String>,
+    /// Also approve later drafts of this kind as the bot proposes them.
+    #[serde(default)]
+    always: bool,
 }
 
 impl VersionedEdits {
@@ -66,6 +73,10 @@ pub(super) fn draft_error(err: DraftError) -> ApiError {
             "The request that drafted this has ended. Reply in chat to send it.".into(),
         ),
         DraftError::Invalid(message) => ApiError::bad_request("invalid_draft", message),
+        DraftError::NoKind => ApiError::bad_request(
+            "no_kind",
+            "Only a message or a new post can be approved always.",
+        ),
         DraftError::Db(err) => err.into(),
         other => {
             tracing::warn!(error = %other, "unexpected outgoing draft error on an owner route");
@@ -87,20 +98,45 @@ async fn edit(
     ApiPath((bot_id, draft_id)): ApiPath<(Uuid, Uuid)>,
     ApiJson(body): ApiJson<VersionedEdits>,
 ) -> Result<Json<Value>, ApiError> {
+    if body.always {
+        return Err(ApiError::bad_request(
+            "invalid_draft",
+            "Saving edits approves nothing; approve the draft to approve it always.",
+        ));
+    }
     let done = outgoing_drafts::edit(&state.db, bot_id, draft_id, body.version, body.edits())
         .await
         .map_err(draft_error)?;
     Ok(settled(&state, done))
 }
 
-/// Approve the version the owner saw, with their final edits. A retry of
-/// the same approval succeeds without changing anything.
+/// Approve the version the owner saw, with their final edits, and with
+/// `always` every later draft of its kind. A retry of the same approval
+/// succeeds without changing anything.
 async fn approve(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, draft_id)): ApiPath<(Uuid, Uuid)>,
     ApiJson(body): ApiJson<VersionedEdits>,
 ) -> Result<Json<Value>, ApiError> {
-    let done = outgoing_drafts::approve(&state.db, bot_id, draft_id, body.version, body.edits())
+    let done = outgoing_drafts::approve(
+        &state.db,
+        bot_id,
+        draft_id,
+        body.version,
+        body.edits(),
+        body.always,
+    )
+    .await
+    .map_err(draft_error)?;
+    Ok(settled(&state, done))
+}
+
+/// Stop approving this draft's kind always.
+async fn stop_always(
+    State(state): State<Arc<AppState>>,
+    ApiPath((bot_id, draft_id)): ApiPath<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    let done = outgoing_drafts::stop_always(&state.db, bot_id, draft_id)
         .await
         .map_err(draft_error)?;
     Ok(settled(&state, done))

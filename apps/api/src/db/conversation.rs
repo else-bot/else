@@ -20,6 +20,8 @@ pub struct Snapshot {
     pub social_triggers: Vec<crate::socials::types::Trigger>,
     /// The bot's mail triggers, at the same snapshot.
     pub mail_triggers: Vec<crate::connectors::types::MailTrigger>,
+    /// The kinds of drafts the owner approves always.
+    pub draft_grants: Vec<crate::app::outgoing::DraftKind>,
     /// The bot's webhooks, at the same snapshot.
     pub webhooks: Vec<super::webhooks::Webhook>,
     /// The bot's current rules version, at the same snapshot.
@@ -73,6 +75,7 @@ pub async fn snapshot(
     let social_triggers = crate::socials::store::triggers(&mut tx, bot_id).await?;
     let mail_triggers = crate::connectors::store::mail_triggers(&mut tx, bot_id).await?;
     let webhooks = super::webhooks::list(&mut tx, bot_id).await?;
+    let draft_grants = super::outgoing_drafts::always_approved(&mut tx, bot_id).await?;
     let rules_version = super::rules::version(&mut tx, bot_id).await?;
     tx.commit().await?;
     Ok(Some(Snapshot {
@@ -84,6 +87,7 @@ pub async fn snapshot(
         routines,
         social_triggers,
         mail_triggers,
+        draft_grants,
         webhooks,
         rules_version,
     }))

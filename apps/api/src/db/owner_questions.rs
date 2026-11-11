@@ -353,6 +353,15 @@ async fn reach(
     ))
 }
 
+/// Which saved grants `turn_id` may use.
+pub(crate) async fn grant_reach(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<GrantReach, sqlx::Error> {
+    let scope = scope(conn, turn_id).await?;
+    reach(conn, turn_id, scope).await
+}
+
 /// What a gated computer tool call may do now.
 #[derive(Debug)]
 pub enum Gate {

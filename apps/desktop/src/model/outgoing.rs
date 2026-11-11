@@ -149,6 +149,30 @@ impl DraftContent {
         }
     }
 
+    /// Who and where "Approve always" covers, as in "X posts from @acme".
+    pub fn kind_label(&self) -> String {
+        let Self::Message {
+            account,
+            destination,
+            ..
+        } = self
+        else {
+            return "emails".into();
+        };
+        let mut label = format!(
+            "{} {}",
+            self.label(),
+            if self.is_post() { "posts" } else { "messages" }
+        );
+        if let Some(account) = account {
+            label.push_str(&format!(" from {account}"));
+        }
+        if let Some(destination) = destination {
+            label.push_str(&format!(" to {destination}"));
+        }
+        label
+    }
+
     pub fn approve_label(&self) -> &'static str {
         if self.is_post() {
             "Approve & post"
@@ -167,6 +191,15 @@ impl DraftContent {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalSource {
+    Button,
+    Message,
+    /// Approved as proposed, because the owner approves its kind always.
+    Standing,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct OutgoingDraft {
     pub id: Uuid,
@@ -180,6 +213,11 @@ pub struct OutgoingDraft {
     #[serde(default)]
     pub in_reply: bool,
     pub result_detail: Option<String>,
+    #[serde(default)]
+    pub approval_source: Option<ApprovalSource>,
+    /// What "Approve always" would cover; none for an email or an X reply.
+    #[serde(default)]
+    pub kind: Option<serde_json::Value>,
     pub updated_at: DateTime<Utc>,
     pub settled_at: Option<DateTime<Utc>>,
 }
@@ -299,6 +337,31 @@ mod tests {
         assert!(!card("pending", true).is_open());
         assert_eq!(card("pending", true).label(), "Continued in your reply");
         assert_eq!(card("discarded", false).label(), "Draft discarded");
+    }
+
+    #[test]
+    fn an_always_approved_post_names_what_approve_always_covers() {
+        let card: OutgoingDraft = serde_json::from_value(json!({
+            "id": Uuid::nil(), "lineage_id": Uuid::nil(), "revision": 1,
+            "content": {"channel":"message", "platform":"x", "account":"@proliquid_xyz",
+                "destination":null, "body":"A whale flipped long."},
+            "version":1, "status":"approved", "can_approve":false,
+            "approval_source":"standing",
+            "kind":{"platform":"x","account_id":null,"account":"@proliquid_xyz","destination":null},
+            "result_detail":null,
+            "updated_at":"2026-11-11T06:30:00Z", "settled_at":null
+        }))
+        .unwrap();
+        assert_eq!(card.approval_source, Some(ApprovalSource::Standing));
+        assert!(card.kind.is_some());
+        assert_eq!(card.content.kind_label(), "X posts from @proliquid_xyz");
+        let chat: DraftContent = serde_json::from_value(json!({"channel":"message",
+            "platform":"telegram", "account":"@main_bot", "destination":"Family", "body":"Hi"}))
+        .unwrap();
+        assert_eq!(
+            chat.kind_label(),
+            "Telegram messages from @main_bot to Family"
+        );
     }
 
     #[test]

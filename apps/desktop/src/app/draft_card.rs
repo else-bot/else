@@ -13,9 +13,16 @@ use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::model::{DraftAttachment, DraftEdit, DraftStatus, OutgoingDraft};
 
+#[derive(Clone, Copy)]
+enum Choice {
+    Approve,
+    ApproveAlways,
+    Discard,
+}
+
 #[derive(Clone)]
 enum Operation {
-    Approve(DraftEdit),
+    Approve { edit: DraftEdit, always: bool },
     Discard,
 }
 
@@ -148,21 +155,23 @@ impl ElseApp {
     fn act_on_draft(
         &mut self,
         id: Uuid,
-        approve: bool,
+        choice: Choice,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(view) = self.view.as_ref() else {
             return;
         };
-        let operation = match view.draft_forms.get(&id) {
-            Some(form) if form.retryable => form.operation.clone(),
-            Some(form) if form.operation.is_none() => Some(if approve {
-                Operation::Approve(form.edit(cx))
-            } else {
-                Operation::Discard
-            }),
-            None if !approve => Some(Operation::Discard),
+        let operation = match (view.draft_forms.get(&id), choice) {
+            (Some(form), _) if form.retryable => form.operation.clone(),
+            (Some(form), Choice::Approve | Choice::ApproveAlways) if form.operation.is_none() => {
+                Some(Operation::Approve {
+                    edit: form.edit(cx),
+                    always: matches!(choice, Choice::ApproveAlways),
+                })
+            }
+            (Some(form), Choice::Discard) if form.operation.is_none() => Some(Operation::Discard),
+            (None, Choice::Discard) => Some(Operation::Discard),
             _ => None,
         };
         let Some(operation) = operation else { return };
@@ -175,7 +184,9 @@ impl ElseApp {
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = match operation {
-                Operation::Approve(edit) => client.approve_draft(bot, id, edit).await,
+                Operation::Approve { edit, always } => {
+                    client.approve_draft(bot, id, edit, always).await
+                }
                 Operation::Discard => client.discard_draft(bot, id).await,
             };
             let _ = this.update_in(cx, |app, window, cx| {
@@ -220,6 +231,22 @@ impl ElseApp {
                 self.remeasure_row(RowKey::Draft(id), cx);
             }
         }
+    }
+
+    fn stop_approving_always(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(bot) = self.view.as_ref().map(|v| v.bot_id) else {
+            return;
+        };
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = client.stop_approving_always(bot, id).await;
+            let _ = this.update_in(cx, |app, window, cx| {
+                if let Err(err) = result {
+                    app.draft_acted(bot, id, Err(err), window, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn reload_draft_form(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
@@ -356,6 +383,36 @@ impl ElseApp {
                         ),
                 );
             }
+            if view
+                .conversation
+                .as_ref()
+                .is_some_and(|c| c.approves_always(draft))
+            {
+                let connected = self.connection == Connection::Connected;
+                card = card.child(
+                    h_flex()
+                        .px_4()
+                        .pb_3()
+                        .gap_2()
+                        .child(muted(format!(
+                            "You approve {} always.",
+                            draft.content.kind_label()
+                        )))
+                        .child(div().flex_1())
+                        .child(
+                            Button::new(SharedString::from(format!("draft-stop-always-{id}")))
+                                .focus_ring(false)
+                                .label("Stop approving always")
+                                .small()
+                                .ghost()
+                                .disabled(!connected)
+                                .when(connected, |b| b.cursor_pointer())
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    app.stop_approving_always(id, window, cx)
+                                })),
+                        ),
+                );
+            }
             if draft.status == DraftStatus::Discarded
                 && let Some(detail) = &draft.result_detail
             {
@@ -455,9 +512,23 @@ impl ElseApp {
                             .disabled(!connected || busy)
                             .when(connected && !busy, |b| b.cursor_pointer())
                             .on_click(cx.listener(move |app, _, window, cx| {
-                                app.act_on_draft(id, false, window, cx)
+                                app.act_on_draft(id, Choice::Discard, window, cx)
                             })),
                     )
+                    .when(draft.kind.is_some(), |row| {
+                        row.child(
+                            Button::new(SharedString::from(format!("draft-approve-always-{id}")))
+                                .focus_ring(false)
+                                .label("Approve always")
+                                .small()
+                                .outline()
+                                .disabled(!approve_enabled)
+                                .when(approve_enabled, |b| b.cursor_pointer())
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    app.act_on_draft(id, Choice::ApproveAlways, window, cx)
+                                })),
+                        )
+                    })
                     .child(
                         Button::new(SharedString::from(format!("draft-approve-{id}")))
                             .focus_ring(false)
@@ -471,7 +542,7 @@ impl ElseApp {
                             .disabled(!approve_enabled)
                             .when(approve_enabled, |b| b.cursor_pointer())
                             .on_click(cx.listener(move |app, _, window, cx| {
-                                app.act_on_draft(id, true, window, cx)
+                                app.act_on_draft(id, Choice::Approve, window, cx)
                             })),
                     ),
             );
@@ -502,7 +573,7 @@ impl ElseApp {
                         .when(connected, |b| b.cursor_pointer())
                         .on_click(cx.listener(move |app, _, window, cx| {
                             if retry {
-                                app.act_on_draft(id, true, window, cx);
+                                app.act_on_draft(id, Choice::Approve, window, cx);
                             } else {
                                 app.reload_draft_form(id, window, cx);
                             }
