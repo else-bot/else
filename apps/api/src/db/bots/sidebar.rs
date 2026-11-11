@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::db::turns::TurnStatus;
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SidebarRow {
     question_kind: Option<String>,
@@ -12,7 +14,7 @@ pub struct SidebarRow {
     credential_at: Option<DateTime<Utc>>,
     skill_install_title: Option<String>,
     skill_install_at: Option<DateTime<Utc>>,
-    latest_turn_status: Option<String>,
+    latest_turn_status: Option<TurnStatus>,
     /// The owner read the latest turn's last reply in full, such as its
     /// failure notice.
     latest_turn_read: bool,
@@ -75,11 +77,17 @@ impl SidebarRow {
         if busy || self.latest_turn_read {
             return None;
         }
-        match self.latest_turn_status.as_deref() {
-            Some("failed") => Some(SidebarStatus::Failed),
-            Some("interrupted") => Some(SidebarStatus::Stopped),
-            Some("uncertain") => Some(SidebarStatus::Uncertain),
-            _ => None,
+        match self.latest_turn_status? {
+            TurnStatus::Failed => Some(SidebarStatus::Failed),
+            TurnStatus::Interrupted => Some(SidebarStatus::Stopped),
+            TurnStatus::Uncertain => Some(SidebarStatus::Uncertain),
+            TurnStatus::Queued
+            | TurnStatus::Preparing
+            | TurnStatus::Sending
+            | TurnStatus::Running
+            | TurnStatus::Cancelling
+            | TurnStatus::Waiting
+            | TurnStatus::Completed => None,
         }
     }
 }

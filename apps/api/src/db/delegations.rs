@@ -24,6 +24,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::events;
+use super::turns::TurnStatus;
 use crate::app::messages::{Attachment, MessagePart};
 use crate::app::providers::Profile;
 use crate::providers::output_files::OutputFile;
@@ -213,7 +214,7 @@ async fn create_in(
         .bind(parent_bot)
         .execute(&mut *conn)
         .await?;
-    let caller: Option<(Uuid, String, i32, String, String)> = sqlx::query_as(
+    let caller: Option<(Uuid, TurnStatus, i32, String, String)> = sqlx::query_as(
         "SELECT t.bot_id, t.status, t.attempt, c.kind, b.status
          FROM turns t JOIN conversations c ON c.id = t.conversation_id
          JOIN bots b ON b.id = t.bot_id
@@ -225,7 +226,7 @@ async fn create_in(
     let Some((parent, status, attempt, kind, bot_status)) = caller else {
         return Err(DelegateError::NotRunning);
     };
-    if !matches!(status.as_str(), "sending" | "running") || bot_status != "active" {
+    if !status.serves_tools() || bot_status != "active" {
         return Err(DelegateError::NotRunning);
     }
     if kind != "owner"

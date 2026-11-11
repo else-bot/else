@@ -14,8 +14,93 @@ use uuid::Uuid;
 use crate::app::messages::{MessagePart, Reaction};
 use crate::app::providers::{HistoryEntry, Profile, SessionState, TurnInput};
 
-/// Turn statuses past the queue that hold the bot's single active slot.
+/// Where a turn is in its life, as stored in `turns.status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::Type)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+pub enum TurnStatus {
+    Queued,
+    Preparing,
+    Sending,
+    Running,
+    Cancelling,
+    Waiting,
+    Completed,
+    Interrupted,
+    Failed,
+    Uncertain,
+}
+
+/// The part of a turn's life a [`TurnStatus`] belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Queued,
+    /// Holds the bot's single active slot.
+    Active,
+    /// Parked until its holds settle.
+    Waiting,
+    Ended,
+}
+
+impl TurnStatus {
+    pub const ALL: [Self; 10] = [
+        Self::Queued,
+        Self::Preparing,
+        Self::Sending,
+        Self::Running,
+        Self::Cancelling,
+        Self::Waiting,
+        Self::Completed,
+        Self::Interrupted,
+        Self::Failed,
+        Self::Uncertain,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Preparing => "preparing",
+            Self::Sending => "sending",
+            Self::Running => "running",
+            Self::Cancelling => "cancelling",
+            Self::Waiting => "waiting",
+            Self::Completed => "completed",
+            Self::Interrupted => "interrupted",
+            Self::Failed => "failed",
+            Self::Uncertain => "uncertain",
+        }
+    }
+
+    pub fn phase(self) -> Phase {
+        match self {
+            Self::Queued => Phase::Queued,
+            Self::Preparing | Self::Sending | Self::Running | Self::Cancelling => Phase::Active,
+            Self::Waiting => Phase::Waiting,
+            Self::Completed | Self::Interrupted | Self::Failed | Self::Uncertain => Phase::Ended,
+        }
+    }
+
+    pub fn is_active(self) -> bool {
+        self.phase() == Phase::Active
+    }
+
+    pub fn is_ended(self) -> bool {
+        self.phase() == Phase::Ended
+    }
+
+    /// The provider has the turn and its tool calls are honored.
+    pub fn serves_tools(self) -> bool {
+        matches!(self, Self::Sending | Self::Running)
+    }
+}
+
+/// [`TurnStatus::is_active`] as an SQL list.
 pub const ACTIVE_STATUSES: &str = "('preparing', 'sending', 'running', 'cancelling')";
+/// [`TurnStatus::is_ended`] as an SQL list.
+pub const ENDED_STATUSES: &str = "('completed', 'interrupted', 'failed', 'uncertain')";
+/// The statuses that are not [`TurnStatus::is_ended`], as an SQL list.
+pub const UNFINISHED_STATUSES: &str =
+    "('queued', 'preparing', 'sending', 'running', 'cancelling', 'waiting')";
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TurnRecord {
@@ -30,7 +115,7 @@ pub struct TurnRecord {
     pub provider_id: String,
     pub profile_revision: Option<i64>,
     pub profile: Option<Json<Profile>>,
-    pub status: String,
+    pub status: TurnStatus,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub effect_uncertain: bool,
@@ -294,10 +379,10 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
         return Err(AcceptError::CancellationPending);
     }
     if req.hidden {
-        let busy: bool = sqlx::query_scalar(
+        let busy: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = ?1
-             AND status IN ('queued', 'preparing', 'sending', 'running', 'cancelling', 'waiting'))",
-        )
+             AND status IN {UNFINISHED_STATUSES})"
+        )))
         .bind(req.bot_id)
         .fetch_one(&mut *tx)
         .await?;
@@ -795,7 +880,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
             i64,
             String,
             String,
-            String,
+            TurnStatus,
             Option<String>,
             Json<Vec<MessagePart>>,
         ),
@@ -1041,7 +1126,7 @@ pub async fn settle_orphans(pool: &SqlitePool, live: &[Uuid]) -> Result<u64, sql
             .execute(&mut *tx)
             .await?;
         crate::db::delegations::lock_targets_of_root(&mut tx, turn_id).await?;
-        let updated = sqlx::query(
+        let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE turns SET
                  status = CASE WHEN status = 'preparing' THEN 'failed' ELSE 'uncertain' END,
                  effect_uncertain = effect_uncertain OR status <> 'preparing',
@@ -1051,8 +1136,8 @@ pub async fn settle_orphans(pool: &SqlitePool, live: &[Uuid]) -> Result<u64, sql
                      ELSE 'Processing stopped unexpectedly. It was not resent; send a follow-up to continue.'
                  END,
                  finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-             WHERE id = ?1 AND status IN ('preparing', 'sending', 'running', 'cancelling')",
-        )
+             WHERE id = ?1 AND status IN {ACTIVE_STATUSES}"
+        )))
         .bind(turn_id)
         .execute(&mut *tx)
         .await?

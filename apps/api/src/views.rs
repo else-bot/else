@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::app::routines::ModelSetting;
 use crate::db::bots::{BotRecord, BotStatus};
 use crate::db::routines::Routine;
-use crate::db::turns::{ItemRecord, TurnRecord};
+use crate::db::turns::{ItemRecord, TurnRecord, TurnStatus};
 
 /// Public projection of an active bot or a deletion receipt.
 pub fn bot_json(bot: &BotRecord) -> Value {
@@ -44,8 +44,8 @@ pub fn bot_json(bot: &BotRecord) -> Value {
 
 /// Project turn records into the sidebar activity. No separate state.
 pub fn activity_json(bot: &BotRecord) -> Value {
-    let phase = match (bot.cancel_pending, bot.active_turn_status.as_deref()) {
-        (true, _) | (_, Some("cancelling")) => "cancelling",
+    let phase = match (bot.cancel_pending, bot.active_turn_status) {
+        (true, _) | (_, Some(TurnStatus::Cancelling)) => "cancelling",
         (_, Some(_)) => "working",
         (_, None) if bot.queued_count > 0 => "queued",
         _ => "idle",

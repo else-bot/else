@@ -28,7 +28,7 @@ pub(crate) fn input() -> TurnInput {
             turn_no,
             kind: kind.into(),
             text: text.into(),
-            status: "completed".into(),
+            status: crate::db::turns::TurnStatus::Completed,
             error: None,
             parts: Vec::new(),
         })
@@ -206,7 +206,7 @@ async fn a_warm_session_gets_only_what_it_lacks() {
         turn_no: 3,
         kind: "user".into(),
         text: "third".into(),
-        status: "completed".into(),
+        status: crate::db::turns::TurnStatus::Completed,
         error: None,
         parts: Vec::new(),
     });

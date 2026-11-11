@@ -9,6 +9,8 @@
 //! allows, queueing a turn whose source is a hidden `routine` item, so a
 //! wake has a routine run's origin and permissions.
 
+use std::sync::LazyLock;
+
 use chrono::{DateTime, Duration, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool};
@@ -17,6 +19,7 @@ use uuid::Uuid;
 
 use super::events;
 use super::routines::{By, Caller, RoutineError, authorize_by, authorized_owner_conversation, ts};
+use super::turns::{ENDED_STATUSES, Phase, TurnStatus};
 use crate::app::providers::WebhookRun;
 use crate::app::routines::{RoutineName, RoutinePrompt};
 use crate::app::webhooks::{InvalidPace, MAX_PER_BOT, Pace, WINDOW, new_token, token_digest};
@@ -114,7 +117,7 @@ struct Row {
     deleted_at: Option<DateTime<Utc>>,
     woke_at: Option<DateTime<Utc>>,
     turn_id: Option<Uuid>,
-    turn_status: Option<String>,
+    turn_status: Option<TurnStatus>,
 }
 
 impl From<Row> for Webhook {
@@ -124,13 +127,12 @@ impl From<Row> for Webhook {
             .zip(row.turn_id)
             .map(|(woke_at, turn_id)| LastWake {
                 woke_at,
-                status: match row.turn_status.as_deref() {
-                    Some("preparing" | "sending" | "running" | "cancelling" | "waiting") => {
-                        "running".to_owned()
-                    }
-                    Some(other) => other.to_owned(),
-                    None => "queued".to_owned(),
-                },
+                status: match row.turn_status.map(|status| (status, status.phase())) {
+                    None => "queued",
+                    Some((_, Phase::Active | Phase::Waiting)) => "running",
+                    Some((status, Phase::Queued | Phase::Ended)) => status.as_str(),
+                }
+                .to_owned(),
                 turn_id,
             });
         Self {
@@ -507,8 +509,12 @@ pub async fn run_of(
     }))
 }
 
-const UNFINISHED: &str = "EXISTS (SELECT 1 FROM webhook_runs r JOIN turns t ON t.id = r.turn_id
-    WHERE r.webhook_id = w.id AND t.status NOT IN ('completed', 'interrupted', 'failed', 'uncertain'))";
+static UNFINISHED: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "EXISTS (SELECT 1 FROM webhook_runs r JOIN turns t ON t.id = r.turn_id
+    WHERE r.webhook_id = w.id AND t.status NOT IN {ENDED_STATUSES})"
+    )
+});
 
 /// Admit up to `limit` requested webhooks whose wake may run at `now`.
 /// Returns how many turns were queued. The caller holds a maintenance
@@ -522,8 +528,9 @@ pub async fn admit_requested(
     let due: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT w.id FROM webhooks w JOIN bots b ON b.id = w.bot_id
          WHERE w.requested_at IS NOT NULL AND (w.not_before IS NULL OR w.not_before <= ?1)
-           AND b.status = 'active' AND NOT b.cancel_pending AND NOT {UNFINISHED}
-         ORDER BY w.requested_at, w.id LIMIT ?2"
+           AND b.status = 'active' AND NOT b.cancel_pending AND NOT {unfinished}
+         ORDER BY w.requested_at, w.id LIMIT ?2",
+        unfinished = *UNFINISHED
     )))
     .bind(ts(now))
     .bind(limit)
@@ -562,7 +569,8 @@ async fn admit(
          FROM webhooks w JOIN bots b ON b.id = w.bot_id
          WHERE w.id = ?1 AND w.requested_at IS NOT NULL
            AND (w.not_before IS NULL OR w.not_before <= ?2)
-           AND b.status = 'active' AND NOT b.cancel_pending AND NOT {UNFINISHED}"
+           AND b.status = 'active' AND NOT b.cancel_pending AND NOT {unfinished}",
+        unfinished = *UNFINISHED
     )))
     .bind(id)
     .bind(ts(now))

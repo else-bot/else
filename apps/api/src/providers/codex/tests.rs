@@ -39,7 +39,7 @@ fn input(history: Vec<(i64, &str, &str)>) -> TurnInput {
                 turn_no,
                 kind: kind.into(),
                 text: text.into(),
-                status: "completed".into(),
+                status: crate::db::turns::TurnStatus::Completed,
                 error: None,
                 parts: Vec::new(),
             })

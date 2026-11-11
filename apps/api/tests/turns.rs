@@ -1217,3 +1217,69 @@ async fn an_owner_message_is_claimed_past_its_bots_queued_background_task() {
         "a message stays behind an earlier routine turn in its own conversation"
     );
 }
+
+#[tokio::test]
+async fn turn_status_matches_the_stored_vocabulary_and_sql_lists() {
+    use else_api::db::turns::{ACTIVE_STATUSES, ENDED_STATUSES, TurnStatus, UNFINISHED_STATUSES};
+    let db = TestDb::migrated().await;
+    let table: String =
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'turns'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let allowed = &table[table.find("turns_status_check").unwrap()..];
+    let allowed = &allowed[..allowed.find(')').unwrap()];
+    let slot_index: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'turns_one_active_per_bot'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let mut stored = Vec::new();
+    for status in TurnStatus::ALL {
+        let text: String = sqlx::query_scalar("SELECT ?1")
+            .bind(status)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        let back: TurnStatus = sqlx::query_scalar("SELECT ?1")
+            .bind(&text)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(back, status);
+        let lists: (bool, bool, bool) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT ?1 IN {ACTIVE_STATUSES}, ?1 IN {ENDED_STATUSES}, ?1 IN {UNFINISHED_STATUSES}"
+        )))
+        .bind(status)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            lists,
+            (status.is_active(), status.is_ended(), !status.is_ended()),
+            "{text} disagrees with the SQL status lists"
+        );
+        assert_eq!(serde_json::to_value(status).unwrap(), json!(text));
+        let quoted = format!("'{text}'");
+        assert!(allowed.contains(&quoted), "{text} is not a stored status");
+        assert_eq!(
+            slot_index.contains(&quoted),
+            status.is_active(),
+            "{text} disagrees with the active-slot index"
+        );
+        stored.push(text);
+    }
+    assert_eq!(allowed.matches('\'').count(), 2 * stored.len());
+    let ended: Vec<&str> = stored
+        .iter()
+        .zip(TurnStatus::ALL)
+        .filter(|(_, status)| status.is_ended())
+        .map(|(text, _)| text.as_str())
+        .collect();
+    assert_eq!(ended, ["completed", "interrupted", "failed", "uncertain"]);
+    let unknown: Result<TurnStatus, _> = sqlx::query_scalar("SELECT 'paused'")
+        .fetch_one(&db.pool)
+        .await;
+    assert!(unknown.is_err());
+}

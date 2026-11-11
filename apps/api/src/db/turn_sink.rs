@@ -7,7 +7,7 @@ use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use super::turns::ACTIVE_STATUSES;
+use super::turns::{ACTIVE_STATUSES, TurnStatus};
 use crate::actor::Actor;
 use crate::app::providers::{Fenced, SessionState, TurnInput, TurnOutcome, TurnSink};
 
@@ -136,7 +136,7 @@ impl SinkState {
         tx: &mut SqliteConnection,
         item: Uuid,
         reply: &crate::providers::output_files::FileReply,
-        allowed: &str,
+        allowed: impl Fn(TurnStatus) -> bool,
     ) -> Result<(), sqlx::Error> {
         if self.guard(tx, allowed).await?.is_none() {
             return Ok(());
@@ -174,7 +174,7 @@ impl SinkState {
     async fn guard(
         &self,
         conn: &mut SqliteConnection,
-        allowed: &str,
+        allowed: impl Fn(TurnStatus) -> bool,
     ) -> Result<Option<OwnerTranscript>, sqlx::Error> {
         let row: Option<(String, Uuid, i64)> = sqlx::query_as(
             "SELECT b.status, c.id, c.last_item_seq
@@ -188,35 +188,35 @@ impl SinkState {
         else {
             return Ok(None);
         };
-        let turn_ok: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "SELECT EXISTS (SELECT 1 FROM turns WHERE id = ?1 AND status IN {allowed})"
-        )))
-        .bind(self.turn_id)
-        .fetch_one(&mut *conn)
-        .await?;
-        Ok(turn_ok.then_some(OwnerTranscript {
+        let status: Option<TurnStatus> =
+            sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+                .bind(self.turn_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+        Ok(status.is_some_and(allowed).then_some(OwnerTranscript {
             conversation_id,
             last_seq,
         }))
     }
 
-    async fn transition(&mut self, from: &str, to: &str) -> Result<(), Fenced> {
+    async fn transition(&mut self, from: TurnStatus, to: TurnStatus) -> Result<(), Fenced> {
         if self.fenced {
             return Err(Fenced);
         }
         let result: Result<bool, sqlx::Error> = async {
             let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-            if self.guard(&mut tx, &format!("('{from}')")).await?.is_none() {
+            if self.guard(&mut tx, |status| status == from).await?.is_none() {
                 return Ok(false);
             }
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "UPDATE turns SET status = '{to}', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1"
-            )))
+            sqlx::query(
+                "UPDATE turns SET status = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
+            )
             .bind(self.turn_id)
+            .bind(to)
             .execute(&mut *tx)
             .await?;
             match to {
-                "sending" => {
+                TurnStatus::Sending => {
                     crate::db::handoffs::transition(
                         &mut tx,
                         self.turn_id,
@@ -226,7 +226,7 @@ impl SinkState {
                     )
                     .await?
                 }
-                "running" => {
+                TurnStatus::Running => {
                     crate::db::handoffs::transition(
                         &mut tx,
                         self.turn_id,
@@ -318,7 +318,12 @@ impl SinkState {
         let result: Result<Option<Uuid>, sqlx::Error> = async {
             let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
             let Some(transcript) = self
-                .guard(&mut tx, "('sending', 'running', 'cancelling')")
+                .guard(&mut tx, |status| {
+                    matches!(
+                        status,
+                        TurnStatus::Sending | TurnStatus::Running | TurnStatus::Cancelling
+                    )
+                })
                 .await?
             else {
                 return Ok(None);
@@ -366,13 +371,16 @@ impl SinkState {
             None
         };
         let (status, code, message, uncertain) = match outcome {
-            TurnOutcome::Completed => ("completed", None, None, false),
-            TurnOutcome::Interrupted => ("interrupted", None, None, false),
-            TurnOutcome::Failed { code, message } => {
-                ("failed", Some(code.as_str()), Some(message.as_str()), false)
-            }
+            TurnOutcome::Completed => (TurnStatus::Completed, None, None, false),
+            TurnOutcome::Interrupted => (TurnStatus::Interrupted, None, None, false),
+            TurnOutcome::Failed { code, message } => (
+                TurnStatus::Failed,
+                Some(code.as_str()),
+                Some(message.as_str()),
+                false,
+            ),
             TurnOutcome::Uncertain { message } => (
-                "uncertain",
+                TurnStatus::Uncertain,
                 Some("delivery_uncertain"),
                 Some(message.as_str()),
                 true,
@@ -382,7 +390,7 @@ impl SinkState {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut wrote_item = None;
         if !chunk.is_empty() && !self.fenced {
-            if let Some(transcript) = self.guard(&mut tx, ACTIVE_STATUSES).await? {
+            if let Some(transcript) = self.guard(&mut tx, TurnStatus::is_active).await? {
                 wrote_item = Some(
                     self.write_text(&mut tx, self.assistant_item, &transcript, &chunk)
                         .await?,
@@ -395,7 +403,7 @@ impl SinkState {
                 .await?;
         }
         if let (Some(item), Some(reply)) = (wrote_item.or(self.assistant_item), files.as_ref()) {
-            self.write_files(&mut tx, item, reply, ACTIVE_STATUSES)
+            self.write_files(&mut tx, item, reply, TurnStatus::is_active)
                 .await?;
         }
         crate::db::delegations::lock_targets_of_root(&mut tx, self.turn_id).await?;
@@ -403,7 +411,7 @@ impl SinkState {
             .bind(self.turn_id)
             .execute(&mut *tx)
             .await?;
-        let (current, pending, unseen): (String, i64, i64) = sqlx::query_as(
+        let (current, pending, unseen): (TurnStatus, i64, i64) = sqlx::query_as(
             "SELECT t.status, coalesce(sum(h.pending), 0), coalesce(sum(h.unseen), 0)
              FROM turns t LEFT JOIN turn_holds h ON h.turn_id = t.id
              WHERE t.id = ?1 GROUP BY t.id",
@@ -421,20 +429,21 @@ impl SinkState {
         .bind(self.turn_id)
         .fetch_one(&mut *tx)
         .await?;
-        let parks = current != "cancelling" && matches!(status, "completed" | "interrupted");
+        let parks = current != TurnStatus::Cancelling
+            && matches!(status, TurnStatus::Completed | TurnStatus::Interrupted);
         let status = if parks && pending == tasks_pending && ready > 0 {
-            "queued"
+            TurnStatus::Queued
         } else if parks && pending > 0 {
-            "waiting"
+            TurnStatus::Waiting
         } else if parks && unseen > 0 {
-            "queued"
+            TurnStatus::Queued
         } else {
             if pending > 0 {
                 crate::db::delegations::cancel_for_root(&mut tx, self.turn_id).await?;
             }
             status
         };
-        let finished = !matches!(status, "waiting" | "queued");
+        let finished = status.is_ended();
         let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE turns SET status = ?2, error_code = ?3, error_message = ?4,
                  effect_uncertain = effect_uncertain OR ?5,
@@ -512,11 +521,15 @@ impl SinkState {
     }
 
     async fn sending(&mut self) -> Result<(), Fenced> {
-        self.transition("preparing", "sending").await
+        self.transition(TurnStatus::Preparing, TurnStatus::Sending)
+            .await
     }
 
     async fn running(&mut self) -> Result<(), Fenced> {
-        match self.transition("sending", "running").await {
+        match self
+            .transition(TurnStatus::Sending, TurnStatus::Running)
+            .await
+        {
             Ok(()) => {
                 if !self.delivered.is_empty()
                     || !self.delivered_secrets.is_empty()
@@ -623,7 +636,7 @@ impl SinkState {
         }
         let result: Result<bool, sqlx::Error> = async {
             let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-            if self.guard(&mut tx, ACTIVE_STATUSES).await?.is_none() {
+            if self.guard(&mut tx, TurnStatus::is_active).await?.is_none() {
                 return Ok(false);
             }
             let existing: Option<Uuid> = sqlx::query_scalar(
@@ -785,7 +798,7 @@ impl SinkState {
                 if ended {
                     let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
                     if let Some((item, reply)) = &files {
-                        self.write_files(&mut tx, *item, reply, "('sending', 'running')")
+                        self.write_files(&mut tx, *item, reply, TurnStatus::serves_tools)
                             .await?;
                     }
                     crate::db::events::task_progressed(&mut tx, self.turn_id).await?;

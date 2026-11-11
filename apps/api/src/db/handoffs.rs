@@ -2,6 +2,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
+use super::turns::ENDED_STATUSES;
 use crate::app::providers::{HandoffContext, JobReceipt, Selection};
 
 /// Version of the checkpoint request and the handoff block in packets.
@@ -184,13 +185,13 @@ pub async fn settle_ended(
     conn: &mut SqliteConnection,
     turn_id: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE handoffs AS h SET state = 'uncertain', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          FROM turns t
          WHERE h.turn_id = t.id AND h.state = 'sending'
-           AND t.status IN ('completed', 'interrupted', 'failed', 'uncertain')
-           AND (?1 IS NULL OR h.turn_id = ?1)",
-    )
+           AND t.status IN {ENDED_STATUSES}
+           AND (?1 IS NULL OR h.turn_id = ?1)"
+    )))
     .bind(turn_id)
     .execute(&mut *conn)
     .await?;

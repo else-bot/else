@@ -31,6 +31,7 @@ use super::types::{
     Account, Credential, Cursor, MailCommand, MailConfig, MailTrigger, Permissions, Provider, Scan,
 };
 use crate::credentials::SecretKey;
+use crate::db::turns::TurnStatus;
 
 pub const PURPOSE: &str = "else.bot/mail-connectors/v1";
 /// Accounts that are not removed.
@@ -1108,7 +1109,7 @@ pub async fn authorize_in(
     turn_id: Uuid,
     command: &MailCommand,
 ) -> Result<(), StoreError> {
-    let turn: Option<(Uuid, String, String)> = sqlx::query_as(
+    let turn: Option<(Uuid, TurnStatus, String)> = sqlx::query_as(
         "SELECT t.bot_id, t.status, b.status FROM turns t JOIN bots b ON b.id = t.bot_id WHERE t.id = ?1",
     )
     .bind(turn_id)
@@ -1120,7 +1121,7 @@ pub async fn authorize_in(
     if owner != bot_id {
         return Err(StoreError::Forbidden);
     }
-    if !matches!(status.as_str(), "sending" | "running") || bot_status != "active" {
+    if !status.serves_tools() || bot_status != "active" {
         return Err(StoreError::NotRunning);
     }
     let account: Option<(String, i64)> = sqlx::query_as(

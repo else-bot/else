@@ -10,6 +10,8 @@
 
 use chrono::{DateTime, Utc};
 
+use crate::db::turns::TurnStatus;
+
 /// Consecutive failed occurrences after which a routine is paused.
 pub const MAX_FAILED_RUNS: i64 = 3;
 
@@ -27,15 +29,20 @@ pub enum Ended<'a> {
 
 impl<'a> Ended<'a> {
     /// `None` while the turn has not ended.
-    pub fn of(status: &str, code: Option<&'a str>) -> Option<Self> {
+    pub fn of(status: TurnStatus, code: Option<&'a str>) -> Option<Self> {
         match status {
-            "completed" => Some(Self::Completed),
-            "interrupted" => Some(Self::Stopped),
-            "failed" => Some(Self::Failed {
+            TurnStatus::Completed => Some(Self::Completed),
+            TurnStatus::Interrupted => Some(Self::Stopped),
+            TurnStatus::Failed => Some(Self::Failed {
                 code: code.unwrap_or_default(),
             }),
-            "uncertain" => Some(Self::Uncertain),
-            _ => None,
+            TurnStatus::Uncertain => Some(Self::Uncertain),
+            TurnStatus::Queued
+            | TurnStatus::Preparing
+            | TurnStatus::Sending
+            | TurnStatus::Running
+            | TurnStatus::Cancelling
+            | TurnStatus::Waiting => None,
         }
     }
 }
