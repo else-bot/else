@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::app::memory_tree::{self, Build};
 use crate::app::providers::Profile;
-use crate::db::memory_tree::{self as store, Completion, Job};
+use crate::db::memory_tree::{self as store, Completion, Job, Wait};
 use crate::scheduler::Scheduler;
 
 const LEASE: Duration = Duration::from_secs(20 * 60);
@@ -129,8 +129,9 @@ impl Compactor {
             return Ok(Step::Idle);
         };
         let Some(prepared) = store::prepare(pool, &job).await? else {
-            store::defer(pool, &job, "missing_input", None, NO_SUMMARIZER_RETRY).await?;
-            return Ok(Step::Deferred);
+            return Ok(deferred(
+                store::defer(pool, &job, Wait::MissingInput, None, NO_SUMMARIZER_RETRY).await?,
+            ));
         };
         let audit = json!({
             "recipe": job.recipe,
@@ -153,20 +154,28 @@ impl Compactor {
                         input.len(),
                         job.recipe.node_bytes
                     );
-                    store::defer(
-                        pool,
-                        &job,
-                        "summary_unavailable",
-                        Some(&reason),
-                        NO_SUMMARIZER_RETRY,
-                    )
-                    .await?;
-                    return Ok(Step::Deferred);
+                    return Ok(deferred(
+                        store::defer(
+                            pool,
+                            &job,
+                            Wait::SummaryUnavailable,
+                            Some(&reason),
+                            NO_SUMMARIZER_RETRY,
+                        )
+                        .await?,
+                    ));
                 };
                 if self.cancel.is_cancelled() {
-                    store::defer(pool, &job, "waiting_for_summary", None, NO_SUMMARIZER_RETRY)
-                        .await?;
-                    return Ok(Step::Deferred);
+                    return Ok(deferred(
+                        store::defer(
+                            pool,
+                            &job,
+                            Wait::WaitingForSummary,
+                            None,
+                            NO_SUMMARIZER_RETRY,
+                        )
+                        .await?,
+                    ));
                 }
                 let task = SummaryTask {
                     pool: pool.clone(),
@@ -189,13 +198,8 @@ impl Compactor {
                             if let Err(err) = task.run().await {
                                 tracing::warn!(error = %err, "memory summary task failed");
                             }
-                            let woken = sqlx::query(
-                                "UPDATE memory_job SET available_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-                         WHERE blocked_reason = 'waiting_for_summary' AND lease_token IS NULL",
-                            )
-                            .execute(&wake_pool)
-                            .await;
-                            if let Err(err) = woken {
+                            if let Err(err) = store::wake(&wake_pool, Wait::WaitingForSummary).await
+                            {
                                 tracing::warn!(error = %err, "waking memory jobs failed");
                             }
                         });
@@ -206,9 +210,16 @@ impl Compactor {
                 if started {
                     Ok(Step::Summarizing)
                 } else {
-                    store::defer(pool, &job, "waiting_for_summary", None, NO_SUMMARIZER_RETRY)
-                        .await?;
-                    Ok(Step::Deferred)
+                    Ok(deferred(
+                        store::defer(
+                            pool,
+                            &job,
+                            Wait::WaitingForSummary,
+                            None,
+                            NO_SUMMARIZER_RETRY,
+                        )
+                        .await?,
+                    ))
                 }
             }
         }
@@ -285,15 +296,16 @@ struct SummaryTask {
 impl SummaryTask {
     async fn wait(
         &self,
-        reason: &str,
+        reason: Wait,
         error: Option<&str>,
         retry: Duration,
         failure: bool,
     ) -> Result<(), sqlx::Error> {
-        store::defer_counting(&self.pool, &self.job, reason, error, retry, failure).await
+        store::defer_counting(&self.pool, &self.job, reason, error, retry, failure).await?;
+        Ok(())
     }
 
-    async fn fail(&self, reason: &str, error: &str) -> Result<(), sqlx::Error> {
+    async fn fail(&self, reason: Wait, error: &str) -> Result<(), sqlx::Error> {
         let failures = store::failures(&self.pool, &self.job).await? + 1;
         self.wait(reason, Some(error), backoff(failures), true)
             .await
@@ -305,7 +317,7 @@ impl SummaryTask {
         let Some(profile) = crate::db::profiles::get(&pool, self.summarizer.id()).await? else {
             return self
                 .wait(
-                    "summary_unavailable",
+                    Wait::SummaryUnavailable,
                     Some("no saved profile"),
                     NO_SUMMARIZER_RETRY,
                     false,
@@ -333,7 +345,7 @@ impl SummaryTask {
             if self.cancel.is_cancelled() {
                 return self
                     .wait(
-                        "waiting_for_capacity",
+                        Wait::WaitingForCapacity,
                         Some("the API is stopping"),
                         CAPACITY_RETRY,
                         false,
@@ -354,7 +366,7 @@ impl SummaryTask {
             };
             let Some(permit) = permit else {
                 return self
-                    .wait("waiting_for_capacity", None, CAPACITY_RETRY, false)
+                    .wait(Wait::WaitingForCapacity, None, CAPACITY_RETRY, false)
                     .await;
             };
             let prompt = memory_tree::summary_prompt(
@@ -406,7 +418,7 @@ impl SummaryTask {
                 Err(_) if self.cancel.is_cancelled() => {
                     return self
                         .wait(
-                            "waiting_for_capacity",
+                            Wait::WaitingForCapacity,
                             Some("the API is stopping"),
                             CAPACITY_RETRY,
                             false,
@@ -415,7 +427,7 @@ impl SummaryTask {
                 }
                 Err(error) => {
                     tracing::warn!(bot = %job.bot_id, node = ?job.node, %error, "memory summary failed");
-                    return self.fail("summary_failed", &error).await;
+                    return self.fail(Wait::SummaryFailed, &error).await;
                 }
             }
         }
@@ -424,7 +436,14 @@ impl SummaryTask {
             sizes.len(),
             job.recipe.node_bytes
         );
-        self.fail("summary_oversized", &reason).await
+        self.fail(Wait::SummaryOversized, &reason).await
+    }
+}
+
+fn deferred(release: Completion) -> Step {
+    match release {
+        Completion::Done => Step::Deferred,
+        Completion::Stale => Step::Stale,
     }
 }
 

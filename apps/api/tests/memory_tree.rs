@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use common::TestApp;
 use else_api::app::memory_tree::NodeId;
 use else_api::db::memory::{self, Kind, NewEntry};
-use else_api::db::memory_tree::{self, Completion};
+use else_api::db::memory_tree::{self, Completion, Wait};
 use else_api::grants::{DEFAULT_TTL, Tool};
 use else_api::memory_worker;
 use serde_json::{Value, json};
@@ -143,7 +143,7 @@ async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
         saved.published_seq, 0,
         "publication stops at the first missing leaf"
     );
-    assert_eq!(saved.blocked, vec![("summary_unavailable".to_owned(), 1)]);
+    assert_eq!(saved.blocked, vec![(Wait::SummaryUnavailable, 1)]);
     let later = memory_tree::node(&app.db.pool, bot_id, 1, NodeId::leaf(2))
         .await
         .unwrap();
@@ -203,6 +203,50 @@ async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
     );
     let date = call("memory_date", json!({ "seq": 0, "end_seq": 2 })).await;
     assert_eq!(date["dates"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retried_job_is_not_reported_blocked_while_leased() {
+    let app = TestApp::installed().await;
+    small_recipe(&app).await;
+    let bot: Uuid = app.create_bot("Retry").await.parse().unwrap();
+    add(&app, bot, "long", &"long ".repeat(40)).await;
+    memory_worker::drain(&app.db.pool).await.unwrap();
+    let saved = memory_tree::load_view(&app.db.pool, bot).await.unwrap();
+    assert_eq!(saved.blocked, vec![(Wait::SummaryUnavailable, 1)]);
+
+    sqlx::query("UPDATE memory_job SET available_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')")
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let retry = memory_tree::claim(&app.db.pool, Duration::from_secs(60))
+        .await
+        .unwrap()
+        .unwrap();
+    let saved = memory_tree::load_view(&app.db.pool, bot).await.unwrap();
+    assert_eq!(
+        saved.blocked,
+        vec![],
+        "a leased job is being worked on, not blocked"
+    );
+
+    let release = || {
+        memory_tree::defer(
+            &app.db.pool,
+            &retry,
+            Wait::WaitingForSummary,
+            None,
+            Duration::from_secs(60),
+        )
+    };
+    assert_eq!(release().await.unwrap(), Completion::Done);
+    assert_eq!(
+        release().await.unwrap(),
+        Completion::Stale,
+        "a released lease cannot release again"
+    );
+    let saved = memory_tree::load_view(&app.db.pool, bot).await.unwrap();
+    assert_eq!(saved.blocked, vec![(Wait::WaitingForSummary, 1)]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
