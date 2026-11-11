@@ -157,7 +157,13 @@ async fn grant(app: &TestApp, turn_id: Uuid) -> String {
             bot,
             conversation,
             turn_id,
-            vec![Tool::ReadMemory, Tool::AskOwner, Tool::Computer, Tool::Mail],
+            vec![
+                Tool::ReadMemory,
+                Tool::AskOwner,
+                Tool::DraftEmail,
+                Tool::Computer,
+                Tool::Mail,
+            ],
             DEFAULT_TTL,
         )
         .await

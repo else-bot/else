@@ -480,7 +480,12 @@ fn turn_tools(delegation: &crate::app::providers::DelegationContext) -> Vec<Tool
         return vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Social];
     }
     if delegation.origin == crate::app::providers::Origin::ConnectorEvent {
-        return vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Mail];
+        return vec![
+            Tool::ReadHistory,
+            Tool::ReadMemory,
+            Tool::Mail,
+            Tool::DraftEmail,
+        ];
     }
     let mut tools = vec![
         Tool::ReadHistory,
@@ -496,6 +501,7 @@ fn turn_tools(delegation: &crate::app::providers::DelegationContext) -> Vec<Tool
             Tool::Social,
             Tool::RequestSecret,
             Tool::AskOwner,
+            Tool::DraftEmail,
         ]);
     }
     if delegation.can_delegate() {
@@ -599,6 +605,25 @@ mod tests {
         for origin in [Origin::SocialEvent, Origin::ConnectorEvent] {
             assert!(!task(origin).contains(&Tool::Diagnose), "{origin:?}");
         }
+    }
+
+    #[test]
+    fn a_mail_event_drafts_email_for_the_owner_but_cannot_ask_them() {
+        let event = turn_tools(&DelegationContext {
+            origin: Origin::ConnectorEvent,
+            ..DelegationContext::default()
+        });
+        assert!(event.contains(&Tool::DraftEmail));
+        assert!(!event.contains(&Tool::AskOwner));
+        assert!(
+            !turn_tools(&DelegationContext {
+                origin: Origin::SocialEvent,
+                ..DelegationContext::default()
+            })
+            .contains(&Tool::DraftEmail)
+        );
+        assert!(task(Origin::OwnerRequest).contains(&Tool::DraftEmail));
+        assert!(!task(Origin::RoutineRun).contains(&Tool::DraftEmail));
     }
 
     #[test]

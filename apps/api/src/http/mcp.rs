@@ -116,6 +116,7 @@ pub async fn endpoint(
                 Some("ask_owner" | "confirm_permission" | "social_connect" | "mail_connect") => {
                     Tool::AskOwner
                 }
+                Some("draft_email" | "send_draft") => Tool::DraftEmail,
                 Some(name) if super::outgoing_tools::TOOL_NAMES.contains(&name) => Tool::AskOwner,
                 Some(name)
                     if name.starts_with("routine_")
