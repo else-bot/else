@@ -60,6 +60,22 @@ pub enum ApprovalSource {
     /// An owner message sent while the draft was open, which the bot read
     /// as approval of that exact version.
     Message,
+    /// The owner approved its kind always ([`DraftKind`]); it was approved
+    /// as proposed.
+    Standing,
+}
+
+/// What "Approve always" covers: messages on one platform from one sending
+/// account to one destination, whatever they say. Emails have no kind
+/// (each goes to its own recipients), nor do X replies (each answers its
+/// own post). `db::outgoing_drafts::KIND` derives it from stored content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftKind {
+    pub platform: Platform,
+    pub account_id: Option<Uuid>,
+    /// The account as the platform shows it, lowercased.
+    pub account: Option<String>,
+    pub destination: Option<String>,
 }
 
 /// How the bot reports a claimed send ended.

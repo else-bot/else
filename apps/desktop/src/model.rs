@@ -949,6 +949,15 @@ impl Conversation {
             .rfind(|d| d.status.can_follow_up())
     }
 
+    /// The owner stopped approving `kind` always: no card of it says so.
+    pub fn stop_approving_always(&mut self, kind: &serde_json::Value) {
+        for draft in self.turns.values_mut().flat_map(|t| &mut t.outgoing_drafts) {
+            if draft.kind.as_ref() == Some(kind) {
+                draft.approved_always = false;
+            }
+        }
+    }
+
     pub fn update_draft(&mut self, draft: OutgoingDraft) {
         for turn in self.turns.values_mut() {
             if let Some(current) = turn.outgoing_drafts.iter_mut().find(|d| d.id == draft.id) {

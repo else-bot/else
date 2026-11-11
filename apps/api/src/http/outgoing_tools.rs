@@ -12,7 +12,9 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::mcp::{Outcome, tool_error, tool_result};
-use crate::app::outgoing::{self, Content, Delivery, Email, MAX_DETAIL, Message, Platform, Status};
+use crate::app::outgoing::{
+    self, ApprovalSource, Content, Delivery, Email, MAX_DETAIL, Message, Platform, Status,
+};
 use crate::connectors::{store, types::MailError};
 use crate::db::outgoing_drafts::{self, DraftError, OutgoingDraft};
 use crate::grants::{Grant, Tool};
@@ -273,6 +275,28 @@ async fn draft(
     let row = outgoing_drafts::propose(&state.db, grant.turn_id, &content, replaces)
         .await
         .map_err(refused)?;
+    if row.status == Status::Approved
+        && row.approval_source == Some(ApprovalSource::Standing)
+        && row.send_turn_id == Some(grant.turn_id)
+    {
+        return Ok((
+            tool_result(json!({
+                "status": "approved",
+                "draft": draft_json(&row),
+                "next": format!(
+                    "The owner approves {} like this always, so it is approved as drafted. {}",
+                    row.content.noun(),
+                    send_next(&row)
+                ),
+            })),
+            Some(format!(
+                "{} {} approved always to {}",
+                row.content.noun(),
+                row.id,
+                row.content.audience()
+            )),
+        ));
+    }
     if row.status != Status::Pending {
         let log = format!("already {} {}", row.status.as_str(), row.id);
         return Ok((
@@ -343,16 +367,14 @@ async fn sender(state: &AppState, grant: &Grant, args: &Value) -> Result<Option<
     }
 }
 
-async fn confirm(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
-    only(args, &["draft_id"])?;
-    let id = id_arg(args, "draft_id")?;
-    let row = outgoing_drafts::confirm(&state.db, grant.turn_id, id)
-        .await
-        .map_err(refused)?;
-    let next = if row.content.account().is_some() {
-        "Send exactly this email with send_draft and this draft_id. It uses the connected \
-         account and records the result; do not send with other tools or report_draft_send."
-            .to_owned()
+/// How to send an approved draft, for the tool result that approved it.
+fn send_next(row: &OutgoingDraft) -> String {
+    if row.content.account().is_some() {
+        format!(
+            "Send exactly this {} with send_draft and this draft_id. It uses the connected \
+             account and records the result; do not send with other tools or report_draft_send.",
+            row.content.noun()
+        )
     } else {
         format!(
             "Send exactly this {} now, once: with a computer tool declared \
@@ -360,12 +382,20 @@ async fn confirm(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcom
                  tools after start_draft_send. Then call report_draft_send.",
             row.content.noun()
         )
-    };
+    }
+}
+
+async fn confirm(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
+    only(args, &["draft_id"])?;
+    let id = id_arg(args, "draft_id")?;
+    let row = outgoing_drafts::confirm(&state.db, grant.turn_id, id)
+        .await
+        .map_err(refused)?;
     Ok((
         tool_result(json!({
             "status": "approved",
             "draft": draft_json(&row),
-            "next": next,
+            "next": send_next(&row),
         })),
         Some(format!(
             "owner message approved {} {} version {}",

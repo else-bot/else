@@ -627,8 +627,22 @@ impl Client {
         bot: Uuid,
         draft: Uuid,
         edit: crate::model::DraftEdit,
+        always: bool,
     ) -> Result<crate::model::OutgoingDraft, ClientError> {
-        self.draft_action(bot, draft, "approve", Some(json!(edit)))
+        let mut body = json!(edit);
+        if always {
+            body["always"] = json!(true);
+        }
+        self.draft_action(Method::POST, bot, draft, "approve", Some(body))
+            .await
+    }
+
+    pub async fn stop_approving_always(
+        self: Arc<Self>,
+        bot: Uuid,
+        draft: Uuid,
+    ) -> Result<crate::model::OutgoingDraft, ClientError> {
+        self.draft_action(Method::DELETE, bot, draft, "always", None)
             .await
     }
 
@@ -637,11 +651,13 @@ impl Client {
         bot: Uuid,
         draft: Uuid,
     ) -> Result<crate::model::OutgoingDraft, ClientError> {
-        self.draft_action(bot, draft, "discard", None).await
+        self.draft_action(Method::POST, bot, draft, "discard", None)
+            .await
     }
 
     async fn draft_action(
         self: Arc<Self>,
+        method: Method,
         bot: Uuid,
         draft: Uuid,
         action: &str,
@@ -652,7 +668,7 @@ impl Client {
             draft: crate::model::OutgoingDraft,
         }
         self.call::<Envelope>(
-            Method::POST,
+            method,
             format!("/v1/bots/{bot}/outgoing-drafts/{draft}/{action}"),
             body,
         )

@@ -27,7 +27,9 @@ use uuid::Uuid;
 
 use super::events;
 use super::turns;
-use crate::app::outgoing::{self, ApprovalSource, Content, Delivery, Edits, Outcome, Status};
+use crate::app::outgoing::{
+    self, ApprovalSource, Content, Delivery, DraftKind, Edits, Outcome, Status,
+};
 
 /// Drafts per owner request (turn).
 pub const MAX_PER_TURN: i64 = 8;
@@ -59,6 +61,11 @@ pub struct OutgoingDraft {
     pub delivery: Option<Json<Delivery>>,
     pub result_detail: Option<String>,
     pub superseded_by: Option<Uuid>,
+    /// What "Approve always" on this card would cover; none for an email
+    /// or an X reply.
+    pub kind: Option<Json<DraftKind>>,
+    /// The owner approves this draft's kind always.
+    pub approved_always: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub settled_at: Option<DateTime<Utc>>,
@@ -70,7 +77,22 @@ pub struct OutgoingDraft {
     pub context_version: Option<i64>,
 }
 
-const SELECT: &str = "SELECT d.id, d.lineage_id, d.revision, d.bot_id, d.turn_id, d.content,
+/// The [`DraftKind`] of draft `d` as JSON, or NULL when it has none: the one
+/// definition both granting and matching use.
+macro_rules! kind {
+    () => {
+        "CASE WHEN json_extract(d.content, '$.channel') = 'message'
+            AND NOT (json_extract(d.content, '$.platform') = 'x'
+                     AND json_extract(d.content, '$.destination') IS NOT NULL)
+        THEN json_object('platform', json_extract(d.content, '$.platform'),
+            'account_id', json_extract(d.content, '$.account_id'),
+            'account', lower(json_extract(d.content, '$.account')),
+            'destination', json_extract(d.content, '$.destination')) END"
+    };
+}
+
+const SELECT: &str = concat!(
+    "SELECT d.id, d.lineage_id, d.revision, d.bot_id, d.turn_id, d.content,
         d.version, d.status,
         d.status = 'pending' AND t.status IN ('queued', 'preparing', 'sending', 'running', 'waiting')
             AS can_approve,
@@ -78,8 +100,13 @@ const SELECT: &str = "SELECT d.id, d.lineage_id, d.revision, d.bot_id, d.turn_id
             AND c.status IN ('queued', 'preparing', 'sending', 'running', 'waiting')) AS in_reply,
         d.approval_source, d.approved_version, d.approved_item_id, d.approved_at, d.delivery,
         d.result_detail, d.superseded_by, d.created_at, d.updated_at, d.settled_at,
-        d.send_turn_id, d.context_turn_id, d.context_version
-    FROM outgoing_drafts d JOIN turns t ON t.id = d.turn_id";
+        d.send_turn_id, d.context_turn_id, d.context_version, ",
+    kind!(),
+    " AS kind, EXISTS (SELECT 1 FROM draft_grants g WHERE g.bot_id = d.bot_id AND g.kind = ",
+    kind!(),
+    ") AS approved_always
+    FROM outgoing_drafts d JOIN turns t ON t.id = d.turn_id"
+);
 
 #[derive(Debug, thiserror::Error)]
 pub enum DraftError {
@@ -93,6 +120,8 @@ pub enum DraftError {
     Inactive,
     #[error("{0}")]
     Invalid(&'static str),
+    #[error("only a message or a new post can be approved always")]
+    NoKind,
     #[error(
         "only the owner's own conversation or a task delegated for an owner request can draft for approval"
     )]
@@ -130,6 +159,7 @@ impl DraftError {
             Self::Settled(_) => "DRAFT_SETTLED",
             Self::Inactive => "DRAFT_INACTIVE",
             Self::Invalid(_) => "INVALID_DRAFT",
+            Self::NoKind => "NO_KIND",
             Self::NotAllowed => "NOT_ALLOWED",
             Self::ChannelChanged(_) => "CHANNEL_CHANGED",
             Self::AttemptParked => "ATTEMPT_PARKED",
@@ -210,7 +240,8 @@ async fn caller(
 
 /// Record a draft from the provider attempt of `turn_id`, parking it, or
 /// a revision of the bot's pending or failed draft `replaces`, which it
-/// supersedes. A revision keeps the channel (email, or the same platform).
+/// supersedes. A draft of a kind the owner approves always is approved
+/// for this request instead, and the attempt goes on to send it. A revision keeps the channel (email, or the same platform).
 /// Proposing the same content again in this turn returns the earlier
 /// revision, so a retried tool call never makes a second card.
 pub async fn propose(
@@ -277,6 +308,18 @@ pub async fn propose(
     .bind(turn_id)
     .bind(caller.attempt)
     .bind(Json(content))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(concat!(
+        "UPDATE outgoing_drafts AS d SET status = 'approved', approval_source = 'standing',
+             approved_version = version, approved_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+             send_turn_id = turn_id, delivered_attempt = attempt
+         WHERE d.id = ?1 AND EXISTS (SELECT 1 FROM draft_grants g
+             WHERE g.bot_id = d.bot_id AND g.kind = ",
+        kind!(),
+        ")"
+    ))
+    .bind(id)
     .execute(&mut *tx)
     .await?;
     if let Some(old_turn) = old_turn.filter(|t| *t != turn_id) {
@@ -366,19 +409,24 @@ pub async fn edit(
 }
 
 /// The owner approves the pending draft they saw at `version`, with their
-/// final edits, atomically, and its turn continues to send it. A retry of
-/// the same approval changes nothing.
+/// final edits, atomically, and its turn continues to send it. `always`
+/// also approves every later draft of its kind as the bot proposes it. A
+/// retry of the same approval changes nothing.
 pub async fn approve(
     pool: &SqlitePool,
     bot_id: Uuid,
     draft_id: Uuid,
     version: i64,
     edits: Edits<'_>,
+    always: bool,
 ) -> Result<Settled, DraftError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let draft = load(&mut tx, bot_id, draft_id).await?;
+    if always && draft.kind.is_none() {
+        return Err(DraftError::NoKind);
+    }
     if draft.status != Status::Pending {
-        if is_button_approval_replay(&draft, version, edits) {
+        if is_button_approval_replay(&draft, version, edits) && (!always || draft.approved_always) {
             return Ok(Settled {
                 draft,
                 changed: false,
@@ -391,6 +439,18 @@ pub async fn approve(
         return Err(DraftError::Inactive);
     }
     apply_edits(&mut tx, &draft, version, edits).await?;
+    if always {
+        sqlx::query(concat!(
+            "INSERT INTO draft_grants (bot_id, kind, draft_id) SELECT d.bot_id, ",
+            kind!(),
+            ", d.id FROM outgoing_drafts d WHERE d.id = ?1
+             ON CONFLICT (bot_id, kind) DO UPDATE SET draft_id = excluded.draft_id,
+                 granted_at = excluded.granted_at"
+        ))
+        .bind(draft.id)
+        .execute(&mut *tx)
+        .await?;
+    }
     sqlx::query(
         "UPDATE outgoing_drafts SET status = 'approved', approval_source = 'button',
              approved_version = version, approved_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
@@ -408,6 +468,38 @@ pub async fn approve(
         draft,
         changed: true,
         requeued,
+    })
+}
+
+/// The owner stops approving `draft_id`'s kind always. Later drafts of it
+/// wait for approval again; drafts already approved keep their approval.
+/// Stopping a kind not approved always changes nothing.
+pub async fn stop_always(
+    pool: &SqlitePool,
+    bot_id: Uuid,
+    draft_id: Uuid,
+) -> Result<Settled, DraftError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let draft = load(&mut tx, bot_id, draft_id).await?;
+    let changed = sqlx::query(concat!(
+        "DELETE FROM draft_grants WHERE (bot_id, kind) IN (SELECT d.bot_id, ",
+        kind!(),
+        " FROM outgoing_drafts d WHERE d.id = ?1)"
+    ))
+    .bind(draft.id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    if changed {
+        events::turn_changed(&mut tx, bot_id, draft.turn_id).await?;
+    }
+    let draft = reload(&mut tx, draft_id).await?;
+    tx.commit().await?;
+    Ok(Settled {
+        draft,
+        changed,
+        requeued: false,
     })
 }
 

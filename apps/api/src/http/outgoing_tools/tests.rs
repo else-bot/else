@@ -65,6 +65,7 @@ async fn connected_send_uses_the_owner_edit_approved_after_the_initial_read() {
                 subject: None,
                 body: Some("Owner-approved text B"),
             },
+            false,
         )
         .await
         .unwrap();
