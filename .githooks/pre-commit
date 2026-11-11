@@ -1,7 +1,13 @@
 #!/bin/sh
 set -eu
+# Read the commit's paths first: git commit -a uses a temporary GIT_INDEX_FILE.
+paths=$(git diff --cached --name-only --no-renames)
 for variable in $(git rev-parse --local-env-vars); do
 	unset "$variable"
 done
+# Rust does not compile these paths in, so commits that only touch them skip the Rust checks.
+if ! printf '%s\n' "$paths" | grep -qvE '^(docs/|\.agents/|\.claude/|\.github/|[^/]+\.md$)'; then
+	exit 0
+fi
 cargo fmt --all -- --check
 exec scripts/check-clippy.sh
