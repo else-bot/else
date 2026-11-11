@@ -786,8 +786,18 @@ async fn multipart_error_documents_do_not_expose_remote_response_secrets() {
 async fn the_estimate_follows_the_latest_whole_assistant_set_over_a_newer_database_only_one() {
     let h = Harness::new().await;
     for (set, finished, bytes, whole) in [
-        ("whole", "2026-11-10T12:00:00.000+00:00", 13_000_000_000_i64, true),
-        ("before-update", "2026-11-10T13:00:00.000+00:00", 30_000_000, false),
+        (
+            "whole",
+            "2026-11-10T12:00:00.000+00:00",
+            13_000_000_000_i64,
+            true,
+        ),
+        (
+            "before-update",
+            "2026-11-10T13:00:00.000+00:00",
+            30_000_000,
+            false,
+        ),
     ] {
         sqlx::query(
             "INSERT INTO backup_runs (id, set_id, finished_at, local_status, ciphertext_bytes, coverage)

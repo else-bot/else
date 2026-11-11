@@ -867,7 +867,10 @@ async fn a_database_only_backup_restores_without_touching_the_schedule() {
             .unwrap(),
     );
     let backups = data.join("backups");
-    assert_eq!(set.parent().unwrap(), backups.join(backup::BEFORE_UPDATE_DIR));
+    assert_eq!(
+        set.parent().unwrap(),
+        backups.join(backup::BEFORE_UPDATE_DIR)
+    );
     assert!(
         backup::completed_sets(&backups).unwrap().is_empty(),
         "the scheduled sets' folder stays empty, so the next scheduled set is still due"
@@ -898,7 +901,10 @@ async fn a_database_only_backup_restores_without_touching_the_schedule() {
     .await
     .unwrap();
     let (ok, out) = run(&["backup", "--database-only"]);
-    assert!(!ok && out.contains("background jobs are still running"), "{out}");
+    assert!(
+        !ok && out.contains("background jobs are still running"),
+        "{out}"
+    );
     sqlx::query("DELETE FROM guest_jobs WHERE id = ?1")
         .bind(job)
         .execute(&mut conn)
