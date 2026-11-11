@@ -13,6 +13,8 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BotActivity {
+    /// The turn that holds this exchange. Separate turns are separate exchanges.
+    turn: Uuid,
     pub(super) items: Vec<Uuid>,
     /// This bot's latest reply to each task it received, hidden from the transcript.
     pub(super) answers: Vec<Uuid>,
@@ -57,6 +59,7 @@ pub(super) fn group_activity(
         };
         let status = outcome(item, conversation);
         let activity = BotActivity {
+            turn: item.turn_id,
             items: vec![item.id],
             answers: conversation
                 .map(|c| {
@@ -77,9 +80,8 @@ pub(super) fn group_activity(
         };
         if !row.unread_start
             && let Some(previous) = grouped.last_mut()
-            && previous.routine.map(|routine| routine.turn)
-                == row.routine.map(|routine| routine.turn)
             && let Some(group) = previous.activity.as_mut()
+            && group.turn == activity.turn
         {
             group.items.extend(activity.items);
             group.answers.extend(activity.answers);

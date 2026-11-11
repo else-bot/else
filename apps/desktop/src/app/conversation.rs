@@ -1173,7 +1173,7 @@ mod tests {
             .map(|id| {
                 let mut item = json!({
                     "id": Uuid::from_u128(id), "seq": id,
-                    "turn_id": Uuid::from_u128(id + 100),
+                    "turn_id": Uuid::from_u128(match id { 2 => 1, 5 => 4, 8 => 7, _ => id } + 100),
                     "kind": match id { 3 => "user", 6 => "assistant", _ => "status" },
                     "text": format!("Full message {id}")
                 });
@@ -1265,6 +1265,28 @@ mod tests {
     }
 
     #[test]
+    fn bot_activity_keeps_each_turns_exchange_in_its_own_row() {
+        let c = activity_conversation();
+        let rows = super::group_activity(
+            [item(1), item(2), item(7), item(8)]
+                .into_iter()
+                .map(transcript_row)
+                .collect(),
+            Some(&c),
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.activity.as_ref().unwrap().items.clone())
+                .collect::<Vec<_>>(),
+            [
+                vec![Uuid::from_u128(1), Uuid::from_u128(2)],
+                vec![Uuid::from_u128(7), Uuid::from_u128(8)],
+            ],
+            "tasks from different turns stay separate even when adjacent"
+        );
+    }
+
+    #[test]
     fn a_received_task_row_holds_this_bots_answer() {
         let c = Conversation::from_snapshot(serde_json::from_value(json!({
             "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
@@ -1325,28 +1347,28 @@ mod tests {
         let rows = super::group_activity(vec![first.clone(), second], Some(&c));
         assert_eq!(rows.len(), 2);
         assert!(rows[1].unread_start);
-        let mut routine = transcript_row(item(2));
+        let mut routine = transcript_row(item(4));
         routine.routine = Some(RoutineRow {
-            turn: Uuid::from_u128(102),
+            turn: Uuid::from_u128(104),
             first: true,
             last: true,
         });
         let rows = super::group_activity(vec![first, routine], Some(&c));
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[1].routine.unwrap().turn, Uuid::from_u128(102));
+        assert_eq!(rows[1].routine.unwrap().turn, Uuid::from_u128(104));
         assert_eq!(
             rows[1].activity.as_ref().unwrap().items,
-            [Uuid::from_u128(2)]
+            [Uuid::from_u128(4)]
         );
         let mut first = transcript_row(item(1));
         first.routine = Some(RoutineRow {
-            turn: Uuid::from_u128(102),
+            turn: Uuid::from_u128(101),
             first: true,
             last: false,
         });
         let mut second = transcript_row(item(2));
         second.routine = Some(RoutineRow {
-            turn: Uuid::from_u128(102),
+            turn: Uuid::from_u128(101),
             first: false,
             last: true,
         });
@@ -1355,7 +1377,7 @@ mod tests {
         assert_eq!(
             rows[0].routine,
             Some(RoutineRow {
-                turn: Uuid::from_u128(102),
+                turn: Uuid::from_u128(101),
                 first: true,
                 last: true
             })
