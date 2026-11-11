@@ -850,18 +850,14 @@ async fn duplicate_and_uncertain_send_retries_never_repeat_transport_effects() {
     }
 }
 
-#[tokio::test]
-async fn mail_event_origin_removes_computer_and_delegation_authority() {
-    let transport = Arc::new(Transport {
-        sends: AtomicUsize::new(0),
-        uncertain: false,
-    });
-    let h = recorder::harness_with(4, Some(transport.clone())).await;
-    let bot: Uuid = h.app.main_bot().await.parse().unwrap();
-    let account = account(&h.app).await;
-    store::set_permissions(&h.app.db.pool, account.id, bot, &permissions())
-        .await
-        .unwrap();
+/// A mail-triggered turn for one arrival in `folder` of `account`, whose
+/// trigger tells the bot `instructions`.
+async fn mail_event(
+    h: &recorder::Harness,
+    account: &Account,
+    folder: &str,
+    instructions: &str,
+) -> Uuid {
     let initial = Scan {
         cursor: Cursor {
             uid_validity: 1,
@@ -886,7 +882,7 @@ async fn mail_event_origin_removes_computer_and_delegation_authority() {
         },
         arrivals: vec![Arrival {
             message: MessageRef {
-                folder: format!("INBOX {GATE}"),
+                folder: folder.into(),
                 uid_validity: 1,
                 uid: 9,
             },
@@ -902,7 +898,8 @@ async fn mail_event_origin_removes_computer_and_delegation_authority() {
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE connector_grants SET wake_instructions = 'Summarize it for me.'")
+    sqlx::query("UPDATE connector_grants SET wake_instructions = ?1")
+        .bind(instructions)
         .execute(&h.app.db.pool)
         .await
         .unwrap();
@@ -910,12 +907,31 @@ async fn mail_event_origin_removes_computer_and_delegation_authority() {
         .await
         .unwrap();
     h.app.scheduler.wake();
-    let turn: Uuid = sqlx::query_scalar(
-        "SELECT turn_id FROM connector_deliveries WHERE turn_id IS NOT NULL LIMIT 1",
+    sqlx::query_scalar("SELECT turn_id FROM connector_deliveries WHERE turn_id IS NOT NULL LIMIT 1")
+        .fetch_one(&h.app.db.pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn mail_event_origin_removes_computer_and_delegation_authority() {
+    let transport = Arc::new(Transport {
+        sends: AtomicUsize::new(0),
+        uncertain: false,
+    });
+    let h = recorder::harness_with(4, Some(transport.clone())).await;
+    let bot: Uuid = h.app.main_bot().await.parse().unwrap();
+    let account = account(&h.app).await;
+    store::set_permissions(&h.app.db.pool, account.id, bot, &permissions())
+        .await
+        .unwrap();
+    let turn = mail_event(
+        &h,
+        &account,
+        &format!("INBOX {GATE}"),
+        "Summarize it for me.",
     )
-    .fetch_one(&h.app.db.pool)
-    .await
-    .unwrap();
+    .await;
     let notice: String =
         sqlx::query_scalar("SELECT text FROM items WHERE turn_id = ?1 AND kind = 'connector'")
             .bind(turn)
@@ -992,6 +1008,103 @@ async fn mail_event_origin_removes_computer_and_delegation_authority() {
     let visible: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bot_events WHERE kind='item.upsert' AND json_extract(data,'$.item.kind')='connector')").fetch_one(&mut *conn).await.unwrap();
     assert!(!visible);
     drop(conn);
+    h.release(turn).await;
+    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+}
+
+#[tokio::test]
+async fn a_mail_event_drafts_a_reply_the_owner_approves_in_a_card() {
+    let transport = Arc::new(Transport {
+        sends: AtomicUsize::new(0),
+        uncertain: false,
+    });
+    let h = recorder::harness_with(4, Some(transport.clone())).await;
+    let bot = h.app.main_bot().await;
+    let account = account(&h.app).await;
+    store::set_permissions(
+        &h.app.db.pool,
+        account.id,
+        bot.parse().unwrap(),
+        &permissions(),
+    )
+    .await
+    .unwrap();
+    let folder = format!("INBOX {GATE_EVERY_ATTEMPT}");
+    let turn = mail_event(
+        &h,
+        &account,
+        &folder,
+        "Draft replies to support mail for my review.",
+    )
+    .await;
+    let (_, token) = h.started(turn).await;
+
+    let reply = json!({ "account_id": account.id,
+                        "reply_to": { "folder": folder, "uid_validity": 1, "uid": 9 },
+                        "to": ["customer@example.com"], "subject": "Re: Support",
+                        "body": "Thanks, we are looking into it." });
+    let drafted = tool(&h.app, &token, "draft_email", reply).await;
+    assert!(!drafted.error, "{}", drafted.body);
+    assert_eq!(drafted.result["status"], "pending", "{}", drafted.body);
+    let id = drafted.result["draft"]["draft_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    h.release(turn).await;
+    h.app
+        .wait_turn_for(
+            &turn.to_string(),
+            &["waiting"],
+            std::time::Duration::from_secs(20),
+        )
+        .await;
+
+    let snapshot = h
+        .app
+        .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+        .await;
+    let card = snapshot.body["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == turn.to_string())
+        .expect("the mail turn is in the owner's chat")["outgoing_drafts"][0]
+        .clone();
+    assert_eq!(card["id"], id, "{card}");
+    assert_eq!(card["status"], "pending");
+    assert_eq!(card["content"]["from"], "bot@example.com");
+    assert_eq!(
+        transport.sends.load(Ordering::SeqCst),
+        0,
+        "nothing sent before approval"
+    );
+
+    let approved = h
+        .app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{bot}/outgoing-drafts/{id}/approve"),
+            Some(json!({ "version": 1 })),
+        )
+        .await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    let token = h.continued(turn, &token).await;
+    for (name, args) in [
+        ("ask_owner", json!({})),
+        ("confirm_draft_approval", json!({ "draft_id": id })),
+        ("draft_message", json!({ "platform": "x", "body": "Hi" })),
+    ] {
+        let refused = tool(&h.app, &token, name, args).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::FORBIDDEN,
+            "{name}: {}",
+            refused.body
+        );
+    }
+    let sent = tool(&h.app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert_eq!(sent.result["status"], "sent", "{}", sent.body);
+    assert_eq!(transport.sends.load(Ordering::SeqCst), 1);
     h.release(turn).await;
     h.app.wait_turn(&turn.to_string(), &["completed"]).await;
 }
