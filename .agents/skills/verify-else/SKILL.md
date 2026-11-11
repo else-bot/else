@@ -52,7 +52,9 @@ scripts/dev.py test -p else-api --serial -- wrong_keys_damage_and_existing_datab
 
 On Linux, use this shared command for Rust tests. It mounts Cargo dependency
 sources and GPUI debug assets, uses private scratch storage, and removes mise
-shims from the test PATH. Binaries run sequentially. Read `results.json`,
+shims from the test PATH. Binaries run concurrently with a CPU-based limit,
+overridden by `--jobs N`. Use `--serial` for one binary with one test thread.
+Longer binaries start first using previous run timings. Read `results.json`,
 `summary.txt`, and logs under the printed `.else-dev/tests/<run>/` directory
 after a runtime restart before starting another run.
 

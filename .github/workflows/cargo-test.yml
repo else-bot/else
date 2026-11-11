@@ -37,6 +37,8 @@ jobs:
         run: python3 scripts/check_migrations.py
       - name: Test migration numbering check
         run: python3 scripts/test-migrations.py
+      - name: Test dev test scheduler
+        run: python3 -m unittest discover -s scripts -p test_dev_tests.py
       - name: Install build dependencies
         timeout-minutes: 10
         # Fail a stalled mirror fast and retry instead of hanging until the job limit.

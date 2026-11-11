@@ -8,6 +8,7 @@ detached worker keeps going when the calling command or agent harness goes away:
   dev_tests.py cancel DIR   stop a run's worker, which removes its box
 """
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -31,6 +32,25 @@ DONE = {"passed", "failed", "interrupted", "error"}
 PROVIDER_HOMES = {"CODEX_HOME", "CLAUDE_CONFIG_DIR", "GROK_HOME"}
 RESULT = re.compile(r"^test result: \w+\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out")
 FAILED_TEST = re.compile(r"^test (\S+) \.\.\. FAILED$")
+COLD_SECONDS = {"else-api/test/delegation": 76, "else-api/test/owner_questions": 73,
+                "else-api/test/outgoing_drafts": 59, "else-api/test/mcp_waits": 41,
+                "else-api/test/routines": 38}
+
+
+def default_jobs():
+    cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+    return max(1, min(cpus // 4, 8))
+
+
+def positive_jobs(value):
+    import argparse
+    try:
+        jobs = int(value)
+        if jobs > 0:
+            return jobs
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("jobs must be a positive integer")
 
 
 def now():
@@ -66,8 +86,8 @@ def rerun_args(results):
         if selection not in args:
             args.append(selection)
     tail = results["selection"]["filter"]
-    serial = ["--serial"] if results["selection"]["serial"] else []
-    return [shlex.join(a + serial + (["--", *tail] if tail else [])) for a in args]
+    scheduling = ["--serial"] if results["selection"]["serial"] else ["--jobs", str(results.get("jobs", 1))]
+    return [shlex.join(a + scheduling + (["--", *tail] if tail else [])) for a in args]
 
 
 def summary(results):
@@ -77,7 +97,7 @@ def summary(results):
              f"revision: {results.get('revision', '?')}{' (dirty)' if results.get('dirty') else ''}",
              f"selection: packages={','.join(selection['packages']) or 'workspace'} "
              f"tests={','.join(selection['tests']) or 'all'} filter={' '.join(selection['filter']) or '-'} "
-             f"test-threads={results['test_threads']}",
+             f"jobs={results.get('jobs', 1)} test-threads={results['test_threads']}",
              f"worker: pid {results['worker']['pid']} log {results['worker']['log']}",
              f"build: {results['build']['status']}" + (f" in {results['build']['seconds']}s" if "seconds" in results["build"] else ""),
              f"box: {results.get('box', {}).get('name', '-')}"]
@@ -206,7 +226,45 @@ def build(run_dir, results):
     return source_mounts(metadata)
 
 
-def run_binary(run_dir, results, binary):
+def order_binaries(run_dir, results):
+    timings = {}
+    remaining = {b["key"] for b in results["binaries"]}
+    sources = []
+    for previous in sorted(RUNS.iterdir() if RUNS.is_dir() else (), reverse=True):
+        if previous >= run_dir or not previous.is_dir():
+            continue
+        try:
+            history = load(previous)
+        except (OSError, ValueError):
+            continue
+        if not history or history["selection"]["filter"] != results["selection"]["filter"]:
+            continue
+        if (history["test_threads"], history["tokio_worker_threads"]) != (
+                results["test_threads"], results["tokio_worker_threads"]):
+            continue
+        used = False
+        for binary in history.get("binaries", []):
+            seconds = binary.get("seconds")
+            if binary["key"] in remaining and binary["status"] == "passed" and isinstance(seconds, (int, float)):
+                timings[binary["key"]] = seconds
+                remaining.remove(binary["key"])
+                used = True
+        if used:
+            sources.append(str(previous))
+        if not remaining:
+            break
+    results["timing_sources"] = sources
+    results["binaries"].sort(key=lambda b: (-timings.get(b["key"], COLD_SECONDS.get(b["key"], 0)), b["key"]))
+
+
+@dataclass
+class RunningBinary:
+    binary: dict
+    child: subprocess.Popen
+    started: float
+
+
+def start_binary(results, binary):
     job = {"run": results["id"], "slug": Path(binary["log"]).stem, "cwd": binary["cwd"],
            "argv": [binary["executable"], *results["selection"]["filter"], "--test-threads", str(results["test_threads"])],
            "env": {"TOKIO_WORKER_THREADS": str(results["tokio_worker_threads"]), "RUST_BACKTRACE": "1",
@@ -215,12 +273,17 @@ def run_binary(run_dir, results, binary):
            "timeout": TIMEOUT_SECONDS}
     argv = ["omabox", "run", "-b", results["box"]["name"], "--", sys.executable, str(SCRIPT), "box-exec", json.dumps(job)]
     binary.update(status="running", started_at=now(), command=argv)
-    save(run_dir, results)
     started = time.monotonic()
+    with Path(binary["log"]).open("w") as log:
+        child = subprocess.Popen(argv, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
+                                 stdin=subprocess.DEVNULL, start_new_session=True)
+    return RunningBinary(binary, child, started)
+
+
+def finish_binary(running):
+    binary, code = running.binary, running.child.returncode
+    binary.update(seconds=round(time.monotonic() - running.started, 1), exit_code=code, finished_at=now())
     log_path = Path(binary["log"])
-    with log_path.open("w") as log:
-        code = owned(argv, timeout=TIMEOUT_SECONDS + 120, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
-    binary.update(seconds=round(time.monotonic() - started, 1), exit_code=code, finished_at=now())
     drain_deadline = time.monotonic() + 10
     while True:
         text = log_path.read_text(errors="replace").splitlines()
@@ -242,6 +305,41 @@ def run_binary(run_dir, results, binary):
         binary["status"] = "passed" if code == 0 and exit_line["exit"] == 0 and counts else "failed"
 
 
+def run_binaries(run_dir, results):
+    pending = iter(results["binaries"])
+    active = []
+    try:
+        while True:
+            while len(active) < results["jobs"]:
+                binary = next(pending, None)
+                if binary is None:
+                    break
+                active.append(start_binary(results, binary))
+                save(run_dir, results)
+            if not active:
+                return
+            for running in active[:]:
+                if running.child.poll() is not None:
+                    finish_binary(running)
+                    active.remove(running)
+                    save(run_dir, results)
+                elif time.monotonic() - running.started > TIMEOUT_SECONDS + 120:
+                    raise subprocess.TimeoutExpired(running.child.args, TIMEOUT_SECONDS + 120)
+            time.sleep(0.05)
+    finally:
+        for running in active:
+            try:
+                os.killpg(running.child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + 5
+        while any(r.child.poll() is None for r in active) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        for running in active:
+            kill_group(running.child.pid, grace=0)
+            running.child.wait()
+
+
 def worker(run_dir):
     lock = os.open(run_dir / "worker.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
@@ -250,6 +348,8 @@ def worker(run_dir):
         raise SystemExit(f"another worker owns {run_dir}") from None
 
     def interrupted(_signal, _frame):
+        for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(number, signal.SIG_IGN)
         raise KeyboardInterrupt
     for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(number, interrupted)
@@ -267,6 +367,7 @@ def worker(run_dir):
     box = None
     try:
         mounts = build(run_dir, results)
+        order_binaries(run_dir, results)
         results["status"] = "box"
         box = f"et-{results['id'].rsplit('-', 1)[1]}"
         up = ["omabox", "up", box, "--net", "isolated", "--no-shell", "--json",
@@ -279,9 +380,7 @@ def worker(run_dir):
         results["box"].update(name=box, home=subprocess.check_output(
             ["omabox", "path", "-b", box, "--home"], cwd=ROOT, text=True, timeout=30).strip())
         results["status"] = "running"
-        for binary in results["binaries"]:
-            run_binary(run_dir, results, binary)
-            save(run_dir, results)
+        run_binaries(run_dir, results)
         passed = results["binaries"] and all(b["status"] == "passed" for b in results["binaries"])
         results["status"] = "passed" if passed else "failed"
         if not results["binaries"]:
@@ -410,7 +509,7 @@ def wait(run_dir, child=None):
 
 
 def run_tests(args):
-    """Entry for `dev.py test`: args has package, test, serial and filter (lists or single values)."""
+    """Entry for `dev.py test`: args has package, test, jobs, serial and filter."""
     if sys.platform != "linux" or not shutil.which("omabox"):
         raise SystemExit("dev.py test needs Linux and omabox: test binaries run only inside an isolated box")
     filter_args = listed(args.filter)
@@ -423,6 +522,7 @@ def run_tests(args):
     request = {"id": run_id, "dir": str(run_dir), "status": "starting", "created_at": now(),
                "selection": {"packages": listed(args.package), "tests": listed(args.test),
                              "serial": bool(args.serial), "filter": filter_args},
+               "jobs": 1 if args.serial else args.jobs,
                "test_threads": threads, "tokio_worker_threads": 2, "timeout_per_binary": TIMEOUT_SECONDS,
                "build": {"status": "pending"}, "worker": {"pid": None, "log": str(run_dir / "worker.log")}}
     write_atomic(run_dir / "request.json", json.dumps(request, indent=2) + "\n")

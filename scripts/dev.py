@@ -5,7 +5,7 @@ Host (manual development, real provider logins allowed):
   dev.py reset | api | desktop | status | curl ARGS... | sql QUERY | drop   [--session NAME] [--dir PATH]
 Agents (disposable omabox on Linux, Synthetic only, foreground until Ctrl-C):
   dev.py run [--api-only]
-  dev.py test [-p PACKAGE] [--test NAME] [--serial] [-- FILTER]
+  dev.py test [-p PACKAGE] [--test NAME] [--jobs N] [--serial] [-- FILTER]
 """
 
 import argparse
@@ -521,7 +521,10 @@ def main(argv=None):
     tests = commands.add_parser("test", help="workspace tests in a new isolated omabox, with durable logs")
     tests.add_argument("-p", "--package", help="test only this Cargo package")
     tests.add_argument("--test", help="test only this integration target")
-    tests.add_argument("--serial", action="store_true", help="run one test thread per binary")
+    from dev_tests import default_jobs, positive_jobs
+    tests.add_argument("--jobs", type=positive_jobs, default=default_jobs(),
+                       help="concurrent test binaries (default: CPU count / 4, capped at 8)")
+    tests.add_argument("--serial", action="store_true", help="run one binary at a time with one test thread")
     tests.add_argument("filter", nargs=argparse.REMAINDER, help="libtest filter after --")
     commands.add_parser("box-worker", help=argparse.SUPPRESS).add_argument("spec")
     args, extra = parser.parse_known_args(argv)

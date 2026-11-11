@@ -137,8 +137,11 @@ mounted read-only. Tests use writable scratch storage in the box's private
 runtime directory instead of host `/tmp`. The runtime PATH excludes mise shims.
 
 Builds use this checkout's `.else-dev/.build` cache and honor `CARGO_BUILD_JOBS`.
-The default build limit is four jobs. Test binaries run sequentially with
-two test threads per binary. Use `--serial` for one test thread per binary.
+The default build limit is four jobs. Test binaries run concurrently, with one
+job per four available CPUs, capped at eight jobs. Each binary uses two test
+threads and two Tokio worker threads. Use `--jobs N` to change the binary limit,
+or `--serial` for one binary at a time with one test thread. Longer binaries
+start first, using previous run timings when available.
 Set `CARGO_BUILD_JOBS=2` when other workspaces build concurrently.
 For focused checks:
 
