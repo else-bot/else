@@ -1173,7 +1173,7 @@ mod tests {
             .map(|id| {
                 let mut item = json!({
                     "id": Uuid::from_u128(id), "seq": id,
-                    "turn_id": Uuid::from_u128(id + 100),
+                    "turn_id": Uuid::from_u128(match id { 2 => 1, 5 => 4, 8 => 7, _ => id } + 100),
                     "kind": match id { 3 => "user", 6 => "assistant", _ => "status" },
                     "text": format!("Full message {id}")
                 });
@@ -1262,6 +1262,28 @@ mod tests {
         assert_eq!(view.row_index(item(2)), Some(0));
         assert_eq!(view.row_index(item(5)), Some(2));
         assert_eq!(view.row_index(item(6)), Some(3));
+    }
+
+    #[test]
+    fn bot_activity_keeps_each_turns_exchange_in_its_own_row() {
+        let c = activity_conversation();
+        let rows = super::group_activity(
+            [item(1), item(2), item(7), item(8)]
+                .into_iter()
+                .map(transcript_row)
+                .collect(),
+            Some(&c),
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.activity.as_ref().unwrap().items.clone())
+                .collect::<Vec<_>>(),
+            [
+                vec![Uuid::from_u128(1), Uuid::from_u128(2)],
+                vec![Uuid::from_u128(7), Uuid::from_u128(8)],
+            ],
+            "tasks from different turns stay separate even when adjacent"
+        );
     }
 
     #[test]
