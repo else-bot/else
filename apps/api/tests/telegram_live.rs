@@ -24,7 +24,7 @@ async fn a_public_channel_link_resolves_and_receives_a_post() {
         remote_id: identity.id,
         display_name: identity.display_name,
         username: identity.username,
-        state: "active".into(),
+        state: ConnectionState::Active,
         health: "connected".into(),
         generation: 1,
         instructions: String::new(),

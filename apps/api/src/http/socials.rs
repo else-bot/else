@@ -117,10 +117,18 @@ async fn active(
     ApiJson(request): ApiJson<Active>,
 ) -> Result<Json<Value>, ApiError> {
     let m = manager(&s)?;
-    let c = store::set_state(&s.db, id, if request.active { "active" } else { "paused" })
-        .await
-        .map_err(error)?;
-    m.changed(id).await;
+    let to = if request.active {
+        ConnectionState::Active
+    } else {
+        ConnectionState::Paused
+    };
+    let c = match store::set_state(&s.db, id, to).await.map_err(error)? {
+        store::StateChange::Changed(c) => {
+            m.changed(id).await;
+            c
+        }
+        store::StateChange::Unchanged(c) => c,
+    };
     Ok(Json(json!({"connection":c})))
 }
 async fn remove(
@@ -128,7 +136,7 @@ async fn remove(
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let m = manager(&s)?;
-    store::set_state(&s.db, id, "removed")
+    store::set_state(&s.db, id, ConnectionState::Removed)
         .await
         .map_err(error)?;
     m.changed(id).await;

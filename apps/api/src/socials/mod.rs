@@ -355,7 +355,7 @@ impl Manager {
             let manager = self.clone();
             let account = c.clone();
             let inbox = tokio::spawn(async move {
-                if account.state == "active" {
+                if account.state == ConnectionState::Active {
                     manager.inbox(account, listener_session, running).await;
                 }
             });
@@ -388,7 +388,7 @@ impl Manager {
                                 continue;
                             }
                             WorkerRequest::Resolve { generation, username, mut reply } => {
-                                if generation != c.generation || c.state != "active" {
+                                if generation != c.generation || c.state != ConnectionState::Active {
                                     let _ = reply.send(Err(Error::Inactive));
                                     continue;
                                 }
@@ -405,7 +405,7 @@ impl Manager {
                             }
                             WorkerRequest::Action(request) => request,
                         };
-                        if request.generation != c.generation || c.state != "active" {
+                        if request.generation != c.generation || c.state != ConnectionState::Active {
                             let _ = request.reply.send(Err(Error::Inactive));
                             continue;
                         }
