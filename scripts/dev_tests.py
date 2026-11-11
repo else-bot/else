@@ -230,7 +230,7 @@ def order_binaries(run_dir, results):
     timings = {}
     remaining = {b["key"] for b in results["binaries"]}
     sources = []
-    for previous in sorted(RUNS.iterdir(), reverse=True):
+    for previous in sorted(RUNS.iterdir() if RUNS.is_dir() else (), reverse=True):
         if previous >= run_dir or not previous.is_dir():
             continue
         try:
