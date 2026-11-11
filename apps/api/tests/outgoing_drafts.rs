@@ -1747,6 +1747,13 @@ async fn a_reply_that_moves_on_closes_the_draft_it_was_sent_with() {
     assert_eq!(late.body["error"]["code"], "draft_settled", "{}", late.body);
 }
 
+async fn granted(app: &TestApp, bot: &str) -> Value {
+    app.owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+        .await
+        .body["draft_grants"]
+        .clone()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
     let Harness { app, .. } = harness().await;
@@ -1794,7 +1801,7 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
         json!({ "platform": "x", "account_id": null, "account": "@proliquid_xyz",
                 "destination": null })
     );
-    assert_eq!(card["approved_always"], false);
+    assert_eq!(granted(&app, &main).await, json!([]));
     let approved = owner_action(
         &app,
         &main,
@@ -1806,7 +1813,11 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
     assert_eq!(approved.body["draft"]["status"], "approved");
     assert_eq!(approved.body["draft"]["approval_source"], "button");
-    assert_eq!(approved.body["draft"]["approved_always"], true);
+    assert_eq!(
+        granted(&app, &main).await,
+        json!([{ "platform": "x", "account_id": null, "account": "@proliquid_xyz",
+                 "destination": null }])
+    );
     let replay = owner_action(
         &app,
         &main,
@@ -1844,7 +1855,6 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
         .unwrap();
     let card = journaled(&app, &main, second).await;
     assert_eq!(card["approval_source"], "standing");
-    assert_eq!(card["approved_always"], true);
     assert_eq!(card["can_approve"], false);
     let claimed = tool(
         &app,
@@ -1862,11 +1872,40 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
     )
     .await;
     assert_eq!(tool_text(&sent)["status"], "sent", "{}", sent.body);
+    let third = tool(&app, &token, "draft_message", post("A third whale.")).await;
+    assert_eq!(
+        tool_text(&third)["status"],
+        "approved",
+        "an approved-always draft parks nothing, so the request can send more: {}",
+        third.body
+    );
+    let reply = tool(
+        &app,
+        &token,
+        "draft_message",
+        json!({ "platform": "x", "account": "@proliquid_xyz", "reply_to": "1890",
+                "body": "Thanks!" }),
+    )
+    .await;
+    assert_eq!(
+        tool_text(&reply)["status"],
+        "pending",
+        "an X reply named only by reply_to is not a post: {}",
+        reply.body
+    );
+    let reply: Uuid = tool_text(&reply)["draft"]["draft_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait(&app, turn, "waiting").await;
+    let discarded = owner_action(&app, &main, reply, "discard", json!({})).await;
+    assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
 
     let stop = format!("/v1/bots/{main}/outgoing-drafts/{second}/always");
     let stopped = app.owner("DELETE", &stop, None).await;
     assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);
-    assert_eq!(stopped.body["draft"]["approved_always"], false);
+    assert_eq!(granted(&app, &main).await, json!([]));
     assert_eq!(
         stopped.body["draft"]["status"], "sent",
         "a sent post stays sent"

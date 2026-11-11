@@ -68,7 +68,8 @@ pub enum ApprovalSource {
 /// What "Approve always" covers: messages on one platform from one sending
 /// account to one destination, whatever they say. Emails have no kind
 /// (each goes to its own recipients), nor do X replies (each answers its
-/// own post). `db::outgoing_drafts::KIND` derives it from stored content.
+/// own post). `kind!` in `db::outgoing_drafts` derives it from stored
+/// content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftKind {
     pub platform: Platform,

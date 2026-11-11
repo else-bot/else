@@ -71,3 +71,34 @@ CREATE TABLE draft_grants (
     granted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
     PRIMARY KEY (bot_id, kind)
 ) STRICT;
+
+-- A standing approval waits on no one, so it holds no attempt: the bot may
+-- go on to draft and send more in the same request.
+DROP VIEW turn_holds;
+
+CREATE VIEW turn_holds AS
+    SELECT root_turn_id AS turn_id, parent_attempt AS attempt,
+           status IN ('queued', 'running') AS pending,
+           delivered_attempt IS NULL AND status IN ('completed', 'failed', 'cancelled') AS unseen
+    FROM delegations
+    UNION ALL
+    SELECT turn_id, attempt, status = 'pending', delivered_attempt IS NULL AND status <> 'pending'
+    FROM secret_requests
+    UNION ALL
+    SELECT turn_id, attempt, status = 'pending', delivered_attempt IS NULL AND status <> 'pending'
+    FROM owner_questions WHERE json_type(action, '$.permission') IS NULL
+    UNION ALL
+    SELECT turn_id, attempt, status = 'pending',
+           delivered_attempt IS NULL AND status IN ('approved', 'discarded')
+    FROM outgoing_drafts WHERE approval_source IS NOT 'message' AND approval_source IS NOT 'standing'
+    UNION ALL
+    SELECT turn_id, attempt, status = 'pending', delivered_attempt IS NULL AND status <> 'pending'
+    FROM social_setups
+    UNION ALL
+    SELECT turn_id, attempt, status = 'pending',
+           delivered_attempt IS NULL AND status IN ('finished', 'failed', 'expired')
+    FROM mcp_waits
+    UNION ALL
+    SELECT turn_id, attempt, status = 'pending',
+           delivered_attempt IS NULL AND status IN ('installed', 'declined')
+    FROM skill_installs;

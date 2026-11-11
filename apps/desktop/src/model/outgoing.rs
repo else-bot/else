@@ -218,9 +218,6 @@ pub struct OutgoingDraft {
     /// What "Approve always" would cover; none for an email or an X reply.
     #[serde(default)]
     pub kind: Option<serde_json::Value>,
-    /// The owner approves this draft's kind always.
-    #[serde(default)]
-    pub approved_always: bool,
     pub updated_at: DateTime<Utc>,
     pub settled_at: Option<DateTime<Utc>>,
 }
@@ -351,12 +348,12 @@ mod tests {
             "version":1, "status":"approved", "can_approve":false,
             "approval_source":"standing",
             "kind":{"platform":"x","account_id":null,"account":"@proliquid_xyz","destination":null},
-            "approved_always":true, "result_detail":null,
+            "result_detail":null,
             "updated_at":"2026-11-11T06:30:00Z", "settled_at":null
         }))
         .unwrap();
         assert_eq!(card.approval_source, Some(ApprovalSource::Standing));
-        assert!(card.approved_always && card.kind.is_some());
+        assert!(card.kind.is_some());
         assert_eq!(card.content.kind_label(), "X posts from @proliquid_xyz");
         let chat: DraftContent = serde_json::from_value(json!({"channel":"message",
             "platform":"telegram", "account":"@main_bot", "destination":"Family", "body":"Hi"}))

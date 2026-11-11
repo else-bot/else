@@ -240,20 +240,10 @@ impl ElseApp {
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.stop_approving_always(bot, id).await;
-            let _ = this.update_in(cx, |app, window, cx| match result {
-                Ok(draft) => {
-                    if let (Some(kind), Some(conversation)) = (
-                        draft.kind.as_ref(),
-                        app.view
-                            .as_mut()
-                            .filter(|v| v.bot_id == bot)
-                            .and_then(|v| v.conversation.as_mut()),
-                    ) {
-                        conversation.stop_approving_always(kind);
-                    }
-                    app.sync_rows(window, cx);
+            let _ = this.update_in(cx, |app, window, cx| {
+                if let Err(err) = result {
+                    app.draft_acted(bot, id, Err(err), window, cx);
                 }
-                Err(err) => app.draft_acted(bot, id, Err(err), window, cx),
             });
         })
         .detach();
@@ -393,7 +383,11 @@ impl ElseApp {
                         ),
                 );
             }
-            if draft.approved_always {
+            if view
+                .conversation
+                .as_ref()
+                .is_some_and(|c| c.approves_always(draft))
+            {
                 let connected = self.connection == Connection::Connected;
                 card = card.child(
                     h_flex()

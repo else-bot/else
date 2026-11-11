@@ -62,13 +62,14 @@ pub async fn bot_updated(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<()
             .map(crate::views::webhook_json)
             .collect();
         let rules_version = super::rules::version(conn, bot_id).await?;
+        let draft_grants = super::outgoing_drafts::always_approved(conn, bot_id).await?;
         append(
             conn,
             bot_id,
             "bot.updated",
             json!({ "bot_id": bot_id, "bot": bot_json(&bot), "routines": routines,
                     "social_triggers": social_triggers, "mail_triggers": mail_triggers,
-                    "webhooks": webhooks,
+                    "webhooks": webhooks, "draft_grants": draft_grants,
                     "rules_version": rules_version }),
         )
         .await?;

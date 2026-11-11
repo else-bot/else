@@ -564,6 +564,9 @@ pub struct Snapshot {
     /// Absent from servers that don't list webhooks in the snapshot.
     #[serde(default)]
     pub webhooks: Vec<Webhook>,
+    /// The kinds of drafts the owner approves always.
+    #[serde(default)]
+    pub draft_grants: Vec<serde_json::Value>,
     /// Absent from servers without rules.
     #[serde(default)]
     pub rules_version: i64,
@@ -607,6 +610,7 @@ pub struct Conversation {
     social_triggers: Vec<Trigger>,
     mail_triggers: Vec<MailTrigger>,
     webhooks: Vec<Webhook>,
+    draft_grants: Vec<serde_json::Value>,
     rules_version: i64,
 }
 
@@ -631,6 +635,7 @@ impl Conversation {
             social_triggers: snapshot.social_triggers,
             mail_triggers: snapshot.mail_triggers,
             webhooks: snapshot.webhooks,
+            draft_grants: snapshot.draft_grants,
             rules_version: snapshot.rules_version,
         };
         for item in snapshot.items {
@@ -730,6 +735,12 @@ impl Conversation {
                 self.webhooks = data
                     .get("webhooks")
                     .map(|webhooks| serde_json::from_value(webhooks.clone()))
+                    .transpose()
+                    .map_err(|_| Reset::Malformed)?
+                    .unwrap_or_default();
+                self.draft_grants = data
+                    .get("draft_grants")
+                    .map(|grants| serde_json::from_value(grants.clone()))
                     .transpose()
                     .map_err(|_| Reset::Malformed)?
                     .unwrap_or_default();
@@ -949,13 +960,12 @@ impl Conversation {
             .rfind(|d| d.status.can_follow_up())
     }
 
-    /// The owner stopped approving `kind` always: no card of it says so.
-    pub fn stop_approving_always(&mut self, kind: &serde_json::Value) {
-        for draft in self.turns.values_mut().flat_map(|t| &mut t.outgoing_drafts) {
-            if draft.kind.as_ref() == Some(kind) {
-                draft.approved_always = false;
-            }
-        }
+    /// The owner approves `draft`'s kind always.
+    pub fn approves_always(&self, draft: &OutgoingDraft) -> bool {
+        draft
+            .kind
+            .as_ref()
+            .is_some_and(|kind| self.draft_grants.contains(kind))
     }
 
     pub fn update_draft(&mut self, draft: OutgoingDraft) {
