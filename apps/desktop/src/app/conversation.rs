@@ -989,13 +989,19 @@ mod tests {
     }
 
     fn draft_page(status: &str, seq: i64, created_at: &str) -> Snapshot {
+        let items = json!([{"id": Uuid::from_u128(seq as u128), "seq": seq,
+            "turn_id": Uuid::from_u128(10), "kind": "assistant", "text": "Edward's reply",
+            "created_at": created_at}]);
+        serde_json::from_value(card_page(status, items, (seq > 1).then_some(seq))).unwrap()
+    }
+
+    fn card_page(status: &str, items: serde_json::Value, older: Option<i64>) -> serde_json::Value {
         let settled = status == "sent";
-        serde_json::from_value(json!({
+        json!({
             "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
             "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
-            "older_before_seq": if seq > 1 { Some(seq) } else { None },
-            "items": [{"id": Uuid::from_u128(seq as u128), "seq":seq, "turn_id":Uuid::from_u128(10),
-                "kind":"assistant", "text":"Edward's reply", "created_at":created_at}],
+            "older_before_seq": older,
+            "items": items,
             "turns": [{
                 "id":Uuid::from_u128(10), "request_id":Uuid::from_u128(110), "turn_no":1,
                 "provider_id":"codex", "status":if settled { "interrupted" } else { "waiting" },
@@ -1008,7 +1014,57 @@ mod tests {
                     "settled_at": if settled { Some("2026-11-01T00:00:01Z") } else { None }}]
             }],
             "activity":{"phase":"idle", "active_turn_id":null, "queued_count":0}
-        })).unwrap()
+        })
+    }
+
+    fn card_rows(page: serde_json::Value) -> Vec<(RowKey, Option<Uuid>)> {
+        request_rows(&Conversation::from_snapshot(serde_json::from_value(page).unwrap()).unwrap())
+    }
+
+    #[test]
+    fn a_draft_sent_by_a_turn_without_visible_items_follows_earlier_history() {
+        let earlier = json!([{"id": Uuid::from_u128(1), "seq": 1, "turn_id": Uuid::from_u128(20),
+            "kind": "user", "text": "Earlier request", "created_at": "2026-11-01T00:00:00Z"}]);
+        assert_eq!(
+            card_rows(card_page("sent", earlier, None)),
+            [(
+                RowKey::Draft(Uuid::from_u128(310)),
+                Some(Uuid::from_u128(1))
+            )]
+        );
+    }
+
+    #[test]
+    fn an_undated_item_does_not_pull_a_sent_draft_to_the_tail() {
+        let items = json!([
+            {"id": Uuid::from_u128(1), "seq": 1, "turn_id": Uuid::from_u128(10),
+                "kind": "assistant", "text": "Sent it.", "created_at": "2026-11-02T00:00:00Z"},
+            {"id": Uuid::from_u128(2), "seq": 2, "turn_id": Uuid::from_u128(20),
+                "kind": "user", "text": "Later request", "created_at": null},
+        ]);
+        assert_eq!(
+            card_rows(card_page("sent", items, None)),
+            [(
+                RowKey::Draft(Uuid::from_u128(310)),
+                Some(Uuid::from_u128(1))
+            )]
+        );
+    }
+
+    #[test]
+    fn settled_skill_installs_wait_for_their_history_page() {
+        let items = json!([{"id": Uuid::from_u128(2), "seq": 2, "turn_id": Uuid::from_u128(10),
+            "kind": "assistant", "text": "Installed.", "created_at": "2026-11-02T00:00:00Z"}]);
+        let mut page = card_page("pending", items, Some(2));
+        page["turns"][0]["outgoing_drafts"] = json!([]);
+        page["turns"][0]["skill_installs"] = json!([{"id": Uuid::from_u128(320),
+            "skill_id": "growth", "name": "growth", "description": "Analyze growth",
+            "reason": "Review the site", "source": {"url": "https://github.com/example/repo",
+                "repo": "example/repo", "path": "skills/growth", "commit": "a41c9e2ffff"},
+            "files": [], "env": [], "secret": "skill-growth", "status": "installed",
+            "scope": null, "key_stored": false, "created_at": "2026-11-01T00:00:00Z",
+            "settled_at": "2026-11-01T00:00:01Z"}]);
+        assert_eq!(card_rows(page), []);
     }
 
     #[test]
