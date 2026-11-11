@@ -830,3 +830,103 @@ async fn categories_and_assignments_survive_backup_and_restore() {
         2
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_database_only_backup_restores_without_touching_the_schedule() {
+    let _serial = SERIAL.lock().await;
+    let db = common::TestDb::migrated().await;
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let run = |args: &[&str]| {
+        let out = common::api_command(&db, &data, common::free_port())
+            .env("ELSE_MSB_BIN", data.join("unavailable-msb"))
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), text)
+    };
+    let (ok, out) = run(&["setup"]);
+    assert!(ok, "{out}");
+    let (ok, out) = run(&["help"]);
+    assert!(ok && out.contains("backup --database-only"), "{out}");
+    let (ok, out) = run(&["backup", "--database-only"]);
+    assert!(ok, "{out}");
+    let set = PathBuf::from(
+        out.lines()
+            .find_map(|l| l.strip_prefix("backup set: "))
+            .unwrap(),
+    );
+    let backups = data.join("backups");
+    assert_eq!(
+        set.parent().unwrap(),
+        backups.join(backup::BEFORE_UPDATE_DIR)
+    );
+    assert!(
+        backup::completed_sets(&backups).unwrap().is_empty(),
+        "the scheduled sets' folder stays empty, so the next scheduled set is still due"
+    );
+    let complete: backup::Completion =
+        serde_json::from_slice(&std::fs::read(set.join("complete.json")).unwrap()).unwrap();
+    assert!(!complete.whole_assistant);
+    assert!(out.contains("Database only"), "{out}");
+
+    let (ok, out) = run(&["backup", "--whole"]);
+    assert!(!ok && out.contains("usage:"), "{out}");
+
+    let mut conn = sqlx::SqliteConnection::connect(db.url.expose())
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    let job = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO guest_jobs (id, bot_id, command, status, deadline)
+         VALUES (?1, ?2, 'sleep 60', 'running', strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '+1 hours'))",
+    )
+    .bind(job)
+    .bind(Uuid::new_v4())
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    let (ok, out) = run(&["backup", "--database-only"]);
+    assert!(
+        !ok && out.contains("background jobs are still running"),
+        "{out}"
+    );
+    sqlx::query("DELETE FROM guest_jobs WHERE id = ?1")
+        .bind(job)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+
+    let app = TestApp::with_db(db);
+    let target = Target::new(&app);
+    let db = app.db.clone();
+    let out = common::api_command(&db, &data, common::free_port())
+        .args(["restore", set.to_str().unwrap(), &target.name])
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        rows(&target.url(), COMPARED[0]).await,
+        rows(db.url.expose(), COMPARED[0]).await
+    );
+}

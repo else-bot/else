@@ -495,6 +495,24 @@ async fn capture_into(
                 "turns are still active; start the API once so it reconciles them".into(),
             ));
         }
+        // Without the computers there is no per-computer lease check, and a
+        // restore releases every lease, so a still-running job could be
+        // stopped as idle afterwards.
+        if coordinator.computers.is_none() {
+            let jobs: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM guest_jobs
+                                WHERE status IN ('starting', 'running', 'cancelling'))",
+            )
+            .fetch_one(pool)
+            .await?;
+            if jobs {
+                return Err(BackupError::Deferred(
+                    "background jobs are still running in the bot computers; \
+                     let them finish or cancel them, then try again"
+                        .into(),
+                ));
+            }
+        }
     }
     let gate = match &coordinator.scheduler {
         Some(scheduler) => {

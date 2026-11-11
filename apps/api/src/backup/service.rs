@@ -366,7 +366,7 @@ impl Backups {
                 .bind(&destination_id).fetch_one(&self.pool).await
         };
         let latest = async {
-            sqlx::query_scalar::<_, i64>("SELECT ciphertext_bytes FROM backup_runs WHERE local_status = 'completed' AND ciphertext_bytes IS NOT NULL ORDER BY finished_at DESC LIMIT 1")
+            sqlx::query_scalar::<_, i64>("SELECT ciphertext_bytes FROM backup_runs WHERE local_status = 'completed' AND ciphertext_bytes IS NOT NULL ORDER BY coalesce(json_extract(coverage, '$.whole_assistant'), 0) DESC, finished_at DESC LIMIT 1")
                 .fetch_optional(&self.pool).await
         };
         let (history, totals, latest) = tokio::join!(history, totals, latest);

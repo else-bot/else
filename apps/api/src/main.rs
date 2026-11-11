@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 mod reset;
 
 const USAGE: &str = "usage: else-api [serve|setup|migrate|backup|version|context]\n       \
+else-api backup --database-only\n       \
 else-api restore <set-dir> <new-database-file> [<new-data-dir>]\n       \
 else-api restore-remote <set-id> <new-database-file> [<new-data-dir>]\n       \
 else-api upgrade-computer <bot-id> <image> [--network <profile>]\n       \
@@ -24,7 +25,9 @@ serve    apply pending migrations and run the API (default)\n  \
 setup    provision missing credentials, apply migrations, and create the main\n           \
 bot and default provider profiles once; never replaces existing state\n  \
 migrate  apply pending versioned migrations only\n  \
-backup   capture one encrypted database backup set now\n  \
+backup   capture one encrypted backup set now (the whole assistant when bot\n           \
+computers are available); --database-only captures just the database into\n           \
+the before-update folder, apart from the schedule and remote uploads\n  \
 restore  verify a backup set and restore it into new paths; new-data-dir is required for sets with shared MCPs, projects, computers, or files\n  \
 restore-remote  download a completed set from the configured bucket, then restore it\n  \
 upgrade-computer  move an existing bot computer to a new guest image, keeping its\n           \
@@ -83,6 +86,7 @@ fn main() -> ExitCode {
         "restore" | "restore-remote" => args.len() == 3 || args.len() == 4,
         "upgrade-computer" => args.len() == 3 || (args.len() == 5 && args[3] == "--network"),
         "rollback-computer" => args.len() == 2,
+        "backup" => args.len() == 1 || (args.len() == 2 && args[1] == "--database-only"),
         "reset" | "remove-state" => args.len() == 2 && args[1] == "--yes",
         _ => args.len() <= 1,
     };
@@ -92,7 +96,7 @@ fn main() -> ExitCode {
     }
     let result = match command {
         "serve" => run_serve(),
-        "backup" => run_backup(),
+        "backup" => run_backup(args.len() == 2),
         "restore" => run_restore(&args[1], &args[2], args.get(3).map(String::as_str)),
         "restore-remote" => run_restore_remote(&args[1], &args[2], args.get(3).map(String::as_str)),
         "upgrade-computer" => {
@@ -159,13 +163,31 @@ fn backup_parts(
 /// Capture one set now. The API must be stopped (its singleton lock is
 /// taken here), so the set covers the database and every bot computer at one
 /// checkpoint; a running API backs up on its own schedule.
-fn run_backup() -> anyhow::Result<()> {
+///
+/// `database_only` is the installer's rollback point before migrations. Its
+/// sets live in their own folder so they neither postpone the scheduled
+/// whole-assistant set nor count toward its retention, and are never uploaded.
+fn run_backup(database_only: bool) -> anyhow::Result<()> {
     let config = load_config()?;
     let _lock = lock(&config)
         .context("the API is running; it backs up on its schedule (or stop it first)")?;
     let (params, key) = backup_parts(&config)?;
     runtime()?.block_on(async {
         let pool = database(&config).await?;
+        if database_only {
+            let mut backup = config.backup.clone();
+            backup.dir = backup.dir.join(else_api::backup::BEFORE_UPDATE_DIR);
+            let summary = else_api::backup::worker::BackupWorker::new(pool, params, key, backup)
+                .with_coordinator(else_api::backup::capture::Coordinator {
+                    exclusive: true,
+                    ..Default::default()
+                })
+                .run_local_until(&CancellationToken::new())
+                .await?;
+            println!("backup set: {}", summary.path.display());
+            println!("coverage: {}", summary.manifest.coverage.note);
+            return Ok(());
+        }
         let computers = match else_api::computers::runtime::Msb::detect(
             &config.data_dir,
             config.msb_bin.clone(),
