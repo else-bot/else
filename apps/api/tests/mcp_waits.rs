@@ -29,7 +29,9 @@ for line in sys.stdin:
     elif m['method'] == 'tools/call':
         open(state + '.calls', 'a').write(m['params']['name'] + '\n')
         work = open(state).read().strip()
-        r = {'content':[{'type':'text','text':json.dumps({'taskId': m['params']['arguments']['taskId'], 'workState': work, 'summary': 'Opened PR #775' if work == 'result_available' else None})}]}
+        body = {'taskId': m['params']['arguments']['taskId'], 'workState': work, 'summary': 'Opened PR #775' if work == 'result_available' else None}
+        if work == 'unreadable': body = {'taskId': body['taskId'], 'error': 'upstream schema changed'}
+        r = {'content':[{'type':'text','text':json.dumps(body)}]}
     else: r = {}
     print(json.dumps({'jsonrpc':'2.0','id':m['id'],'result':r}), flush=True)
 "#;
@@ -179,6 +181,52 @@ async fn a_request_waiting_on_a_running_mcp_job_continues_by_itself_when_it_fini
     let done = text(&tool(&app, &token, "mcp_wait", wait_args()).await);
     assert_eq!(done["status"], "finished", "{done}");
     assert_eq!(done["result"]["content"][0]["type"], "text");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_status_that_cannot_be_read_never_counts_as_the_job_finishing() {
+    let (app, synthetic) = harness().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("job");
+    std::fs::write(&state, "working").unwrap();
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main).await;
+    text(&tool(&app, &token, "mcp_install", install(&state)).await);
+
+    let mut misspelled = wait_args();
+    misspelled["status_pointer"] = json!("/work_state");
+    let refused = tool(&app, &token, "mcp_wait", misspelled).await;
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert!(
+        refused.to_string().contains("UNREADABLE_STATUS"),
+        "{refused}"
+    );
+    assert!(refused.to_string().contains("/work_state"), "{refused}");
+
+    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
+    settle(&app, turn, "waiting").await;
+    std::fs::write(&state, "unreadable").unwrap();
+    check_now(&app).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let (status, _, checks) = wait_row(&app, turn).await;
+    assert_eq!(
+        (status.as_str(), checks),
+        ("pending", 2),
+        "one unreadable status keeps waiting"
+    );
+    assert_eq!(attempts(&app, turn).await, 1);
+
+    for _ in 0..2 {
+        check_now(&app).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    settle(&app, turn, "completed").await;
+    let (status, delivered, checks) = wait_row(&app, turn).await;
+    assert_eq!((status.as_str(), delivered, checks), ("failed", Some(2), 4));
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(packet.contains("status=\"failed\""), "{packet}");
+    assert!(packet.contains("UNREADABLE_STATUS"), "{packet}");
+    assert!(packet.contains("upstream schema changed"), "{packet}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
