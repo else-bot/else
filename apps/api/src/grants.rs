@@ -40,6 +40,10 @@ pub enum Tool {
     RequestSecret,
     /// Ask the owner a question or for permission (owner conversations only).
     AskOwner,
+    /// Draft an email for the owner's approval card and send an approved
+    /// draft (`send_draft` also needs its channel's Mail or Social): owner
+    /// work, and mail events, whose drafts the owner reviews.
+    DraftEmail,
     /// Check a host action against the owner's approvals; the gate decides
     /// whether this turn may use a saved grant or show a card.
     AskPermission,

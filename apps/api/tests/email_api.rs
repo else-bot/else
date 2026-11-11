@@ -945,6 +945,10 @@ async fn mail_event_origin_removes_computer_and_delegation_authority() {
     let (_, token) = h.started(turn).await;
     let grant = h.app.scheduler.grants().resolve(&token).await.unwrap();
     assert!(grant.allows(Tool::Mail));
+    assert!(
+        grant.allows(Tool::DraftEmail),
+        "the owner reviews its drafts"
+    );
     for forbidden in [
         Tool::Computer,
         Tool::Delegate,
@@ -970,8 +974,8 @@ async fn mail_event_origin_removes_computer_and_delegation_authority() {
         "a standing send permission still sends"
     );
     for name in [
-        "draft_email",
-        "send_draft",
+        "ask_owner",
+        "confirm_draft_approval",
         "mail_trigger_set",
         "mail_trigger_delete",
         "mcp_list",

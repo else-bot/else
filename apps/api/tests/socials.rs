@@ -862,7 +862,7 @@ async fn owner_credentials_task_authority_and_approved_native_send_stay_separate
             bot,
             conversation,
             turn,
-            vec![Tool::Social, Tool::AskOwner],
+            vec![Tool::Social, Tool::AskOwner, Tool::DraftEmail],
             Duration::from_secs(300),
         )
         .await;
@@ -922,7 +922,7 @@ async fn owner_credentials_task_authority_and_approved_native_send_stay_separate
             bot,
             conversation,
             turn,
-            vec![Tool::Social, Tool::AskOwner],
+            vec![Tool::Social, Tool::AskOwner, Tool::DraftEmail],
             Duration::from_secs(300),
         )
         .await;
@@ -982,7 +982,12 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
             bot,
             conversation,
             turn,
-            vec![Tool::Social, Tool::Routines, Tool::AskOwner],
+            vec![
+                Tool::Social,
+                Tool::Routines,
+                Tool::AskOwner,
+                Tool::DraftEmail,
+            ],
             Duration::from_secs(300),
         )
     };
