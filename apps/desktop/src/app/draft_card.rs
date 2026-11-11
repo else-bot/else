@@ -139,7 +139,7 @@ impl ElseApp {
             .and_then(|bot| self.pending.get(&bot))
             .is_some_and(|list| {
                 list.iter().any(|pending| {
-                    pending.rejected.is_none()
+                    !pending.is_rejected()
                         && pending.open_draft.as_ref().is_some_and(|a| a.id == id)
                 })
             })

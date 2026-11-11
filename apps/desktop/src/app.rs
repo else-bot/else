@@ -18,6 +18,7 @@ mod link_target;
 mod mentions;
 mod message_menu;
 mod message_row;
+mod pending_send;
 mod question_card;
 mod quotes;
 mod reading;
@@ -37,6 +38,7 @@ use categories::CategoryFormHolder;
 use conversation::{ConversationView, RowKey};
 use create_bot::CreateFormHolder;
 use dialogs::Welcome;
+use pending_send::{Failure, Lookup, PendingSend};
 use reply::Draft;
 use settings::{BotSettings, ModelDialog};
 
@@ -44,7 +46,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::*;
 use uuid::Uuid;
@@ -247,19 +248,6 @@ pub enum Connection {
     Disconnected(String),
     /// Retrying will not help until the token is fixed.
     InvalidCredentials(String),
-}
-
-#[derive(Debug, Clone)]
-struct PendingSend {
-    request_id: Uuid,
-    text: String,
-    parts: Vec<crate::attachments::MessagePart>,
-    sent_at: DateTime<Utc>,
-    provider_id: Option<String>,
-    reaction: Option<Reaction>,
-    open_draft: Option<crate::model::DraftAttachment>,
-    unknown: Option<String>,
-    rejected: Option<String>,
 }
 
 pub struct ElseApp {
@@ -713,88 +701,69 @@ impl ElseApp {
             cx.notify();
             return false;
         }
-        let pending = PendingSend {
-            request_id: Uuid::new_v4(),
-            text,
-            parts,
-            sent_at: Utc::now(),
-            provider_id: None,
-            reaction,
-            open_draft: if reaction.is_none() {
-                self.outgoing_attachment(cx)
-            } else {
-                None
-            },
-            unknown: None,
-            rejected: None,
+        let open_draft = if reaction.is_none() {
+            self.outgoing_attachment(cx)
+        } else {
+            None
         };
+        let pending = PendingSend::new(text, parts, reaction, open_draft);
+        let request = pending.request();
         self.notice = None;
-        self.pending.entry(bot).or_default().push(pending.clone());
+        self.pending.entry(bot).or_default().push(pending);
         self.sync_rows(window, cx);
-        self.submit(bot, pending, window, cx);
+        self.submit(bot, request, window, cx);
         true
     }
 
     fn submit(
         &mut self,
         bot: Uuid,
-        pending: PendingSend,
+        request: crate::api::SendRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let client = self.client.clone();
+        let request_id = request.request_id;
         cx.spawn_in(window, async move |this, cx| {
-            let result = client
-                .send(
-                    bot,
-                    crate::api::SendRequest {
-                        request_id: pending.request_id,
-                        text: pending.text.clone(),
-                        provider_id: pending.provider_id.clone(),
-                        reaction: pending.reaction,
-                        parts: pending.parts.clone(),
-                        open_draft: pending.open_draft.clone(),
-                    },
-                )
-                .await;
+            let result = client.send(bot, request).await;
             let _ = this.update_in(cx, |app, window, cx| {
-                app.apply_send(bot, pending, result, window, cx)
+                app.apply_send(bot, request_id, result, window, cx)
             });
         })
         .detach();
     }
 
+    fn pending_mut(&mut self, bot: Uuid, request_id: Uuid) -> Option<&mut PendingSend> {
+        self.pending
+            .get_mut(&bot)
+            .and_then(|list| list.iter_mut().find(|p| p.request_id == request_id))
+    }
+
     fn apply_send(
         &mut self,
         bot: Uuid,
-        pending: PendingSend,
+        request_id: Uuid,
         result: Result<Sent, ClientError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match result {
-            Ok(sent) => self.accept_sent(bot, sent, window, cx),
-            Err(err) if err.outcome_unknown() => {
-                if let Some(p) = self
-                    .pending
-                    .get_mut(&bot)
-                    .and_then(|list| list.iter_mut().find(|p| p.request_id == pending.request_id))
-                {
-                    p.unknown = Some(err.to_string());
-                }
-                cx.notify();
-            }
-            Err(err) => {
-                if let Some(p) = self
-                    .pending
-                    .get_mut(&bot)
-                    .and_then(|list| list.iter_mut().find(|p| p.request_id == pending.request_id))
-                {
-                    p.unknown = None;
-                    p.rejected = Some(err.to_string());
-                }
-                self.sync_rows(window, cx);
-            }
+        let err = match result {
+            Ok(sent) => return self.accept_sent(bot, sent, window, cx),
+            Err(err) => err,
+        };
+        let unknown = err.outcome_unknown();
+        let failure = if unknown {
+            Failure::Unknown(err.to_string())
+        } else {
+            Failure::Rejected(err.to_string())
+        };
+        if let Some(pending) = self.pending_mut(bot, request_id) {
+            pending.on_send_failure(failure);
+        }
+        if unknown {
+            cx.notify();
+        } else {
+            self.sync_rows(window, cx);
         }
     }
 
@@ -815,47 +784,50 @@ impl ElseApp {
     }
 
     fn resolve_unknown_sends(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        for (bot, list) in &self.pending {
-            for pending in list.iter().filter(|p| p.unknown.is_some()) {
-                let (client, bot, request_id) = (client.clone(), *bot, pending.request_id);
-                cx.spawn_in(window, async move |this, cx| {
-                    let found = client.by_request(bot, request_id).await;
-                    let _ = this.update_in(cx, |app, window, cx| match found {
-                        Ok(Some(sent)) => app.accept_sent(bot, sent, window, cx),
-                        Ok(None) => app.retry_pending_for(bot, request_id, window, cx),
-                        Err(_) => {}
-                    });
-                })
-                .detach();
+        let mut lookups = Vec::new();
+        for (bot, list) in &mut self.pending {
+            for pending in list.iter_mut() {
+                if pending.begin_resolution() {
+                    lookups.push((*bot, pending.request_id));
+                }
             }
+        }
+        if !lookups.is_empty() {
+            cx.notify();
+        }
+        for (bot, request_id) in lookups {
+            let client = self.client.clone();
+            cx.spawn_in(window, async move |this, cx| {
+                let found = client.by_request(bot, request_id).await;
+                let _ = this.update_in(cx, |app, window, cx| {
+                    let lookup = match found {
+                        Ok(Some(sent)) => return app.accept_sent(bot, sent, window, cx),
+                        Ok(None) => Lookup::Missing,
+                        Err(_) => Lookup::Failed,
+                    };
+                    let resend = app
+                        .pending_mut(bot, request_id)
+                        .and_then(|pending| pending.on_lookup(lookup));
+                    cx.notify();
+                    if let Some(request) = resend {
+                        app.submit(bot, request, window, cx);
+                    }
+                });
+            })
+            .detach();
         }
     }
 
     fn retry_pending(&mut self, request_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(bot) = self.selected {
-            self.retry_pending_for(bot, request_id, window, cx);
-        }
-    }
-
-    fn retry_pending_for(
-        &mut self,
-        bot: Uuid,
-        request_id: Uuid,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(pending) = self
-            .pending
-            .get_mut(&bot)
-            .and_then(|list| list.iter_mut().find(|p| p.request_id == request_id))
+        let Some(bot) = self.selected else { return };
+        let Some(request) = self
+            .pending_mut(bot, request_id)
+            .and_then(PendingSend::retry)
         else {
             return;
         };
-        pending.unknown = None;
-        let pending = pending.clone();
         cx.notify();
-        self.submit(bot, pending, window, cx);
+        self.submit(bot, request, window, cx);
     }
 
     fn take_rejected(
@@ -871,7 +843,7 @@ impl ElseApp {
         };
         let Some(ix) = list
             .iter()
-            .position(|p| p.request_id == request_id && p.rejected.is_some())
+            .position(|p| p.request_id == request_id && p.is_rejected())
         else {
             return;
         };
