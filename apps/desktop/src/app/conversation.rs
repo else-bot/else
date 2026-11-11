@@ -152,11 +152,10 @@ pub(super) fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
                         c.question_anchor(turn.id, None),
                     )
                 })
-                .chain(turn.skill_installs.iter().map(move |install| {
-                    (
-                        RowKey::SkillInstall(install.id),
-                        c.question_anchor(turn.id, install.settled_at),
-                    )
+                .chain(turn.skill_installs.iter().filter_map(move |install| {
+                    let anchor = c.question_anchor(turn.id, install.settled_at);
+                    (install.settled_at.is_none() || anchor.is_some())
+                        .then_some((RowKey::SkillInstall(install.id), anchor))
                 }))
                 .chain(turn.questions.iter().filter_map(move |question| {
                     let anchor = c.question_anchor(turn.id, question.settled_at);
