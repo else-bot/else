@@ -506,8 +506,14 @@ fn outcomes_without_social(input: &TurnInput) -> String {
             .iter()
             .map(|file| format!("Returned {}\n", file_reference(file)))
             .collect();
+        let result = match (outcome.result.as_deref(), outcome.error.as_deref()) {
+            (Some(result), Some(error)) => format!("Result: {result}\nError: {error}\n"),
+            (Some(result), None) => format!("Result: {result}\n"),
+            (None, Some(error)) => format!("Error: {error}\n"),
+            (None, None) => "Result: (no text)\n".to_owned(),
+        };
         text.push_str(&format!(
-            "<task id=\"{}\" bot=\"{}\" bot_id=\"{}\" status=\"{}\"{}>\nTask: {}\nResult: {}\n{files}</task>\n",
+            "<task id=\"{}\" bot=\"{}\" bot_id=\"{}\" status=\"{}\"{}>\nTask: {}\n{result}{files}</task>\n",
             outcome.id,
             outcome.target_name,
             outcome.target_bot_id,
@@ -518,11 +524,6 @@ fn outcomes_without_social(input: &TurnInput) -> String {
                 ""
             },
             outcome.task,
-            outcome
-                .result
-                .as_deref()
-                .or(outcome.error.as_deref())
-                .unwrap_or("(no text)"),
         ));
     }
     text.push('\n');
@@ -1444,6 +1445,30 @@ mod tests {
         assert!(
             !packet.contains(&input.text),
             "a resumed session already has the message"
+        );
+    }
+
+    #[test]
+    fn a_failed_result_keeps_its_error_beside_the_progress() {
+        let mut input = crate::providers::cli::session::tests::input();
+        input.delegation.outcomes = vec![crate::app::providers::DelegationOutcome {
+            id: uuid::Uuid::nil(),
+            target_bot_id: uuid::Uuid::nil(),
+            target_name: "Scout".into(),
+            task: "Run the pipeline three times.".into(),
+            status: "failed".into(),
+            result: Some("Run 1 done. Started run 2.".into()),
+            error: Some("turn_deadline: Stopped at the 30-minute attempt limit.".into()),
+            files: Vec::new(),
+            earlier_request: false,
+        }];
+        let block = super::outcomes_block(&input);
+        assert!(
+            block.contains(
+                "Result: Run 1 done. Started run 2.\n\
+                 Error: turn_deadline: Stopped at the 30-minute attempt limit.\n"
+            ),
+            "{block}"
         );
     }
 

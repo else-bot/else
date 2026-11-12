@@ -172,6 +172,9 @@ pub struct BotReply {
     pub sender_name: String,
     pub prompt: String,
     pub status: String,
+    /// Why a failed task failed, apart from the progress it wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -222,7 +225,10 @@ pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kin
          FROM delegations d JOIN bots b ON b.id = d.parent_bot_id WHERE d.child_turn_id = i.turn_id)
     END AS bot_task,
     CASE WHEN i.kind = 'status' AND i.conversation_id = t.conversation_id THEN
-        (SELECT json_object('sender_bot_id', lower(hex(d.target_bot_id)), 'sender_name', b.name, 'prompt', d.task, 'status', d.status)
+        (SELECT json_object('sender_bot_id', lower(hex(d.target_bot_id)), 'sender_name', b.name, 'prompt', d.task, 'status', d.status,
+                'reason', CASE WHEN d.status = 'failed' THEN
+                    (SELECT nullif(c.error_message, '') FROM turns c
+                     WHERE c.id = coalesce(d.takeover_turn_id, d.child_turn_id)) END)
          FROM delegations d JOIN bots b ON b.id = d.target_bot_id WHERE d.id = i.id)
     END AS bot_reply, coalesce(i.parts, i.assistant_parts) AS parts, i.routine_update,
     i.bot_created, i.rules_update";

@@ -1918,6 +1918,85 @@ async fn a_failed_child_shows_its_error_once_however_often_it_is_settled() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_child_stopped_by_the_attempt_limit_names_the_limit_apart_from_its_progress() {
+    let db = TestDb::migrated().await;
+    let (main, root, child, delegation) = seed(&db).await;
+    let progress = "Routine paused. Now the computer state.";
+    let (target, conversation, seq): (Uuid, Uuid, i64) = sqlx::query_as(
+        "SELECT t.bot_id, c.id, c.last_item_seq + 1 FROM turns t
+         JOIN conversations c ON c.bot_id = t.bot_id AND c.kind = 'owner' WHERE t.id = ?1",
+    )
+    .bind(child)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+         VALUES (?1, ?2, ?3, ?4, 'assistant', ?5)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(conversation)
+    .bind(seq)
+    .bind(child)
+    .bind(progress)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE conversations SET last_item_seq = ?2 WHERE id = ?1")
+        .bind(conversation)
+        .bind(seq)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let else_api::app::providers::TurnOutcome::Failed { code, message } =
+        else_api::providers::cli::attempt::deadline_failure()
+    else {
+        panic!("the deadline fails the turn");
+    };
+    sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
+        .bind(child)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE turns SET status = 'failed', error_code = ?2, error_message = ?3 WHERE id = ?1",
+    )
+    .bind(child)
+    .bind(&code)
+    .bind(&message)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let mut tx = db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    else_api::db::events::turn_changed(&mut tx, target, child)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let snapshot = else_api::db::conversation::snapshot(&db.pool, main, 50, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let shown = snapshot.items.iter().find(|i| i.id == delegation).unwrap();
+    let reply = shown.bot_reply.as_ref().unwrap();
+    assert_eq!(reply.status, "failed");
+    assert_eq!(shown.text, progress, "the progress stays the reply text");
+    assert_eq!(reply.reason.as_deref(), Some(message.as_str()));
+    assert!(message.contains("30-minute attempt limit"), "{message}");
+
+    let mut conn = db.pool.acquire().await.unwrap();
+    let outcomes = else_api::db::delegations::undelivered(&mut conn, root)
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].result.as_deref(), Some(progress));
+    assert_eq!(
+        outcomes[0].error.as_deref(),
+        Some(format!("turn_deadline: {message}").as_str())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_cancelled_child_keeps_its_partial_reply_and_an_empty_one_shows_empty() {
     let db = TestDb::migrated().await;
     let (main, root, child, _) = seed(&db).await;
