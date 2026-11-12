@@ -267,28 +267,43 @@ impl ElseApp {
         ] {
             for id in ids {
                 let item = conversation.item(*id)?;
-                let (name, text) = match (&item.bot_task, me) {
+                let (name, reason, text) = match (&item.bot_task, me) {
                     (Some(_), Some(me)) => (
                         me.name.as_str(),
                         conversation
                             .turn(item.turn_id)
-                            .and_then(|turn| turn.error.as_ref()?.message.as_deref())
-                            .unwrap_or_default(),
+                            .and_then(|turn| turn.error.as_ref()?.message.as_deref()),
+                        "",
                     ),
-                    _ => (exchange_sender(item)?.1, item.text.as_str()),
+                    _ => (
+                        exchange_sender(item)?.1,
+                        item.bot_reply.as_ref().and_then(|r| r.reason.as_deref()),
+                        item.text.as_str(),
+                    ),
                 };
-                let detail = text
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("No reply text.");
+                let (reason, reply) = note_lines(reason, text);
                 noted = true;
                 notes = notes.child(
                     v_flex()
                         .gap_1()
                         .text_xs()
-                        .text_color(color)
-                        .child(format!("{name} · {label}"))
-                        .child(div().line_clamp(2).child(detail.to_owned())),
+                        .child(div().text_color(color).child(format!("{name} · {label}")))
+                        .when_some(reason, |note, reason| {
+                            note.child(
+                                div()
+                                    .line_clamp(2)
+                                    .text_color(color)
+                                    .child(reason.to_owned()),
+                            )
+                        })
+                        .when_some(reply, |note, reply| {
+                            note.child(
+                                div()
+                                    .line_clamp(2)
+                                    .text_color(theme.muted_foreground)
+                                    .child(reply.to_owned()),
+                            )
+                        }),
                 );
             }
         }
@@ -314,6 +329,18 @@ impl ElseApp {
             });
         }
         Some(card.into_any_element())
+    }
+}
+
+/// A failed or stopped reply's note: the reason it ended, styled as the
+/// outcome, and the first line of what it wrote, styled as plain text.
+fn note_lines<'a>(reason: Option<&'a str>, text: &'a str) -> (Option<&'a str>, Option<&'a str>) {
+    let first = |text: &'a str| text.lines().map(str::trim).find(|line| !line.is_empty());
+    let reason = reason.and_then(first);
+    let reply = first(text).filter(|line| Some(*line) != reason);
+    match (reason, reply) {
+        (None, None) => (None, Some("No reply text.")),
+        lines => lines,
     }
 }
 
@@ -461,5 +488,35 @@ impl ElseApp {
             )
             .children(stamp.map(|at| div().text_xs().text_color(theme.muted_foreground).child(at)))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::note_lines;
+
+    /// Issue #314: progress must not read as the failure.
+    #[test]
+    fn a_failure_reason_stays_apart_from_the_progress_it_wrote() {
+        assert_eq!(
+            note_lines(
+                Some("Stopped at the 30-minute attempt limit."),
+                "Routine paused.\nNow the computer state."
+            ),
+            (
+                Some("Stopped at the 30-minute attempt limit."),
+                Some("Routine paused.")
+            )
+        );
+        assert_eq!(
+            note_lines(Some("no input"), "no input"),
+            (Some("no input"), None),
+            "a reply that only repeats the reason shows once"
+        );
+        assert_eq!(
+            note_lines(None, "Half of the form"),
+            (None, Some("Half of the form"))
+        );
+        assert_eq!(note_lines(None, " "), (None, Some("No reply text.")));
     }
 }

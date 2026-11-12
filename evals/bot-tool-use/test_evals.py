@@ -190,6 +190,10 @@ def run(runner):
                     "Research recommended a timed harvester with checkpoints. That fix has not been "
                     "built or tested.",
                     "Not acted on: harvest."),
+                "timed-out-task-reports-the-limit-and-kept-work": (
+                    [], "Research hit the 30-minute attempt limit during run 2. Run 1 finished with "
+                        "41 profiles and 6 drafts, and run 2 may still be running as job 7f3c.",
+                    "Research crashed, so the pipeline test failed."),
                 "routine-task-drafts-post-for-approval": (
                     [self.call("draft_message", {"platform": "x",
                                                  "body": "A whale just opened a $40M BTC short on Hyperliquid at 10x."},

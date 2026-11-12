@@ -159,6 +159,10 @@ pub struct BotReply {
     pub sender_name: String,
     pub prompt: String,
     pub status: BotReplyStatus,
+    /// Why a failed task failed, apart from the progress it wrote. Absent
+    /// from older servers.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

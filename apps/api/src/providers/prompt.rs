@@ -506,8 +506,14 @@ fn outcomes_without_social(input: &TurnInput) -> String {
             .iter()
             .map(|file| format!("Returned {}\n", file_reference(file)))
             .collect();
+        let result = match (outcome.result.as_deref(), outcome.error.as_deref()) {
+            (Some(result), Some(error)) => format!("Result: {result}\nError: {error}\n"),
+            (Some(result), None) => format!("Result: {result}\n"),
+            (None, Some(error)) => format!("Error: {error}\n"),
+            (None, None) => "Result: (no text)\n".to_owned(),
+        };
         text.push_str(&format!(
-            "<task id=\"{}\" bot=\"{}\" bot_id=\"{}\" status=\"{}\"{}>\nTask: {}\nResult: {}\n{files}</task>\n",
+            "<task id=\"{}\" bot=\"{}\" bot_id=\"{}\" status=\"{}\"{}>\nTask: {}\n{result}{files}</task>\n",
             outcome.id,
             outcome.target_name,
             outcome.target_bot_id,
@@ -518,11 +524,6 @@ fn outcomes_without_social(input: &TurnInput) -> String {
                 ""
             },
             outcome.task,
-            outcome
-                .result
-                .as_deref()
-                .or(outcome.error.as_deref())
-                .unwrap_or("(no text)"),
         ));
     }
     text.push('\n');
