@@ -70,6 +70,13 @@ def run(runner):
             self.assertTrue(self.passed({}, [self.call("memory_read", result={"nested": {"parked": True}}),
                                              self.call("memory_read")]))
             self.assertFalse(self.passed({}, [{"name": "use_tool", "result": mock.tool_result("error", True)}]))
+            refused = {"name": "delegate", "arguments": {}, "result": mock.tool_result("NOT_ALLOWED", True)}
+            self.assertTrue(self.passed({"errors": ["delegate"]}, [refused]))
+            self.assertFalse(self.passed({"errors": ["delegate"]}, [refused, {**refused, "name": "council"}]))
+            with tempfile.TemporaryDirectory() as temp:
+                case = {"setup": {"mocks": [{"name": "delegate", "error": True, "result": {"error": "NOT_ALLOWED"}}]}}
+                server = mock.Server(self.context(), case, Path(temp) / "log")
+                self.assertTrue(server.dispatch("delegate", {})["isError"])
 
         def test_baseline_excludes_errors(self):
             self.assertEqual(runner.rates([
@@ -167,6 +174,22 @@ def run(runner):
                 "carried-result-keeps-current-request-status": (
                     [], "Issue https://github.com/else-bot/else/issues/260 is filed, as I said. Twitter saved draft 7 without the chart; it is not posted.",
                     "Twitter saved draft 7 without the chart; it is not posted."),
+                "task-result-handoff-is-delegated": (
+                    [self.call("delegate", {"target_bot_id": "00000000-0000-0000-0000-000000000005",
+                                            "task": "Implement ENG-412: skip removed products in CartService.total."},
+                               {"status": "pending", "parked": True})],
+                    "Research filed ENG-412; I handed the fix to GitHub."),
+                "task-names-follow-up-for-delegating-bot": (
+                    [{"name": "delegate", "arguments": {"target_bot_id": "00000000-0000-0000-0000-000000000005"},
+                      "result": mock.tool_result({"error": "NOT_ALLOWED"}, True)}], "Fix: skip removed products in CartService.total. Follow-up for GitHub "
+                        "(bot_id 00000000-0000-0000-0000-000000000005): implement ENG-412.",
+                    "I could not delegate, so the ENG-412 handoff is pending."),
+                "routine-task-drafts-post-for-approval": (
+                    [self.call("draft_message", {"platform": "x",
+                                                 "body": "A whale just opened a $40M BTC short on Hyperliquid at 10x."},
+                               {"status": "pending", "parked": True})],
+                    "The post waits for your approval on the card.",
+                    "I cannot ask the owner from this task, so I did not draft the post."),
                 "blocked-screen-hands-off": ([self.call("computer_browser", {"action": "open", "url": "https://x.com/messages"}),
                                              self.call("computer_screenshot", {"share": True}),
                                              self.call("computer_handoff", {"reason": "X Chat is blank at x.com/messages."})],

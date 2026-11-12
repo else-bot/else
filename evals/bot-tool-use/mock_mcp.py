@@ -114,13 +114,13 @@ class Server:
             return tool_result(f"{key} exceeds maxLength {schema['inputSchema']['properties'][key]['maxLength']}.", True)
         call = {"name": name, "arguments": arguments}
         for mock in self.mocks:
-            if matches(call, {k: v for k, v in mock.items() if k != "result"}):
+            if matches(call, {k: v for k, v in mock.items() if k not in ("result", "error")}):
                 result = dict(mock["result"]) if isinstance(mock["result"], dict) else mock["result"]
                 # Production's with_next: a parked result without guidance gets the default.
                 if (isinstance(result, dict) and result.get("parked") is True and "next" not in result
                         and name in self.context.get("parking_tools", ())):
                     result["next"] = self.context.get("parked_next", "")
-                return tool_result(result)
+                return tool_result(result, mock.get("error", False))
         return tool_result({"status": "ok"})
 
     def handle(self, message):
