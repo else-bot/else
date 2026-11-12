@@ -2310,3 +2310,98 @@ async fn the_delegating_turn_hears_a_tasks_progress_while_its_message_streams() 
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_routes_follow_up_work_through_the_bot_that_delegated_it() {
+    use common::recorder::{GATE_EVERY_ATTEMPT, harness, tool};
+    let h = harness(2).await;
+    let main = h.app.main_bot().await;
+    let (manager, dev) = tokio::join!(h.app.create_bot("Manager"), h.app.create_bot("Dev"));
+    let main_name: String = sqlx::query_scalar("SELECT name FROM bots WHERE id = ?1")
+        .bind(main.parse::<Uuid>().unwrap())
+        .fetch_one(&h.app.db.pool)
+        .await
+        .unwrap();
+    let to_dev = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM delegations WHERE target_bot_id = ?1")
+            .bind(dev.parse::<Uuid>().unwrap())
+            .fetch_one(&h.app.db.pool)
+            .await
+            .unwrap()
+    };
+
+    let (root, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let triage = tool(
+        &h.app,
+        &token,
+        "delegate",
+        json!({ "target_bot_id": manager,
+                "task": "[gate] Triage the checkout 500s; the fix goes to Dev." }),
+    )
+    .await;
+    assert_eq!(triage.result["status"], "pending", "{}", triage.body);
+    let task: Uuid =
+        sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
+            .bind(root)
+            .fetch_one(&h.app.db.pool)
+            .await
+            .unwrap();
+    h.release(root).await;
+
+    let (_, task_token) = h.started(task).await;
+    let refused = tool(
+        &h.app,
+        &task_token,
+        "delegate",
+        json!({ "target_bot_id": dev, "task": "Implement the checkout fix." }),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::OK, "{}", refused.body);
+    assert!(refused.error, "{}", refused.body);
+    assert!(
+        refused.result["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("NOT_ALLOWED"),
+        "{}",
+        refused.body
+    );
+    let next = refused.result["next"].as_str().unwrap();
+    assert!(
+        next.contains("bot_id") && next.contains(&main_name),
+        "{next}"
+    );
+    assert_eq!(to_dev().await, 0, "a task stays one hop");
+    h.release(task).await;
+
+    let follow_up = json!({ "target_bot_id": dev,
+                            "task": "Implement the checkout fix Manager's triage found." });
+    let token = h.continued(root, &token).await;
+    let started = tool(&h.app, &token, "delegate", follow_up.clone()).await;
+    assert_eq!(started.result["status"], "pending", "{}", started.body);
+    assert_eq!(to_dev().await, 1);
+    h.release(root).await;
+
+    let token = h.continued(root, &token).await;
+    let repeated = tool(&h.app, &token, "delegate", follow_up).await;
+    assert_eq!(
+        (
+            repeated.result["status"].as_str(),
+            repeated.result["task_id"].clone()
+        ),
+        (Some("completed"), started.result["task_id"].clone()),
+        "the follow-up starts once: {}",
+        repeated.body
+    );
+    assert_eq!(to_dev().await, 1);
+    let blocked = tool(
+        &h.app,
+        &token,
+        "delegate",
+        json!({ "target_bot_id": manager, "task": "Triage the next incident." }),
+    )
+    .await;
+    assert_eq!(blocked.code(), "BUDGET_EXHAUSTED", "{}", blocked.body);
+    h.release(root).await;
+    wait_status(&h.app, root, "completed").await;
+}
