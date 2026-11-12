@@ -266,7 +266,7 @@ fn worker(s: &Setup, drain: Duration) -> BackupWorker {
             dir: s.dir.path().join("backups"),
             keep: 7,
             max_bytes: 1 << 30,
-            interval: Duration::from_secs(3600),
+            cadence: else_api::backup::capture::Cadence::Every(Duration::from_secs(3600)),
         },
     )
     .with_coordinator(Coordinator {
@@ -552,7 +552,10 @@ async fn the_gate_refuses_changes_and_desktop_wakes_while_closed() {
         .app
         .scheduler
         .gate()
-        .close(Duration::from_secs(1))
+        .close(
+            Duration::from_secs(1),
+            else_api::maintenance::Pause::backup(None),
+        )
         .await
         .unwrap()
         .unwrap();
@@ -562,11 +565,28 @@ async fn the_gate_refuses_changes_and_desktop_wakes_while_closed() {
         .await;
     assert_eq!(
         send.status,
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        axum::http::StatusCode::ACCEPTED,
         "{:?}",
         send.body
     );
-    assert_eq!(send.body["error"]["code"], "maintenance");
+    assert_eq!(
+        send.body["turn"]["status"], "queued",
+        "a message waits for the backup"
+    );
+    let queued = send.body["turn"]["id"].as_str().unwrap().to_owned();
+    let rename = s
+        .app
+        .owner(
+            "PATCH",
+            &format!("/v1/bots/{bot}"),
+            Some(json!({ "name": "Renamed during backup" })),
+        )
+        .await;
+    assert_eq!(
+        rename.body["error"]["code"], "maintenance",
+        "{:?}",
+        rename.body
+    );
     let desktop = s
         .app
         .owner("GET", &format!("/v1/bots/{bot}/desktop"), None)
@@ -589,6 +609,70 @@ async fn the_gate_refuses_changes_and_desktop_wakes_while_closed() {
         .send(&bot, Uuid::new_v4(), "after backup", Some("synthetic"))
         .await;
     assert!(send.status.is_success());
+    assert_eq!(
+        s.app
+            .wait_turn(&queued, &["interrupted", "cancelled"])
+            .await,
+        "interrupted",
+        "the newer message supersedes the queued one"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_sent_during_a_backup_queues_behind_the_running_turn() {
+    let s = setup().await;
+    let bot = s.app.main_bot().await;
+    let first = s
+        .app
+        .send(
+            &bot,
+            Uuid::new_v4(),
+            "[synthetic:slow] a long piece of work",
+            Some("synthetic"),
+        )
+        .await;
+    let first = first.body["turn"]["id"].as_str().unwrap().to_owned();
+    s.app.wait_turn(&first, &["running"]).await;
+    let gate = s.app.scheduler.gate().clone();
+    let closed = gate
+        .close(
+            Duration::from_secs(1),
+            else_api::maintenance::Pause::backup(None),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let second = s
+        .app
+        .send(&bot, Uuid::new_v4(), "a follow-up", Some("synthetic"))
+        .await;
+    assert_eq!(
+        second.status,
+        axum::http::StatusCode::ACCEPTED,
+        "{:?}",
+        second.body
+    );
+    let second = second.body["turn"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        s.app
+            .wait_turn_for(
+                &first,
+                &["completed", "cancelling", "interrupted"],
+                Duration::from_secs(30)
+            )
+            .await,
+        "completed",
+        "the running turn finishes instead of being cancelled"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+        .bind(second.parse::<Uuid>().unwrap())
+        .fetch_one(&s.app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "queued", "nothing starts while the gate is closed");
+    drop(closed);
+    assert_eq!(s.app.wait_turn(&second, &["completed"]).await, "completed");
 }
 
 #[tokio::test(flavor = "multi_thread")]

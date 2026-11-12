@@ -2001,6 +2001,7 @@ async fn follow_up(db: &TestDb, bot: Uuid) -> Uuid {
             uses_profile: false,
             open_draft: None,
         },
+        else_api::db::turns::Preemption::Cancel,
     )
     .await
     .unwrap();

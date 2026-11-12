@@ -337,3 +337,172 @@ impl Shell {
         cx.notify();
     }
 }
+
+pub(super) struct LocalForm {
+    pub base_revision: i64,
+    enabled: bool,
+    time: Entity<InputState>,
+    keep: Entity<InputState>,
+    saved: crate::api::LocalBackupSettings,
+    _edits: Vec<Subscription>,
+}
+
+fn local_values(time: &str, keep: &str) -> Result<(String, usize), String> {
+    let time = time.trim();
+    let valid_time = time.len() == 5
+        && time.as_bytes()[2] == b':'
+        && time
+            .bytes()
+            .enumerate()
+            .all(|(i, c)| i == 2 || c.is_ascii_digit())
+        && time[..2].parse::<u8>().is_ok_and(|hour| hour < 24)
+        && time[3..].parse::<u8>().is_ok_and(|minute| minute < 60);
+    if !valid_time {
+        return Err("Enter a daily backup time in 24-hour HH:MM format.".into());
+    }
+    let keep = keep
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|keep| (1..=1000).contains(keep))
+        .ok_or("Keep between 1 and 1,000 local backups.")?;
+    Ok((time.into(), keep))
+}
+
+impl LocalForm {
+    pub fn new(snapshot: &BackupSnapshot, window: &mut Window, cx: &mut Context<Shell>) -> Self {
+        let local = &snapshot.local;
+        let time = input(&local.time, "03:00", window, cx);
+        let keep = input(&local.keep.to_string(), "7", window, cx);
+        let edits = [&time, &keep]
+            .into_iter()
+            .map(|field| cx.subscribe_in(field, window, |_, _, _: &InputEvent, _, cx| cx.notify()))
+            .collect();
+        Self {
+            base_revision: snapshot.revision,
+            enabled: local.enabled,
+            time,
+            keep,
+            saved: local.clone(),
+            _edits: edits,
+        }
+    }
+
+    pub fn dirty(&self, cx: &App) -> bool {
+        self.enabled != self.saved.enabled
+            || self.time.read(cx).value().as_ref() != self.saved.time
+            || self.keep.read(cx).value().as_ref() != self.saved.keep.to_string()
+    }
+
+    pub fn input(&self, cx: &App) -> Result<crate::api::LocalBackupSettingsInput, String> {
+        let (time, keep) = local_values(&self.time.read(cx).value(), &self.keep.read(cx).value())?;
+        Ok(crate::api::LocalBackupSettingsInput {
+            expected_revision: self.base_revision,
+            enabled: self.enabled,
+            time,
+            keep,
+        })
+    }
+
+    pub fn render(
+        &self,
+        snapshot: &BackupSnapshot,
+        busy: bool,
+        stacked: bool,
+        cx: &mut Context<Shell>,
+    ) -> Div {
+        use gpui_kit::component::button::ButtonVariants as _;
+        let theme = cx.theme();
+        let managed = snapshot.local.managed_by_env;
+        let disabled = busy || managed;
+        let selected = self.time.read(cx).value();
+        let mut presets = h_flex().gap_2().flex_wrap();
+        for time in ["01:00", "02:00", "03:00", "04:00", "05:00"] {
+            presets = presets.child(
+                Button::new(ElementId::Name(format!("local-backup-{time}").into()))
+                    .focus_ring(false)
+                    .cursor_pointer()
+                    .small()
+                    .label(if time == "03:00" {
+                        "03:00 · recommended"
+                    } else {
+                        time
+                    })
+                    .selected(selected.as_ref() == time)
+                    .toggled(selected.as_ref() == time)
+                    .disabled(disabled)
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        if let Some(form) = shell
+                            .backups
+                            .as_mut()
+                            .and_then(|view| view.local_form.as_mut())
+                        {
+                            form.time
+                                .update(cx, |field, cx| field.set_value(time, window, cx));
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        let field = |label, state| {
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1p5()
+                .child(div().text_xs().child(label))
+                .child(
+                    Input::new(state)
+                        .focus_ring(false)
+                        .aria_label(label)
+                        .disabled(disabled),
+                )
+        };
+        v_flex().gap_4().p_4().rounded(theme.radius).bg(theme.secondary.opacity(0.45))
+            .child(h_flex().gap_3().justify_between().when(stacked, |row| row.flex_col().items_start())
+                .child(v_flex().gap_1().flex_1().min_w_0()
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Daily backup time"))
+                    .child(div().text_xs().text_color(theme.muted_foreground)
+                        .child("else.bot pauses new work while it backs up. Running tasks finish first.")))
+                .child(h_flex().gap_2().text_xs().child("Automatic")
+                    .child(Switch::new("local-backups-enabled").focus_ring(false).cursor_pointer().small()
+                        .checked(self.enabled).disabled(disabled).accessibility_label("Automatic daily local backups")
+                        .on_click(cx.listener(|shell, enabled: &bool, _, cx| {
+                            if let Some(form) = shell.backups.as_mut().and_then(|view| view.local_form.as_mut()) {
+                                form.enabled = *enabled;
+                            }
+                            cx.notify();
+                        })))))
+            .child(presets)
+            .child(h_flex().gap_4().items_start().when(stacked, |row| row.flex_col())
+                .child(field("Exact time", &self.time)).child(field("Keep", &self.keep)))
+            .child(div().text_xs().text_color(theme.muted_foreground)
+                .child(format!("Times use the server's timezone ({}). A missed backup runs at the next scheduled time.", snapshot.local.timezone)))
+            .when(managed, |panel| panel.child(super::view::message(
+                "ELSE_BACKUP_INTERVAL_SECS controls this schedule. Change the environment variable on the server to edit it.".into(), theme.muted_foreground, theme)))
+            .when(!managed, |panel| panel.child(h_flex().justify_end().gap_2()
+                .child(Button::new("local-backup-cancel").focus_ring(false).cursor_pointer().label("Cancel")
+                    .disabled(disabled || !self.dirty(cx))
+                    .on_click(cx.listener(|shell, _, window, cx| shell.cancel_local_backup_edit(window, cx))))
+                .child(Button::new("local-backup-save").focus_ring(false).cursor_pointer().label("Save schedule").primary()
+                    .disabled(disabled || !self.dirty(cx))
+                    .on_click(cx.listener(|shell, _, window, cx| shell.save_local_backup_schedule(window, cx))))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_values;
+
+    #[test]
+    fn backup_local_schedule_validates_time_and_retention() {
+        assert_eq!(local_values("03:00", "7"), Ok(("03:00".into(), 7)));
+        assert_eq!(local_values("23:59", "1000"), Ok(("23:59".into(), 1000)));
+        assert_eq!(local_values("00:00", "1"), Ok(("00:00".into(), 1)));
+        for time in ["3:00", "24:00", "03:60", "03.00", "03:0a", "é:00", ""] {
+            assert!(local_values(time, "7").is_err(), "{time}");
+        }
+        for keep in ["0", "1001", "-1", "7.5", ""] {
+            assert!(local_values("03:00", keep).is_err(), "{keep}");
+        }
+    }
+}

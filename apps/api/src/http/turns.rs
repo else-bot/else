@@ -117,7 +117,15 @@ async fn send(
     {
         tracing::warn!(error = %err, "recording the owner's time zone failed");
     }
-    let accepted = accept_send(&state, bot_id, body, false).await?;
+    // A message sent during a backup is accepted without an admission and
+    // waits in the queue; it lets the turns the backup is waiting for finish.
+    let admission = state.scheduler.gate().enter();
+    let preemption = match admission {
+        Some(_) => turns::Preemption::Cancel,
+        None => turns::Preemption::Defer,
+    };
+    let accepted = accept_send(&state, bot_id, body, false, preemption).await?;
+    drop(admission);
     let status = if accepted.created {
         StatusCode::ACCEPTED
     } else {
@@ -149,6 +157,7 @@ pub(super) async fn introduce(
             timezone: None,
         },
         true,
+        turns::Preemption::Cancel,
     )
     .await
 }
@@ -158,6 +167,7 @@ async fn accept_send(
     bot_id: Uuid,
     body: SendBody,
     hidden: bool,
+    preemption: turns::Preemption,
 ) -> Result<turns::Accepted, ApiError> {
     let request_id = body.request_id;
     let with_id = |err: ApiError| err.with_request_id(request_id);
@@ -218,7 +228,7 @@ async fn accept_send(
             }
             request.provider_id = provider.id();
             request.uses_profile = provider.uses_profile();
-            turns::accept(&state.db, request)
+            turns::accept(&state.db, request, preemption)
                 .await
                 .map_err(|err| with_id(err.into()))?
         }

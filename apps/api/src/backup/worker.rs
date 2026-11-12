@@ -1,9 +1,10 @@
-//! The one serialized backup worker. It runs inside the API on a schedule
-//! (a missed set runs once at startup, not once per missed interval),
-//! retries failures with a bounded backoff, keeps the newest completed
-//! local sets, and records every run. A file lock on the backup directory
-//! (released by the kernel if the process dies) serializes capture,
-//! retention, and cleanup with a manual `else-api backup` run.
+//! The one serialized backup worker. It captures sets, retries failures
+//! with a bounded backoff, keeps the newest completed local sets, and
+//! records every run. Its own loop runs a fixed interval for tests and
+//! operators: a missed set runs once at startup, not once per missed
+//! interval. A file lock on the backup directory (released by the kernel
+//! if the process dies) serializes capture, retention, and cleanup with a
+//! manual `else-api backup` run.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -189,9 +190,9 @@ impl BackupWorker {
         result
     }
 
-    /// How long until the next set is due: zero when none has completed or
-    /// the newest is older than the interval.
-    pub fn next_due(&self) -> Result<Duration, BackupError> {
+    /// How long until the next set is due `interval` after the newest one:
+    /// zero when none has completed or the newest is older than that.
+    pub fn next_due(&self, interval: Duration) -> Result<Duration, BackupError> {
         let sets = super::completed_sets(&self.config.dir)?;
         let Some(newest) = sets.last() else {
             return Ok(Duration::ZERO);
@@ -201,7 +202,7 @@ impl BackupWorker {
             .and_then(|m| m.modified())
             .map_err(|e| BackupError::io(path.display(), e))?;
         let age = modified.elapsed().unwrap_or_default();
-        Ok(self.config.interval.saturating_sub(age))
+        Ok(interval.saturating_sub(age))
     }
 
     /// Startup housekeeping under the backup lock: runs left `running` by
@@ -244,17 +245,19 @@ impl BackupWorker {
     /// Run the schedule: captures and uploads have separate deadlines, so
     /// a bucket outage (or a conflicting old set) never stops local
     /// backups, and pending uploads start at once after a restart.
+    /// Only a fixed interval runs here; the API's backup service owns the
+    /// daily schedule.
     pub async fn run(self: Arc<Self>, cancel: CancellationToken) {
-        if self.config.interval.is_zero() {
+        let super::capture::Cadence::Every(interval) = self.config.cadence else {
             return;
-        }
+        };
         if let Err(err) = self.recover().await {
             tracing::warn!(error = %err, "backup recovery failed");
         }
         use tokio::time::Instant;
         let mut capture_retry = FIRST_RETRY;
         let mut upload_retry = FIRST_RETRY;
-        let mut capture_at = Instant::now() + self.next_due().unwrap_or(FIRST_RETRY);
+        let mut capture_at = Instant::now() + self.next_due(interval).unwrap_or(FIRST_RETRY);
         let mut upload_at = match &self.replicator {
             Some(replicator) => match replicator.awaiting(&self.config.dir).await {
                 Ok(awaiting) if !awaiting.is_empty() => Some(Instant::now()),
@@ -289,15 +292,14 @@ impl BackupWorker {
                 match result {
                     Ok(summary) => {
                         capture_retry = FIRST_RETRY;
-                        capture_at =
-                            Instant::now() + self.next_due().unwrap_or(self.config.interval);
+                        capture_at = Instant::now() + self.next_due(interval).unwrap_or(interval);
                         if matches!(summary.remote, Some(Err(_))) && upload_at.is_none() {
                             upload_at = Some(Instant::now() + upload_retry);
                             upload_retry = (upload_retry * 2).min(MAX_RETRY);
                         }
                     }
                     Err(_) => {
-                        capture_at = Instant::now() + capture_retry.min(self.config.interval);
+                        capture_at = Instant::now() + capture_retry.min(interval);
                         capture_retry = (capture_retry * 2).min(MAX_RETRY);
                     }
                 }

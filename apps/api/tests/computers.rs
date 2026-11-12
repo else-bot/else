@@ -1580,7 +1580,10 @@ async fn owners_upgrade_from_the_api_while_turns_queue() {
     assert!(
         app.scheduler
             .gate()
-            .close(Duration::from_millis(50))
+            .close(
+                Duration::from_millis(50),
+                else_api::maintenance::Pause::backup(None)
+            )
             .await
             .is_err(),
         "a backup or an update waits for the upgrade"

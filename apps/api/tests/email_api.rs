@@ -1129,7 +1129,10 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
         let _closed = app
             .scheduler
             .gate()
-            .close(Duration::from_secs(2))
+            .close(
+                Duration::from_secs(2),
+                else_api::maintenance::Pause::backup(None),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1212,7 +1215,7 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
                 dir: dir.path().join("backups"),
                 keep: 1,
                 max_bytes: 1 << 28,
-                interval: Duration::from_secs(3600),
+                cadence: else_api::backup::capture::Cadence::Every(Duration::from_secs(3600)),
             },
         );
         let set = worker.run_once().await.unwrap();

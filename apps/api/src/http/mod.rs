@@ -275,8 +275,18 @@ fn maintenance_response() -> Response {
     .into_response()
 }
 
+/// A tool call from a running turn (it carries the turn's grant) keeps
+/// working while a backup waits for that turn to finish; other callers,
+/// such as webhooks, wait for the pause to end.
 async fn tools_gate(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
-    let Some(_admission) = state.scheduler.gate().enter() else {
+    let gate = state.scheduler.gate();
+    if request.extensions().get::<crate::grants::Grant>().is_some() {
+        let Some(_admission) = gate.enter_turn() else {
+            return maintenance_response();
+        };
+        return next.run(request).await;
+    }
+    let Some(_admission) = gate.enter() else {
         return maintenance_response();
     };
     next.run(request).await

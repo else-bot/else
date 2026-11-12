@@ -170,6 +170,77 @@ pub struct Settings {
     pub interval_secs: u64,
     pub keep: usize,
     pub destination: Option<Destination>,
+    pub local: LocalSchedule,
+}
+
+/// The daily local backup: on or off, when it runs on the server's clock
+/// (kept while off), and how many completed sets stay on disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalSchedule {
+    pub enabled: bool,
+    pub at: TimeOfDay,
+    pub keep: usize,
+}
+
+impl LocalSchedule {
+    pub fn default_for(keep: usize) -> Self {
+        Self {
+            enabled: true,
+            at: TimeOfDay::OVERNIGHT,
+            keep,
+        }
+    }
+}
+
+/// Minutes after midnight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimeOfDay(u16);
+
+impl TimeOfDay {
+    /// 03:00, when an owner is least likely to be working.
+    pub const OVERNIGHT: Self = Self(180);
+
+    pub fn from_minutes(minutes: i64) -> Option<Self> {
+        u16::try_from(minutes)
+            .ok()
+            .filter(|minutes| *minutes < 24 * 60)
+            .map(Self)
+    }
+
+    /// `HH:MM` on a 24-hour clock.
+    pub fn parse(text: &str) -> Option<Self> {
+        let (hours, minutes) = text.trim().split_once(':')?;
+        if hours.len() != 2 || minutes.len() != 2 {
+            return None;
+        }
+        let hours: u16 = hours.parse().ok()?;
+        let minutes: u16 = minutes.parse().ok()?;
+        (hours < 24 && minutes < 60).then_some(Self(hours * 60 + minutes))
+    }
+
+    pub fn minutes(self) -> u16 {
+        self.0
+    }
+
+    pub fn time(self) -> chrono::NaiveTime {
+        chrono::NaiveTime::from_hms_opt(u32::from(self.0 / 60), u32::from(self.0 % 60), 0)
+            .expect("minutes are within a day")
+    }
+}
+
+impl std::fmt::Display for TimeOfDay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:02}:{:02}", self.0 / 60, self.0 % 60)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalUpdate {
+    pub expected_revision: i64,
+    pub enabled: bool,
+    pub time: String,
+    pub keep: usize,
 }
 
 #[derive(Deserialize)]
@@ -212,6 +283,27 @@ impl Settings {
             interval_secs: input.interval_secs,
             keep: input.keep,
             destination,
+            local: self.local,
+        })
+    }
+
+    pub fn updated_local(&self, input: LocalUpdate) -> Result<Self, Error> {
+        if input.expected_revision != self.revision {
+            return Err(Error::Conflict);
+        }
+        let at = TimeOfDay::parse(&input.time)
+            .ok_or(Error::Invalid("Enter a time as HH:MM on a 24-hour clock."))?;
+        if !(1..=1000).contains(&input.keep) {
+            return Err(Error::Invalid("Keep between 1 and 1000 backups."));
+        }
+        Ok(Self {
+            revision: self.revision + 1,
+            local: LocalSchedule {
+                enabled: input.enabled,
+                at,
+                keep: input.keep,
+            },
+            ..self.clone()
         })
     }
 }
@@ -251,9 +343,11 @@ pub async fn save(pool: &SqlitePool, key: &SecretKey, settings: &Settings) -> Re
             )
         }
     };
-    let result = sqlx::query("INSERT INTO backup_settings (id, revision, enabled, interval_secs, keep_count, destination, secret_salt, secret_cipher) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(id) DO UPDATE SET revision = excluded.revision, enabled = excluded.enabled, interval_secs = excluded.interval_secs, keep_count = excluded.keep_count, destination = excluded.destination, secret_salt = excluded.secret_salt, secret_cipher = excluded.secret_cipher WHERE backup_settings.revision = excluded.revision - 1")
+    let result = sqlx::query("INSERT INTO backup_settings (id, revision, enabled, interval_secs, keep_count, destination, secret_salt, secret_cipher, local_enabled, local_minute, local_keep) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT(id) DO UPDATE SET revision = excluded.revision, enabled = excluded.enabled, interval_secs = excluded.interval_secs, keep_count = excluded.keep_count, destination = excluded.destination, secret_salt = excluded.secret_salt, secret_cipher = excluded.secret_cipher, local_enabled = excluded.local_enabled, local_minute = excluded.local_minute, local_keep = excluded.local_keep WHERE backup_settings.revision = excluded.revision - 1")
         .bind(settings.revision).bind(settings.enabled).bind(settings.interval_secs as i64).bind(settings.keep as i64)
-        .bind(destination).bind(salt).bind(cipher).execute(pool).await?;
+        .bind(destination).bind(salt).bind(cipher)
+        .bind(settings.local.enabled).bind(i64::from(settings.local.at.minutes())).bind(settings.local.keep as i64)
+        .execute(pool).await?;
     if result.rows_affected() == 0 {
         return Err(Error::Conflict);
     }
@@ -292,6 +386,11 @@ pub async fn load(pool: &SqlitePool, key: &SecretKey) -> Result<Option<Settings>
         interval_secs: row.get::<i64, _>("interval_secs") as u64,
         keep: row.get::<i64, _>("keep_count") as usize,
         destination,
+        local: LocalSchedule {
+            enabled: row.get("local_enabled"),
+            at: TimeOfDay::from_minutes(row.get("local_minute")).ok_or(Error::Unavailable)?,
+            keep: row.get::<i64, _>("local_keep") as usize,
+        },
     }))
 }
 
@@ -315,12 +414,75 @@ pub async fn load_or_seed(
     let settings = Settings {
         revision: 0,
         enabled: destination.is_some(),
-        interval_secs: config.backup.interval.as_secs(),
+        interval_secs: match config.backup.cadence {
+            super::capture::Cadence::Off => 0,
+            super::capture::Cadence::Every(interval) => interval.as_secs(),
+            super::capture::Cadence::Daily => 86_400,
+        },
         keep: config.backup.keep,
         destination,
+        local: LocalSchedule::default_for(config.backup.keep),
     };
     if valid {
         save(pool, key, &settings).await?;
     }
     Ok(settings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings() -> Settings {
+        Settings {
+            revision: 4,
+            enabled: false,
+            interval_secs: 0,
+            keep: 7,
+            destination: None,
+            local: LocalSchedule::default_for(7),
+        }
+    }
+
+    fn local(revision: i64, time: &str, keep: usize) -> LocalUpdate {
+        LocalUpdate {
+            expected_revision: revision,
+            enabled: true,
+            time: time.into(),
+            keep,
+        }
+    }
+
+    #[test]
+    fn times_are_24_hour_hh_mm() {
+        assert_eq!(TimeOfDay::parse("03:00"), Some(TimeOfDay::OVERNIGHT));
+        assert_eq!(TimeOfDay::parse("23:59").unwrap().to_string(), "23:59");
+        for bad in ["3:00", "24:00", "12:60", "noon", "12:5", ""] {
+            assert_eq!(TimeOfDay::parse(bad), None, "{bad}");
+        }
+        assert_eq!(TimeOfDay::from_minutes(1440), None);
+        assert_eq!(TimeOfDay::from_minutes(-1), None);
+    }
+
+    #[test]
+    fn the_local_schedule_changes_only_at_the_current_revision() {
+        let saved = settings();
+        let next = saved.updated_local(local(4, "04:30", 3)).unwrap();
+        assert_eq!(next.revision, 5);
+        assert_eq!(next.local.at.to_string(), "04:30");
+        assert_eq!(next.local.keep, 3);
+        assert_eq!(next.keep, 7, "remote retention is untouched");
+        assert!(matches!(
+            saved.updated_local(local(3, "04:30", 3)),
+            Err(Error::Conflict)
+        ));
+        assert!(matches!(
+            saved.updated_local(local(4, "25:00", 3)),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            saved.updated_local(local(4, "04:30", 0)),
+            Err(Error::Invalid(_))
+        ));
+    }
 }

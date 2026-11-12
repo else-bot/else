@@ -1720,7 +1720,10 @@ async fn stop_deletion_and_maintenance_hold_runs() {
         .app
         .scheduler
         .gate()
-        .close(Duration::from_secs(10))
+        .close(
+            Duration::from_secs(10),
+            else_api::maintenance::Pause::backup(None),
+        )
         .await
         .unwrap()
         .unwrap();

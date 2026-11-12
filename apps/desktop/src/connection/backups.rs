@@ -1,4 +1,5 @@
 mod form;
+mod local;
 mod view;
 
 use super::*;
@@ -6,13 +7,14 @@ use crate::api::{BackupSettingsInput, BackupSnapshot};
 use std::time::Duration;
 use uuid::Uuid;
 
-use form::{DestinationForm, Editor, PolicyForm};
+use form::{DestinationForm, Editor, LocalForm, PolicyForm};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Operation {
     Idle,
     Testing,
     Saving,
+    SavingLocal,
     Starting,
 }
 
@@ -21,6 +23,7 @@ pub(super) struct View {
     client: Arc<Client>,
     snapshot: Option<BackupSnapshot>,
     editor: Option<Editor>,
+    local_form: Option<LocalForm>,
     operation: Operation,
     error: Option<String>,
     poll_error: Option<String>,
@@ -30,19 +33,30 @@ pub(super) struct View {
 }
 
 impl View {
-    pub(super) fn has_unsaved_work(&self) -> bool {
-        self.editor.is_some() || self.busy()
+    pub(super) fn has_unsaved_work(&self, cx: &App) -> bool {
+        self.editor.is_some()
+            || self.busy()
+            || self.local_form.as_ref().is_some_and(|form| form.dirty(cx))
     }
     fn busy(&self) -> bool {
         self.operation != Operation::Idle
     }
 
-    fn accept(&mut self, snapshot: BackupSnapshot) {
+    fn accept(&mut self, snapshot: BackupSnapshot, window: &mut Window, cx: &mut Context<Shell>) {
         if self
             .snapshot
             .as_ref()
             .is_none_or(|s| snapshot.revision >= s.revision)
         {
+            if self.local_form.is_none()
+                || (self.local_form.as_ref().is_some_and(|form| !form.dirty(cx))
+                    && self
+                        .snapshot
+                        .as_ref()
+                        .is_none_or(|saved| saved.revision != snapshot.revision))
+            {
+                self.local_form = Some(LocalForm::new(&snapshot, window, cx));
+            }
             self.snapshot = Some(snapshot);
         }
     }
@@ -57,23 +71,29 @@ impl Shell {
         let poll = cx.spawn_in(window, async move |this, cx| {
             loop {
                 let result = poll_client.clone().backups().await;
-                let delay = this.update_in(cx, |shell, _, cx| {
+                let delay = this.update_in(cx, |shell, window, cx| {
                     let view = shell.backups.as_mut().filter(|v| v.id == id)?;
                     if !view.busy() {
                         match result {
                             Ok(snapshot) => {
-                                view.accept(snapshot);
+                                view.accept(snapshot, window, cx);
                                 view.poll_error = None;
                             }
                             Err(err) => view.poll_error = Some(err.to_string()),
                         }
                         cx.notify();
                     }
-                    Some(if view.snapshot.as_ref().is_some_and(|s| s.running) {
-                        Duration::from_secs(2)
-                    } else {
-                        Duration::from_secs(10)
-                    })
+                    Some(
+                        if view
+                            .snapshot
+                            .as_ref()
+                            .is_some_and(|s| s.running || s.pause.is_some())
+                        {
+                            Duration::from_secs(2)
+                        } else {
+                            Duration::from_secs(10)
+                        },
+                    )
                 });
                 let Ok(Some(delay)) = delay else { break };
                 cx.background_executor().timer(delay).await;
@@ -84,6 +104,7 @@ impl Shell {
             client,
             snapshot: None,
             editor: None,
+            local_form: None,
             operation: Operation::Idle,
             error: None,
             poll_error: None,
@@ -95,7 +116,11 @@ impl Shell {
     }
 
     fn edit_backup_destination(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.backups.as_ref().filter(|v| !v.busy()) else {
+        let Some(view) = self
+            .backups
+            .as_ref()
+            .filter(|v| !v.busy() && v.local_form.as_ref().is_none_or(|f| !f.dirty(cx)))
+        else {
             return;
         };
         let Some(snapshot) = &view.snapshot else {
@@ -110,7 +135,11 @@ impl Shell {
     }
 
     fn edit_backup_policy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.backups.as_ref().filter(|v| !v.busy()) else {
+        let Some(view) = self
+            .backups
+            .as_ref()
+            .filter(|v| !v.busy() && v.local_form.as_ref().is_none_or(|f| !f.dirty(cx)))
+        else {
             return;
         };
         let Some(snapshot) = &view.snapshot else {
@@ -137,7 +166,11 @@ impl Shell {
     }
 
     fn test_backup_destination(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.backups.as_mut().filter(|v| !v.busy()) else {
+        let Some(view) = self
+            .backups
+            .as_mut()
+            .filter(|v| !v.busy() && v.local_form.as_ref().is_none_or(|f| !f.dirty(cx)))
+        else {
             return;
         };
         let Some(Editor::Destination(form)) = &view.editor else {
@@ -180,7 +213,11 @@ impl Shell {
     }
 
     fn save_backup_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.backups.as_mut().filter(|v| !v.busy()) else {
+        let Some(view) = self
+            .backups
+            .as_mut()
+            .filter(|v| !v.busy() && v.local_form.as_ref().is_none_or(|f| !f.dirty(cx)))
+        else {
             return;
         };
         let Some(snapshot) = &view.snapshot else {
@@ -217,11 +254,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self
-            .backups
-            .as_ref()
-            .filter(|v| !v.busy() && v.editor.is_none())
-        else {
+        let Some(view) = self.backups.as_ref().filter(|v| {
+            !v.busy() && v.editor.is_none() && v.local_form.as_ref().is_none_or(|f| !f.dirty(cx))
+        }) else {
             return;
         };
         let Some(snapshot) = &view.snapshot else {
@@ -246,12 +281,12 @@ impl Shell {
         view.feedback = None;
         view._request = Some(cx.spawn_in(window, async move |this, cx| {
             let result = client.save_backups(settings).await;
-            let _ = this.update_in(cx, |shell, _, cx| {
+            let _ = this.update_in(cx, |shell, window, cx| {
                 let Some(view) = shell.backups.as_mut().filter(|v| v.id == id) else { return };
                 view.operation = Operation::Idle;
                 match result {
                     Ok(snapshot) => {
-                        view.accept(snapshot);
+                        view.accept(snapshot, window, cx);
                         view.editor = None;
                         view.feedback = Some("Backup settings saved.".into());
                     }
@@ -263,8 +298,72 @@ impl Shell {
         cx.notify();
     }
 
-    fn run_remote_backup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn cancel_local_backup_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = self.backups.as_mut().filter(|v| !v.busy()) else {
+            return;
+        };
+        if let Some(snapshot) = &view.snapshot {
+            view.local_form = Some(LocalForm::new(snapshot, window, cx));
+            view.error = None;
+            view.feedback = None;
+            cx.notify();
+        }
+    }
+
+    fn save_local_backup_schedule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self
+            .backups
+            .as_mut()
+            .filter(|v| !v.busy() && v.editor.is_none())
+        else {
+            return;
+        };
+        if view
+            .snapshot
+            .as_ref()
+            .is_none_or(|s| s.local.managed_by_env)
+        {
+            return;
+        }
+        let Some(form) = &view.local_form else { return };
+        let settings = match form.input(cx) {
+            Ok(settings) => settings,
+            Err(error) => {
+                view.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let client = view.client.clone();
+        let id = view.id;
+        view.operation = Operation::SavingLocal;
+        view.error = None;
+        view.feedback = None;
+        view._request = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = client.save_local_backups(settings).await;
+            let _ = this.update_in(cx, |shell, window, cx| {
+                let Some(view) = shell.backups.as_mut().filter(|v| v.id == id) else { return };
+                view.operation = Operation::Idle;
+                match result {
+                    Ok(snapshot) => {
+                        view.local_form = None;
+                        view.accept(snapshot, window, cx);
+                        view.feedback = Some("Local backup schedule saved.".into());
+                    }
+                    Err(error) => view.error = Some(format!("{error} Your edits have been kept. Cancel to reload the saved schedule.")),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn run_remote_backup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self
+            .backups
+            .as_mut()
+            .filter(|v| !v.busy() && v.local_form.as_ref().is_none_or(|f| !f.dirty(cx)))
+        else {
             return;
         };
         let client = view.client.clone();
@@ -279,7 +378,7 @@ impl Shell {
             } else {
                 None
             };
-            let _ = this.update_in(cx, |shell, _, cx| {
+            let _ = this.update_in(cx, |shell, window, cx| {
                 let Some(view) = shell.backups.as_mut().filter(|v| v.id == id) else {
                     return;
                 };
@@ -287,7 +386,7 @@ impl Shell {
                 match result {
                     Ok(()) => {
                         if let Some(snapshot) = snapshot {
-                            view.accept(snapshot);
+                            view.accept(snapshot, window, cx);
                         }
                         view.feedback =
                             Some("Backup started. You can leave settings while it runs.".into());

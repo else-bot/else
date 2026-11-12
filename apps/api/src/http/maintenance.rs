@@ -96,7 +96,8 @@ async fn prepare(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiE
             Box::pin(async move {
                 let state = owner;
                 if hold.is_none() {
-                    let closed = match state.scheduler.gate().close(ADMITTED_GRACE).await {
+                    let pause = crate::maintenance::Pause::update();
+                    let closed = match state.scheduler.gate().close(ADMITTED_GRACE, pause).await {
                         Ok(Some(closed)) => closed,
                         Ok(None) => {
                             return Err(busy("A backup is running; update once it has finished."));
@@ -115,6 +116,13 @@ async fn prepare(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiE
                             "Bots are working ({} active turns, {} running commands); \
                  nothing was changed. Update once they have finished.",
                             work.turns, work.commands
+                        )));
+                    }
+                    if let Err(calls) = closed.capture(ADMITTED_GRACE).await {
+                        drop(closed);
+                        return Err(busy(format!(
+                            "{calls} tool calls were still running after {} s.",
+                            ADMITTED_GRACE.as_secs()
                         )));
                     }
                     *hold = Some(closed);

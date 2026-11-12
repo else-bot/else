@@ -316,7 +316,22 @@ pub fn request_hash(req: &SendRequest<'_>) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted, AcceptError> {
+/// What a new owner message does to the conversation's turns that are
+/// still working.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preemption {
+    /// Stop them: the newer message takes over (the usual case).
+    Cancel,
+    /// Let them finish and queue behind them, as while a backup waits for
+    /// running turns to end.
+    Defer,
+}
+
+pub async fn accept(
+    pool: &SqlitePool,
+    req: SendRequest<'_>,
+    preemption: Preemption,
+) -> Result<Accepted, AcceptError> {
     let hash = request_hash(&req);
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let bot: Option<(String, Uuid, i64, i64, bool)> = sqlx::query_as(
@@ -503,18 +518,23 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
         crate::db::events::turn_changed(&mut tx, req.bot_id, superseded).await?;
         crate::db::delegations::cancel_for_root(&mut tx, superseded).await?;
     }
-    let preempted: Vec<Uuid> = sqlx::query_scalar(
-        "UPDATE turns SET status = 'cancelling', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE status IN ('preparing', 'sending', 'running')
-           AND ((conversation_id = ?1 AND turn_no < ?2)
-                OR id IN (SELECT child_turn_id FROM delegations WHERE takeover_turn_id = ?3))
-         RETURNING id",
-    )
-    .bind(conversation_id)
-    .bind(turn_no)
-    .bind(turn_id)
-    .fetch_all(&mut *tx)
-    .await?;
+    let preempted: Vec<Uuid> = match preemption {
+        Preemption::Cancel => sqlx::query_scalar(
+            "UPDATE turns SET status = 'cancelling', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE status IN ('preparing', 'sending', 'running')
+               AND ((conversation_id = ?1 AND turn_no < ?2)
+                    OR id IN (SELECT child_turn_id FROM delegations WHERE takeover_turn_id = ?3))
+             RETURNING id",
+        )
+        .bind(conversation_id)
+        .bind(turn_no)
+        .bind(turn_id)
+        .fetch_all(&mut *tx)
+        .await?,
+        // The scheduler starts this turn only once the bot has no active
+        // turn, so it runs after them.
+        Preemption::Defer => Vec::new(),
+    };
     for &active in &preempted {
         crate::db::events::turn_changed(&mut tx, req.bot_id, active).await?;
     }
