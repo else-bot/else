@@ -83,6 +83,7 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
         r.reason AS credential_reason, r.created_at AS credential_at,
         'Install skill ' || install.name AS skill_install_title,
         install.created_at AS skill_install_at,
+        draft.content AS draft_content, draft.created_at AS draft_at,
         (SELECT t.status FROM turns t WHERE t.conversation_id = c.id
             ORDER BY t.turn_no DESC LIMIT 1) AS latest_turn_status,
         coalesce((SELECT (i.seq, length(CAST(i.text AS BLOB)))
@@ -100,18 +101,23 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
     LEFT JOIN items h ON h.id = (SELECT x.id FROM items x WHERE x.conversation_id = c.id
                                  AND x.kind = 'assistant' ORDER BY x.seq DESC LIMIT 1)
     LEFT JOIN owner_questions question ON question.id = (
-        SELECT p.id FROM owner_questions p JOIN turns t ON t.id = p.turn_id
-        WHERE p.bot_id = b.id AND p.status = 'pending' AND t.conversation_id = c.id
+        SELECT p.id FROM owner_questions p
+        WHERE p.bot_id = b.id AND p.status = 'pending'
         ORDER BY p.created_at, p.id LIMIT 1)
     LEFT JOIN computer_handoffs handoff ON handoff.bot_id = b.id AND handoff.status = 'pending'
     LEFT JOIN skill_installs install ON install.id = (
-        SELECT p.id FROM skill_installs p JOIN turns t ON t.id = p.turn_id
-        WHERE p.bot_id = b.id AND p.status = 'pending' AND t.conversation_id = c.id
+        SELECT p.id FROM skill_installs p
+        WHERE p.bot_id = b.id AND p.status = 'pending'
         ORDER BY p.created_at, p.id LIMIT 1)
     LEFT JOIN secret_requests r ON r.id = (
-        SELECT p.id FROM secret_requests p JOIN turns t ON t.id = p.turn_id
-        WHERE p.bot_id = b.id AND p.status = 'pending' AND t.conversation_id = c.id
+        SELECT p.id FROM secret_requests p
+        WHERE p.bot_id = b.id AND p.status = 'pending'
         ORDER BY p.created_at, p.id LIMIT 1)
+    LEFT JOIN outgoing_drafts draft ON draft.id = (
+        SELECT d.id FROM outgoing_drafts d JOIN turns t ON t.id = d.turn_id
+        WHERE d.bot_id = b.id AND d.status = 'pending'
+            AND t.status IN ('queued', 'preparing', 'sending', 'running', 'waiting')
+        ORDER BY d.created_at, d.id LIMIT 1)
     LEFT JOIN turns a ON a.bot_id = b.id
         AND a.status IN ('preparing', 'sending', 'running', 'cancelling', 'waiting')
         AND a.id = (SELECT w.id FROM turns w WHERE w.bot_id = b.id

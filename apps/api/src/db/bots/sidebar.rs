@@ -1,5 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use sqlx::types::Json;
+
+use crate::app::outgoing::Content;
 
 use crate::db::turns::TurnStatus;
 
@@ -14,6 +17,8 @@ pub struct SidebarRow {
     credential_at: Option<DateTime<Utc>>,
     skill_install_title: Option<String>,
     skill_install_at: Option<DateTime<Utc>>,
+    draft_content: Option<Json<Content>>,
+    draft_at: Option<DateTime<Utc>>,
     latest_turn_status: Option<TurnStatus>,
     /// The owner read the latest turn's last reply in full, such as its
     /// failure notice.
@@ -65,6 +70,12 @@ impl SidebarRow {
         if let (Some(title), Some(since)) = (&self.skill_install_title, self.skill_install_at) {
             return Some(SidebarStatus::NeedsApproval {
                 preview: preview(title),
+                since,
+            });
+        }
+        if let (Some(Json(content)), Some(since)) = (&self.draft_content, self.draft_at) {
+            return Some(SidebarStatus::NeedsApproval {
+                preview: preview(&format!("{} to {}", content.noun(), content.audience())),
                 since,
             });
         }
