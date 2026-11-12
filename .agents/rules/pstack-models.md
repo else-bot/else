@@ -5,7 +5,7 @@ This repository's role choices override pstack's defaults and any user-level
 presets and role assignments. The effort is set per preset below. Keep the
 configured effort and speed when delegating.
 
-Sol xhigh fast is the default for coordination, coding, explanations, and
+Sol high fast is the default for coordination, coding, explanations, and
 synthesis. Fable high provides independent design and review. Opus medium
 owns risky decisions and their hardest bounded implementation slice under
 the routing policy below. Use Opus high only when the user requests it.
@@ -20,10 +20,10 @@ Recheck provider capabilities before using a model in a new environment.
 
 ```json
 {
-  "sol-xhigh-fast": {
+  "sol-high-fast": {
     "providerInstanceId": "codex",
     "model": "gpt-6.1-sol",
-    "options": { "reasoningEffort": "xhigh", "serviceTier": "priority" }
+    "options": { "reasoningEffort": "high", "serviceTier": "priority" }
   },
   "opus-medium": {
     "providerInstanceId": "claudeAgent",
@@ -48,30 +48,30 @@ Recheck provider capabilities before using a model in a new environment.
 }
 ```
 
-coordinator: sol-xhigh-fast
-feature, refactoring: sol-xhigh-fast
-bug-fix: sol-xhigh-fast
-perf-issue: sol-xhigh-fast
-hillclimb: sol-xhigh-fast
-judgment and prose: sol-xhigh-fast
+coordinator: sol-high-fast
+feature, refactoring: sol-high-fast
+bug-fix: sol-high-fast
+perf-issue: sol-high-fast
+hillclimb: sol-high-fast
+judgment and prose: sol-high-fast
 hardest tasks: opus-medium
 risk decision and implementation: opus-medium
 escalation: opus-medium
 routine reviewer: fable-high
-Claude-authored code reviewer: sol-xhigh-fast
-how explorer: sol-xhigh-fast
-how explainer: sol-xhigh-fast
-why investigators: sol-xhigh-fast
-why synthesizer: sol-xhigh-fast
-reflect tooling: sol-xhigh-fast
-reflect judgment: sol-xhigh-fast
+Claude-authored code reviewer: sol-high-fast
+how explorer: sol-high-fast
+how explainer: sol-high-fast
+why investigators: sol-high-fast
+why synthesizer: sol-high-fast
+reflect tooling: sol-high-fast
+reflect judgment: sol-high-fast
 reflect divergent: fable-high
-reflect synthesizer: sol-xhigh-fast
-arena runners: sol-xhigh-fast, fable-high
-arena cross-judge pool: sol-xhigh-fast, fable-high
-swarm workers: sol-xhigh-fast
-architect runners: sol-xhigh-fast, fable-high
-interrogate reviewers: sol-xhigh-fast, fable-high
+reflect synthesizer: sol-high-fast
+arena runners: sol-high-fast, fable-high
+arena cross-judge pool: sol-high-fast, fable-high
+swarm workers: sol-high-fast
+architect runners: sol-high-fast, fable-high
+interrogate reviewers: sol-high-fast, fable-high
 
 ## Routing policy
 
@@ -144,6 +144,6 @@ native agents and background work. Preset names must never be passed as
 
 Outside T3, native Claude agents can use `model: opus` or `model: fable` with
 the preset's `effort` when their tool schema supports those values. Native
-Codex agents can use Sol with `reasoning_effort: xhigh` when supported. If
+Codex agents can use Sol with `reasoning_effort: high` when supported. If
 the runtime cannot express the requested model or its settings, report the
 unavailable preset. Do not silently substitute a different model or effort.
