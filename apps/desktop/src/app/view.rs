@@ -677,6 +677,9 @@ impl ElseApp {
                     .child(notice.clone()),
             );
         }
+        if let Some(text) = self.pause.text(std::time::Instant::now()) {
+            notices = notices.child(div().text_xs().text_color(theme.warning).child(text));
+        }
         let owner = cx.entity().downgrade();
         let preview_owner = owner.clone();
         let files = self

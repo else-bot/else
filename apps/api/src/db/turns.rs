@@ -316,7 +316,22 @@ pub fn request_hash(req: &SendRequest<'_>) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted, AcceptError> {
+/// What a new owner message does to the conversation's turns that are
+/// still working.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preemption {
+    /// Stop them: the newer message takes over (the usual case).
+    Cancel,
+    /// Let them finish and queue behind them, as while a backup waits for
+    /// running turns to end.
+    Defer,
+}
+
+pub async fn accept(
+    pool: &SqlitePool,
+    req: SendRequest<'_>,
+    preemption: Preemption,
+) -> Result<Accepted, AcceptError> {
     let hash = request_hash(&req);
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let bot: Option<(String, Uuid, i64, i64, bool)> = sqlx::query_as(
@@ -406,8 +421,8 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
     let seq = last_item_seq + 1;
     sqlx::query(
         "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
-             owner_item_id, provider_id, profile_revision, profile)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             owner_item_id, provider_id, profile_revision, profile, deferred)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )
     .bind(turn_id)
     .bind(req.bot_id)
@@ -419,6 +434,7 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
     .bind(req.provider_id)
     .bind(profile.as_ref().map(|(revision, _)| *revision))
     .bind(profile.as_ref().map(|(_, profile)| profile))
+    .bind(preemption == Preemption::Defer)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -455,9 +471,39 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
             })?;
     }
     crate::db::events::turn_accepted(&mut tx, req.bot_id, turn_id).await?;
-    crate::db::delegations::lock_targets_of_bot(&mut tx, req.bot_id).await?;
-    crate::db::delegations::take_over(&mut tx, req.bot_id, conversation_id, turn_no, turn_id)
-        .await?;
+    let preempted = match preemption {
+        Preemption::Cancel => {
+            take_conversation(&mut tx, req.bot_id, conversation_id, turn_no, turn_id).await?
+        }
+        // Running turns finish first; settle_deferred takes over once the
+        // pause ends.
+        Preemption::Defer => Vec::new(),
+    };
+    // Show the tasks carried from the turns this message ended.
+    crate::db::events::turn_changed(&mut tx, req.bot_id, turn_id).await?;
+    crate::db::memory::log_item(&mut tx, item_id).await?;
+    let (turn, item) = load_turn_and_item(&mut tx, turn_id).await?;
+    tx.commit().await?;
+    Ok(Accepted {
+        created: true,
+        turn,
+        item,
+        preempted,
+    })
+}
+
+/// A new owner message takes over its conversation: it takes over delegated
+/// work, skips older questions and handoffs, carries tasks forward, and
+/// supersedes or cancels the turns before it. Returns the turns to cancel.
+async fn take_conversation(
+    tx: &mut SqliteConnection,
+    bot_id: Uuid,
+    conversation_id: Uuid,
+    turn_no: i64,
+    turn_id: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    crate::db::delegations::lock_targets_of_bot(&mut *tx, bot_id).await?;
+    crate::db::delegations::take_over(&mut *tx, bot_id, conversation_id, turn_no, turn_id).await?;
     // A delegated task shows its cards here through its receipt item; its
     // turn lives in a task conversation. One this message took over ends
     // below; any other continues with the skip.
@@ -480,11 +526,11 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
         .into_iter()
         .filter_map(|(turn, delegated)| delegated.then_some(turn))
     {
-        continue_waiting(&mut tx, task).await?;
-        crate::db::events::turn_changed(&mut tx, req.bot_id, task).await?;
+        continue_waiting(&mut *tx, task).await?;
+        crate::db::events::turn_changed(&mut *tx, bot_id, task).await?;
     }
-    crate::db::computer_handoffs::skip_pending(&mut tx, req.bot_id).await?;
-    crate::db::delegations::carry_forward(&mut tx, conversation_id, turn_no, turn_id).await?;
+    crate::db::computer_handoffs::skip_pending(&mut *tx, bot_id).await?;
+    crate::db::delegations::carry_forward(&mut *tx, conversation_id, turn_no, turn_id).await?;
     let superseded: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'interrupted', error_code = 'superseded',
              error_message = 'A newer owner message continued this conversation before this one finished.',
@@ -500,8 +546,8 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
     .fetch_all(&mut *tx)
     .await?;
     for superseded in superseded {
-        crate::db::events::turn_changed(&mut tx, req.bot_id, superseded).await?;
-        crate::db::delegations::cancel_for_root(&mut tx, superseded).await?;
+        crate::db::events::turn_changed(&mut *tx, bot_id, superseded).await?;
+        crate::db::delegations::cancel_for_root(&mut *tx, superseded).await?;
     }
     let preempted: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'cancelling', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
@@ -516,19 +562,45 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
     .fetch_all(&mut *tx)
     .await?;
     for &active in &preempted {
-        crate::db::events::turn_changed(&mut tx, req.bot_id, active).await?;
+        crate::db::events::turn_changed(&mut *tx, bot_id, active).await?;
     }
-    // Show the tasks carried from the turns this message ended.
-    crate::db::events::turn_changed(&mut tx, req.bot_id, turn_id).await?;
-    crate::db::memory::log_item(&mut tx, item_id).await?;
-    let (turn, item) = load_turn_and_item(&mut tx, turn_id).await?;
-    tx.commit().await?;
-    Ok(Accepted {
-        created: true,
-        turn,
-        item,
-        preempted,
-    })
+    Ok(preempted)
+}
+
+/// Let messages sent during a pause take over their conversations, now that
+/// the turns they queued behind have finished or parked. Run while the gate
+/// is open, before claiming. Returns how many it settled.
+pub async fn settle_deferred(pool: &SqlitePool) -> Result<usize, sqlx::Error> {
+    let deferred: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT t.id FROM turns t JOIN bots b ON b.id = t.bot_id
+         WHERE t.deferred = 1 AND t.status = 'queued'
+           AND b.status = 'active' AND NOT b.cancel_pending
+         ORDER BY t.turn_no",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut settled = 0;
+    for id in deferred {
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        let turn: Option<(Uuid, Uuid, i64)> = sqlx::query_as(
+            "UPDATE turns SET deferred = 0
+             WHERE id = ?1 AND deferred = 1 AND status = 'queued'
+               AND bot_id IN (SELECT id FROM bots WHERE status = 'active' AND NOT cancel_pending)
+             RETURNING bot_id, conversation_id, turn_no",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        // Superseded, stopped or settled since the scan: nothing to do.
+        let Some((bot_id, conversation_id, turn_no)) = turn else {
+            continue;
+        };
+        take_conversation(&mut tx, bot_id, conversation_id, turn_no, id).await?;
+        crate::db::events::turn_changed(&mut tx, bot_id, id).await?;
+        tx.commit().await?;
+        settled += 1;
+    }
+    Ok(settled)
 }
 
 pub async fn load_turn(
@@ -775,7 +847,8 @@ pub async fn claim_next(
                                           AND d.status IN ('queued', 'running')) DESC,
                                 t.turn_no) AS queue_rank
             FROM turns t JOIN bots b ON b.id = t.bot_id
-            WHERE t.status = 'queued' AND b.status = 'active' AND NOT b.cancel_pending
+            WHERE t.status = 'queued' AND NOT t.deferred
+              AND b.status = 'active' AND NOT b.cancel_pending
               AND NOT EXISTS (SELECT 1 FROM turns a
                               WHERE a.bot_id = t.bot_id AND a.status IN {ACTIVE_STATUSES})
               AND {TASK_OR_NO_WAITING_OWNER}
@@ -808,7 +881,7 @@ pub async fn claim_next(
         let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE turns SET status = 'preparing', started_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
                  attempt = attempt + 1
-             WHERE id = ?1 AND status = 'queued'
+             WHERE id = ?1 AND status = 'queued' AND NOT deferred
                AND NOT EXISTS (SELECT 1 FROM turns a
                                WHERE a.bot_id = ?2 AND a.status IN {ACTIVE_STATUSES})
                AND (SELECT {TASK_OR_NO_WAITING_OWNER} FROM turns t WHERE t.id = ?1)"

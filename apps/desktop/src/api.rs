@@ -1363,6 +1363,13 @@ pub(crate) mod tests {
         while let Ok(line) = seen.try_recv() {
             log.push(line);
         }
+        assert_eq!(
+            log.iter()
+                .filter(|line| line.contains("\"channel\":\"server\""))
+                .count(),
+            2,
+            "the server channel is subscribed on every connection: {log:?}"
+        );
         let token = format!("auth Bearer {}", "T".repeat(43));
         assert_eq!(log.iter().filter(|l| **l == token).count(), 2, "{log:?}");
         assert!(

@@ -171,13 +171,15 @@ impl Config {
                 1024 * 1024,
                 1 << 44,
             )?,
-            interval: std::time::Duration::from_secs(parse_number(
-                source,
-                "ELSE_BACKUP_INTERVAL_SECS",
-                86_400,
-                0,
-                30 * 86_400,
-            )?),
+            cadence: match source.get("ELSE_BACKUP_INTERVAL_SECS") {
+                None => crate::backup::capture::Cadence::Daily,
+                Some(_) => {
+                    match parse_number(source, "ELSE_BACKUP_INTERVAL_SECS", 0, 0, 30 * 86_400)? {
+                        0 => crate::backup::capture::Cadence::Off,
+                        secs => crate::backup::capture::Cadence::Every(Duration::from_secs(secs)),
+                    }
+                }
+            },
         };
         let s3 = match (
             source.get("ELSE_S3_ENDPOINT"),

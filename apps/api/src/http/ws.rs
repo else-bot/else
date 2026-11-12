@@ -7,7 +7,9 @@
 //! - `bots`: the bot list and default pointer, pushed whenever they change
 //!   (replaces sidebar polling);
 //! - `bot:<id>` with a cursor from a conversation snapshot: that bot's event
-//!   journal after the cursor, in order (replaces the per-bot SSE stream).
+//!   journal after the cursor, in order (replaces the per-bot SSE stream);
+//! - `server`: why new work is paused (a backup or an update), sent on
+//!   subscribe and whenever it changes, `null` while nothing is paused.
 //!
 //! ```text
 //! client → {"op":"subscribe","channel":"bots"}
@@ -16,6 +18,7 @@
 //! server → {"channel":"bots","event":"bots.snapshot","data":{"default_bot_id":…,"categories":[…],"bots":[…]}}
 //! server → {"channel":"bot:<id>","id":"<cursor>","event":"item.delta","data":{…}}
 //! server → {"channel":"bot:<id>","error":{"code":"cursor_reset_required","message":"…"}}
+//! server → {"channel":"server","event":"server.pause","data":{"pause":{"reason":"backup",…}}}
 //! ```
 //!
 //! The upgrade is authenticated like every `/v1` route (bearer header, no
@@ -291,8 +294,8 @@ async fn connection(state: Arc<AppState>, socket: WebSocket) {
                         } else {
                             match &bot {
                                 Some(Err(_)) => Some(("not_found", "Unknown bot.")),
-                                None if channel != "bots" => {
-                                    Some(("unknown_channel", "Use bots or bot:<id>."))
+                                None if channel != "bots" && channel != "server" => {
+                                    Some(("unknown_channel", "Use bots, server, or bot:<id>."))
                                 }
                                 _ => None,
                             }
@@ -323,6 +326,9 @@ async fn connection(state: Arc<AppState>, socket: WebSocket) {
                 match sub.bot {
                     Some(bot_id) => {
                         tokio::spawn(bot_channel(state.clone(), bot_id, cursor, sub));
+                    }
+                    None if channel == "server" => {
+                        tokio::spawn(server_channel(state.clone(), sub));
                     }
                     None => {
                         tokio::spawn(bots_channel(state.clone(), sub));
@@ -413,6 +419,22 @@ async fn bots_channel(state: Arc<AppState>, sub: Sub) {
         }
         if !wait(&mut wake, None, &sub.token).await {
             return;
+        }
+    }
+}
+
+async fn server_channel(state: Arc<AppState>, sub: Sub) {
+    let mut pause = state.scheduler.gate().watch_pause();
+    loop {
+        let current = pause.borrow_and_update().as_ref().map(|p| p.json());
+        let body =
+            json!({ "channel": "server", "event": "server.pause", "data": { "pause": current } });
+        if !sub.send(body).await {
+            return;
+        }
+        tokio::select! {
+            _ = sub.token.cancelled() => return,
+            changed = pause.changed() => if changed.is_err() { return },
         }
     }
 }

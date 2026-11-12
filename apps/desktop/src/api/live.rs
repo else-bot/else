@@ -1,4 +1,4 @@
-use super::{BotList, Client};
+use super::{BotList, Client, ServerPause};
 use crate::model::Frame;
 use futures_util::{SinkExt as _, StreamExt as _};
 use reqwest::StatusCode;
@@ -28,6 +28,7 @@ pub enum LiveEvent {
     Unauthorized,
     /// The `bots` channel: the current list and default pointer.
     Bots(BotList),
+    ServerPause(Option<ServerPause>),
     Bot {
         bot: Uuid,
         message: StreamMessage,
@@ -102,6 +103,13 @@ pub(super) fn route(
     wanted: &mut HashMap<Uuid, String>,
 ) -> Option<LiveEvent> {
     let channel = message["channel"].as_str()?;
+    if channel == "server" && message["event"] == "server.pause" {
+        return serde_json::from_value::<Option<ServerPause>>(
+            message["data"].get("pause")?.clone(),
+        )
+        .ok()
+        .map(LiveEvent::ServerPause);
+    }
     if channel == "bots" {
         return serde_json::from_value(message["data"].clone())
             .ok()
@@ -246,6 +254,7 @@ impl Client {
                 commands.borrow_and_update().clone(),
             );
             let mut ok = socket.send(subscribe("bots".into(), None)).await.is_ok();
+            ok = ok && socket.send(subscribe("server".into(), None)).await.is_ok();
             for (bot, cursor) in &wanted {
                 ok = ok
                     && socket
@@ -310,5 +319,54 @@ impl Client {
             }
             pause!();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::PauseReason;
+
+    #[test]
+    fn backup_server_pause_routes_start_progress_update_and_end() {
+        let mut wanted = HashMap::new();
+        for phase in [
+            "waiting_for_tasks",
+            "database",
+            "computers",
+            "files",
+            "projects",
+        ] {
+            let message = json!({ "channel": "server", "event": "server.pause", "data": {
+                "pause": { "reason": "backup", "started_at": "2026-11-12T06:45:26.950Z",
+                    "expected_secs": 327, "phase": phase, "done": 6, "total": 11 }
+            }});
+            let Some(LiveEvent::ServerPause(Some(pause))) = route(&message, &mut wanted) else {
+                panic!("pause missing")
+            };
+            assert_eq!(pause.reason, PauseReason::Backup);
+            assert_eq!(pause.expected_secs, Some(327));
+        }
+        let update = json!({ "channel": "server", "event": "server.pause", "data": {
+            "pause": { "reason": "update", "started_at": "2026-11-12T06:45:26.950Z",
+                "expected_secs": null, "phase": null, "done": null, "total": null }
+        }});
+        assert!(matches!(
+            route(&update, &mut wanted),
+            Some(LiveEvent::ServerPause(Some(ServerPause {
+                reason: PauseReason::Update,
+                expected_secs: None,
+                ..
+            })))
+        ));
+        let end = json!({ "channel": "server", "event": "server.pause", "data": { "pause": null }});
+        assert!(matches!(
+            route(&end, &mut wanted),
+            Some(LiveEvent::ServerPause(None))
+        ));
+        let unrelated = json!({ "channel": "server", "event": "other", "data": { "pause": null }});
+        assert!(route(&unrelated, &mut wanted).is_none());
+        let malformed = json!({ "channel": "server", "event": "server.pause", "data": {} });
+        assert!(route(&malformed, &mut wanted).is_none());
     }
 }

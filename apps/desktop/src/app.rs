@@ -18,6 +18,7 @@ mod link_target;
 mod mentions;
 mod message_menu;
 mod message_row;
+mod pause;
 mod pending_send;
 mod question_card;
 mod quotes;
@@ -297,6 +298,7 @@ pub struct ElseApp {
     rules: rules::RulesState,
     rules_dialog: Option<rules::RulesDialog>,
     sidebar_focus: FocusHandle,
+    pause: pause::PauseStrip,
     live: Option<crate::api::LiveCommands>,
     _live: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -395,6 +397,7 @@ impl ElseApp {
             rules: HashMap::new(),
             rules_dialog: None,
             sidebar_focus,
+            pause: Default::default(),
             live: None,
             _live: None,
             _subscriptions: vec![
@@ -470,6 +473,7 @@ impl ElseApp {
                 self.clear_social_forms(window, cx);
                 self.sync_secret_forms(window, cx);
             }
+            LiveEvent::ServerPause(pause) => self.set_server_pause(pause, window, cx),
             LiveEvent::Bots(list) => self.apply_bots(list, window, cx),
             LiveEvent::Bot { bot, message } => self.apply_stream(bot, message, window, cx),
         }

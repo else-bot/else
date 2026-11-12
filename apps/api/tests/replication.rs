@@ -84,7 +84,7 @@ fn config(dir: &Path) -> BackupConfig {
         dir: dir.join("backups"),
         keep: 7,
         max_bytes: 1 << 30,
-        interval: Duration::from_secs(3600),
+        cadence: else_api::backup::capture::Cadence::Every(Duration::from_secs(3600)),
     }
 }
 
@@ -1060,7 +1060,7 @@ async fn the_schedule_keeps_capturing_while_the_bucket_is_down_and_uploads_at_st
     })
     .unwrap();
     let mut w = worker(&app, dir.path(), replicator(&app, &unreachable));
-    w.config.interval = Duration::from_secs(2);
+    w.config.cadence = else_api::backup::capture::Cadence::Every(Duration::from_secs(2));
     let w = Arc::new(w);
     let stop = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn(w.clone().run(stop.clone()));
@@ -1071,7 +1071,7 @@ async fn the_schedule_keeps_capturing_while_the_bucket_is_down_and_uploads_at_st
     assert!(sets.len() >= 2, "captures continued: {sets:?}");
     let s3 = bucket().await;
     let mut w = worker(&app, dir.path(), replicator(&app, &s3));
-    w.config.interval = Duration::from_secs(3600);
+    w.config.cadence = else_api::backup::capture::Cadence::Every(Duration::from_secs(3600));
     let w = Arc::new(w);
     let stop = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn(w.clone().run(stop.clone()));

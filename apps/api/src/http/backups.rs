@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -10,13 +10,14 @@ use serde_json::{Value, json};
 use super::AppState;
 use super::error::{ApiError, ApiJson};
 use crate::backup::service::{Backups, Snapshot};
-use crate::backup::settings::{DestinationInput, Error, Update};
+use crate::backup::settings::{DestinationInput, Error, LocalUpdate, Update};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/settings/backups", get(show).put(save))
         .route("/settings/backups/test", post(test))
         .route("/settings/backups/run", post(run))
+        .route("/settings/backups/local", put(save_local))
 }
 
 fn service(state: &AppState) -> Result<&Backups, ApiError> {
@@ -52,6 +53,15 @@ async fn save(
     ApiJson(body): ApiJson<Update>,
 ) -> Result<Json<Snapshot>, ApiError> {
     Ok(Json(service(&state)?.save(body).await.map_err(error)?))
+}
+
+async fn save_local(
+    State(state): State<Arc<AppState>>,
+    ApiJson(body): ApiJson<LocalUpdate>,
+) -> Result<Json<Snapshot>, ApiError> {
+    Ok(Json(
+        service(&state)?.save_local(body).await.map_err(error)?,
+    ))
 }
 
 #[derive(Deserialize)]

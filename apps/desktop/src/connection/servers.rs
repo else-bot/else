@@ -632,7 +632,7 @@ impl Shell {
             || self
                 .backups
                 .as_ref()
-                .is_some_and(|view| view.has_unsaved_work())
+                .is_some_and(|view| view.has_unsaved_work(cx))
             || self
                 .email
                 .as_ref()

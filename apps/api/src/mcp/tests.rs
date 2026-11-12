@@ -204,8 +204,11 @@ async fn maintenance_blocks_mutation_and_execution_but_not_discovery() {
         .install(input("shared"), "Maple".into())
         .await
         .unwrap();
-    let _closed = gate
-        .close(std::time::Duration::from_secs(1))
+    let closed = gate
+        .close(
+            std::time::Duration::from_secs(1),
+            crate::maintenance::Pause::backup(None),
+        )
         .await
         .unwrap()
         .unwrap();
@@ -218,16 +221,17 @@ async fn maintenance_blocks_mutation_and_execution_but_not_discovery() {
         library.remove(&input("shared").id).await,
         Err(Error::Paused)
     ));
-    assert!(matches!(
-        library
-            .request(
-                &input("shared").id,
-                "tools/list".into(),
-                serde_json::json!({})
-            )
-            .await,
-        Err(Error::Paused)
-    ));
+    let shared = input("shared").id;
+    let list = || library.request(&shared, "tools/list".into(), serde_json::json!({}));
+    assert!(
+        !matches!(list().await, Err(Error::Paused)),
+        "running turns keep their MCP tools while the backup drains them"
+    );
+    closed
+        .capture(std::time::Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(matches!(list().await, Err(Error::Paused)));
 }
 
 #[tokio::test]

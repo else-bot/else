@@ -944,7 +944,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
             dir: dir.path().join("backups"),
             keep: 7,
             max_bytes: 8 << 30,
-            interval: Duration::from_secs(3600),
+            cadence: else_api::backup::capture::Cadence::Every(Duration::from_secs(3600)),
         },
     )
     .with_coordinator(else_api::backup::capture::Coordinator {

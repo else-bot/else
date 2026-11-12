@@ -481,7 +481,7 @@ async fn pausing_remote_backups_preserves_the_local_capture_schedule_and_retenti
     body["enabled"] = json!(false);
     let saved = h.app.owner("PUT", "/v1/settings/backups", Some(body)).await;
     assert_eq!(saved.status, StatusCode::OK);
-    h.config.backup.interval = Duration::from_millis(50);
+    h.config.backup.cadence = else_api::backup::capture::Cadence::Every(Duration::from_millis(50));
     h.config.backup.keep = 2;
     h.restart().await;
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -604,7 +604,7 @@ async fn invalid_environment_destination_keeps_local_backups_and_api_available()
         secret_access_key: zeroize::Zeroizing::new(SECRET.into()),
         path_style: true,
     });
-    h.config.backup.interval = Duration::from_millis(50);
+    h.config.backup.cadence = else_api::backup::capture::Cadence::Every(Duration::from_millis(50));
     h.restart().await;
     let snapshot = h.snapshot().await;
     assert_eq!(snapshot["enabled"], false);
@@ -689,7 +689,7 @@ async fn a_failed_capture_retries_capture_before_the_full_remote_interval() {
 async fn a_successful_local_capture_does_not_clear_a_failed_remote_upload() {
     let mut h = Harness::new().await;
     let store = Store::new(true).await;
-    h.config.backup.interval = Duration::from_millis(200);
+    h.config.backup.cadence = else_api::backup::capture::Cadence::Every(Duration::from_millis(200));
     h.restart().await;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -813,4 +813,107 @@ async fn the_estimate_follows_the_latest_whole_assistant_set_over_a_newer_databa
         .unwrap();
     }
     assert_eq!(h.snapshot().await["estimate"]["bytes"], 13_000_000_000_u64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_owner_picks_the_daily_local_backup_time() {
+    let mut h = Harness::new().await;
+    let env_managed = h.snapshot().await;
+    assert_eq!(env_managed["local"]["managed_by_env"], true);
+    assert_eq!(
+        env_managed["local"]["enabled"], false,
+        "ELSE_BACKUP_INTERVAL_SECS=0"
+    );
+    let refused = h
+        .app
+        .owner(
+            "PUT",
+            "/v1/settings/backups/local",
+            Some(json!({ "expected_revision": env_managed["revision"], "enabled": true, "time": "04:00", "keep": 7 })),
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{}", refused.body);
+
+    h.config.backup.cadence = else_api::backup::capture::Cadence::Daily;
+    h.restart().await;
+    let initial = h.snapshot().await;
+    let local = &initial["local"];
+    assert_eq!(local["managed_by_env"], false);
+    assert_eq!(local["enabled"], true);
+    assert_eq!(local["time"], "03:00", "overnight by default");
+    assert_eq!(local["copies"], 0);
+    assert!(initial["pause"].is_null());
+    let next = chrono::DateTime::parse_from_rfc3339(local["next_at"].as_str().unwrap()).unwrap();
+    let hours = (next.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_minutes() as f64 / 60.;
+    assert!(
+        (0.0..=24.0).contains(&hours),
+        "the next 03:00, never now: {hours}"
+    );
+    assert_eq!(
+        next.with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string(),
+        "03:00"
+    );
+
+    let revision = initial["revision"].as_i64().unwrap();
+    let saved = h
+        .app
+        .owner(
+            "PUT",
+            "/v1/settings/backups/local",
+            Some(json!({ "expected_revision": revision, "enabled": true, "time": "04:15", "keep": 3 })),
+        )
+        .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    assert_eq!(saved.body["revision"], revision + 1);
+    assert_eq!(saved.body["local"]["time"], "04:15");
+    assert_eq!(saved.body["local"]["keep"], 3);
+    let next =
+        chrono::DateTime::parse_from_rfc3339(saved.body["local"]["next_at"].as_str().unwrap())
+            .unwrap();
+    assert_eq!(
+        next.with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string(),
+        "04:15"
+    );
+
+    let stale = h
+        .app
+        .owner(
+            "PUT",
+            "/v1/settings/backups/local",
+            Some(json!({ "expected_revision": revision, "enabled": true, "time": "05:00", "keep": 3 })),
+        )
+        .await;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    assert_eq!(stale.body["error"]["code"], "revision_conflict");
+    let invalid = h
+        .app
+        .owner(
+            "PUT",
+            "/v1/settings/backups/local",
+            Some(json!({ "expected_revision": revision + 1, "enabled": true, "time": "4pm", "keep": 3 })),
+        )
+        .await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid.body["error"]["code"], "invalid_backup_settings");
+
+    let off = h
+        .app
+        .owner(
+            "PUT",
+            "/v1/settings/backups/local",
+            Some(json!({ "expected_revision": revision + 1, "enabled": false, "time": "04:15", "keep": 3 })),
+        )
+        .await;
+    assert_eq!(off.status, StatusCode::OK, "{}", off.body);
+    assert_eq!(off.body["local"]["enabled"], false);
+    assert!(off.body["local"]["next_at"].is_null());
+
+    h.restart().await;
+    let reloaded = h.snapshot().await;
+    assert_eq!(reloaded["local"]["time"], "04:15", "the schedule is stored");
+    assert_eq!(reloaded["local"]["enabled"], false);
 }

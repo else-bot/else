@@ -13,6 +13,7 @@ use super::{
     MANIFEST, Manifest, ObjectRef, SCHEMA_VERSION, Sqlite, TableDigest,
 };
 use crate::credentials::SecretKey;
+use crate::maintenance::Step;
 
 #[derive(Debug, Clone)]
 pub struct BackupConfig {
@@ -21,8 +22,19 @@ pub struct BackupConfig {
     pub keep: usize,
     /// Largest dump accepted, in plaintext bytes; bounds temporary storage.
     pub max_bytes: u64,
-    /// Time between scheduled sets; zero disables the schedule.
-    pub interval: std::time::Duration,
+    pub cadence: Cadence,
+}
+
+/// When local sets are captured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cadence {
+    /// Never on a schedule (`ELSE_BACKUP_INTERVAL_SECS=0`).
+    Off,
+    /// A fixed interval after the newest set, for operators and tests
+    /// (`ELSE_BACKUP_INTERVAL_SECS`).
+    Every(std::time::Duration),
+    /// Once a day at the owner's chosen time (the default).
+    Daily,
 }
 
 #[derive(Debug, Clone)]
@@ -250,6 +262,7 @@ async fn capture_computers(
     staging: &Path,
     identity: &age::x25519::Identity,
     limit: u64,
+    progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<
     (
         Vec<Artifact>,
@@ -261,6 +274,12 @@ async fn capture_computers(
     let mut artifacts = Vec::new();
     let mut entries = std::collections::HashMap::new();
     let mut carried = std::collections::HashSet::new();
+    let total = bots
+        .iter()
+        .filter(|(_, _, status)| status == "active")
+        .count();
+    let mut done = 0;
+    progress(done, total);
     for (bot, name, status) in bots {
         if status != "active" {
             entries.insert(*bot, ("omitted-deleted-bot".to_owned(), None));
@@ -355,8 +374,27 @@ async fn capture_computers(
                 );
             }
         }
+        done += 1;
+        progress(done, total);
     }
     Ok((artifacts, entries))
+}
+
+/// How long the last complete backup of the bot computers paused new
+/// work. Runs from before `paused_ms` existed count their whole duration.
+async fn last_pause(pool: &SqlitePool) -> Result<Option<std::time::Duration>, sqlx::Error> {
+    let ms: Option<i64> = sqlx::query_scalar(
+        "SELECT CAST(coalesce(paused_ms,
+                (julianday(finished_at) - julianday(started_at)) * 86400000) AS INTEGER)
+         FROM backup_runs
+         WHERE local_status = 'completed' AND finished_at IS NOT NULL
+           AND json_extract(coverage, '$.vm') IS NOT 'omitted'
+         ORDER BY finished_at DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    Ok(ms.map(|ms| std::time::Duration::from_millis(ms.max(0) as u64)))
 }
 
 async fn capture_files(
@@ -543,10 +581,13 @@ async fn capture_into(
             }
         }
     }
+    let paused_at = tokio::time::Instant::now();
     let gate = match &coordinator.scheduler {
         Some(scheduler) => {
             let deadline = tokio::time::Instant::now() + coordinator.drain;
-            let closed = match scheduler.gate().close(coordinator.drain).await {
+            let expected = last_pause(pool).await?;
+            let pause = crate::maintenance::Pause::backup(expected);
+            let closed = match scheduler.gate().close(coordinator.drain, pause).await {
                 Ok(Some(closed)) => closed,
                 Ok(None) => {
                     return Err(BackupError::Refused("another backup holds the gate".into()));
@@ -565,6 +606,13 @@ async fn capture_into(
                     coordinator.drain.as_secs()
                 )));
             }
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if let Err(calls) = closed.capture(left).await {
+                return Err(BackupError::Deferred(format!(
+                    "{calls} tool calls did not finish within {} s",
+                    coordinator.drain.as_secs()
+                )));
+            }
             Some(closed)
         }
         None => None,
@@ -573,12 +621,27 @@ async fn capture_into(
         sqlx::query_as("SELECT id, name, status FROM bots ORDER BY created_at, id")
             .fetch_all(pool)
             .await?;
+    let step = |step| {
+        if let Some(closed) = &gate {
+            closed.step(step);
+        }
+    };
     let (mut vm_artifacts, mut vm_entries) = match &coordinator.computers {
         Some(computers) => {
-            capture_computers(computers, &bot_rows, staging, &identity, config.max_bytes).await?
+            let progress = |done, total| step(Step::Computers { done, total });
+            capture_computers(
+                computers,
+                &bot_rows,
+                staging,
+                &identity,
+                config.max_bytes,
+                &progress,
+            )
+            .await?
         }
         None => Default::default(),
     };
+    step(Step::Files);
     let (mut file_artifacts, missing_files) = match &coordinator.computers {
         Some(computers) => {
             capture_files(
@@ -614,6 +677,7 @@ async fn capture_into(
             _ => Ok(None),
         }
     };
+    step(Step::Projects);
     let (projects, mcp) = tokio::join!(project_capture, mcp_capture);
     let (mut project_artifacts, mut project_states) = projects?;
     let mcp_artifact = mcp?;
@@ -621,6 +685,7 @@ async fn capture_into(
         return Err(BackupError::Interrupted);
     }
 
+    step(Step::Database);
     let mut tx = pool.begin().await?;
     let tables = table_digests(&mut tx).await?;
     let migration_version: i64 =
@@ -694,7 +759,18 @@ async fn capture_into(
         return Err(BackupError::Interrupted);
     }
     let sealed = sealed?;
-    drop(gate);
+    if let Some(closed) = gate {
+        drop(closed);
+        // Messages sent during the pause can now take over and run.
+        if let Some(scheduler) = &coordinator.scheduler {
+            scheduler.wake();
+        }
+        sqlx::query("UPDATE backup_runs SET paused_ms = ?2 WHERE set_id = ?1")
+            .bind(set_id)
+            .bind(i64::try_from(paused_at.elapsed().as_millis()).unwrap_or(i64::MAX))
+            .execute(pool)
+            .await?;
+    }
 
     let coordinated = coordinator.computers.is_some()
         && (coordinator.scheduler.is_some() || coordinator.exclusive);

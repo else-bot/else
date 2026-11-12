@@ -56,13 +56,23 @@ async fn an_update_is_refused_while_bots_work_and_holds_new_work_once_idle() {
     let held = app
         .send(&bot, Uuid::new_v4(), "after the update", Some("synthetic"))
         .await;
+    assert_eq!(held.status, StatusCode::ACCEPTED, "{}", held.body);
     assert_eq!(
-        held.status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "{}",
-        held.body
+        held.body["turn"]["status"], "queued",
+        "a message waits for the update instead of failing"
     );
-    assert_eq!(held.body["error"]["code"], "maintenance");
+    let rename = app
+        .owner(
+            "PATCH",
+            &format!("/v1/bots/{bot}"),
+            Some(serde_json::json!({ "name": "Renamed" })),
+        )
+        .await;
+    assert_eq!(
+        rename.body["error"]["code"], "maintenance",
+        "{}",
+        rename.body
+    );
     assert_eq!(
         app.owner("GET", "/v1/bots", None).await.status,
         StatusCode::OK

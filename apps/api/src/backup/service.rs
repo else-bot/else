@@ -4,17 +4,19 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use serde_json::Value;
 use sqlx::{Row, SqlitePool};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::capture::{BackupConfig, Coordinator};
+use super::capture::{BackupConfig, Cadence, Coordinator};
 use super::replicate::Replicator;
 use super::s3::S3;
 use super::settings::{
-    self, Destination, DestinationInput, DestinationView, Error, Settings, Update,
+    self, Destination, DestinationInput, DestinationView, Error, LocalSchedule, LocalUpdate,
+    Settings, Update,
 };
 use super::worker::BackupWorker;
 use super::{BackupError, DatabaseParams};
@@ -27,6 +29,12 @@ pub struct Backups {
     pool: SqlitePool,
     initial_estimate: Estimate,
     probe_slots: Arc<tokio::sync::Semaphore>,
+    local_dir: std::path::PathBuf,
+    cadence: Cadence,
+    /// `ELSE_BACKUP_KEEP`, which applies while the environment sets the
+    /// schedule.
+    env_keep: usize,
+    gate: Option<Arc<crate::maintenance::Gate>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -66,18 +74,76 @@ pub struct Snapshot {
     pub remote_bytes: u64,
     pub unavailable_reason: Option<String>,
     pub last_error: Option<String>,
+    pub local: LocalView,
+    /// Why new work is paused right now, if it is.
+    pub pause: Option<Value>,
+}
+
+/// The daily local backup on this server.
+#[derive(Serialize)]
+pub struct LocalView {
+    pub enabled: bool,
+    /// `HH:MM` on the server's clock.
+    pub time: String,
+    pub timezone: String,
+    pub utc_offset_secs: i32,
+    pub keep: usize,
+    /// An environment variable sets the schedule; the owner cannot change it.
+    pub managed_by_env: bool,
+    pub next_at: Option<String>,
+    pub copies: usize,
+    pub bytes: u64,
+    pub free_bytes: Option<u64>,
+    pub recent: Vec<LocalRun>,
+}
+
+/// How a local set ended, from `backup_runs.local_status` and whether it
+/// covered the whole assistant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalResult {
+    Running,
+    Completed,
+    /// Completed without every computer.
+    Partial,
+    Failed,
+}
+
+impl LocalResult {
+    fn decode(status: &str, whole: bool) -> Self {
+        match status {
+            "running" => Self::Running,
+            "completed" if whole => Self::Completed,
+            "completed" => Self::Partial,
+            _ => Self::Failed,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct LocalRun {
+    pub set_id: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub status: LocalResult,
+    pub bytes: Option<u64>,
+    pub took_secs: Option<u64>,
+    pub paused_secs: Option<u64>,
+    pub error: Option<String>,
 }
 
 struct RuntimeView {
     settings: Settings,
     running: bool,
     next_backup_at: Option<String>,
+    next_local_at: Option<String>,
     last_error: Option<String>,
 }
 
 enum Command {
     Read(oneshot::Sender<RuntimeView>),
     Save(Update, oneshot::Sender<Result<(), Error>>),
+    SaveLocal(LocalUpdate, oneshot::Sender<Result<(), Error>>),
     Resolve(
         i64,
         DestinationInput,
@@ -134,12 +200,22 @@ impl Failure {
 }
 
 impl Engine {
+    /// The backup config with the owner's local retention, unless the
+    /// environment sets the schedule.
+    fn config(&self, settings: &Settings) -> BackupConfig {
+        let mut config = self.config.clone();
+        if config.cadence == Cadence::Daily {
+            config.keep = settings.local.keep;
+        }
+        config
+    }
+
     fn worker(&self, settings: &Settings, with_remote: bool) -> Result<BackupWorker, Error> {
         let mut worker = BackupWorker::new(
             self.pool.clone(),
             self.params.clone(),
             self.key.clone(),
-            self.config.clone(),
+            self.config(settings),
         )
         .with_coordinator(self.coordinator.clone());
         if with_remote && let Some(destination) = &settings.destination {
@@ -184,17 +260,43 @@ impl Engine {
         }))
     }
 
-    fn next_local(&self) -> Option<Instant> {
-        if self.config.interval.is_zero() {
-            return None;
+    /// When the next local set is due. A daily set that was missed, for
+    /// example while the server was off, waits for the next chosen time.
+    fn next_local(&self, settings: &Settings) -> Option<Instant> {
+        match self.config.cadence {
+            Cadence::Off => None,
+            Cadence::Every(interval) => {
+                let worker = BackupWorker::new(
+                    self.pool.clone(),
+                    self.params.clone(),
+                    self.key.clone(),
+                    self.config(settings),
+                );
+                Some(Instant::now() + worker.next_due(interval).unwrap_or(Duration::from_secs(60)))
+            }
+            Cadence::Daily => settings
+                .local
+                .enabled
+                .then(|| instant(next_daily(settings.local, chrono::Local::now()))),
         }
-        let worker = BackupWorker::new(
-            self.pool.clone(),
-            self.params.clone(),
-            self.key.clone(),
-            self.config.clone(),
-        );
-        Some(Instant::now() + worker.next_due().unwrap_or(Duration::from_secs(60)))
+    }
+
+    /// When to retry a failed local set: after `backoff`, but a daily set
+    /// gives up a few hours after its time and waits for the next one, so
+    /// it never pauses the owner's day.
+    fn retry_local(&self, settings: &Settings, backoff: Duration) -> Option<Instant> {
+        let retry = Instant::now() + backoff;
+        if self.config.cadence != Cadence::Daily {
+            return Some(retry);
+        }
+        let now = chrono::Local::now();
+        let slot = last_daily(settings.local, now);
+        let retry_at = now + chrono::Duration::from_std(backoff).unwrap_or_default();
+        if retry_at - slot <= daily_retry_window() {
+            Some(retry)
+        } else {
+            self.next_local(settings)
+        }
     }
 
     async fn next_remote(&self, settings: &Settings) -> Result<Option<Instant>, Error> {
@@ -222,11 +324,70 @@ impl Engine {
     }
 }
 
+/// A daily set may still retry this long after its chosen time.
+fn daily_retry_window() -> chrono::Duration {
+    chrono::Duration::hours(3)
+}
+
+/// The first moment after `now` when the clock in `now`'s zone shows the
+/// schedule's time. A time the clock skips (a daylight-saving jump) runs
+/// an hour later; a time it shows twice runs the first time.
+fn next_daily<Tz: chrono::TimeZone>(schedule: LocalSchedule, now: DateTime<Tz>) -> DateTime<Tz> {
+    let mut day = now.date_naive();
+    loop {
+        if let Some(at) = daily_slot(schedule, &now.timezone(), day)
+            && at > now
+        {
+            return at;
+        }
+        day = day.succ_opt().expect("the calendar has a next day");
+    }
+}
+
+/// The latest daily slot at or before `now`: the one a failed backup
+/// retries for.
+fn last_daily<Tz: chrono::TimeZone>(schedule: LocalSchedule, now: DateTime<Tz>) -> DateTime<Tz> {
+    let mut day = now.date_naive();
+    loop {
+        if let Some(at) = daily_slot(schedule, &now.timezone(), day)
+            && at <= now
+        {
+            return at;
+        }
+        day = day.pred_opt().expect("the calendar has a previous day");
+    }
+}
+
+/// The schedule's instant on `day`. A time skipped by a DST change runs an
+/// hour later; a repeated time runs at its first occurrence.
+fn daily_slot<Tz: chrono::TimeZone>(
+    schedule: LocalSchedule,
+    zone: &Tz,
+    day: chrono::NaiveDate,
+) -> Option<DateTime<Tz>> {
+    use chrono::offset::LocalResult;
+    let naive = day.and_time(schedule.at.time());
+    match zone.from_local_datetime(&naive) {
+        LocalResult::Single(at) | LocalResult::Ambiguous(at, _) => Some(at),
+        LocalResult::None => zone
+            .from_local_datetime(&(naive + chrono::Duration::hours(1)))
+            .earliest(),
+    }
+}
+
+fn instant(at: DateTime<chrono::Local>) -> Instant {
+    Instant::now() + (at - chrono::Local::now()).to_std().unwrap_or_default()
+}
+
+/// The wall-clock time of a deadline, to the nearest second: reading the
+/// two clocks apart would otherwise show 03:00 as 02:59:59.999.
 fn wall_time(at: Instant) -> String {
-    (Utc::now()
+    let at = Utc::now()
         + chrono::Duration::from_std(at.saturating_duration_since(Instant::now()))
-            .unwrap_or_default())
-    .to_rfc3339()
+            .unwrap_or_default();
+    chrono::DurationRound::duration_round(at, chrono::Duration::seconds(1))
+        .unwrap_or(at)
+        .to_rfc3339()
 }
 
 impl Backups {
@@ -271,13 +432,21 @@ impl Backups {
         if engine.worker(&settings, false)?.recover().await.is_err() {
             tracing::warn!("backup recovery failed; the next backup will retry");
         }
-        let local_at = engine.next_local();
+        let local_at = engine.next_local(&settings);
         let remote_at = engine.next_remote(&settings).await?;
         let (tx, rx) = mpsc::channel(32);
         let service = Self {
             tx,
             pool,
             probe_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            local_dir: engine.config.dir.clone(),
+            cadence: engine.config.cadence,
+            env_keep: engine.config.keep,
+            gate: engine
+                .coordinator
+                .scheduler
+                .as_ref()
+                .map(|scheduler| scheduler.gate().clone()),
             initial_estimate: Estimate {
                 bytes: initial_bytes,
                 basis: "Rough database, file, project and shared MCP size. Computer snapshots and encryption overhead are excluded until the first complete backup.".into(),
@@ -301,6 +470,11 @@ impl Backups {
 
     pub async fn save(&self, update: Update) -> Result<Snapshot, Error> {
         self.request(|tx| Command::Save(update, tx)).await??;
+        self.snapshot().await
+    }
+
+    pub async fn save_local(&self, update: LocalUpdate) -> Result<Snapshot, Error> {
+        self.request(|tx| Command::SaveLocal(update, tx)).await??;
         self.snapshot().await
     }
 
@@ -369,7 +543,50 @@ impl Backups {
             sqlx::query_scalar::<_, i64>("SELECT ciphertext_bytes FROM backup_runs WHERE local_status = 'completed' AND ciphertext_bytes IS NOT NULL ORDER BY coalesce(json_extract(coverage, '$.whole_assistant'), 0) DESC, finished_at DESC LIMIT 1")
                 .fetch_optional(&self.pool).await
         };
-        let (history, totals, latest) = tokio::join!(history, totals, latest);
+        let local_runs = async {
+            sqlx::query("SELECT set_id, started_at, finished_at, local_status, ciphertext_bytes, paused_ms, error,
+                    coalesce(json_extract(coverage, '$.whole_assistant'), 1) AS whole,
+                    CAST(round((julianday(finished_at) - julianday(started_at)) * 86400) AS INTEGER) AS took
+                 FROM backup_runs ORDER BY started_at DESC LIMIT 10")
+                .fetch_all(&self.pool).await
+        };
+        let dir = self.local_dir.clone();
+        let disk = tokio::task::spawn_blocking(move || {
+            let sets = super::completed_sets(&dir).unwrap_or_default();
+            let bytes = sets
+                .iter()
+                .fold(0u64, |sum, set| sum.saturating_add(size(&dir.join(set))));
+            (sets.len(), bytes, free_space(&dir))
+        });
+        let (history, totals, latest, local_runs, disk) =
+            tokio::join!(history, totals, latest, local_runs, disk);
+        let (copies, local_bytes, free_bytes) = disk.map_err(|_| Error::Unavailable)?;
+        let local_recent = local_runs?
+            .into_iter()
+            .map(|row| {
+                let status = LocalResult::decode(
+                    &row.get::<String, _>("local_status"),
+                    row.get::<i64, _>("whole") != 0,
+                );
+                LocalRun {
+                    set_id: row.get("set_id"),
+                    started_at: row.get("started_at"),
+                    finished_at: row.get("finished_at"),
+                    status,
+                    bytes: (status != LocalResult::Failed)
+                        .then(|| row.get::<Option<i64>, _>("ciphertext_bytes"))
+                        .flatten()
+                        .map(|n| n.max(0) as u64),
+                    took_secs: row.get::<Option<i64>, _>("took").map(|n| n.max(0) as u64),
+                    paused_secs: row
+                        .get::<Option<i64>, _>("paused_ms")
+                        .map(|ms| (ms.max(0) as u64 + 500) / 1000),
+                    error: (status == LocalResult::Failed)
+                        .then(|| row.get::<Option<String>, _>("error"))
+                        .flatten(),
+                }
+            })
+            .collect();
         let recent = history?
             .into_iter()
             .map(|row| Recent {
@@ -406,8 +623,69 @@ impl Backups {
             remote_bytes: totals.get::<i64, _>("bytes").max(0) as u64,
             unavailable_reason: None,
             last_error: view.last_error,
+            local: LocalView {
+                enabled: self.cadence != Cadence::Off && settings.local.enabled,
+                time: match self.cadence {
+                    Cadence::Daily | Cadence::Off => settings.local.at.to_string(),
+                    Cadence::Every(interval) => {
+                        format!("every {} min", interval.as_secs().div_ceil(60))
+                    }
+                },
+                timezone: server_timezone(),
+                utc_offset_secs: chrono::Local::now().offset().local_minus_utc(),
+                keep: match self.cadence {
+                    Cadence::Daily => settings.local.keep,
+                    _ => self.env_keep,
+                },
+                managed_by_env: self.cadence != Cadence::Daily,
+                next_at: view.next_local_at,
+                copies,
+                bytes: local_bytes,
+                free_bytes,
+                recent: local_recent,
+            },
+            pause: self
+                .gate
+                .as_ref()
+                .and_then(|gate| gate.pause())
+                .map(|pause| pause.json()),
         })
     }
+}
+
+/// The server's IANA time zone, or its UTC offset when that is unknown.
+fn server_timezone() -> String {
+    iana_time_zone::get_timezone().unwrap_or_else(|_| {
+        let offset = chrono::Local::now().offset().local_minus_utc();
+        format!(
+            "UTC{}{:02}:{:02}",
+            if offset < 0 { '-' } else { '+' },
+            offset.abs() / 3600,
+            offset.abs() % 3600 / 60
+        )
+    })
+}
+
+/// Bytes available to this user on the file system holding `path`.
+fn free_space(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `stat` is written by statvfs
+    // before it is read, only when the call succeeds.
+    let stat = unsafe {
+        if libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) != 0 {
+            return None;
+        }
+        stat.assume_init()
+    };
+    // The field types are u64 on Linux and narrower on macOS.
+    #[allow(
+        clippy::unnecessary_cast,
+        reason = "statvfs field widths differ by platform"
+    )]
+    let (available, fragment) = (stat.f_bavail as u64, stat.f_frsize as u64);
+    Some(available.saturating_mul(fragment))
 }
 
 fn size(path: &Path) -> u64 {
@@ -475,6 +753,7 @@ async fn run(
                         settings: settings.clone(),
                         running: job.is_some(),
                         next_backup_at: [remote_at, retry_at].into_iter().flatten().min().map(wall_time),
+                        next_local_at: local_at.map(wall_time),
                         last_error: remote_error.clone().or_else(|| local_error.clone()),
                     });
                 }
@@ -495,6 +774,25 @@ async fn run(
                         remote_at = engine.next_remote(&settings).await?;
                         retry_at = None;
                         remote_error = None;
+                        Ok(())
+                    }.await;
+                    let _ = reply.send(result);
+                }
+                Command::SaveLocal(update, reply) => {
+                    let result = async {
+                        if engine.config.cadence != Cadence::Daily {
+                            return Err(Error::Invalid(
+                                "ELSE_BACKUP_INTERVAL_SECS sets the local backup schedule on this server.",
+                            ));
+                        }
+                        let next = settings.updated_local(update)?;
+                        settings::save(&engine.pool, &engine.key, &next).await?;
+                        settings = next;
+                        // A capture reschedules when it ends; an upload-only
+                        // retry does not, so apply the new time now.
+                        if job.is_none() || matches!(kind, Job::Retry) {
+                            local_at = engine.next_local(&settings);
+                        }
                         Ok(())
                     }.await;
                     let _ = reply.send(result);
@@ -521,7 +819,11 @@ async fn run(
             } => {
                 job = None;
                 let result = outcome.unwrap_or_else(|_| Err(Failure::Capture("Backup task stopped unexpectedly.".into())));
-                local_at = engine.next_local();
+                // An upload-only retry captured nothing, so a local backup
+                // that fell due meanwhile still runs.
+                if !matches!(kind, Job::Retry) {
+                    local_at = engine.next_local(&settings);
+                }
                 match result {
                     Ok(()) => {
                         match kind {
@@ -548,7 +850,7 @@ async fn run(
                     Err(error) => {
                         if matches!(kind, Job::Local) {
                             local_error = Some(error.message());
-                            local_at = Some(Instant::now() + local_retry);
+                            local_at = engine.retry_local(&settings, local_retry);
                             local_retry = (local_retry * 2).min(Duration::from_secs(3600));
                         } else {
                             remote_error = Some(error.message());
@@ -591,10 +893,89 @@ async fn run(
                         remote_error = Some(error.to_string());
                         remote_at = None;
                         retry_at = None;
-                        local_at = Some(now + Duration::from_secs(60));
+                        local_at = engine.retry_local(&settings, Duration::from_secs(60));
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone as _;
+    use chrono_tz::{America::New_York, Asia::Dubai};
+
+    use super::*;
+    use crate::backup::settings::TimeOfDay;
+
+    fn at(time: &str) -> LocalSchedule {
+        LocalSchedule {
+            enabled: true,
+            at: TimeOfDay::parse(time).unwrap(),
+            keep: 7,
+        }
+    }
+
+    #[test]
+    fn the_daily_time_is_the_next_one_on_the_servers_clock() {
+        let morning = Dubai.with_ymd_and_hms(2026, 11, 12, 10, 40, 0).unwrap();
+        assert_eq!(
+            next_daily(at("03:00"), morning),
+            Dubai.with_ymd_and_hms(2026, 11, 13, 3, 0, 0).unwrap(),
+            "a time already past today runs tomorrow, not now"
+        );
+        let night = Dubai.with_ymd_and_hms(2026, 11, 12, 1, 0, 0).unwrap();
+        assert_eq!(
+            next_daily(at("03:00"), night),
+            Dubai.with_ymd_and_hms(2026, 11, 12, 3, 0, 0).unwrap()
+        );
+        let exactly = Dubai.with_ymd_and_hms(2026, 11, 12, 3, 0, 0).unwrap();
+        assert_eq!(
+            next_daily(at("03:00"), exactly),
+            Dubai.with_ymd_and_hms(2026, 11, 13, 3, 0, 0).unwrap(),
+            "the set that just ran is not repeated"
+        );
+    }
+
+    #[test]
+    fn daylight_saving_days_still_run_once() {
+        // 2026-03-08 02:00 does not exist in New York; 2026-11-01 01:30 happens twice.
+        let before_jump = New_York.with_ymd_and_hms(2026, 3, 8, 0, 0, 0).unwrap();
+        assert_eq!(
+            next_daily(at("02:30"), before_jump),
+            New_York.with_ymd_and_hms(2026, 3, 8, 3, 30, 0).unwrap()
+        );
+        let before_repeat = New_York.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+        let first = next_daily(at("01:30"), before_repeat);
+        assert_eq!(first.offset().to_string(), "EDT", "the first 01:30");
+        assert_eq!(
+            next_daily(at("01:30"), first).date_naive(),
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap(),
+            "the repeated hour does not run it twice"
+        );
+    }
+
+    #[test]
+    fn a_retry_counts_from_the_slot_it_missed_across_daylight_saving() {
+        // The retry window runs from the actual slot, not 24 hours before
+        // the next one, so a DST day neither shrinks nor stretches it.
+        let after_jump = New_York.with_ymd_and_hms(2026, 3, 8, 4, 0, 0).unwrap();
+        let slot = last_daily(at("01:30"), after_jump);
+        assert_eq!(
+            slot,
+            New_York.with_ymd_and_hms(2026, 3, 8, 1, 30, 0).unwrap()
+        );
+        assert_eq!(after_jump - slot, chrono::Duration::minutes(90));
+        let after_repeat = New_York.with_ymd_and_hms(2026, 11, 1, 3, 0, 0).unwrap();
+        let slot = last_daily(at("01:30"), after_repeat);
+        assert_eq!(slot.offset().to_string(), "EDT", "the first 01:30");
+        assert_eq!(after_repeat - slot, chrono::Duration::minutes(150));
+        let before = Dubai.with_ymd_and_hms(2026, 11, 12, 2, 0, 0).unwrap();
+        assert_eq!(
+            last_daily(at("03:00"), before),
+            Dubai.with_ymd_and_hms(2026, 11, 11, 3, 0, 0).unwrap(),
+            "before today's time, the slot is yesterday's"
+        );
     }
 }

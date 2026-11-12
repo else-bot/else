@@ -67,7 +67,7 @@ fn next_backup(snapshot: &BackupSnapshot) -> String {
     }
 }
 
-fn metric(label: &'static str, value: String, detail: String, theme: &Theme) -> Div {
+pub(super) fn metric(label: &'static str, value: String, detail: String, theme: &Theme) -> Div {
     v_flex()
         .flex_1()
         .min_w_0()
@@ -95,7 +95,7 @@ fn metric(label: &'static str, value: String, detail: String, theme: &Theme) -> 
         )
 }
 
-fn message(text: String, color: Hsla, theme: &Theme) -> Div {
+pub(super) fn message(text: String, color: Hsla, theme: &Theme) -> Div {
     div()
         .p_3()
         .rounded(theme.radius)
@@ -123,8 +123,8 @@ impl Shell {
                 .p_8()
                 .gap_5()
                 .child(super::super::settings::section_heading(
-                    "Remote backups",
-                    "Keep a remote copy of your workspace.",
+                    "Backups",
+                    "Copies of every bot’s computer, projects and memory.",
                     cx,
                 ))
                 .child(
@@ -151,7 +151,7 @@ impl Shell {
                 )
                 .into_any_element();
         };
-        let busy = view.busy();
+        let busy = view.busy() || view.local_dirty(cx);
         let unavailable = snapshot.unavailable_reason.is_some();
         let stacked = window.viewport_size().width < px(850.);
         let has_destination = snapshot.destination.is_some();
@@ -182,7 +182,15 @@ impl Shell {
         let mut content = v_flex()
             .gap_5()
             .child(super::super::settings::section_heading(
-                "Remote backups",
+                "Backups",
+                "Copies of every bot’s computer, projects and memory.",
+                cx,
+            ))
+            .when_some(snapshot.local.as_ref(), |content, local| {
+                content.child(self.render_local_backups(view, snapshot, local, stacked, cx))
+            })
+            .child(super::super::settings::section_heading(
+                "Remote",
                 "Your workspace, backed up off this server.",
                 cx,
             ))

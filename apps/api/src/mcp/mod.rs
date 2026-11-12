@@ -827,7 +827,8 @@ impl Library {
             .actor
             .call_async(move |slot| {
                 Box::pin(async move {
-                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
+                    // Called for running turns: allowed until a backup captures.
+                    let _admission = slot.gate.enter_turn().ok_or(Error::Paused)?;
                     let (config, secrets) = slot.config().await?;
                     let result = slot
                         .session()
@@ -851,7 +852,7 @@ impl Library {
             .actor
             .call_async(move |slot| {
                 Box::pin(async move {
-                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
+                    let _admission = slot.gate.enter_turn().ok_or(Error::Paused)?;
                     let (config, _) = slot.config().await?;
                     slot.session().await?.git_token(&config).await
                 })

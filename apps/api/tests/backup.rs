@@ -39,7 +39,7 @@ fn config(dir: &Path) -> BackupConfig {
         dir: dir.join("backups"),
         keep: 7,
         max_bytes: 1 << 30,
-        interval: Duration::from_secs(3600),
+        cadence: else_api::backup::capture::Cadence::Every(Duration::from_secs(3600)),
     }
 }
 
@@ -511,7 +511,7 @@ async fn scheduling_serializes_runs_and_keeps_the_newest_sets() {
     cfg.keep = 2;
     let worker = Arc::new(worker(&app, key(1), cfg));
     assert_eq!(
-        worker.next_due().unwrap(),
+        worker.next_due(Duration::from_secs(3600)).unwrap(),
         Duration::ZERO,
         "nothing yet: due now"
     );
@@ -522,7 +522,7 @@ async fn scheduling_serializes_runs_and_keeps_the_newest_sets() {
     }
     let sets = backup::completed_sets(&dir.path().join("backups")).unwrap();
     assert_eq!(sets, ids[1..].to_vec(), "the two newest kept");
-    let due = worker.next_due().unwrap();
+    let due = worker.next_due(Duration::from_secs(3600)).unwrap();
     assert!(
         due > Duration::from_secs(3500) && due <= Duration::from_secs(3600),
         "{due:?}"
@@ -535,7 +535,7 @@ async fn scheduling_serializes_runs_and_keeps_the_newest_sets() {
     assert_eq!(refused, 1, "{a:?} {b:?}");
     let empty = tempfile::tempdir().unwrap();
     let mut cfg = config(empty.path());
-    cfg.interval = Duration::from_secs(3600);
+    cfg.cadence = else_api::backup::capture::Cadence::Every(Duration::from_secs(3600));
     let scheduled = Arc::new(BackupWorker::new(
         app.db.pool.clone(),
         DatabaseParams::parse(app.db.url.expose()).unwrap(),
