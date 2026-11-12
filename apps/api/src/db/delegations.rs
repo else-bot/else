@@ -532,7 +532,9 @@ pub async fn take_over(
                         UNION ALL SELECT turn_id FROM secret_requests WHERE status = 'pending'
                         UNION ALL SELECT turn_id FROM outgoing_drafts WHERE status = 'pending'
                         UNION ALL SELECT turn_id FROM social_setups WHERE status = 'pending'
-                        UNION ALL SELECT turn_id FROM skill_installs WHERE status = 'pending'))))",
+                        UNION ALL SELECT turn_id FROM skill_installs WHERE status = 'pending'
+                        UNION ALL SELECT turn_id FROM computer_handoffs
+                                  WHERE status = 'pending' AND attempt > 0))))",
     )
     .bind(bot_id)
     .bind(conversation_id)

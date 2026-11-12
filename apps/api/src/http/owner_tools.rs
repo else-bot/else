@@ -204,14 +204,14 @@ pub(super) fn handoff_schema() -> Value {
         "name": "computer_handoff",
         "description": "Ask the owner to take over your computer when only they can get past something \
             on screen: a login, a captcha, a 2FA prompt, or a broken page to inspect. Pins a Take \
-            over bar above their message box until they act or message you. Does not wait: leave \
-            the screen as it is, say what you need in your reply, and end your turn.",
+            over bar and returns parked: leave the screen as it is, say what you need in your reply, \
+            and end the attempt. You continue once they hand it back, decline, or message you.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "reason": { "type": "string", "minLength": 1,
                             "maxLength": crate::db::computer_handoffs::MAX_REASON,
-                            "description": "Shown on the bar: what is on screen and what you need, e.g. X Chat is blank at x.com/messages." },
+                            "description": "Shown on the bar and beside your screen while the owner works: what is on screen and what you need, e.g. X Chat is blank at x.com/messages." },
             },
             "required": ["reason"],
             "additionalProperties": false,
@@ -231,9 +231,10 @@ pub(super) async fn computer_handoff(state: &AppState, grant: &Grant, args: &Val
         Ok(handoff) => (
             tool_result(json!({
                 "status": "pending",
+                "parked": true,
                 "handoff_id": handoff.id,
-                "next": "The owner sees a Take over bar. Leave the screen as it is, tell them \
-                         briefly what you need, and end your turn without more computer actions.",
+                "next": "End this attempt now without more computer actions. You continue when \
+                         the owner hands your computer back, declines, or messages you.",
             })),
             Some(format!("pending {}", handoff.id)),
         ),
@@ -241,6 +242,8 @@ pub(super) async fn computer_handoff(state: &AppState, grant: &Grant, args: &Val
             let code = match err {
                 CreateError::NotAllowed => "NOT_ALLOWED",
                 CreateError::NotRunning => "NOT_RUNNING",
+                CreateError::AttemptParked => "ATTEMPT_PARKED",
+                CreateError::OwnerInControl => "OWNER_IN_CONTROL",
                 CreateError::Db => "UNAVAILABLE",
             };
             (

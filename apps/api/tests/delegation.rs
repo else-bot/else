@@ -2493,3 +2493,84 @@ async fn a_message_sent_during_a_pause_takes_over_only_once_it_ends() {
         "settling again changes nothing"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_question_while_the_owner_holds_a_delegated_bots_computer_keeps_the_task_waiting() {
+    let app = app_with(2).await;
+    let work = leaf(&app, "Scout").await;
+    let (_, root, token) = running_main(&app).await;
+    let reply = delegate(&app, &token, &work, "[synthetic:slow] check X replies").await;
+    let task_id: Uuid = tool_text(&reply)["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
+        .bind(task_id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    wait_status(&app, child, "running").await;
+    let (bot, conversation): (Uuid, Uuid) =
+        sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
+            .bind(child)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    let child_token = app
+        .scheduler
+        .grants()
+        .issue(bot, conversation, child, vec![Tool::Computer], DEFAULT_TTL)
+        .await;
+    let asked = app
+        .call(
+            "POST",
+            "/tools/v1/mcp",
+            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                         "params": { "name": "computer_handoff",
+                                     "arguments": { "reason": "Log in to X as @scout." } } })),
+            Some(&child_token),
+        )
+        .await;
+    let handoff = tool_text(&asked)["handoff_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{}", asked.body))
+        .to_owned();
+    wait_status(&app, child, "waiting").await;
+    let taken = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{work}/computer-handoffs/{handoff}/take"),
+            None,
+        )
+        .await;
+    assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
+
+    let sent = app
+        .send(&work, Uuid::new_v4(), "Which account?", Some("synthetic"))
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    let state: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
+        .bind(task_id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_ne!(
+        state, "completed",
+        "a question is not a hand back; the task keeps waiting"
+    );
+    wait_status(&app, child, "waiting").await;
+
+    let back = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{work}/computer-handoffs/{handoff}/hand-back"),
+            None,
+        )
+        .await;
+    assert_eq!(back.status, StatusCode::OK, "{}", back.body);
+    wait_status(&app, child, "completed").await;
+    wait_status(&app, root, "completed").await;
+}

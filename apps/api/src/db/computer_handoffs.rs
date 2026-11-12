@@ -1,8 +1,14 @@
 //! A bot's request that the owner take over its computer.
 //!
-//! The bot calls `computer_handoff` and ends its reply; nothing waits on the
-//! request. It stays pending, one per bot, until the owner takes over or
-//! dismisses it, the owner sends the bot a message, or the bot asks again.
+//! The bot calls `computer_handoff` and ends its attempt; the turn waits on
+//! the request like a question. One request per bot is open at a time.
+//! `pending` waits for the owner, who takes over (`taken`) or declines
+//! (`dismissed`). Taking over only hands them control: the turn continues
+//! once they press Hand back (`handed_back`). A newer owner message or a
+//! newer request replaces a pending one (`skipped`), and the end of its
+//! turn withdraws it (`cancelled`, by trigger). A taken request outlives its
+//! turn: the owner holds the computer until they hand it back, and the
+//! bot's later turns are told so.
 
 use std::collections::HashMap;
 
@@ -17,30 +23,36 @@ use super::events;
 pub const MAX_REASON: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Status {
     Pending,
     Taken,
+    HandedBack,
     Dismissed,
     Skipped,
+    Cancelled,
 }
 
 impl Status {
     fn parse(text: &str) -> Self {
         match text {
             "taken" => Self::Taken,
+            "handed_back" => Self::HandedBack,
             "dismissed" => Self::Dismissed,
             "skipped" => Self::Skipped,
+            "cancelled" => Self::Cancelled,
             _ => Self::Pending,
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Taken => "taken",
+            Self::HandedBack => "handed_back",
             Self::Dismissed => "dismissed",
             Self::Skipped => "skipped",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -53,6 +65,7 @@ pub struct Handoff {
     pub reason: String,
     pub status: Status,
     pub created_at: DateTime<Utc>,
+    pub taken_at: Option<DateTime<Utc>>,
     pub settled_at: Option<DateTime<Utc>>,
 }
 
@@ -64,11 +77,14 @@ type Row = (
     String,
     DateTime<Utc>,
     Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
 );
 
-const COLUMNS: &str = "id, bot_id, turn_id, reason, status, created_at, settled_at";
+const COLUMNS: &str = "id, bot_id, turn_id, reason, status, created_at, taken_at, settled_at";
 
-fn handoff((id, bot_id, turn_id, reason, status, created_at, settled_at): Row) -> Handoff {
+fn handoff(
+    (id, bot_id, turn_id, reason, status, created_at, taken_at, settled_at): Row,
+) -> Handoff {
     Handoff {
         id,
         bot_id,
@@ -76,6 +92,7 @@ fn handoff((id, bot_id, turn_id, reason, status, created_at, settled_at): Row) -
         reason,
         status: Status::parse(&status),
         created_at,
+        taken_at,
         settled_at,
     }
 }
@@ -96,6 +113,10 @@ pub enum CreateError {
     NotAllowed,
     #[error("the request is no longer running")]
     NotRunning,
+    #[error("this attempt already waits on the owner and must end")]
+    AttemptParked,
+    #[error("the owner already controls your computer for an earlier request")]
+    OwnerInControl,
     #[error("database error")]
     Db,
 }
@@ -107,8 +128,9 @@ impl From<sqlx::Error> for CreateError {
     }
 }
 
-/// Record a request from the running turn `turn_id`. It replaces the bot's
-/// earlier pending request, so the owner sees only the latest.
+/// Record a request from the running attempt of `turn_id`, which then
+/// waits on it. It replaces the bot's earlier pending request, so the owner
+/// sees only the latest; a request the owner already took over stays.
 pub async fn create(
     pool: &SqlitePool,
     turn_id: Uuid,
@@ -121,14 +143,27 @@ pub async fn create(
     if !super::turns::may_ask_owner(&mut tx, turn_id, &caller).await? {
         return Err(CreateError::NotAllowed);
     }
+    if super::turns::attempt_parked(&mut tx, turn_id, caller.attempt).await? {
+        return Err(CreateError::AttemptParked);
+    }
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM computer_handoffs WHERE bot_id = ?1 AND status = 'taken')",
+    )
+    .bind(caller.bot_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if taken {
+        return Err(CreateError::OwnerInControl);
+    }
     skip_pending(&mut tx, caller.bot_id).await?;
     let row: Row = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "INSERT INTO computer_handoffs (id, bot_id, turn_id, reason)
-         VALUES (?1, ?2, ?3, ?4) RETURNING {COLUMNS}"
+        "INSERT INTO computer_handoffs (id, bot_id, turn_id, attempt, reason)
+         VALUES (?1, ?2, ?3, ?4, ?5) RETURNING {COLUMNS}"
     )))
     .bind(Uuid::new_v4())
     .bind(caller.bot_id)
     .bind(turn_id)
+    .bind(caller.attempt)
     .bind(reason)
     .fetch_one(&mut *tx)
     .await?;
@@ -138,7 +173,8 @@ pub async fn create(
 }
 
 /// Withdraw the bot's pending request, when the owner messages it or it
-/// asks again.
+/// asks again. The turn that waits on it continues and learns it was
+/// skipped. A request the owner already took over stays theirs.
 pub async fn skip_pending(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<(), sqlx::Error> {
     let skipped: Option<Uuid> = sqlx::query_scalar(
         "UPDATE computer_handoffs SET status = 'skipped',
@@ -149,6 +185,7 @@ pub async fn skip_pending(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<(
     .fetch_optional(&mut *conn)
     .await?;
     if let Some(turn_id) = skipped {
+        super::turns::continue_waiting(conn, turn_id).await?;
         events::turn_changed(conn, bot_id, turn_id).await?;
     }
     Ok(())
@@ -175,25 +212,117 @@ pub async fn for_turns(
     Ok(by_turn)
 }
 
+/// What the owner did with a request, for the attempt that continues the
+/// turn that asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcome {
+    pub id: Uuid,
+    pub reason: String,
+    pub status: Status,
+}
+
+/// Settled requests of a turn not yet given to an attempt.
+pub async fn undelivered(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<Vec<Outcome>, sqlx::Error> {
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT id, reason, status FROM computer_handoffs
+         WHERE turn_id = ?1 AND attempt > 0 AND delivered_attempt IS NULL
+           AND status IN ('handed_back', 'dismissed', 'skipped')
+         ORDER BY created_at, id",
+    )
+    .bind(turn_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, reason, status)| Outcome {
+            id,
+            reason,
+            status: Status::parse(&status),
+        })
+        .collect())
+}
+
+/// Record that `attempt` received these outcomes.
+pub async fn mark_delivered(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+    attempt: i32,
+    ids: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE computer_handoffs SET delivered_attempt = ?3
+         WHERE turn_id = ?1 AND delivered_attempt IS NULL
+           AND lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?2))",
+    )
+    .bind(turn_id)
+    .bind(Json(ids))
+    .bind(attempt)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// The bot's latest request the owner took over, for the context every
+/// turn of the bot carries: whether the owner still holds its computer.
+pub async fn latest_taken(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+) -> Result<Option<Handoff>, sqlx::Error> {
+    let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLUMNS} FROM computer_handoffs
+         WHERE bot_id = ?1 AND taken_at IS NOT NULL
+         ORDER BY taken_at DESC, id DESC LIMIT 1"
+    )))
+    .bind(bot_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(row.map(handoff))
+}
+
+/// What the owner does with a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// Take control of the computer; the turn keeps waiting.
+    Take,
+    /// Return control; the turn continues.
+    HandBack,
+    /// Decline a request not taken over; the turn continues.
+    Dismiss,
+}
+
+impl Action {
+    fn transition(self) -> (Status, &'static [Status]) {
+        match self {
+            Self::Take => (Status::Taken, &[Status::Pending]),
+            Self::HandBack => (Status::HandedBack, &[Status::Taken]),
+            Self::Dismiss => (Status::Dismissed, &[Status::Pending]),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SettleError {
     #[error("not found")]
     NotFound,
-    #[error("the request was already settled")]
+    #[error("the request is already {}", .0.status.as_str())]
     Settled(Handoff),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
 
-/// The owner takes over or dismisses a pending request. Settling it again
-/// the same way returns it unchanged.
+/// Apply the owner's `action` to a request. Repeating an action that
+/// already applied returns the request unchanged; any other action from a
+/// state it does not start from is refused.
 pub async fn settle(
     pool: &SqlitePool,
     bot_id: Uuid,
     handoff_id: Uuid,
-    status: Status,
+    action: Action,
 ) -> Result<Handoff, SettleError> {
-    debug_assert!(matches!(status, Status::Taken | Status::Dismissed));
+    let (target, sources) = action.transition();
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT h.{} FROM computer_handoffs h JOIN bots b ON b.id = h.bot_id
@@ -205,22 +334,30 @@ pub async fn settle(
     .fetch_optional(&mut *tx)
     .await?;
     let found = row.map(handoff).ok_or(SettleError::NotFound)?;
-    if found.status == status {
+    if found.status == target {
         return Ok(found);
     }
-    if found.status != Status::Pending {
+    if !sources.contains(&found.status) {
         return Err(SettleError::Settled(found));
     }
-    let row: Row = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+    let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "UPDATE computer_handoffs SET status = ?2,
-             settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE id = ?1 RETURNING {COLUMNS}"
+             taken_at = CASE WHEN ?2 = 'taken'
+                 THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') ELSE taken_at END,
+             settled_at = CASE WHEN ?2 = 'taken'
+                 THEN NULL ELSE strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') END
+         WHERE id = ?1 AND status = ?3 RETURNING {COLUMNS}"
     )))
     .bind(handoff_id)
-    .bind(status.as_str())
-    .fetch_one(&mut *tx)
+    .bind(target.as_str())
+    .bind(found.status.as_str())
+    .fetch_optional(&mut *tx)
     .await?;
+    let settled = handoff(row.ok_or(SettleError::Settled(found.clone()))?);
+    if target != Status::Taken {
+        super::turns::continue_waiting(&mut tx, found.turn_id).await?;
+    }
     events::turn_changed(&mut tx, bot_id, found.turn_id).await?;
     tx.commit().await?;
-    Ok(handoff(row))
+    Ok(settled)
 }

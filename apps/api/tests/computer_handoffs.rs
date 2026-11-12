@@ -12,12 +12,16 @@ use uuid::Uuid;
 
 const SLOW: &str = "[synthetic:slow] check the inbox on your computer.";
 
-async fn app() -> TestApp {
+async fn harness() -> (TestApp, Arc<Synthetic>) {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
-    let registry = else_api::providers::Registry::new(vec![synthetic]);
-    TestApp::with_registry(db, 4, registry)
+    let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
+    (TestApp::with_registry(db, 4, registry), synthetic)
+}
+
+async fn app() -> TestApp {
+    harness().await.0
 }
 
 async fn running(app: &TestApp, bot: &str) -> (Uuid, String) {
@@ -81,44 +85,122 @@ async fn settle(app: &TestApp, bot: &str, id: &Value, action: &str) -> common::R
     .await
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_handoff_stays_pending_without_holding_the_turn_until_the_owner_acts() {
-    let app = app().await;
-    let bot = app.main_bot().await;
-    let (turn, token) = running(&app, &bot).await;
-
-    let first = hand_off(&app, &token, "X Chat is blank at x.com/messages.").await;
-    assert_eq!(first["status"], "pending", "{first}");
-    let turn_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+async fn turn_status(app: &TestApp, turn: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
         .await
-        .unwrap();
-    assert_eq!(turn_status, "running", "a handoff never parks the turn");
+        .unwrap()
+}
 
-    let second = hand_off(&app, &token, "Log in to X again.").await;
-    assert_eq!(
-        status(&app, &first["handoff_id"]).await,
-        "skipped",
-        "a newer request replaces the pending one"
+async fn wait(app: &TestApp, turn: Uuid, status: &str) {
+    app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(30))
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_handoff_parks_the_turn_until_the_owner_hands_the_computer_back() {
+    let (app, synthetic) = harness().await;
+    let bot = app.main_bot().await;
+    let (turn, token) = running(&app, &bot).await;
+
+    let asked = hand_off(&app, &token, "X wants a 2FA code at x.com/login.").await;
+    assert_eq!(asked["status"], "pending", "{asked}");
+    assert_eq!(asked["parked"], true, "{asked}");
+    let again = hand_off(&app, &token, "Log in to X again.").await;
+    assert!(
+        again
+            .as_str()
+            .is_some_and(|t| t.starts_with("ATTEMPT_PARKED")),
+        "a parked attempt asks nothing more: {again}"
     );
+    wait(&app, turn, "waiting").await;
 
-    let taken = settle(&app, &bot, &second["handoff_id"], "take").await;
+    let taken = settle(&app, &bot, &asked["handoff_id"], "take").await;
     assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
     assert_eq!(taken.body["handoff"]["status"], "taken");
-    let again = settle(&app, &bot, &second["handoff_id"], "take").await;
-    assert_eq!(again.status, StatusCode::OK, "taking over twice is a no-op");
-    let dismissed = settle(&app, &bot, &second["handoff_id"], "dismiss").await;
-    assert_eq!(dismissed.status, StatusCode::CONFLICT, "{}", dismissed.body);
+    assert!(
+        taken.body["handoff"]["taken_at"].is_string(),
+        "{}",
+        taken.body
+    );
+    assert_eq!(
+        turn_status(&app, turn).await,
+        "waiting",
+        "taking over does not continue the bot"
+    );
+    let retried = settle(&app, &bot, &asked["handoff_id"], "take").await;
+    assert_eq!(
+        retried.status,
+        StatusCode::OK,
+        "taking over twice is a no-op"
+    );
+    let declined = settle(&app, &bot, &asked["handoff_id"], "dismiss").await;
+    assert_eq!(
+        declined.status,
+        StatusCode::CONFLICT,
+        "a taken request is only handed back: {}",
+        declined.body
+    );
+    assert_eq!(declined.body["error"]["code"], "computer_handoff_settled");
+
+    let back = settle(&app, &bot, &asked["handoff_id"], "hand-back").await;
+    assert_eq!(back.status, StatusCode::OK, "{}", back.body);
+    assert_eq!(back.body["handoff"]["status"], "handed_back");
+    wait(&app, turn, "completed").await;
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(packet.contains("[else.bot take-over results]"), "{packet}");
+    assert!(
+        packet.contains("result=\"handed_back: the owner took over and handed it back\""),
+        "{packet}"
+    );
+    assert!(
+        packet.contains("X wants a 2FA code at x.com/login."),
+        "{packet}"
+    );
+
+    let twice = settle(&app, &bot, &asked["handoff_id"], "hand-back").await;
+    assert_eq!(
+        twice.status,
+        StatusCode::OK,
+        "handing back twice is a no-op"
+    );
+    assert_eq!(status(&app, &asked["handoff_id"]).await, "handed_back");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn declining_a_handoff_continues_the_turn_and_it_cannot_be_handed_back() {
+    let (app, synthetic) = harness().await;
+    let bot = app.main_bot().await;
+    let (turn, token) = running(&app, &bot).await;
+    let asked = hand_off(&app, &token, "A captcha blocks the login page.").await;
+    wait(&app, turn, "waiting").await;
+
+    let early = settle(&app, &bot, &asked["handoff_id"], "hand-back").await;
+    assert_eq!(
+        early.status,
+        StatusCode::CONFLICT,
+        "nothing to hand back before taking over: {}",
+        early.body
+    );
+    let declined = settle(&app, &bot, &asked["handoff_id"], "dismiss").await;
+    assert_eq!(declined.status, StatusCode::OK, "{}", declined.body);
+    assert_eq!(declined.body["handoff"]["status"], "dismissed");
+    wait(&app, turn, "completed").await;
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(packet.contains("result=\"declined:"), "{packet}");
+    let late = settle(&app, &bot, &asked["handoff_id"], "take").await;
+    assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owner_message_withdraws_a_pending_handoff() {
-    let app = app().await;
+    let (app, _) = harness().await;
     let bot = app.main_bot().await;
-    let (_, token) = running(&app, &bot).await;
+    let (turn, token) = running(&app, &bot).await;
     let handoff = hand_off(&app, &token, "A captcha blocks the login page.").await;
     assert_eq!(handoff["status"], "pending", "{handoff}");
+    wait(&app, turn, "waiting").await;
 
     let sent = app
         .send(&bot, Uuid::new_v4(), "Skip X for today.", Some("synthetic"))
@@ -127,6 +209,53 @@ async fn an_owner_message_withdraws_a_pending_handoff() {
     assert_eq!(status(&app, &handoff["handoff_id"]).await, "skipped");
     let later = settle(&app, &bot, &handoff["handoff_id"], "dismiss").await;
     assert_eq!(later.status, StatusCode::CONFLICT, "{}", later.body);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chatting_while_in_control_keeps_the_computer_with_the_owner() {
+    let (app, synthetic) = harness().await;
+    let bot = app.main_bot().await;
+    let (turn, token) = running(&app, &bot).await;
+    let asked = hand_off(&app, &token, "Log in to X as @scout.").await;
+    wait(&app, turn, "waiting").await;
+    let taken = settle(&app, &bot, &asked["handoff_id"], "take").await;
+    assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
+
+    let sent = app
+        .send(
+            &bot,
+            Uuid::new_v4(),
+            "Which account was it?",
+            Some("synthetic"),
+        )
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    let next: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    wait(&app, next, "completed").await;
+    assert_eq!(
+        status(&app, &asked["handoff_id"]).await,
+        "taken",
+        "a message is not a hand back"
+    );
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(packet.contains("[else.bot computer control]"), "{packet}");
+    assert!(packet.contains("They have not handed it back"), "{packet}");
+
+    let (_, token) = running(&app, &bot).await;
+    let refused = hand_off(&app, &token, "Solve the captcha.").await;
+    assert!(
+        refused
+            .as_str()
+            .is_some_and(|t| t.starts_with("OWNER_IN_CONTROL")),
+        "{refused}"
+    );
+    let back = settle(&app, &bot, &asked["handoff_id"], "hand-back").await;
+    assert_eq!(back.status, StatusCode::OK, "{}", back.body);
+    assert_eq!(
+        turn_status(&app, turn).await,
+        "interrupted",
+        "the newer message superseded the waiting turn"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -144,11 +273,14 @@ async fn a_handoff_needs_a_short_reason() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_pending_handoff_stays_in_the_snapshot_after_its_turn_leaves_the_page() {
+async fn a_taken_handoff_stays_in_the_snapshot_after_its_turn_leaves_the_page() {
     let app = app().await;
     let bot = app.main_bot().await;
     let (turn, token) = running(&app, &bot).await;
     let handoff = hand_off(&app, &token, "X Chat is blank at x.com/messages.").await;
+    wait(&app, turn, "waiting").await;
+    let taken = settle(&app, &bot, &handoff["handoff_id"], "take").await;
+    assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
     let request: Uuid = sqlx::query_scalar("SELECT request_id FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
@@ -163,7 +295,7 @@ async fn a_pending_handoff_stays_in_the_snapshot_after_its_turn_leaves_the_page(
         .await;
     assert!(stopped.status.is_success(), "{}", stopped.body);
     app.wait_turn(&turn.to_string(), &["interrupted"]).await;
-    assert_eq!(status(&app, &handoff["handoff_id"]).await, "pending");
+    assert_eq!(status(&app, &handoff["handoff_id"]).await, "taken");
 
     let first: i64 = sqlx::query_scalar("SELECT min(seq) FROM items WHERE turn_id = ?1")
         .bind(turn)
@@ -183,7 +315,33 @@ async fn a_pending_handoff_stays_in_the_snapshot_after_its_turn_leaves_the_page(
         .iter()
         .find(|t| t["id"] == turn.to_string())
         .expect("the handoff's turn is in the snapshot");
-    assert_eq!(shown["computer_handoffs"][0]["status"], "pending");
+    assert_eq!(shown["computer_handoffs"][0]["status"], "taken");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_the_turn_withdraws_a_handoff_the_owner_has_not_taken() {
+    let app = app().await;
+    let bot = app.main_bot().await;
+    let (turn, token) = running(&app, &bot).await;
+    let handoff = hand_off(&app, &token, "X Chat is blank at x.com/messages.").await;
+    wait(&app, turn, "waiting").await;
+    let request: Uuid = sqlx::query_scalar("SELECT request_id FROM turns WHERE id = ?1")
+        .bind(turn)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    let stopped = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{bot}/cancel"),
+            Some(json!({ "request_id": request })),
+        )
+        .await;
+    assert!(stopped.status.is_success(), "{}", stopped.body);
+    app.wait_turn(&turn.to_string(), &["interrupted"]).await;
+    assert_eq!(status(&app, &handoff["handoff_id"]).await, "cancelled");
+    let late = settle(&app, &bot, &handoff["handoff_id"], "take").await;
+    assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
 }
 
 async fn sidebar_status(app: &TestApp, bot: &str) -> Value {
@@ -217,4 +375,34 @@ async fn a_pending_handoff_shows_in_the_sidebar_until_it_is_settled() {
     let dismissed = settle(&app, &bot, &handoff["handoff_id"], "dismiss").await;
     assert_eq!(dismissed.status, StatusCode::OK, "{}", dismissed.body);
     assert_ne!(sidebar_status(&app, &bot).await["kind"], "needs_takeover");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_from_before_hand_back_still_tells_later_turns_who_holds_the_computer() {
+    let (app, synthetic) = harness().await;
+    let bot = app.main_bot().await;
+    let (turn, _) = running(&app, &bot).await;
+    let bot_id: Uuid = bot.parse().unwrap();
+    let legacy = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO computer_handoffs (id, bot_id, turn_id, attempt, reason, delivered_attempt)
+         VALUES (?1, ?2, ?3, 0, 'Log in to X as @scout.', 0)",
+    )
+    .bind(legacy)
+    .bind(bot_id)
+    .bind(turn)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    let id = json!(legacy.to_string());
+    let taken = settle(&app, &bot, &id, "take").await;
+    assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
+
+    let sent = app
+        .send(&bot, Uuid::new_v4(), "Any replies yet?", Some("synthetic"))
+        .await;
+    app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(packet.contains("They have not handed it back"), "{packet}");
 }

@@ -1075,6 +1075,9 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         social_setups: crate::socials::store::setup_outcomes(&mut conn, turn_id).await?,
         mcp_waits: crate::db::mcp_waits::undelivered(&mut conn, turn_id).await?,
         skill_installs: crate::db::skills::undelivered(&mut conn, turn_id).await?,
+        computer_handoffs: crate::db::computer_handoffs::undelivered(&mut conn, turn_id).await?,
+        computer_control: crate::db::computer_handoffs::latest_taken(&mut conn, turn.bot_id)
+            .await?,
         mcps: None,
         skills: None,
         handoff: None,
