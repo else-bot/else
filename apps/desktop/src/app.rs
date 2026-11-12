@@ -830,7 +830,7 @@ impl ElseApp {
         self.submit(bot, request, window, cx);
     }
 
-    fn take_rejected(
+    fn take_failed(
         &mut self,
         request_id: Uuid,
         restore: bool,
@@ -841,10 +841,14 @@ impl ElseApp {
         let Some(list) = self.pending.get_mut(&bot) else {
             return;
         };
-        let Some(ix) = list
-            .iter()
-            .position(|p| p.request_id == request_id && p.is_rejected())
-        else {
+        let Some(ix) = list.iter().position(|p| {
+            p.request_id == request_id
+                && if restore {
+                    p.is_rejected()
+                } else {
+                    p.is_dismissible()
+                }
+        }) else {
             return;
         };
         let pending = list.remove(ix);

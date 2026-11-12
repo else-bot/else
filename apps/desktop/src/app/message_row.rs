@@ -445,7 +445,7 @@ impl ElseApp {
                                         .label("Restore to composer")
                                         .xsmall()
                                         .on_click(cx.listener(move |app, _, window, cx| {
-                                            app.take_rejected(request_id, true, window, cx)
+                                            app.take_failed(request_id, true, window, cx)
                                         }))
                                 }))
                                 .child(
@@ -458,7 +458,7 @@ impl ElseApp {
                                     .xsmall()
                                     .ghost()
                                     .on_click(cx.listener(move |app, _, window, cx| {
-                                        app.take_rejected(request_id, false, window, cx)
+                                        app.take_failed(request_id, false, window, cx)
                                     })),
                                 ),
                         ),
@@ -477,16 +477,33 @@ impl ElseApp {
                     Delivery::Unknown { reason } => column
                         .child(note(format!("{subject}Not confirmed. {reason}"), true).w_full())
                         .child(
-                            h_flex().w_full().justify_end().gap_2().child(
-                                Button::new(SharedString::from(format!("retry-{request_id}")))
+                            h_flex()
+                                .w_full()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new(SharedString::from(format!("retry-{request_id}")))
+                                        .focus_ring(false)
+                                        .cursor_pointer()
+                                        .label("Retry")
+                                        .xsmall()
+                                        .on_click(cx.listener(move |app, _, window, cx| {
+                                            app.retry_pending(request_id, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "dismiss-{request_id}"
+                                    )))
                                     .focus_ring(false)
                                     .cursor_pointer()
-                                    .label("Retry")
+                                    .label("Dismiss")
                                     .xsmall()
+                                    .ghost()
                                     .on_click(cx.listener(move |app, _, window, cx| {
-                                        app.retry_pending(request_id, window, cx)
+                                        app.take_failed(request_id, false, window, cx)
                                     })),
-                            ),
+                                ),
                         ),
                 };
                 column.into_any_element()
