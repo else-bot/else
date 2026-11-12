@@ -1994,3 +1994,39 @@ async fn a_task_rooted_in_neither_the_owner_nor_a_routine_cannot_draft() {
         refused.body
     );
 }
+
+async fn sidebar_status(app: &TestApp, bot: &str) -> Value {
+    let list = app.owner("GET", "/v1/bots", None).await;
+    let mut status = list.body["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == bot)
+        .unwrap()["sidebar_status"]
+        .clone();
+    if let Some(fields) = status.as_object_mut() {
+        assert!(fields.remove("since").is_some(), "{status}");
+    }
+    status
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delegated_draft_marks_its_bot_as_needing_approval_until_approved() {
+    let Harness { app, .. } = harness().await;
+    let (leaf, _, _, child) = delegated_task(&app, SLOW).await;
+    let id = draft(&app, &grant(&app, child).await, family_message()).await;
+    wait(&app, child, "waiting").await;
+    assert_eq!(
+        sidebar_status(&app, &leaf).await,
+        json!({ "kind": "needs_approval", "preview": "Telegram message to Family group" }),
+        "the card in the bot's chat waits on the owner"
+    );
+
+    let approved = owner_action(&app, &leaf, id, "approve", json!({ "version": 1 })).await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    assert_ne!(
+        sidebar_status(&app, &leaf).await["kind"],
+        "needs_approval",
+        "an approved draft no longer waits on the owner"
+    );
+}
