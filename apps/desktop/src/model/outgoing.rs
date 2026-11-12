@@ -57,6 +57,8 @@ pub enum DraftContent {
         platform: String,
         account: Option<String>,
         destination: Option<String>,
+        /// The recurring task the bot filed it under.
+        task: Option<String>,
         body: String,
     },
 }
@@ -128,9 +130,13 @@ impl DraftContent {
                 platform,
                 account,
                 destination,
+                task,
                 ..
             } => {
                 let mut rows = Vec::new();
+                if let Some(task) = task {
+                    rows.push(("Task", task.clone()));
+                }
                 if let Some(account) = account {
                     rows.push(("Account", account.clone()));
                 }
@@ -149,25 +155,30 @@ impl DraftContent {
         }
     }
 
-    /// Who and where "Approve always" covers, as in "X posts from @acme".
+    /// Who and where "Approve always" covers, as in "X posts from @acme",
+    /// or for a task, "Initial lead DMs on X from @acme".
     pub fn kind_label(&self) -> String {
         let Self::Message {
             account,
             destination,
+            task,
             ..
         } = self
         else {
             return "emails".into();
         };
-        let mut label = format!(
-            "{} {}",
-            self.label(),
-            if self.is_post() { "posts" } else { "messages" }
-        );
+        let mut label = match task {
+            Some(task) => format!("{task} on {}", self.label()),
+            None => format!(
+                "{} {}",
+                self.label(),
+                if self.is_post() { "posts" } else { "messages" }
+            ),
+        };
         if let Some(account) = account {
             label.push_str(&format!(" from {account}"));
         }
-        if let Some(destination) = destination {
+        if let (None, Some(destination)) = (task, destination) {
             label.push_str(&format!(" to {destination}"));
         }
         label
@@ -362,6 +373,15 @@ mod tests {
             chat.kind_label(),
             "Telegram messages from @main_bot to Family"
         );
+        let lead: DraftContent = serde_json::from_value(json!({"channel":"message",
+            "platform":"x", "account":"@proliquid_xyz", "destination":"@ada",
+            "task":"Initial lead DMs", "body":"Hi"}))
+        .unwrap();
+        assert_eq!(
+            lead.kind_label(),
+            "Initial lead DMs on X from @proliquid_xyz"
+        );
+        assert_eq!(lead.metadata()[0], ("Task", "Initial lead DMs".into()));
     }
 
     #[test]
