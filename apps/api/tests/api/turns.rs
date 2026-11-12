@@ -310,6 +310,9 @@ async fn rapid_corrections_are_all_accepted_and_reach_the_newest_reply() {
     app.wait_turn(&hang, &["running"]).await;
     app.wait_turn(&elsewhere, &["running"]).await;
 
+    // Keep the cancelled hang turn draining until every correction is queued,
+    // so each one supersedes the one before however slowly they arrive.
+    synthetic.hold_hangs(true).await;
     let corrections: Vec<String> = (0..6).map(|i| format!("correction {i}")).collect();
     let mut requests = Vec::new();
     for text in &corrections {
@@ -330,6 +333,7 @@ async fn rapid_corrections_are_all_accepted_and_reach_the_newest_reply() {
         "{}",
         listing.body
     );
+    synthetic.hold_hangs(false).await;
 
     let (_, newest) = requests.last().unwrap();
     assert_eq!(app.wait_turn(newest, &["completed"]).await, "completed");
