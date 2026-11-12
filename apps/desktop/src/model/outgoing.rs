@@ -171,7 +171,7 @@ impl DraftContent {
             "{}{} {}",
             task.as_ref().map(|t| format!("{t}: ")).unwrap_or_default(),
             self.label(),
-            if self.is_post() && destination.is_none() {
+            if self.is_post() && destination.is_none() && task.is_none() {
                 "posts"
             } else {
                 "messages"
@@ -386,6 +386,15 @@ mod tests {
             "Initial lead DMs: X messages from @proliquid_xyz to anyone"
         );
         assert_eq!(lead.metadata()[0], ("Task", "Initial lead DMs".into()));
+        let reply: DraftContent = serde_json::from_value(json!({"channel":"message",
+            "platform":"x", "account":"@proliquid_xyz", "destination":null,
+            "task":"Initial lead DMs", "body":"Thanks"}))
+        .unwrap();
+        assert_eq!(
+            reply.kind_label(),
+            "Initial lead DMs: X messages from @proliquid_xyz to anyone",
+            "a task grant on a reply also covers DMs"
+        );
     }
 
     #[test]
