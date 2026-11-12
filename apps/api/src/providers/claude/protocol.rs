@@ -183,6 +183,20 @@ impl Tracker {
         Ok(())
     }
 
+    /// The CLI's progress heartbeat for a slow tool call is parented to that
+    /// call. A sub-agent's events are parented to its `Agent` call, which
+    /// never reaches `tools_by_id`.
+    fn is_heartbeat(&self, event: &Value, parent: &str) -> Result<bool, Violation> {
+        if event["type"] != "tool_progress" {
+            return Ok(false);
+        }
+        let tool = required(&event["tool_name"], "tool progress")?;
+        Ok(self
+            .tools_by_id
+            .get(parent)
+            .is_some_and(|name| name == tool))
+    }
+
     fn on_assistant(&mut self, event: &Value) -> Result<(), Violation> {
         self.activity = true;
         self.check_model(text(&event["message"]["model"], "model")?)?;
@@ -251,7 +265,10 @@ impl Protocol for Tracker {
     type Terminal = ResultInfo;
 
     fn on(&mut self, event: &Value) -> Result<Vec<Event<ResultInfo>>, Violation> {
-        if text(&event["parent_tool_use_id"], "parent tool use")?.is_some() {
+        if let Some(parent) = text(&event["parent_tool_use_id"], "parent tool use")? {
+            if self.is_heartbeat(event, parent)? {
+                return Ok(Vec::new());
+            }
             return Err(Violation::policy("Claude ran a native sub-agent"));
         }
         let mut events = Vec::new();

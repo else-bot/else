@@ -25,7 +25,8 @@
 //! replacing Claude Code's. A summary gets no tools at all. The
 //! `system/init` event must report exactly the expected tools and server and
 //! the saved model; any other tool use, a permission request, a sub-agent's
-//! event (anything carrying a parent tool use), a task lifecycle event, or
+//! event (anything carrying a parent tool use, except the progress heartbeat
+//! for a slow tool call the turn itself made), a task lifecycle event, or
 //! another model stops the turn at once as a policy failure. An empty
 //! custom-agent list is not taken as proof: the built-in agents are listed
 //! but unusable without the `Agent` tool.

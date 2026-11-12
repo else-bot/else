@@ -181,6 +181,11 @@ fn a_heartbeat_for_a_slow_main_thread_tool_call_is_not_a_sub_agent() {
         let violation = t.on(&heartbeat(parent, tool)).unwrap_err();
         assert!(violation.message.contains("sub-agent"), "{parent} {tool}");
     }
+    let violation = t
+        .on(&json!({"type":"assistant","parent_tool_use_id":"toolu_1",
+            "message":{"model":"claude-haiku-5-5","content":[]}}))
+        .unwrap_err();
+    assert!(violation.message.contains("sub-agent"));
 }
 
 #[test]
