@@ -2050,3 +2050,69 @@ async fn a_delegated_question_marks_its_bot_as_waiting_for_the_owner() {
         "the card in the bot's chat waits on the owner"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approving_a_task_always_approves_its_later_messages_to_anyone() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let dm = |to: &str, task: &str| {
+        json!({ "platform": "x", "account": "@Proliquid_xyz", "destination": to,
+                "task": task, "body": format!("Hey {to}, want VIP access?") })
+    };
+    let unowned = tool(
+        &app,
+        &token,
+        "draft_message",
+        json!({ "platform": "x", "destination": "@ada", "task": "Initial lead DMs",
+                "body": "Hi" }),
+    )
+    .await;
+    assert!(
+        refusal(&unowned).contains("a task needs the account it sends from"),
+        "{}",
+        unowned.body
+    );
+    let first = draft(&app, &token, dm("@ada", "Initial  lead DMs")).await;
+    wait(&app, turn, "waiting").await;
+    let kind = json!({ "platform": "x", "account_id": null, "account": "@proliquid_xyz",
+                       "destination": null, "task": "initial lead dms" });
+    assert_eq!(
+        shown(&app, &main, turn).await[0]["kind"],
+        kind,
+        "a DM filed under a task can be approved always"
+    );
+    let approved = owner_action(
+        &app,
+        &main,
+        first,
+        "approve",
+        json!({ "version": 1, "always": true }),
+    )
+    .await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    assert_eq!(granted(&app, &main).await, json!([kind]));
+
+    wait(&app, turn, "running").await;
+    let token = grant(&app, turn).await;
+    let next = tool(
+        &app,
+        &token,
+        "draft_message",
+        dm("@bob", "initial lead dms"),
+    )
+    .await;
+    assert_eq!(
+        tool_text(&next)["status"],
+        "approved",
+        "the same task from the same account reaches a new lead without a card: {}",
+        next.body
+    );
+    let other = tool(&app, &token, "draft_message", dm("@cy", "Follow-ups")).await;
+    assert_eq!(
+        tool_text(&other)["status"],
+        "pending",
+        "another task still waits for the owner: {}",
+        other.body
+    );
+}

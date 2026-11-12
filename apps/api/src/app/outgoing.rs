@@ -66,10 +66,11 @@ pub enum ApprovalSource {
 }
 
 /// What "Approve always" covers: messages on one platform from one sending
-/// account to one destination, whatever they say. Emails have no kind
-/// (each goes to its own recipients), nor do X replies (each answers its
-/// own post). `kind!` in `db::outgoing_drafts` derives it from stored
-/// content.
+/// account to one destination, whatever they say, or, for a message the bot
+/// files under a recurring task, every message of that task from that
+/// account, to any destination. Emails have no kind (each goes to its own
+/// recipients), nor do X replies without a task (each answers its own
+/// post). `kind!` in `db::outgoing_drafts` derives it from stored content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftKind {
     pub platform: Platform,
@@ -77,6 +78,9 @@ pub struct DraftKind {
     /// The account as the platform shows it, lowercased.
     pub account: Option<String>,
     pub destination: Option<String>,
+    /// The recurring task, lowercased.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
 }
 
 /// How the bot reports a claimed send ended.
@@ -205,6 +209,10 @@ pub struct Message {
     pub reply_to: Option<String>,
     pub account: Option<String>,
     pub destination: Option<String>,
+    /// The recurring task the bot files this message under, so "Approve
+    /// always" can cover the task's messages to any destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
     pub body: String,
 }
 
@@ -350,7 +358,7 @@ fn handle(args: &Value, key: &str) -> Result<Option<String>, &'static str> {
         {
             Ok(Some(text.trim().to_owned()))
         }
-        Some(_) => Err("account and destination are one line of 1 to 200 bytes"),
+        Some(_) => Err("account, destination, and task are one line of 1 to 200 bytes"),
     }
 }
 
@@ -495,9 +503,10 @@ impl Message {
                 "replaces",
                 "account_id",
                 "reply_to",
+                "task",
             ],
-            "use platform, body, and optionally account, destination, replaces (a message has \
-             no subject or addresses; use draft_email for email)",
+            "use platform, body, and optionally account, destination, task, replaces (a message \
+             has no subject or addresses; use draft_email for email)",
         )?;
         let platform = args["platform"]
             .as_str()
@@ -519,12 +528,19 @@ impl Message {
         if account_id.is_some() && platform == Platform::X {
             return Err("X has no native social connector");
         }
+        let account = handle(args, "account")?;
+        let task =
+            handle(args, "task")?.map(|task| task.split_whitespace().collect::<Vec<_>>().join(" "));
+        if task.is_some() && account.is_none() && account_id.is_none() {
+            return Err("a task needs the account it sends from: account or account_id");
+        }
         Ok(Self {
             platform,
             account_id,
             reply_to: handle(args, "reply_to")?,
-            account: handle(args, "account")?,
+            account,
             destination,
+            task,
             body: body(args["body"].as_str().ok_or("body is text")?)?,
         })
     }
@@ -698,6 +714,7 @@ mod tests {
             platform: Platform::Telegram,
             account: None,
             destination: Some("Family".into()),
+            task: None,
             body: "Dinner?".into(),
         });
         let edited = message
@@ -730,6 +747,7 @@ mod tests {
             platform: Platform::X,
             account: None,
             destination: None,
+            task: None,
             body: "x".into(),
         });
         assert!(!post.same_channel(&message), "platforms differ");

@@ -48,6 +48,7 @@ async fn connected_send_uses_the_owner_edit_approved_after_the_initial_read() {
             account_id: Some(account_id),
             account: None,
             destination: Some("100".into()),
+            task: None,
             reply_to: Some("42".into()),
             body: "Provisional text A".into(),
         });
