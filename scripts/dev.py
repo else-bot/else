@@ -49,6 +49,14 @@ class Refused(Exception):
     pass
 
 
+def enable_hooks():
+    """Turn on the repository's pre-commit and pre-push hooks for this clone and all its worktrees."""
+    current = subprocess.run(["git", "-C", str(ROOT), "config", "core.hooksPath"], capture_output=True, text=True)
+    if current.returncode == 1 and (ROOT / ".githooks").is_dir():
+        subprocess.run(["git", "-C", str(ROOT), "config", "core.hooksPath", ".githooks"], check=True)
+        print("dev.py: enabled the repository git hooks (core.hooksPath=.githooks)", file=sys.stderr)
+
+
 def require(condition, message):
     if not condition:
         raise Refused(message)
@@ -537,6 +545,7 @@ def main(argv=None):
 
     if args.command == "box-worker":
         return box_worker(json.loads(args.spec))
+    enable_hooks()
     if args.command == "run":
         return run_box(args)
     if args.command == "test":
