@@ -175,6 +175,11 @@ async fn grok_conversations_stream_resume_use_host_and_mcp_tools_and_cancel() {
         called.iter().any(|name| name == "list_bots"),
         "MCP call reached the real server: {called:?}"
     );
+    let (_, answer) = ask(&app, &a, "grok", "Call your use_tool tool once with tool_name exactly elsebot__else_status and tool_input {}. Do not use the shell or any other tool. Reply with the result or error message verbatim.").await;
+    assert!(answer.to_lowercase().contains("not found"), "{answer}");
+    while let Ok(name) = observed_calls.try_recv() {
+        assert_ne!(name, "else_status", "Grok resolves catalog keys only");
+    }
     ask(
         &app,
         &b,
