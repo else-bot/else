@@ -172,7 +172,7 @@ fn reject(err: RoutineError) -> Outcome {
 }
 
 /// A routine as its bot reads it. Any-time hours read back as "always", the
-/// value the tools accept, because an omitted value means working hours.
+/// value the tools accept; bots read null as the working-hours default.
 fn tool_routine_json(routine: &Routine) -> Value {
     let mut json = routine_json(routine);
     if routine.run_at.is_none() && routine.active_hours.is_none() {
