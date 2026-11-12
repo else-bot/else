@@ -67,6 +67,7 @@ pub fn export(turn: Turn) -> Value {
         secrets: vec![],
         questions: vec![],
         standing_permissions: vec![],
+        draft_tasks: Vec::new(),
         outgoing_drafts: vec![],
         social_setups: vec![],
         mcp_waits: vec![],

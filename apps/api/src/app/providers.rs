@@ -150,6 +150,9 @@ pub struct TurnInput {
     /// that no attempt has received yet.
     pub questions: Vec<QuestionOutcome>,
     pub standing_permissions: Vec<super::questions::PermissionTarget>,
+    /// The recurring message tasks the owner approves always, for drafts to
+    /// name exactly; empty when this turn's drafts reach no standing grant.
+    pub draft_tasks: Vec<super::outgoing::DraftKind>,
     /// Owner decisions on this turn's outgoing drafts not yet received,
     /// and the draft open when the owner sent this turn's message.
     pub outgoing_drafts: Vec<super::outgoing::Note>,

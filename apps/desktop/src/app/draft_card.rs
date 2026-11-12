@@ -487,6 +487,12 @@ impl ElseApp {
                             .aria_label(draft.content.body_label()),
                     ),
             )
+            .when(draft.kind.is_some() && draft.can_approve, |card| {
+                card.child(div().px_4().pt_2().child(muted(format!(
+                    "Approve always also approves later {} without asking.",
+                    draft.content.kind_label()
+                ))))
+            })
             .child(
                 h_flex()
                     .px_4()

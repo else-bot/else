@@ -200,6 +200,18 @@ def run(runner):
                                {"status": "pending", "parked": True})],
                     "The post waits for your approval on the card.",
                     "I cannot ask the owner from this task, so I did not draft the post."),
+                "routine-lead-dm-names-its-task": (
+                    [self.call("draft_message", {"platform": "x", "account": "@proliquid_xyz",
+                                                 "destination": "@ada_trades", "task": "Initial lead DMs",
+                                                 "body": "Hey, saw your $BTC short post. Want VIP access?"},
+                               {"status": "pending", "parked": True})],
+                    "The DM waits for your approval on the card."),
+                "routine-lead-dm-reuses-saved-task": (
+                    [self.call("draft_message", {"platform": "x", "account": "@proliquid_xyz",
+                                                 "destination": "@bo_perps", "task": "Initial lead DMs",
+                                                 "body": "Hey, saw your ETH long."},
+                               {"status": "approved"})],
+                    "Drafted; it is approved always."),
                 "blocked-screen-hands-off": ([self.call("computer_browser", {"action": "open", "url": "https://x.com/messages"}),
                                              self.call("computer_screenshot", {"share": True}),
                                              self.call("computer_handoff", {"reason": "X Chat is blank at x.com/messages."},

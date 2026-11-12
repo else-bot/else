@@ -502,6 +502,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         secrets: Vec::new(),
         questions: Vec::new(),
         standing_permissions: Vec::new(),
+        draft_tasks: Vec::new(),
         outgoing_drafts: Vec::new(),
         social_setups: Vec::new(),
         mcp_waits: Vec::new(),

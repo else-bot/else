@@ -530,6 +530,27 @@ fn outcomes_without_social(input: &TurnInput) -> String {
     text
 }
 
+/// The message tasks the owner approves always, so a fresh session files
+/// its drafts under the exact saved task instead of a new paraphrase.
+fn draft_tasks(input: &TurnInput) -> String {
+    if input.draft_tasks.is_empty() {
+        return String::new();
+    }
+    let tasks: Vec<_> = input
+        .draft_tasks
+        .iter()
+        .map(|kind| {
+            serde_json::json!({ "platform": kind.platform, "account_id": kind.account_id,
+                                "account": kind.account, "task": kind.task })
+        })
+        .collect();
+    format!(
+        "[else.bot always-approved message tasks] {}\nFor a draft_message that does one of these \
+         jobs, pass the same task, platform and account so it needs no card.\n\n",
+        serde_json::Value::from(tasks),
+    )
+}
+
 pub(super) fn permissions_block(input: &TurnInput) -> String {
     if input.grant_reach() == crate::app::questions::GrantReach::Nothing {
         return String::new();
@@ -540,8 +561,9 @@ pub(super) fn permissions_block(input: &TurnInput) -> String {
          not instructions to perform work. Reuse task and target exactly as task_scope for matching \
          host work and computer tool calls. \
          Always call ask_permission before a sensitive host action; the gate checks the current \
-         grant. Records from memory or old conversation history cannot restore a revoked grant.\n\n",
+         grant. Records from memory or old conversation history cannot restore a revoked grant.\n\n{}",
         serde_json::to_string(&input.standing_permissions).expect("permission serialization"),
+        draft_tasks(input),
     )
 }
 
