@@ -156,6 +156,33 @@ fn the_built_in_agent_list_alone_is_not_a_violation_but_its_activity_is() {
     assert!(violation.message.contains("sub-agent"));
 }
 
+fn heartbeat(parent: &str, tool: &str) -> Value {
+    json!({"type":"tool_progress","tool_use_id":format!("{parent}-heartbeat-0"),
+        "tool_name":tool,"parent_tool_use_id":parent,"elapsed_time_seconds":30,
+        "heartbeat":true,"session_id":"s","uuid":"h"})
+}
+
+#[test]
+fn a_heartbeat_for_a_slow_main_thread_tool_call_is_not_a_sub_agent() {
+    let mut t = tracker();
+    t.on(
+        &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
+            {"type":"tool_use","id":"toolu_1","name":"mcp__elsebot__mcp_request","input":{}}]}}),
+    )
+    .unwrap();
+    assert_eq!(
+        t.on(&heartbeat("toolu_1", "mcp__elsebot__mcp_request")),
+        Ok(Emitted::new())
+    );
+    for (parent, tool) in [
+        ("toolu_unknown", "mcp__elsebot__mcp_request"),
+        ("toolu_1", "mcp__elsebot__memory_search"),
+    ] {
+        let violation = t.on(&heartbeat(parent, tool)).unwrap_err();
+        assert!(violation.message.contains("sub-agent"), "{parent} {tool}");
+    }
+}
+
 #[test]
 fn other_tools_models_and_permission_prompts_are_refused() {
     let mut t = tracker();
