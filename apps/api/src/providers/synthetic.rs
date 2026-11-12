@@ -7,7 +7,8 @@
 //!
 //! - `[synthetic:slow]` streams one chunk every 200 ms.
 //! - `[synthetic:hang]` acknowledges, then waits until cancelled and takes
-//!   200 ms to drain, like a provider confirming an interrupt.
+//!   200 ms to drain, like a provider confirming an interrupt. While a test
+//!   holds hangs, the drain waits for the release.
 //! - `[synthetic:fail]` acknowledges, then fails.
 //! - `[synthetic:ignore-cancel]` acknowledges and stops only when the stop escalates.
 //! - `[synthetic:stall-send]` marks delivery as started, then waits until
@@ -51,6 +52,7 @@ struct State {
     packets: VecDeque<String>,
     checkpoint_error: Option<String>,
     forgotten: Vec<String>,
+    hangs_held: tokio::sync::watch::Sender<bool>,
 }
 
 impl Synthetic {
@@ -73,6 +75,16 @@ impl Synthetic {
         self.state
             .call(|state| state.packets.iter().cloned().collect())
             .await
+    }
+
+    /// Hold or release the drain of every cancelled `[synthetic:hang]` turn,
+    /// so a test can queue messages behind one at any speed.
+    pub async fn hold_hangs(&self, held: bool) {
+        self.state
+            .call(move |state| {
+                state.hangs_held.send_replace(held);
+            })
+            .await;
     }
 
     /// Make checkpoints fail with `reason` (or succeed again with `None`).
@@ -240,6 +252,9 @@ impl Provider for Synthetic {
         }
         if input.text.contains("[synthetic:hang]") {
             cancel.cancelled().await;
+            let mut held = self.state.call(|state| state.hangs_held.subscribe()).await;
+            // The actor's state owns the sender, so the channel stays open.
+            let _ = held.wait_for(|held| !held).await;
             tokio::time::sleep(Duration::from_millis(200)).await;
             return TurnOutcome::Interrupted;
         }

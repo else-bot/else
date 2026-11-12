@@ -46,7 +46,7 @@ For the existing test coverage as well:
 
 ```sh
 scripts/dev.py test
-scripts/dev.py test -p else-api --test bots
+scripts/dev.py test --test api -- bots::
 scripts/dev.py test -p else-api --serial -- wrong_keys_damage_and_existing_databases_never_produce_a_restore
 ```
 

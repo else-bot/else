@@ -29,7 +29,7 @@ git config core.hooksPath .githooks
 cargo build --workspace --locked
 ```
 
-The pre-commit hook runs `cargo fmt --all -- --check` and `scripts/check-clippy.sh`, and skips both when a commit only touches `docs/`, `.agents/`, `.github/`, or top-level Markdown. The pre-push hook runs the workspace tests with [cargo-nextest](https://nexte.st) when it is installed (`brew install cargo-nextest` or `cargo install cargo-nextest --locked`), and falls back to `cargo test --workspace --locked`. Nextest runs tests from every binary in parallel, each in its own process, which makes the suite several times faster. Fix failures before committing or pushing. Pull requests only need to be up to date with main to merge; CI still runs the slower checks but does not block on them, so these hooks are the gate. Git does not enable repository hooks on clone, so run the hook configuration command once per clone; `scripts/dev.py` also sets it when it is unset. It applies to every linked worktree of that clone, including agent worktrees.
+The pre-commit hook runs `cargo fmt --all -- --check` and `scripts/check-clippy.sh`, and skips both when a commit only touches `docs/`, `.agents/`, `.github/`, or top-level Markdown. The pre-push hook skips the same paths and otherwise runs the workspace tests with [cargo-nextest](https://nexte.st) when it is installed (`brew install cargo-nextest` or `cargo install cargo-nextest --locked`), and falls back to `cargo test --workspace --locked`. Nextest runs tests from every binary in parallel, each in its own process, which makes the suite several times faster. Fix failures before committing or pushing. Because the hooks and CI run the full suite, run only focused tests while developing. Pull requests only need to be up to date with main to merge; CI still runs the slower checks but does not block on them, so these hooks are the gate. Git does not enable repository hooks on clone, so run the hook configuration command once per clone; `scripts/dev.py` also sets it when it is unset. It applies to every linked worktree of that clone, including agent worktrees.
 
 For real provider replies, install Codex, Claude Code, or Grok Build and sign in as your development user. Set `ELSE_CODEX_BIN`, `ELSE_CLAUDE_BIN`, or `ELSE_GROK_BIN` if a CLI is outside `PATH`.
 
@@ -146,7 +146,7 @@ Set `CARGO_BUILD_JOBS=2` when other workspaces build concurrently.
 For focused checks:
 
 ```sh
-scripts/dev.py test -p else-api --test bots
+scripts/dev.py test --test api -- bots::
 scripts/dev.py test -p else-api --serial -- wrong_keys_damage_and_existing_databases_never_produce_a_restore
 ```
 
@@ -170,7 +170,7 @@ Database tests create temporary SQLite files. Live provider and VM tests require
 To check Grok through the API, sign in with `grok login` and run:
 
 ```sh
-ELSE_LIVE_GROK=1 cargo test -p else-api --test grok_live --locked -- --nocapture
+ELSE_LIVE_GROK=1 cargo test --workspace --test grok_live --locked -- --nocapture
 ```
 
 This journey creates disposable bots and checks session reuse, host files, MCP calls, cancellation, and provider handoffs with the installed Grok CLI.
@@ -183,7 +183,7 @@ The `release-ready` check tests the release tooling and installers and rejects a
 
 ### Branch protection
 
-In the [Main pull requests and checks ruleset](https://github.com/else-bot/else/rules/26617470), require only `up-to-date` from GitHub Actions and keep **Require branches to be up to date before merging** enabled. GitHub enforces that setting through required checks, and `up-to-date` finishes in seconds. `cargo-check`, `cargo-test`, and `release-ready` still run on every PR to `main` without path filters, but merging does not wait for them; the repository hooks run the same Rust checks before each commit and push. Read a red check before merging anyway.
+In the [Main pull requests and checks ruleset](https://github.com/else-bot/else/rules/26617470), require only `up-to-date` from GitHub Actions and keep **Require branches to be up to date before merging** enabled. GitHub enforces that setting through required checks, and `up-to-date` finishes in seconds. `cargo-test` skips pull requests and pushes that only touch `docs/`, `.agents/`, `.claude/`, or top-level Markdown. Otherwise `cargo-check`, `cargo-test`, and `release-ready` run on every PR to `main`, but merging does not wait for them; the repository hooks run the same Rust checks before each commit and push. Read a red check before merging anyway.
 
 Fetch `origin/main` and rebase before the first push and again before merging. Rerun `python3 scripts/check_migrations.py` after rebasing. An up-to-date branch runs main's workflow and scripts against its own changes. Force pushes, branch deletion, and non-linear history on `main` are blocked.
 
@@ -192,8 +192,13 @@ CI caches Cargo downloads and compiled output by Rust version and lockfile, with
 Use a focused target while developing, for example:
 
 ```sh
-scripts/dev.py test -p else-api --test bots
+cargo nextest run --workspace --locked --test api -E 'test(/^bots::.*avatar/)'
+scripts/dev.py test --test api -- bots::   # Linux
 ```
+
+The offline API integration tests are modules of one `api` test binary in `apps/api/tests/api/`, so an API change relinks one test executable instead of 59. Declare a new test file in `apps/api/tests/api/main.rs`; a file that is not declared there does not compile. Live tests (`*_live.rs`), `replication.rs`, and the fault-injection tests `backup.rs` and `recovery.rs` stay separate targets in `apps/api/tests/`, because `else_api::faults` is process-global. `scripts/dev.py test` runs the `api` binary as one job per module, so each module keeps its own scratch HOME and TMPDIR.
+
+Keep `--workspace` and narrow with `--test`, `--lib`, or a filter. A `-p else-api` build resolves different dependency features than the workspace build that the hooks use, so its first run compiles a second copy of up to about 240 dependency crates (about 50 seconds) before it runs a test.
 
 For public API journeys with fresh state and the Synthetic provider:
 

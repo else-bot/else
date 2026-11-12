@@ -17,7 +17,10 @@
 - Keep the repository hooks enabled with `git config core.hooksPath .githooks` before committing, so `cargo fmt --all -- --check` and clippy run on every commit; `scripts/dev.py` sets it when unset, and never bypass it with `--no-verify`.
 - Before opening a PR, run `cargo clippy --workspace --all-targets --locked -- -D warnings` or `scripts/check-clippy.sh` and fix every finding, including findings in untouched files.
 - Fix lint causes instead of adding blanket suppressions; justify targeted `#[allow]` and `#[expect]` attributes inline.
-- On Linux, run workspace tests with `scripts/dev.py test` and focused tests with `scripts/dev.py test -p PACKAGE --test TARGET -- FILTER`; read the printed `.else-dev/tests/` results before repeating a run after a restart.
+- While developing, run only the focused tests that cover your change, and rerun only the tests that failed; do not run the full workspace suite by hand, because the pre-commit hook runs fmt and Clippy, the pre-push hook runs the full suite, and CI runs it again.
+- Keep `--workspace` on focused Cargo test commands and narrow them with `--test TARGET`, `--lib`, or a name filter, as in `cargo nextest run --workspace --locked --test api -E 'test(/^bots::/)'`; `-p PACKAGE` resolves different dependency features and compiles a second copy of up to about 240 dependency crates.
+- Add each offline else-api integration test file as a module in `apps/api/tests/api/` and declare it in its `main.rs`, so all of them link into one `api` binary; keep `*_live`, `replication`, and tests that arm `else_api::faults` (`backup`, `recovery`) as their own files in `apps/api/tests/`, because fault points are process-global.
+- On Linux, run focused tests with `scripts/dev.py test --test api -- MODULE::`; read the printed `.else-dev/tests/` results before repeating a run after a restart.
 - Fetch `origin/main` before adding a migration in `apps/api/migrations`, choose the next contiguous `NNNN_` prefix, and run `python3 scripts/check_migrations.py` after rebasing; never renumber a shipped migration.
 - Use a pointer cursor for every enabled clickable control; keep text and resize cursors for text entry and resizing.
 - Do not draw focus rings or decorative outlines on controls; use outlines only to indicate a selected state.

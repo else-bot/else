@@ -3,9 +3,13 @@ name: cargo-test
 on:
   pull_request:
     branches: [main]
+    # Rust does not compile these paths in; the pre-commit hook skips them too.
+    paths-ignore: ['docs/**', '.agents/**', '.claude/**', '*.md']
   # Caches are saved only on main, where every pull request can restore them.
   push:
     branches: [main]
+    # Rust does not compile these paths in; the pre-commit hook skips them too.
+    paths-ignore: ['docs/**', '.agents/**', '.claude/**', '*.md']
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -23,6 +27,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Incremental artifacts never get reused on a fresh runner and slow down a from-scratch build.
+  CARGO_INCREMENTAL: 0
 
 jobs:
   cargo-check:

@@ -115,7 +115,7 @@ The live `computers_live` target owns its runtime homes and needs the current
 Microsandbox's Unix socket path must fit the platform limit.
 
 ```sh
-TMPDIR=/tmp ELSE_LIVE_VM=1 cargo test -p else-api --locked --test computers_live -- --test-threads 1 --nocapture
+TMPDIR=/tmp ELSE_LIVE_VM=1 cargo test --workspace --locked --test computers_live -- --test-threads 1 --nocapture
 ```
 
 Keep this result separate from offline or container coverage. Report missing

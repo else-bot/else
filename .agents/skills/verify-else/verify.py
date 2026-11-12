@@ -25,6 +25,17 @@ SCRIPT = Path(__file__).resolve()
 _spec = importlib.util.spec_from_file_location("else_dev", ROOT / "scripts/dev.py")
 dev = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dev)
+# The offline else-api integration tests are modules of one `api` test binary.
+API_TESTS = ROOT / "apps/api/tests/api/main.rs"
+
+
+def api_shards():
+    """Module name to libtest filter for the `api` binary. Loaded only when tests run,
+    because staged guest payloads carry neither scripts/dev_tests.py nor the tests."""
+    spec = importlib.util.spec_from_file_location("else_dev_tests", ROOT / "scripts/dev_tests.py")
+    dev_tests = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dev_tests)
+    return {s["module"]: s["filter"] for s in dev_tests.shard({"key": "api", "log": "api.log"}, API_TESTS.read_text())}
 SEPARATE_CHECKS = "Native desktop input, doctests, provider subscriptions, real VMs, S3 replication, installer updates"
 CANCELLED = threading.Event()
 
@@ -328,7 +339,7 @@ def worker(spec):
                     feature(api)
             else:
                 with tempfile.TemporaryDirectory(prefix="else-test-") as work, (evidence / "test.log").open("w") as log:
-                    command([feature["executable"], "--test-threads", str(spec["test_threads"])],
+                    command([feature["executable"], *feature.get("args", []), "--test-threads", str(spec["test_threads"])],
                             cwd=work, env={**runtime_env(Path(work) / "home"), "TOKIO_WORKER_THREADS": "2"}, stdout=log, stderr=subprocess.STDOUT,
                             timeout=spec["timeout"])
                 summaries = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored", (evidence / "test.log").read_text())
@@ -494,9 +505,11 @@ def main():
     metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
                                                 cwd=ROOT, env=build_env, text=True, timeout=60))
     targets = sorted(t["name"] for p in metadata["packages"] for t in p["targets"] if "test" in t["kind"])
-    offline = [name for name in targets if not name.endswith("_live") and name != "replication"]
+    shards = api_shards()
+    offline = sorted({name for name in targets if not name.endswith("_live") and name not in ("replication", "api")} | set(shards))
     selected = offline if args.full else args.tests or []
     require(all(t in offline for t in selected), "--tests must name offline targets: " + ", ".join(offline))
+    test_targets = sorted({"api" if name in shards else name for name in selected})
     started = time.monotonic()
     source_info = ROOT / ".else-source.json"
     source = json.loads(source_info.read_text()) if source_info.exists() else {
@@ -514,16 +527,20 @@ def main():
                     cwd=ROOT, env=build_env, stdout=artifacts, stderr=log, timeout=1800)
             if args.full or selected:
                 command(["cargo", "test", *package, "--locked", "--no-run", "--message-format=json", "--lib", "--bins",
-                         *[flag for name in selected for flag in ["--test", name]]],
+                         *[flag for name in test_targets for flag in ["--test", name]]],
                         cwd=ROOT, env=build_env, stdout=artifacts, stderr=log, timeout=1800)
         report["build_seconds"] = round(time.monotonic() - build_start, 3)
         frames = [json.loads(line) for line in (output / "build.jsonl").read_text().splitlines()]
         built = [f for f in frames if f.get("reason") == "compiler-artifact" and f.get("executable")]
         api = next(f["executable"] for f in built if f["target"]["name"] == "else-api" and not f["profile"]["test"])
-        tests = [{"name": f["target"]["name"], "executable": f["executable"]} for f in built if f["profile"]["test"]]
+        tests = [{"name": f["target"]["name"], "executable": f["executable"]}
+                 for f in built if f["profile"]["test"] and f["target"]["name"] != "api"]
+        tests += [{"name": name, "executable": f["executable"], "args": shards[name]}
+                  for f in built if f["profile"]["test"] and f["target"]["name"] == "api"
+                  for name in selected if name in shards]
         spec = {"run_id": run_id, "api": api, "tests": tests, "jobs": args.jobs,
                 "test_threads": args.test_threads, "timeout": args.timeout,
-                "excluded_targets": sorted(set(targets) - set(selected))}
+                "excluded_targets": sorted(((set(targets) - {"api"}) | set(shards)) - set(selected))}
         spec_file = output / "spec.json"
         if backend == "process":
             spec["output"] = str(output / "evidence")
