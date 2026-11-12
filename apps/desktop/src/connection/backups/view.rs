@@ -151,7 +151,7 @@ impl Shell {
                 )
                 .into_any_element();
         };
-        let busy = view.busy() || view.local_form.as_ref().is_some_and(|form| form.dirty(cx));
+        let busy = view.busy() || view.local_dirty(cx);
         let unavailable = snapshot.unavailable_reason.is_some();
         let stacked = window.viewport_size().width < px(850.);
         let has_destination = snapshot.destination.is_some();
@@ -186,7 +186,9 @@ impl Shell {
                 "Copies of every bot’s computer, projects and memory.",
                 cx,
             ))
-            .child(self.render_local_backups(view, snapshot, stacked, cx))
+            .when_some(snapshot.local.as_ref(), |content, local| {
+                content.child(self.render_local_backups(view, snapshot, local, stacked, cx))
+            })
             .child(super::super::settings::section_heading(
                 "Remote",
                 "Your workspace, backed up off this server.",

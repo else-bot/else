@@ -97,12 +97,35 @@ pub struct LocalView {
     pub recent: Vec<LocalRun>,
 }
 
+/// How a local set ended, from `backup_runs.local_status` and whether it
+/// covered the whole assistant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalResult {
+    Running,
+    Completed,
+    /// Completed without every computer.
+    Partial,
+    Failed,
+}
+
+impl LocalResult {
+    fn decode(status: &str, whole: bool) -> Self {
+        match status {
+            "running" => Self::Running,
+            "completed" if whole => Self::Completed,
+            "completed" => Self::Partial,
+            _ => Self::Failed,
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct LocalRun {
     pub set_id: String,
     pub started_at: String,
     pub finished_at: Option<String>,
-    pub status: &'static str,
+    pub status: LocalResult,
     pub bytes: Option<u64>,
     pub took_secs: Option<u64>,
     pub paused_secs: Option<u64>,
@@ -267,7 +290,7 @@ impl Engine {
             return Some(retry);
         }
         let now = chrono::Local::now();
-        let slot = next_daily(settings.local, now) - chrono::Duration::days(1);
+        let slot = last_daily(settings.local, now);
         let retry_at = now + chrono::Duration::from_std(backoff).unwrap_or_default();
         if retry_at - slot <= daily_retry_window() {
             Some(retry)
@@ -310,23 +333,45 @@ fn daily_retry_window() -> chrono::Duration {
 /// schedule's time. A time the clock skips (a daylight-saving jump) runs
 /// an hour later; a time it shows twice runs the first time.
 fn next_daily<Tz: chrono::TimeZone>(schedule: LocalSchedule, now: DateTime<Tz>) -> DateTime<Tz> {
-    use chrono::offset::LocalResult;
-    let zone = now.timezone();
     let mut day = now.date_naive();
     loop {
-        let naive = day.and_time(schedule.at.time());
-        let at = match zone.from_local_datetime(&naive) {
-            LocalResult::Single(at) | LocalResult::Ambiguous(at, _) => Some(at),
-            LocalResult::None => zone
-                .from_local_datetime(&(naive + chrono::Duration::hours(1)))
-                .earliest(),
-        };
-        if let Some(at) = at
+        if let Some(at) = daily_slot(schedule, &now.timezone(), day)
             && at > now
         {
             return at;
         }
         day = day.succ_opt().expect("the calendar has a next day");
+    }
+}
+
+/// The latest daily slot at or before `now`: the one a failed backup
+/// retries for.
+fn last_daily<Tz: chrono::TimeZone>(schedule: LocalSchedule, now: DateTime<Tz>) -> DateTime<Tz> {
+    let mut day = now.date_naive();
+    loop {
+        if let Some(at) = daily_slot(schedule, &now.timezone(), day)
+            && at <= now
+        {
+            return at;
+        }
+        day = day.pred_opt().expect("the calendar has a previous day");
+    }
+}
+
+/// The schedule's instant on `day`. A time skipped by a DST change runs an
+/// hour later; a repeated time runs at its first occurrence.
+fn daily_slot<Tz: chrono::TimeZone>(
+    schedule: LocalSchedule,
+    zone: &Tz,
+    day: chrono::NaiveDate,
+) -> Option<DateTime<Tz>> {
+    use chrono::offset::LocalResult;
+    let naive = day.and_time(schedule.at.time());
+    match zone.from_local_datetime(&naive) {
+        LocalResult::Single(at) | LocalResult::Ambiguous(at, _) => Some(at),
+        LocalResult::None => zone
+            .from_local_datetime(&(naive + chrono::Duration::hours(1)))
+            .earliest(),
     }
 }
 
@@ -519,21 +564,16 @@ impl Backups {
         let local_recent = local_runs?
             .into_iter()
             .map(|row| {
-                let status = match (
-                    row.get::<String, _>("local_status").as_str(),
-                    row.get::<i64, _>("whole"),
-                ) {
-                    ("running", _) => "running",
-                    ("completed", 0) => "partial",
-                    ("completed", _) => "completed",
-                    _ => "failed",
-                };
+                let status = LocalResult::decode(
+                    &row.get::<String, _>("local_status"),
+                    row.get::<i64, _>("whole") != 0,
+                );
                 LocalRun {
                     set_id: row.get("set_id"),
                     started_at: row.get("started_at"),
                     finished_at: row.get("finished_at"),
                     status,
-                    bytes: (status != "failed")
+                    bytes: (status != LocalResult::Failed)
                         .then(|| row.get::<Option<i64>, _>("ciphertext_bytes"))
                         .flatten()
                         .map(|n| n.max(0) as u64),
@@ -541,7 +581,7 @@ impl Backups {
                     paused_secs: row
                         .get::<Option<i64>, _>("paused_ms")
                         .map(|ms| (ms.max(0) as u64 + 500) / 1000),
-                    error: (status == "failed")
+                    error: (status == LocalResult::Failed)
                         .then(|| row.get::<Option<String>, _>("error"))
                         .flatten(),
                 }
@@ -777,7 +817,11 @@ async fn run(
             } => {
                 job = None;
                 let result = outcome.unwrap_or_else(|_| Err(Failure::Capture("Backup task stopped unexpectedly.".into())));
-                local_at = engine.next_local(&settings);
+                // An upload-only retry captured nothing, so a local backup
+                // that fell due meanwhile still runs.
+                if !matches!(kind, Job::Retry) {
+                    local_at = engine.next_local(&settings);
+                }
                 match result {
                     Ok(()) => {
                         match kind {
@@ -907,6 +951,29 @@ mod tests {
             next_daily(at("01:30"), first).date_naive(),
             chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap(),
             "the repeated hour does not run it twice"
+        );
+    }
+
+    #[test]
+    fn a_retry_counts_from_the_slot_it_missed_across_daylight_saving() {
+        // The retry window runs from the actual slot, not 24 hours before
+        // the next one, so a DST day neither shrinks nor stretches it.
+        let after_jump = New_York.with_ymd_and_hms(2026, 3, 8, 4, 0, 0).unwrap();
+        let slot = last_daily(at("01:30"), after_jump);
+        assert_eq!(
+            slot,
+            New_York.with_ymd_and_hms(2026, 3, 8, 1, 30, 0).unwrap()
+        );
+        assert_eq!(after_jump - slot, chrono::Duration::minutes(90));
+        let after_repeat = New_York.with_ymd_and_hms(2026, 11, 1, 3, 0, 0).unwrap();
+        let slot = last_daily(at("01:30"), after_repeat);
+        assert_eq!(slot.offset().to_string(), "EDT", "the first 01:30");
+        assert_eq!(after_repeat - slot, chrono::Duration::minutes(150));
+        let before = Dubai.with_ymd_and_hms(2026, 11, 12, 2, 0, 0).unwrap();
+        assert_eq!(
+            last_daily(at("03:00"), before),
+            Dubai.with_ymd_and_hms(2026, 11, 11, 3, 0, 0).unwrap(),
+            "before today's time, the slot is yesterday's"
         );
     }
 }

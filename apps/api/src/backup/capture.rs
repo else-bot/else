@@ -761,6 +761,10 @@ async fn capture_into(
     let sealed = sealed?;
     if let Some(closed) = gate {
         drop(closed);
+        // Messages sent during the pause can now take over and run.
+        if let Some(scheduler) = &coordinator.scheduler {
+            scheduler.wake();
+        }
         sqlx::query("UPDATE backup_runs SET paused_ms = ?2 WHERE set_id = ?1")
             .bind(set_id)
             .bind(i64::try_from(paused_at.elapsed().as_millis()).unwrap_or(i64::MAX))

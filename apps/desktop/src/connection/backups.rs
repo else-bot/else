@@ -34,9 +34,12 @@ pub(super) struct View {
 
 impl View {
     pub(super) fn has_unsaved_work(&self, cx: &App) -> bool {
-        self.editor.is_some()
-            || self.busy()
-            || self.local_form.as_ref().is_some_and(|form| form.dirty(cx))
+        self.editor.is_some() || self.busy() || self.local_dirty(cx)
+    }
+    /// Whether the owner has unsaved schedule edits, which hold every
+    /// other backup action until they save or cancel.
+    fn local_dirty(&self, cx: &App) -> bool {
+        self.local_form.as_ref().is_some_and(|form| form.dirty(cx))
     }
     fn busy(&self) -> bool {
         self.operation != Operation::Idle
@@ -48,18 +51,26 @@ impl View {
             .as_ref()
             .is_none_or(|s| snapshot.revision >= s.revision)
         {
-            if self.local_form.is_none()
-                || (self.local_form.as_ref().is_some_and(|form| !form.dirty(cx))
-                    && self
-                        .snapshot
-                        .as_ref()
-                        .is_none_or(|saved| saved.revision != snapshot.revision))
-            {
-                self.local_form = Some(LocalForm::new(&snapshot, window, cx));
+            let form = self
+                .local_form
+                .as_ref()
+                .map(|form| (form.dirty(cx), form.base_revision));
+            match snapshot.local.as_ref() {
+                None => self.local_form = None,
+                Some(local) if rebuild_local_form(form, snapshot.revision) => {
+                    self.local_form = Some(LocalForm::new(snapshot.revision, local, window, cx));
+                }
+                Some(_) => {}
             }
             self.snapshot = Some(snapshot);
         }
     }
+}
+
+/// Rebuild the schedule form when there is none, or when a newer revision
+/// arrived and the owner has no edits to keep. `form` is (dirty, revision).
+fn rebuild_local_form(form: Option<(bool, i64)>, revision: i64) -> bool {
+    form.is_none_or(|(dirty, base)| !dirty && base != revision)
 }
 
 impl Shell {
@@ -119,7 +130,7 @@ impl Shell {
         let Some(view) = self
             .backups
             .as_ref()
-            .filter(|v| !v.busy() && v.local_form.as_ref().is_none_or(|f| !f.dirty(cx)))
+            .filter(|v| !v.busy() && !v.local_dirty(cx))
         else {
             return;
         };
@@ -138,7 +149,7 @@ impl Shell {
         let Some(view) = self
             .backups
             .as_ref()
-            .filter(|v| !v.busy() && v.local_form.as_ref().is_none_or(|f| !f.dirty(cx)))
+            .filter(|v| !v.busy() && !v.local_dirty(cx))
         else {
             return;
         };
@@ -169,7 +180,7 @@ impl Shell {
         let Some(view) = self
             .backups
             .as_mut()
-            .filter(|v| !v.busy() && v.local_form.as_ref().is_none_or(|f| !f.dirty(cx)))
+            .filter(|v| !v.busy() && !v.local_dirty(cx))
         else {
             return;
         };
@@ -216,7 +227,7 @@ impl Shell {
         let Some(view) = self
             .backups
             .as_mut()
-            .filter(|v| !v.busy() && v.local_form.as_ref().is_none_or(|f| !f.dirty(cx)))
+            .filter(|v| !v.busy() && !v.local_dirty(cx))
         else {
             return;
         };
@@ -254,9 +265,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self.backups.as_ref().filter(|v| {
-            !v.busy() && v.editor.is_none() && v.local_form.as_ref().is_none_or(|f| !f.dirty(cx))
-        }) else {
+        let Some(view) = self
+            .backups
+            .as_ref()
+            .filter(|v| !v.busy() && v.editor.is_none() && !v.local_dirty(cx))
+        else {
             return;
         };
         let Some(snapshot) = &view.snapshot else {
@@ -302,8 +315,12 @@ impl Shell {
         let Some(view) = self.backups.as_mut().filter(|v| !v.busy()) else {
             return;
         };
-        if let Some(snapshot) = &view.snapshot {
-            view.local_form = Some(LocalForm::new(snapshot, window, cx));
+        if let Some((revision, local)) = view
+            .snapshot
+            .as_ref()
+            .and_then(|s| Some((s.revision, s.local.as_ref()?)))
+        {
+            view.local_form = Some(LocalForm::new(revision, local, window, cx));
             view.error = None;
             view.feedback = None;
             cx.notify();
@@ -321,7 +338,8 @@ impl Shell {
         if view
             .snapshot
             .as_ref()
-            .is_none_or(|s| s.local.managed_by_env)
+            .and_then(|s| s.local.as_ref())
+            .is_none_or(|local| local.managed_by_env)
         {
             return;
         }
@@ -362,7 +380,7 @@ impl Shell {
         let Some(view) = self
             .backups
             .as_mut()
-            .filter(|v| !v.busy() && v.local_form.as_ref().is_none_or(|f| !f.dirty(cx)))
+            .filter(|v| !v.busy() && !v.local_dirty(cx))
         else {
             return;
         };
@@ -397,5 +415,18 @@ impl Shell {
             });
         }));
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rebuild_local_form;
+
+    #[test]
+    fn backup_local_form_reloads_only_without_unsaved_edits() {
+        assert!(rebuild_local_form(None, 4));
+        assert!(rebuild_local_form(Some((false, 3)), 4));
+        assert!(!rebuild_local_form(Some((false, 4)), 4));
+        assert!(!rebuild_local_form(Some((true, 3)), 4));
     }
 }

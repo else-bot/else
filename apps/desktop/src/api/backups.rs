@@ -81,7 +81,10 @@ pub struct BackupRun {
 #[derive(Clone, Deserialize)]
 pub struct BackupSnapshot {
     pub revision: i64,
-    pub local: LocalBackupSettings,
+    /// Absent from servers that predate the daily local schedule.
+    #[serde(default)]
+    pub local: Option<LocalBackupSettings>,
+    #[serde(default)]
     pub pause: Option<ServerPause>,
     pub enabled: bool,
     pub interval_secs: u64,
@@ -119,11 +122,13 @@ pub enum LocalBackupStatus {
     Completed,
     Partial,
     Failed,
+    /// A status this desktop does not know yet.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct LocalBackupRun {
-    pub set_id: String,
     pub started_at: String,
     pub finished_at: Option<String>,
     pub status: LocalBackupStatus,
@@ -138,13 +143,18 @@ pub struct LocalBackupRun {
 pub enum PauseReason {
     Backup,
     Update,
+    /// A reason this desktop does not know yet.
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ServerPause {
     pub reason: PauseReason,
-    pub started_at: chrono::DateTime<chrono::Utc>,
     pub expected_secs: Option<u64>,
+    /// How long the pause had run when the server sent this.
+    #[serde(default)]
+    pub elapsed_secs: u64,
 }
 
 #[derive(Serialize)]
@@ -274,28 +284,54 @@ mod tests {
                 "expected_secs": 327, "phase": "computers", "done": 6, "total": 11 }
         });
         let snapshot: BackupSnapshot = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(snapshot.local.time, "03:00");
-        assert_eq!(snapshot.local.utc_offset_secs, 14400);
-        assert_eq!(snapshot.local.bytes, 98400000000);
+        assert_eq!(snapshot.local.as_ref().unwrap().time, "03:00");
+        assert_eq!(snapshot.local.as_ref().unwrap().utc_offset_secs, 14400);
+        assert_eq!(snapshot.local.as_ref().unwrap().bytes, 98400000000);
         assert_eq!(
-            snapshot.local.recent[0].status,
+            snapshot.local.as_ref().unwrap().recent[0].status,
             LocalBackupStatus::Completed
         );
-        assert_eq!(snapshot.local.recent[0].paused_secs, Some(327));
-        assert_eq!(snapshot.local.recent[1].status, LocalBackupStatus::Running);
-        assert_eq!(snapshot.local.recent[2].status, LocalBackupStatus::Partial);
-        assert_eq!(snapshot.local.recent[3].status, LocalBackupStatus::Failed);
+        assert_eq!(
+            snapshot.local.as_ref().unwrap().recent[0].paused_secs,
+            Some(327)
+        );
+        assert_eq!(
+            snapshot.local.as_ref().unwrap().recent[1].status,
+            LocalBackupStatus::Running
+        );
+        assert_eq!(
+            snapshot.local.as_ref().unwrap().recent[2].status,
+            LocalBackupStatus::Partial
+        );
+        assert_eq!(
+            snapshot.local.as_ref().unwrap().recent[3].status,
+            LocalBackupStatus::Failed
+        );
         let pause = snapshot.pause.unwrap();
         assert_eq!(pause.reason, PauseReason::Backup);
         value["pause"] = json!(null);
         value["local"]["free_bytes"] = json!(null);
         value["local"]["next_at"] = json!(null);
         value["local"]["managed_by_env"] = json!(true);
-        let snapshot: BackupSnapshot = serde_json::from_value(value).unwrap();
+        let snapshot: BackupSnapshot = serde_json::from_value(value.clone()).unwrap();
         assert!(snapshot.pause.is_none());
-        assert!(snapshot.local.free_bytes.is_none());
-        assert!(snapshot.local.next_at.is_none());
-        assert!(snapshot.local.managed_by_env);
+        assert!(snapshot.local.as_ref().unwrap().free_bytes.is_none());
+        assert!(snapshot.local.as_ref().unwrap().next_at.is_none());
+        assert!(snapshot.local.as_ref().unwrap().managed_by_env);
+        // Newer servers may add statuses and reasons; older ones omit `local`.
+        value["local"]["recent"][0]["status"] = json!("verifying");
+        value["pause"] = json!({ "reason": "migration", "expected_secs": null });
+        let snapshot: BackupSnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            snapshot.local.unwrap().recent[0].status,
+            LocalBackupStatus::Unknown
+        );
+        assert_eq!(snapshot.pause.unwrap().reason, PauseReason::Other);
+        let object = value.as_object_mut().unwrap();
+        object.remove("local");
+        object.remove("pause");
+        let snapshot: BackupSnapshot = serde_json::from_value(value).unwrap();
+        assert!(snapshot.local.is_none() && snapshot.pause.is_none());
     }
 
     #[test]

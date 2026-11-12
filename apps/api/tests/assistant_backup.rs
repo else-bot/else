@@ -672,6 +672,7 @@ async fn a_message_sent_during_a_backup_queues_behind_the_running_turn() {
         .unwrap();
     assert_eq!(status, "queued", "nothing starts while the gate is closed");
     drop(closed);
+    s.app.scheduler.wake();
     assert_eq!(s.app.wait_turn(&second, &["completed"]).await, "completed");
 }
 

@@ -111,6 +111,8 @@ impl Pause {
             },
             "started_at": self.started_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "expected_secs": self.expected.map(|d| d.as_secs()),
+            // Measured here so clients count down without trusting their clock.
+            "elapsed_secs": (Utc::now() - self.started_at).num_seconds().max(0),
             "phase": phase,
             "done": done,
             "total": total,
@@ -151,9 +153,11 @@ pub struct Closed(Arc<Gate>);
 
 impl Drop for Closed {
     fn drop(&mut self) {
-        self.0.state.fetch_and(ADMITTED, Ordering::AcqRel);
+        // Release CLOSED last: once it clears, the next closer may set
+        // CAPTURING and publish its own pause, which must survive.
         self.0.turn_work.fetch_and(ADMITTED, Ordering::AcqRel);
         self.0.pause.send_replace(None);
+        self.0.state.fetch_and(ADMITTED, Ordering::AcqRel);
     }
 }
 
@@ -295,6 +299,61 @@ fn is_message_send(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_next_closer_keeps_its_capture_and_pause() {
+        let gate = Arc::new(Gate::default());
+        let first = gate
+            .close(Duration::from_secs(1), Pause::update())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(first);
+        let second = gate
+            .close(Duration::from_secs(1), Pause::backup(None))
+            .await
+            .unwrap()
+            .unwrap();
+        second.capture(Duration::from_secs(1)).await.unwrap();
+        assert!(
+            gate.enter_turn().is_none(),
+            "capturing refuses running turns"
+        );
+        assert_eq!(gate.pause().map(|p| p.reason), Some(Reason::Backup));
+        drop(second);
+        assert!(gate.pause().is_none());
+        assert!(gate.enter_turn().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_closers_never_clear_each_others_capture() {
+        let gate = Arc::new(Gate::default());
+        let mut closers = Vec::new();
+        for _ in 0..4 {
+            let gate = gate.clone();
+            closers.push(tokio::spawn(async move {
+                for _ in 0..500 {
+                    let Ok(Some(closed)) = gate
+                        .close(Duration::from_secs(1), Pause::backup(None))
+                        .await
+                    else {
+                        tokio::task::yield_now().await;
+                        continue;
+                    };
+                    closed.capture(Duration::from_secs(1)).await.unwrap();
+                    tokio::task::yield_now().await;
+                    assert!(
+                        gate.enter_turn().is_none(),
+                        "another closer cleared the capture"
+                    );
+                    assert!(gate.pause().is_some(), "another closer cleared the pause");
+                }
+            }));
+        }
+        for closer in closers {
+            closer.await.unwrap();
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_admissions_never_enter_a_closed_gate() {

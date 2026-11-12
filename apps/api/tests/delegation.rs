@@ -1979,6 +1979,14 @@ async fn a_cancelled_child_keeps_its_partial_reply_and_an_empty_one_shows_empty(
 }
 
 async fn follow_up(db: &TestDb, bot: Uuid) -> Uuid {
+    follow_up_with(db, bot, else_api::db::turns::Preemption::Cancel).await
+}
+
+async fn follow_up_with(
+    db: &TestDb,
+    bot: Uuid,
+    preemption: else_api::db::turns::Preemption,
+) -> Uuid {
     sqlx::query(
         "UPDATE conversations SET last_turn_no = (SELECT max(turn_no) FROM turns t
              WHERE t.conversation_id = conversations.id) WHERE bot_id = ?1 AND kind = 'owner'",
@@ -2001,7 +2009,7 @@ async fn follow_up(db: &TestDb, bot: Uuid) -> Uuid {
             uses_profile: false,
             open_draft: None,
         },
-        else_api::db::turns::Preemption::Cancel,
+        preemption,
     )
     .await
     .unwrap();
@@ -2405,4 +2413,83 @@ async fn a_task_routes_follow_up_work_through_the_bot_that_delegated_it() {
     assert_eq!(blocked.code(), "BUDGET_EXHAUSTED", "{}", blocked.body);
     h.release(root).await;
     wait_status(&h.app, root, "completed").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_sent_during_a_pause_takes_over_only_once_it_ends() {
+    let db = TestDb::migrated().await;
+    let (main, root, child, delegation) = seed(&db).await;
+    let follow = follow_up_with(&db, main, else_api::db::turns::Preemption::Defer).await;
+    let state = || async {
+        sqlx::query_as::<_, (Uuid, String, String, bool)>(
+            "SELECT d.root_turn_id, r.status, f.status, f.deferred
+             FROM delegations d, turns r, turns f WHERE d.id = ?1 AND r.id = ?2 AND f.id = ?3",
+        )
+        .bind(delegation)
+        .bind(root)
+        .bind(follow)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(
+        state().await,
+        (root, "running".into(), "queued".into(), true),
+        "the running turn keeps its task and is not cancelled"
+    );
+    assert!(
+        else_api::db::turns::claim_next(&db.pool, &[], true)
+            .await
+            .unwrap()
+            .is_none_or(|claimed| claimed.id != follow),
+        "a deferred message is not claimed"
+    );
+
+    // During the pause the running turn parks on its task and asks the owner.
+    set_status(&db, root, "waiting").await;
+    let question = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, choices)
+         VALUES (?1, ?2, ?3, 1, 'choice', 'Which file?', '[]')",
+    )
+    .bind(question)
+    .bind(main)
+    .bind(root)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    set_status(&db, child, "completed").await;
+    sqlx::query("UPDATE delegations SET status = 'completed' WHERE id = ?1")
+        .bind(delegation)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        else_api::db::turns::settle_deferred(&db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        state().await,
+        (follow, "interrupted".into(), "queued".into(), false),
+        "once the pause ends the message takes over and receives the outcome"
+    );
+    let skipped: String = sqlx::query_scalar("SELECT status FROM owner_questions WHERE id = ?1")
+        .bind(question)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        skipped, "skipped",
+        "the question asked during the pause no longer blocks it"
+    );
+    assert_eq!(
+        else_api::db::turns::settle_deferred(&db.pool)
+            .await
+            .unwrap(),
+        0,
+        "settling again changes nothing"
+    );
 }

@@ -1,18 +1,24 @@
 use super::*;
-use crate::api::{LocalBackupStatus, PauseReason};
+use crate::api::{LocalBackupSettings, LocalBackupStatus, PauseReason};
 use chrono::{DateTime, FixedOffset, Offset as _, Utc};
 use gpui_kit::component::{Theme, h_flex};
 use view::{bytes, message, metric};
 
 fn server_timestamp(value: &str, timezone: &str, offset: i32) -> String {
-    let Ok(at) = DateTime::parse_from_rfc3339(value) else {
-        return value.into();
-    };
+    match DateTime::parse_from_rfc3339(value) {
+        Ok(at) => server_time(at.to_utc(), timezone, offset, "%b %-d, %H:%M"),
+        Err(_) => value.into(),
+    }
+}
+
+/// Format an instant on the server's wall clock: its IANA zone when this
+/// desktop knows it, otherwise the offset the server reported.
+fn server_time(at: DateTime<Utc>, timezone: &str, offset: i32, format: &str) -> String {
     if let Ok(zone) = timezone.parse::<chrono_tz::Tz>() {
-        at.with_timezone(&zone).format("%b %-d, %H:%M").to_string()
+        at.with_timezone(&zone).format(format).to_string()
     } else {
         at.with_timezone(&FixedOffset::east_opt(offset).unwrap_or_else(|| Utc.fix()))
-            .format("%b %-d, %H:%M")
+            .format(format)
             .to_string()
     }
 }
@@ -27,12 +33,24 @@ fn duration(seconds: u64) -> String {
     }
 }
 
+/// Time until the next backup, to the minute: the panel redraws every few
+/// seconds, so a seconds countdown would jitter.
+fn countdown(seconds: i64) -> String {
+    let minutes = (seconds.max(0) as u64).div_ceil(60);
+    match minutes {
+        0 => "Due now".into(),
+        1..60 => format!("In {minutes} min"),
+        _ => format!("In {}h {}m", minutes / 60, minutes % 60),
+    }
+}
+
 fn result(status: LocalBackupStatus, theme: &Theme) -> (&'static str, Hsla) {
     match status {
         LocalBackupStatus::Running => ("Running", theme.warning),
         LocalBackupStatus::Completed => ("Complete", theme.success),
         LocalBackupStatus::Partial => ("Partial", theme.warning),
-        LocalBackupStatus::Failed => ("Failed", theme.warning),
+        LocalBackupStatus::Failed => ("Failed", theme.danger),
+        LocalBackupStatus::Unknown => ("Unknown", theme.muted_foreground),
     }
 }
 
@@ -41,11 +59,11 @@ impl Shell {
         &self,
         view: &View,
         snapshot: &BackupSnapshot,
+        local: &LocalBackupSettings,
         stacked: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = cx.theme();
-        let local = &snapshot.local;
         let stamp = |value: &str| server_timestamp(value, &local.timezone, local.utc_offset_secs);
         let running = snapshot
             .pause
@@ -76,16 +94,12 @@ impl Shell {
             .next_at
             .as_deref()
             .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
-            .map(|at| {
-                let seconds = at.signed_duration_since(Utc::now()).num_seconds();
-                if seconds <= 0 {
-                    "Due now".into()
-                } else {
-                    format!("In {}", duration(seconds as u64))
-                }
-            })
+            .map(|at| countdown(at.signed_duration_since(Utc::now()).num_seconds()))
+            .filter(|_| !running)
             .unwrap_or_else(|| {
-                if local.enabled {
+                if running {
+                    "Running now".into()
+                } else if local.enabled {
                     local.timezone.clone()
                 } else {
                     "Enable automatic backups to schedule".into()
@@ -141,9 +155,6 @@ impl Shell {
                 let (label, tone) = result(run.status, theme);
                 history = history.child(
                     v_flex()
-                        .id(ElementId::Name(
-                            format!("local-backup-{}", run.set_id).into(),
-                        ))
                         .gap_1()
                         .py_2()
                         .border_b_1()
@@ -211,10 +222,12 @@ impl Shell {
                             .child(format!(
                                 "{} · server time {}",
                                 local.timezone,
-                                stamp(&Utc::now().to_rfc3339())
-                                    .rsplit(", ")
-                                    .next()
-                                    .unwrap_or_default()
+                                server_time(
+                                    Utc::now(),
+                                    &local.timezone,
+                                    local.utc_offset_secs,
+                                    "%H:%M"
+                                )
                             )),
                     ),
             )
@@ -246,7 +259,8 @@ impl Shell {
             )
             .when_some(view.local_form.as_ref(), |section, form| {
                 section.child(form.render(
-                    snapshot,
+                    local,
+                    view.operation == Operation::SavingLocal,
                     view.busy() || view.editor.is_some() || snapshot.pause.is_some(),
                     stacked,
                     cx,
@@ -258,6 +272,16 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn backup_next_local_countdown_rounds_up_to_the_minute() {
+        assert_eq!(super::countdown(-5), "Due now");
+        assert_eq!(super::countdown(0), "Due now");
+        assert_eq!(super::countdown(1), "In 1 min");
+        assert_eq!(super::countdown(3540), "In 59 min");
+        assert_eq!(super::countdown(3599), "In 1h 0m");
+        assert_eq!(super::countdown(3601), "In 1h 1m");
+    }
+
     use super::{duration, server_timestamp};
 
     #[test]

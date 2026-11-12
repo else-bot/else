@@ -1,5 +1,5 @@
 use super::*;
-use crate::api::{BackupDestinationInput, BackupService};
+use crate::api::{BackupDestinationInput, BackupService, LocalBackupSettings};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::switch::Switch;
@@ -343,7 +343,7 @@ pub(super) struct LocalForm {
     enabled: bool,
     time: Entity<InputState>,
     keep: Entity<InputState>,
-    saved: crate::api::LocalBackupSettings,
+    saved: LocalBackupSettings,
     _edits: Vec<Subscription>,
 }
 
@@ -370,8 +370,12 @@ fn local_values(time: &str, keep: &str) -> Result<(String, usize), String> {
 }
 
 impl LocalForm {
-    pub fn new(snapshot: &BackupSnapshot, window: &mut Window, cx: &mut Context<Shell>) -> Self {
-        let local = &snapshot.local;
+    pub fn new(
+        revision: i64,
+        local: &LocalBackupSettings,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) -> Self {
         let time = input(&local.time, "03:00", window, cx);
         let keep = input(&local.keep.to_string(), "7", window, cx);
         let edits = [&time, &keep]
@@ -379,7 +383,7 @@ impl LocalForm {
             .map(|field| cx.subscribe_in(field, window, |_, _, _: &InputEvent, _, cx| cx.notify()))
             .collect();
         Self {
-            base_revision: snapshot.revision,
+            base_revision: revision,
             enabled: local.enabled,
             time,
             keep,
@@ -390,8 +394,8 @@ impl LocalForm {
 
     pub fn dirty(&self, cx: &App) -> bool {
         self.enabled != self.saved.enabled
-            || self.time.read(cx).value().as_ref() != self.saved.time
-            || self.keep.read(cx).value().as_ref() != self.saved.keep.to_string()
+            || self.time.read(cx).value().trim() != self.saved.time
+            || self.keep.read(cx).value().trim() != self.saved.keep.to_string()
     }
 
     pub fn input(&self, cx: &App) -> Result<crate::api::LocalBackupSettingsInput, String> {
@@ -406,14 +410,15 @@ impl LocalForm {
 
     pub fn render(
         &self,
-        snapshot: &BackupSnapshot,
+        local: &LocalBackupSettings,
+        saving: bool,
         busy: bool,
         stacked: bool,
         cx: &mut Context<Shell>,
     ) -> Div {
         use gpui_kit::component::button::ButtonVariants as _;
         let theme = cx.theme();
-        let managed = snapshot.local.managed_by_env;
+        let managed = local.managed_by_env;
         let disabled = busy || managed;
         let selected = self.time.read(cx).value();
         let mut presets = h_flex().gap_2().flex_wrap();
@@ -476,7 +481,7 @@ impl LocalForm {
             .child(h_flex().gap_4().items_start().when(stacked, |row| row.flex_col())
                 .child(field("Exact time", &self.time)).child(field("Keep", &self.keep)))
             .child(div().text_xs().text_color(theme.muted_foreground)
-                .child(format!("Times use the server's timezone ({}). A missed backup runs at the next scheduled time.", snapshot.local.timezone)))
+                .child(format!("Times use the server's timezone ({}). A missed backup runs at the next scheduled time.", local.timezone)))
             .when(managed, |panel| panel.child(super::view::message(
                 "ELSE_BACKUP_INTERVAL_SECS controls this schedule. Change the environment variable on the server to edit it.".into(), theme.muted_foreground, theme)))
             .when(!managed, |panel| panel.child(h_flex().justify_end().gap_2()
@@ -484,6 +489,7 @@ impl LocalForm {
                     .disabled(disabled || !self.dirty(cx))
                     .on_click(cx.listener(|shell, _, window, cx| shell.cancel_local_backup_edit(window, cx))))
                 .child(Button::new("local-backup-save").focus_ring(false).cursor_pointer().label("Save schedule").primary()
+                    .loading(saving)
                     .disabled(disabled || !self.dirty(cx))
                     .on_click(cx.listener(|shell, _, window, cx| shell.save_local_backup_schedule(window, cx))))))
     }
