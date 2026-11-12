@@ -49,4 +49,4 @@ and a line diff. Send `[ui:rule-change]` to change the same rule. Open Bot
 details and confirm the Rules section lists **New Linear issue**. Click it
 and check the dialog's Rules, History, and Markdown tabs. Use **Undo change**
 on the newest card and confirm `GET /v1/bots/{id}/rules` reports a restored
-version. `cargo nextest run --workspace --locked --test bot_rules` covers the API side.
+version. `cargo nextest run --workspace --locked --test api -E 'test(/^bot_rules::/)'` covers the API side.

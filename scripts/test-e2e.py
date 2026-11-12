@@ -127,11 +127,20 @@ def application_targets(compile_live):
 def application_tests(cargo, selected, args, env, work, result):
     # Cargo runs integration binaries serially. Run independent binaries in
     # bounded lanes; each binary retains its own in-process fixture locks.
-    jobs = [("unit", ["--lib", "--bins"])] + [(name, ["--test", name]) for name in selected]
+    # The offline API tests share one binary, so each of its modules gets a lane.
+    from dev_tests import shard
+    jobs = [("unit", ["--lib", "--bins"], [])]
+    for name in selected:
+        if name == "api":
+            source = (ROOT / "apps/api/tests/api/main.rs").read_text()
+            jobs += [(f"api-{s['module']}", ["--test", "api"], s["filter"])
+                     for s in shard({"key": "api", "log": "api.log"}, source)]
+        else:
+            jobs.append((name, ["--test", name], []))
     results = {}
     mailboxes = []
 
-    def execute(name, flags, cancel):
+    def execute(name, flags, filters, cancel):
         start = time.perf_counter()
         log = work / f"test-{name}.log"
         status = "passed"
@@ -140,7 +149,7 @@ def application_tests(cargo, selected, args, env, work, result):
                 test_args = ["--test-threads", str(args.test_threads)]
                 if name == "replication":
                     test_args += ["--ignored"]
-                run(cargo + flags + ["--", *test_args],
+                run(cargo + flags + ["--", *filters, *test_args],
                     cancel=cancel, cwd=ROOT, env=env, stdout=stream, stderr=subprocess.STDOUT)
             except Exception as error:
                 status = "failed"
@@ -150,10 +159,10 @@ def application_tests(cargo, selected, args, env, work, result):
     with ThreadPoolExecutor(max_workers=args.test_jobs) as pool:
         pending = {}
         jobs.sort(key=lambda job: job[0] != "replication")
-        for name, flags in jobs:
+        for name, flags, filters in jobs:
             cancel = queue.Queue(maxsize=1)
             mailboxes.append(cancel)
-            pending[pool.submit(execute, name, flags, cancel)] = name
+            pending[pool.submit(execute, name, flags, filters, cancel)] = name
         try:
             for future in as_completed(pending):
                 name = pending[future]

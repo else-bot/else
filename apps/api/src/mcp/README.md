@@ -109,4 +109,4 @@ The embedded app credentials are extractable from the API binary. PKCE binds eac
 
 ## Verification
 
-The focused test targets are `cargo test -p else-api --lib mcp:: --locked` and `cargo test -p else-api --test mcp_oauth --test shared_mcp --test assistant_backup --test backup --locked`.
+The focused tests are `cargo nextest run --workspace --locked --lib -E 'test(/^mcp::/)'` and `cargo nextest run --workspace --locked --test api -E 'test(/^(mcp_oauth|shared_mcp|assistant_backup|backup)::/)'`.

@@ -146,7 +146,7 @@ Set `CARGO_BUILD_JOBS=2` when other workspaces build concurrently.
 For focused checks:
 
 ```sh
-scripts/dev.py test --test bots
+scripts/dev.py test --test api -- bots::
 scripts/dev.py test -p else-api --serial -- wrong_keys_damage_and_existing_databases_never_produce_a_restore
 ```
 
@@ -192,9 +192,11 @@ CI caches Cargo downloads and compiled output by Rust version and lockfile, with
 Use a focused target while developing, for example:
 
 ```sh
-cargo nextest run --workspace --locked --test bots -E 'test(/avatar/)'
-scripts/dev.py test --test bots   # Linux
+cargo nextest run --workspace --locked --test api -E 'test(/^bots::.*avatar/)'
+scripts/dev.py test --test api -- bots::   # Linux
 ```
+
+The offline API integration tests are modules of one `api` test binary in `apps/api/tests/api/`, so an API change relinks one test executable instead of 61. Declare a new test file in `apps/api/tests/api/main.rs`; a file that is not declared there does not compile. Live tests (`*_live.rs`) and `replication.rs` stay separate targets in `apps/api/tests/`. `scripts/dev.py test` runs the `api` binary as one job per module, so each module keeps its own scratch HOME and TMPDIR.
 
 Keep `--workspace` and narrow with `--test`, `--lib`, or a filter. A `-p else-api` build resolves different dependency features than the workspace build that the hooks use, so its first run compiles a second copy of up to about 240 dependency crates (about 50 seconds) before it runs a test.
 

@@ -190,6 +190,30 @@ if mode != 'missing':
         self.assertEqual(scope(["else-api"], []), ["-p", "else-api"])
         self.assertEqual(scope([], []), ["--workspace"])
 
+    def test_combined_binary_runs_one_job_per_module(self):
+        binary = dict(self.binary("api"), key="else-api/test/api")
+        source = '#[path = "../common/mod.rs"]\nmod common;\n\nmod backup_settings;\nmod bots;\nmod settings;\n'
+        shards = runner.shard(binary, source)
+        self.assertEqual([s["key"] for s in shards],
+                         ["else-api/test/api/backup_settings", "else-api/test/api/bots", "else-api/test/api/settings"])
+        self.assertEqual(shards[1]["filter"], ["bots::"])
+        self.assertEqual(shards[2]["filter"], ["settings::", "--skip", "backup_settings::"])
+        self.assertEqual(len({s["log"] for s in shards}), 3)
+        self.assertEqual(runner.shard(binary, "fn main() {}\n"), [binary])
+
+        self.results.update(selection={"packages": [], "tests": ["api"], "filter": [], "serial": False}, jobs=2)
+        self.results["binaries"] = [dict(shards[2], status="failed", package="else-api", target="api"),
+                                    dict(shards[1], status="passed", package="else-api", target="api")]
+        self.assertEqual(runner.rerun_args(self.results),
+                         ["-p else-api --test api --jobs 2 -- settings:: --skip backup_settings::"])
+
+        argv = []
+        with patch.object(runner.subprocess, "Popen", side_effect=lambda a, **_: argv.append(a)):
+            self.results.update(id="run", box={"name": "box"}, test_threads=2, tokio_worker_threads=2)
+            runner.start_binary(self.results, self.results["binaries"][0])
+        job = json.loads(argv[0][-1])
+        self.assertEqual(job["argv"][1:], ["settings::", "--skip", "backup_settings::", "--test-threads", "2"])
+
     def test_serial_overrides_jobs_and_uses_one_test_thread(self):
         for serial, jobs, threads in ((False, 3, 2), (True, 1, 1)):
             args = argparse.Namespace(package="else-api", test=None, serial=serial, jobs=3, filter=[])
@@ -211,14 +235,14 @@ if mode != 'missing':
 
     def test_sparse_history_does_not_push_unknown_slow_targets_behind_short_ones(self):
         self.binary("short")
-        self.binary("else-api/test/delegation")
+        self.binary("else-api/test/api/delegation")
         previous = self.directory / "001"
         previous.mkdir()
         history = dict(self.results, binaries=[{"key": "short", "status": "passed", "seconds": 1}])
         (previous / "results.json").write_text(json.dumps(history))
         with patch.object(runner, "RUNS", self.directory):
             runner.order_binaries(self.directory / "002", self.results)
-        self.assertEqual(self.results["binaries"][0]["key"], "else-api/test/delegation")
+        self.assertEqual(self.results["binaries"][0]["key"], "else-api/test/api/delegation")
 
     def test_worker_records_interruption_and_error_and_removes_box(self):
         for error, status in ((KeyboardInterrupt(), "interrupted"), (OSError("broken"), "error")):

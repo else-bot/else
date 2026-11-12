@@ -32,9 +32,10 @@ DONE = {"passed", "failed", "interrupted", "error"}
 PROVIDER_HOMES = {"CODEX_HOME", "CLAUDE_CONFIG_DIR", "GROK_HOME"}
 RESULT = re.compile(r"^test result: \w+\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out")
 FAILED_TEST = re.compile(r"^test (\S+) \.\.\. FAILED$")
-COLD_SECONDS = {"else-api/test/delegation": 76, "else-api/test/owner_questions": 73,
-                "else-api/test/outgoing_drafts": 59, "else-api/test/mcp_waits": 41,
-                "else-api/test/routines": 38}
+COLD_SECONDS = {"else-api/test/api/delegation": 76, "else-api/test/api/owner_questions": 73,
+                "else-api/test/api/outgoing_drafts": 59, "else-api/test/api/mcp_waits": 41,
+                "else-api/test/api/routines": 38}
+MODULE = re.compile(r"^mod (\w+);$", re.M)
 
 
 def default_jobs():
@@ -83,11 +84,11 @@ def rerun_args(results):
         if binary["status"] == "passed":
             continue
         selection = ["-p", binary["package"]] + (["--test", binary["target"]] if binary["kind"] == "test" else [])
+        selection.append(binary.get("filter") or results["selection"]["filter"])
         if selection not in args:
             args.append(selection)
-    tail = results["selection"]["filter"]
     scheduling = ["--serial"] if results["selection"]["serial"] else ["--jobs", str(results.get("jobs", 1))]
-    return [shlex.join(a + scheduling + (["--", *tail] if tail else [])) for a in args]
+    return [shlex.join(a[:-1] + scheduling + (["--", *a[-1]] if a[-1] else [])) for a in args]
 
 
 def summary(results):
@@ -180,6 +181,21 @@ def source_mounts(metadata):
     return sorted(str(p) for p in found if not any(p != q and p.is_relative_to(q) for q in found))
 
 
+def shard(binary, source):
+    """Split a combined test binary (tests/NAME/main.rs) into one job per top-level module, so each
+    module keeps the parallelism and private HOME/TMPDIR it had as its own binary. libtest filters
+    match substrings, so a module also skips every module whose name ends with its own."""
+    modules = [m for m in MODULE.findall(source) if m != "common"]
+    shards = []
+    for module in modules:
+        skips = [a for other in modules if other != module and other.endswith(module)
+                 for a in ("--skip", f"{other}::")]
+        key = f"{binary['key']}/{module}"
+        shards.append({**binary, "key": key, "module": module, "filter": [f"{module}::", *skips],
+                       "log": str(Path(binary["log"]).with_name(re.sub(r"[^A-Za-z0-9_.-]", "--", key) + ".log"))})
+    return shards or [binary]
+
+
 def build_scope(selection):
     """Cargo selection args. A `-p` build resolves its own dependency features and compiles a second
     copy of crates the workspace build already has, so named test targets keep the workspace resolution."""
@@ -226,10 +242,15 @@ def build(run_dir, results):
         package = packages[frame["manifest_path"]]
         kind = frame["target"]["kind"][0]
         key = f"{package['name']}/{kind}/{frame['target']['name']}"
-        binaries.append({"key": key, "package": package["name"], "version": package["version"], "kind": kind,
-                         "target": frame["target"]["name"], "executable": frame["executable"],
-                         "cwd": str(Path(frame["manifest_path"]).parent), "status": "pending",
-                         "log": str(run_dir / "logs" / (re.sub(r"[^A-Za-z0-9_.-]", "--", key) + ".log"))})
+        binary = {"key": key, "package": package["name"], "version": package["version"], "kind": kind,
+                  "target": frame["target"]["name"], "executable": frame["executable"],
+                  "cwd": str(Path(frame["manifest_path"]).parent), "status": "pending",
+                  "log": str(run_dir / "logs" / (re.sub(r"[^A-Za-z0-9_.-]", "--", key) + ".log"))}
+        source = Path(frame["target"]["src_path"])
+        if kind == "test" and source.name == "main.rs" and not selection["filter"]:
+            binaries.extend(shard(binary, source.read_text()))
+        else:
+            binaries.append(binary)
     results["binaries"] = sorted(binaries, key=lambda b: b["key"])
     return source_mounts(metadata)
 
@@ -274,7 +295,8 @@ class RunningBinary:
 
 def start_binary(results, binary):
     job = {"run": results["id"], "slug": Path(binary["log"]).stem, "cwd": binary["cwd"],
-           "argv": [binary["executable"], *results["selection"]["filter"], "--test-threads", str(results["test_threads"])],
+           "argv": [binary["executable"], *(binary.get("filter") or results["selection"]["filter"]),
+                    "--test-threads", str(results["test_threads"])],
            "env": {"TOKIO_WORKER_THREADS": str(results["tokio_worker_threads"]), "RUST_BACKTRACE": "1",
                    "CARGO_MANIFEST_DIR": binary["cwd"], "CARGO_PKG_NAME": binary["package"],
                    "CARGO_PKG_VERSION": binary["version"]},

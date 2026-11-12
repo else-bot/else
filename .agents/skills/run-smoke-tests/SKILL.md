@@ -15,6 +15,7 @@ Read the [local runtime rules](../../rules/plugin-compatibility.md) and [model p
 
    ```sh
    cargo check --workspace --all-targets
+   scripts/dev.py test --test api -- <module>::
    scripts/dev.py test --test <integration-target> -- <test-filter>
    scripts/dev.py test -p <crate> -- <test-filter>
    ```
