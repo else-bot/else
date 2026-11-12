@@ -15,18 +15,22 @@ Read the [local runtime rules](../../rules/plugin-compatibility.md) and [model p
 
    ```sh
    cargo check --workspace --all-targets
+   scripts/dev.py test --test <integration-target> -- <test-filter>
    scripts/dev.py test -p <crate> -- <test-filter>
-   scripts/dev.py test -p <crate> --test <integration-target>
-   scripts/dev.py test --serial
    ```
 
-   `scripts/dev.py test` runs the full workspace by default. It builds on
+   Run only the tests that cover the change. The pre-push hook and CI run
+   the full suite, so do not run it by hand. Keep `--workspace` resolution
+   by naming a `--test` target where you can; `-p <crate>` alone resolves
+   different dependency features and compiles a second copy of its
+   dependencies. It builds on
    the host and runs each executable in an isolated box with dependency
    assets and private scratch storage. `--serial` limits each executable
    to one test thread. Read `results.json`, `summary.txt`, and the logs in
    the printed `.else-dev/tests/<run>/` directory after a restart before
-   repeating work. On macOS, use `cargo test --workspace --locked` or a
-   focused Cargo target inside the owned verification guest.
+   repeating work. On macOS, use a focused Cargo target such as
+   `cargo nextest run --workspace --locked --test <integration-target>`
+   inside the owned verification guest.
 
 3. Use the checked-in integration or end-to-end runner when the change covers
    services or desktop flows. Follow the session's containment rules before

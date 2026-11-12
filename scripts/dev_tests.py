@@ -180,12 +180,20 @@ def source_mounts(metadata):
     return sorted(str(p) for p in found if not any(p != q and p.is_relative_to(q) for q in found))
 
 
+def build_scope(selection):
+    """Cargo selection args. A `-p` build resolves its own dependency features and compiles a second
+    copy of crates the workspace build already has, so named test targets keep the workspace resolution."""
+    tests = [a for t in selection["tests"] for a in ("--test", t)]
+    if tests:
+        return ["--workspace", *tests]
+    return [a for p in selection["packages"] for a in ("-p", p)] or ["--workspace"]
+
+
 def build(run_dir, results):
     import dev
     selection = results["selection"]
-    scope = [a for p in selection["packages"] for a in ("-p", p)] or ["--workspace"]
     target_dir = ROOT / ".else-dev/.build"
-    argv = ["cargo", "test", *scope, *[a for t in selection["tests"] for a in ("--test", t)],
+    argv = ["cargo", "test", *build_scope(selection),
             "--target-dir", str(target_dir), "--config", "build.incremental=false",
             "--locked", "--no-run", "--message-format=json-render-diagnostics"]
     env = dev.cargo_env()

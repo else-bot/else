@@ -182,6 +182,14 @@ if mode != 'missing':
             with patch.object(os, "sched_getaffinity", return_value=set(range(cpus))):
                 self.assertEqual(runner.default_jobs(), expected)
 
+    def test_named_targets_keep_workspace_feature_resolution(self):
+        def scope(packages, tests):
+            return runner.build_scope({"packages": packages, "tests": tests})
+        self.assertEqual(scope(["else-api"], ["bots"]), ["--workspace", "--test", "bots"])
+        self.assertEqual(scope([], ["bots", "routines"]), ["--workspace", "--test", "bots", "--test", "routines"])
+        self.assertEqual(scope(["else-api"], []), ["-p", "else-api"])
+        self.assertEqual(scope([], []), ["--workspace"])
+
     def test_serial_overrides_jobs_and_uses_one_test_thread(self):
         for serial, jobs, threads in ((False, 3, 2), (True, 1, 1)):
             args = argparse.Namespace(package="else-api", test=None, serial=serial, jobs=3, filter=[])
