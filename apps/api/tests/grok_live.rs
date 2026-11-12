@@ -89,6 +89,12 @@ async fn grok_conversations_stream_resume_use_host_and_mcp_tools_and_cancel() {
                     && value["method"] == "tools/call"
                     && let Some(name) = value["params"]["name"].as_str()
                 {
+                    let name = match name {
+                        "use_tool" => value["params"]["arguments"]["name"]
+                            .as_str()
+                            .unwrap_or(name),
+                        name => name,
+                    };
                     calls.send(name.to_owned()).await.unwrap();
                 }
                 next.run(axum::extract::Request::from_parts(

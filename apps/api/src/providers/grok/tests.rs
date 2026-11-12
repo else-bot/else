@@ -284,10 +284,15 @@ fn only_elsebot_mcp_calls_are_allowed_and_parking_is_preserved() {
 }
 
 #[test]
-fn a_deferred_tool_called_by_its_catalog_key_is_left_to_grok_to_reject() {
+fn an_elsebot_tool_name_missing_from_the_catalog_is_left_to_grok_to_reject() {
     let mut t = tracker(false);
     t.on(&init(false)).unwrap();
-    for name in ["elsebot__report_draft_send", "mcp__elsebot__list_bots"] {
+    for name in [
+        "elsebot__report_draft_send",
+        "mcp__elsebot__list_bots",
+        "list_bots",
+        "mcp_list",
+    ] {
         t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c1","name":"use_tool","input":{"tool_name":name,"tool_input":{}}}]}})).unwrap();
     }
     assert_eq!(
