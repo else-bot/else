@@ -14,6 +14,13 @@
 //! that chat turn takes the task over: the card is skipped, the child ends,
 //! and the chat turn's outcome becomes the child's. Identity, budget,
 //! target, and permissions come from the server, never from tool arguments.
+//!
+//! A task cannot delegate. Follow-up work for another bot, such as a fix a
+//! triage task found, goes in the task's reply with that bot's ID and a
+//! self-contained task. The delegating turn reads the reply in its
+//! continuation and delegates the follow-up itself, within its request's
+//! budget and its own origin's permissions. The task hash makes a repeated
+//! delegation of the same follow-up return the existing task.
 
 use std::collections::HashMap;
 

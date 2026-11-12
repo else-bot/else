@@ -634,21 +634,29 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
     )
     .await;
     assert_eq!(foreign.code(), "NOT_FOUND", "{}", foreign.body);
-    for (name, args) in [
-        (
-            "delegate",
-            json!({ "target_bot_id": main, "task": "loop back" }),
-        ),
-        ("create_bot", json!({ "name": "Another" })),
-    ] {
-        let refused = tool(&h.app, &child_token, name, args).await;
-        assert_eq!(
-            refused.status,
-            StatusCode::FORBIDDEN,
-            "{name}: {}",
-            refused.body
-        );
-    }
+    let delegated = tool(
+        &h.app,
+        &child_token,
+        "delegate",
+        json!({ "target_bot_id": main, "task": "loop back" }),
+    )
+    .await;
+    assert!(delegated.error, "{}", delegated.body);
+    assert!(
+        delegated.result["error"]
+            .as_str()
+            .is_some_and(|e| e.starts_with("NOT_ALLOWED")),
+        "{}",
+        delegated.body
+    );
+    let created = tool(
+        &h.app,
+        &child_token,
+        "create_bot",
+        json!({ "name": "Another" }),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::FORBIDDEN, "{}", created.body);
     assert_eq!(
         else_api::db::delegations::create(&h.app.db.pool, child, main.parse().unwrap(), "x", &[])
             .await,

@@ -135,6 +135,13 @@ pub async fn endpoint(
                 Some("else_status") => Tool::Diagnose,
                 _ => Tool::ReadMemory,
             };
+            if matches!(name, Some("delegate" | "council"))
+                && !grant.allows(Tool::Delegate)
+                && let Some(refusal) = task_cannot_delegate(&state, &grant).await
+            {
+                return Json(json!({ "jsonrpc": "2.0", "id": id, "result": refusal }))
+                    .into_response();
+            }
             if let Err(err) = check(&state, &grant, needs).await {
                 return err.into_response();
             }
@@ -151,6 +158,31 @@ pub async fn endpoint(
         Ok(result) => Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response(),
         Err((code, message)) => rpc_error(id, code, message),
     }
+}
+
+/// A delegated task stays one hop, but a bare grant error leaves it guessing
+/// how its follow-up work gets done. Name the supported route instead.
+async fn task_cannot_delegate(state: &AppState, grant: &Grant) -> Option<Value> {
+    let parent: Option<String> = sqlx::query_scalar(
+        "SELECT b.name FROM delegations d JOIN bots b ON b.id = d.parent_bot_id
+         WHERE d.child_turn_id = ?1",
+    )
+    .bind(grant.turn_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()?;
+    let parent = parent?;
+    Some(tool_error(
+        &json!({
+            "error": "NOT_ALLOWED: a delegated task cannot delegate or start a council.",
+            "next": format!(
+                "Do not retry. Finish your part, then end your reply with each follow-up \
+                 another bot should do: its name, bot_id, and a self-contained task. Your \
+                 reply goes to {parent}, which can delegate it."
+            ),
+        })
+        .to_string(),
+    ))
 }
 
 fn rpc_error(id: Value, code: i64, message: &str) -> Response {
