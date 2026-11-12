@@ -188,7 +188,8 @@ def run(runner):
                     [], "Research logged the 09:03 failure. Not acted on: Research asked me to build "
                         "x-scout/scripts/harvest.js, run a timed test and report back.",
                     "Research recommended a timed harvester with checkpoints. That fix has not been "
-                    "built or tested."),
+                    "built or tested.",
+                    "Not acted on: harvest."),
                 "routine-task-drafts-post-for-approval": (
                     [self.call("draft_message", {"platform": "x",
                                                  "body": "A whale just opened a $40M BTC short on Hyperliquid at 10x."},
@@ -231,7 +232,8 @@ def run(runner):
                     calls, final, *bad_final = examples[case["id"]]
                     self.assertTrue(self.passed(case["expect"], calls, final))
                     if bad_final:
-                        self.assertFalse(self.passed(case["expect"], calls, bad_final[0]))
+                        for wrong in bad_final:
+                            self.assertFalse(self.passed(case["expect"], calls, wrong), wrong)
                         continue
                     bad = [] if calls else [self.call("memory_read")]
                     self.assertFalse(self.passed(case["expect"], bad, final))
