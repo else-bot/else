@@ -1917,8 +1917,6 @@ async fn a_failed_child_shows_its_error_once_however_often_it_is_settled() {
     assert_eq!(upserts, 1);
 }
 
-/// Issue #314: a task cut off by the attempt limit must say so, apart from
-/// the progress it wrote.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_stopped_by_the_attempt_limit_names_the_limit_apart_from_its_progress() {
     let db = TestDb::migrated().await;

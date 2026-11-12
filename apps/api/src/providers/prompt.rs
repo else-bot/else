@@ -1448,7 +1448,6 @@ mod tests {
         );
     }
 
-    /// Issue #314: progress a failed task wrote must not hide why it failed.
     #[test]
     fn a_failed_result_keeps_its_error_beside_the_progress() {
         let mut input = crate::providers::cli::session::tests::input();

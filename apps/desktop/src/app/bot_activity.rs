@@ -332,8 +332,6 @@ impl ElseApp {
     }
 }
 
-/// A failed or stopped reply's note: the reason it ended, styled as the
-/// outcome, and the first line of what it wrote, styled as plain text.
 fn note_lines<'a>(reason: Option<&'a str>, text: &'a str) -> (Option<&'a str>, Option<&'a str>) {
     let first = |text: &'a str| text.lines().map(str::trim).find(|line| !line.is_empty());
     let reason = reason.and_then(first);
@@ -495,7 +493,6 @@ impl ElseApp {
 mod tests {
     use super::note_lines;
 
-    /// Issue #314: progress must not read as the failure.
     #[test]
     fn a_failure_reason_stays_apart_from_the_progress_it_wrote() {
         assert_eq!(
