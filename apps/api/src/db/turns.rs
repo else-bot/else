@@ -172,6 +172,9 @@ pub struct BotReply {
     pub sender_name: String,
     pub prompt: String,
     pub status: String,
+    /// Why a failed task failed, apart from the progress it wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]

@@ -159,12 +159,17 @@ impl Lifecycle {
     pub fn settled(&self, outcome: TurnOutcome) -> TurnOutcome {
         match (self.cause(), &outcome) {
             (_, TurnOutcome::Uncertain { .. }) => outcome,
-            (Some(StopCause::Deadline), _) => TurnOutcome::Failed {
-                code: "turn_deadline".into(),
-                message: "The turn exceeded its 30 minute deadline.".into(),
-            },
+            (Some(StopCause::Deadline), _) => deadline_failure(),
             _ => outcome,
         }
+    }
+}
+
+/// How an attempt cut off at [`TURN_DEADLINE`] ends.
+pub fn deadline_failure() -> TurnOutcome {
+    TurnOutcome::Failed {
+        code: "turn_deadline".into(),
+        message: "The turn exceeded its 30 minute deadline.".into(),
     }
 }
 

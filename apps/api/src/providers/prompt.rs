@@ -1447,6 +1447,31 @@ mod tests {
         );
     }
 
+    /// Issue #314: progress a failed task wrote must not hide why it failed.
+    #[test]
+    fn a_failed_result_keeps_its_error_beside_the_progress() {
+        let mut input = crate::providers::cli::session::tests::input();
+        input.delegation.outcomes = vec![crate::app::providers::DelegationOutcome {
+            id: uuid::Uuid::nil(),
+            target_bot_id: uuid::Uuid::nil(),
+            target_name: "Scout".into(),
+            task: "Run the pipeline three times.".into(),
+            status: "failed".into(),
+            result: Some("Run 1 done. Started run 2.".into()),
+            error: Some("turn_deadline: Stopped at the 30-minute attempt limit.".into()),
+            files: Vec::new(),
+            earlier_request: false,
+        }];
+        let block = super::outcomes_block(&input);
+        assert!(
+            block.contains(
+                "Result: Run 1 done. Started run 2.\n\
+                 Error: turn_deadline: Stopped at the 30-minute attempt limit.\n"
+            ),
+            "{block}"
+        );
+    }
+
     /// Native host tools cannot be gated, so the instructions carry this rule.
     #[test]
     fn host_installs_and_settings_need_the_owners_approval() {
