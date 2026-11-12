@@ -19,7 +19,8 @@ else-api backup --database-only\n       \
 else-api restore <set-dir> <new-database-file> [<new-data-dir>]\n       \
 else-api restore-remote <set-id> <new-database-file> [<new-data-dir>]\n       \
 else-api upgrade-computer <bot-id> <image> [--network <profile>]\n       \
-else-api rollback-computer <bot-id>\n\n\
+else-api rollback-computer <bot-id>\n       \
+else-api context [delegated-task|delegated-routine-task]\n\n\
 commands:\n  \
 serve    apply pending migrations and run the API (default)\n  \
 setup    provision missing credentials, apply migrations, and create the main\n           \
@@ -37,7 +38,9 @@ rollback-computer  switch a bot back to the computer its last upgrade replaced\n
 reset --yes  erase this installation's local state; use `elsebot reset`\n  \
 remove-state --yes  erase local state without setup; used by `elsebot remove`\n  \
 version  print this build's version\n  \
-context  print representative bot instructions, tool schemas, and byte counts as JSON\n";
+context  print representative bot instructions, tool schemas, and byte counts as JSON\n           \
+for the main bot's owner turn, or for a task delegated to another bot for an\n           \
+owner request or a routine run\n";
 
 fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some(else_visual::isolate::WORKER_ARG) {
@@ -45,11 +48,17 @@ fn main() -> ExitCode {
     }
     else_visual::isolate::use_this_executable();
     if std::env::args().nth(1).as_deref() == Some("context") {
-        if std::env::args().len() != 2 {
-            eprintln!("{USAGE}");
-            return ExitCode::from(2);
-        }
-        println!("{}", http::context::export());
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        let turn = match args.as_slice() {
+            [] => http::context::Turn::Owner,
+            [kind] if kind == "delegated-task" => http::context::Turn::DelegatedTask,
+            [kind] if kind == "delegated-routine-task" => http::context::Turn::RoutineTask,
+            _ => {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+        };
+        println!("{}", http::context::export(turn));
         return ExitCode::SUCCESS;
     }
     if matches!(

@@ -32,6 +32,9 @@ def write_json(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+TURNS = ("owner", "delegated-task", "delegated-routine-task")
+
+
 def load_cases():
     cases = [row for path in sorted((HERE / "cases").glob("*.ndjson")) for row in read_rows(path)]
     for case in cases:
@@ -40,14 +43,17 @@ def load_cases():
         if case["kind"] not in ("bad", "guard", "control") or not case["experience"]:
             raise ValueError(f"Invalid kind or experience: {case['id']}")
         setup, expect = case["setup"], case["expect"]
+        if case.get("turn", "owner") not in TURNS:
+            raise ValueError(f"Invalid turn: {case['id']}")
         if not isinstance(setup["prompt"], str):
             raise ValueError(f"Invalid prompt: {case['id']}")
         extra = expect.keys() - {"calls", "callsMustNot", "maxCalls", "order", "finalTextMust",
-                                 "finalTextMustNot", "maxFinalWords"}
+                                 "finalTextMustNot", "maxFinalWords", "errors"}
         if extra:
             raise ValueError(f"Unknown expectations in {case['id']}: {extra}")
-        selectors = [s for key in ("calls", "callsMustNot", "order") for s in expect.get(key, [])]
-        selectors.extend({k: v for k, v in m.items() if k != "result"} for m in setup.get("mocks", []))
+        selectors = [s for key in ("calls", "callsMustNot", "order", "errors") for s in expect.get(key, [])]
+        selectors.extend({k: v for k, v in m.items() if k not in ("result", "error")}
+                         for m in setup.get("mocks", []))
         for selector in selectors:
             if isinstance(selector, str):
                 continue
@@ -89,7 +95,8 @@ def grade(expect, calls, final, rejected=(), parking_tools=None):
         check(f"maxFinalWords {expect['maxFinalWords']}", len(final.split()) <= expect["maxFinalWords"])
     for index, call in enumerate(calls):
         result = call.get("result", {})
-        check(f"tool result {index + 1} succeeded", not result.get("isError", False))
+        expected = any(mock.matches(call, selector) for selector in expect.get("errors", []))
+        check(f"tool result {index + 1} succeeded", expected or not result.get("isError", False))
         for block in result.get("content", []):
             if block.get("type") != "text":
                 continue
@@ -134,10 +141,12 @@ def packet(setup, context=None):
     return "\n\n".join(blocks)
 
 
-def export_context(api_bin):
+def export_context(api_bin, turn="owner"):
     command = [str(Path(api_bin).resolve()), "context"] if api_bin else [
         "cargo", "run", "--quiet", "--locked", "-p", "else-api", "--bin", "else-api", "--", "context"
     ]
+    if turn != "owner":
+        command.append(turn)
     result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=True)
     context = json.loads(result.stdout)
     for key in ("listed_tools", "deferred_tools"):
@@ -297,8 +306,10 @@ def main():
         if any(out.iterdir()):
             parser.error(f"output directory is not empty: {out}")
     rows = []
-    context = export_context(args.api_bin)
+    contexts = {turn: export_context(args.api_bin, turn)
+                for turn in dict.fromkeys(case.get("turn", "owner") for case in cases)}
     for case in cases:
+        context = contexts[case.get("turn", "owner")]
         if args.context:
             print(json.dumps({"id": case["id"], "sizes": context["sizes"]}))
             continue

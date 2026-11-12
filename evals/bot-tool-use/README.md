@@ -48,14 +48,14 @@ Live runs append each sample to `results.jsonl` before starting the next sample,
 
 ## Add a case
 
-Add one JSON object per line to `cases/*.ndjson`. Use a unique filesystem-safe `id`, a `kind` of `bad`, `guard`, or `control`, and an `experience` sentence explaining the mistake or behavior. `bad` reproduces a mistake, `guard` protects correct behavior, and `control` checks ordinary work.
+Add one JSON object per line to `cases/*.ndjson`. Use a unique filesystem-safe `id`, a `kind` of `bad`, `guard`, or `control`, and an `experience` sentence explaining the mistake or behavior. `bad` reproduces a mistake, `guard` protects correct behavior, and `control` checks ordinary work. An optional `turn` of `delegated-task` exports `else-api context delegated-task` instead: Research working on a task the main bot delegated for an owner request, with no registry and the task as the latest message. `delegated-routine-task` is the same task delegated during a routine run. The default is `owner`.
 
 `setup` contains:
 
 - `prompt`: the latest owner message.
 - `prior`: optional history objects with `kind`, `text`, and optional `status`, default `completed`. Use `user` or `assistant` for ordinary history.
 - `context_blocks`: optional extra text blocks for the packet. The registry, saved-permission, and installed-MCP blocks a first owner turn carries are exported from Rust and always come first, so cases never copy their wording.
-- `mocks`: optional ordered selectors with a `result`. The first matching mock wins. Unmatched tools return `{"status":"ok"}`. Select inner tool names for deferred mocks, such as `routine_run`, while expectations select the actual `use_tool` wrapper.
+- `mocks`: optional ordered selectors with a `result`. The first matching mock wins. Unmatched tools return `{"status":"ok"}`. A mock with `"error": true` returns its result as a tool error, as production does for a refusal. Select inner tool names for deferred mocks, such as `routine_run`, while expectations select the actual `use_tool` wrapper.
 
 For example, this mock parks delegation:
 
@@ -72,6 +72,7 @@ For example, this mock parks delegation:
 - `finalTextMust` and `finalTextMustNot`: case-insensitive substrings of the final result text.
 - Every sample also fails on a call to a tool name the CLI does not offer, such as a bare `delegate` instead of `mcp__elsebot__delegate`: it never reaches else.bot and costs a round trip.
 - `maxFinalWords`: optional word limit for short acknowledgments.
+- `errors`: selectors for calls whose error result is expected, such as a refusal a mock returns with `"error": true`. Every other call must succeed.
 
 A selector is a tool name string or an object with `name`, optional `arguments`, and optional `absent`. Argument objects match partially and recursively. Dotted keys traverse nested objects. Strings beginning with `~` match a case-insensitive substring, or any element of an array; other values match exactly. Arrays match in order with equal length. `absent` lists argument paths that must be missing, which distinguishes `mcp_list` with no id from reading an MCP's skill.
 
