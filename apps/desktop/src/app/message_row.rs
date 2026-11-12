@@ -10,6 +10,7 @@ use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -418,77 +419,88 @@ impl ElseApp {
                     .and_then(|list| list.iter().find(|p| p.request_id == request_id))?;
                 let text = view.texts.get(&key)?;
                 let mark = pending.reaction.map(|r| r.kind.mark());
+                let settled = matches!(
+                    pending.delivery(),
+                    Delivery::Unknown { .. } | Delivery::Rejected { .. }
+                );
                 let mut column = gpui_kit::component::v_flex().w_full().gap_1();
                 if mark.is_none() {
-                    column = column
-                        .child(side(
-                            true,
-                            card(text, true)
-                                .id(SharedString::from(format!("pending-{request_id}")))
-                                .into_any_element(),
-                        ))
-                        .children(footer.map(|at| beside(true, note(at, false))));
+                    column = column.child(side(
+                        true,
+                        card(text, true)
+                            .id(SharedString::from(format!("pending-{request_id}")))
+                            .into_any_element(),
+                    ));
+                    if !settled {
+                        column = column.children(footer.map(|at| beside(true, note(at, false))));
+                    }
                 }
                 let subject = mark.map_or_else(String::new, |mark| format!("{mark} "));
-                column = match pending.delivery() {
-                    Delivery::Rejected { reason } => column
-                        .child(note(format!("{subject}Not sent. {reason}"), true).w_full())
+                let action = |id: &str, label: &'static str| {
+                    Button::new(SharedString::from(format!("{id}-{request_id}")))
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .link()
+                        .xsmall()
+                        .label(label)
+                };
+                let failed = |status: &str, color: Hsla, reason: &str, retry: bool| {
+                    h_flex()
+                        .flex_wrap()
+                        .justify_end()
+                        .items_center()
+                        .gap_x_2()
+                        .text_xs()
+                        .child(div().flex_none().size(px(6.)).rounded_full().bg(color))
+                        .child({
+                            let reason = SharedString::from(reason.to_owned());
+                            div()
+                                .id(SharedString::from(format!("failure-{request_id}")))
+                                .text_color(color)
+                                .child(format!("{subject}{status}"))
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(reason.clone()).build(window, cx)
+                                })
+                        })
                         .child(
                             h_flex()
-                                .w_full()
-                                .justify_end()
-                                .gap_2()
-                                .children(mark.is_none().then(|| {
-                                    Button::new(SharedString::from(format!("restore-{request_id}")))
-                                        .focus_ring(false)
-                                        .cursor_pointer()
-                                        .label("Restore to composer")
-                                        .xsmall()
-                                        .on_click(cx.listener(move |app, _, window, cx| {
-                                            app.take_rejected(request_id, true, window, cx)
-                                        }))
+                                .flex_none()
+                                .gap_x_2()
+                                .child(div().text_color(theme.muted_foreground).child("·"))
+                                .children(retry.then(|| {
+                                    action("retry", "Retry").on_click(cx.listener(
+                                        move |app, _, window, cx| {
+                                            app.retry_pending(request_id, window, cx)
+                                        },
+                                    ))
                                 }))
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "dismiss-{request_id}"
-                                    )))
-                                    .focus_ring(false)
-                                    .cursor_pointer()
-                                    .label("Dismiss")
-                                    .xsmall()
-                                    .ghost()
-                                    .on_click(cx.listener(move |app, _, window, cx| {
-                                        app.take_rejected(request_id, false, window, cx)
-                                    })),
-                                ),
-                        ),
-                    Delivery::Sending => column.child(
-                        h_flex()
-                            .w_full()
-                            .justify_end()
-                            .child(note(format!("{subject}Sending…"), false)),
-                    ),
-                    Delivery::Resolving { .. } => column.child(
-                        h_flex()
-                            .w_full()
-                            .justify_end()
-                            .child(note(format!("{subject}Checking delivery…"), false)),
-                    ),
-                    Delivery::Unknown { reason } => column
-                        .child(note(format!("{subject}Not confirmed. {reason}"), true).w_full())
-                        .child(
-                            h_flex().w_full().justify_end().gap_2().child(
-                                Button::new(SharedString::from(format!("retry-{request_id}")))
-                                    .focus_ring(false)
-                                    .cursor_pointer()
-                                    .label("Retry")
-                                    .xsmall()
-                                    .on_click(cx.listener(move |app, _, window, cx| {
-                                        app.retry_pending(request_id, window, cx)
-                                    })),
-                            ),
-                        ),
+                                .children((mark.is_none() && !retry).then(|| {
+                                    action("restore", "Edit").on_click(cx.listener(
+                                        move |app, _, window, cx| {
+                                            app.take_failed(request_id, true, window, cx)
+                                        },
+                                    ))
+                                }))
+                                .child(action("dismiss", "Dismiss").on_click(cx.listener(
+                                    move |app, _, window, cx| {
+                                        app.take_failed(request_id, false, window, cx)
+                                    },
+                                ))),
+                        )
                 };
+                let line = match pending.delivery() {
+                    Delivery::Sending => note(format!("{subject}Sending…"), false),
+                    Delivery::Resolving { .. } => {
+                        note(format!("{subject}Checking delivery…"), false)
+                    }
+                    Delivery::Unknown { reason } => {
+                        failed("Not confirmed", theme.warning, reason, true)
+                    }
+                    Delivery::Rejected { reason } => {
+                        failed("Not sent", theme.danger, reason, false)
+                    }
+                };
+                column = column.child(beside(true, line));
                 column.into_any_element()
             }
         })

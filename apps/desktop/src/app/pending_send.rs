@@ -68,6 +68,15 @@ impl PendingSend {
         matches!(self.delivery, Delivery::Rejected { .. })
     }
 
+    /// Only a send in flight cannot be dismissed. Dismissing an unconfirmed send drops the local
+    /// copy; if the server did store it, the conversation history shows it.
+    pub(super) fn is_dismissible(&self) -> bool {
+        matches!(
+            self.delivery,
+            Delivery::Unknown { .. } | Delivery::Rejected { .. }
+        )
+    }
+
     pub(super) fn request(&self) -> SendRequest {
         SendRequest {
             request_id: self.request_id,
@@ -166,6 +175,20 @@ mod tests {
             }
         );
         assert!(pending.retry().is_some());
+    }
+
+    #[test]
+    fn only_a_settled_failure_is_dismissible() {
+        let mut pending = PendingSend::new("hello".into(), Vec::new(), None, None);
+        assert!(!pending.is_dismissible());
+        pending.on_send_failure(Failure::Unknown("paused".into()));
+        assert!(pending.is_dismissible());
+        assert!(pending.begin_resolution());
+        assert!(!pending.is_dismissible());
+        pending.on_lookup(Lookup::Failed);
+        assert!(pending.is_dismissible());
+        pending.retry();
+        assert!(!pending.is_dismissible());
     }
 
     #[test]
