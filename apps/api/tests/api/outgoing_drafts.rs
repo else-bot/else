@@ -2053,7 +2053,7 @@ async fn a_delegated_question_marks_its_bot_as_waiting_for_the_owner() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn approving_a_task_always_approves_its_later_messages_to_anyone() {
-    let Harness { app, .. } = harness().await;
+    let Harness { app, synthetic } = harness().await;
     let main = app.main_bot().await;
     let (turn, token) = running(&app, &main, SLOW, None).await;
     let dm = |to: &str, task: &str| {
@@ -2094,6 +2094,12 @@ async fn approving_a_task_always_approves_its_later_messages_to_anyone() {
     assert_eq!(granted(&app, &main).await, json!([kind]));
 
     wait(&app, turn, "running").await;
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(
+        packet.contains("[else.bot always-approved message tasks]")
+            && packet.contains("\"task\":\"initial lead dms\""),
+        "the next attempt learns the saved task to reuse: {packet}"
+    );
     let token = grant(&app, turn).await;
     let next = tool(
         &app,

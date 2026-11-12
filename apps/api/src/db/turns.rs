@@ -1077,6 +1077,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         secrets: crate::db::secret_requests::undelivered(&mut conn, turn_id).await?,
         questions: crate::db::owner_questions::undelivered(&mut conn, turn_id).await?,
         standing_permissions: Vec::new(),
+        draft_tasks: Vec::new(),
         outgoing_drafts: crate::db::outgoing_drafts::notes(&mut conn, turn_id).await?,
         social_setups: crate::socials::store::setup_outcomes(&mut conn, turn_id).await?,
         mcp_waits: crate::db::mcp_waits::undelivered(&mut conn, turn_id).await?,
@@ -1098,6 +1099,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
             .await?
             .map(|(_, markdown)| markdown),
     };
+    let draft_tasks = crate::db::outgoing_drafts::always_approved(&mut conn, turn.bot_id).await?;
     drop(conn);
     let (memory, permissions) = tokio::join!(
         crate::db::memory_tree::session_context(pool, input.bot_id),
@@ -1111,6 +1113,12 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         .filter_map(|p| p.target)
         .filter(|t| reach.covers(t))
         .collect();
+    if reach != crate::app::questions::GrantReach::Nothing {
+        input.draft_tasks = draft_tasks
+            .into_iter()
+            .filter(|kind| kind.task.is_some())
+            .collect();
+    }
     Ok(input)
 }
 

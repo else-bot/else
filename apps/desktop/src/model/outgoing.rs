@@ -156,7 +156,7 @@ impl DraftContent {
     }
 
     /// Who and where "Approve always" covers, as in "X posts from @acme",
-    /// or for a task, "Initial lead DMs on X from @acme".
+    /// or for a task, "Initial lead DMs: X messages from @acme to anyone".
     pub fn kind_label(&self) -> String {
         let Self::Message {
             account,
@@ -167,19 +167,23 @@ impl DraftContent {
         else {
             return "emails".into();
         };
-        let mut label = match task {
-            Some(task) => format!("{task} on {}", self.label()),
-            None => format!(
-                "{} {}",
-                self.label(),
-                if self.is_post() { "posts" } else { "messages" }
-            ),
-        };
+        let mut label = format!(
+            "{}{} {}",
+            task.as_ref().map(|t| format!("{t}: ")).unwrap_or_default(),
+            self.label(),
+            if self.is_post() && destination.is_none() {
+                "posts"
+            } else {
+                "messages"
+            }
+        );
         if let Some(account) = account {
             label.push_str(&format!(" from {account}"));
         }
-        if let (None, Some(destination)) = (task, destination) {
-            label.push_str(&format!(" to {destination}"));
+        match (task, destination) {
+            (Some(_), _) => label.push_str(" to anyone"),
+            (None, Some(destination)) => label.push_str(&format!(" to {destination}")),
+            (None, None) => {}
         }
         label
     }
@@ -379,7 +383,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             lead.kind_label(),
-            "Initial lead DMs on X from @proliquid_xyz"
+            "Initial lead DMs: X messages from @proliquid_xyz to anyone"
         );
         assert_eq!(lead.metadata()[0], ("Task", "Initial lead DMs".into()));
     }

@@ -529,15 +529,19 @@ impl Message {
             return Err("X has no native social connector");
         }
         let account = handle(args, "account")?;
-        let task =
-            handle(args, "task")?.map(|task| task.split_whitespace().collect::<Vec<_>>().join(" "));
+        let reply_to = handle(args, "reply_to")?;
+        // A public post is approved always by its account alone, so a task
+        // would add nothing there.
+        let task = handle(args, "task")?
+            .filter(|_| destination.is_some() || reply_to.is_some())
+            .map(|task| task.split_whitespace().collect::<Vec<_>>().join(" "));
         if task.is_some() && account.is_none() && account_id.is_none() {
             return Err("a task needs the account it sends from: account or account_id");
         }
         Ok(Self {
             platform,
             account_id,
-            reply_to: handle(args, "reply_to")?,
+            reply_to,
             account,
             destination,
             task,
@@ -567,6 +571,24 @@ pub struct Note {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_task_files_messages_to_a_chat_or_user_never_public_posts() {
+        let dm = Message::parse(&json!({ "platform": "x", "account": "@acme",
+            "destination": "@ada", "task": " Initial   lead DMs ", "body": "Hi" }))
+        .unwrap();
+        assert_eq!(dm.task.as_deref(), Some("Initial lead DMs"));
+        let post = Message::parse(&json!({ "platform": "x", "account": "@acme",
+            "task": "Initial lead DMs", "body": "Hi all" }))
+        .unwrap();
+        assert_eq!(post.task, None, "a public post keeps its account-wide kind");
+        assert!(
+            Message::parse(&json!({ "platform": "x", "destination": "@ada",
+                "task": "Initial lead DMs", "body": "Hi" }))
+            .is_err(),
+            "a task needs its sending account"
+        );
+    }
 
     #[test]
     fn an_email_parses_only_its_fields_and_refuses_header_injection() {

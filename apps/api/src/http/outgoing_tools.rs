@@ -101,10 +101,10 @@ pub(super) fn schemas() -> Vec<Value> {
                         it (for example @handle). Optional."),
                     "destination": handle("Where it goes, as the platform knows it: the \
                         Telegram chat, group, channel, or user (required for telegram), or for x \
-                        the post it replies to. Omit for a new public X post."),
-                    "task": handle("A recurring job this message belongs to, such as \
-                        \"Initial lead DMs\". Reuse it exactly on each of the job's drafts: the \
-                        card then offers Approve always for the job from this account."),
+                        the user to DM or the post it replies to. Omit for a new public X post."),
+                    "task": handle("The recurring job of a message to a chat or user (never a \
+                        public post), such as \"Initial lead DMs\", so Approve always covers it to \
+                        anyone. Reuse a listed always-approved task exactly."),
                     "body": body,
                     "replaces": draft_id(),
                 },
