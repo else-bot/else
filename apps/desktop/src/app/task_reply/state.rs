@@ -266,7 +266,7 @@ mod tests {
                 !task_replies(&c).contains_key(&id(11)),
                 "a {status} handoff turn without loaded items must not add a task row"
             );
-            assert_eq!(c.pending_handoff().map(|h| h.id), Some(id(300)));
+            assert_eq!(c.open_handoff().map(|h| h.id), Some(id(300)));
             assert!(crate::app::conversation::request_rows(&c).is_empty());
         }
     }
