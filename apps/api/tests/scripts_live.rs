@@ -91,6 +91,9 @@ impl Install {
             .to_owned();
         let Some(base) = common::ready_url(&self.data, &child, Duration::from_secs(30)).await
         else {
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
             panic!("the API did not start; see {}", self.log.display());
         };
         Api {

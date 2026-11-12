@@ -223,7 +223,12 @@ fn processes(pattern: &str) -> usize {
 async fn gone(pattern: &str) {
     let started = Instant::now();
     while processes(pattern) > 0 {
-        assert!(started.elapsed() < common::SETTLE, "{pattern} still runs");
+        if started.elapsed() > common::SETTLE {
+            let _ = std::process::Command::new("pkill")
+                .args(["-f", pattern])
+                .status();
+            panic!("{pattern} still runs");
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -399,13 +404,13 @@ async fn a_timed_out_command_and_its_descendants_end_and_are_recorded() {
         .run_command(
             bot,
             "test:hold",
-            &format!("sleep 61.{tag:09} & sleep 62.{tag:09}; echo late"),
+            &format!("sleep 601.{tag:09} & sleep 602.{tag:09}; echo late"),
             Duration::from_secs(2),
         )
         .await;
     assert!(out.is_err(), "the runtime call timed out: {out:?}");
     assert!(started.elapsed() < Duration::from_secs(10));
-    gone(&format!("sleep 6[12].{tag:09}")).await;
+    gone(&format!("sleep 60[12].{tag:09}")).await;
     let ended: (Option<String>, bool) =
         sqlx::query_as("SELECT end_reason, ended_at IS NOT NULL FROM guest_runs WHERE bot_id = ?1")
             .bind(bot)
@@ -418,12 +423,12 @@ async fn a_timed_out_command_and_its_descendants_end_and_are_recorded() {
         .run_command(
             bot,
             "test:hold",
-            &format!("sleep 63.{tag:09} & echo started"),
+            &format!("sleep 603.{tag:09} & echo started"),
             Duration::from_secs(30),
         )
         .await
         .unwrap()
         .unwrap();
     assert_eq!(out.stdout.trim(), "started");
-    gone(&format!("sleep 63.{tag:09}")).await;
+    gone(&format!("sleep 603.{tag:09}")).await;
 }

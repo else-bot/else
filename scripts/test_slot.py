@@ -11,6 +11,7 @@ default is one per 16 CPUs, at least one.
 
 import fcntl
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -57,9 +58,13 @@ def main(argv):
         raise SystemExit(__doc__)
     slot = acquire(slot_count())
     try:
-        return subprocess.call(argv)
-    except KeyboardInterrupt:
-        return 130
+        child = subprocess.Popen(argv)
+        # Hold the slot until the suite exits, even when this wrapper is told to stop.
+        def forward(number, _frame):
+            child.send_signal(number)
+        for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            signal.signal(number, forward)
+        return child.wait()
     finally:
         os.close(slot)
 
