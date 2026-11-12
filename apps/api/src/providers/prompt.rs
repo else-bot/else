@@ -190,25 +190,39 @@ fn delegation_rules(input: &TurnInput) -> String {
         } else {
             " This task is not rooted in an owner request, so the routine tools are refused for you."
         };
-        let approvals = if delegation.origin == crate::app::providers::Origin::OwnerRequest {
-            "You cannot delegate further. You act for the owner request that started this \
-             task, so when the work needs the owner, ask the owner yourself instead of \
-             reporting back: social_connect, request_secret, ask_owner, drafts, and gated \
-             tool calls show their cards in your own chat with the owner and return parked. \
-             End the attempt then; you continue after the owner answers, and retry an \
-             approved call exactly once. Unless a tool result says standing permission \
-             applies, a gated destructive or external tool call, or an MCP sign-in, asks \
-             this way. Your saved task permissions apply here to host actions and to computer \
-             tool calls declaring the same task_scope: call \
-             ask_permission before each sensitive host action, with the saved task and \
-             target when the work fits. If it returns pending, end this attempt; if the \
-             continuation says it was approved, do exactly that host action once without \
-             asking again."
+        let approvals = if delegation.acts_for_owner() {
+            let (root, saved) = if delegation.origin == crate::app::providers::Origin::OwnerRequest
+            {
+                (
+                    "An owner request",
+                    "Your saved task permissions apply here to host actions and to computer \
+                     tool calls declaring the same task_scope: call ask_permission before each \
+                     sensitive host action, with the saved task and target when the work fits.",
+                )
+            } else {
+                (
+                    "A routine run",
+                    "Saved task permissions do not apply to this task: call ask_permission \
+                     before each sensitive host action.",
+                )
+            };
+            format!(
+                "You cannot delegate further. {root} started this task and you act for the \
+                 owner, so when the work needs the owner, ask the owner yourself instead of \
+                 reporting back: social_connect, request_secret, ask_owner, drafts, and gated \
+                 tool calls show their cards in your own chat with the owner and return parked. \
+                 End the attempt then; you continue after the owner answers, and retry an \
+                 approved call exactly once. Unless a tool result says standing permission \
+                 applies, a gated destructive or external tool call, or an MCP sign-in, asks \
+                 this way. {saved} If it returns pending, end this attempt; if the continuation \
+                 says it was approved, do exactly that host action once without asking again."
+            )
         } else {
             "You cannot delegate further or ask the owner anything (no secrets, questions, or \
              approvals), so you cannot get approval here: take no destructive or external \
              action in this task unless a tool result says standing permission applies, and \
              report what would need the owner's approval instead."
+                .to_owned()
         };
         return format!(
             "\n\nThis conversation is a task delegated to you by {sender}, not a message from \

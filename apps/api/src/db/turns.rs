@@ -599,16 +599,19 @@ pub async fn asking_caller(
 }
 
 /// Whether `caller` may show the owner a card: from the owner's own chat, or
-/// from a task another bot delegated for an owner request, whose cards
-/// appear in its own bot's chat.
+/// from a task another bot delegated for an owner request or a routine run,
+/// whose cards appear in its own bot's chat.
 pub async fn may_ask_owner(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
     caller: &AskingCaller,
 ) -> Result<bool, sqlx::Error> {
+    use crate::app::providers::Origin;
     Ok(caller.owner_conversation
-        || super::delegations::origin(conn, turn_id).await?
-            == crate::app::providers::Origin::OwnerRequest)
+        || matches!(
+            super::delegations::origin(conn, turn_id).await?,
+            Origin::OwnerRequest | Origin::RoutineRun
+        ))
 }
 
 /// Whether the current `attempt` of `turn_id` already delegated, asked for

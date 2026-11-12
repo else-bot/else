@@ -623,11 +623,12 @@ mod tests {
             .contains(&Tool::DraftEmail)
         );
         assert!(task(Origin::OwnerRequest).contains(&Tool::DraftEmail));
-        assert!(!task(Origin::RoutineRun).contains(&Tool::DraftEmail));
+        assert!(task(Origin::RoutineRun).contains(&Tool::DraftEmail));
+        assert!(!task(Origin::Other).contains(&Tool::DraftEmail));
     }
 
     #[test]
-    fn a_task_delegated_by_a_routine_run_cannot_ask_the_owner() {
+    fn a_task_delegated_by_a_routine_run_asks_the_owner_like_the_run() {
         let tools = task(Origin::RoutineRun);
         for tool in [
             Tool::Social,
@@ -635,7 +636,11 @@ mod tests {
             Tool::RequestSecret,
             Tool::AskOwner,
         ] {
+            assert!(tools.contains(&tool), "{tool:?} missing from {tools:?}");
+        }
+        for tool in [Tool::Delegate, Tool::Routines, Tool::Rules, Tool::EditBot] {
             assert!(!tools.contains(&tool), "{tool:?} granted in {tools:?}");
         }
+        assert!(!task(Origin::Other).contains(&Tool::AskOwner));
     }
 }
