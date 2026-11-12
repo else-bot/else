@@ -294,7 +294,30 @@ async fn new_routines_default_to_working_hours_in_the_desktop_time_zone() {
     )
     .await;
     assert!(!always.error, "{}", always.body);
-    assert_eq!(always.result["routine"]["active_hours"], Value::Null);
+    assert_eq!(always.result["routine"]["active_hours"], "always");
+    let again = tool(
+        &h.app,
+        &token,
+        "routine_update",
+        json!({ "routine_id": id, "active_hours": "always" }),
+    )
+    .await;
+    assert!(!again.error, "{}", again.body);
+    assert_eq!(
+        again.result["routine"]["active_hours"], "always",
+        "a repeat reads back the hours it kept"
+    );
+    assert_eq!(
+        again.result["routine"]["updated_at"],
+        always.result["routine"]["updated_at"]
+    );
+    let listed = tool(&h.app, &token, "routine_list", json!({})).await;
+    assert_eq!(listed.result["routines"][0]["active_hours"], "always");
+    assert_eq!(
+        owner_routines(&h.app, &main).await[0]["active_hours"],
+        Value::Null,
+        "the desktop still reads any time as null"
+    );
     let weekend = tool(
         &h.app,
         &token,
