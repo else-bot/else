@@ -284,6 +284,25 @@ fn only_elsebot_mcp_calls_are_allowed_and_parking_is_preserved() {
 }
 
 #[test]
+fn an_elsebot_tool_name_missing_from_the_catalog_is_left_to_grok_to_reject() {
+    let mut t = tracker(false);
+    t.on(&init(false)).unwrap();
+    for name in [
+        "elsebot__report_draft_send",
+        "mcp__elsebot__list_bots",
+        "list_bots",
+        "mcp_list",
+    ] {
+        t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c1","name":"use_tool","input":{"tool_name":name,"tool_input":{}}}]}})).unwrap();
+    }
+    assert_eq!(
+        t.on(&json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"{\"error\":\"tool_execution_failed\",\"message\":\"Tool not found: elsebot__report_draft_send\"}","is_error":true}]}})),
+        Ok(vec![])
+    );
+    assert!(t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c2","name":"elsebot__report_draft_send","input":{}}]}})).is_err());
+}
+
+#[test]
 fn a_claude_spelled_elsebot_tool_is_left_to_grok_to_reject() {
     let mut t = tracker(false);
     t.on(&init(false)).unwrap();

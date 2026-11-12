@@ -89,6 +89,12 @@ async fn grok_conversations_stream_resume_use_host_and_mcp_tools_and_cancel() {
                     && value["method"] == "tools/call"
                     && let Some(name) = value["params"]["name"].as_str()
                 {
+                    let name = match name {
+                        "use_tool" => value["params"]["arguments"]["name"]
+                            .as_str()
+                            .unwrap_or(name),
+                        name => name,
+                    };
                     calls.send(name.to_owned()).await.unwrap();
                 }
                 next.run(axum::extract::Request::from_parts(
@@ -175,6 +181,14 @@ async fn grok_conversations_stream_resume_use_host_and_mcp_tools_and_cancel() {
         called.iter().any(|name| name == "list_bots"),
         "MCP call reached the real server: {called:?}"
     );
+    let (_, answer) = ask(&app, &a, "grok", "Call your use_tool tool once with tool_name exactly elsebot__else_status and tool_input {}. Do not use the shell or any other tool. Reply with the result or error message verbatim.").await;
+    assert!(
+        answer.contains("Tool not found: elsebot__else_status"),
+        "Grok rejected the call itself: {answer}"
+    );
+    while let Ok(name) = observed_calls.try_recv() {
+        assert_ne!(name, "else_status", "Grok resolves catalog keys only");
+    }
     ask(
         &app,
         &b,

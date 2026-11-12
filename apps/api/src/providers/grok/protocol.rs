@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::grok_home;
 use crate::app::providers::TurnOutcome;
-use crate::app::tools::{SERVER_NAME, TOOL_NAMES};
+use crate::app::tools::{DEFERRED_TOOLS, SERVER_NAME, TOOL_NAMES};
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 
 /// Grok's terminal event.
@@ -84,6 +84,20 @@ impl Tracker {
         name.strip_prefix(SERVER_NAME)
             .and_then(|rest| rest.strip_prefix("__"))
             .filter(|tool| self.mcp && TOOL_NAMES.contains(tool))
+    }
+
+    /// An else.bot tool under a name Grok's catalog lacks: Claude's
+    /// mcp__elsebot__<tool> from memory, a bare tool name, or a deferred tool
+    /// named directly instead of through elsebot__use_tool. Grok rejects each
+    /// without running it and the model can retry, so none is a policy
+    /// breach.
+    fn misnamed(&self, target: &str) -> bool {
+        let tool = target.strip_prefix("mcp__").unwrap_or(target);
+        let tool = tool
+            .strip_prefix(SERVER_NAME)
+            .and_then(|rest| rest.strip_prefix("__"))
+            .unwrap_or(tool);
+        self.mcp && (TOOL_NAMES.contains(&tool) || DEFERRED_TOOLS.contains(&tool))
     }
 
     fn check_model(&self, model: &Value) -> Result<(), Violation> {
@@ -167,15 +181,15 @@ impl Tracker {
             let id = required(&block["id"], "tool call")?;
             let tool = if name == "use_tool" {
                 let target = required(&block["input"]["tool_name"], "use_tool call")?;
-                // Memory from Claude turns spells tools mcp__elsebot__<tool>.
-                // Grok answers that name with "Tool not found" and the model
-                // can retry with the catalog name, so it is not a policy breach.
-                let catalog = target.strip_prefix("mcp__").unwrap_or(target);
-                Some(self.mcp_tool(catalog).ok_or_else(|| {
-                    Violation::policy(format!(
-                        "Grok called an MCP tool outside else.bot: {target}"
-                    ))
-                })?)
+                match self.mcp_tool(target) {
+                    Some(tool) => Some(tool),
+                    None if self.misnamed(target) => None,
+                    None => {
+                        return Err(Violation::policy(format!(
+                            "Grok called an MCP tool outside else.bot: {target}"
+                        )));
+                    }
+                }
             } else if let Some(tool) = self.mcp_tool(name) {
                 Some(tool)
             } else if self.expected.iter().any(|t| t == name) {
