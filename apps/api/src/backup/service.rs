@@ -788,7 +788,9 @@ async fn run(
                         let next = settings.updated_local(update)?;
                         settings::save(&engine.pool, &engine.key, &next).await?;
                         settings = next;
-                        if job.is_none() {
+                        // A capture reschedules when it ends; an upload-only
+                        // retry does not, so apply the new time now.
+                        if job.is_none() || matches!(kind, Job::Retry) {
                             local_at = engine.next_local(&settings);
                         }
                         Ok(())
