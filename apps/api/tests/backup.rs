@@ -1,4 +1,4 @@
-use crate::common;
+mod common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

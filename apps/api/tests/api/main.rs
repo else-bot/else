@@ -1,6 +1,9 @@
 //! The offline else-api integration tests, linked into one binary so an API
-//! change relinks one test executable instead of one per file. Live and
-//! replication tests stay separate targets in `tests/`.
+//! change relinks one test executable instead of one per file. Live,
+//! replication, and fault-injection tests (`backup`, `recovery`) stay separate
+//! targets in `tests/`: `else_api::faults` is process-global, so an armed point
+//! would stop another module's operation when plain `cargo test` runs modules
+//! on threads of one process.
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -9,7 +12,6 @@ mod admission_profiles;
 mod assistant_backup;
 mod assistant_images;
 mod attachments;
-mod backup;
 mod backup_settings;
 mod bot_councils;
 mod bot_descriptions;
@@ -43,7 +45,6 @@ mod onboarding;
 mod outgoing_drafts;
 mod owner_questions;
 mod reads;
-mod recovery;
 mod reset;
 mod routine_grants;
 mod routine_models;

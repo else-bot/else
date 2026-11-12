@@ -196,7 +196,7 @@ cargo nextest run --workspace --locked --test api -E 'test(/^bots::.*avatar/)'
 scripts/dev.py test --test api -- bots::   # Linux
 ```
 
-The offline API integration tests are modules of one `api` test binary in `apps/api/tests/api/`, so an API change relinks one test executable instead of 61. Declare a new test file in `apps/api/tests/api/main.rs`; a file that is not declared there does not compile. Live tests (`*_live.rs`) and `replication.rs` stay separate targets in `apps/api/tests/`. `scripts/dev.py test` runs the `api` binary as one job per module, so each module keeps its own scratch HOME and TMPDIR.
+The offline API integration tests are modules of one `api` test binary in `apps/api/tests/api/`, so an API change relinks one test executable instead of 59. Declare a new test file in `apps/api/tests/api/main.rs`; a file that is not declared there does not compile. Live tests (`*_live.rs`), `replication.rs`, and the fault-injection tests `backup.rs` and `recovery.rs` stay separate targets in `apps/api/tests/`, because `else_api::faults` is process-global. `scripts/dev.py test` runs the `api` binary as one job per module, so each module keeps its own scratch HOME and TMPDIR.
 
 Keep `--workspace` and narrow with `--test`, `--lib`, or a filter. A `-p else-api` build resolves different dependency features than the workspace build that the hooks use, so its first run compiles a second copy of up to about 240 dependency crates (about 50 seconds) before it runs a test.
 

@@ -25,11 +25,17 @@ SCRIPT = Path(__file__).resolve()
 _spec = importlib.util.spec_from_file_location("else_dev", ROOT / "scripts/dev.py")
 dev = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dev)
-_spec = importlib.util.spec_from_file_location("else_dev_tests", ROOT / "scripts/dev_tests.py")
-dev_tests = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(dev_tests)
 # The offline else-api integration tests are modules of one `api` test binary.
 API_TESTS = ROOT / "apps/api/tests/api/main.rs"
+
+
+def api_shards():
+    """Module name to libtest filter for the `api` binary. Loaded only when tests run,
+    because staged guest payloads carry neither scripts/dev_tests.py nor the tests."""
+    spec = importlib.util.spec_from_file_location("else_dev_tests", ROOT / "scripts/dev_tests.py")
+    dev_tests = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dev_tests)
+    return {s["module"]: s["filter"] for s in dev_tests.shard({"key": "api", "log": "api.log"}, API_TESTS.read_text())}
 SEPARATE_CHECKS = "Native desktop input, doctests, provider subscriptions, real VMs, S3 replication, installer updates"
 CANCELLED = threading.Event()
 
@@ -499,7 +505,7 @@ def main():
     metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
                                                 cwd=ROOT, env=build_env, text=True, timeout=60))
     targets = sorted(t["name"] for p in metadata["packages"] for t in p["targets"] if "test" in t["kind"])
-    shards = {s["module"]: s["filter"] for s in dev_tests.shard({"key": "api", "log": "api.log"}, API_TESTS.read_text())}
+    shards = api_shards()
     offline = sorted({name for name in targets if not name.endswith("_live") and name not in ("replication", "api")} | set(shards))
     selected = offline if args.full else args.tests or []
     require(all(t in offline for t in selected), "--tests must name offline targets: " + ", ".join(offline))
@@ -534,7 +540,7 @@ def main():
                   for name in selected if name in shards]
         spec = {"run_id": run_id, "api": api, "tests": tests, "jobs": args.jobs,
                 "test_threads": args.test_threads, "timeout": args.timeout,
-                "excluded_targets": sorted((set(targets) - {"api"}) | set(shards) - set(selected))}
+                "excluded_targets": sorted(((set(targets) - {"api"}) | set(shards)) - set(selected))}
         spec_file = output / "spec.json"
         if backend == "process":
             spec["output"] = str(output / "evidence")

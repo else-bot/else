@@ -1,4 +1,4 @@
-use crate::common;
+mod common;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
