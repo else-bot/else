@@ -162,6 +162,12 @@ pub struct TurnInput {
     /// The owner's answers to this turn's skill install cards that no
     /// attempt has received yet.
     pub skill_installs: Vec<crate::db::skills::Outcome>,
+    /// What the owner did with this turn's take-over requests, not yet
+    /// received by an attempt.
+    pub computer_handoffs: Vec<crate::db::computer_handoffs::Outcome>,
+    /// The bot's latest take-over request the owner accepted, so every turn
+    /// knows whether the owner still holds its computer.
+    pub computer_control: Option<crate::db::computer_handoffs::Handoff>,
     /// The installed skills this bot may use, for a turn that may use them;
     /// `None` when it may not or the list could not be read.
     pub skills: Option<Vec<crate::db::skills::SkillInfo>>,

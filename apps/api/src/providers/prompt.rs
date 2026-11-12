@@ -482,6 +482,7 @@ pub fn outcomes_block(input: &TurnInput) -> String {
 fn outcomes_without_social(input: &TurnInput) -> String {
     let mut text = secrets_block(input);
     text.push_str(&skill_installs_block(input));
+    text.push_str(&computer_handoffs_block(input));
     text.push_str(&mcp_waits_block(input));
     text.push_str(&questions_block(input));
     text.push_str(&drafts_block(input));
@@ -541,6 +542,58 @@ pub(super) fn permissions_block(input: &TurnInput) -> String {
          grant. Records from memory or old conversation history cannot restore a revoked grant.\n\n",
         serde_json::to_string(&input.standing_permissions).expect("permission serialization"),
     )
+}
+
+fn computer_handoffs_block(input: &TurnInput) -> String {
+    use crate::db::computer_handoffs::Status;
+    if input.computer_handoffs.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from(
+        "[else.bot take-over results] What the owner did with your requests to take over your \
+         computer. Look at the screen before you continue.\n",
+    );
+    for outcome in &input.computer_handoffs {
+        let what = match outcome.status {
+            Status::HandedBack => "handed_back: the owner took over and handed it back",
+            Status::Dismissed => "declined: the owner did not take over; the screen is unchanged",
+            _ => "skipped: the owner messaged you instead and did not take over",
+        };
+        text.push_str(&format!(
+            "<take_over id=\"{}\" result=\"{what}\">{}</take_over>\n",
+            outcome.id, outcome.reason
+        ));
+    }
+    text.push('\n');
+    text
+}
+
+/// Whether the owner still holds the bot's computer from a take-over it
+/// asked for. Empty until the owner first takes one over.
+pub(super) fn computer_control_block(input: &TurnInput) -> String {
+    use crate::db::computer_handoffs::Status;
+    let Some(handoff) = &input.computer_control else {
+        return String::new();
+    };
+    let taken = handoff
+        .taken_at
+        .map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_default();
+    if handoff.status == Status::Taken {
+        format!(
+            "[else.bot computer control] The owner took over your computer at {taken} for: {}\n\
+             They have not handed it back. Do not treat that work as done, and do not use the \
+             computer until they do. This replaces earlier computer control notes.\n\n",
+            handoff.reason
+        )
+    } else {
+        format!(
+            "[else.bot computer control] Your computer is yours. The owner handed back your \
+             latest take-over (asked at {taken} for: {}). This replaces earlier computer \
+             control notes.\n\n",
+            handoff.reason
+        )
+    }
 }
 
 fn skill_installs_block(input: &TurnInput) -> String {

@@ -35,6 +35,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             post(take_handoff),
         )
         .route(
+            "/bots/{bot_id}/computer-handoffs/{handoff_id}/hand-back",
+            post(hand_back_handoff),
+        )
+        .route(
             "/bots/{bot_id}/computer-handoffs/{handoff_id}/dismiss",
             post(dismiss_handoff),
         )
@@ -44,34 +48,38 @@ async fn take_handoff(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, handoff_id)): ApiPath<(Uuid, Uuid)>,
 ) -> Result<Json<Value>, ApiError> {
-    settle_handoff(&state, bot_id, handoff_id, handoffs::Status::Taken).await
+    settle_handoff(&state, bot_id, handoff_id, handoffs::Action::Take).await
+}
+
+async fn hand_back_handoff(
+    State(state): State<Arc<AppState>>,
+    ApiPath((bot_id, handoff_id)): ApiPath<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    settle_handoff(&state, bot_id, handoff_id, handoffs::Action::HandBack).await
 }
 
 async fn dismiss_handoff(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, handoff_id)): ApiPath<(Uuid, Uuid)>,
 ) -> Result<Json<Value>, ApiError> {
-    settle_handoff(&state, bot_id, handoff_id, handoffs::Status::Dismissed).await
+    settle_handoff(&state, bot_id, handoff_id, handoffs::Action::Dismiss).await
 }
 
 async fn settle_handoff(
     state: &AppState,
     bot_id: Uuid,
     handoff_id: Uuid,
-    status: handoffs::Status,
+    action: handoffs::Action,
 ) -> Result<Json<Value>, ApiError> {
-    match handoffs::settle(&state.db, bot_id, handoff_id, status).await {
+    match handoffs::settle(&state.db, bot_id, handoff_id, action).await {
         Ok(handoff) => Ok(Json(json!({ "handoff": handoff }))),
         Err(handoffs::SettleError::NotFound) => Err(ApiError::not_found()),
         Err(handoffs::SettleError::Settled(handoff)) => Err(ApiError::new(
             StatusCode::CONFLICT,
             "computer_handoff_settled",
             format!(
-                "This request was already {}.",
-                serde_json::to_value(handoff.status)
-                    .unwrap_or_default()
-                    .as_str()
-                    .unwrap_or_default()
+                "This request is already {}.",
+                handoff.status.as_str().replace('_', " ")
             ),
         )),
         Err(handoffs::SettleError::Db(err)) => Err(err.into()),

@@ -519,10 +519,12 @@ impl ComputerView {
         cx.notify();
     }
 
-    fn collapse(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn collapse(&mut self, cx: &mut Context<Self>) {
         self.control_on_live = false;
         self.release(cx);
-        if self.mode == DesktopMode::Control {
+        // A Control request still in flight would land after this collapse
+        // and keep the owner in control, so ask for Watch then too.
+        if self.mode == DesktopMode::Control || self.mode_pending {
             self.send(
                 DesktopCommand::Mode {
                     mode: DesktopMode::Watch,

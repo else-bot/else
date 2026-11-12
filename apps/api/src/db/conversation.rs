@@ -63,7 +63,7 @@ pub async fn snapshot(
         "SELECT {TURN_COLUMNS} FROM turns t
          WHERE t.bot_id = ?1
            AND (lower(hex(t.id)) IN (SELECT replace(value, '-', '') FROM json_each(?2)) OR t.status IN {UNFINISHED_STATUSES}
-                OR EXISTS (SELECT 1 FROM computer_handoffs h WHERE h.turn_id = t.id AND h.status = 'pending'))
+                OR EXISTS (SELECT 1 FROM computer_handoffs h WHERE h.turn_id = t.id AND h.status IN ('pending', 'taken')))
          ORDER BY t.turn_no"
     )))
     .bind(bot_id)

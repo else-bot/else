@@ -506,6 +506,8 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         social_setups: Vec::new(),
         mcp_waits: Vec::new(),
         skill_installs: Vec::new(),
+        computer_handoffs: Vec::new(),
+        computer_control: None,
         skills: None,
         mcps: None,
         handoff: None,

@@ -89,6 +89,7 @@ pub const PARKING_TOOLS: &[&str] = &[
     "mcp_install",
     "mcp_connect",
     "skill_install",
+    "computer_handoff",
     "social_connect",
     "social_action",
     "mail_connect",

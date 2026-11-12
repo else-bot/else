@@ -71,6 +71,8 @@ pub fn export(turn: Turn) -> Value {
         social_setups: vec![],
         mcp_waits: vec![],
         skill_installs: Vec::new(),
+        computer_handoffs: Vec::new(),
+        computer_control: None,
         skills: None,
         mcps: Some(vec![InstalledMcp {
             id: "github".into(),

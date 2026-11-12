@@ -216,7 +216,8 @@ impl SecretRequest {
     }
 }
 
-/// A bot's request that the owner take over its computer. It holds no turn.
+/// A bot's request that the owner take over its computer. Its turn waits
+/// until the owner hands the computer back or declines.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ComputerHandoff {
     pub id: Uuid,
@@ -224,16 +225,27 @@ pub struct ComputerHandoff {
     pub status: HandoffStatus,
     pub created_at: DateTime<Utc>,
     #[serde(default)]
+    pub taken_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     pub settled_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum HandoffStatus {
     Pending,
+    /// The owner controls the computer and has not handed it back.
     Taken,
+    HandedBack,
     Dismissed,
     Skipped,
+    Cancelled,
+}
+
+impl HandoffStatus {
+    pub fn is_open(self) -> bool {
+        matches!(self, Self::Pending | Self::Taken)
+    }
 }
 
 pub const APPROVE: &str = "approve";
@@ -868,12 +880,13 @@ impl Conversation {
             .find(|h| h.id == id)
     }
 
-    /// The bot's open request to take over its computer (at most one).
-    pub fn pending_handoff(&self) -> Option<&ComputerHandoff> {
+    /// The bot's open request to take over its computer (at most one):
+    /// waiting on the owner, or taken and not yet handed back.
+    pub fn open_handoff(&self) -> Option<&ComputerHandoff> {
         self.turns
             .values()
             .flat_map(|t| &t.computer_handoffs)
-            .filter(|h| h.status == HandoffStatus::Pending)
+            .filter(|h| h.status.is_open())
             .max_by_key(|h| h.created_at)
     }
 

@@ -50,6 +50,14 @@ pub struct SendRequest {
     pub open_draft: Option<crate::model::DraftAttachment>,
 }
 
+/// What the owner does with a bot's request to take over its computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoffAction {
+    Take,
+    HandBack,
+    Dismiss,
+}
+
 /// The complete create payload, retained unchanged when delivery is uncertain.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CreateBotRequest {
@@ -720,14 +728,18 @@ impl Client {
             .map(|_| ())
     }
 
-    /// Settle a bot's request to take over its computer: taken or dismissed.
+    /// Act on a bot's request to take over its computer.
     pub async fn settle_handoff(
         self: Arc<Self>,
         bot: Uuid,
         handoff: Uuid,
-        take: bool,
+        action: HandoffAction,
     ) -> Result<(), ClientError> {
-        let action = if take { "take" } else { "dismiss" };
+        let action = match action {
+            HandoffAction::Take => "take",
+            HandoffAction::HandBack => "hand-back",
+            HandoffAction::Dismiss => "dismiss",
+        };
         let path = format!("/v1/bots/{bot}/computer-handoffs/{handoff}/{action}");
         self.call::<serde_json::Value>(Method::POST, path, None)
             .await
