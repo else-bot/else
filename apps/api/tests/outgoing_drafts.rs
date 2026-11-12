@@ -1933,3 +1933,64 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
         "after stopping, the kind waits for approval again"
     );
 }
+
+async fn root_source(app: &TestApp, root: Uuid, kind: &str) {
+    sqlx::query(
+        "UPDATE items SET kind = ?2 WHERE id = (SELECT owner_item_id FROM turns WHERE id = ?1)",
+    )
+    .bind(root)
+    .bind(kind)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_a_routine_run_delegated_drafts_for_the_owners_approval() {
+    let Harness { app, synthetic } = harness().await;
+    let (leaf, root, _, child) = delegated_task(&app, SLOW).await;
+    root_source(&app, root, "routine").await;
+
+    let id = draft(&app, &grant(&app, child).await, ship_post()).await;
+    wait(&app, child, "waiting").await;
+    let card = shown(&app, &leaf, child).await[0].clone();
+    assert_eq!(
+        card["status"], "pending",
+        "the owner still approves the post"
+    );
+    assert_eq!(card["id"], id.to_string(), "{card}");
+
+    let approved = owner_action(&app, &leaf, id, "approve", json!({ "version": 1 })).await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    wait(&app, child, "running").await;
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(packet.contains("send exactly this X post now"), "{packet}");
+    wait(&app, child, "completed").await;
+    let delegation: String =
+        sqlx::query_scalar("SELECT status FROM delegations WHERE child_turn_id = ?1")
+            .bind(child)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(delegation, "completed", "the routine run gets the result");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_rooted_in_neither_the_owner_nor_a_routine_cannot_draft() {
+    let Harness { app, .. } = harness().await;
+    let (_, root, _, child) = delegated_task(&app, SLOW).await;
+    root_source(&app, root, "status").await;
+
+    let refused = tool(
+        &app,
+        &grant(&app, child).await,
+        "draft_message",
+        ship_post(),
+    )
+    .await;
+    assert!(
+        refusal(&refused).starts_with("NOT_ALLOWED"),
+        "{}",
+        refused.body
+    );
+}
