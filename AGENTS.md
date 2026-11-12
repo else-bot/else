@@ -14,6 +14,7 @@
 - Test each transition a change adds or alters, plus at least one rejected transition.
 - In recorder test fixtures, use `started(turn)` before calling tools and `continued(turn, previous_token)` after resuming an attempt; a recorded grant alone does not prove that the turn is ready.
 - Read and follow `.agents/rules/*.md` before using the repository's shared skills and agents.
+- Keep the repository hooks enabled with `git config core.hooksPath .githooks` before committing, so `cargo fmt --all -- --check` and clippy run on every commit; `scripts/dev.py` sets it when unset, and never bypass it with `--no-verify`.
 - Before opening a PR, run `cargo clippy --workspace --all-targets --locked -- -D warnings` or `scripts/check-clippy.sh` and fix every finding, including findings in untouched files.
 - Fix lint causes instead of adding blanket suppressions; justify targeted `#[allow]` and `#[expect]` attributes inline.
 - On Linux, run workspace tests with `scripts/dev.py test` and focused tests with `scripts/dev.py test -p PACKAGE --test TARGET -- FILTER`; read the printed `.else-dev/tests/` results before repeating a run after a restart.
