@@ -24,7 +24,7 @@ use crate::app::routines::{
     MAX_REMINDER_DAYS, ModelSetting, RoutineModel, RoutineName, RoutinePrompt, Schedule, When,
     match_model,
 };
-use crate::db::routines::{self, By, Caller, NewRoutine, Patch, RoutineError};
+use crate::db::routines::{self, By, Caller, NewRoutine, Patch, Routine, RoutineError};
 use crate::grants::Grant;
 use crate::views::routine_json;
 
@@ -169,6 +169,16 @@ fn reject(err: RoutineError) -> Outcome {
         tool_error(&format!("{code}: {message}")),
         Some(format!("rejected {code}")),
     )
+}
+
+/// A routine as its bot reads it. Any-time hours read back as "always", the
+/// value the tools accept, because an omitted value means working hours.
+fn tool_routine_json(routine: &Routine) -> Value {
+    let mut json = routine_json(routine);
+    if routine.run_at.is_none() && routine.active_hours.is_none() {
+        json["active_hours"] = json!("always");
+    }
+    json
 }
 
 fn invalid(message: &str) -> Outcome {
@@ -677,7 +687,7 @@ pub async fn create(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 routine.timezone
             );
             let result = json!({
-                "routine": routine_json(&routine),
+                "routine": tool_routine_json(&routine),
                 "created": created,
                 "deleted": routine.deleted,
                 "next": next,
@@ -699,7 +709,7 @@ pub async fn list(state: &AppState, grant: &Grant) -> Outcome {
         Ok(list) => {
             let log = format!("{} routines", list.len());
             let result = json!({
-                "routines": list.iter().map(routine_json).collect::<Vec<_>>(),
+                "routines": list.iter().map(tool_routine_json).collect::<Vec<_>>(),
                 "limit": MAX_PER_BOT,
                 "default_timezone": DEFAULT_TIMEZONE,
             });
@@ -795,7 +805,9 @@ pub async fn update(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 routine.name, routine.id, routine.cron, routine.timezone, routine.enabled
             );
             (
-                tool_result(json!({ "routine": routine_json(&routine), "model_note": model_note })),
+                tool_result(
+                    json!({ "routine": tool_routine_json(&routine), "model_note": model_note }),
+                ),
                 Some(log),
             )
         }
@@ -854,7 +866,7 @@ pub async fn run(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 routine.id
             );
             let result = json!({
-                "routine": routine_json(&routine),
+                "routine": tool_routine_json(&routine),
                 "queued": queued,
                 "next": "The run starts after this reply and reports to the owner when it ends. \
                     Tell the owner it is queued; do not run its task yourself.",

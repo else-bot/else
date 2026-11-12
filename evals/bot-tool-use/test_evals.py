@@ -199,6 +199,11 @@ def run(runner):
                     "question": "What time and time zone should the weekday whale callout run?",
                     "choices": ["9:00 a.m. New York", "10:00 a.m. New York"]},
                     {"status": "pending", "parked": True})], "Pick a time on the card."),
+                "routine-always-reads-back": ([self.call("use_tool", {
+                    "name": "routine_update", "arguments": {"routine_id": "10000000-0000-0000-0000-000000000002",
+                                                            "active_hours": "always"}})],
+                                              "Hourly scout now runs 24/7; next run at 23:03.",
+                                              "The change did not apply; set it manually in Bot details."),
             }
             write_in_case = next(c for c in runner.load_cases() if c["id"] == "choice-without-write-in-option")
             for bad_args in ({"choices": ["9:00 a.m. New York", "10:00 a.m. New York", "I'll specify another time"]},
