@@ -2030,3 +2030,23 @@ async fn a_delegated_draft_marks_its_bot_as_needing_approval_until_approved() {
         "an approved draft no longer waits on the owner"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delegated_question_marks_its_bot_as_waiting_for_the_owner() {
+    let Harness { app, .. } = harness().await;
+    let (leaf, _, _, child) = delegated_task(&app, SLOW).await;
+    let asked = tool(
+        &app,
+        &grant(&app, child).await,
+        "ask_owner",
+        json!({ "question": "Which account?", "choices": ["Main", "Alt"] }),
+    )
+    .await;
+    assert_eq!(tool_text(&asked)["status"], "pending", "{}", asked.body);
+    wait(&app, child, "waiting").await;
+    assert_eq!(
+        sidebar_status(&app, &leaf).await,
+        json!({ "kind": "waiting_for_answer", "preview": "Which account?" }),
+        "the card in the bot's chat waits on the owner"
+    );
+}
