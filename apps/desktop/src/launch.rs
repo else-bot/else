@@ -1058,19 +1058,19 @@ mod tests {
         );
     }
 
-    async fn free_origin() -> (u16, Origin) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+    /// A loopback port held by this test: bound, so no other process can
+    /// take it, but refusing connections until the test listens on it.
+    fn reserved_origin() -> (tokio::net::TcpSocket, Origin) {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind(([127, 0, 0, 1], 0).into()).unwrap();
+        let port = socket.local_addr().unwrap().port();
         (
-            port,
+            socket,
             Origin::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
         )
     }
 
-    async fn answer(port: u16, response: &'static str) {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-            .await
-            .unwrap();
+    async fn answer(listener: tokio::net::TcpListener, response: &'static str) {
         loop {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buf = vec![0u8; 4096];
@@ -1150,10 +1150,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_running_server_is_used_without_starting_it() {
-        let (port, origin) = free_origin().await;
-        let server = tokio::spawn(answer(port, CAPABILITIES));
+        let (socket, origin) = reserved_origin();
+        let server = tokio::spawn(answer(socket.listen(16).unwrap(), CAPABILITIES));
         let fixture = fixture(&origin, "exit 0");
-        tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
             fixture.run(quick()).await,
             (vec![Phase::Connecting], Ok(()))
@@ -1171,10 +1170,9 @@ mod tests {
                 LocalError::Unexpected(String::new()),
             ),
         ] {
-            let (port, origin) = free_origin().await;
-            let server = tokio::spawn(answer(port, response));
+            let (socket, origin) = reserved_origin();
+            let server = tokio::spawn(answer(socket.listen(16).unwrap(), response));
             let fixture = fixture(&origin, "exit 0");
-            tokio::time::sleep(Duration::from_millis(50)).await;
             let (phases, result) = fixture.run(quick()).await;
             assert_eq!(phases, [Phase::Connecting]);
             match (result.unwrap_err(), &expected) {
@@ -1188,7 +1186,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_stopped_server_is_started_and_awaited() {
-        let (port, origin) = free_origin().await;
+        let (socket, origin) = reserved_origin();
         let fixture = fixture(&origin, "touch \"$ELSE_HOME/started\"");
         let started = fixture.home.join("started");
         let server = tokio::spawn(async move {
@@ -1196,7 +1194,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             tokio::time::sleep(Duration::from_millis(150)).await;
-            answer(port, CAPABILITIES).await
+            answer(socket.listen(16).unwrap(), CAPABILITIES).await
         });
         let (phases, result) = fixture.run(quick()).await;
         assert_eq!(result, Ok(()));
@@ -1213,7 +1211,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_connect_only_server_that_is_down_is_not_started() {
-        let (_, origin) = free_origin().await;
+        let (_reserved, origin) = reserved_origin();
         let fixture = fixture(&origin, "exit 0");
         let local = LocalServer {
             service: None,
@@ -1237,7 +1235,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_failures_hide_the_helpers_output() {
-        let (_, origin) = free_origin().await;
+        let (_reserved, origin) = reserved_origin();
         let fixture = fixture(&origin, "echo \"secret $0\" >&2; exit 3");
         let (phases, result) = fixture.run(quick()).await;
         assert_eq!(phases, [Phase::Connecting, Phase::Starting]);
@@ -1250,7 +1248,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_hung_start_is_killed_and_reaped() {
-        let (_, origin) = free_origin().await;
+        let (_reserved, origin) = reserved_origin();
         let fixture = fixture(&origin, "sleep 30 & echo $! >\"$ELSE_HOME/pid\"; wait");
         let limits = Limits {
             start: Duration::from_millis(400),
@@ -1280,7 +1278,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelling_the_start_owner_ends_its_helper_group() {
-        let (_, origin) = free_origin().await;
+        let (_reserved, origin) = reserved_origin();
         let fixture = fixture(&origin, "sleep 30 & echo $! >\"$ELSE_HOME/pid\"; wait");
         let service = fixture.local.service.clone().unwrap();
         let task = tokio::spawn(async move { service.start(Duration::from_secs(30)).await });
@@ -1311,7 +1309,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_server_that_never_answers_times_out() {
-        let (_, origin) = free_origin().await;
+        let (_reserved, origin) = reserved_origin();
         let fixture = fixture(&origin, "exit 0");
         let limits = Limits {
             ready: Duration::from_millis(400),
@@ -1329,7 +1327,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_the_receiver_stops_the_wait() {
-        let (_, origin) = free_origin().await;
+        let (_reserved, origin) = reserved_origin();
         let fixture = fixture(&origin, "exit 0");
         let (tx, mut rx) = mpsc::channel(4);
         let limits = Limits {

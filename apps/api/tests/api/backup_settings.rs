@@ -484,7 +484,7 @@ async fn pausing_remote_backups_preserves_the_local_capture_schedule_and_retenti
     h.config.backup.cadence = else_api::backup::capture::Cadence::Every(Duration::from_millis(50));
     h.config.backup.keep = 2;
     h.restart().await;
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(common::SETTLE, async {
         loop {
             let count: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM backup_runs WHERE local_status = 'completed'",
@@ -566,7 +566,7 @@ async fn restart_uploads_pending_sets_without_waiting_for_the_next_remote_interv
         StatusCode::OK
     );
     h.restart().await;
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(common::SETTLE, async {
         loop {
             let snapshot = h.snapshot().await;
             if snapshot["remote_count"] == 2 && snapshot["running"] == false {
@@ -609,7 +609,7 @@ async fn invalid_environment_destination_keeps_local_backups_and_api_available()
     let snapshot = h.snapshot().await;
     assert_eq!(snapshot["enabled"], false);
     assert!(snapshot["destination"].is_null());
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(common::SETTLE, async {
         loop {
             let count: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM backup_runs WHERE local_status = 'completed'",
@@ -656,7 +656,7 @@ async fn a_failed_capture_retries_capture_before_the_full_remote_interval() {
     h.config.backup.dir = h._dir.path().join("blocked-backups");
     std::fs::write(&h.config.backup.dir, b"not a directory").unwrap();
     h.restart().await;
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(common::SETTLE, async {
         loop {
             let snapshot = h.snapshot().await;
             if !snapshot["last_error"].is_null() && snapshot["running"] == false {
@@ -671,7 +671,7 @@ async fn a_failed_capture_retries_capture_before_the_full_remote_interval() {
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(61)).await;
     tokio::time::resume();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(common::SETTLE, async {
         loop {
             let snapshot = h.snapshot().await;
             if snapshot["remote_count"] == 1 && snapshot["running"] == false {
@@ -691,7 +691,7 @@ async fn a_successful_local_capture_does_not_clear_a_failed_remote_upload() {
     let store = Store::new(true).await;
     h.config.backup.cadence = else_api::backup::capture::Cadence::Every(Duration::from_millis(200));
     h.restart().await;
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(common::SETTLE, async {
         loop {
             let count: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM backup_runs WHERE local_status = 'completed'",
@@ -716,13 +716,19 @@ async fn a_successful_local_capture_does_not_clear_a_failed_remote_upload() {
         )
         .await;
     assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
-    assert_eq!(
-        h.app
-            .owner("POST", "/v1/settings/backups/run", None)
-            .await
-            .status,
-        StatusCode::ACCEPTED
-    );
+    // A scheduled capture can start first and refuse the manual run.
+    tokio::time::timeout(common::SETTLE, async {
+        loop {
+            let run = h.app.owner("POST", "/v1/settings/backups/run", None).await;
+            match run.status {
+                StatusCode::ACCEPTED => break,
+                StatusCode::CONFLICT => tokio::time::sleep(Duration::from_millis(20)).await,
+                other => panic!("{other}: {}", run.body),
+            }
+        }
+    })
+    .await
+    .unwrap();
     let failed = h.wait_idle().await;
     assert!(
         failed["last_error"]
@@ -735,7 +741,7 @@ async fn a_successful_local_capture_does_not_clear_a_failed_remote_upload() {
             .fetch_one(&h.app.db.pool)
             .await
             .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(common::SETTLE, async {
         loop {
             let count: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM backup_runs WHERE local_status = 'completed'",

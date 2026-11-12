@@ -223,10 +223,7 @@ fn processes(pattern: &str) -> usize {
 async fn gone(pattern: &str) {
     let started = Instant::now();
     while processes(pattern) > 0 {
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "{pattern} still runs"
-        );
+        assert!(started.elapsed() < common::SETTLE, "{pattern} still runs");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -394,18 +391,21 @@ async fn a_timed_out_command_and_its_descendants_end_and_are_recorded() {
     let Setup {
         app, manager, bot, ..
     } = setup().await;
+    // pgrep sees every suite on this machine; a per-run fraction keeps
+    // another run of this test from looking like a survivor.
+    let tag = Uuid::new_v4().as_u128() % 1_000_000_000;
     let started = Instant::now();
     let out = manager
         .run_command(
             bot,
             "test:hold",
-            "sleep 61.731 & sleep 62.731; echo late",
+            &format!("sleep 61.{tag:09} & sleep 62.{tag:09}; echo late"),
             Duration::from_secs(2),
         )
         .await;
     assert!(out.is_err(), "the runtime call timed out: {out:?}");
     assert!(started.elapsed() < Duration::from_secs(10));
-    gone("sleep 6[12].731").await;
+    gone(&format!("sleep 6[12].{tag:09}")).await;
     let ended: (Option<String>, bool) =
         sqlx::query_as("SELECT end_reason, ended_at IS NOT NULL FROM guest_runs WHERE bot_id = ?1")
             .bind(bot)
@@ -418,12 +418,12 @@ async fn a_timed_out_command_and_its_descendants_end_and_are_recorded() {
         .run_command(
             bot,
             "test:hold",
-            "sleep 63.731 & echo started",
+            &format!("sleep 63.{tag:09} & echo started"),
             Duration::from_secs(30),
         )
         .await
         .unwrap()
         .unwrap();
     assert_eq!(out.stdout.trim(), "started");
-    gone("sleep 63.731").await;
+    gone(&format!("sleep 63.{tag:09}")).await;
 }

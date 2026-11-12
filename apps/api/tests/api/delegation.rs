@@ -29,9 +29,14 @@ async fn leaf(app: &TestApp, name: &str) -> String {
 }
 
 async fn running_main(app: &TestApp) -> (String, Uuid, String) {
+    running_main_with(app, SLOW).await
+}
+
+/// The main bot's running turn for `prompt`, with a delegate grant.
+async fn running_main_with(app: &TestApp, prompt: &str) -> (String, Uuid, String) {
     let main = app.main_bot().await;
     let sent = app
-        .send(&main, Uuid::new_v4(), SLOW, Some("synthetic"))
+        .send(&main, Uuid::new_v4(), prompt, Some("synthetic"))
         .await;
     let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
     app.wait_turn(&turn, &["running"]).await;
@@ -124,7 +129,7 @@ fn tool_text(reply: &common::Reply) -> Value {
 }
 
 async fn wait_status(app: &TestApp, turn: Uuid, status: &str) {
-    app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(20))
+    app.wait_turn_for(&turn.to_string(), &[status], common::SETTLE)
         .await;
 }
 
@@ -1482,7 +1487,8 @@ async fn a_deleted_creation_replays_as_deleted() {
 async fn creation_requires_an_owner_request_and_a_purpose_for_peer_bots() {
     let app = app_with(3).await;
     let work = leaf(&app, "Work").await;
-    let (main, root, token) = running_main(&app).await;
+    // A slow reply can finish before a loaded machine reaches the cancel.
+    let (main, root, token) = running_main_with(&app, "[synthetic:hang] plan the week").await;
     let before = bot_count(&app).await;
     let args = json!({ "name": "GitHub" });
     let text = |reply: &common::Reply| {
