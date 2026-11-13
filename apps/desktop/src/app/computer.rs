@@ -4,6 +4,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 use xkeysym::Keysym;
@@ -669,11 +670,14 @@ impl ComputerView {
                 color: crate::avatar::AvatarColor::Gray,
                 ..self.avatar
             };
+            // In the panel the state sits 48 px under the bot's header, the
+            // way Settings places its empty states; expanded, it centers.
             area = area.child(
                 v_flex()
                     .size_full()
                     .items_center()
-                    .justify_center()
+                    .when(self.expanded, |state| state.justify_center())
+                    .when(!self.expanded, |state| state.justify_start().pt_12())
                     .gap_2()
                     .text_color(cx.theme().muted_foreground)
                     .child(div().opacity(0.8).child(
