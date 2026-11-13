@@ -114,10 +114,10 @@ impl Shell {
             ),
             None => format!("{} on disk · free space unknown", byte_size(local.bytes)),
         };
-        let mut history = v_flex().gap_2().child(
+        let mut history = v_flex().gap_3().child(
             div()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
+                .text_base()
+                .font_weight(FontWeight::SEMIBOLD)
                 .child("Recent local backups"),
         );
         if local.recent.is_empty() {
@@ -191,7 +191,7 @@ impl Shell {
                     .when(stacked, |row| row.flex_col().items_start())
                     .child(
                         div()
-                            .text_size(px(15.))
+                            .text_base()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("On this server"),
                     )
@@ -238,7 +238,7 @@ impl Shell {
                 theme,
             ));
         v_flex()
-            .gap_8()
+            .gap_6()
             .child(summary)
             .when_some(view.local_form.as_ref(), |section, form| {
                 section.child(form.render(
