@@ -96,6 +96,8 @@ def run(runner):
             examples = {
                 "rerun-routine-now": ([self.call("find_tool", {"query": "routine_run"}), self.call("use_tool", {
                     "name": "routine_run", "arguments": {"routine_id": routine_id}})], "Queued."),
+                "pause-routine-discovers-update": ([self.call("find_tool", {"query": "routine_update"}), self.call("use_tool", {
+                    "name": "routine_update", "arguments": {"routine_id": routine_id, "enabled": False}})], "Paused Daily digest."),
                 "one-off-check-is-a-reminder": ([self.call("find_tool", {"query": "reminder_create"}), self.call("use_tool", {
                     "name": "reminder_create", "arguments": {"name": "Scout check", "in_minutes": 360,
                                                              "prompt": "Check whether Scout sent 2-3 DMs."}})],
@@ -310,6 +312,10 @@ def run(runner):
                 ]}}, Path(temp) / "log")
                 self.assertEqual(mock.find(self.context()["deferred_tools"], "routine_run")["tools"][0]["name"], "routine_run")
                 self.assertTrue(mock.find(self.context()["deferred_tools"], "saved routine")["tools"])
+                routines = self.context()["deferred_tools"] + [{"name": "routine_list", "description": "List saved routines."}]
+                self.assertEqual(len(mock.find(routines, "saved routine")["tools"]), 2)
+                self.assertEqual([t["name"] for t in mock.find(routines, "mcp__elsebot__routine_run")["tools"]],
+                                 ["routine_run"])
                 self.assertEqual(mock.find(self.context()["deferred_tools"], "zzzz")["tools"], [])
                 result = server.dispatch("use_tool", {"name": "routine_run", "arguments": {"routine_id": "r1"}})
                 self.assertEqual(json.loads(result["content"][0]["text"]), {"status": "queued"})
