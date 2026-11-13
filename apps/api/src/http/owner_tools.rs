@@ -106,10 +106,10 @@ pub(super) fn confirm_permission_schema() -> Value {
     json!({
         "name": "confirm_permission",
         "description": "Record the owner's explicit instruction, in the current message, to always allow a \
-            type of work; quote their exact words. Prefer task scope for recurring host work, \
-            mcp_tool for one integration tool dedicated to the action, routine for one routine's \
-            runs, and bot only for an instruction allowing ALL destructive actions. Keep every \
-            limit the owner gave.",
+            type of work; quote their exact words. Use task scope for recurring host or computer \
+            work; it never covers MCP calls. Use mcp_tool for one MCP tool with any arguments, \
+            routine for one routine's runs, and bot only to allow ALL destructive actions. Keep \
+            every limit the owner gave; save nothing if no scope keeps it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -174,11 +174,17 @@ pub(super) async fn confirm_permission(state: &AppState, grant: &Grant, args: &V
                 "status": if confirmed.active { "approved" } else { "revoked" },
                 "target": target,
                 "question_id": confirmed.question.id,
-                "next": if confirmed.active {
+                "next": if !confirmed.active {
+                    "The owner withdrew this permission. This retry grants nothing; a new explicit owner request is required."
+                } else if matches!(target, PermissionTarget::Task { .. }) {
+                    "Standing permission is recorded for host actions and computer tool calls \
+                     declaring this task_scope; it never covers MCP tools/call. An MCP tool needs \
+                     mcp_tool scope, which covers that tool with that effect whatever the arguments; \
+                     if the owner limited the work more narrowly, save nothing and tell them. Declare each effect \
+                     honestly. Sensitive actions outside this scope still need approval."
+                } else {
                     "Standing permission is recorded for this scope. Declare each effect honestly. \
                      Routine reversible work needs no card. Sensitive actions outside this scope still need approval."
-                } else {
-                    "The owner withdrew this permission. This retry grants nothing; a new explicit owner request is required."
                 },
             })),
             Some(format!("standing permission {}", confirmed.question.id)),
