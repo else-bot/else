@@ -108,8 +108,8 @@ impl Drop for Scope {
 }
 
 /// The tail of a process's stderr, collected in the background, with the
-/// launch's tool grant hidden. Set once the pipe closes.
-pub struct Stderr(watch::Receiver<Option<String>>);
+/// launch's tool grant hidden. Updated at each complete line.
+pub struct Stderr(watch::Receiver<String>);
 
 impl Stderr {
     pub fn collect(stderr: ChildStderr, spec: &LaunchSpec) -> Self {
@@ -117,8 +117,8 @@ impl Stderr {
             .env
             .iter()
             .find(|(key, value)| key == GRANT_ENV && !value.is_empty())
-            .map(|(_, value)| value.clone());
-        let (done, tail) = watch::channel(None);
+            .map(|(_, value)| value.clone().into_bytes());
+        let (published, tail) = watch::channel(String::new());
         tokio::spawn(async move {
             let mut stderr = stderr;
             let mut tail = Vec::new();
@@ -128,27 +128,41 @@ impl Stderr {
                     break;
                 }
                 tail.extend_from_slice(&buf[..n]);
+                // Hidden before trimming, so a cut never splits a grant.
+                if let Some(grant) = &grant {
+                    hide(&mut tail, grant);
+                }
                 if tail.len() > STDERR_TAIL * 2 {
                     tail.drain(..tail.len() - STDERR_TAIL);
                 }
+                // Only whole lines: a grant still arriving stays unpublished.
+                if let Some(end) = tail.iter().rposition(|&b| b == b'\n') {
+                    published.send_replace(String::from_utf8_lossy(&tail[..=end]).into_owned());
+                }
             }
-            let mut text = String::from_utf8_lossy(&tail).into_owned();
-            if let Some(grant) = grant {
-                text = text.replace(&grant, "[tool grant]");
-            }
-            let _ = done.send(Some(text));
+            published.send_replace(String::from_utf8_lossy(&tail).into_owned());
         });
         Self(tail)
     }
 
-    /// The tail, waiting briefly for the pipe to close; empty if it stays
-    /// open.
+    /// The tail once the pipe closes, or as it stands after a brief wait
+    /// when a descendant still holds the pipe open.
     pub async fn tail(&self) -> String {
         let mut tail = self.0.clone();
-        match tokio::time::timeout(Duration::from_secs(2), tail.wait_for(Option::is_some)).await {
-            Ok(Ok(text)) => text.clone().unwrap_or_default(),
-            _ => String::new(),
-        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while let Ok(Ok(())) = tokio::time::timeout_at(deadline, tail.changed()).await {}
+        tail.borrow().clone()
+    }
+}
+
+const HIDDEN: &[u8] = b"[tool grant]";
+
+fn hide(tail: &mut Vec<u8>, grant: &[u8]) {
+    let mut from = 0;
+    while let Some(at) = tail[from..].windows(grant.len()).position(|w| w == grant) {
+        let at = from + at;
+        tail.splice(at..at + grant.len(), HIDDEN.iter().copied());
+        from = at + HIDDEN.len();
     }
 }
 
@@ -163,4 +177,17 @@ pub fn last_lines(text: &str, count: usize) -> Vec<&str> {
         .collect();
     lines.reverse();
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_grant_is_hidden_wherever_it_falls() {
+        let grant = b"tg_secret";
+        let mut tail = b"a tg_secret b tg_secrettg_secret".to_vec();
+        hide(&mut tail, grant);
+        assert_eq!(tail, b"a [tool grant] b [tool grant][tool grant]");
+    }
 }

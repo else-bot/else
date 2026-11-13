@@ -776,30 +776,36 @@ async fn an_unexpected_tool_inventory_is_a_policy_violation() {
 
 #[tokio::test]
 async fn a_codex_that_exits_reports_the_end_of_its_stderr_without_the_grant() {
-    let dir = tempfile::tempdir().unwrap();
-    let codex = detect_with(
-        dir.path(),
-        "[ \"$1\" = --version ] && echo 'codex-cli 9.0.0' && exit\n\
-         printf 'starting\\nthread main panicked: bad grant %s\\nnote: run with RUST_BACKTRACE=1\\n' \"$ELSE_TASK_GRANT\" >&2\n\
-         exit 101",
-        true,
-    )
-    .with_tools(TOOL_URL.into());
-    let sink = super::super::recording::Recorded::default();
-    let outcome = codex
-        .run(
-            turn_from(crate::app::providers::Origin::OwnerRequest),
-            &sink,
-            Stop::default(),
+    for leftover in ["", "sleep 30 >/dev/null &"] {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = detect_with(
+            dir.path(),
+            &format!(
+                "[ \"$1\" = --version ] && echo 'codex-cli 9.0.0' && exit\n\
+                 {leftover}\n\
+                 printf 'starting\\nthread main panicked: bad grant %s\\nnote: run with RUST_BACKTRACE=1\\n' \"$ELSE_TASK_GRANT\" >&2\n\
+                 exit 101"
+            ),
+            true,
         )
-        .await;
-    assert_eq!(
-        outcome,
-        failed(
-            "provider_unavailable",
-            "the provider process exited: starting / thread main panicked: bad grant [tool grant] / note: run with RUST_BACKTRACE=1",
-        )
-    );
+        .with_tools(TOOL_URL.into());
+        let sink = super::super::recording::Recorded::default();
+        let outcome = codex
+            .run(
+                turn_from(crate::app::providers::Origin::OwnerRequest),
+                &sink,
+                Stop::default(),
+            )
+            .await;
+        assert_eq!(
+            outcome,
+            failed(
+                "provider_unavailable",
+                "the provider process exited: starting / thread main panicked: bad grant [tool grant] / note: run with RUST_BACKTRACE=1",
+            ),
+            "{leftover}"
+        );
+    }
 }
 
 #[tokio::test]
