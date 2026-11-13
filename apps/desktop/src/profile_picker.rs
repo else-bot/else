@@ -523,18 +523,24 @@ impl ProfilePicker {
                 .child(control)
         };
         let reasoning = field("Reasoning", slider.into_any_element()).flex_grow(3.);
-        let speed = field(
-            "Speed",
-            h_flex()
-                .w_full()
-                .gap_1()
-                .p_0p5()
-                .bg(theme.muted.opacity(0.3))
-                .rounded(theme.radius)
-                .children(speeds)
-                .into_any_element(),
-        )
-        .flex_grow(2.);
+        let speed = h_flex()
+            .gap_3()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Speed"),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .gap_1()
+                    .p_0p5()
+                    .bg(theme.muted.opacity(0.3))
+                    .rounded(theme.radius)
+                    .children(speeds),
+            )
+            .flex_grow(2.);
         let row = if self.tabs {
             v_flex().gap_3()
         } else {
@@ -690,7 +696,7 @@ impl Render for ProfilePicker {
                         picker.child(self.render_settings(cx))
                     }),
             )
-            .when(!self.any_available(), |picker| {
+            .when(!self.any_available() && !self.tabs, |picker| {
                 picker.child(
                     div()
                         .text_xs()

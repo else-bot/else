@@ -169,21 +169,12 @@ impl ElseApp {
                         },
                     ));
             let mut details = v_flex().flex_1().min_w_0().gap_4().child(
-                v_flex()
-                    .gap_1()
-                    .child(field_label("Bot name", cx))
-                    .child(
-                        Input::new(&form.name)
-                            .focus_ring(false)
-                            .aria_label("Bot name")
-                            .disabled(locked),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("You can change this later."),
-                    ),
+                v_flex().gap_1().child(field_label("Bot name", cx)).child(
+                    Input::new(&form.name)
+                        .focus_ring(false)
+                        .aria_label("Bot name")
+                        .disabled(locked),
+                ),
             );
             if !categories.is_empty() {
                 details = details.child(

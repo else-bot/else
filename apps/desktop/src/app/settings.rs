@@ -1789,6 +1789,20 @@ impl ElseApp {
             .or_else(|| {
                 unavailable.then(|| "Saved model is unavailable. Choose another model.".to_owned())
             });
+        let model_summary = choice
+            .map(|choice| {
+                format!(
+                    "{} · {} · {}",
+                    model_label(&choice.model),
+                    effort_label(&choice.reasoning_effort),
+                    if choice.service_tier == "priority" {
+                        "Fast"
+                    } else {
+                        "Standard"
+                    }
+                )
+            })
+            .unwrap_or_else(|| "Choose a model".to_owned());
         let model_control = Button::new(ElementId::Name(format!("routine-model-{id}").into()))
             .focus_ring(false)
             .cursor_pointer()
@@ -1797,7 +1811,10 @@ impl ElseApp {
             .w_full()
             .py_1()
             .px_0()
-            .accessibility_label(format!("Change model for {}", routine.name))
+            .accessibility_label(format!(
+                "Change model for {}. {model_title}. {model_details}",
+                routine.name
+            ))
             .loading(matches!(save, Some(RoutineSave::Model { .. })))
             .disabled(busy || !connected || self.caps.is_none())
             .child(
@@ -1807,8 +1824,8 @@ impl ElseApp {
                     .text_left()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .whitespace_normal()
-                    .child(format!("{model_title} · {model_details}")),
+                    .truncate()
+                    .child(model_summary),
             )
             .on_click(cx.listener(move |app, _, window, cx| {
                 app.open_routine_model_dialog(bot, id, window, cx)
