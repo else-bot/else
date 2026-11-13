@@ -819,4 +819,67 @@ mod tests {
         assert_eq!(finished.kept, [id(3)]);
         assert_eq!(finished.history, [id(2)]);
     }
+
+    /// #393, shaped like production turn 42: every resumed attempt restated
+    /// the work and re-attached the same card, once under another name.
+    #[test]
+    fn a_turn_that_parks_repeatedly_keeps_one_copy_of_a_restated_reply() {
+        let reply = |number: u128, attempt: Option<i64>, file: Option<&str>| {
+            let mut reply = item(number, 10, "assistant");
+            reply["attempt"] = json!(attempt);
+            if let Some(name) = file {
+                reply["parts"] = json!([{"type": "file", "file": {
+                    "id": id(1000 + number), "name": name,
+                    "media_type": "image/png", "size": 572_211
+                }}]);
+            }
+            reply
+        };
+        let card = Some("recap-final.png");
+        for attempts in [false, true] {
+            let at = |attempt| attempts.then_some(attempt);
+            let items = vec![
+                item(1, 10, "user"),
+                reply(2, at(1), None),
+                reply(3, at(1), Some("recap.png")),
+                reply(4, at(1), card),
+                reply(5, at(2), card),
+                reply(6, at(2), card),
+                reply(7, at(3), card),
+                reply(8, at(3), card),
+                reply(9, at(4), None),
+            ];
+            let mut finished = turn(10, "completed");
+            finished["attempt"] = json!(4);
+            let task = &task_replies(&conversation(items, vec![finished]))[&id(10)];
+            assert_eq!(task.latest, Some(id(9)), "attempts={attempts}");
+            assert_eq!(
+                task.kept,
+                [id(8)],
+                "attempts={attempts}: one copy of the card and the last park's reply"
+            );
+            assert_eq!(task.history, [id(2), id(3), id(4), id(5), id(6), id(7)]);
+        }
+    }
+
+    #[test]
+    fn a_distinct_earlier_file_stays_beside_a_later_one() {
+        let file = |number: u128, size: u64| {
+            let mut reply = item(number, 10, "assistant");
+            reply["parts"] = json!([{"type": "file", "file": {
+                "id": id(1000 + number), "name": "chart.png", "media_type": "image/png", "size": size
+            }}]);
+            reply
+        };
+        let c = conversation(
+            vec![
+                item(1, 10, "user"),
+                file(2, 10),
+                file(3, 20),
+                item(4, 10, "assistant"),
+            ],
+            vec![turn(10, "completed")],
+        );
+        assert_eq!(task_replies(&c)[&id(10)].kept, [id(2), id(3)]);
+    }
 }
