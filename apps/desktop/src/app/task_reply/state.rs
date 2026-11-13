@@ -95,7 +95,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             let state = match turn.status.as_str() {
                 "queued" => ReplyState::Queued,
                 "preparing" | "sending" | "running" => ReplyState::Working,
-                "waiting" if !turn.mcp_waits.is_empty() => ReplyState::Working,
+                "waiting" if turn.waits_on_job() => ReplyState::Working,
                 "waiting" => ReplyState::Waiting,
                 "cancelling" => ReplyState::Stopping,
                 "completed" => ReplyState::Complete,
@@ -525,18 +525,22 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_parked_on_an_mcp_job_is_working_not_waiting_for_a_bot() {
-        let mut parked = turn(11, "waiting");
-        parked["mcp_waits"] = json!([{ "id": id(30), "mcp_id": "t3-code" }]);
+    fn a_turn_parked_on_a_job_is_working_not_waiting_for_a_bot() {
+        let mut mcp = turn(11, "waiting");
+        mcp["mcp_waits"] = json!([{ "id": id(30), "mcp_id": "t3-code" }]);
+        let mut computer = turn(13, "waiting");
+        computer["computer_job_waits"] = json!([{ "id": id(31), "job_id": id(32) }]);
         let c = conversation(
-            vec![item(1, 11, "assistant")],
-            vec![parked, turn(12, "waiting")],
+            vec![item(1, 11, "assistant"), item(2, 13, "assistant")],
+            vec![mcp, turn(12, "waiting"), computer],
         );
         let replies = task_replies(&c);
         assert_eq!(replies[&id(11)].state, ReplyState::Working);
+        assert_eq!(replies[&id(13)].state, ReplyState::Working);
         assert_eq!(replies[&id(12)].state, ReplyState::Waiting);
         let label = |n| crate::app::message_row::turn_label(c.turn(id(n)).unwrap()).0;
         assert_eq!(label(11), "Working");
+        assert_eq!(label(13), "Working");
         assert_eq!(label(12), "Waiting for another bot…");
     }
 

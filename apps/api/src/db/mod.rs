@@ -3,6 +3,7 @@ pub mod bot_profiles;
 pub mod bots;
 pub mod categories;
 pub mod computer_handoffs;
+pub mod computer_job_waits;
 pub mod conversation;
 pub mod delegations;
 pub mod events;

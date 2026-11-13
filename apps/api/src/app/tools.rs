@@ -86,6 +86,7 @@ pub const DEFERRED_TOOLS: &[&str] = &[
 pub const PARKING_TOOLS: &[&str] = &[
     "mcp_request",
     "mcp_wait",
+    "computer_job",
     "mcp_install",
     "mcp_connect",
     "skill_install",

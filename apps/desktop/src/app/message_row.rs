@@ -581,7 +581,7 @@ pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
     match turn.status.as_str() {
         "queued" => ("Queued".into(), false),
         "preparing" | "sending" | "running" => ("Working".into(), false),
-        "waiting" if !turn.mcp_waits.is_empty() => ("Working".into(), false),
+        "waiting" if turn.waits_on_job() => ("Working".into(), false),
         "cancelling" => ("Stopping…".into(), false),
         "waiting"
             if turn

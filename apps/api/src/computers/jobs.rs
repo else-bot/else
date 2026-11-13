@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{Acquire, ComputerError, ComputerManager, ExecOutput};
+use crate::db::computer_job_waits as job_waits;
 use crate::db::task_secrets::{Env, redact};
 
 /// Running background jobs per bot.
@@ -126,6 +127,13 @@ pub enum JobStatus {
 }
 
 impl JobStatus {
+    pub fn is_ended(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Lost
+        )
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Starting => "starting",
@@ -537,14 +545,17 @@ impl ComputerManager {
     }
 
     async fn fail_start(&self, id: Uuid, error: &str) -> Result<(), ComputerError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "UPDATE guest_jobs SET status = 'failed', error = ?2, finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
              WHERE id = ?1 AND status = 'starting'",
         )
         .bind(id)
         .bind(super::bounded(error, 2000))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        job_waits::publish_settled(&mut tx, id).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -692,6 +703,7 @@ impl ComputerManager {
         output: &str,
         lease: Uuid,
     ) -> Result<(), ComputerError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "UPDATE guest_jobs SET status = ?2, exit_code = ?3, output_tail = ?4, finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
              WHERE id = ?1 AND status IN ('starting', 'running', 'cancelling')",
@@ -700,8 +712,10 @@ impl ComputerManager {
         .bind(outcome.status())
         .bind(outcome.exit_code())
         .bind(output)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        job_waits::publish_settled(&mut tx, job_id).await?;
+        tx.commit().await?;
         self.release(lease).await
     }
 
@@ -730,13 +744,16 @@ impl ComputerManager {
     ) -> Result<(), ComputerError> {
         let op = self.op(bot_id).await;
         let Some(lease) = lease else {
+            let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
             sqlx::query(
                 "UPDATE guest_jobs SET status = 'cancelled', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
                  WHERE id = ?1 AND lease_id IS NULL AND status IN ('starting', 'cancelling')",
             )
             .bind(job_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+            job_waits::publish_settled(&mut tx, job_id).await?;
+            tx.commit().await?;
             return Ok(());
         };
         let dir = format!("{JOBS_DIR}/{job_id}");
@@ -867,14 +884,17 @@ impl ComputerManager {
                     return self.kill_job(bot, job, lease).await;
                 }
                 let Some(lease) = lease else {
+                    let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
                     sqlx::query(
                         "UPDATE guest_jobs SET status = 'failed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
                              error = 'interrupted before launch'
                          WHERE id = ?1 AND status = 'starting' AND lease_id IS NULL",
                     )
                     .bind(job)
-                    .execute(&self.pool)
+                    .execute(&mut *tx)
                     .await?;
+                    job_waits::publish_settled(&mut tx, job).await?;
+                    tx.commit().await?;
                     return Ok(());
                 };
                 if overdue {
