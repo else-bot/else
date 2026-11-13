@@ -1,3 +1,4 @@
+use super::conversation::Spot;
 use super::pending_send::Delivery;
 use super::reply::Author;
 use super::row_text::RowText;
@@ -14,7 +15,6 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::time::Duration;
 
 /// Right gutter that sets the width of bot-side bubbles and cards.
 pub(super) const BOT_GUTTER: Pixels = px(60.);
@@ -93,20 +93,20 @@ impl ElseApp {
                 .into_any_element(),
             None => body,
         };
-        let body = match self.view.as_ref().and_then(|view| view.revealed) {
-            Some((key, at)) if row.contains(key) && at.elapsed() < Duration::from_secs(2) => {
-                let highlight = cx.theme().primary;
-                div()
+        let body = match self.view.as_ref().and_then(|view| view.revealed.as_ref()) {
+            Some(reveal) if row.contains(reveal.row) => match reveal.spot {
+                Spot::Row => div()
                     .w_full()
                     .rounded(cx.theme().radius_lg)
+                    .bg(cx.theme().primary.opacity(0.16 * reveal.shown))
                     .child(body)
-                    .with_animation(
-                        SharedString::from(format!("revealed-{key:?}-{at:?}")),
-                        Animation::new(Duration::from_millis(1600)).with_max_fps(60.),
-                        move |row, t| row.bg(highlight.opacity(0.16 * (1. - t))),
-                    )
-                    .into_any_element()
-            }
+                    .into_any_element(),
+                Spot::Passage { .. } => CenterReveal {
+                    body,
+                    list: self.view.as_ref().map(|view| view.list.clone()),
+                }
+                .into_any_element(),
+            },
             _ => body,
         };
         let column = super::view::reading_column();
@@ -719,6 +719,81 @@ where
         at.format("%-d %b, %H:%M").to_string()
     } else {
         at.format("%-d %b %Y, %H:%M").to_string()
+    }
+}
+
+/// Centers in the transcript the line a revealed passage asks to scroll to.
+///
+/// The request is not passed on: the list would only bring the line to its
+/// edge, by laying its rows out a second time in the same frame, which
+/// registers their accessibility nodes twice. The list scrolls after the frame
+/// instead.
+struct CenterReveal {
+    body: AnyElement,
+    list: Option<ListState>,
+}
+
+impl IntoElement for CenterReveal {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for CenterReveal {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.body.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.body.prepaint(window, cx);
+        if let Some(line) = window.take_autoscroll()
+            && let Some(list) = self.list.clone()
+        {
+            let distance = line.center().y - window.content_mask().bounds.center().y;
+            if distance.abs() > px(1.) {
+                window.defer(cx, move |_, _| list.scroll_by(distance));
+            }
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.body.paint(window, cx);
     }
 }
 

@@ -322,12 +322,62 @@ pub(super) struct ConversationView {
     pub(super) _reply_clock: Option<Task<()>>,
     pub(super) latest_seen: bool,
     pub(super) reply_layout: Option<ReplyLayout>,
-    /// The row the last "go to original message" landed on, and when.
-    pub(super) revealed: Option<(RowKey, std::time::Instant)>,
+    /// Where the last "go to original message" landed.
+    pub(super) revealed: Option<Reveal>,
+    _reveal_clock: Option<Task<()>>,
     /// A quoted message to find once older history arrives.
     pending_reveal: Option<(RowKey, Author, String)>,
     pub(super) _load: Option<Task<()>>,
     pub(super) _older: Option<Task<()>>,
+}
+
+/// A message the owner jumped to, flashed until it fades out.
+pub(super) struct Reveal {
+    /// The row that holds it.
+    pub(super) row: RowKey,
+    pub(super) at: std::time::Instant,
+    pub(super) spot: Spot,
+    /// How strongly the highlight paints, as of the last tick, so every
+    /// paint until the next tick gives the same color.
+    pub(super) shown: f32,
+}
+
+pub(super) enum Spot {
+    /// The whole row, as for a card or a plain-text message.
+    Row,
+    /// The quoted text of a Markdown message.
+    Passage {
+        item: RowKey,
+        /// The quoted part, or `None` for the whole message.
+        quote: Option<String>,
+        /// Whether the list was asked to center the passage, which waits for
+        /// the message's Markdown to parse.
+        centered: bool,
+    },
+}
+
+/// How long a revealed message stays highlighted before it starts to fade.
+const REVEAL_HOLD: Duration = Duration::from_millis(1200);
+/// How long its highlight takes to fade out.
+const REVEAL_FADE: Duration = Duration::from_millis(1600);
+
+impl Reveal {
+    pub(super) fn new(row: RowKey, spot: Spot) -> Self {
+        Self {
+            row,
+            at: std::time::Instant::now(),
+            spot,
+            shown: 1.,
+        }
+    }
+
+    /// How strongly to paint the highlight now, from 1 down to 0 once it
+    /// has faded out.
+    fn strength(&self) -> f32 {
+        let fading = self.at.elapsed().saturating_sub(REVEAL_HOLD);
+        let t = (fading.as_secs_f32() / REVEAL_FADE.as_secs_f32()).min(1.);
+        1. - t * t * (3. - 2. * t)
+    }
 }
 
 impl ConversationView {
@@ -378,6 +428,7 @@ impl ConversationView {
             latest_seen: false,
             reply_layout: None,
             revealed: None,
+            _reveal_clock: None,
             pending_reveal: None,
             _load: None,
             _older: None,
@@ -546,8 +597,21 @@ impl ElseApp {
                 item_ix: ix,
                 offset_in_item: px(0.),
             });
-            view.revealed = Some((row.key, std::time::Instant::now()));
-            cx.notify();
+            let item = RowKey::Item(target);
+            let spot = if view.texts.get(&item).is_some_and(RowText::is_markdown) {
+                let whole = conversation
+                    .item(target)
+                    .is_some_and(|item| super::reply::quotes_whole(&item.text, original));
+                Spot::Passage {
+                    item,
+                    quote: (!whole).then(|| original.to_owned()),
+                    centered: false,
+                }
+            } else {
+                Spot::Row
+            };
+            let row = row.key;
+            self.start_reveal(Reveal::new(row, spot), cx);
         } else if conversation.older_before_seq.is_some() {
             view.pending_reveal = Some((from, author, original.to_owned()));
             self.load_older(window, cx);
@@ -557,6 +621,63 @@ impl ElseApp {
                 cx,
             );
         }
+    }
+
+    /// Flashes `reveal` until it fades out, painting its passage on each
+    /// frame and asking the list to center the passage once it is found.
+    pub(super) fn start_reveal(&mut self, reveal: Reveal, cx: &mut Context<Self>) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        let previous = view.revealed.replace(reveal);
+        if let Some(Reveal {
+            spot: Spot::Passage { item, .. },
+            ..
+        }) = previous
+        {
+            self.paint_row_quotes(item, cx);
+        }
+        self.tick_reveal(cx);
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        view._reveal_clock = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                let live = this.update(cx, |app, cx| app.tick_reveal(cx));
+                if !live.unwrap_or(false) {
+                    break;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    /// Repaints the revealed passage, and drops the reveal once it has faded
+    /// out. Returns whether it is still showing.
+    fn tick_reveal(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(view) = self.view.as_mut() else {
+            return false;
+        };
+        let Some(reveal) = view.revealed.as_mut() else {
+            return false;
+        };
+        reveal.shown = reveal.strength();
+        let live = reveal.shown > 0.;
+        let passage = match &reveal.spot {
+            Spot::Passage { item, .. } => Some(*item),
+            Spot::Row => None,
+        };
+        if !live {
+            view.revealed = None;
+        }
+        match passage {
+            Some(item) => self.paint_row_quotes(item, cx),
+            None => cx.notify(),
+        }
+        live
     }
 
     pub(super) fn load_older(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -968,9 +1089,31 @@ impl ElseApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConversationView, RoutineRow, RowKey, TranscriptRow, burst_tail_stamps, first_unread_row,
-        request_rows, routine_rows,
+        ConversationView, REVEAL_FADE, REVEAL_HOLD, Reveal, RoutineRow, RowKey, Spot,
+        TranscriptRow, burst_tail_stamps, first_unread_row, request_rows, routine_rows,
     };
+    use std::time::{Duration, Instant};
+
+    fn reveal_from(ago: Duration) -> Reveal {
+        Reveal {
+            row: RowKey::Item(Uuid::nil()),
+            at: Instant::now() - ago,
+            spot: Spot::Row,
+            shown: 1.,
+        }
+    }
+
+    #[test]
+    fn a_reveal_holds_its_highlight_then_fades_it_out() {
+        assert_eq!(reveal_from(Duration::ZERO).strength(), 1.);
+        assert_eq!(reveal_from(REVEAL_HOLD / 2).strength(), 1.);
+        let fading = reveal_from(REVEAL_HOLD + REVEAL_FADE / 2).strength();
+        assert!(
+            fading > 0. && fading < 1.,
+            "half way through the fade: {fading}"
+        );
+        assert_eq!(reveal_from(REVEAL_HOLD + REVEAL_FADE).strength(), 0.);
+    }
     use crate::api::ReplyPosition;
     use crate::app::reply::Author::{self, Bot, Owner};
     use chrono::{DateTime, FixedOffset, Utc};

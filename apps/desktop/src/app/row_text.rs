@@ -166,10 +166,13 @@ impl RowSource {
     }
 }
 
+/// Backgrounds painted behind ranges of a row's rendered text.
+pub(super) type Highlights = Vec<(Range<usize>, Hsla)>;
+
 pub(super) struct RowText {
     source: String,
     /// The highlights last painted, and the rendered text they fit.
-    painted: Option<(RenderedText, Vec<Range<usize>>)>,
+    painted: Option<(RenderedText, Highlights)>,
     mentions: Vec<BotMention>,
     bots: Arc<MentionRegistry>,
     display: MentionDisplay,
@@ -338,9 +341,47 @@ impl RowText {
         Some((text, range))
     }
 
-    /// Highlights `ranges` of the rendered text. Ranges that do not fit,
-    /// as before the Markdown has parsed, are tried again on the next call.
-    pub(super) fn highlight(&mut self, ranges: Vec<Range<usize>>, color: Hsla, cx: &mut App) {
+    pub(super) fn is_markdown(&self) -> bool {
+        matches!(self.widget, Widget::Markdown { .. })
+    }
+
+    /// Where `quote` shows in the rendered text, or all of the text for
+    /// `None`; `None` until the Markdown has parsed.
+    pub(super) fn passage(&self, quote: Option<&str>, cx: &App) -> Option<Range<usize>> {
+        let Widget::Markdown { state, .. } = &self.widget else {
+            return None;
+        };
+        let rendered = state.read(cx).rendered_text();
+        match quote {
+            _ if rendered.is_empty() => None,
+            Some(quote) => super::reply::passage_range(rendered.as_str(), quote),
+            None => Some(0..rendered.len()),
+        }
+    }
+
+    /// Asks the enclosing list to scroll to `range` of the rendered text.
+    /// Returns whether the request was taken.
+    pub(super) fn reveal(&self, range: &Range<usize>, cx: &mut App) -> bool {
+        // Scroll to the passage's middle, but no more than 240 bytes in, so a
+        // long passage still starts on screen.
+        const MAX_LEAD: usize = 240;
+        let Widget::Markdown { state, .. } = &self.widget else {
+            return false;
+        };
+        state.update(cx, |state, cx| {
+            let text = state.rendered_text();
+            let mut at = range.start + (range.len() / 2).min(MAX_LEAD);
+            while !text.as_str().is_char_boundary(at) {
+                at -= 1;
+            }
+            state.reveal_range(at..at, cx).is_ok()
+        })
+    }
+
+    /// Paints `highlights` behind ranges of the rendered text. Ranges that do
+    /// not fit, as before the Markdown has parsed, are tried again on the
+    /// next call.
+    pub(super) fn highlight(&mut self, highlights: Highlights, cx: &mut App) {
         let Widget::Markdown { state, .. } = &self.widget else {
             return;
         };
@@ -348,26 +389,26 @@ impl RowText {
         if self
             .painted
             .as_ref()
-            .is_some_and(|(text, painted)| *text == rendered && *painted == ranges)
+            .is_some_and(|(text, painted)| *text == rendered && *painted == highlights)
         {
             return;
         }
         let painted = state.update(cx, |state, cx| {
-            let painted = ranges.is_empty()
+            let painted = highlights.is_empty()
                 || state
                     .set_range_highlights(
-                        ranges
+                        highlights
                             .iter()
-                            .map(|range| RangeHighlight::new(range.clone(), color)),
+                            .map(|(range, color)| RangeHighlight::new(range.clone(), *color)),
                         cx,
                     )
                     .is_ok();
-            if ranges.is_empty() || !painted {
+            if highlights.is_empty() || !painted {
                 state.clear_range_highlights(cx);
             }
             painted
         });
-        self.painted = painted.then_some((rendered, ranges));
+        self.painted = painted.then_some((rendered, highlights));
     }
 
     pub(super) fn copy_text(&self, cx: &App) -> String {

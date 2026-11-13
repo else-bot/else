@@ -1,5 +1,6 @@
-use super::conversation::ConversationView;
+use super::conversation::{ConversationView, Reveal, Spot};
 use super::reply::{Author, MessageReference, Quote};
+use super::row_text::RowText;
 use super::{APP_CONTEXT, CiteSelection, ElseApp, RowKey};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::TextSelection;
@@ -280,7 +281,7 @@ impl ElseApp {
             .get(&view.bot_id)
             .map_or(&[][..], |d| &d.quotes[..]);
         if let Some(text) = view.texts.get_mut(&key) {
-            text.highlight(ranges(quotes, key), highlight_color(cx), cx);
+            paint_text(key, text, quotes, view.revealed.as_mut(), cx);
         }
     }
 
@@ -690,8 +691,41 @@ pub(super) fn paint_view(
     cx: &mut App,
 ) {
     let quotes = drafts.get(&view.bot_id).map_or(&[][..], |d| &d.quotes[..]);
-    let color = highlight_color(cx);
     for (key, text) in view.texts.iter_mut() {
-        text.highlight(ranges(quotes, *key), color, cx);
+        paint_text(*key, text, quotes, view.revealed.as_mut(), cx);
     }
+}
+
+/// Paints the draft's quotes of one message, and the passage the owner
+/// jumped to in it, asking the list to center that passage once it is found.
+fn paint_text(
+    key: RowKey,
+    text: &mut RowText,
+    quotes: &[Quote],
+    revealed: Option<&mut Reveal>,
+    cx: &mut App,
+) {
+    let color = highlight_color(cx);
+    let mut highlights: Vec<_> = ranges(quotes, key)
+        .into_iter()
+        .map(|range| (range, color))
+        .collect();
+    if let Some(reveal) = revealed {
+        let strength = reveal.shown;
+        if let Spot::Passage {
+            item,
+            quote,
+            centered,
+        } = &mut reveal.spot
+            && *item == key
+            && let Some(range) = text.passage(quote.as_deref(), cx)
+        {
+            if !*centered {
+                *centered = text.reveal(&range, cx);
+            }
+            let color = cx.theme().primary.opacity(0.32 * strength);
+            highlights.push((range, color));
+        }
+    }
+    text.highlight(highlights, cx);
 }
