@@ -973,6 +973,18 @@ async fn mail_event_origin_removes_computer_and_delegation_authority() {
         1,
         "a standing send permission still sends"
     );
+    let search = json!({ "account_id": account.id,
+                         "command": { "operation": "search", "folder": "INBOX", "limit": 200 } });
+    let wide = tool(&h.app, &token, "mail_action", search).await;
+    assert!(
+        wide.error
+            && wide
+                .body
+                .to_string()
+                .contains("invalid_mail_command: limit must be 1 to 100"),
+        "{}",
+        wide.body
+    );
     for name in [
         "ask_owner",
         "confirm_draft_approval",

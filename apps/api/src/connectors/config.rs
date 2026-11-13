@@ -198,17 +198,16 @@ impl MailCommand {
                 && !d.subject.contains(['\r', '\n'])
                 && d.body.len() <= 32_000
         }
+        if let Self::Search { limit, .. } = self
+            && !(1..=100).contains(limit)
+        {
+            return Err(MailError::new("invalid_mail_command").detail("limit must be 1 to 100"));
+        }
         let valid = match self {
             Self::Folders => true,
             Self::Search {
-                folder: f,
-                query,
-                limit,
-            } => {
-                folder(f)
-                    && (1..=100).contains(limit)
-                    && query.as_ref().is_none_or(|s| text(s, 1024))
-            }
+                folder: f, query, ..
+            } => folder(f) && query.as_ref().is_none_or(|s| text(s, 1024)),
             Self::Read { message }
             | Self::SetRead { message, .. }
             | Self::SetFlagged { message, .. }
@@ -267,6 +266,18 @@ mod tests {
             reply_to: None,
         };
         assert!(MailCommand::Send { draft }.validate().is_err());
+        let search = |limit| MailCommand::Search {
+            folder: "INBOX".into(),
+            query: None,
+            limit,
+        };
+        assert!(search(100).validate().is_ok());
+        for limit in [0, 200] {
+            assert_eq!(
+                search(limit).validate().unwrap_err().to_string(),
+                "invalid_mail_command: limit must be 1 to 100"
+            );
+        }
         assert!(
             !MailCommand::Send {
                 draft: Draft {

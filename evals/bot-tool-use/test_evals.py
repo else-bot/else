@@ -115,6 +115,16 @@ def run(runner):
                 "missing-api-key": ([self.call("request_secret", {"name": "openweather", "reason": "Weather data", "env": ["OPENWEATHER_API_KEY"]})], "Private form opened."),
                 "installed-mcp-has-id": (mcp_calls, "#17 Fix digest retry"),
                 "mcp-index-then-schema": (mcp_calls, "#17 Fix digest retry"),
+                "mcp-wait-purpose-is-a-label": ([self.call("mcp_request", {
+                    "id": "github", "method": "tools/call", "effect": "local", "params": {
+                        "name": "dispatch_workflow", "arguments": {"owner": "acme", "repo": "widget",
+                                                                   "workflow": "release.yml", "ref": "main"}}},
+                    {"run_id": 9001, "status": "queued"}), self.call("mcp_wait", {
+                        "id": "github", "tool": "get_workflow_run", "status_pointer": "/status",
+                        "arguments": {"owner": "acme", "repo": "widget", "run_id": 9001},
+                        "running_values": ["queued", "in_progress"], "effect": "local",
+                        "purpose": "Release workflow run 9001 on acme/widget"},
+                    {"status": "waiting", "parked": True})], ""),
                 "connect-gmail-from-chat": ([self.call("mail_connect", {"provider": "gmail", "address": "max@example.com"},
                                                        {"status": "pending_owner_auth", "parked": True})], "Sign in on the card above."),
                 "watch-connected-inbox": ([self.call("mail_accounts", {}), self.call("mail_trigger_set", {

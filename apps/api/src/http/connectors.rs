@@ -122,7 +122,7 @@ impl From<MailError> for ApiError {
             )
             .retryable();
         }
-        ApiError::bad_request(error.code, error.code)
+        ApiError::bad_request(error.code, error.detail.unwrap_or(error.code))
     }
 }
 
@@ -675,7 +675,7 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
     let result = tool_call(state, grant, name, args).await;
     match result {
         Ok(value) => (tool_result(value), Some("Email tool completed.".into())),
-        Err(error) => (tool_error(error.code), None),
+        Err(error) => (tool_error(&error.to_string()), None),
     }
 }
 
