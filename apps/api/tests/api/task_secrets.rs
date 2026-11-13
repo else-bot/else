@@ -152,6 +152,10 @@ impl ComputerRuntime for Guest {
             }
             self.killed(name).notify_one();
             "stopped".into()
+        } else if script.contains("else-browser") && args.contains(&"snapshot") {
+            json!({ "url": "https://example.com/", "title": "Projects",
+                    "snapshot": "heading \"Projects\"\nbutton \"Delete project\" @kqvzb5" })
+            .to_string()
         } else if script.contains("echo launched") {
             if args.get(at + 3).is_some_and(|c| c.contains("LAUNCH_ERROR")) {
                 return Ok(ExecOutput {
@@ -926,4 +930,47 @@ async fn upgrading_keeps_every_bots_secrets_under_distinct_shared_names() {
         secrets, r#"["kaneo-0badc0de-2","smtp"]"#,
         "a running job still names its own bot's copy"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_browser_approval_card_names_the_control_a_snapshot_ref_points_at() {
+    let Setup { app, .. } = setup().await;
+    let bot = app.create_bot("Browser").await;
+    // A pending card parks its attempt, so each call gets a fresh turn.
+    let card = |args: Value| {
+        let (app, bot) = (&app, &bot);
+        async move {
+            let (_, token) = grant(app, bot).await;
+            let question = tool(app, &token, "computer_browser", args).await;
+            let id: Uuid = question["question_id"].as_str().unwrap().parse().unwrap();
+            sqlx::query_scalar::<_, String>("SELECT context FROM owner_questions WHERE id = ?1")
+                .bind(id)
+                .fetch_one(&app.db.pool)
+                .await
+                .unwrap()
+        }
+    };
+    let click = |selector: &str| json!({ "action": "click", "selector": selector, "effect": "destructive" });
+    assert_eq!(
+        card(click("@kqvzb5")).await,
+        "Browser: click @kqvzb5",
+        "before a snapshot the ref is shown as given"
+    );
+    let (_, token) = grant(&app, &bot).await;
+    let snapshot = tool(
+        &app,
+        &token,
+        "computer_browser",
+        json!({ "action": "snapshot" }),
+    )
+    .await;
+    assert!(
+        snapshot["snapshot"].as_str().unwrap().contains("@kqvzb5"),
+        "{snapshot}"
+    );
+    assert_eq!(
+        card(click("@kqvzb5")).await,
+        "Browser: click button \"Delete project\" (@kqvzb5)"
+    );
+    assert_eq!(card(click("@kqvzb6")).await, "Browser: click @kqvzb6");
 }

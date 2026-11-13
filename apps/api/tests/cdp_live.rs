@@ -495,6 +495,24 @@ async fn scripts_drive_the_visible_browser_safely() {
         lost["error"].as_str().unwrap().starts_with("STALE_REF"),
         "a ref from before the state was lost: {lost}"
     );
+    let snapshot = browse(&["snapshot"]).await;
+    let remove = ref_of(&snapshot, "button \"Remove\"");
+    browse(&["click", "text=Rename"]).await;
+    let changed = browse(&["click", &remove]).await;
+    assert!(
+        changed["error"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with(&format!(
+                "CHANGED_REF: {remove} was button \"Remove\" and is now button \"Keep\""
+            )),
+        "a relabelled control is refused: {changed}"
+    );
+    let page = browse(&["text"]).await;
+    assert!(
+        !page["text"].as_str().unwrap().contains("removed"),
+        "and not clicked: {page}"
+    );
     let covered = browse(&["click", "#covered"]).await;
     assert!(
         covered["error"].as_str().unwrap().starts_with("COVERED"),
