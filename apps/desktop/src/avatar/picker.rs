@@ -42,10 +42,15 @@ impl AvatarPicker {
 
 impl RenderOnce for AvatarPicker {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.theme();
-        let size = px(if self.compact { 34. } else { 44. });
-        let art_size = px(if self.compact { 26. } else { 32. });
+        // Shapes and colors share one grid: the same cells, columns and
+        // ring, so both rows of each start under their label.
+        let size = px(if self.compact { 36. } else { 40. });
+        let art_size = px(if self.compact { 28. } else { 32. });
+        let swatch_size = px(if self.compact { 22. } else { 24. });
         let radius = px(if self.compact { 10. } else { 12. });
+        let gap = px(8.);
+        let grid_width = size * COLUMNS as f32 + gap * (COLUMNS - 1) as f32;
+        let theme = cx.theme();
         let shapes = AvatarShape::ALL.map(|shape| {
             let avatar = Avatar {
                 shape,
@@ -85,7 +90,7 @@ impl RenderOnce for AvatarPicker {
             };
             let pick = self.on_change.clone();
             let swatch = div()
-                .size(px(20.))
+                .size(swatch_size)
                 .rounded_full()
                 .p(px(1.))
                 .bg(theme.border)
@@ -94,31 +99,26 @@ impl RenderOnce for AvatarPicker {
                 .focus_ring(false)
                 .cursor_pointer()
                 .ghost()
-                .w(px(30.))
-                .h(px(30.))
+                .w(size)
+                .h(size)
                 .p_0()
-                .rounded_full()
+                .rounded(radius)
                 .toggled(self.current.color == color)
                 .disabled(self.disabled)
                 .accessibility_label(format!("{} color", color.label()))
                 .tooltip(color.label())
-                .child(ring(
-                    px(30.),
-                    px(15.),
-                    self.current.color == color,
-                    cx,
-                    swatch,
-                ))
+                .child(ring(size, radius, self.current.color == color, cx, swatch))
                 .on_click(move |_, window, cx| pick(avatar, window, cx))
         });
         let reset = self.on_change;
-        let muted = theme.muted_foreground;
-        // Shape and Color each get a label; Reset is a quiet 12 px action.
+        let grid =
+            |cells: [Button; 12]| h_flex().w(grid_width).flex_wrap().gap(gap).children(cells);
         v_flex()
-            .w(px(if self.compact { 224. } else { 288. }))
+            .w(grid_width)
             .gap_2()
             .child(
                 h_flex()
+                    .h(px(28.))
                     .items_center()
                     .justify_between()
                     .child(crate::appearance::section_label("Shape", cx))
@@ -130,28 +130,26 @@ impl RenderOnce for AvatarPicker {
                                 self.disabled || self.current == Avatar::default(),
                                 cx,
                             )
+                            .label("Reset")
                             .accessibility_label("Reset avatar")
-                            .child(div().text_xs().text_color(muted).child("Reset"))
+                            .mr(-Scale::Compact.padding())
                             .on_click(move |_, window, cx| reset(Avatar::default(), window, cx)),
                     ),
             )
+            .child(grid(shapes))
             .child(
                 h_flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .justify_center()
-                    .children(shapes),
+                    .h(px(28.))
+                    .mt_2()
+                    .items_center()
+                    .child(crate::appearance::section_label("Color", cx)),
             )
-            .child(crate::appearance::section_label("Color", cx).pt_3().pb_1())
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .justify_center()
-                    .children(colors),
-            )
+            .child(grid(colors))
     }
 }
+
+/// Cells per row in both grids.
+const COLUMNS: usize = 6;
 
 fn ring(size: Pixels, radius: Pixels, picked: bool, cx: &App, content: impl IntoElement) -> Div {
     let theme = cx.theme();

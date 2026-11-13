@@ -227,33 +227,24 @@ impl Render for SocialsView {
         let theme = cx.theme().clone();
         let mut root = v_flex().w_full().gap_3();
         if self.setup.is_none() {
-            root = root.child(
-                h_flex()
-                    .items_start()
-                    .gap_3()
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_2()
-                            .child(div().text_xl().font_semibold().child("Socials"))
-                            .child(div().text_sm().text_color(theme.muted_foreground).child(
-                                "Connect Telegram and Discord bots for any of your bots to use.",
-                            )),
-                    )
-                    .child(
-                        Button::new("social-refresh")
-                            .control(
-                                Tier::Ghost,
-                                Scale::Standard,
-                                self.busy || !self.available,
-                                cx,
-                            )
-                            .icon(gpui_kit::assets::IconName::RefreshCw)
-                            .label("Refresh")
-                            .on_click(cx.listener(|view, _, window, cx| view.refresh(window, cx))),
-                    ),
-            );
+            root = root.child(crate::panel_kit::page_heading(
+                "Socials",
+                "Connect Telegram and Discord bots for any of your bots to use.",
+                vec![
+                    Button::new("social-refresh")
+                        .control(
+                            Tier::Secondary,
+                            Scale::Compact,
+                            self.busy || !self.available,
+                            cx,
+                        )
+                        .icon(gpui_kit::assets::IconName::RefreshCw)
+                        .label("Refresh")
+                        .on_click(cx.listener(|view, _, window, cx| view.refresh(window, cx)))
+                        .into_any_element(),
+                ],
+                cx,
+            ));
             if !self.connections.is_empty() {
                 let rows: Vec<_> = self
                     .connections

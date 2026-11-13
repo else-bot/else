@@ -570,18 +570,16 @@ impl Shell {
             ))
         };
         v_flex()
-            .size_full()
+            .flex_1()
             .min_h_0()
-            .child(
-                div().flex_1().min_h_0().child(crate::panel_kit::faded(
-                    div()
-                        .id("backup-settings-scroll")
-                        .size_full()
-                        .overflow_y_scrollbar()
-                        .child(div().py_8().child(settings_column(page.child(content)))),
-                    theme.popover,
-                )),
-            )
+            .child(super::super::settings::sheet_scroller(
+                div()
+                    .id("backup-settings-scroll")
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .child(div().py_8().child(settings_column(page.child(content)))),
+                cx,
+            ))
             .when_some(view.error.clone(), |content, text| {
                 content.child(status_line(text, theme.warning))
             })

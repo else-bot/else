@@ -125,13 +125,13 @@ impl ProfilePicker {
             });
             let button_id = SharedString::from(format!("provider-{}", provider.id));
             if self.tabs {
-                return segment(
+                return crate::panel_kit::hugging(segment(
                     button_id,
                     provider.label.clone(),
                     browsing,
                     self.disabled,
                     cx,
-                )
+                ))
                 .accessibility_label(format!("{} · {status}", provider.label))
                 .on_click(select);
             }
@@ -187,6 +187,7 @@ impl ProfilePicker {
         if self.tabs {
             v_flex()
                 .w_full()
+                .items_start()
                 .gap_2()
                 .child(
                     div()
@@ -195,7 +196,7 @@ impl ProfilePicker {
                         .text_color(theme.muted_foreground)
                         .child("Provider"),
                 )
-                .child(segment_track(cx).w_full().children(items))
+                .child(segment_track(cx).children(items))
                 .into_any_element()
         } else {
             v_flex()
@@ -358,15 +359,19 @@ impl ProfilePicker {
         let copied = self.copied.as_deref() == Some(provider.id.as_str());
         let explained = self.explained.as_deref() == Some(provider.id.as_str());
         let explain_id = provider.id.clone();
+        // Under the Provider tabs the warning row is the whole notice; the
+        // side-by-side catalog keeps a heading over it.
         v_flex()
-            .map(|setup| if self.tabs { setup.py_2() } else { setup.p_3() })
+            .map(|setup| if self.tabs { setup } else { setup.p_3() })
             .gap_2()
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(format!("Connect {}", provider.label)),
-            )
+            .when(!self.tabs, |setup| {
+                setup.child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(format!("Connect {}", provider.label)),
+                )
+            })
             // Why the provider can't run: one short warning line, with the
             // server's full reason behind a disclosure.
             .child(
@@ -461,18 +466,27 @@ impl ProfilePicker {
             .iter()
             .position(|effort| *effort == choice.reasoning_effort)
             .unwrap_or(0);
+        // Under tabs each control hugs its labels; beside the catalog the
+        // two share the row.
+        let fit = |segment: Button| {
+            if self.tabs {
+                crate::panel_kit::hugging(segment)
+            } else {
+                segment
+            }
+        };
         let slider = segment_track(cx)
-            .w_full()
+            .when(!self.tabs, |track| track.w_full())
             .children(efforts.iter().enumerate().map(|(i, effort)| {
                 let value = effort.clone();
                 let on = i == index;
-                segment(
+                fit(segment(
                     SharedString::from(format!("effort-{effort}")),
                     short_effort_label(effort).to_owned(),
                     on,
                     self.disabled,
                     cx,
-                )
+                ))
                 .toggled(on)
                 .accessibility_label(format!("{} reasoning", effort_label(effort)))
                 .on_click(cx.listener(move |picker, _, _, cx| {
@@ -490,13 +504,13 @@ impl ProfilePicker {
         .map(|(tier, label, icon)| {
             let selected = choice.service_tier == tier;
             let enabled = !self.disabled && (tier != FAST || fast_offered);
-            segment(
+            fit(segment(
                 SharedString::from(format!("speed-{tier}")),
                 label,
                 selected,
                 !enabled,
                 cx,
-            )
+            ))
             .toggled(selected)
             .icon(icon)
             .accessibility_label(if enabled || tier != FAST {
@@ -516,6 +530,7 @@ impl ProfilePicker {
                 .flex_1()
                 .flex_basis(px(0.))
                 .min_w_0()
+                .when(self.tabs, |field| field.items_start())
                 .gap_2()
                 .child(
                     div()
@@ -530,7 +545,7 @@ impl ProfilePicker {
         let speed = field(
             "Speed",
             segment_track(cx)
-                .w_full()
+                .when(!self.tabs, |track| track.w_full())
                 .children(speeds)
                 .into_any_element(),
         )
@@ -543,13 +558,11 @@ impl ProfilePicker {
         row.w_full()
             .map(|row| {
                 if self.tabs {
-                    row.pt_4()
+                    row.pt_2()
                 } else {
-                    row.px_4().py_3()
+                    row.px_4().py_3().border_t_1().border_color(theme.border)
                 }
             })
-            .border_t_1()
-            .border_color(theme.border)
             .child(reasoning)
             .child(speed)
             .into_any_element()

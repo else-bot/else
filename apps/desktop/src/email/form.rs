@@ -235,6 +235,7 @@ impl Form {
         let theme = cx.theme().clone();
         let note = |text: &str| {
             div()
+                .max_w(crate::panel_kit::PARAGRAPH)
                 .text_xs()
                 .text_color(theme.muted_foreground)
                 .child(text.to_owned())
@@ -251,12 +252,10 @@ impl Form {
                         .disabled(busy),
                 )
         };
-        let mut form = v_flex().gap_4().w_full().child(
-            div()
-                .text_size(px(15.))
-                .font_semibold()
-                .child("Add email account"),
-        );
+        // One group: its title, the provider and its fields, the optional
+        // bot, and the action that closes the group at its trailing edge.
+        let mut form = crate::panel_kit::group_card(cx)
+            .child(crate::panel_kit::group_title("Add email account"));
         if let Some(authorization) = &self.authorization {
             let waiting = matches!(authorization, Authorization::Waiting(_));
             form = form.child(note(&if waiting {
@@ -335,7 +334,7 @@ impl Form {
                     .child(note("TLS is required. Ports 143 and 587 use STARTTLS; other ports use implicit TLS."));
             }
         }
-        form = form.child(v_flex().gap_1()
+        form = form.child(v_flex().gap_2().pt_2()
             .child(
                 h_flex()
                     .gap_2()
@@ -343,12 +342,10 @@ impl Form {
                     .child(div().text_sm().font_medium().child("Ask a bot to help"))
                     .child(crate::panel_kit::tag("Optional", cx)),
             )
-            .child(div().max_w(px(320.)).child(field_style(Select::new(&self.bot), cx).focus_ring(false).cursor_pointer().accessibility_label("Email bot").disabled(busy))))
-            .child(note("The bot will ask what this inbox is for and whether you want a first triage. All your other bots can still use it when asked."));
-        // The action closes the form at its left edge, under the last
-        // helper line, where the eye ends up.
+            .child(div().max_w(px(320.)).child(field_style(Select::new(&self.bot), cx).focus_ring(false).cursor_pointer().accessibility_label("Email bot").disabled(busy)))
+            .child(note("The bot will ask what this inbox is for and whether you want a first triage. All your other bots can still use it when asked.")));
         form.child(
-            h_flex().gap_2().child(
+            h_flex().justify_end().gap_2().child(
                 Button::new("email-connect")
                     .control(
                         Tier::Primary,

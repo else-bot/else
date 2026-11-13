@@ -13,7 +13,10 @@ pub(crate) const FADE: Pixels = px(24.);
 /// of being sliced at a hard line. The fades are static, so the container
 /// must keep at least [`FADE`] of padding at both ends: at rest they cover
 /// only that padding, and they soften only what scrolls beneath them.
-pub(crate) fn faded(scroller: impl IntoElement, background: Hsla) -> Div {
+/// `corner` rounds the bottom fade's trailing corner to match a rounded
+/// surface it ends on, because clipping is rectangular and an opaque square
+/// fade would poke past the surface's curve.
+pub(crate) fn faded(scroller: impl IntoElement, background: Hsla, corner: Pixels) -> Div {
     let edge = || div().absolute().left_0().right_0().h(FADE);
     div()
         .relative()
@@ -27,7 +30,7 @@ pub(crate) fn faded(scroller: impl IntoElement, background: Hsla) -> Div {
             linear_color_stop(background, 0.),
             linear_color_stop(background.opacity(0.), 1.),
         )))
-        .child(edge().bottom_0().bg(linear_gradient(
+        .child(edge().bottom_0().rounded_br(corner).bg(linear_gradient(
             0.,
             linear_color_stop(background, 0.),
             linear_color_stop(background.opacity(0.), 1.),
@@ -105,4 +108,74 @@ pub(crate) fn tag(text: impl Into<SharedString>, cx: &App) -> Div {
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.muted_foreground)
         .child(text.into())
+}
+
+/// A page's title and one-line description, with its header actions on the
+/// title's line. Every page uses compact secondary actions here, so "Check
+/// all", "Refresh" and "Add server" read as one set.
+pub(crate) fn page_heading(
+    title: &'static str,
+    description: &'static str,
+    actions: Vec<AnyElement>,
+    cx: &App,
+) -> Div {
+    h_flex()
+        .w_full()
+        .items_start()
+        .gap_3()
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xl()
+                        .line_height(px(28.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .max_w(PARAGRAPH)
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(description),
+                ),
+        )
+        .when(!actions.is_empty(), |row| {
+            row.child(h_flex().flex_none().gap_2().children(actions))
+        })
+}
+
+/// The widest a Settings paragraph runs, so lines stay readable.
+pub(crate) const PARAGRAPH: Pixels = px(480.);
+
+/// One bordered group on a Settings page: `radius_lg`, a 16 px inset and
+/// 16 px between its parts, the same frame as [`grouped_list`].
+pub(crate) fn group_card(cx: &App) -> Div {
+    v_flex()
+        .w_full()
+        .p_4()
+        .gap_4()
+        .rounded(cx.theme().radius_lg)
+        .border_1()
+        .border_color(cx.theme().border)
+}
+
+/// A group's 16 px semibold title.
+pub(crate) fn group_title(text: impl Into<SharedString>) -> Div {
+    div()
+        .text_base()
+        .line_height(px(22.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(text.into())
+}
+
+/// Lets a segment hug its label with 16 px on each side instead of taking
+/// an equal share of a stretched track; the track then hugs its segments.
+pub(crate) fn hugging(
+    segment: gpui_kit::component::button::Button,
+) -> gpui_kit::component::button::Button {
+    segment.flex_none().flex_basis(Length::Auto).px_4()
 }

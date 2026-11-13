@@ -455,42 +455,88 @@ impl LocalForm {
                 .whitespace_normal()
                 .child(text)
         };
-        let heading =
-            |text: &'static str| div().text_sm().font_weight(FontWeight::MEDIUM).child(text);
-        // A locked schedule reads as its values, not as dead inputs.
-        let value = |label: &'static str, value: SharedString| {
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(label),
-                )
-                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(value))
+        let automatic = |label: &'static str| {
+            toggle("local-backups-enabled", self.enabled, disabled, cx)
+                .accessibility_label(label)
+                .on_click(cx.listener(|shell, enabled: &bool, _, cx| {
+                    if let Some(form) = shell
+                        .backups
+                        .as_mut()
+                        .and_then(|view| view.local_form.as_mut())
+                    {
+                        form.enabled = *enabled;
+                    }
+                    cx.notify();
+                }))
         };
-        // The lock sits under the heading it locks, in place of the
-        // description of what a backup does to running work.
-        let explanation = if managed {
-            h_flex()
+        let title = div()
+            .text_base()
+            .font_weight(FontWeight::SEMIBOLD)
+            .child("Schedule");
+        let footnote = || {
+            note(
+                "Times use the server's timezone. A missed backup runs at the next scheduled \
+                 time. Old copies are removed after a new backup is verified."
+                    .into(),
+            )
+        };
+        if managed {
+            // One label-left, value-right row of the locked schedule card.
+            let row = |label: &'static str, value: AnyElement| {
+                h_flex()
+                    .w_full()
+                    .min_h(px(44.))
+                    .px_4()
+                    .py_2()
+                    .gap_3()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_sm().child(label))
+                    .child(value)
+                    .into_any_element()
+            };
+            let value = |text: SharedString| {
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(text)
+                    .into_any_element()
+            };
+            // A locked schedule is one card. The lock comes first, as the
+            // reason every row below it shows a value instead of a field.
+            let lock = h_flex()
+                .w_full()
+                .px_4()
+                .py_3()
                 .gap_2()
                 .items_start()
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child(Icon::new(IconName::Lock).size_3().mt(px(2.)).flex_none())
-                .child(div().flex_1().min_w_0().child(
+                .child(Icon::new(IconName::Lock).size_3p5().mt(px(1.)).flex_none())
+                .child(div().flex_1().min_w_0().whitespace_normal().child(
                     "Locked by ELSE_BACKUP_INTERVAL_SECS on the server. Change that variable to \
                      edit this schedule.",
                 ))
-        } else {
-            h_flex().child(note(
-                "else.bot pauses new work while it backs up. Running tasks finish first.".into(),
-            ))
-        };
-        let schedule = v_flex()
-            .gap_4()
+                .into_any_element();
+            return v_flex()
+                .gap_3()
+                .child(title)
+                .child(crate::panel_kit::grouped_list(
+                    [
+                        lock,
+                        row(
+                            "Automatic",
+                            automatic("Automatic daily local backups, locked by the server")
+                                .into_any_element(),
+                        ),
+                        row("Daily time", value(self.time.read(cx).value())),
+                        row("Keep copies", value(self.keep.read(cx).value())),
+                    ],
+                    cx,
+                ))
+                .child(footnote());
+        }
+        let schedule = crate::panel_kit::group_card(cx)
             .child(
                 h_flex()
                     .gap_3()
@@ -502,122 +548,73 @@ impl LocalForm {
                             .gap_1()
                             .flex_1()
                             .min_w_0()
-                            .child(heading("Daily backup time"))
-                            .child(explanation),
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("Daily backup time"),
+                            )
+                            .child(note(
+                                "else.bot pauses new work while it backs up. Running tasks finish \
+                                 first."
+                                    .into(),
+                            )),
                     )
-                    // A locked schedule keeps its switch, disabled, so its
-                    // state reads the same way as an editable one.
                     .child(
                         h_flex()
                             .gap_2()
                             .items_center()
-                            .text_xs()
-                            .when(managed, |row| {
-                                row.text_color(theme.muted_foreground)
-                                    .child(Icon::new(IconName::Lock).size_3())
-                            })
+                            .text_sm()
                             .child("Automatic")
-                            .child(
-                                toggle("local-backups-enabled", self.enabled, disabled, cx)
-                                    .accessibility_label(if managed {
-                                        "Automatic daily local backups, locked by the server"
-                                    } else {
-                                        "Automatic daily local backups"
-                                    })
-                                    .on_click(cx.listener(|shell, enabled: &bool, _, cx| {
-                                        if let Some(form) = shell
-                                            .backups
-                                            .as_mut()
-                                            .and_then(|view| view.local_form.as_mut())
-                                        {
-                                            form.enabled = *enabled;
-                                        }
-                                        cx.notify();
-                                    })),
-                            ),
+                            .child(automatic("Automatic daily local backups")),
                     ),
             )
-            .when(managed, |panel| {
-                panel.child(
-                    h_flex()
-                        .gap_4()
-                        .items_start()
-                        .when(stacked, |row| row.flex_col())
-                        .child(value("Daily time", self.time.read(cx).value()))
-                        .child(div().flex_1().min_w_0()),
-                )
-            })
-            .when(!managed, |panel| {
-                panel.child(presets).child(
-                    h_flex()
-                        .gap_4()
-                        .items_start()
-                        .when(stacked, |row| row.flex_col())
-                        .child(field("Exact time", &self.time))
-                        .child(div().flex_1().min_w_0()),
-                )
-            })
-            // The summary above names the server's timezone; this note
-            // does not repeat it.
-            .child(note(
-                "Times use the server's timezone. A missed backup runs at the next scheduled \
-                 time."
-                    .into(),
-            ));
-        let retention = v_flex()
-            .gap_4()
+            .child(presets)
             .child(
                 h_flex()
                     .gap_4()
                     .items_start()
                     .when(stacked, |row| row.flex_col())
-                    .when(managed, |row| {
-                        row.child(value("Keep copies", self.keep.read(cx).value()))
-                    })
-                    .when(!managed, |row| row.child(field("Keep copies", &self.keep)))
-                    .child(div().flex_1().min_w_0()),
-            )
-            .child(note(
-                "Old copies are removed after a new backup is verified.".into(),
-            ));
+                    .child(field("Exact time", &self.time))
+                    .child(field("Keep copies", &self.keep)),
+            );
         v_flex()
-            .gap_8()
+            .gap_3()
+            .child(title)
             .child(schedule)
-            .child(retention)
-            .when(!managed, |panel| {
-                panel.child(
-                    h_flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("local-backup-cancel")
-                                .control(
-                                    Tier::Secondary,
-                                    Scale::Standard,
-                                    disabled || !self.dirty(cx),
-                                    cx,
-                                )
-                                .label("Cancel")
-                                .on_click(cx.listener(|shell, _, window, cx| {
-                                    shell.cancel_local_backup_edit(window, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new("local-backup-save")
-                                .control(
-                                    Tier::Primary,
-                                    Scale::Standard,
-                                    disabled || !self.dirty(cx),
-                                    cx,
-                                )
-                                .label("Save schedule")
-                                .loading(saving)
-                                .on_click(cx.listener(|shell, _, window, cx| {
-                                    shell.save_local_backup_schedule(window, cx)
-                                })),
-                        ),
-                )
-            })
+            .child(footnote())
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("local-backup-cancel")
+                            .control(
+                                Tier::Secondary,
+                                Scale::Standard,
+                                disabled || !self.dirty(cx),
+                                cx,
+                            )
+                            .label("Cancel")
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.cancel_local_backup_edit(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("local-backup-save")
+                            .control(
+                                Tier::Primary,
+                                Scale::Standard,
+                                disabled || !self.dirty(cx),
+                                cx,
+                            )
+                            .label("Save schedule")
+                            .loading(saving)
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.save_local_backup_schedule(window, cx)
+                            })),
+                    ),
+            )
     }
 }
 

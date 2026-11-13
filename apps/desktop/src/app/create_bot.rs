@@ -128,20 +128,21 @@ impl ElseApp {
             });
             let stacked = window.viewport_size().width < px(760.);
             let choose = holder.downgrade();
-            // The avatar studio starts on the "Bot name" line, preview first.
+            // The avatar studio starts on the "Bot name" line, preview first,
+            // and its last swatch row ends on the details' last control.
             let studio =
                 v_flex()
                     .flex_none()
                     .items_center()
-                    .justify_start()
+                    .justify_between()
                     .gap_5()
                     .when(stacked, |studio| studio.w_full().pb_2())
-                    .when(!stacked, |studio| studio.w(px(248.)))
+                    .when(!stacked, |studio| studio.w(px(256.)))
                     .child(
                         v_flex()
                             .items_center()
                             .gap_2()
-                            .child(bot_avatar("create-avatar-preview", form.avatar, px(96.)))
+                            .child(bot_avatar("create-avatar-preview", form.avatar, px(104.)))
                             .child(div().text_xs().text_color(theme.muted_foreground).child(
                                 format!(
                                     "{} · {}",

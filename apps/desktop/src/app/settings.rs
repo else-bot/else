@@ -1077,20 +1077,22 @@ impl ElseApp {
         }
         if self.details_tab == super::computer::DetailsTab::Details {
             if let Some(entry) = self.settings.get(&bot.id) {
-                // The conversation header already presents the bot, so the
-                // panel opens on what it configures; renaming and the avatar
-                // follow the sections.
                 body = body
                     .child(self.render_model(bot.id, &entry.model, cx))
                     .child(self.render_rules_section(bot.id, cx))
                     .child(self.render_routines(bot.id, &entry.routines, cx))
                     .child(self.render_reminders(bot.id, &entry.routines, cx))
-                    .child(self.render_triggers(bot.id, entry, cx))
-                    .child(self.render_details(bot.id, &entry.details, cx));
+                    .child(self.render_triggers(bot.id, entry, cx));
             } else {
                 body = body.child(muted("Loading…", cx));
             }
         }
+        // Both tabs open on the bot itself: its avatar and name, where both
+        // are edited, so the Computer tab is anchored the same way.
+        let identity = self
+            .settings
+            .get(&bot.id)
+            .map(|entry| self.render_identity(bot.id, &entry.details, cx));
         let mut panel = v_flex()
             .id("bot-settings")
             .relative()
@@ -1116,15 +1118,14 @@ impl ElseApp {
                     .gap_2()
                     .child(
                         segment_track(cx)
-                            .flex_1()
                             .child(
-                                segment(
+                                crate::panel_kit::hugging(segment(
                                     "details-tab",
                                     "Details",
                                     self.details_tab == super::computer::DetailsTab::Details,
                                     false,
                                     cx,
-                                )
+                                ))
                                 .on_click(cx.listener(
                                     |app, _, _, cx| {
                                         app.details_tab = super::computer::DetailsTab::Details;
@@ -1135,13 +1136,13 @@ impl ElseApp {
                                 )),
                             )
                             .child(
-                                segment(
+                                crate::panel_kit::hugging(segment(
                                     "computer-tab",
                                     "Computer",
                                     self.details_tab == super::computer::DetailsTab::Computer,
                                     false,
                                     cx,
-                                )
+                                ))
                                 .on_click(cx.listener(
                                     |app, _, window, cx| {
                                         app.details_tab = super::computer::DetailsTab::Computer;
@@ -1151,15 +1152,18 @@ impl ElseApp {
                                 )),
                             ),
                     )
+                    .child(div().flex_1())
                     .child(div().flex_none().child(close)),
             )
+            .children(identity)
             .child(
                 // Rows dissolve under the tabs and the footer instead of
                 // being sliced at the rule.
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(crate::panel_kit::faded(body, theme.sidebar)),
+                div().flex_1().min_h_0().child(crate::panel_kit::faded(
+                    body,
+                    theme.sidebar,
+                    px(0.),
+                )),
             )
             .child(self.sidebar_handle(super::layout::SidebarEdge::Right, cx));
         if self.default_bot_id != Some(bot.id) {
@@ -1197,7 +1201,9 @@ impl ElseApp {
         panel.into_any_element()
     }
 
-    fn render_details(&self, bot: Uuid, details: &Details, cx: &mut Context<Self>) -> AnyElement {
+    /// The panel's identity header: a 40 px avatar that opens the picker
+    /// and the bot's 17 px name, which turns into a field when clicked.
+    fn render_identity(&self, bot: Uuid, details: &Details, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let name = if details.editing {
             div()
@@ -1207,25 +1213,44 @@ impl ElseApp {
                 .child(
                     text_field(Input::new(&details.name), cx)
                         .text_left()
+                        .text_size(px(15.))
                         .font_weight(FontWeight::SEMIBOLD),
                 )
                 .into_any_element()
         } else {
             let hover = theme.sidebar_accent;
-            div()
+            h_flex()
                 .id("bot-name")
                 .max_w_full()
+                .min_w_0()
+                .gap_1p5()
                 .px_2()
-                .py_1()
-                .text_sm()
+                .py_0p5()
                 .rounded(theme.radius)
                 .cursor_pointer()
                 .hover(move |style| style.bg(hover))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_left()
-                .truncate()
+                .group("bot-name")
                 .aria_description("Click to rename")
-                .child(details.sync.desired.name.clone())
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(17.))
+                        .line_height(px(24.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(details.sync.desired.name.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .opacity(0.)
+                        .group_hover("bot-name", |style| style.opacity(1.))
+                        .child(
+                            Icon::new(gpui_kit::assets::IconName::PencilLine)
+                                .size_3p5()
+                                .text_color(theme.muted_foreground),
+                        ),
+                )
                 .on_click(cx.listener(move |app, _, window, cx| app.edit_name(bot, window, cx)))
                 .into_any_element()
         };
@@ -1240,30 +1265,29 @@ impl ElseApp {
                 .child(note(format!("Couldn't save. {err}"), true, cx))
                 .child(
                     Button::new("retry-details")
-                        .control(Tier::Secondary, Scale::Standard, false, cx)
+                        .control(Tier::Secondary, Scale::Compact, false, cx)
                         .label("Retry")
                         .on_click(cx.listener(move |app, _, _, cx| app.flush_details(bot, cx))),
                 )
         });
-        // A compact row, not a hero: the conversation header already
-        // presents the bot. This is where its avatar and name are edited.
-        section("Name and avatar", cx)
+        h_flex()
+            .flex_none()
+            .w_full()
+            .px_4()
+            .pt_4()
+            .pb_3()
+            .gap_1()
+            .items_center()
+            .child(self.render_avatar_editor(bot, details, cx))
             .child(
-                h_flex()
-                    .w_full()
-                    .py_1()
-                    .items_center()
-                    .gap_2()
-                    .child(self.render_avatar_editor(bot, details, cx))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
-                            .child(name)
-                            .children(problem)
-                            .children(error),
-                    ),
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .px_1()
+                    .child(name)
+                    .children(problem)
+                    .children(error),
             )
             .into_any_element()
     }
@@ -1303,8 +1327,8 @@ impl ElseApp {
             .focus_ring(false)
             .cursor_pointer()
             .ghost()
-            .w(px(36.))
-            .h(px(36.))
+            .w(px(44.))
+            .h(px(44.))
             .p_0()
             .rounded(theme.radius_lg)
             .accessibility_label(editing)
@@ -1316,15 +1340,15 @@ impl ElseApp {
                     .child(bot_avatar(
                         ElementId::Name(format!("settings-avatar-{bot}").into()),
                         details.sync.desired.avatar,
-                        px(28.),
+                        px(40.),
                     ))
                     .child(badge),
             );
         let app = cx.entity().downgrade();
         let toggle = app.clone();
-        // The row sits at the end of the panel, so the picker opens upward.
+        // The header sits at the top of the panel, so the picker opens down.
         Popover::new("avatar-picker")
-            .anchor(Anchor::BottomCenter)
+            .anchor(Anchor::TopLeft)
             .open(details.picking)
             .on_open_change(move |open, _, cx| {
                 let _ = toggle.update(cx, |app, cx| app.set_picking(bot, *open, cx));
@@ -1577,9 +1601,10 @@ impl ElseApp {
             .gap_1()
             .group("automation-card")
             .child(
+                // The switch lines up with the name, the row's first line.
                 h_flex()
                     .gap_2()
-                    .items_center()
+                    .items_start()
                     .child(
                         v_flex()
                             .flex_1()
@@ -1945,10 +1970,11 @@ impl ElseApp {
             .gap_1()
             .group("automation-card")
             .child(
+                // The switch lines up with the name, the row's first line.
                 h_flex()
                     .w_full()
                     .gap_2()
-                    .items_center()
+                    .items_start()
                     .child(div().flex_1().min_w_0().child(description))
                     .child(
                         h_flex()
@@ -2224,7 +2250,7 @@ pub(super) fn section_frame(cx: &App) -> Div {
 }
 
 fn section(title: &'static str, cx: &App) -> Div {
-    section_frame(cx).child(crate::appearance::section_label(title, cx).pb_1())
+    section_frame(cx).child(crate::appearance::section_label(title, cx).pb_0p5())
 }
 
 /// Rows separated by hairlines, without a rule above the first.
@@ -2242,7 +2268,7 @@ fn list_rows(rows: Vec<AnyElement>, cx: &App) -> impl Iterator<Item = Div> {
 /// wraps instead of truncating.
 fn meta(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
-        .text_size(px(12.5))
+        .text_size(px(12.))
         .line_height(px(18.))
         .text_color(cx.theme().muted_foreground)
         .whitespace_normal()
@@ -2270,7 +2296,7 @@ fn meta_line(tokens: Vec<AnyElement>, cx: &App) -> Div {
                     token.child(
                         div()
                             .flex_none()
-                            .text_size(px(12.5))
+                            .text_size(px(12.))
                             .text_color(separator)
                             .child("·"),
                     )
