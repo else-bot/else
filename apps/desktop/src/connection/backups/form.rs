@@ -513,10 +513,34 @@ impl LocalForm {
                 .text_xs()
                 .text_color(theme.muted_foreground)
                 .child(Icon::new(IconName::Lock).size_3p5().mt(px(1.)).flex_none())
-                .child(div().flex_1().min_w_0().whitespace_normal().child(
-                    "Locked by ELSE_BACKUP_INTERVAL_SECS on the server. Change that variable to \
-                     edit this schedule.",
-                ))
+                // The variable is set in mono, like inline code in chat.
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            h_flex()
+                                .flex_wrap()
+                                .gap_x_1()
+                                .child("Locked by")
+                                .child(
+                                    div()
+                                        .px_1()
+                                        .rounded(px(4.))
+                                        .bg(theme.foreground.opacity(0.07))
+                                        .font_family(theme.mono_font_family.clone())
+                                        .text_color(theme.foreground)
+                                        .child("ELSE_BACKUP_INTERVAL_SECS"),
+                                )
+                                .child("on the server."),
+                        )
+                        .child(
+                            div()
+                                .whitespace_normal()
+                                .child("Change that variable to edit this schedule."),
+                        ),
+                )
                 .into_any_element();
             return v_flex()
                 .gap_3()
