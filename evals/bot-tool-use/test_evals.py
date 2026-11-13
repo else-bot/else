@@ -313,6 +313,14 @@ def run(runner):
                                                 "summary": "Dev is signed out of its provider, so it can't make the fix. Sign Dev back in from Settings."},
                                {"status": "pending"})],
                     "The fix waits on Dev, which is signed out. I flagged the owner to sign it back in."),
+                "review-task-fix-flags-owner": (
+                    [self.call("notify_owner", {"kind": "decision",
+                                                "summary": "Scout's DM drafts keep overclaiming. I specced a per-candidate qualification gate, but Scout won't build it from my review. Tell me to go ahead and I'll send Scout the build."},
+                               {"status": "pending"})],
+                    "Drop @jwhh365: a promo and an NFT mint are not trading evidence. Build one per-candidate gate."),
+                "review-task-requester-applies-stays-quiet": (
+                    [], "Use A: it cites the Hyperliquid perp post from yesterday. B claims more than the evidence shows.",
+                    "Use the first option."),
                 "routine-task-report-stays-quiet": (
                     [], "0 new checkout errors in the last hour; this morning's 3 are resolved.",
                     "No new checkout errors in the last hour."),
