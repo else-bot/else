@@ -176,16 +176,14 @@ async fn partial_or_inconsistent_installations_are_refused() {
 async fn concurrent_setups_create_one_main_bot() {
     let db = TestDb::migrated().await;
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(4));
-    let runs: Vec<_> = (0..4)
-        .map(|_| {
-            let pool = db.pool.clone();
-            let barrier = barrier.clone();
-            tokio::spawn(async move {
-                barrier.wait().await;
-                installation::setup(&pool).await.unwrap()
-            })
+    let runs: Vec<_> = Vec::from_fn(4, |_| {
+        let pool = db.pool.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            installation::setup(&pool).await.unwrap()
         })
-        .collect();
+    });
     let created = futures_count(runs.into_iter()).await;
     assert_eq!(created, 1);
     assert_eq!(counts(&db.pool).await, (1, 1, 1, 1));

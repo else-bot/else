@@ -17,9 +17,7 @@ fn busy_worker() {
 fn a_full_queue_refuses_at_once_instead_of_blocking() {
     busy_worker();
     let theme = Theme::standard(true);
-    let mut pending: Vec<_> = (0..2)
-        .map(|_| isolate::submit("<p>x</p>", 300, 1.0, &theme))
-        .collect();
+    let mut pending: Vec<_> = Vec::from_fn(2, |_| isolate::submit("<p>x</p>", 300, 1.0, &theme));
     std::thread::sleep(std::time::Duration::from_millis(300));
     pending.extend((0..16).map(|_| isolate::submit("<p>x</p>", 300, 1.0, &theme)));
     let started = std::time::Instant::now();

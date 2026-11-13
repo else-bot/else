@@ -253,7 +253,7 @@ async fn councils_are_atomic_bounded_and_cannot_create_nested_work() {
         vec![peer.clone(), peer.clone()],
         vec![peer.clone(), Uuid::max().to_string()],
         vec![main.clone()],
-        (0..33).map(|_| Uuid::new_v4().to_string()).collect(),
+        Vec::from_fn(33, |_| Uuid::new_v4().to_string()),
     ] {
         let rejected = tool(
             &h.app,

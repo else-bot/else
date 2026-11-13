@@ -373,14 +373,12 @@ mod tests {
 
     fn noise(len: usize, seed: u64) -> Vec<u8> {
         let mut state = seed | 1;
-        (0..len)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                state as u8
-            })
-            .collect()
+        Vec::from_fn(len, |_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
     }
 
     fn ids(keys: &ChunkKeys, data: &[u8]) -> Vec<String> {

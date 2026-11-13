@@ -4,6 +4,8 @@
 //! the turn's lease (`turn:<id>`), which starts the computer on demand unless
 //! the owner stopped it. Guest output is task data, never instructions.
 
+use std::mem::DropGuard;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -14,7 +16,7 @@ use super::mcp::{Outcome, slice, tool_error, tool_image, tool_result, wire_size}
 use crate::app::tools::summarize_input;
 use crate::computers::jobs::CommandOutput;
 use crate::computers::jobs::Started;
-use crate::computers::{Acquire, ComputerError};
+use crate::computers::{Acquire, ComputerError, ComputerManager};
 use crate::db::memory::RESPONSE_BUDGET;
 use crate::db::task_secrets::{self, Env};
 use crate::grants::Grant;
@@ -536,18 +538,13 @@ async fn shown(
     (tool_image(meta, png), Some(log))
 }
 
-struct EndOnDrop {
-    computers: Option<std::sync::Arc<crate::computers::ComputerManager>>,
+fn end_turn_on_drop(
+    computers: &Arc<ComputerManager>,
     turn: Uuid,
-}
-
-impl Drop for EndOnDrop {
-    fn drop(&mut self) {
-        if let Some(computers) = self.computers.take() {
-            let turn = self.turn;
-            tokio::spawn(async move { computers.end_turn_commands(turn).await });
-        }
-    }
+) -> DropGuard<Arc<ComputerManager>, impl FnOnce(Arc<ComputerManager>)> {
+    DropGuard::new(computers.clone(), move |computers| {
+        tokio::spawn(async move { computers.end_turn_commands(turn).await });
+    })
 }
 
 async fn input(
@@ -596,10 +593,7 @@ async fn input(
         )],
     };
     let command = "DISPLAY=:99 exec /usr/local/bin/else-input".to_owned();
-    let mut guard = EndOnDrop {
-        computers: Some(computers.clone()),
-        turn: grant.turn_id,
-    };
+    let guard = end_turn_on_drop(computers, grant.turn_id);
     let run = {
         let computers = computers.clone();
         let (bot, holder) = (grant.bot_id, holder(grant));
@@ -610,7 +604,7 @@ async fn input(
         })
     };
     let finished = run.await;
-    guard.computers = None;
+    DropGuard::dismiss(guard);
     let out = match finished {
         Ok(Ok(Ok(out))) => out,
         Ok(Ok(Err(acquired))) => return (not_ready(&acquired), None),
@@ -822,12 +816,9 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                         .await
                 })
             };
-            let mut guard = EndOnDrop {
-                computers: Some(computers.clone()),
-                turn: grant.turn_id,
-            };
+            let guard = end_turn_on_drop(&computers, grant.turn_id);
             let finished = run.await;
-            guard.computers = None;
+            DropGuard::dismiss(guard);
             let ran = match finished {
                 Ok(ran) => ran,
                 Err(err) => {

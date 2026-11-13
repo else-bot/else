@@ -176,15 +176,13 @@ async fn concurrent_retries_create_one_bot() {
     let app = Arc::new(TestApp::installed().await);
     let request = Uuid::new_v4();
     let barrier = Arc::new(tokio::sync::Barrier::new(6));
-    let calls: Vec<_> = (0..6)
-        .map(|_| {
-            let (app, barrier) = (app.clone(), barrier.clone());
-            tokio::spawn(async move {
-                barrier.wait().await;
-                create(&app, request, "Family").await
-            })
+    let calls: Vec<_> = Vec::from_fn(6, |_| {
+        let (app, barrier) = (app.clone(), barrier.clone());
+        tokio::spawn(async move {
+            barrier.wait().await;
+            create(&app, request, "Family").await
         })
-        .collect();
+    });
     let mut ids = Vec::new();
     let mut created = 0;
     for call in calls {

@@ -314,7 +314,7 @@ fn read_private_file(path: &Path, what: &'static str) -> Result<String, Credenti
 }
 
 fn strip_newline(text: &str) -> &str {
-    text.strip_suffix('\n').unwrap_or(text)
+    text.trim_suffix('\n')
 }
 
 pub fn load_owner_token(path: &Path) -> Result<OwnerToken, CredentialError> {

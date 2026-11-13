@@ -486,20 +486,18 @@ pub async fn rows(conn: &mut sqlx::SqliteConnection, sql: &str) -> Vec<String> {
     let mut out: Vec<String> = rows
         .iter()
         .map(|row| {
-            let values: Vec<serde_json::Value> = (0..row.len())
-                .map(|i| {
-                    let value = row.try_get_raw(i).unwrap();
-                    if value.is_null() {
-                        return serde_json::Value::Null;
-                    }
-                    match value.type_info().name() {
-                        "INTEGER" => serde_json::json!(row.get::<i64, _>(i)),
-                        "REAL" => serde_json::json!(row.get::<f64, _>(i)),
-                        "BLOB" => serde_json::json!(hex::encode(row.get::<Vec<u8>, _>(i))),
-                        _ => serde_json::json!(row.get::<String, _>(i)),
-                    }
-                })
-                .collect();
+            let values: Vec<serde_json::Value> = Vec::from_fn(row.len(), |i| {
+                let value = row.try_get_raw(i).unwrap();
+                if value.is_null() {
+                    return serde_json::Value::Null;
+                }
+                match value.type_info().name() {
+                    "INTEGER" => serde_json::json!(row.get::<i64, _>(i)),
+                    "REAL" => serde_json::json!(row.get::<f64, _>(i)),
+                    "BLOB" => serde_json::json!(hex::encode(row.get::<Vec<u8>, _>(i))),
+                    _ => serde_json::json!(row.get::<String, _>(i)),
+                }
+            });
             serde_json::to_string(&values).unwrap()
         })
         .collect();

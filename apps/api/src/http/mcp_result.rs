@@ -417,9 +417,7 @@ mod tests {
 
     #[test]
     fn a_structured_copy_goes_only_when_the_text_carries_the_same_json() {
-        let rows: Vec<Value> = (0..250)
-            .map(|i| json!({ "id": i, "title": "row" }))
-            .collect();
+        let rows: Vec<Value> = Vec::from_fn(250, |i| json!({ "id": i, "title": "row" }));
         let text = serde_json::to_string(&json!({ "rows": rows })).unwrap();
         let value = json!({ "result": { "content": [{ "type": "text", "text": text }], "structuredContent": { "rows": rows } } });
         let fitted = fit(value, RESULT_BUDGET);
@@ -449,9 +447,10 @@ mod tests {
 
     #[test]
     fn a_large_page_is_indexed_in_parts_without_losing_tools() {
-        let tools: Vec<Value> = (0..500)
-            .map(|i| json!({ "name": format!("tool_{i}"), "description": "d".repeat(150), "inputSchema": {} }))
-            .collect();
+        let tools: Vec<Value> = Vec::from_fn(
+            500,
+            |i| json!({ "name": format!("tool_{i}"), "description": "d".repeat(150), "inputSchema": {} }),
+        );
         let listed = json!({ "tools": tools, "nextCursor": "up2" });
         let mut at = IndexCursor::parse(Some("up1"));
         let mut seen = 0;
@@ -473,7 +472,7 @@ mod tests {
     #[test]
     fn named_schemas_are_whole_or_named_as_omitted() {
         let big = json!({ "name": "big", "inputSchema": { "type": "object", "properties": {
-            "kind": { "enum": (0..3_000).map(|i| format!("value_{i}")).collect::<Vec<_>>() } } } });
+            "kind": { "enum": Vec::from_fn(3_000, |i| format!("value_{i}")) } } } });
         let small = json!({ "name": "small", "inputSchema": { "type": "object" } });
         let names = vec!["big".to_owned(), "small".to_owned(), "gone".to_owned()];
         let response = named_response(vec![big.clone(), small.clone()], &names);
@@ -487,9 +486,7 @@ mod tests {
 
     #[test]
     fn a_long_list_keeps_its_first_items() {
-        let rows: Vec<Value> = (0..2_000)
-            .map(|i| json!({ "id": i, "title": "an issue" }))
-            .collect();
+        let rows: Vec<Value> = Vec::from_fn(2_000, |i| json!({ "id": i, "title": "an issue" }));
         let fitted = fit(json!({ "result": { "issues": rows } }), RESULT_BUDGET);
         assert!(fitted.to_string().len() <= RESULT_BUDGET);
         let issues = fitted["result"]["issues"].as_array().unwrap();

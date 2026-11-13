@@ -328,7 +328,7 @@ fn challenge_parameters(value: &str) -> Result<BTreeMap<String, String>, Error> 
             continue;
         }
         if byte == b'"' {
-            quoted = !quoted
+            quoted.toggle()
         }
         if byte == b',' && !quoted {
             let part = value[start..index].trim();

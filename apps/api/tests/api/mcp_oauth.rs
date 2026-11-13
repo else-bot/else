@@ -586,9 +586,7 @@ async fn an_unauthorized_mutation_is_not_replayed_after_token_refresh() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_provider_advertising_hundreds_of_scopes_still_shows_the_sign_in_card() {
     let fixture = Fixture::start().await;
-    let scopes: Vec<String> = (0..250)
-        .map(|index| format!("resource_{index}:read"))
-        .collect();
+    let scopes: Vec<String> = Vec::from_fn(250, |index| format!("resource_{index}:read"));
     fixture.control(json!({"scopes": scopes})).await;
     let app = TestApp::installed().await;
     let bot = app.create_bot("Large scope list").await;

@@ -29,7 +29,7 @@ fn one_line(task: &str) -> String {
 impl ElseApp {
     pub(super) fn toggle_waiting_tray(&mut self, cx: &mut Context<Self>) {
         if let Some(view) = self.view.as_mut() {
-            view.tray_expanded = !view.tray_expanded;
+            view.tray_expanded.toggle();
         }
         cx.notify();
     }

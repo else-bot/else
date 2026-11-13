@@ -52,7 +52,7 @@ fn is_line_anchor(anchor: &str) -> bool {
         return false;
     };
     match range.split_once('-') {
-        Some((start, end)) => position(start) && position(end.strip_prefix('L').unwrap_or(end)),
+        Some((start, end)) => position(start) && position(end.trim_prefix('L')),
         None => position(range),
     }
 }

@@ -13,6 +13,7 @@
 //! error, never a reason to regenerate anything.
 
 use std::io::{Read, Write};
+use std::mem::DropGuard;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -306,14 +307,6 @@ fn verify_and_decrypt(
     Ok(())
 }
 
-struct Staging(PathBuf);
-
-impl Drop for Staging {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, BackupError> {
     if request.target_database.is_empty() || request.target_database.contains('\0') {
         return Err(BackupError::Refused(
@@ -350,14 +343,17 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
     let _lock = super::try_lock(request.staging_parent)?
         .ok_or_else(|| BackupError::Refused("another restore is running".into()))?;
     clean_stale(request.staging_parent)?;
-    let staging = Staging(
+    let staging = DropGuard::new(
         request
             .staging_parent
             .join(format!(".restore-{}", uuid::Uuid::new_v4())),
+        |dir| {
+            let _ = std::fs::remove_dir_all(dir);
+        },
     );
-    super::private_dir(&staging.0)?;
-    super::mark_owned(&staging.0)?;
-    let dump = staging.0.join("database.dump");
+    super::private_dir(&staging)?;
+    super::mark_owned(&staging)?;
+    let dump = staging.join("database.dump");
     {
         let set_dir = request.set_dir.to_owned();
         let manifest = manifest.clone();
@@ -392,7 +388,7 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
     let mut restored = load_and_check(&request, &manifest, &dump).await;
     let _ = std::fs::remove_file(&dump);
     if restored.is_ok()
-        && let Err(err) = restore_computers(&request, &manifest, &identity, &staging.0).await
+        && let Err(err) = restore_computers(&request, &manifest, &identity, &staging).await
     {
         restored = Err(err);
     }

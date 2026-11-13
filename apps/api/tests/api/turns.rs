@@ -159,16 +159,14 @@ async fn concurrent_duplicate_sends_accept_once() {
     let app = Arc::new(TestApp::installed().await);
     let bot = app.main_bot().await;
     let request = Uuid::new_v4();
-    let calls: Vec<_> = (0..6)
-        .map(|_| {
-            let (app, bot) = (app.clone(), bot.clone());
-            tokio::spawn(async move {
-                app.send(&bot, request, "once", Some("synthetic"))
-                    .await
-                    .status
-            })
+    let calls: Vec<_> = Vec::from_fn(6, |_| {
+        let (app, bot) = (app.clone(), bot.clone());
+        tokio::spawn(async move {
+            app.send(&bot, request, "once", Some("synthetic"))
+                .await
+                .status
         })
-        .collect();
+    });
     let mut statuses = Vec::new();
     for call in calls {
         statuses.push(call.await.unwrap());
@@ -313,7 +311,7 @@ async fn rapid_corrections_are_all_accepted_and_reach_the_newest_reply() {
     // Keep the cancelled hang turn draining until every correction is queued,
     // so each one supersedes the one before however slowly they arrive.
     synthetic.hold_hangs(true).await;
-    let corrections: Vec<String> = (0..6).map(|i| format!("correction {i}")).collect();
+    let corrections: Vec<String> = Vec::from_fn(6, |i| format!("correction {i}"));
     let mut requests = Vec::new();
     for text in &corrections {
         let request = Uuid::new_v4();
