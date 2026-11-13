@@ -160,16 +160,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                 reply.reactions.push((item.id, kind));
             }
             if let Some(previous) = reply.latest.replace(item.id) {
-                // The owner read an earlier attempt's last reply as the answer.
-                let ended_attempt = conversation
-                    .item(previous)
-                    .and_then(|previous| previous.attempt)
-                    .is_some_and(|previous| item.attempt > Some(previous));
-                if reply.latest_kept || ended_attempt {
-                    reply.kept.push(previous)
-                } else {
-                    reply.history.push(previous)
-                }
+                reply.history.push(previous);
             }
             reply.latest_kept = reaction.is_some() || has_file;
             reply.anchor = Some(item.id);
@@ -178,6 +169,9 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
         } else if reply.latest.is_none() && item.routine_update.is_none() {
             reply.anchor = Some(item.id);
         }
+    }
+    for reply in replies.values_mut() {
+        keep_earlier_replies(conversation, &reactions, reply);
     }
     // A queued turn runs no attempt, so its latest reply ended one.
     for (turn, reply) in &mut replies {
@@ -232,6 +226,54 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             });
     }
     replies
+}
+
+/// Moves the earlier replies the owner still needs from `history` to `kept`:
+/// a reacted reply, the reply that ended the most recent earlier attempt, and
+/// a reply with a file no later reply delivers again. A bot that restates its
+/// work after each park re-uploads the same file, often under another name,
+/// so a file is matched by type and size.
+fn keep_earlier_replies(
+    conversation: &Conversation,
+    reactions: &HashMap<Uuid, crate::model::ReactionKind>,
+    reply: &mut TaskReply,
+) {
+    let Some(latest) = reply.latest else {
+        return;
+    };
+    let attempt = |id| conversation.item(id).and_then(|item| item.attempt);
+    let files = |id| {
+        conversation
+            .item(id)
+            .into_iter()
+            .flat_map(|item| &item.parts)
+            .filter_map(|part| match part {
+                crate::attachments::MessagePart::File { file } => {
+                    Some((file.media_type.as_str(), file.size))
+                }
+                crate::attachments::MessagePart::Text { .. } => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let replies: Vec<_> = reply.history.iter().copied().chain([latest]).collect();
+    let ended_attempt = replies
+        .windows(2)
+        .rev()
+        .find(|pair| attempt(pair[0]).is_some_and(|ended| attempt(pair[1]) > Some(ended)))
+        .map(|pair| pair[0]);
+    let mut delivered_later: HashSet<_> = files(latest).into_iter().collect();
+    let mut kept = Vec::new();
+    for &id in reply.history.iter().rev() {
+        let files = files(id);
+        let new_file = files.iter().any(|file| !delivered_later.contains(file));
+        delivered_later.extend(files);
+        if new_file || reactions.contains_key(&id) || ended_attempt == Some(id) {
+            kept.push(id);
+        }
+    }
+    reply.history.retain(|id| !kept.contains(id));
+    kept.reverse();
+    reply.kept = kept;
 }
 
 #[cfg(test)]
