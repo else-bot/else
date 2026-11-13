@@ -133,10 +133,22 @@ fn diff_block(diff: &[DiffLine], cx: &App) -> Div {
         .text_xs()
         .line_height(px(18.))
         .children(diff.iter().map(|line| {
-            let (sign, color, fill) = match line.op {
-                DiffOp::Same => (" ", theme.muted_foreground, None),
-                DiffOp::Add => ("+", theme.success, Some(theme.success.opacity(0.12))),
-                DiffOp::Remove => ("-", theme.danger, Some(theme.danger.opacity(0.10))),
+            // The band and the sign carry the colour; the text stays in the
+            // body colour so it reads on the tint.
+            let (sign, color, text, fill) = match line.op {
+                DiffOp::Same => (" ", theme.muted_foreground, theme.muted_foreground, None),
+                DiffOp::Add => (
+                    "+",
+                    theme.success,
+                    theme.foreground,
+                    Some(theme.success.opacity(0.12)),
+                ),
+                DiffOp::Remove => (
+                    "-",
+                    theme.danger,
+                    theme.foreground,
+                    Some(theme.danger.opacity(0.12)),
+                ),
             };
             h_flex()
                 .w_full()
@@ -144,8 +156,8 @@ fn diff_block(diff: &[DiffLine], cx: &App) -> Div {
                 .gap_2()
                 .items_start()
                 .when_some(fill, |row, fill| row.bg(fill))
-                .text_color(color)
-                .child(div().flex_none().child(sign))
+                .text_color(text)
+                .child(div().flex_none().text_color(color).child(sign))
                 .child(
                     div()
                         .flex_1()
@@ -245,8 +257,10 @@ impl ElseApp {
         }
         let owner = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
+            // One 24 px inset for the title, body and footer.
             let dialog = crate::appearance::modal_surface(dialog, cx)
                 .w(px(820.))
+                .p_6()
                 .centered();
             let Some(app) = owner.upgrade() else {
                 return dialog;
@@ -569,7 +583,8 @@ impl ElseApp {
                 .child("Loading…")
                 .into_any_element();
         };
-        let tabs = segment_track(cx).w(px(220.)).children(
+        // The switch spans the dialog: it governs everything under it.
+        let tabs = segment_track(cx).w_full().children(
             [(RulesTab::Rules, "Rules"), (RulesTab::History, "History")]
                 .into_iter()
                 .map(|(value, label)| {
@@ -640,8 +655,8 @@ impl ElseApp {
             );
         v_flex()
             .w_full()
-            .gap_3()
-            .child(h_flex().child(tabs))
+            .gap_4()
+            .child(tabs)
             .child(div().w_full().child(body))
             .child(footer)
             .into_any_element()
@@ -722,7 +737,7 @@ impl ElseApp {
         file: &RulesFile,
         owner: &WeakEntity<ElseApp>,
         cx: &App,
-    ) -> Option<Button> {
+    ) -> Option<AnyElement> {
         let dialog = self.rules_dialog.as_ref()?;
         let picked = dialog
             .version
@@ -740,8 +755,15 @@ impl ElseApp {
         if target < 0 {
             return None;
         }
-        let (label, icon, color) = if target == 0 {
-            ("Clear rules".to_owned(), IconName::Trash, cx.theme().danger)
+        // Quiet secondary text; clearing turns red only on hover.
+        let clear = target == 0;
+        let danger = cx.theme().danger;
+        let (label, icon, color) = if clear {
+            (
+                "Clear rules".to_owned(),
+                IconName::Trash,
+                cx.theme().muted_foreground,
+            )
         } else {
             (
                 format!("Restore v{target}"),
@@ -749,21 +771,37 @@ impl ElseApp {
                 cx.theme().secondary_foreground,
             )
         };
-        Some(
-            Button::new(if current {
-                "rules-restore"
-            } else {
-                "rules-restore-this"
-            })
-            .control(Tier::Ghost, Scale::Compact, restoring, cx)
-            .flush_start(Scale::Compact)
-            .icon(Icon::new(icon).text_color(color))
-            .label(label)
-            .loading(restoring)
+        // The Button owns its hover style, so the red comes from a group
+        // hover on the label it wraps.
+        let group = "rules-history-action";
+        let content = h_flex()
+            .gap_1p5()
+            .items_center()
             .text_color(color)
-            .on_click(on(owner, move |app, window, cx| {
-                app.restore_rules(bot, target, expected, window, cx)
-            })),
+            .when(clear, |content| {
+                content.group_hover(group, move |style| style.text_color(danger))
+            })
+            .child(Icon::new(icon).size_3p5())
+            .child(label.clone());
+        Some(
+            div()
+                .group(group)
+                .child(
+                    Button::new(if current {
+                        "rules-restore"
+                    } else {
+                        "rules-restore-this"
+                    })
+                    .control(Tier::Ghost, Scale::Compact, restoring, cx)
+                    .flush_start(Scale::Compact)
+                    .accessibility_label(label)
+                    .loading(restoring)
+                    .child(content)
+                    .on_click(on(owner, move |app, window, cx| {
+                        app.restore_rules(bot, target, expected, window, cx)
+                    })),
+                )
+                .into_any_element(),
         )
     }
 
@@ -817,12 +855,12 @@ impl ElseApp {
         };
         let list = v_flex()
             .id("rules-versions")
-            .w(px(240.))
+            .w(px(264.))
             .flex_none()
             .max_h(px(BODY_MAX))
             .overflow_y_scroll()
-            .gap_0p5()
-            .pr_2()
+            .gap_1()
+            .pr_3()
             .border_r_1()
             .border_color(theme.border)
             .children(file.history.iter().map(|v| {
@@ -835,8 +873,8 @@ impl ElseApp {
                     .cursor_pointer()
                     .with_size(Size::Size(px(16.)))
                     .w_full()
-                    .px_2()
-                    .py_1p5()
+                    .px_2p5()
+                    .py_2()
                     .selected(selected)
                     .accessibility_label(format!("Show version {version}"))
                     .on_click(on(owner, move |app, _, cx| {
@@ -892,7 +930,7 @@ impl ElseApp {
             .w_full()
             .max_h(px(BODY_MAX))
             .items_stretch()
-            .gap_4()
+            .gap_6()
             .child(list)
             .child(detail)
             .into_any_element()
