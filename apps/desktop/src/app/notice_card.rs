@@ -85,10 +85,7 @@ impl ElseApp {
             .and_then(|item| item.bot_task.as_ref())
             .map(|task| &task.sender_name);
         let since = crate::sidebar::status::waited(notice.created_at, chrono::Utc::now());
-        let subtitle = sender.map_or_else(
-            || since.clone(),
-            |sender| format!("From {sender}'s task · {since}"),
-        );
+        let subtitle = sender.map_or_else(String::new, |sender| format!("From {sender}'s task"));
         let anchor = receipt.and_then(|receipt| {
             view.rows.iter().find_map(|row| {
                 let activity = row.activity.as_ref()?;
@@ -133,6 +130,7 @@ impl ElseApp {
             );
         Some(
             super::action_card::card(IconName::TriangleAlert, title, subtitle)
+                .meta(since)
                 .child(
                     div()
                         .text_sm()

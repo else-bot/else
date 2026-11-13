@@ -216,7 +216,7 @@ impl ElseApp {
         let mut body = super::super::action_card::card(
             IconName::CircleQuestionMark,
             question.title.clone(),
-            format!("{bot_name} · {kind}"),
+            kind,
         );
         if let Some(context) = &question.context {
             body = body.child(
@@ -227,12 +227,23 @@ impl ElseApp {
                     .child(context.clone()),
             );
         }
-        let mut rows = v_flex().w_full().gap_2();
-        for choice in &question.choices {
+        // Options are borderless rows split by hairlines: the card is the
+        // only box.
+        let line = theme.border;
+        let separated = |index: usize, row: AnyElement| {
+            div()
+                .w_full()
+                .py_0p5()
+                .when(index > 0, |cell| cell.border_t_1().border_color(line))
+                .child(row)
+        };
+        let mut rows = v_flex().w_full();
+        for (index, choice) in question.choices.iter().enumerate() {
             let choice_id = choice.id.clone();
             if question.multiple {
                 let checked = answer.is_some_and(|a| a.contains(&choice.id));
-                rows = rows.child(
+                rows = rows.child(separated(
+                    index,
                     Checkbox::new(SharedString::from(format!("question-{id}-{}", choice.id)))
                         .focus_ring(false)
                         .small()
@@ -244,12 +255,6 @@ impl ElseApp {
                         .py_2()
                         .gap_2p5()
                         .rounded(theme.radius)
-                        .border_1()
-                        .border_color(if checked {
-                            theme.primary.opacity(0.5)
-                        } else {
-                            theme.border
-                        })
                         .when(!locked, |row| row.cursor_pointer())
                         .when(checked, |row| row.bg(theme.primary.opacity(0.08)))
                         .when(!locked && !checked, |row| {
@@ -266,10 +271,12 @@ impl ElseApp {
                         )
                         .on_change(cx.listener(move |app, _, _, cx| {
                             app.toggle_question_choice(id, &choice_id, cx);
-                        })),
-                );
+                        }))
+                        .into_any_element(),
+                ));
             } else {
-                rows = rows.child(
+                rows = rows.child(separated(
+                    index,
                     Button::new(SharedString::from(format!("question-{id}-{}", choice.id)))
                         .focus_ring(false)
                         .ghost()
@@ -281,8 +288,6 @@ impl ElseApp {
                         .px_2()
                         .py_1p5()
                         .rounded(theme.radius)
-                        .border_1()
-                        .border_color(theme.border)
                         .when(!locked, |row| row.cursor_pointer())
                         .accessibility_label(format!("{}. {}", letter(&choice.id), choice.label))
                         .child(
@@ -306,12 +311,15 @@ impl ElseApp {
                                 window,
                                 cx,
                             );
-                        })),
-                );
+                        }))
+                        .into_any_element(),
+                ));
             }
         }
         if let Some(write_in) = view.write_ins.get(&id).filter(|_| takes_write_in(question)) {
-            rows = rows.child(self.render_write_in(id, question, write_in, locked, cx));
+            let index = question.choices.len();
+            let row = self.render_write_in(id, question, write_in, locked, cx);
+            rows = rows.child(separated(index, row.into_any_element()));
         }
         body = body.child(rows);
         let hint = if question.multiple {
@@ -369,8 +377,6 @@ impl ElseApp {
             .pr_1()
             .py_1()
             .rounded(theme.radius)
-            .border_1()
-            .border_color(theme.border)
             .children(next.map(|next| key_chip(theme, next)))
             .child(
                 div().flex_1().min_w_0().child(
@@ -407,7 +413,7 @@ impl ElseApp {
 /// The letter that leads an option row.
 fn key_chip(theme: &Theme, key: String) -> Div {
     h_flex()
-        .size_6()
+        .size_5()
         .flex_shrink_0()
         .justify_center()
         .rounded(theme.radius)

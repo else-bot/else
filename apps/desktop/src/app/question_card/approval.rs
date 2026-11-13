@@ -145,7 +145,7 @@ impl ElseApp {
         } else {
             IconName::Send
         };
-        let mut source = vec![bot_name.to_owned()];
+        let mut source = Vec::new();
         if let Some(scope) = question.task_scope() {
             source.extend([scope.task.clone(), scope.target.clone()]);
         } else if let Some((integration, tool)) = question.mcp_tool_scope() {

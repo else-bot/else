@@ -10,6 +10,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{ActiveTheme as _, Icon, Theme, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 /// The icon column every action card and activity row leads with.
@@ -20,6 +21,7 @@ pub(super) struct ActionCard {
     icon: IconName,
     title: SharedString,
     source: SharedString,
+    meta: Option<SharedString>,
     tag: Option<SharedString>,
     body: Vec<AnyElement>,
     footer: Option<AnyElement>,
@@ -34,6 +36,7 @@ pub(super) fn card(
         icon,
         title: title.into(),
         source: source.into(),
+        meta: None,
         tag: None,
         body: Vec::new(),
         footer: None,
@@ -44,6 +47,13 @@ impl ActionCard {
     /// A short fact beside the title that nothing else on screen says.
     pub(super) fn tag(mut self, tag: impl Into<SharedString>) -> Self {
         self.tag = Some(tag.into());
+        self
+    }
+
+    /// Quiet meta, such as how long it has waited, right-aligned on the
+    /// title row.
+    pub(super) fn meta(mut self, meta: impl Into<SharedString>) -> Self {
+        self.meta = Some(meta.into());
         self
     }
 
@@ -81,14 +91,28 @@ impl RenderOnce for ActionCard {
                             .whitespace_normal()
                             .child(self.title),
                     )
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(theme.muted_foreground)
-                            .whitespace_normal()
-                            .child(self.source),
-                    ),
+                    // The bot's name row sits right above the card, so the
+                    // source line is only for facts it does not repeat.
+                    .when(!self.source.is_empty(), |heading| {
+                        heading.child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(theme.muted_foreground)
+                                .whitespace_normal()
+                                .child(self.source),
+                        )
+                    }),
             )
+            .children(self.meta.map(|meta| {
+                div()
+                    .flex_none()
+                    .h(px(22.))
+                    .flex()
+                    .items_center()
+                    .text_size(px(13.))
+                    .text_color(theme.muted_foreground)
+                    .child(meta)
+            }))
             .children(self.tag.map(|tag| {
                 div()
                     .flex_none()
@@ -105,7 +129,7 @@ impl RenderOnce for ActionCard {
             .min_w_0()
             .items_start()
             .gap_3()
-            .p_4()
+            .p_5()
             .rounded(theme.radius_lg)
             .border_1()
             .border_color(theme.border)
@@ -128,7 +152,7 @@ impl RenderOnce for ActionCard {
                     .children(self.body)
                     .children(
                         self.footer
-                            .map(|footer| div().w_full().pt_1().child(footer)),
+                            .map(|footer| div().w_full().pt_2().child(footer)),
                     ),
             )
     }
@@ -274,12 +298,13 @@ pub(super) fn event_object(theme: &Theme, text: impl Into<SharedString>) -> Div 
         .child(text.into())
 }
 
-/// Right-aligned meta: status, count, time.
+/// Right-aligned meta: status, count, time. Same size as the row, quieter
+/// than its verb.
 pub(super) fn event_meta(theme: &Theme, text: impl Into<SharedString>) -> Div {
     div()
         .flex_none()
-        .text_xs()
-        .text_color(theme.muted_foreground)
+        .text_size(px(13.))
+        .text_color(theme.foreground.opacity(0.55))
         .child(text.into())
 }
 

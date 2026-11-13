@@ -289,11 +289,20 @@ impl ElseApp {
                 .content
                 .metadata()
                 .into_iter()
+                // A fixed label column, so every value starts on one edge.
                 .map(|(label, value)| {
                     h_flex()
-                        .gap_2()
-                        .child(muted(label.into()))
-                        .child(div().min_w_0().text_xs().whitespace_normal().child(value))
+                        .items_start()
+                        .text_size(px(13.))
+                        .line_height(px(20.))
+                        .child(
+                            div()
+                                .w(px(56.))
+                                .flex_none()
+                                .text_color(theme.muted_foreground)
+                                .child(label),
+                        )
+                        .child(div().flex_1().min_w_0().whitespace_normal().child(value))
                 })
                 .collect::<Vec<_>>()
         };
@@ -440,40 +449,37 @@ impl ElseApp {
         let busy = form.operation.is_some() || self.draft_in_flight(id);
         let conflict = form.baseline.version != draft.version;
         let approve_enabled = connected && !busy && !conflict && draft.can_approve;
-        let mut source = self
-            .bots
-            .iter()
-            .find(|bot| bot.id == view.bot_id)
-            .map_or("Draft".to_owned(), |bot| format!("{} · Draft", bot.name));
-        if draft.revision > 1 {
-            source.push_str(&format!(" · v{}", draft.revision));
-        }
-        let mut card =
-            super::action_card::card(content_icon, draft.content.label().to_owned(), source)
-                .when(!draft.can_approve, |card| card.tag("Reply in chat"))
-                .child(
-                    v_flex()
-                        .gap_2()
-                        .children(form.subject.as_ref().map(|subject| {
-                            Input::new(subject)
+        // The bot's name row sits above the card, so the header is one line:
+        // what this is, with the revision as quiet meta.
+        let title = format!("{} draft", draft.content.label());
+        let mut card = super::action_card::card(content_icon, title, "")
+            .when(draft.revision > 1, |card| {
+                card.meta(format!("v{}", draft.revision))
+            })
+            .when(!draft.can_approve, |card| card.tag("Reply in chat"))
+            .child(
+                v_flex()
+                    .gap_2()
+                    .children(form.subject.as_ref().map(|subject| {
+                        Input::new(subject)
+                            .appearance(false)
+                            .px_0()
+                            .disabled(busy)
+                            .aria_label("Email subject")
+                            .font_semibold()
+                    }))
+                    .children(metadata())
+                    .child(
+                        // The editor pads its text by the medium input inset;
+                        // pull it back so the body starts on the card's text edge.
+                        div().mx(px(-10.)).mt_1().line_height(relative(1.5)).child(
+                            Textarea::new(&form.body)
                                 .appearance(false)
-                                .px_0()
                                 .disabled(busy)
-                                .aria_label("Email subject")
-                                .font_semibold()
-                        }))
-                        .children(metadata())
-                        .child(
-                            // The editor pads its text by the medium input inset;
-                            // pull it back so the body starts on the card's text edge.
-                            div().mx(px(-10.)).child(
-                                Textarea::new(&form.body)
-                                    .appearance(false)
-                                    .disabled(busy)
-                                    .aria_label(draft.content.body_label()),
-                            ),
+                                .aria_label(draft.content.body_label()),
                         ),
-                );
+                    ),
+            );
         let footer = super::action_card::footer()
             .when(draft.kind.is_some() && draft.can_approve, |row| {
                 row.child(super::action_card::footer_note(

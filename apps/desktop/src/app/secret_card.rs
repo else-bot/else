@@ -347,26 +347,23 @@ impl ElseApp {
             "Encrypted on this server. Values stay out of chat.".into(),
         ));
         let expanded = view.expanded_events.contains(&id);
-        let mut card = super::action_card::card(
-            IconName::Lock,
-            format!("Save {}", request.name),
-            format!("{bot_name} · Credentials"),
-        )
-        .child(
-            div()
-                .text_sm()
-                .whitespace_normal()
-                .child(request.reason.clone()),
-        )
-        .child(fields)
-        .when(expanded, |card| {
-            card.child(note(format!(
+        let mut card =
+            super::action_card::card(IconName::Lock, format!("Save {}", request.name), "")
+                .child(
+                    div()
+                        .text_sm()
+                        .whitespace_normal()
+                        .child(request.reason.clone()),
+                )
+                .child(fields)
+                .when(expanded, |card| {
+                    card.child(note(format!(
                 "Saved as the task secret {} for every bot on this server, replacing one with the \
                  same name. {bot_name} never sees the values. Paste multi-line values such as \
                  private keys whole.",
                 request.name
             )))
-        });
+                });
         if let Some(error) = &form.error {
             card = card.child(super::action_card::failure(&theme, error.clone()));
         }
