@@ -357,6 +357,7 @@ fn handed_back(bot: &Bot) -> bool {
                 SidebarStatus::WaitingForAnswer { .. }
                     | SidebarStatus::NeedsApproval { .. }
                     | SidebarStatus::NeedsCredentials { .. }
+                    | SidebarStatus::NeedsYou { .. }
             )
         )
 }
@@ -521,6 +522,19 @@ mod tests {
             "same turn, new reply"
         );
         assert_eq!(inbox.alerts(&[done], nobody).len(), 1);
+    }
+
+    #[test]
+    fn a_pending_owner_notice_announces_the_task_reply_while_other_work_continues() {
+        let mut inbox = Inbox::default();
+        inbox.observe(&[busy(bot(1, None, at(0, 0)), "working")]);
+        let mut asking = busy(bot(1, Some((1, at(2, 7))), at(0, 0)), "working");
+        asking.sidebar_status = Some(SidebarStatus::NeedsYou {
+            preview: "Choose another bot".into(),
+            since: None,
+        });
+        assert!(inbox.observe(std::slice::from_ref(&asking)));
+        assert_eq!(inbox.alerts(&[asking], nobody).len(), 1);
     }
 
     #[test]

@@ -74,6 +74,25 @@ impl ElseApp {
         let Some(body) = body else {
             return div().into_any_element();
         };
+        let sender = self
+            .view
+            .as_ref()
+            .and_then(|view| view.conversation.as_ref())
+            .and_then(|c| row.key.task_sender(c));
+        let body = match sender {
+            Some(sender) => gpui_kit::component::v_flex()
+                .w_full()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("From {sender}'s task")),
+                )
+                .child(body)
+                .into_any_element(),
+            None => body,
+        };
         let body = match self.view.as_ref().and_then(|view| view.revealed) {
             Some((key, at)) if row.contains(key) && at.elapsed() < Duration::from_secs(2) => {
                 let highlight = cx.theme().primary;
@@ -410,6 +429,9 @@ impl ElseApp {
             }
             RowKey::Handoff(id) => self.render_handoff(id, cx),
             RowKey::ComputerHandoff(id) => self.render_handoff_row(id, cx),
+            RowKey::OwnerNotice(id) => {
+                side(false, self.render_notice_card(id, cx)?).into_any_element()
+            }
             RowKey::Pending(request_id) => {
                 let pending = self
                     .selected
