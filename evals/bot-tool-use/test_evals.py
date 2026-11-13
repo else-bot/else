@@ -24,6 +24,14 @@ def run(runner):
             return {"name": name, "arguments": arguments or {},
                     "result": mock.tool_result(result or {"status": "ok"}, error)}
 
+        def test_any_of_selects_one_of_several_right_calls(self):
+            expect = {"calls": [{"anyOf": [{"name": "computer_browser", "arguments": {"selector": "@e2"}},
+                                           {"name": "computer_browser", "arguments": {"selector": "~/32/"}}]}]}
+            for selector, passed in (("@e2", True), ("a[href='/drafts/32/edit']", True), ("@e1", False)):
+                with self.subTest(selector=selector):
+                    self.assertEqual(self.passed(expect, [self.call("computer_browser", {"selector": selector})], "Done."),
+                                     passed)
+
         def test_partial_and_dotted_arguments(self):
             calls = [self.call("mcp_request", {"params": {"name": "list_prs", "arguments": {
                 "repo": "Else.Bot", "state": "open"}}, "id": "github"})]
@@ -178,6 +186,9 @@ def run(runner):
                                                    self.call("computer_browser", {"action": "click",
                                                                                   "selector": "a[href='/drafts/32/edit']"})],
                                                   "Opened the Q4 plan draft."),
+                "browser-icon-button-uses-snapshot-ref": ([self.call("computer_browser", {"action": "snapshot"}),
+                                                           self.call("computer_browser", {"action": "click", "selector": "@e5"})],
+                                                          "Liked Maria's post."),
                 "header-mcp-uses-task-secrets": ([self.call("mcp_install", {"id": "bento", "config": {
                     "type": "http", "url": "https://mcp.bentonow.com/mcp", "secrets": ["bento"], "headers": {
                         "X-Bento-Publishable-Key": "${BENTO_PUBLISHABLE_KEY}", "X-Bento-Secret-Key": "${BENTO_SECRET_KEY}",
@@ -401,6 +412,25 @@ def run(runner):
                            self.call("computer_browser", {"action": "click", "selector": "a[href='/drafts/32/edit']"})]):
                 with self.subTest(calls=[c["arguments"]["selector"] for c in wrong]):
                     self.assertFalse(self.passed(several_case["expect"], wrong, "Opened the Q4 plan draft."))
+            snapshot = self.call("computer_browser", {"action": "snapshot"})
+            self.assertTrue(self.passed(text_case["expect"], [snapshot, self.call("computer_browser", {
+                "action": "click", "selector": "@e1"})], "Selected Everyone subscribed."))
+            self.assertFalse(self.passed(text_case["expect"], [snapshot, self.call("computer_browser", {
+                "action": "click", "selector": "@e2"})], "Selected Everyone subscribed."))
+            self.assertTrue(self.passed(several_case["expect"], [snapshot, self.call("computer_browser", {
+                "action": "click", "selector": "@e2"})], "Opened the Q4 plan draft."))
+            for wrong in ([snapshot, self.call("computer_browser", {"action": "click", "selector": "@e1"})],
+                          [self.call("computer_browser", {"action": "click", "selector": "@e2"})]):
+                with self.subTest(calls=[c["arguments"].get("selector") for c in wrong]):
+                    self.assertFalse(self.passed(several_case["expect"], wrong, "Opened the Q4 plan draft."))
+            icon_case = next(c for c in runner.load_cases() if c["id"] == "browser-icon-button-uses-snapshot-ref")
+            for wrong in ([self.call("computer_browser", {"action": "click", "selector": "button.like"},
+                                     {"error": "no element matches the CSS selector"}, True),
+                           snapshot, self.call("computer_browser", {"action": "click", "selector": "@e5"})],
+                          [snapshot, self.call("computer_browser", {"action": "click", "selector": "@e4"})],
+                          [self.call("computer_browser", {"action": "click", "selector": "@e5"})]):
+                with self.subTest(calls=[c["arguments"].get("selector") for c in wrong]):
+                    self.assertFalse(self.passed(icon_case["expect"], wrong, "Liked Maria's post."))
             for case in runner.load_cases():
                 with self.subTest(case=case["id"]):
                     calls, final, *bad_final = examples[case["id"]]

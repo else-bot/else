@@ -54,6 +54,7 @@ def load_cases():
         selectors = [s for key in ("calls", "callsMustNot", "order", "errors") for s in expect.get(key, [])]
         selectors.extend({k: v for k, v in m.items() if k not in ("result", "error")}
                          for m in setup.get("mocks", []))
+        selectors = [s for sel in selectors for s in (sel["anyOf"] if isinstance(sel, dict) and "anyOf" in sel else [sel])]
         for selector in selectors:
             if isinstance(selector, str):
                 continue
