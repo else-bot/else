@@ -71,10 +71,11 @@ pub const DISABLED_OPACITY: f32 = 0.4;
 /// Ghost and unselected segment labels sit below body text and come up to
 /// full strength on hover or selection.
 const QUIET_TEXT: f32 = 0.72;
-const SEGMENT_TEXT: f32 = 0.6;
+const SEGMENT_TEXT: f32 = 0.55;
 const RADIUS: Pixels = px(8.);
 const THUMB_RADIUS: Pixels = px(6.);
 const INSET: Pixels = px(2.);
+const TOGGLE_SATURATION: f32 = 0.6;
 
 /// The fill a tier shows while disabled: accent and danger fills turn
 /// neutral so a disabled action never reads as a muddy accent.
@@ -150,10 +151,12 @@ pub fn segment_track(cx: &App) -> Div {
             .opacity(if theme.mode.is_dark() { 0.05 } else { 0.06 }))
 }
 
+/// The selected segment: in dark, a clearly lighter step over the track
+/// (about 10% lightness); in light, the raised sheet color.
 fn segment_thumb(cx: &App) -> Hsla {
     let theme = cx.theme();
     if theme.mode.is_dark() {
-        theme.foreground.opacity(0.1)
+        theme.foreground.opacity(0.17)
     } else {
         theme.popover
     }
@@ -213,12 +216,23 @@ pub fn segment(
 
 /// A 36×20 switch with a solid 16 px knob. Its name comes from the call
 /// site's `accessibility_label`.
-pub fn toggle(id: impl Into<ElementId>, checked: bool, disabled: bool) -> Switch {
+pub fn toggle(id: impl Into<ElementId>, checked: bool, disabled: bool, cx: &App) -> Switch {
     Switch::new(id)
         .focus_ring(false)
+        .color(toggle_on(cx))
         .checked(checked)
         .disabled(disabled)
         .when(!disabled, |switch| switch.cursor_pointer())
+}
+
+/// The checked track: the primary's hue with less saturation, so a stack
+/// of switches reads as state rather than a column of calls to action.
+fn toggle_on(cx: &App) -> Hsla {
+    let primary = cx.theme().primary;
+    Hsla {
+        s: primary.s * TOGGLE_SATURATION,
+        ..primary
+    }
 }
 
 /// An editable single-line field: a fill set apart from the card or dialog
@@ -303,23 +317,25 @@ pub fn send_button(id: impl Into<ElementId>, ready: bool, cx: &App) -> Button {
     }
 }
 
-/// The stop button: a filled circle the size of send.
+/// The stop button: a neutral circle the size of send with a light square,
+/// present without outshining the conversation.
 pub fn stop_button(id: impl Into<ElementId>, stopping: bool, cx: &App) -> Button {
     let theme = cx.theme();
+    let glyph = theme.foreground.opacity(0.85);
     let button = Button::new(id)
         .focus_ring(false)
         .size(COMPOSER_ACTION)
         .rounded(COMPOSER_ACTION / 2.)
         .border_0()
-        .bg(theme.foreground)
-        .text_color(theme.background)
+        .bg(theme.foreground.opacity(0.12))
+        .text_color(glyph)
         .loading(stopping)
         .map(|button| {
             if stopping {
                 // The loading spinner takes the icon's place.
                 button.icon(gpui_kit::assets::IconName::Square)
             } else {
-                button.child(div().size(px(10.)).rounded(px(2.)).bg(theme.background))
+                button.child(div().size(px(10.)).rounded(px(2.)).bg(glyph))
             }
         });
     if stopping {

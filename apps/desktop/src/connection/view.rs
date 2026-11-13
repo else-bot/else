@@ -7,37 +7,6 @@ use gpui_kit::component::input::Input;
 use gpui_kit::component::{Icon, Theme, h_flex};
 
 impl Shell {
-    pub(super) fn render_bar(&self, _active: &Active, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let content = h_flex()
-            .flex_1()
-            .min_w_0()
-            .gap_2()
-            .items_center()
-            .child(self.render_server_switcher("topbar-server-switcher", cx))
-            .child(div().flex_1())
-            .child(
-                Button::new("app-settings-open")
-                    .control(Tier::Ghost, Scale::Compact, false, cx)
-                    .track_focus(&self.settings_focus)
-                    .icon(IconName::Settings)
-                    .label("Settings")
-                    .on_click(cx.listener(|shell, _, window, cx| shell.open_settings(window, cx))),
-            );
-        if cfg!(target_os = "macos") {
-            return TitleBar::new().pr_2().child(content).into_any_element();
-        }
-        h_flex()
-            .flex_none()
-            .h(px(30.))
-            .px_3()
-            .border_b_1()
-            .border_color(theme.title_bar_border)
-            .bg(theme.title_bar)
-            .child(content)
-            .into_any_element()
-    }
-
     pub(super) fn render_setup(
         &self,
         setup: &Setup,

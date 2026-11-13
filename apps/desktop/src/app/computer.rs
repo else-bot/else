@@ -663,6 +663,12 @@ impl ComputerView {
                 Screen::Live => ("Connecting…", ""),
                 Screen::Upgrading => ("Upgrading computer…", "This takes a few minutes"),
             };
+            // Without a screen to show, the bot keeps its shape in neutral
+            // grey: absent, not dimmed.
+            let resting = crate::avatar::Avatar {
+                color: crate::avatar::AvatarColor::Gray,
+                ..self.avatar
+            };
             area = area.child(
                 v_flex()
                     .size_full()
@@ -670,8 +676,8 @@ impl ComputerView {
                     .justify_center()
                     .gap_2()
                     .text_color(cx.theme().muted_foreground)
-                    .child(div().opacity(0.55).child(
-                        crate::avatar::bot_avatar("computer-avatar", self.avatar, px(56.)).still(),
+                    .child(div().opacity(0.8).child(
+                        crate::avatar::bot_avatar("computer-avatar", resting, px(56.)).still(),
                     ))
                     .child(
                         div()

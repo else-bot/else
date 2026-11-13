@@ -552,7 +552,10 @@ fn paint_avatar(
         .iter()
         .map(|(x, y)| (x * x + y * y).sqrt())
         .fold(0f32, f32::max);
-    let working_fit = (0.4 / reach).min(1.);
+    // While working, the body shrinks so its farthest point keeps an even
+    // gap inside the ring.
+    let working_fit =
+        ((halo_radius(unit) - halo_width(unit) / 2. - HALO_GAP) / (unit * reach)).clamp(0., 1.);
     let scale = unit
         * (1. + 0.06 * pose.hover)
         * (1. + 0.015 * pulse * work)
@@ -628,7 +631,20 @@ fn focus_blink(elapsed: f32) -> f32 {
     }
 }
 
-/// A concentric working light contained inside the avatar's layout bounds.
+/// The clear space between a working body and its ring, in px.
+const HALO_GAP: f32 = 2.;
+
+fn halo_radius(unit: f32) -> f32 {
+    unit * 0.475
+}
+
+fn halo_width(unit: f32) -> f32 {
+    (unit * 0.04).max(1.25)
+}
+
+/// A concentric working ring contained inside the avatar's layout bounds: a
+/// faint full track, so the ring reads as one centered circle, with a
+/// brighter arc travelling around it.
 fn paint_halo(
     center: Point<Pixels>,
     unit: f32,
@@ -637,7 +653,8 @@ fn paint_halo(
     elapsed: f32,
     window: &mut Window,
 ) {
-    let radius = unit * 0.475;
+    let radius = halo_radius(unit);
+    let stroke = px(halo_width(unit));
     let points: [_; SAMPLES] = std::array::from_fn(|i| {
         let angle = i as f32 / SAMPLES as f32 * TAU;
         point(
@@ -645,8 +662,15 @@ fn paint_halo(
             center.y + px(radius * angle.sin()),
         )
     });
-    // No static track: a dim full ring reads as a dark crescent beside the
-    // lit arc, so only the moving light is drawn.
+    let mut track = PathBuilder::stroke(stroke);
+    track.move_to(points[0]);
+    for point in &points[1..] {
+        track.line_to(*point);
+    }
+    track.close();
+    if let Ok(path) = track.build() {
+        window.paint_path(path, color.opacity(0.28 * work));
+    }
     const LIT: usize = SAMPLES * 38 / 100;
     let at = |i: isize| points[i.rem_euclid(SAMPLES as isize) as usize];
     let head = (elapsed / 1.7).fract() * SAMPLES as f32;
@@ -655,7 +679,7 @@ fn paint_halo(
         let position = head - i as f32;
         let index = position.floor() as isize;
         let (from, to, next) = (at(index - 1), at(index), at(index + 1));
-        let mut segment = PathBuilder::stroke(px((unit * 0.035).max(1.1)));
+        let mut segment = PathBuilder::stroke(stroke);
         segment.move_to(from);
         segment.line_to(to);
         segment.line_to(to + (next - to) * position.fract());

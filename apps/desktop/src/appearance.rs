@@ -346,11 +346,11 @@ impl Palette {
             p.background.mix(WHITE, 0.75)
         };
         // In light the conversation is the lightest surface: the sidebar
-        // and panels sit a visible step below it.
+        // and panels sit one soft step, about 3% lightness, below it.
         let sidebar = if dark {
             p.surface
         } else {
-            p.background.mix(p.foreground, 0.07)
+            p.background.mix(p.foreground, 0.045)
         };
         // A selected row reads as one firm step: lighter in dark, about 8%
         // black over the sidebar in light.
@@ -507,6 +507,7 @@ impl Palette {
         }))
         .expect("every palette projects onto a theme");
         config.font_family = crate::ui_font::family();
+        config.mono_font_family = crate::ui_font::mono_family();
         config
     }
 }

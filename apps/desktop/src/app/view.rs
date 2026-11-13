@@ -7,6 +7,7 @@ use super::{
 };
 use crate::api::Bot;
 use crate::avatar::bot_avatar;
+use crate::connection::{OpenAppSettings, SHELL_CONTEXT};
 use crate::controls::{
     COMPOSER_ACTION, Control as _, Scale, Tier, Turn, composer_actions, send_button, stop_button,
 };
@@ -51,6 +52,18 @@ impl Render for BotDrag {
 impl ElseApp {
     pub(crate) fn connected(&self) -> bool {
         self.connection == Connection::Connected
+    }
+
+    pub(crate) fn link(&self) -> super::Link {
+        match self.connection {
+            Connection::Connecting => super::Link::Connecting,
+            Connection::Connected => super::Link::Connected,
+            Connection::Disconnected(_) | Connection::InvalidCredentials(_) => super::Link::Failed,
+        }
+    }
+
+    pub(crate) fn set_server_switcher(&mut self, switcher: super::ServerSwitcher) {
+        self.server_switcher = Some(switcher);
     }
 
     pub(crate) fn status_text(&self) -> (SharedString, bool) {
@@ -230,19 +243,31 @@ impl ElseApp {
             }
             list = list.child(zone);
         }
+        let switcher = self
+            .server_switcher
+            .clone()
+            .map(|switcher| switcher(self.link(), cx));
         let brand = h_flex()
             .flex_none()
             .h(px(52.))
             .pl_4()
             .pr_2()
+            .gap_1()
             .items_center()
-            .justify_between()
             .child(
                 h_flex()
+                    .flex_none()
                     .text_xl()
                     .font_weight(FontWeight::BOLD)
                     .child("else")
                     .child(div().text_color(theme.primary).child(".")),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .children(switcher),
             )
             .child(
                 Button::new("new-bot")
@@ -256,36 +281,48 @@ impl ElseApp {
                     .disabled(!can_edit)
                     .on_click(cx.listener(|app, _, window, cx| app.open_create_dialog(window, cx))),
             );
+        let settings_key = Kbd::binding_for_action(&OpenAppSettings, Some(SHELL_CONTEXT), window)
+            .map(|kbd| {
+                div()
+                    .flex_none()
+                    .ml_auto()
+                    .pl_2()
+                    .child(kbd.text_size(px(11.5)).bg(theme.foreground.opacity(0.07)))
+            });
         let footer =
             h_flex()
                 .flex_none()
                 .px_2()
                 .py_2()
+                .gap_1()
+                .items_center()
                 .border_t_1()
                 .border_color(theme.sidebar_border)
+                .child(
+                    Button::new("app-settings-open")
+                        .control(Tier::Ghost, Scale::Compact, false, cx)
+                        .px_2()
+                        .flex_1()
+                        .min_w_0()
+                        .justify_start()
+                        .icon(IconName::Settings)
+                        .accessibility_label("Settings")
+                        .child(div().text_size(px(13.)).child("Settings"))
+                        .children(settings_key)
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(OpenAppSettings), cx)
+                        }),
+                )
                 .child(
                     Button::new("new-category")
                         .focus_ring(false)
                         .cursor_pointer()
                         .icon(IconName::FolderPlus)
-                        .accessibility_label("New category")
-                        .child(div().text_size(px(13.)).child("New category"))
-                        .text_color(theme.muted_foreground)
                         .small()
                         .ghost()
-                        .w_full()
-                        .justify_start()
-                        .children(
-                            Kbd::binding_for_action(&NewCategory, Some(APP_CONTEXT), window).map(
-                                |kbd| {
-                                    div()
-                                        .flex_none()
-                                        .ml_auto()
-                                        .pl_2()
-                                        .child(kbd.text_size(px(11.5)))
-                                },
-                            ),
-                        )
+                        .text_color(theme.muted_foreground)
+                        .accessibility_label("New category")
+                        .tooltip_with_action("New category", &NewCategory, Some(APP_CONTEXT))
                         .disabled(!can_edit)
                         .on_click(cx.listener(|app, _, window, cx| {
                             app.open_category_dialog(None, window, cx)
@@ -459,7 +496,8 @@ impl ElseApp {
             .min_w_0()
             .gap_1()
             .items_center()
-            .text_xs()
+            .text_size(px(13.))
+            .line_height(px(18.))
             .text_color(theme.muted_foreground)
             .when(!pending, |line| {
                 line.group_hover("sidebar-bot-row", |style| {
@@ -481,11 +519,11 @@ impl ElseApp {
         let mut row = h_flex()
             .id(SharedString::from(format!("bot-{id}")))
             .group("sidebar-bot-row")
-            .min_h(px(46.))
+            .min_h(px(44.))
             .gap_2p5()
             .items_center()
             .px_2()
-            .py_1()
+            .py(px(3.))
             .rounded(theme.radius)
             .child(self.render_bot_identity_avatar("avatar", bot, working))
             .child(
@@ -499,8 +537,9 @@ impl ElseApp {
                             .items_center()
                             .child(
                                 div()
-                                    .text_size(px(13.))
-                                    .line_height(px(18.))
+                                    .min_w_0()
+                                    .text_size(px(14.))
+                                    .line_height(px(20.))
                                     .truncate()
                                     .font_weight(FontWeight::MEDIUM)
                                     .child(bot.name.clone()),
@@ -518,19 +557,20 @@ impl ElseApp {
                                                 .text_color(theme.muted_foreground),
                                         ),
                                 )
-                            }),
+                            })
+                            // The wait sits on the title's line, at its end.
+                            .children(waited.map(|waited| {
+                                div()
+                                    .flex_none()
+                                    .ml_auto()
+                                    .pl_2()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(waited)
+                            })),
                     )
                     .child(subtitle),
             )
-            .children(waited.map(|waited| {
-                div()
-                    .flex_none()
-                    .self_start()
-                    .mt_1p5()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(waited)
-            }))
             .children(unread.then(|| div().flex_none().size_2().rounded_full().bg(theme.primary)));
         if pending {
             row = row.opacity(0.5);
@@ -846,8 +886,17 @@ impl ElseApp {
             .py(px(7.))
             .rounded(theme.radius_lg)
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover);
+            // Dark: a hairline on the page. Light: a white field on the
+            // tinted page, so it still reads as the place to type.
+            .map(|frame| {
+                if theme.mode.is_dark() {
+                    frame
+                        .border_color(theme.foreground.opacity(0.12))
+                        .bg(theme.background)
+                } else {
+                    frame.border_color(theme.border).bg(theme.popover)
+                }
+            });
         if let Some(quotes) = self.render_quote_stack(bot.id, &bot.name, cx) {
             frame = frame.child(quotes);
         }
@@ -912,6 +961,10 @@ impl ElseApp {
                         )
                     }),
             );
+        let hint = {
+            let composer = self.composer.read(cx);
+            composer.value().is_empty() && composer.focus_handle(cx).is_focused(window)
+        };
         let footer = reading_column()
             .flex_none()
             .gap_1p5()
@@ -928,10 +981,14 @@ impl ElseApp {
                     .children(self.render_mentions(cx)),
             )
             .child(
+                // The hint shows only while it helps: the composer is focused
+                // and empty. Its line stays reserved so the composer never
+                // moves.
                 div()
                     .px(px(22.))
                     .text_size(px(11.5))
                     .text_color(theme.foreground.opacity(super::message_row::META_OPACITY))
+                    .when(!hint, |line| line.invisible())
                     .child("Enter to send · Shift+Enter for a new line"),
             );
         v_flex()

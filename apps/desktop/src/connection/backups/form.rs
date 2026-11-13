@@ -185,7 +185,7 @@ impl DestinationForm {
                 if let Some(Editor::Destination(form)) = shell.backups.as_mut().and_then(|view| view.editor.as_mut()) { form.advanced.toggle(); }
                 cx.notify();
             })))
-            .when(self.advanced, |content| content.child(self.field("Region", &self.region, busy, cx)).child(h_flex().gap_3().child(toggle("backup-path-style", self.path_style, busy).accessibility_label("Use path-style addressing").on_click(cx.listener(|shell, checked: &bool, _, cx| {
+            .when(self.advanced, |content| content.child(self.field("Region", &self.region, busy, cx)).child(h_flex().gap_3().child(toggle("backup-path-style", self.path_style, busy, cx).accessibility_label("Use path-style addressing").on_click(cx.listener(|shell, checked: &bool, _, cx| {
                 if let Some(Editor::Destination(form)) = shell.backups.as_mut().and_then(|view| view.editor.as_mut()) { form.path_style = *checked; form.verified = false; }
                 cx.notify();
             }))).child(div().text_xs().child("Use path-style addressing"))))
@@ -517,7 +517,7 @@ impl LocalForm {
                     .when(!managed, |row| {
                         row.child(
                             h_flex().gap_2().text_xs().child("Automatic").child(
-                                toggle("local-backups-enabled", self.enabled, disabled)
+                                toggle("local-backups-enabled", self.enabled, disabled, cx)
                                     .accessibility_label("Automatic daily local backups")
                                     .on_click(cx.listener(|shell, enabled: &bool, _, cx| {
                                         if let Some(form) = shell

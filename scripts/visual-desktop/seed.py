@@ -200,6 +200,14 @@ Watch renewal failures for 30 minutes. Pause renewals if the rate rises. **Revie
     item('travel-context',secret,bots['Travel Planner'],'assistant','I have three small hotels near the gardens, all within your €180 nightly budget. Connect your travel account so I can save the shortlist privately.')
     insert('secret_requests',id=blob(uid('secret/travel')),bot_id=blob(bots['Travel Planner']),turn_id=secret,attempt=1,
         name='travel-account',reason='Save your Lisbon hotel shortlist to your private travel account.',env_names=js(['TRAVEL_API_KEY']))
+    # The Needs you tray sorts by request time. Pin it so shoot.sh's sidebar
+    # key paths always land on Code Reviewer, Inbox, Research, Travel Planner.
+    for table, ident, at in [
+        ('owner_questions', uid('question/publish'), '2026-11-13T14:20:00.000+00:00'),
+        ('outgoing_drafts', uid('draft/review'), '2026-11-13T14:20:01.000+00:00'),
+        ('owner_questions', uid('question/focus'), '2026-11-13T14:20:02.000+00:00'),
+        ('secret_requests', uid('secret/travel'), '2026-11-13T14:20:03.000+00:00')]:
+        db.execute(f'UPDATE {table} SET created_at=? WHERE id=?', (at, blob(ident)))
     if list(db.execute('PRAGMA foreign_key_check')): raise RuntimeError('foreign key check failed')
     if db.execute('PRAGMA integrity_check').fetchone()[0]!='ok': raise RuntimeError('integrity check failed')
 
