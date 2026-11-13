@@ -342,7 +342,14 @@ color8 = "#555753"
             let palette = parse(text).unwrap();
             let config = palette.config("Omarchy", Style::OMARCHY);
             let colors = &config.colors;
-            let border = Rgb::parse(colors.border.as_deref().unwrap()).unwrap();
+            // Dark lines are translucent ink; judge them as painted on the page.
+            let line = colors.border.as_deref().unwrap();
+            let alpha =
+                u8::from_str_radix(line.get(7..).filter(|a| !a.is_empty()).unwrap_or("ff"), 16)
+                    .unwrap();
+            let border = palette
+                .background
+                .mix(Rgb::parse(&line[..7]).unwrap(), f32::from(alpha) / 255.);
             assert!(
                 palette.background.contrast(border) < palette.background.contrast(palette.border)
             );
@@ -354,7 +361,11 @@ color8 = "#555753"
             );
             assert_eq!(
                 colors.primary.as_deref(),
-                Some(super::super::strong_fill(palette.accent).hex().as_str())
+                Some(
+                    super::super::accent_fill(palette.accent, palette.mode)
+                        .hex()
+                        .as_str()
+                )
             );
             assert_eq!(
                 colors.selection.as_deref(),
