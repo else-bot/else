@@ -18,9 +18,10 @@
 //! is skipped stays listed so the owner sees what happened.
 //!
 //! A routine either inherits the bot's live model or has its own. A run on
-//! its own model snapshots that profile into its turn, leaves the bot's
-//! profile alone, and keeps its native sessions in a lane of its own, so it
-//! neither resets the bot's chat session nor triggers provider handoffs.
+//! its own model snapshots that profile into its turn and leaves the bot's
+//! profile alone. Every run keeps its native session in the routine's own
+//! lane and starts a fresh one there, so it neither resets nor replays the
+//! bot's chat session or earlier runs.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use sha2::{Digest, Sha256};
@@ -739,10 +740,7 @@ pub async fn run_now(
     if busy {
         return Err(RoutineError::AlreadyRunning);
     }
-    let run_on = match &model {
-        Some(Json(own)) => RunOn::Own(own, id),
-        None => RunOn::Bot,
-    };
+    let run_on = RunOn::routine(id, &model);
     let turn_id = match queue_saved_task(
         &mut tx,
         registry,
@@ -912,10 +910,7 @@ async fn review(
     let mut reaction = routine_failures::react(ended, state);
     if reaction == Reaction::Retry {
         let retry_id = Uuid::new_v4();
-        let run_on = match &run.model {
-            Some(Json(own)) => RunOn::Own(own, run.routine_id),
-            None => RunOn::Bot,
-        };
+        let run_on = RunOn::routine(run.routine_id, &run.model);
         let in_hours = run.active.hours().is_none_or(|hours| {
             run.timezone
                 .parse::<chrono_tz::Tz>()
@@ -1133,13 +1128,12 @@ struct Due {
 struct Chosen {
     provider_id: &'static str,
     profile: Option<(i64, Json<Profile>)>,
-    lane: String,
 }
 
 /// A run on the routine's own model, if its provider can run it now. An
 /// unavailable choice skips the run rather than switching models; the
 /// profile revision 0 marks a routine's own profile, not a bot revision.
-fn own_model(registry: &Registry, own: &RoutineModel, routine_id: Uuid) -> Option<Chosen> {
+fn own_model(registry: &Registry, own: &RoutineModel) -> Option<Chosen> {
     let provider = registry
         .get(&own.provider_id)
         .filter(|p| p.uses_profile() && p.availability() == Availability::Available)?;
@@ -1147,17 +1141,32 @@ fn own_model(registry: &Registry, own: &RoutineModel, routine_id: Uuid) -> Optio
     Some(Chosen {
         provider_id: provider.id(),
         profile: Some((0, Json(own.profile.clone()))),
-        lane: format!("routine:{routine_id}"),
     })
 }
 
 /// Where a saved task's turn runs.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum RunOn<'a> {
-    /// The bot's selected provider and profile.
-    Bot,
-    /// A routine's own model, in that routine's session lane.
-    Own(&'a RoutineModel, Uuid),
+    /// A webhook wake: the bot's selected provider and profile, in its chat
+    /// session.
+    Chat,
+    /// A routine run, on its own model if it has one and otherwise the
+    /// bot's, in that routine's session lane.
+    Routine(Uuid, Option<&'a RoutineModel>),
+}
+
+impl<'a> RunOn<'a> {
+    pub(crate) fn routine(id: Uuid, model: &'a Option<Json<RoutineModel>>) -> Self {
+        RunOn::Routine(id, model.as_ref().map(|Json(own)| own))
+    }
+
+    /// The provider session lane; '' is the bot's chat.
+    fn lane(self) -> String {
+        match self {
+            RunOn::Chat => String::new(),
+            RunOn::Routine(id, _) => format!("routine:{id}"),
+        }
+    }
 }
 
 /// Queue a turn in `conversation_id` whose source is a hidden `routine`
@@ -1186,19 +1195,19 @@ pub(crate) async fn queue_saved_task(
         return Ok(Err(Skip::QueueFull));
     }
     let chosen = match run_on {
-        RunOn::Own(own, routine_id) => own_model(registry, own, routine_id),
-        RunOn::Bot => bot_profiles::for_admission(&mut *conn, registry, bot_id)
-            .await?
-            .map(|chosen| Chosen {
-                provider_id: chosen.provider_id,
-                profile: chosen.profile,
-                lane: String::new(),
-            }),
+        RunOn::Routine(_, Some(own)) => own_model(registry, own),
+        RunOn::Chat | RunOn::Routine(_, None) => {
+            bot_profiles::for_admission(&mut *conn, registry, bot_id)
+                .await?
+                .map(|chosen| Chosen {
+                    provider_id: chosen.provider_id,
+                    profile: chosen.profile,
+                })
+        }
     };
     let Some(Chosen {
         provider_id,
         profile,
-        lane,
     }) = chosen
     else {
         return Ok(Err(Skip::ProviderUnavailable));
@@ -1230,7 +1239,7 @@ pub(crate) async fn queue_saved_task(
     .bind(provider_id)
     .bind(profile.as_ref().map(|(revision, _)| *revision))
     .bind(profile.as_ref().map(|(_, profile)| profile))
-    .bind(&lane)
+    .bind(run_on.lane())
     .execute(&mut *conn)
     .await?;
     sqlx::query(
@@ -1326,10 +1335,7 @@ async fn admit(
     let queued = if unfinished {
         Err(Skip::Overlap)
     } else {
-        let run_on = match &model {
-            Some(Json(own)) => RunOn::Own(own, id),
-            None => RunOn::Bot,
-        };
+        let run_on = RunOn::routine(id, &model);
         queue_saved_task(
             &mut tx,
             registry,

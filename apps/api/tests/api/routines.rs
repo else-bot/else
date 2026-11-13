@@ -998,7 +998,7 @@ async fn a_run_is_hidden_and_its_report_is_visible() {
 
     let packet = h.packets().await.into_iter().last().unwrap();
     assert!(
-        packet.starts_with("[else.bot routine] Scheduled run of the routine \"Morning digest\""),
+        packet.contains("[else.bot routine] Scheduled run of the routine \"Morning digest\""),
         "{packet}"
     );
     assert!(packet.contains(TASK));

@@ -9,8 +9,7 @@ use crate::app::providers::{HandoffContext, JobReceipt, Selection};
 pub const PROMPT_VERSION: &str = "else-handoff-v1";
 
 /// The provider of the owner turn just before `turn_no` in the same session
-/// lane, if any: a routine run on its own model never hands off to or from
-/// the bot's chat.
+/// lane, if any: a routine run never hands off to or from the bot's chat.
 pub async fn previous_provider(
     pool: &SqlitePool,
     conversation_id: Uuid,
