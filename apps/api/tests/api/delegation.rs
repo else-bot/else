@@ -2816,16 +2816,6 @@ async fn a_delegating_bot_updates_a_running_task_and_gets_the_updated_reply() {
         second,
         "a retry changes nothing"
     );
-    let delivered: Option<i64> =
-        sqlx::query_scalar("SELECT delivered_attempt FROM delegations WHERE id = ?1")
-            .bind(task)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
-    assert!(
-        delivered.is_some(),
-        "the retry's outcome is not delivered again"
-    );
 }
 
 async fn app_with_synthetic() -> (TestApp, Arc<else_api::providers::synthetic::Synthetic>) {
@@ -2982,7 +2972,17 @@ async fn a_delegating_bot_cancels_a_running_task() {
     .await;
     assert!(!failed, "{again}");
     assert_eq!(again["status"], "cancelled");
-    assert!(again["outcome"].as_str().is_some(), "{again}");
+    assert!(
+        again["next"].as_str().unwrap().contains("continuation"),
+        "{again}"
+    );
+    let delivered: Option<i64> =
+        sqlx::query_scalar("SELECT delivered_attempt FROM delegations WHERE id = ?1")
+            .bind(task)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(delivered, None, "the outcome is left for the continuation");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3016,7 +3016,14 @@ async fn an_update_to_an_ended_task_is_rejected_with_its_outcome() {
         "{rejected}"
     );
     assert_eq!(rejected["task"]["status"], "completed");
-    assert_eq!(rejected["task"]["outcome"].as_str(), result.as_deref());
+    assert!(result.is_some());
+    assert!(
+        rejected["task"]["next"]
+            .as_str()
+            .unwrap()
+            .contains("continuation"),
+        "{rejected}"
+    );
     assert_eq!(child_of(&app, task).await, child, "nothing was changed");
 
     let (failed, unknown) = control(

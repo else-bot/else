@@ -322,7 +322,7 @@ fn tool_list() -> Value {
             "description": "Change a task you delegated that is still in progress, by its task_id. \
                 The other bot stops its current attempt and continues the same task with your \
                 message and its earlier work; the result still arrives in a continuation. Returns \
-                the task's state. An ended task is not changed: its outcome is returned instead.",
+                the task's state. An ended task is not changed; its outcome arrives in a continuation.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -340,7 +340,7 @@ fn tool_list() -> Value {
             "name": "delegation_cancel",
             "description": "Stop a task you delegated that is still in progress, by its task_id. \
                 Returns its state: stopping until the other bot's attempt ends; the outcome, \
-                normally cancelled with any partial reply, arrives in a continuation. Cancelling an ended task returns its outcome unchanged.",
+                normally cancelled with any partial reply, arrives in a continuation. An ended task is not changed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1255,8 +1255,10 @@ fn task_json(task: &crate::db::delegations::Task) -> Value {
         "status": task.state.as_str(),
         "target": { "bot_id": task.target_bot_id, "name": task.target_name },
     });
-    if let TaskState::Ended { outcome, .. } = &task.state {
-        value["outcome"] = json!(outcome);
+    if let TaskState::Ended(_) = task.state {
+        value["next"] = json!(
+            "This task ended. Its outcome is in your context or arrives in your next continuation."
+        );
     }
     value
 }
@@ -1279,7 +1281,7 @@ fn control_error(err: crate::db::delegations::ControlError) -> Outcome {
         ControlError::Ended(task) => (
             "ENDED",
             Some(task),
-            "Nothing was changed. Use this outcome; for more work, delegate a new task.",
+            "Nothing was changed. For more work, delegate a new task.",
         ),
         ControlError::TakenOver(task) => (
             "TAKEN_OVER",
