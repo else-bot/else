@@ -228,7 +228,8 @@ pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kin
                 'prompt', CASE WHEN t.request_id = d.id THEN d.task
                                ELSE (SELECT s.text FROM items s WHERE s.id = t.owner_item_id) END)
          FROM delegations d JOIN bots b ON b.id = d.parent_bot_id
-         -- A task's first turn carries the delegation's ID as its request.
+         -- A task's first turn carries the delegation's ID as its request
+         -- (see delegations::control::update_request_id).
          WHERE d.id = (SELECT f.request_id FROM turns f WHERE f.conversation_id = t.conversation_id
                        ORDER BY f.turn_no LIMIT 1))
     END AS bot_task,
@@ -859,6 +860,7 @@ pub async fn claim_next(
             SELECT t.id, t.bot_id, t.created_at, {BACKGROUND} AS background,
                    row_number() OVER (
                        PARTITION BY t.bot_id
+                       -- Takeovers and update turns (control::update_request_id) first.
                        ORDER BY EXISTS (SELECT 1 FROM delegations d
                                         WHERE (d.takeover_turn_id = t.id
                                                OR (d.child_turn_id = t.id AND d.id <> t.request_id))

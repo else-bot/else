@@ -161,6 +161,11 @@ pub async fn state(conn: &mut SqliteConnection, task: Uuid) -> Result<Task, sqlx
 }
 
 /// One request ID per replaced turn, so each update is its own turn.
+///
+/// This is how SQL tells a task's turns apart: the first turn of a task
+/// carries the delegation's ID as its `request_id`, and an update turn
+/// carries this derived ID, so `request_id <> delegation id` means "an
+/// update turn". Queries that rely on it point here.
 fn update_request_id(task: Uuid, replaced: Uuid, message: &str) -> Uuid {
     let mut hasher = Sha256::new();
     hasher.update(b"delegation-update\0");
@@ -198,7 +203,8 @@ pub async fn update(
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row = owned(&mut tx, caller, task).await?;
     // A retry repeats the latest update; an earlier message sent again is
-    // a new change.
+    // a new change. An update turn is one whose request is not the task's
+    // (see `update_request_id`).
     let repeated: bool = sqlx::query_scalar(
         "SELECT t.request_id <> ?2 AND i.text = ?3
          FROM turns t JOIN items i ON i.id = t.owner_item_id WHERE t.id = ?1",

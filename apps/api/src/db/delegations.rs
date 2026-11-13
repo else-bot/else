@@ -557,7 +557,8 @@ pub async fn take_over(
                       AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running'))
                 OR (takeover_turn_id IS NULL AND child_turn_id IN (
                     SELECT id FROM turns WHERE status IN ('preparing', 'sending', 'running')
-                    -- An update's turn waiting for the one it replaced to stop.
+                    -- An update's turn waiting for the one it replaced to stop
+                    -- (see control::update_request_id).
                     UNION ALL SELECT id FROM turns WHERE status = 'queued' AND request_id <> delegations.id
                     UNION ALL SELECT id FROM turns WHERE status = 'waiting' AND id IN (
                         SELECT turn_id FROM owner_questions WHERE status = 'pending'
