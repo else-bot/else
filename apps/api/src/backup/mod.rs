@@ -736,7 +736,6 @@ impl Drop for DirLock {
 }
 
 pub fn try_lock(dir: &Path) -> Result<Option<DirLock>, BackupError> {
-    use std::os::fd::AsRawFd;
     ensure_private_dir(dir)?;
     let path = dir.join(".lock");
     let file = OpenOptions::new()
@@ -748,17 +747,11 @@ pub fn try_lock(dir: &Path) -> Result<Option<DirLock>, BackupError> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(&path)
         .map_err(|e| BackupError::io(path.display(), e))?;
-    // SAFETY: a valid descriptor owned by `file`.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        return if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            Ok(None)
-        } else {
-            Err(BackupError::io(path.display(), err))
-        };
+    match file.try_lock() {
+        Ok(()) => Ok(Some(DirLock(file))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(err)) => Err(BackupError::io(path.display(), err)),
     }
-    Ok(Some(DirLock(file)))
 }
 
 pub fn staging_path(dir: &Path, set_id: &str) -> PathBuf {
