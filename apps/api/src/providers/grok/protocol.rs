@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use super::grok_home;
-use crate::app::providers::TurnOutcome;
+use crate::app::providers::{TurnOutcome, Usage};
 use crate::app::tools::{DEFERRED_TOOLS, SERVER_NAME, TOOL_NAMES};
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 
@@ -244,10 +244,12 @@ impl Protocol for Tracker {
         self.check_model(&event["message"]["model"])?;
         self.check_model(&event["event"]["message"]["model"])?;
         let kind = required(&event["type"], "event")?;
-        if let Some(terminal) = terminal(kind, event)? {
-            return Ok(vec![Event::Finished(terminal)]);
-        }
         let mut events = Vec::new();
+        if let Some(terminal) = terminal(kind, event)? {
+            events.extend(Usage::from_result(event).map(Event::Usage));
+            events.push(Event::Finished(terminal));
+            return Ok(events);
+        }
         match kind {
             "system" => match text(&event["subtype"], "system event")?.unwrap_or_default() {
                 "init" => self.on_init(event)?,

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::app::providers::TurnOutcome;
+use crate::app::providers::{TurnOutcome, Usage};
 use crate::app::tools::SERVER_NAME;
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 
@@ -245,21 +245,6 @@ fn result_info(event: &Value) -> ResultInfo {
     }
 }
 
-/// The turn's token totals from the result event. Claude counts cache
-/// reads and writes apart from `input_tokens`.
-fn result_usage(event: &Value) -> Option<crate::app::providers::Usage> {
-    let usage = event.get("usage")?;
-    let count = |key: &str| usage[key].as_i64().unwrap_or(0).max(0);
-    let cached_input = count("cache_read_input_tokens");
-    let cache_write = count("cache_creation_input_tokens");
-    Some(crate::app::providers::Usage {
-        input: count("input_tokens") + cached_input + cache_write,
-        cached_input,
-        cache_write,
-        output: count("output_tokens"),
-    })
-}
-
 impl Protocol for Tracker {
     type Message = Value;
     type Terminal = ResultInfo;
@@ -297,7 +282,7 @@ impl Protocol for Tracker {
                 )));
             }
             "result" => {
-                events.extend(result_usage(event).map(Event::Usage));
+                events.extend(Usage::from_result(event).map(Event::Usage));
                 events.push(Event::Finished(result_info(event)));
             }
             _ => {}
