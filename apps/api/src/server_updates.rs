@@ -1,5 +1,5 @@
 use std::io::{Read as _, Seek as _};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -300,22 +300,7 @@ fn private_directory(path: &Path) -> Result<(), ApiError> {
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), ApiError> {
-    use std::io::Write as _;
-    let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temporary)
-        .map_err(|_| storage_error())?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| std::fs::rename(&temporary, path))
-        .and_then(|()| {
-            std::fs::File::open(path.parent().expect("update files have a directory"))?.sync_all()
-        })
-        .map_err(|_| storage_error())
+    crate::private_file::replace(path, bytes).map_err(|_| storage_error())
 }
 
 fn tail(path: &Path) -> Result<String, ApiError> {

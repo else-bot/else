@@ -65,16 +65,10 @@ impl Preferences {
             .path
             .as_ref()
             .ok_or("The layout has no profile storage path.")?;
-        let staged = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
         let bytes =
             serde_json::to_vec(self).map_err(|err| format!("Could not serialize layout: {err}"))?;
-        let result = std::fs::write(&staged, bytes)
-            .and_then(|_| std::fs::rename(&staged, path))
-            .map_err(|err| format!("Could not save layout: {err}"));
-        if result.is_err() {
-            let _ = std::fs::remove_file(staged);
-        }
-        result
+        crate::config::replace_private(path, &bytes)
+            .map_err(|err| format!("Could not save layout: {err}"))
     }
 }
 

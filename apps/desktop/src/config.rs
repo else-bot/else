@@ -528,30 +528,30 @@ impl ProfileStore {
                 parent.display()
             ));
         }
-        let name = self
-            .path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("desktop.json");
-        let tmp = parent.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
-        let written = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&tmp)?;
-            file.write_all(json)?;
-            file.write_all(b"\n")?;
-            file.sync_all()?;
-            std::fs::rename(&tmp, &self.path)?;
-            std::fs::File::open(parent)?.sync_all()
-        })();
-        if written.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        written.map_err(fail)
+        replace_private(&self.path, &[json, b"\n"].concat()).map_err(fail)
     }
+}
+
+/// Replace `path` with a new owner-only (0600) file holding `bytes`. The
+/// file is written beside `path` under a fresh name, synced, renamed over
+/// `path`, and the directory synced. A failed write leaves the old file and
+/// removes the temporary one.
+pub(crate) fn replace_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let name = path
+        .file_name()
+        .map_or_else(Default::default, |n| n.to_string_lossy());
+    let mut file = tempfile::Builder::new()
+        .prefix(&format!(".{name}."))
+        .suffix(".tmp")
+        .tempfile_in(dir)?;
+    file.write_all(bytes)?;
+    file.as_file().sync_all()?;
+    file.persist(path)?;
+    std::fs::File::open(dir)?.sync_all()
 }
 
 pub(crate) fn current_uid() -> u32 {
