@@ -1,4 +1,4 @@
-use crate::controls::{Control as _, Scale, Tier};
+use crate::controls::{Control as _, Scale, Tier, text_field};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -314,7 +314,12 @@ impl ElseApp {
         if let Some(write_in) = view.write_ins.get(&id).filter(|_| takes_write_in(question)) {
             let index = question.choices.len();
             let row = self.render_write_in(id, question, write_in, locked, cx);
-            rows = rows.child(separated(index, row.into_any_element()));
+            // The last option closes the list with the same hairline, so the
+            // footer reads apart from the options.
+            rows = rows.child(
+                separated(index, row.into_any_element())
+                    .when(index > 0, |cell| cell.border_b_1().border_color(line)),
+            );
         }
         body = body.child(rows);
         let hint = if question.multiple {
@@ -369,20 +374,27 @@ impl ElseApp {
             .py_1()
             .rounded(theme.radius)
             .children(next.map(|next| key_chip(theme, next)))
+            // An editable field, so it never reads as a fourth fixed option.
             .child(
                 div().flex_1().min_w_0().child(
-                    Input::new(&write_in.input)
-                        .focus_ring(false)
-                        .appearance(false)
-                        .small()
-                        .px_0()
-                        .aria_label("Your own answer")
-                        .disabled(locked),
+                    text_field(
+                        Input::new(&write_in.input)
+                            .aria_label("Your own answer")
+                            .disabled(locked),
+                        cx,
+                    )
+                    .h(px(32.)),
                 ),
             )
+            // Quiet until there is an answer to send.
             .child(
                 Button::new(SharedString::from(format!("question-{id}-write-in")))
-                    .control(Tier::Primary, Scale::Compact, disabled, cx)
+                    .control(
+                        if empty { Tier::Ghost } else { Tier::Primary },
+                        Scale::Compact,
+                        disabled,
+                        cx,
+                    )
                     .label("Send")
                     .children(
                         Keystroke::parse("enter")
