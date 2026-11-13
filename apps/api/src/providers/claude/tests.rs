@@ -442,7 +442,7 @@ fn fake_claude(dir: &std::path::Path) -> (Claude, std::path::PathBuf) {
         &program,
         format!(
             r#"#!/usr/bin/env python3
-import json, sys
+import json, os, sys
 a = sys.argv[1:]
 if a[:1] == ["--version"]: print("2.1.999 (Claude Code)"); sys.exit()
 if a[:1] == ["auth"]: print('{{"loggedIn":true}}'); sys.exit()
@@ -453,6 +453,9 @@ out({{"type": "system", "subtype": "init", "model": a[a.index("--model") + 1],
 msg = json.loads(sys.stdin.readline())
 with open({received:?}, "a") as f: f.write(json.dumps(msg["message"]["content"]) + "\n")
 out({{"type": "user", "uuid": msg["uuid"], "isReplay": True}})
+if os.environ.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS") != "1":
+    out({{"type": "system", "subtype": "task_started", "task_id": "b1", "task_type": "mcp_task",
+         "description": "elsebot/computer_run"}})
 out({{"type": "result", "subtype": "success", "is_error": False, "result": "ok", "num_turns": 1}})
 "#
         ),
