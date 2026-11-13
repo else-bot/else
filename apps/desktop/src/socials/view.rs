@@ -5,6 +5,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, FocusableExt as _, Sizable as _, StyledExt as _, h_flex,
     v_flex,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 
 impl SocialsView {
     fn render_receipt(&self, receipt: &Receipt, cx: &mut Context<Self>) -> AnyElement {
@@ -204,20 +205,40 @@ impl Render for SocialsView {
         let theme = cx.theme().clone();
         let mut root = v_flex().w_full().gap_3();
         if self.setup.is_none() {
-            root =
-                root.child(
-                    v_flex()
-                        .gap_2()
-                        .child(div().text_xl().font_semibold().child("Socials"))
-                        .child(div().text_sm().text_color(theme.muted_foreground).child(
-                            "Connect Telegram and Discord bots for any of your bots to use.",
-                        )),
-                );
+            root = root.child(
+                h_flex()
+                    .items_start()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .child(div().text_xl().font_semibold().child("Socials"))
+                            .child(div().text_sm().text_color(theme.muted_foreground).child(
+                                "Connect Telegram and Discord bots for any of your bots to use.",
+                            )),
+                    )
+                    .child(
+                        Button::new("social-refresh")
+                            .focus_ring(false)
+                            .cursor_pointer()
+                            .ghost()
+                            .icon(gpui_kit::assets::IconName::RefreshCw)
+                            .label("Refresh")
+                            .disabled(self.busy || !self.available)
+                            .on_click(cx.listener(|view, _, window, cx| view.refresh(window, cx))),
+                    ),
+            );
             for connection in &self.connections {
                 root = root.child(self.render_connection(connection, cx));
             }
-            let mut providers = v_flex().gap_3().mt_3();
-            for (provider, id, description) in [
+            let mut providers = v_flex()
+                .mt_3()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.border);
+            for (index, (provider, id, description)) in [
                 (
                     Provider::Telegram,
                     "social-add-telegram",
@@ -228,28 +249,41 @@ impl Render for SocialsView {
                     "social-add-discord",
                     "Send messages and follow Discord channels.",
                 ),
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 providers = providers.child(
                     h_flex()
                         .w_full()
-                        .p_4()
+                        .px_4()
+                        .py_3()
                         .gap_3()
-                        .rounded(theme.radius_lg)
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.background)
+                        .items_center()
+                        .when(index > 0, |row| row.border_t_1().border_color(theme.border))
                         .child(
-                            gpui_kit::component::Icon::new(match provider {
-                                Provider::Telegram => gpui_kit::assets::IconName::MessageSquare,
-                                Provider::Discord => gpui_kit::assets::IconName::MessageSquare,
-                            })
-                            .size_5()
-                            .text_color(theme.muted_foreground),
+                            div()
+                                .size_8()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(theme.radius)
+                                .bg(theme.secondary)
+                                .child(
+                                    gpui_kit::component::Icon::new(match provider {
+                                        Provider::Telegram => gpui_kit::assets::IconName::Send,
+                                        Provider::Discord => gpui_kit::assets::IconName::Gamepad2,
+                                    })
+                                    .size_4()
+                                    .text_color(theme.muted_foreground),
+                                ),
                         )
                         .child(
                             v_flex()
                                 .flex_1()
-                                .gap_1()
+                                .min_w_0()
+                                .gap_0p5()
                                 .child(div().text_sm().font_semibold().child(provider.label()))
                                 .child(
                                     div()
@@ -270,16 +304,7 @@ impl Render for SocialsView {
                         ),
                 );
             }
-            root = root.child(providers).child(
-                h_flex().justify_end().child(
-                    Button::new("social-refresh")
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .label("Refresh")
-                        .disabled(self.busy || !self.available)
-                        .on_click(cx.listener(|view, _, window, cx| view.refresh(window, cx))),
-                ),
-            );
+            root = root.child(providers);
         }
         if self.busy {
             root = root.child(

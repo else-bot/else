@@ -1,5 +1,6 @@
 use super::*;
 use crate::api::{Bot, ClientError, EmailConfig, EmailEndpoint, EmailProvider};
+use gpui_kit::component::button::ButtonCustomVariant;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::searchable_list::SearchableListItem;
 use gpui_kit::component::select::{Select, SelectState};
@@ -254,7 +255,7 @@ impl Form {
         let mut form = v_flex()
             .gap_4()
             .w_full()
-            .child(div().font_semibold().child("Add email account"));
+            .child(div().text_base().font_semibold().child("Add email account"));
         if let Some(authorization) = &self.authorization {
             let waiting = matches!(authorization, Authorization::Waiting(_));
             form = form.child(note(&if waiting {
@@ -283,7 +284,18 @@ impl Form {
                 )
                 .into_any_element();
         }
-        let mut providers = h_flex().gap_2().flex_wrap();
+        // A segmented control: one track, the chosen provider raised on it.
+        let dark = theme.mode.is_dark();
+        let (track, raised) = if dark {
+            (theme.background, theme.secondary_active)
+        } else {
+            (theme.foreground.opacity(0.06), theme.background)
+        };
+        let mut providers = h_flex()
+            .p(px(3.))
+            .gap(px(2.))
+            .rounded(theme.radius + px(3.))
+            .bg(track);
         for provider in [
             EmailProvider::Gmail,
             EmailProvider::Microsoft,
@@ -291,13 +303,32 @@ impl Form {
             EmailProvider::Icloud,
             EmailProvider::Imap,
         ] {
+            let chosen = self.provider == provider;
             providers = providers.child(
                 Button::new(SharedString::from(format!("email-provider-{provider:?}")))
                     .focus_ring(false)
                     .cursor_pointer()
                     .small()
+                    .flex_1()
+                    .flex_basis(px(0.))
                     .label(provider.label())
-                    .selected(self.provider == provider)
+                    .custom(
+                        ButtonCustomVariant::new(cx)
+                            .color(if chosen { raised } else { track.opacity(0.) })
+                            .foreground(if chosen {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .hover(if chosen {
+                                raised
+                            } else {
+                                theme.foreground.opacity(0.05)
+                            })
+                            .active(raised)
+                            .shadow(chosen),
+                    )
+                    .selected(chosen)
                     .disabled(busy)
                     .on_click(cx.listener(move |view, _, window, cx| {
                         if let Some(form) = &mut view.form {
@@ -309,7 +340,7 @@ impl Form {
                     })),
             );
         }
-        form = form.child(providers);
+        form = form.child(div().max_w(px(520.)).child(providers));
         if self.provider != EmailProvider::Gmail {
             form = form.child(field("Email address", &self.address));
         }
@@ -338,7 +369,7 @@ impl Form {
         }
         form = form.child(v_flex().gap_1()
             .child(div().text_sm().font_medium().child("Ask a bot to help, optional"))
-            .child(Select::new(&self.bot).focus_ring(false).cursor_pointer().accessibility_label("Email bot").disabled(busy)))
+            .child(div().max_w(px(320.)).child(Select::new(&self.bot).focus_ring(false).cursor_pointer().accessibility_label("Email bot").disabled(busy))))
             .child(note("The bot will ask what this inbox is for and whether you want a first triage. All your other bots can still use it when asked."));
         form.child(
             h_flex().gap_2().justify_end().child(

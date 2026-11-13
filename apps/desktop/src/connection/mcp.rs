@@ -236,12 +236,6 @@ impl Shell {
         let Some(view) = &self.mcp else {
             return body.child("Loading installed MCPs…").into_any_element();
         };
-        body = body.child(
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child("Skills, documentation and config are shared by all bots. A signed-in OAuth account serves every bot."),
-        );
         let error = view.error.as_ref().or(view.poll_error.as_ref());
         if let Some(error) = error {
             body = body.child(
@@ -279,43 +273,29 @@ impl Shell {
         };
         if entries.is_empty() {
             return body
-                .child(
-                    v_flex()
-                        .w_full()
-                        .items_center()
-                        .text_center()
-                        .py_12()
-                        .gap_3()
-                        .child(
-                            Icon::new(IconName::Plug)
-                                .size_6()
-                                .text_color(theme.muted_foreground),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child("No MCPs installed yet"),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child("Ask a bot to install an MCP."),
-                        )
-                        .child(
-                            Button::new("empty-open-chat")
-                                .focus_ring(false)
-                                .cursor_pointer()
-                                .label("Open chat")
-                                .on_click(cx.listener(|shell, _, window, cx| {
-                                    window.close_dialog(cx);
-                                    shell.cancel(window, cx);
-                                })),
-                        ),
-                )
+                .flex_1()
+                .child(settings::empty_state(
+                    IconName::Plug,
+                    "No MCPs installed yet",
+                    "Ask a bot to install an MCP.",
+                    Button::new("empty-open-chat")
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .label("Open chat")
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            window.close_dialog(cx);
+                            shell.cancel(window, cx);
+                        })),
+                    cx,
+                ))
                 .into_any_element();
         }
+        body = body.child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child("Skills, documentation and config are shared by all bots. A signed-in OAuth account serves every bot."),
+        );
         body = body.child(
             div().max_w(px(340.)).child(
                 Input::new(&view.search)

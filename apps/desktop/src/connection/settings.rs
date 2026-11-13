@@ -123,7 +123,7 @@ impl Shell {
             let shell_close = shell_close.clone();
             let viewport = window.viewport_size();
             dialog
-                .w((viewport.width - px(64.)).min(px(1040.)))
+                .w((viewport.width - px(64.)).min(SETTINGS_SHEET_WIDTH))
                 .h((viewport.height - px(64.)).min(px(760.)))
                 .centered()
                 .bg(cx.theme().popover)
@@ -341,16 +341,15 @@ impl Shell {
         let body = if section == SettingsSection::Backups {
             body
         } else if section == SettingsSection::Updates {
-            div().size_full().p_8().child(body).into_any_element()
+            v_flex()
+                .size_full()
+                .py_8()
+                .child(settings_column(body).min_h_0())
+                .into_any_element()
         } else {
             div()
-                .h_full()
-                .child(
-                    div()
-                        .p_8()
-                        .w_full()
-                        .child(div().max_w(px(680.)).w_full().child(body)),
-                )
+                .size_full()
+                .child(v_flex().min_h_full().py_8().child(settings_column(body)))
                 .overflow_y_scrollbar()
                 .into_any_element()
         };
@@ -819,6 +818,69 @@ fn settings_row(
                 .min_w_0()
                 .child(value),
         )
+}
+
+/// Width of the content column on every Settings page. The server strip,
+/// page bodies and footers share it so their left and right edges line up.
+pub(super) const SETTINGS_COLUMN: Pixels = px(640.);
+/// Inset of that column from the left edge of the Settings pane.
+pub(super) const SETTINGS_INSET: Pixels = px(32.);
+/// The sheet fits the navigation, one inset column and a matching margin,
+/// so every page keeps the same size and no page floats in a wide void.
+const SETTINGS_SHEET_WIDTH: Pixels = px(920.);
+
+/// Place `content` in the shared Settings column. The column grows to fill
+/// the pane's height, so a page can center an empty state in it.
+pub(super) fn settings_column(content: impl IntoElement) -> Div {
+    v_flex().flex_1().w_full().px(SETTINGS_INSET).child(
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .max_w(SETTINGS_COLUMN)
+            .child(content),
+    )
+}
+
+/// The empty state of an inventory page (MCP, Skills): centered in the
+/// space under the page heading, raised slightly so it sits optically
+/// centered, with one supporting line and the button that fixes it.
+pub(super) fn empty_state(
+    icon: IconName,
+    title: &'static str,
+    detail: &'static str,
+    action: Button,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h(px(240.))
+        .pb(px(72.))
+        .items_center()
+        .justify_center()
+        .text_center()
+        .gap_2()
+        .child(
+            Icon::new(icon)
+                .size_6()
+                .mb_1()
+                .text_color(theme.muted_foreground),
+        )
+        .child(
+            div()
+                .text_base()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(detail),
+        )
+        .child(div().pt_2().child(action))
 }
 
 pub(super) fn section_heading(title: &'static str, description: &'static str, cx: &App) -> Div {

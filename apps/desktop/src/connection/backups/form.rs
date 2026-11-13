@@ -1,10 +1,11 @@
 use super::*;
 use crate::api::{BackupDestinationInput, BackupService, LocalBackupSettings};
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    Disableable as _, FocusableExt as _, Selectable as _, Sizable as _, h_flex,
+    Disableable as _, FocusableExt as _, Icon, Selectable as _, Sizable as _, h_flex,
 };
 
 pub(super) enum Editor {
@@ -453,8 +454,8 @@ impl LocalForm {
             v_flex()
                 .flex_1()
                 .min_w_0()
-                .gap_1p5()
-                .child(div().text_xs().child(label))
+                .gap_2()
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
                 .child(
                     Input::new(state)
                         .focus_ring(false)
@@ -462,7 +463,17 @@ impl LocalForm {
                         .disabled(disabled),
                 )
         };
-        v_flex().gap_4().py_4().border_t_1().border_color(theme.border)
+        let note = format!(
+            "Times use the server's timezone ({}). A missed backup runs at the next scheduled time.",
+            local.timezone
+        );
+        v_flex().gap_4().pt_5().border_t_1().border_color(theme.border)
+            .when(managed, |panel| panel.child(
+                h_flex().gap_2().items_start().text_xs().text_color(theme.muted_foreground)
+                    .child(Icon::new(IconName::Lock).size_3().mt(px(2.)).flex_none())
+                    .child(div().flex_1().min_w_0().child(
+                        "Locked by ELSE_BACKUP_INTERVAL_SECS on the server. Change that variable to edit this schedule.",
+                    ))))
             .child(h_flex().gap_3().justify_between().when(stacked, |row| row.flex_col().items_start())
                 .child(v_flex().gap_1().flex_1().min_w_0()
                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Daily backup time"))
@@ -479,11 +490,8 @@ impl LocalForm {
                         })))))
             .child(presets)
             .child(h_flex().gap_4().items_start().when(stacked, |row| row.flex_col())
-                .child(field("Exact time", &self.time)).child(field("Keep", &self.keep)))
-            .child(div().text_xs().text_color(theme.muted_foreground)
-                .child(format!("Times use the server's timezone ({}). A missed backup runs at the next scheduled time.", local.timezone)))
-            .when(managed, |panel| panel.child(div().text_xs().text_color(theme.muted_foreground)
-                .child("ELSE_BACKUP_INTERVAL_SECS controls this schedule. Change the environment variable on the server to edit it.")))
+                .child(field("Exact time", &self.time)).child(field("Keep copies", &self.keep)))
+            .child(div().text_xs().text_color(theme.muted_foreground).child(note))
             .when(!managed, |panel| panel.child(h_flex().justify_end().gap_2()
                 .child(Button::new("local-backup-cancel").focus_ring(false).cursor_pointer().label("Cancel")
                     .disabled(disabled || !self.dirty(cx))

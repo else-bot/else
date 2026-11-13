@@ -92,6 +92,8 @@ gpui_kit::assets::icon_assets!(
         Star,
         RotateCw,
         Send,
+        Gamepad2,
+        Plus,
         ExternalLink,
         Webhook
     ]

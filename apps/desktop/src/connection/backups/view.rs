@@ -1,4 +1,5 @@
 use super::*;
+use crate::connection::settings::settings_column;
 use chrono::{DateTime, Local, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -59,10 +60,9 @@ pub(super) fn metric(label: &'static str, value: String, detail: String, theme: 
     v_flex()
         .flex_1()
         .min_w_0()
-        .gap_1p5()
-        .p_3()
-        .rounded(theme.radius)
-        .bg(theme.secondary.opacity(0.45))
+        .gap_1()
+        .px_4()
+        .py_3()
         .child(
             div()
                 .text_xs()
@@ -71,7 +71,7 @@ pub(super) fn metric(label: &'static str, value: String, detail: String, theme: 
         )
         .child(
             div()
-                .text_lg()
+                .text_base()
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(value),
         )
@@ -81,6 +81,28 @@ pub(super) fn metric(label: &'static str, value: String, detail: String, theme: 
                 .text_color(theme.muted_foreground)
                 .child(detail),
         )
+}
+
+/// Backup figures in one bordered row, separated by hairlines, so they read
+/// as one summary instead of three floating tiles.
+pub(super) fn metrics(cells: [Div; 3], stacked: bool, theme: &Theme) -> Div {
+    let mut row = h_flex()
+        .w_full()
+        .items_stretch()
+        .rounded(theme.radius_lg)
+        .border_1()
+        .border_color(theme.border)
+        .when(stacked, |row| row.flex_col());
+    for (index, cell) in cells.into_iter().enumerate() {
+        row = row.child(cell.when(index > 0, |cell| {
+            if stacked {
+                cell.border_t_1().border_color(theme.border)
+            } else {
+                cell.border_l_1().border_color(theme.border)
+            }
+        }));
+    }
+    row
 }
 
 pub(super) fn message(text: String, color: Hsla, theme: &Theme) -> Div {
@@ -221,18 +243,15 @@ impl Shell {
                 content.child(message(reason, theme.warning, &theme))
             })
             .when(view.editor.is_none(), |content| {
-                content.child(
-                    h_flex()
-                        .items_stretch()
-                        .gap_3()
-                        .when(stacked, |row| row.flex_col())
-                        .child(metric(
+                content.child(metrics(
+                    [
+                        metric(
                             "Next backup",
                             next_backup(snapshot),
                             interval(snapshot.interval_secs),
                             &theme,
-                        ))
-                        .child(metric(
+                        ),
+                        metric(
                             "Uploaded last run",
                             latest
                                 .and_then(|run| run.uploaded_bytes.or(run.bytes))
@@ -243,8 +262,8 @@ impl Shell {
                                 .map(timestamp)
                                 .unwrap_or_else(|| "After your first remote backup".into()),
                             &theme,
-                        ))
-                        .child(metric(
+                        ),
+                        metric(
                             "Remote copies",
                             format!("{} copies", snapshot.remote_count),
                             format!(
@@ -253,8 +272,11 @@ impl Shell {
                                 byte_size(snapshot.remote_bytes)
                             ),
                             &theme,
-                        )),
-                )
+                        ),
+                    ],
+                    stacked,
+                    &theme,
+                ))
             });
         if let Some(destination) = &snapshot.destination {
             content = content.when(
@@ -476,13 +498,7 @@ impl Shell {
                 content.child(message(err, theme.warning, &theme))
             })
             .child(h_flex().gap_2().items_start().text_xs().text_color(theme.muted_foreground).child(Icon::new(IconName::Lock).size_3()).child("Backups are encrypted before upload. Keep your installation's recovery key safe."));
-        let mut footer = h_flex()
-            .flex_none()
-            .px_6()
-            .py_3()
-            .gap_3()
-            .border_t_1()
-            .border_color(theme.border);
+        let mut footer = h_flex().w_full().gap_3().items_center();
         if let Some(editor) = &view.editor {
             if let Editor::Destination(form) = editor {
                 footer = footer
@@ -562,6 +578,11 @@ impl Shell {
                         ),
                 );
         }
+        let status_line = |text: String, color: Hsla| {
+            div().flex_none().pt_2().child(settings_column(
+                div().text_xs().text_color(color).child(text),
+            ))
+        };
         v_flex()
             .size_full()
             .min_h_0()
@@ -571,29 +592,22 @@ impl Shell {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .child(content.max_w(px(744.)).p_8()),
+                    .child(div().py_8().child(settings_column(content))),
             )
             .when_some(view.error.clone(), |content, text| {
-                content.child(
-                    div()
-                        .px_6()
-                        .py_2()
-                        .text_xs()
-                        .text_color(theme.warning)
-                        .child(text),
-                )
+                content.child(status_line(text, theme.warning))
             })
             .when_some(view.feedback.clone(), |content, text| {
-                content.child(
-                    div()
-                        .px_6()
-                        .py_2()
-                        .text_xs()
-                        .text_color(theme.success)
-                        .child(text),
-                )
+                content.child(status_line(text, theme.success))
             })
-            .child(footer)
+            .child(
+                div()
+                    .flex_none()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(settings_column(footer)),
+            )
             .into_any_element()
     }
 }

@@ -461,17 +461,11 @@ impl ElseApp {
             }));
         let heading = h_flex()
             .w_full()
+            .pb_1()
             .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.muted_foreground)
-                    .child("RULES"),
-            )
+            .child(super::settings::section_label("Rules", cx).flex_1())
             .when(only_history, |row| row.child(open));
-        let body = v_flex().gap_3().child(heading);
+        let body = super::settings::section_frame(cx).child(heading);
         let muted = |text: String| {
             div()
                 .text_xs()
@@ -532,8 +526,8 @@ impl ElseApp {
             .focus_ring(false)
             .cursor_pointer()
             .with_size(Size::Size(px(16.)))
-            .w_full()
-            .px_2p5()
+            .mx(px(-8.))
+            .px_2()
             .py_2()
             .accessibility_label("Open rules")
             .on_click(cx.listener(move |app, _, window, cx| {
@@ -578,16 +572,7 @@ impl ElseApp {
                             .text_color(theme.muted_foreground),
                     ),
             );
-        body.child(
-            div()
-                .w_full()
-                .rounded(theme.radius)
-                .bg(theme.background)
-                .border_1()
-                .border_color(theme.border)
-                .child(card),
-        )
-        .into_any_element()
+        body.child(card).into_any_element()
     }
 
     fn render_rules_dialog(
