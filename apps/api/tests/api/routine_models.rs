@@ -440,9 +440,12 @@ async fn unknown_or_omitted_models_never_block_creation() {
             .await
             .unwrap();
     assert_eq!(
-        (provider.as_str(), lane.as_str()),
-        ("synthetic", ""),
-        "an inheriting routine runs exactly as before"
+        (provider.as_str(), lane),
+        (
+            "synthetic",
+            format!("routine:{}", unknown["id"].as_str().unwrap())
+        ),
+        "an inheriting routine runs on the bot's model in its own lane"
     );
 }
 
@@ -798,4 +801,116 @@ async fn a_bot_sets_another_bots_model_and_its_next_turn_runs_on_it() {
     let used: Value = serde_json::from_str(&used).unwrap();
     assert_eq!(used["model"], "gpt-6.1-sol");
     assert_eq!(used["reasoning_effort"], "low");
+}
+
+/// Admit the routine's next due run, wait until it completes and is
+/// reviewed, and return its turn.
+async fn run_once(app: &TestApp, routine: Uuid) -> Uuid {
+    let due: String = sqlx::query_scalar("SELECT next_due_at FROM routines WHERE id = ?1")
+        .bind(routine)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    let due = DateTime::parse_from_rfc3339(&due).unwrap().to_utc();
+    else_api::db::routines::admit_due(&app.db.pool, app.scheduler.registry(), due, 8)
+        .await
+        .unwrap();
+    app.scheduler.wake();
+    let turn: Uuid = sqlx::query_scalar(
+        "SELECT turn_id FROM routine_runs WHERE routine_id = ?1 ORDER BY due_at DESC LIMIT 1",
+    )
+    .bind(routine)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    tokio::time::timeout(common::SETTLE, async {
+        while !sqlx::query_scalar::<_, bool>("SELECT reviewed FROM routine_runs WHERE turn_id = ?1")
+            .bind(turn)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap()
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the run was reviewed");
+    turn
+}
+
+#[tokio::test]
+async fn each_routine_run_starts_fresh_with_only_the_last_report() {
+    let h = harness().await;
+    let bot = h.app.main_bot().await;
+    let (turn, token) = h
+        .running(&bot, "The planetarium trip leaves Friday. [gate]")
+        .await;
+    let routine = create(&h.app, &token, digest("Digest", json!({}))).await["routine"].clone();
+    assert_eq!(
+        routine["model"],
+        Value::Null,
+        "the routine inherits the bot's model"
+    );
+    finish(&h, turn).await;
+    let id: Uuid = routine["id"].as_str().unwrap().parse().unwrap();
+
+    let mut runs = Vec::new();
+    for _ in 0..3 {
+        runs.push(run_once(&h.app, id).await);
+    }
+    for run in &runs {
+        let (provider, lane, turn_no): (String, String, i64) =
+            sqlx::query_as("SELECT provider_id, session_lane, turn_no FROM turns WHERE id = ?1")
+                .bind(run)
+                .fetch_one(&h.app.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (provider.as_str(), lane),
+            ("synthetic", format!("routine:{id}"))
+        );
+        let inputs = h.inputs(*run).await;
+        assert!(
+            inputs[0].session.is_none(),
+            "run at turn {turn_no} resumed an earlier session"
+        );
+        assert!(
+            inputs[0]
+                .history
+                .iter()
+                .all(|entry| !entry.text.contains("planetarium")),
+            "run at turn {turn_no} was given the owner's chat: {:?}",
+            inputs[0].history
+        );
+    }
+    let previous: i64 = sqlx::query_scalar("SELECT turn_no FROM turns WHERE id = ?1")
+        .bind(runs[1])
+        .fetch_one(&h.app.db.pool)
+        .await
+        .unwrap();
+    let history: Vec<(i64, String)> = h.inputs(runs[2]).await[0]
+        .history
+        .iter()
+        .map(|entry| (entry.turn_no, entry.kind.clone()))
+        .collect();
+    assert_eq!(
+        history,
+        vec![(previous, "assistant".to_owned())],
+        "a run catches up on its routine's last report alone"
+    );
+    let active: Vec<(String, String)> = sqlx::query_as(
+        "SELECT provider_id, lane FROM provider_sessions WHERE status = 'active' ORDER BY lane",
+    )
+    .fetch_all(&h.app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        active,
+        vec![
+            ("synthetic".to_owned(), String::new()),
+            ("synthetic".to_owned(), format!("routine:{id}"))
+        ],
+        "the chat session stays active beside the latest run's"
+    );
 }

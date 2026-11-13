@@ -971,15 +971,23 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
                 CASE WHEN t.status IN ('failed', 'uncertain') THEN t.error_message END,
                 coalesce(i.parts, i.assistant_parts, '[]')
          FROM items i JOIN turns t ON t.id = i.turn_id
+              JOIN (SELECT session_lane AS name FROM turns WHERE id = ?3) lane
          WHERE i.conversation_id = ?1 AND t.turn_no < ?2
            AND i.kind IN ('user', 'routine', 'connector', 'status', 'assistant')
            AND i.routine_update IS NULL
            -- A child's reply reached this bot as its delegation outcome.
            AND NOT EXISTS (SELECT 1 FROM delegations d WHERE d.id = i.id)
+           -- A routine run starts a fresh session in its own lane; it catches
+           -- up on the lane's latest report alone, never the bot's chat.
+           AND (lane.name = '' OR (i.kind = 'assistant' AND t.turn_no = (
+                SELECT max(u.turn_no) FROM turns u JOIN items j ON j.turn_id = u.id
+                WHERE u.conversation_id = ?1 AND u.turn_no < ?2
+                  AND u.session_lane = lane.name AND j.kind = 'assistant')))
          ORDER BY t.turn_no, i.seq",
     )
     .bind(turn.conversation_id)
     .bind(turn.turn_no)
+    .bind(turn_id)
     .fetch_all(&mut *conn)
     .await?
     .into_iter()
@@ -1001,6 +1009,8 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
          FROM provider_sessions s
          WHERE conversation_id = ?1 AND provider_id = ?2 AND status = 'active'
            AND lane = (SELECT session_lane FROM turns WHERE id = ?3)
+           -- A routine run resumes only the session it started itself.
+           AND (lane = '' OR s.id = (SELECT provider_session_id FROM turns WHERE id = ?3))
            -- A session that may hold an uncertain delivery is never resumed.
            AND NOT EXISTS (SELECT 1 FROM turns u
                            WHERE u.provider_session_id = s.id AND u.status = 'uncertain')",

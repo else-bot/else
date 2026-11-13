@@ -610,7 +610,7 @@ async fn admit(
         run_id,
         b"webhook-run\0",
         &prompt,
-        super::routines::RunOn::Bot,
+        super::routines::RunOn::Chat,
     )
     .await?;
     let Ok(turn_id) = queued else {
