@@ -153,11 +153,6 @@ impl ElseApp {
             ),
         };
         let last_text = last_text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let preview = if last_text.is_empty() {
-            format!("{last_sender} finished without a reply.")
-        } else {
-            format!("{last_sender}: {last_text}")
-        };
         let status = activity_status(activity, last, conversation);
         let messages = format!(
             "{count} {}",
@@ -176,84 +171,41 @@ impl ElseApp {
                 );
             }
         }
-        let header = h_flex()
-            .w_full()
-            .min_w_0()
-            .items_start()
-            .gap_3()
-            .child(avatars.mt(px(1.)))
+        let header = super::action_card::event_row(&theme)
+            .children([avatars.into_any_element()])
             .child(
-                v_flex()
+                div()
                     .flex_1()
                     .min_w_0()
-                    .gap_0p5()
-                    .text_left()
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .min_w_0()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(names.clone()),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(match status {
-                                        ActivityStatus::NeedsYou => theme.warning,
-                                        ActivityStatus::Failed(_) => theme.danger,
-                                        _ => theme.muted_foreground,
-                                    })
-                                    .child(format!("{} · {messages}", status.label())),
-                            )
-                            .child(
-                                Icon::new(IconName::ChevronRight)
-                                    .xsmall()
-                                    .flex_none()
-                                    .text_color(theme.muted_foreground),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .truncate()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(preview),
-                    ),
-            );
-        let title = names.clone();
-        let mut card = v_flex()
-            .w_full()
-            .min_w_0()
-            .rounded(theme.radius_lg)
-            .bg(theme.secondary.opacity(0.5))
+                    .truncate()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(names.clone()),
+            )
             .child(
-                Button::new(SharedString::from(format!("bot-activity-{anchor}")))
-                    .ghost()
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .w_full()
-                    .h_auto()
-                    .px_3p5()
-                    .py_2p5()
-                    .rounded(theme.radius_lg)
-                    .accessibility_label(format!(
-                        "Open conversation between {names}, {messages}, {}",
-                        status.label()
-                    ))
-                    .child(header)
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        app.open_bot_exchange(anchor, title.clone(), window, cx);
-                    })),
-            );
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .child(format!("{} · {messages}", status.label())),
+            )
+            .child(Icon::new(IconName::ChevronRight).xsmall());
+        let title = names.clone();
+        let mut card = v_flex().w_full().min_w_0().child(
+            Button::new(SharedString::from(format!("bot-activity-{anchor}")))
+                .ghost()
+                .focus_ring(false)
+                .cursor_pointer()
+                .w_full()
+                .h_auto()
+                .p_0()
+                .accessibility_label(format!(
+                    "Open conversation between {names}, {messages}, {}. {last_sender}: {last_text}",
+                    status.label()
+                ))
+                .child(header)
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    app.open_bot_exchange(anchor, title.clone(), window, cx);
+                })),
+        );
         let mut notes = v_flex().w_full().gap_2().px_3p5().pb_3();
         let mut noted = false;
         for (ids, label, color) in [
@@ -287,7 +239,7 @@ impl ElseApp {
                             note.child(
                                 div()
                                     .line_clamp(2)
-                                    .text_color(color)
+                                    .text_color(theme.muted_foreground)
                                     .child(reason.to_owned()),
                             )
                         })
@@ -419,120 +371,81 @@ impl ElseApp {
         let child = bot(created.bot_id);
         let creator_name = creator.map_or(created.creator_name.clone(), |b| b.name.clone());
         let name = child.map_or(created.name.clone(), |b| b.name.clone());
-        let identity = h_flex()
-            .flex_1()
-            .min_w_0()
-            .items_center()
-            .gap_2p5()
-            .children(child.map(|b| {
+        let expanded = self
+            .view
+            .as_ref()
+            .is_some_and(|view| view.expanded_events.contains(&item));
+        let row = super::action_card::event_row(&theme)
+            .children(child.map(|bot| {
                 bot_avatar(
                     SharedString::from(format!("created-{item}")),
-                    b.avatar,
-                    px(32.),
+                    bot.avatar,
+                    px(16.),
                 )
                 .still()
             }))
-            .child(
-                v_flex()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .truncate()
-                            .text_base()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .when(child.is_none(), |name| {
-                                name.text_color(theme.muted_foreground)
-                            })
-                            .child(name.clone()),
-                    )
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        if child.is_some() {
-                            "New bot"
-                        } else {
-                            "Deleted bot"
-                        },
-                    )),
-            );
-        let open = child.map(|b| {
-            let id = b.id;
-            Button::new(SharedString::from(format!("open-created-{item}")))
-                .ghost()
-                .small()
-                .focus_ring(false)
-                .cursor_pointer()
-                .label("Open chat")
-                .accessibility_label(format!("Open chat with {name}"))
-                .on_click(cx.listener(move |app, _, window, cx| app.open_bot(id, window, cx)))
-        });
-        let card = v_flex()
-            .id(SharedString::from(format!("message-{item}")))
-            .w_full()
-            .gap_3()
-            .p_3p5()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border.opacity(0.6))
-            .bg(theme.sidebar.opacity(0.6))
-            .child(
-                h_flex()
-                    .min_w_0()
-                    .items_center()
-                    .gap_1p5()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .children(creator.map(|b| {
-                        bot_avatar(
-                            SharedString::from(format!("creator-{item}")),
-                            b.avatar,
-                            px(16.),
-                        )
-                        .still()
-                    }))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.foreground)
-                            .child(creator_name),
-                    )
-                    .child(div().flex_none().child("created a bot")),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .items_center()
-                    .gap_3()
-                    .child(identity)
-                    .children(open),
-            )
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap_1()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(theme.border.opacity(0.6))
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.muted_foreground)
-                            .child("Purpose"),
-                    )
-                    .child(div().w_full().text_sm().child(created.purpose.clone())),
-            );
-        v_flex()
-            .w_full()
-            .gap_1()
+            .child(div().flex_none().child("Created bot"))
             .child(
                 div()
-                    .w_full()
-                    .pr(super::message_row::BOT_GUTTER)
-                    .child(card),
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(name.clone()),
             )
-            .children(stamp.map(|at| div().text_xs().text_color(theme.muted_foreground).child(at)))
+            .child(
+                Button::new(SharedString::from(format!("created-details-{item}")))
+                    .small()
+                    .ghost()
+                    .focus_ring(false)
+                    .cursor_pointer()
+                    .label("Details")
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        if let Some(view) = app.view.as_mut()
+                            && !view.expanded_events.remove(&item)
+                        {
+                            view.expanded_events.insert(item);
+                        }
+                        app.remeasure_row(RowKey::Item(item), cx);
+                    })),
+            )
+            .children(child.map(|bot| {
+                let id = bot.id;
+                Button::new(SharedString::from(format!("open-created-{item}")))
+                    .ghost()
+                    .small()
+                    .focus_ring(false)
+                    .cursor_pointer()
+                    .label("Open chat")
+                    .accessibility_label(format!("Open chat with {name}"))
+                    .on_click(cx.listener(move |app, _, window, cx| app.open_bot(id, window, cx)))
+            }));
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .child(row)
+            .when(expanded, |column| {
+                column.child(
+                    v_flex()
+                        .gap_2()
+                        .p_4()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("Created by {creator_name}")),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .whitespace_normal()
+                                .child(created.purpose.clone()),
+                        )
+                        .children(stamp.map(|at| {
+                            div().text_xs().text_color(theme.muted_foreground).child(at)
+                        })),
+                )
+            })
             .into_any_element()
     }
 }

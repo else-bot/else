@@ -3,9 +3,7 @@ use crate::api::ClientError;
 use crate::model::{OwnerNoticeKind, OwnerNoticeStatus};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Sizable as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, FocusableExt as _, Sizable as _};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -110,16 +108,7 @@ impl ElseApp {
                 .accessibility_label(label.clone())
                 .label(label)
         };
-        let actions = h_flex()
-            .flex_wrap()
-            .gap_2()
-            .child(
-                button("reply", format!("Reply to {name}"))
-                    .primary()
-                    .on_click(cx.listener(|app, _, window, cx| {
-                        app.composer.read(cx).focus_handle(cx).focus(window, cx);
-                    })),
-            )
+        let actions = super::action_card::footer()
             .child(
                 button("open", "Open task".into())
                     .disabled(anchor.is_none())
@@ -131,75 +120,33 @@ impl ElseApp {
             )
             .child(
                 button("dismiss", "Mark handled".into())
-                    .ghost()
                     .disabled(!connected)
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.dismiss_owner_notice(bot, id, window, cx);
                     })),
+            )
+            .child(
+                button("reply", format!("Reply to {name}"))
+                    .primary()
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.composer.read(cx).focus_handle(cx).focus(window, cx);
+                    })),
             );
         Some(
-            v_flex()
-                .w_full()
-                .min_w_0()
-                .rounded(theme.radius_lg)
-                .border_1()
-                .border_color(theme.warning.opacity(0.45))
-                .bg(theme.secondary)
-                .overflow_hidden()
+            super::action_card::card(theme, IconName::TriangleAlert, title, subtitle, "Needs you")
                 .child(
-                    h_flex()
-                        .gap_3()
-                        .p_4()
-                        .bg(theme.warning.opacity(0.11))
-                        .child(
-                            h_flex()
-                                .size_9()
-                                .flex_none()
-                                .justify_center()
-                                .rounded(theme.radius)
-                                .bg(theme.warning.opacity(0.16))
-                                .text_color(theme.warning)
-                                .child(Icon::new(IconName::TriangleAlert).size(px(16.))),
-                        )
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(subtitle),
-                                ),
-                        ),
+                    div()
+                        .text_sm()
+                        .whitespace_normal()
+                        .child(notice.summary.clone()),
                 )
-                .child(
-                    v_flex()
-                        .gap_3()
-                        .p_4()
-                        .child(
-                            div()
-                                .border_l_2()
-                                .border_color(theme.warning.opacity(0.45))
-                                .pl_3()
-                                .text_sm()
-                                .child(notice.summary.clone()),
-                        )
-                        .children(notice.tried.as_ref().map(|tried| {
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(format!("Tried · {tried}"))
-                        }))
-                        .child(actions),
-                )
+                .children(notice.tried.as_ref().map(|tried| {
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("Tried · {tried}"))
+                }))
+                .child(actions)
                 .into_any_element(),
         )
     }

@@ -140,15 +140,10 @@ impl ElseApp {
         let locked =
             submit.is_some_and(QuestionForm::locks) || self.connection != Connection::Connected;
         let destructive = question.kind == "destructive";
-        let (icon, tint, badge, badge_color) = if destructive {
-            (
-                IconName::TriangleAlert,
-                theme.danger,
-                "Hard to undo",
-                theme.danger,
-            )
+        let (icon, badge) = if destructive {
+            (IconName::TriangleAlert, "Hard to undo")
         } else {
-            (IconName::Send, theme.info, "Approval needed", theme.warning)
+            (IconName::Send, "Approval needed")
         };
         let mut source = vec![bot_name.to_owned()];
         if let Some(scope) = question.task_scope() {
@@ -158,33 +153,13 @@ impl ElseApp {
         } else if let Some(tool) = question.action.as_ref().and_then(|a| a.tool.clone()) {
             source.push(tool);
         }
-        let mut card = v_flex()
-            .w_full()
-            .gap_3()
-            .p_4()
-            .rounded(theme.radius_lg)
-            .bg(theme.secondary)
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_start()
-                    .gap_3()
-                    .child(tile(icon, tint))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .font_semibold()
-                                    .whitespace_normal()
-                                    .child(question.title.clone()),
-                            )
-                            .child(note(source.join(" · "))),
-                    )
-                    .child(pill(id, badge, badge_color, false, true)),
-            );
+        let mut card = super::super::action_card::card(
+            &theme,
+            icon,
+            question.title.clone(),
+            source.join(" · "),
+            badge,
+        );
         if let Some(context) = &question.context {
             let short = preview(context);
             let shown = match (&short, expanded) {
@@ -294,21 +269,17 @@ impl ElseApp {
                     _ => None,
                 })
         };
-        let mut footer =
-            h_flex()
-                .w_full()
-                .gap_2()
-                .flex_wrap()
-                .child(div().flex_1().min_w_0().child(note(if grants.len() > 1 {
-                    "Sending a new message skips this.".into()
-                } else {
-                    "Covers exactly this action, once. Sending a new message skips this.".into()
-                })));
+        let mut footer = super::super::action_card::footer().child(div().flex_1().min_w_0().child(
+            note(if grants.len() > 1 {
+                "Sending a new message skips this.".into()
+            } else {
+                "Covers exactly this action, once. Sending a new message skips this.".into()
+            }),
+        ));
         if question.choices.iter().any(|c| c.id == DENY) {
             footer = footer.child(
                 Button::new(SharedString::from(format!("question-{id}-{DENY}")))
                     .focus_ring(false)
-                    .ghost()
                     .small()
                     .label(sending(DENY).unwrap_or("Deny"))
                     .disabled(locked)

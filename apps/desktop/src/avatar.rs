@@ -547,7 +547,16 @@ fn paint_avatar(
     let gy = pose.gaze.1 + (0.3 * orbit.sin() - pose.gaze.1) * work;
     let pulse = (TAU * elapsed / 1.8).sin();
     let blink = pose.blink.max(focus_blink(elapsed) * work);
-    let scale = unit * (1. + 0.06 * pose.hover) * (1. + 0.015 * pulse * work);
+    let shape = outline(&art);
+    let reach = shape
+        .iter()
+        .map(|(x, y)| (x * x + y * y).sqrt())
+        .fold(0f32, f32::max);
+    let working_fit = (0.4 / reach).min(1.);
+    let scale = unit
+        * (1. + 0.06 * pose.hover)
+        * (1. + 0.015 * pulse * work)
+        * (1. - work * (1. - working_fit));
     let lean = (gx * 0.025 * unit, gy * 0.02 * unit);
     let tilt = gx * 0.05 + 0.03 * orbit.cos() * work;
     let (sin, cos) = tilt.sin_cos();
@@ -563,17 +572,8 @@ fn paint_avatar(
     };
     let place = place_at(scale);
 
-    let shape = outline(&art);
     if work > 0.01 {
-        paint_halo(
-            shape.map(place_at(scale * 1.26)),
-            center,
-            unit,
-            avatar.color.fill(),
-            work,
-            elapsed,
-            window,
-        );
+        paint_halo(center, unit, avatar.color.fill(), work, elapsed, window);
     }
     let points = shape.map(place);
     let mut body = PathBuilder::fill();
@@ -628,9 +628,8 @@ fn focus_blink(elapsed: f32) -> f32 {
     }
 }
 
-/// A soft glow behind the avatar and a light tracing its outline, one lap per 1.7 s.
+/// A concentric working ring contained inside the avatar's layout bounds.
 fn paint_halo(
-    points: [Point<Pixels>; SAMPLES],
     center: Point<Pixels>,
     unit: f32,
     color: Hsla,
@@ -638,20 +637,14 @@ fn paint_halo(
     elapsed: f32,
     window: &mut Window,
 ) {
-    let glow = 0.3 * unit;
-    let breathe = 0.35 + 0.15 * (TAU * elapsed / 1.8).sin();
-    window.paint_drop_shadows(
-        Bounds::centered_at(center, size(px(glow * 2.), px(glow * 2.))),
-        Corners::all(px(glow)),
-        &[BoxShadow {
-            color: color.opacity(breathe * work),
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(0.4 * unit),
-            spread_radius: px(0.),
-            inset: false,
-        }],
-    );
-
+    let radius = unit * 0.475;
+    let points: [_; SAMPLES] = std::array::from_fn(|i| {
+        let angle = i as f32 / SAMPLES as f32 * TAU;
+        point(
+            center.x + px(radius * angle.cos()),
+            center.y + px(radius * angle.sin()),
+        )
+    });
     let mut track = PathBuilder::stroke(px((0.035 * unit).max(1.)));
     track.move_to(points[0]);
     for p in &points[1..] {
@@ -670,7 +663,7 @@ fn paint_halo(
         let position = head - i as f32;
         let index = position.floor() as isize;
         let (from, to, next) = (at(index - 1), at(index), at(index + 1));
-        let mut segment = PathBuilder::stroke(px((unit * (0.03 + 0.045 * k)).max(1.1)));
+        let mut segment = PathBuilder::stroke(px((unit * 0.035).max(1.1)));
         segment.move_to(from);
         segment.line_to(to);
         segment.line_to(to + (next - to) * position.fract());

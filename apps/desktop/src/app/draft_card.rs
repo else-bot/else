@@ -294,7 +294,7 @@ impl ElseApp {
                 .into_iter()
                 .map(|(label, value)| {
                     h_flex()
-                        .px_1()
+                        .px_2p5()
                         .gap_2()
                         .child(muted(label.into()))
                         .child(div().min_w_0().text_xs().whitespace_normal().child(value))
@@ -444,123 +444,91 @@ impl ElseApp {
         let busy = form.operation.is_some() || self.draft_in_flight(id);
         let conflict = form.baseline.version != draft.version;
         let approve_enabled = connected && !busy && !conflict && draft.can_approve;
-        card = card
-            .child(
-                h_flex()
-                    .px_4()
-                    .pt_3()
-                    .pb_2()
-                    .gap_2()
-                    .child(Icon::new(content_icon).size_4())
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_medium()
-                            .child(draft.content.label().to_owned()),
-                    )
-                    .child(div().flex_1())
-                    .child(muted(if draft.revision > 1 {
-                        format!("Needs approval · v{}", draft.revision)
-                    } else {
-                        "Needs approval".into()
-                    })),
-            )
-            .child(
-                v_flex()
-                    .px_3()
-                    .gap_1()
-                    .children(form.subject.as_ref().map(|subject| {
-                        Input::new(subject)
-                            .appearance(false)
-                            .disabled(busy)
-                            .aria_label("Email subject")
-                            .font_semibold()
-                    }))
-                    .children(metadata())
-                    .when(draft.content.is_email(), |el| {
-                        el.child(div().mt_2().border_t_1().border_color(theme.border))
-                    })
-                    .child(
-                        Textarea::new(&form.body)
-                            .appearance(false)
-                            .disabled(busy)
-                            .aria_label(draft.content.body_label()),
-                    ),
-            )
-            .when(draft.kind.is_some() && draft.can_approve, |card| {
-                card.child(div().px_4().pt_2().child(muted(format!(
-                    "Approve always also approves later {} without asking.",
-                    draft.content.kind_label()
-                ))))
-            })
-            .child(
-                h_flex()
-                    .px_4()
-                    .pt_2()
-                    .pb_3()
-                    .gap_2()
-                    .flex_wrap()
-                    .child(muted(
-                        if draft.can_approve {
-                            "Waiting for your approval"
-                        } else {
-                            "Reply in chat to continue this draft"
-                        }
-                        .into(),
-                    ))
-                    .child(div().flex_1())
-                    .child(
-                        Button::new(SharedString::from(format!("draft-discard-{id}")))
+        card = super::action_card::card(
+            &theme,
+            content_icon,
+            draft.content.label().to_owned(),
+            self.bots
+                .iter()
+                .find(|bot| bot.id == view.bot_id)
+                .map_or("Draft".to_owned(), |bot| format!("{} · Draft", bot.name)),
+            if !draft.can_approve {
+                "Reply in chat".to_owned()
+            } else if draft.revision > 1 {
+                format!("Needs approval · v{}", draft.revision)
+            } else {
+                "Needs approval".to_owned()
+            },
+        )
+        .child(
+            v_flex()
+                .gap_2()
+                .children(form.subject.as_ref().map(|subject| {
+                    Input::new(subject)
+                        .appearance(false)
+                        .disabled(busy)
+                        .aria_label("Email subject")
+                        .font_semibold()
+                }))
+                .children(metadata())
+                .child(
+                    Textarea::new(&form.body)
+                        .appearance(false)
+                        .disabled(busy)
+                        .aria_label(draft.content.body_label()),
+                ),
+        )
+        .when(draft.kind.is_some() && draft.can_approve, |card| {
+            card.child(div().child(muted(format!(
+                "Approve always also approves later {} without asking.",
+                draft.content.kind_label()
+            ))))
+        })
+        .child(
+            super::action_card::footer()
+                .child(
+                    Button::new(SharedString::from(format!("draft-discard-{id}")))
+                        .focus_ring(false)
+                        .label("Discard")
+                        .small()
+                        .disabled(!connected || busy)
+                        .when(connected && !busy, |b| b.cursor_pointer())
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.act_on_draft(id, Choice::Discard, window, cx)
+                        })),
+                )
+                .when(draft.kind.is_some(), |row| {
+                    row.child(
+                        Button::new(SharedString::from(format!("draft-approve-always-{id}")))
                             .focus_ring(false)
-                            .label("Discard")
+                            .label("Approve always")
                             .small()
-                            .ghost()
-                            .disabled(!connected || busy)
-                            .when(connected && !busy, |b| b.cursor_pointer())
-                            .on_click(cx.listener(move |app, _, window, cx| {
-                                app.act_on_draft(id, Choice::Discard, window, cx)
-                            })),
-                    )
-                    .when(draft.kind.is_some(), |row| {
-                        row.child(
-                            Button::new(SharedString::from(format!("draft-approve-always-{id}")))
-                                .focus_ring(false)
-                                .label("Approve always")
-                                .small()
-                                .outline()
-                                .disabled(!approve_enabled)
-                                .when(approve_enabled, |b| b.cursor_pointer())
-                                .on_click(cx.listener(move |app, _, window, cx| {
-                                    app.act_on_draft(id, Choice::ApproveAlways, window, cx)
-                                })),
-                        )
-                    })
-                    .child(
-                        Button::new(SharedString::from(format!("draft-approve-{id}")))
-                            .focus_ring(false)
-                            .label(if busy {
-                                "Saving…"
-                            } else {
-                                draft.content.approve_label()
-                            })
-                            .small()
-                            .primary()
                             .disabled(!approve_enabled)
                             .when(approve_enabled, |b| b.cursor_pointer())
                             .on_click(cx.listener(move |app, _, window, cx| {
-                                app.act_on_draft(id, Choice::Approve, window, cx)
+                                app.act_on_draft(id, Choice::ApproveAlways, window, cx)
                             })),
-                    ),
-            );
+                    )
+                })
+                .child(
+                    Button::new(SharedString::from(format!("draft-approve-{id}")))
+                        .focus_ring(false)
+                        .label(if busy {
+                            "Saving…"
+                        } else {
+                            draft.content.approve_label()
+                        })
+                        .small()
+                        .primary()
+                        .disabled(!approve_enabled)
+                        .when(approve_enabled, |b| b.cursor_pointer())
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.act_on_draft(id, Choice::Approve, window, cx)
+                        })),
+                ),
+        );
         if let Some(error) = &form.error {
-            card = card.child(
-                div()
-                    .px_4()
-                    .pb_2()
-                    .text_xs()
-                    .text_color(theme.danger)
-                    .child(error.clone()),
-            );
+            card = card.child(super::action_card::failure(&theme, error.clone()));
         }
         if form.retryable || conflict {
             let retry = form.retryable;

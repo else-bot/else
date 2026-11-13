@@ -450,8 +450,7 @@ fn inset(text: String, theme: &Theme) -> Div {
         .py_2p5()
         .rounded(theme.radius)
         .bg(theme.background)
-        .font_family(theme.mono_font_family.clone())
-        .text_xs()
+        .text_sm()
         .line_height(relative(1.6))
         .whitespace_normal()
         .child(text)
@@ -459,18 +458,7 @@ fn inset(text: String, theme: &Theme) -> Div {
 
 /// A red callout for an error the owner can act on.
 fn callout(text: String, theme: &Theme) -> Div {
-    h_flex()
-        .w_full()
-        .items_start()
-        .gap_2p5()
-        .px_3()
-        .py_2p5()
-        .rounded(theme.radius)
-        .bg(theme.danger.opacity(0.1))
-        .text_color(theme.danger)
-        .text_xs()
-        .child(Icon::new(IconName::TriangleAlert).size_4().flex_none())
-        .child(div().flex_1().min_w_0().whitespace_normal().child(text))
+    super::action_card::failure(theme, text)
 }
 
 #[cfg(test)]

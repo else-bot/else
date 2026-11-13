@@ -11,9 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
-use super::{
-    Connection, ElseApp, QuestionForm, RowKey, SubmitState, callout, letter, receipt, tile,
-};
+use super::{Connection, ElseApp, QuestionForm, RowKey, SubmitState, callout, letter, receipt};
 use crate::model::{Question, QuestionAnswer};
 
 /// The field on a pending single-choice card for an answer its options don't
@@ -214,30 +212,12 @@ impl ElseApp {
         } else {
             "Choose one"
         };
-        let mut body = v_flex().w_full().gap_3().p_4().child(
-            h_flex()
-                .w_full()
-                .items_start()
-                .gap_3()
-                .child(tile(IconName::CircleQuestionMark, theme.warning))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_0p5()
-                        .child(
-                            div()
-                                .font_semibold()
-                                .whitespace_normal()
-                                .child(question.title.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(format!("{bot_name} · {kind}")),
-                        ),
-                ),
+        let mut body = super::super::action_card::card(
+            &theme,
+            IconName::CircleQuestionMark,
+            question.title.clone(),
+            format!("{bot_name} · {kind}"),
+            "Your answer",
         );
         if let Some(context) = &question.context {
             body = body.child(
@@ -340,7 +320,7 @@ impl ElseApp {
         } else {
             "Choose an answer or type your own. Sending a new message skips this.".to_owned()
         };
-        let mut footer = h_flex().w_full().gap_3().flex_wrap().child(
+        let mut footer = super::super::action_card::footer().child(
             div()
                 .flex_1()
                 .min_w(px(180.))
@@ -369,39 +349,7 @@ impl ElseApp {
         if let Some(SubmitState::Failed(error)) = form.map(|f| &f.state) {
             body = body.child(callout(error.clone(), &theme));
         }
-        let card = v_flex()
-            .w_full()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.warning.opacity(0.45))
-            .bg(theme.secondary)
-            .overflow_hidden()
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .px_4()
-                    .py_2()
-                    .bg(theme.warning.opacity(0.11))
-                    .text_xs()
-                    .font_semibold()
-                    .text_color(theme.warning)
-                    .child(
-                        div()
-                            .size(px(7.))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(theme.warning),
-                    )
-                    .child(format!("{bot_name} is paused until you answer")),
-            )
-            .child(body);
-        v_flex()
-            .w_full()
-            .gap_2()
-            .child(divider("Paused · waiting on you".into(), theme.warning))
-            .child(card)
-            .into_any_element()
+        body.into_any_element()
     }
 
     fn render_write_in(

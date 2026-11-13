@@ -12,6 +12,7 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, h_flex, v_flex,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -333,47 +334,44 @@ impl ElseApp {
             };
             fields = fields.child(v_flex().gap_1().child(label).child(control));
         }
-        let mut card = v_flex()
-            .w_full()
-            .gap_2()
-            .p_3()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.secondary)
-            .child(
-                div()
-                    .font_semibold()
-                    .child(format!("{bot_name} needs credentials: {}", request.name)),
-            )
-            .child(div().text_sm().child(request.reason.clone()))
-            .child(note(format!(
-                "Stored encrypted as the task secret {} for every bot on this server when you save, \
-                 replacing one with the same name. {bot_name} never sees the values, \
-                 and they are not added to the conversation. A multi-line value such as a \
-                 private key can be pasted whole.",
-                request.name
-            )))
-            .child(fields);
+        let mut card = super::action_card::card(
+            &theme,
+            gpui_kit::assets::IconName::Lock,
+            format!("Save {}", request.name),
+            format!("{bot_name} · Credentials"),
+            "Needs credentials",
+        )
+        .child(div().text_sm().child(request.reason.clone()))
+        .child(
+            h_flex().w_full().min_w_0().gap_2().items_center()
+                .child(div().flex_1().min_w_0().text_xs().text_color(theme.muted_foreground)
+                    .child("Encrypted on this server. Values stay out of chat."))
+                .child(Button::new(SharedString::from(format!("secret-about-{id}")))
+                    .small().ghost().focus_ring(false).cursor_pointer().label("About saving")
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        if let Some(view) = app.view.as_mut() && !view.expanded_events.remove(&id) {
+                            view.expanded_events.insert(id);
+                        }
+                        app.remeasure_row(super::RowKey::SecretRequest(id), cx);
+                    }))),
+        )
+        .when(view.expanded_events.contains(&id), |card| card.child(note(format!(
+            "Saved as the task secret {} for every bot on this server, replacing one with the same name. \
+             {bot_name} never sees the values. Paste multi-line values such as private keys whole.", request.name
+        ))))
+        .child(fields);
+
         if let Some(error) = &form.error {
-            card = card.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.danger)
-                    .child(error.clone()),
-            );
+            card = card.child(super::action_card::failure(&theme, error.clone()));
         }
         card = card.child(
-            h_flex()
-                .justify_end()
-                .gap_2()
+            super::action_card::footer()
                 .child(
                     Button::new(SharedString::from(format!("secret-decline-{id}")))
                         .focus_ring(false)
                         .cursor_pointer()
                         .label("Decline")
                         .small()
-                        .ghost()
                         .disabled(busy)
                         .on_click(cx.listener(move |app, _, window, cx| {
                             app.answer_secret(id, false, window, cx)

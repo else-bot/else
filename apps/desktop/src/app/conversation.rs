@@ -314,8 +314,9 @@ pub(super) struct ConversationView {
     pub(super) expanded_drafts: HashSet<Uuid>,
     pub(super) expanded_questions: HashSet<Uuid>,
     pub(super) expanded_tasks: HashSet<Uuid>,
-    /// Live councils whose queued lane shows every member.
+    /// Delegation groups whose task details are expanded.
     pub(super) expanded_councils: HashSet<Uuid>,
+    pub(super) expanded_events: HashSet<Uuid>,
     /// The waiting tray lists its tasks instead of only its header.
     pub(super) tray_expanded: bool,
     pub(super) reply_transitions: HashMap<Uuid, std::time::Instant>,
@@ -422,6 +423,7 @@ impl ConversationView {
             expanded_questions: HashSet::new(),
             expanded_tasks: HashSet::new(),
             expanded_councils: HashSet::new(),
+            expanded_events: HashSet::new(),
             tray_expanded: false,
             reply_transitions: HashMap::new(),
             _reply_clock: None,
