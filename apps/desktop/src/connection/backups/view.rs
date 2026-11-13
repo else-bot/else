@@ -190,8 +190,9 @@ impl Shell {
             .recent
             .iter()
             .find(|run| run.remote_status.as_deref() == Some("completed"));
-        let mut content = v_flex()
-            .gap_5()
+        // Groups sit 32 px apart; rows inside a group 20 px.
+        let page = v_flex()
+            .gap_8()
             .child(super::super::settings::section_heading(
                 "Backups",
                 "Copies of every bot’s computer, projects and memory.",
@@ -199,24 +200,52 @@ impl Shell {
             ))
             .when_some(snapshot.local.as_ref(), |content, local| {
                 content.child(self.render_local_backups(view, snapshot, local, stacked, cx))
+            });
+        let run_now = Button::new("backup-run-now")
+            .focus_ring(false)
+            .cursor_pointer()
+            .label(if snapshot.running {
+                "Backing up…"
+            } else {
+                "Back up now"
             })
+            .loading(view.operation == Operation::Starting)
+            .tier(
+                Tier::Primary,
+                busy || snapshot.running || !has_destination || unavailable,
+                cx,
+            )
+            .on_click(cx.listener(|shell, _, window, cx| shell.run_remote_backup(window, cx)));
+        let mut content = v_flex()
+            .gap_5()
             .child(super::super::settings::section_heading(
                 "Remote",
                 "Your workspace, backed up off this server.",
                 cx,
             ))
+            // The remote summary: its state, the run action beside it, and
+            // the automatic switch.
             .child(
                 h_flex()
                     .justify_between()
+                    .items_center()
                     .gap_3()
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(tone)
-                            .child(div().size_1p5().rounded_full().bg(tone))
-                            .child(status),
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(div().text_sm().text_color(tone).child(status))
+                            .when(snapshot.running, |summary| {
+                                summary.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child("You can leave settings while this backup runs."),
+                                )
+                            }),
                     )
+                    .when(view.editor.is_none(), |row| row.child(run_now))
                     .child(
                         Switch::new("remote-backups-enabled")
                             .focus_ring(false)
@@ -499,10 +528,12 @@ impl Shell {
                 content.child(message(err, theme.warning, &theme))
             })
             .child(h_flex().gap_2().items_start().text_xs().text_color(theme.muted_foreground).child(Icon::new(IconName::Lock).size_3()).child("Backups are encrypted before upload. Keep your installation's recovery key safe."));
-        let mut footer = h_flex().w_full().gap_3().items_center();
+        // Only an open editor keeps a footer bar, for its save and cancel.
+        let mut footer = None;
         if let Some(editor) = &view.editor {
+            let mut bar = h_flex().w_full().gap_3().items_center();
             if let Editor::Destination(form) = editor {
-                footer = footer
+                bar = bar
                     .child(
                         Button::new("backup-test-connection")
                             .focus_ring(false)
@@ -528,7 +559,7 @@ impl Shell {
                             })),
                     );
             } else {
-                footer = footer.child(div().flex_1()).child(
+                bar = bar.child(div().flex_1()).child(
                     Button::new("backup-save-policy")
                         .focus_ring(false)
                         .cursor_pointer()
@@ -541,7 +572,7 @@ impl Shell {
                         ),
                 );
             }
-            footer = footer.child(
+            bar = bar.child(
                 Button::new("backup-cancel-edit")
                     .focus_ring(false)
                     .cursor_pointer()
@@ -549,38 +580,7 @@ impl Shell {
                     .disabled(busy)
                     .on_click(cx.listener(|shell, _, _, cx| shell.cancel_backup_edit(cx))),
             );
-        } else {
-            footer = footer
-                .child(
-                    div()
-                        .flex_1()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(if snapshot.running {
-                            "You can leave settings while this backup runs."
-                        } else {
-                            "Old copies are removed after a new backup is verified."
-                        }),
-                )
-                .child(
-                    Button::new("backup-run-now")
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .label(if snapshot.running {
-                            "Backing up…"
-                        } else {
-                            "Back up now"
-                        })
-                        .loading(view.operation == Operation::Starting)
-                        .tier(
-                            Tier::Primary,
-                            busy || snapshot.running || !has_destination || unavailable,
-                            cx,
-                        )
-                        .on_click(
-                            cx.listener(|shell, _, window, cx| shell.run_remote_backup(window, cx)),
-                        ),
-                );
+            footer = Some(bar);
         }
         let status_line = |text: String, color: Hsla| {
             div().flex_none().pt_2().child(settings_column(
@@ -596,7 +596,7 @@ impl Shell {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .child(div().py_8().child(settings_column(content))),
+                    .child(div().py_8().child(settings_column(page.child(content)))),
             )
             .when_some(view.error.clone(), |content, text| {
                 content.child(status_line(text, theme.warning))
@@ -604,14 +604,16 @@ impl Shell {
             .when_some(view.feedback.clone(), |content, text| {
                 content.child(status_line(text, theme.success))
             })
-            .child(
-                div()
-                    .flex_none()
-                    .py_3()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .child(settings_column(footer)),
-            )
+            .when_some(footer, |content, footer| {
+                content.child(
+                    div()
+                        .flex_none()
+                        .py_3()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(settings_column(footer)),
+                )
+            })
             .into_any_element()
     }
 }

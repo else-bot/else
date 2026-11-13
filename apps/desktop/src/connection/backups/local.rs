@@ -69,22 +69,6 @@ impl Shell {
             .pause
             .as_ref()
             .is_some_and(|pause| pause.reason == PauseReason::Backup);
-        let status = if running {
-            "Backing up this server".into()
-        } else if local.managed_by_env {
-            "Local backup schedule managed by server".into()
-        } else if local.enabled {
-            format!("Daily local backup at {}", local.time)
-        } else {
-            "Automatic local backups off".into()
-        };
-        let tone = if running {
-            theme.warning
-        } else if local.enabled {
-            theme.success
-        } else {
-            theme.muted_foreground
-        };
         let next = local
             .next_at
             .as_deref()
@@ -194,26 +178,22 @@ impl Shell {
                 );
             }
         }
-        v_flex()
-            .gap_4()
-            .child(
-                div()
-                    .text_base()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("On this server"),
-            )
+        // Three groups, 32 px apart: the summary, the schedule, and what is
+        // kept. The summary's figures already say whether a backup is
+        // running or scheduled, so no status line repeats them.
+        let summary = v_flex()
+            .gap_3()
             .child(
                 h_flex()
                     .gap_3()
+                    .items_baseline()
                     .justify_between()
                     .when(stacked, |row| row.flex_col().items_start())
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(tone)
-                            .child(div().size_1p5().rounded_full().bg(tone))
-                            .child(status),
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("On this server"),
                     )
                     .child(
                         div()
@@ -256,7 +236,10 @@ impl Shell {
                 ],
                 stacked,
                 theme,
-            ))
+            ));
+        v_flex()
+            .gap_8()
+            .child(summary)
             .when_some(view.local_form.as_ref(), |section, form| {
                 section.child(form.render(
                     local,

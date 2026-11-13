@@ -463,43 +463,131 @@ impl LocalForm {
                         .disabled(disabled),
                 )
         };
-        let note = format!(
-            "Times use the server's timezone ({}). A missed backup runs at the next scheduled time.",
-            local.timezone
-        );
-        v_flex().gap_4().pt_5().border_t_1().border_color(theme.border)
-            .when(managed, |panel| panel.child(
-                h_flex().gap_2().items_start().text_xs().text_color(theme.muted_foreground)
-                    .child(Icon::new(IconName::Lock).size_3().mt(px(2.)).flex_none())
-                    .child(div().flex_1().min_w_0().child(
-                        "Locked by ELSE_BACKUP_INTERVAL_SECS on the server. Change that variable to edit this schedule.",
-                    ))))
-            .child(h_flex().gap_3().justify_between().when(stacked, |row| row.flex_col().items_start())
-                .child(v_flex().gap_1().flex_1().min_w_0()
-                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Daily backup time"))
-                    .child(div().text_xs().text_color(theme.muted_foreground)
-                        .child("else.bot pauses new work while it backs up. Running tasks finish first.")))
-                .child(h_flex().gap_2().text_xs().child("Automatic")
-                    .child(Switch::new("local-backups-enabled").focus_ring(false).cursor_pointer().small()
-                        .checked(self.enabled).disabled(disabled).accessibility_label("Automatic daily local backups")
-                        .on_click(cx.listener(|shell, enabled: &bool, _, cx| {
-                            if let Some(form) = shell.backups.as_mut().and_then(|view| view.local_form.as_mut()) {
-                                form.enabled = *enabled;
-                            }
-                            cx.notify();
-                        })))))
+        let note = |text: String| {
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .whitespace_normal()
+                .child(text)
+        };
+        let heading =
+            |text: &'static str| div().text_sm().font_weight(FontWeight::MEDIUM).child(text);
+        // The lock sits under the heading it locks, in place of the
+        // description of what a backup does to running work.
+        let explanation = if managed {
+            h_flex()
+                .gap_2()
+                .items_start()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(Icon::new(IconName::Lock).size_3().mt(px(2.)).flex_none())
+                .child(div().flex_1().min_w_0().child(
+                    "Locked by ELSE_BACKUP_INTERVAL_SECS on the server. Change that variable to \
+                     edit this schedule.",
+                ))
+        } else {
+            h_flex().child(note(
+                "else.bot pauses new work while it backs up. Running tasks finish first.".into(),
+            ))
+        };
+        let schedule = v_flex()
+            .gap_4()
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_start()
+                    .justify_between()
+                    .when(stacked, |row| row.flex_col())
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .flex_1()
+                            .min_w_0()
+                            .child(heading("Daily backup time"))
+                            .child(explanation),
+                    )
+                    .child(
+                        h_flex().gap_2().text_xs().child("Automatic").child(
+                            Switch::new("local-backups-enabled")
+                                .focus_ring(false)
+                                .cursor_pointer()
+                                .small()
+                                .checked(self.enabled)
+                                .disabled(disabled)
+                                .accessibility_label("Automatic daily local backups")
+                                .on_click(cx.listener(|shell, enabled: &bool, _, cx| {
+                                    if let Some(form) = shell
+                                        .backups
+                                        .as_mut()
+                                        .and_then(|view| view.local_form.as_mut())
+                                    {
+                                        form.enabled = *enabled;
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
+                    ),
+            )
             .child(presets)
-            .child(h_flex().gap_4().items_start().when(stacked, |row| row.flex_col())
-                .child(field("Exact time", &self.time)).child(field("Keep copies", &self.keep)))
-            .child(div().text_xs().text_color(theme.muted_foreground).child(note))
-            .when(!managed, |panel| panel.child(h_flex().justify_end().gap_2()
-                .child(Button::new("local-backup-cancel").focus_ring(false).cursor_pointer().label("Cancel")
-                    .disabled(disabled || !self.dirty(cx))
-                    .on_click(cx.listener(|shell, _, window, cx| shell.cancel_local_backup_edit(window, cx))))
-                .child(Button::new("local-backup-save").focus_ring(false).cursor_pointer().label("Save schedule").primary()
-                    .loading(saving)
-                    .disabled(disabled || !self.dirty(cx))
-                    .on_click(cx.listener(|shell, _, window, cx| shell.save_local_backup_schedule(window, cx))))))
+            .child(
+                h_flex()
+                    .gap_4()
+                    .items_start()
+                    .when(stacked, |row| row.flex_col())
+                    .child(field("Exact time", &self.time))
+                    .child(div().flex_1().min_w_0()),
+            )
+            .child(note(format!(
+                "Times use the server's timezone ({}). A missed backup runs at the next \
+                 scheduled time.",
+                local.timezone
+            )));
+        let retention = v_flex()
+            .gap_4()
+            .child(
+                h_flex()
+                    .gap_4()
+                    .items_start()
+                    .when(stacked, |row| row.flex_col())
+                    .child(field("Keep copies", &self.keep))
+                    .child(div().flex_1().min_w_0()),
+            )
+            .child(note(
+                "Old copies are removed after a new backup is verified.".into(),
+            ));
+        v_flex()
+            .gap_8()
+            .child(schedule)
+            .child(retention)
+            .when(!managed, |panel| {
+                panel.child(
+                    h_flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("local-backup-cancel")
+                                .focus_ring(false)
+                                .cursor_pointer()
+                                .label("Cancel")
+                                .disabled(disabled || !self.dirty(cx))
+                                .on_click(cx.listener(|shell, _, window, cx| {
+                                    shell.cancel_local_backup_edit(window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("local-backup-save")
+                                .focus_ring(false)
+                                .cursor_pointer()
+                                .label("Save schedule")
+                                .primary()
+                                .loading(saving)
+                                .disabled(disabled || !self.dirty(cx))
+                                .on_click(cx.listener(|shell, _, window, cx| {
+                                    shell.save_local_backup_schedule(window, cx)
+                                })),
+                        ),
+                )
+            })
     }
 }
 
