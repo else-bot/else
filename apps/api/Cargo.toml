@@ -43,6 +43,7 @@ rustix = { version = "1.1.6", features = ["fs", "process", "event", "param", "st
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 markdown = "1.0.0"
 mime_guess = "2.0.5"
+quick-xml = { version = "0.41.0", features = ["serialize"] }
 percent-encoding = "2.3.2"
 png = "0.18.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["stream", "json", "rustls", "form"] }

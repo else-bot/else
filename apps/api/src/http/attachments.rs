@@ -6,6 +6,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -137,17 +138,24 @@ async fn download(
     Ok(response)
 }
 
+/// Bytes RFC 8187 `attr-char` leaves unencoded in `filename*`.
+const ATTR_CHAR: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'!')
+    .remove(b'#')
+    .remove(b'$')
+    .remove(b'&')
+    .remove(b'+')
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'^')
+    .remove(b'_')
+    .remove(b'`')
+    .remove(b'|')
+    .remove(b'~');
+
 /// RFC 8187 encoding of a file name for `filename*`.
 fn percent_encode(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for byte in name.bytes() {
-        if byte.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&byte) {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
+    utf8_percent_encode(name, ATTR_CHAR).to_string()
 }
 
 #[cfg(test)]
