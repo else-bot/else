@@ -12,7 +12,7 @@ use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -123,18 +123,26 @@ impl ElseApp {
                             .and_then(|conversation| conversation.turn(task.turn))
                             .and_then(|turn| turn.routine.as_ref())
                             .map(|run| {
-                                h_flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(Icon::new(IconName::Clock).xsmall().flex_none())
-                                    .child(div().flex_1().min_w_0().truncate().child(format!(
-                                        "{} · {}",
-                                        run.label(),
-                                        run.name
-                                    )))
-                                    .child(stamp(run.due_at))
+                                super::action_card::event_row(cx.theme())
+                                    .child(Icon::new(IconName::Clock).size_4())
+                                    .child(run.label())
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(run.name.clone()),
+                                    )
+                                    .child(div().flex_none().text_xs().child(stamp(run.due_at)))
+                                    .child(routine_details(
+                                        SharedString::from(format!(
+                                            "routine-{}-{}",
+                                            run.routine_id,
+                                            run.due_at.timestamp()
+                                        )),
+                                        cx,
+                                    ))
                             }),
                     )
                     .child(body)
@@ -168,17 +176,27 @@ impl ElseApp {
             .and_then(|ix| view.rows.get(ix))
             .is_some_and(|row| row.key == RowKey::Task(group.turn));
         let theme = cx.theme().clone();
+        let actionable = matches!(
+            row.key,
+            RowKey::Question(_)
+                | RowKey::SecretRequest(_)
+                | RowKey::Draft(_)
+                | RowKey::OwnerNotice(_)
+        );
         let frame = gpui_kit::component::v_flex()
             .w_full()
-            .border_l_1()
-            .border_r_1()
-            .border_color(theme.primary.opacity(0.25))
-            .bg(theme.sidebar.opacity(0.6))
-            .when(group.first, |frame| {
-                frame.border_t_1().rounded_t(theme.radius_lg)
-            })
-            .when(group.last, |frame| {
-                frame.border_b_1().rounded_b(theme.radius_lg)
+            .when(!actionable, |frame| {
+                frame
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(theme.primary.opacity(0.25))
+                    .bg(theme.sidebar.opacity(0.6))
+                    .when(group.first, |frame| {
+                        frame.border_t_1().rounded_t(theme.radius_lg)
+                    })
+                    .when(group.last, |frame| {
+                        frame.border_b_1().rounded_b(theme.radius_lg)
+                    })
             })
             .children(
                 turn.routine
@@ -186,13 +204,23 @@ impl ElseApp {
                     .filter(|_| group.first && !follows_task)
                     .map(|run| routine_banner(run, cx)),
             )
-            .child(div().w_full().px_1().pt_1().child(body))
-            .when(group.last, |frame| frame.pb_1());
+            .child(
+                div()
+                    .w_full()
+                    .when(!actionable, |body| body.px_1().pt_1())
+                    .child(body),
+            )
+            .when(group.last && !actionable, |frame| frame.pb_1());
         column
             .when(group.first, |column| column.pt_1p5())
             .when(group.last, |column| column.pb_1p5())
             .children(row.unread_start.then(|| unread_divider(cx)))
-            .child(div().w_full().pr(BOT_GUTTER).child(frame))
+            .child(
+                div()
+                    .w_full()
+                    .when(!actionable, |frame| frame.pr(BOT_GUTTER))
+                    .child(frame),
+            )
             .into_any_element()
     }
 
@@ -272,17 +300,21 @@ impl ElseApp {
                 let item = conversation.item(id)?;
                 if let Some(update) = &item.routine_update {
                     return Some(
-                        h_flex()
-                            .w_full()
-                            .justify_center()
-                            .items_center()
-                            .gap_1p5()
-                            .py_2()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
+                        super::action_card::event_row(&theme)
+                            .child(Icon::new(IconName::Clock).size_4())
                             .child("Updated routine")
-                            .child(Icon::new(IconName::Clock).size_3p5())
-                            .child(div().min_w_0().truncate().child(update.name.clone()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(update.name.clone()),
+                            )
+                            .child(routine_details(
+                                SharedString::from(format!("routine-update-{id}")),
+                                cx,
+                            ))
                             .into_any_element(),
                     );
                 }
@@ -526,36 +558,49 @@ pub(super) fn with_reaction(
 
 fn routine_banner(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> AnyElement {
     let theme = cx.theme();
-    gpui_kit::component::v_flex()
-        .w_full()
-        .gap_1p5()
-        .px_3p5()
-        .py_2p5()
-        .rounded_t(theme.radius_lg)
-        .bg(theme.primary.opacity(0.07))
+    super::action_card::event_row(theme)
+        .child(Icon::new(IconName::Clock).size_4())
+        .child(run.label())
         .child(
-            h_flex()
-                .items_center()
-                .gap_2()
-                .text_xs()
-                .text_color(theme.primary)
-                .child(Icon::new(IconName::Clock).size_3p5())
-                .child(run.label())
-                .child(
-                    div()
-                        .flex_1()
-                        .text_right()
-                        .text_color(theme.muted_foreground)
-                        .child(
-                            run.due_at
-                                .with_timezone(&Local)
-                                .format("%e %b · %H:%M %Z")
-                                .to_string(),
-                        ),
-                ),
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(run.name.clone()),
         )
-        .child(div().text_sm().font_semibold().child(run.name.clone()))
+        .child(
+            div().flex_none().text_xs().child(
+                run.due_at
+                    .with_timezone(&Local)
+                    .format("%e %b · %H:%M %Z")
+                    .to_string(),
+            ),
+        )
+        .child(routine_details(
+            SharedString::from(format!(
+                "routine-{}-{}",
+                run.routine_id,
+                run.due_at.timestamp()
+            )),
+            cx,
+        ))
         .into_any_element()
+}
+
+fn routine_details(id: SharedString, cx: &mut Context<ElseApp>) -> Button {
+    Button::new(id)
+        .small()
+        .ghost()
+        .focus_ring(false)
+        .cursor_pointer()
+        .label("View")
+        .accessibility_label("View routines in bot details")
+        .on_click(cx.listener(|app, _, window, cx| {
+            if !app.settings_open {
+                app.toggle_settings(window, cx);
+            }
+        }))
 }
 
 pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {

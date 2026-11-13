@@ -79,8 +79,35 @@ impl ElseApp {
             history.push(id);
         }
         let expandable = !history.is_empty();
-        let header_padding = if complete { px(10.) } else { px(14.) };
-        let header = if complete {
+        let owner_waiting = task.state == ReplyState::Waiting
+            && (turn.waits_on_owner()
+                || turn
+                    .owner_notices
+                    .iter()
+                    .any(|notice| notice.status == crate::model::OwnerNoticeStatus::Pending));
+        let header_padding = if complete || owner_waiting {
+            px(8.)
+        } else {
+            px(12.)
+        };
+        let header = if owner_waiting {
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .when(expandable, |row| {
+                    row.child("Earlier updates").child(
+                        Icon::new(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .xsmall(),
+                    )
+                })
+        } else if complete {
             h_flex()
                 .w_full()
                 .min_w_0()
@@ -126,11 +153,7 @@ impl ElseApp {
                         )
                 }))
         } else {
-            let label = if error {
-                "Needs attention"
-            } else {
-                task.state.label()
-            };
+            let label = task.state.label();
             let pill = (error || !matches!(task.state, ReplyState::Working | ReplyState::Waiting))
                 .then_some(label);
             let detail = (!error && summary != label).then(|| summary.clone());
@@ -142,17 +165,17 @@ impl ElseApp {
                 .w_full()
                 .min_w_0()
                 .items_center()
-                .gap_4()
+                .gap_3()
                 .children(bot.map(|bot| {
                     let avatar = bot_avatar(
                         SharedString::from(format!("task-avatar-{}", task.turn)),
                         bot.avatar,
-                        px(38.),
+                        px(28.),
                     )
                     .when(working, |avatar| avatar.working());
                     h_flex()
                         .flex_none()
-                        .size(px(56.))
+                        .size(px(40.))
                         .items_center()
                         .justify_center()
                         .child(
@@ -195,8 +218,13 @@ impl ElseApp {
                                         .child(title.clone()),
                                 )
                                 .children(pill.map(|label| {
-                                    div()
+                                    h_flex()
                                         .flex_none()
+                                        .gap_1()
+                                        .items_center()
+                                        .children(
+                                            error.then(|| Icon::new(IconName::CircleX).xsmall()),
+                                        )
                                         .px_2()
                                         .rounded_full()
                                         .border_1()
@@ -278,7 +306,9 @@ impl ElseApp {
                     }))
                     .into_any_element()
             } else {
-                header.px_3p5().py(header_padding).into_any_element()
+                header
+                    .when(!owner_waiting, |header| header.px_3p5().py(header_padding))
+                    .into_any_element()
             })
             .children(error.then(|| {
                 div()
@@ -286,7 +316,7 @@ impl ElseApp {
                     .px_3p5()
                     .pb_2()
                     .text_sm()
-                    .text_color(theme.danger)
+                    .text_color(theme.foreground)
                     .child(summary)
             }));
         if expanded && expandable {
@@ -341,13 +371,17 @@ impl ElseApp {
         } else {
             None
         };
-        let bubble = v_flex()
-            .w_full()
-            .min_w_0()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border.opacity(0.6))
-            .bg(theme.sidebar.opacity(0.6));
+        let bubble =
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .rounded(theme.radius_lg)
+                .when(complete, |bubble| {
+                    bubble
+                        .border_1()
+                        .border_color(theme.border.opacity(0.6))
+                        .bg(theme.sidebar.opacity(0.6))
+                });
         let mut card = v_flex().relative().w_full().min_w_0().gap_2();
         card = if complete {
             card.child(

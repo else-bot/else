@@ -575,6 +575,7 @@ impl ElseApp {
             .as_ref()
             .and_then(|view| view.conversation.as_ref())
             .and_then(|conversation| conversation.latest_unshown_turn())
+            .filter(|_| bot.waiting().is_none())
             .and_then(|turn| self.render_turn_status(turn, bot.id, cx));
         let mut actions = h_flex().flex_none().gap_1().items_center();
         if !self.settings_open {
@@ -885,7 +886,7 @@ impl ElseApp {
                                 .when(!stopping, |button| button.cursor_pointer())
                                 .icon(IconName::Square)
                                 .small()
-                                .size(px(32.))
+                                .size(px(28.))
                                 .accessibility_label(if stopping {
                                     "Stopping work"
                                 } else {
@@ -1007,6 +1008,9 @@ fn subtitle(bot: &Bot, main: bool) -> String {
             "Idle".to_owned()
         }
     };
+    if bot.waiting().is_some() {
+        return "Waiting for you".to_owned();
+    }
     let Some(activity) = &bot.activity else {
         return idle();
     };

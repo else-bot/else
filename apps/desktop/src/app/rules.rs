@@ -403,20 +403,8 @@ impl ElseApp {
                     app.restore_rules(bot, previous, shown, window, cx)
                 }))
         });
-        let line = h_flex()
+        let line = super::action_card::event_row(&theme)
             .id(SharedString::from(format!("message-{item}")))
-            .w_full()
-            .min_w_0()
-            .items_center()
-            .gap_1p5()
-            .pl_2p5()
-            .pr_1()
-            .py_1()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border.opacity(0.6))
-            .bg(theme.sidebar.opacity(0.6))
-            .text_sm()
             .children(author.map(|b| {
                 bot_avatar(
                     SharedString::from(format!("rules-{item}")),
@@ -444,22 +432,13 @@ impl ElseApp {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::SEMIBOLD)
                     .child(update.section.clone()),
             )
             .child(view)
             .children(undo);
-        v_flex()
-            .w_full()
-            .gap_1()
-            .child(
-                div()
-                    .w_full()
-                    .pr(super::message_row::BOT_GUTTER)
-                    .child(line),
-            )
-            .children(stamp.map(|at| div().text_xs().text_color(theme.muted_foreground).child(at)))
-            .into_any_element()
+        let _ = stamp;
+        line.into_any_element()
     }
 
     pub(super) fn render_rules_section(&self, bot: Uuid, cx: &mut Context<Self>) -> AnyElement {
