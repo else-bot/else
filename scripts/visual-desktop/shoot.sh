@@ -95,8 +95,8 @@ settings_page() {
   local label=$1 fallback_y=$2
   # Most nav items have accessible names; Backups currently lacks one.
   if ! click_named "$label"; then
-    # Settings nav is at x=285; y comes from its row in the 1440x900 sheet.
-    click 285 "$fallback_y"
+    # Settings nav is at x=340; y comes from its row in the 1440x900 sheet.
+    click 340 "$fallback_y"
   fi
 }
 
@@ -127,14 +127,14 @@ command cp -f "$png" "$OUT/dark-07-working.png"
 select_bot main
 main_bottom
 keys ctrl+shift+b
-# Details tab at x=1152,y=110, under the panel header; GPUI does not expose it to AT-SPI.
-click 1152 110
+# Details tab at x=1188,y=58; the tabs are the panel header. GPUI does not expose it to AT-SPI.
+click 1188 58
 scroll 1300 450 -4500
 shot dark-08-bot-details
 scroll 1300 650 4500
 shot dark-09-schedules-and-triggers
-# Computer tab at x=1340,y=110; the two tabs share the panel width.
-click 1340 110
+# Computer tab at x=1327,y=58; the two tabs share the header beside the hide button.
+click 1327 58
 shot dark-10-computer
 keys ctrl+shift+b
 select_bot empty
@@ -149,28 +149,28 @@ shot dark-12-create-bot
 keys Escape
 # Shell-level settings shortcut survives focus restoration after a modal.
 keys ctrl+comma
-settings_page Servers 198
+settings_page Servers 265
 shot dark-13-settings-servers
-settings_page 'App updates' 234
+settings_page 'App updates' 301
 shot dark-14-settings-updates
-settings_page Email 325
+settings_page Email 392
 shot dark-15-settings-email
-settings_page Socials 361
+settings_page Socials 428
 shot dark-16-settings-socials
-settings_page MCP 397
+settings_page MCP 464
 shot dark-17-settings-mcp
-settings_page Skills 433
+settings_page Skills 500
 shot dark-18-settings-skills
-settings_page Backups 469
+settings_page Backups 536
 shot dark-19-settings-backups
 keys Escape
 # One additional dark shot opens the saved rules version from the Details pane.
 select_bot main
 keys ctrl+shift+b
-click 1152 110
+click 1188 58
 scroll 1300 450 -4500
-# Rules summary row at x=1260,y=387 in the default Details layout.
-click 1260 387
+# Rules summary row at x=1260,y=292 in the default Details layout.
+click 1260 292
 click_named History
 shot dark-20-rules-diff
 keys Escape
@@ -181,7 +181,7 @@ select_bot main
 main_bottom
 shot light-01-release-plan
 keys ctrl+shift+b
-click 1152 110
+click 1188 58
 scroll 1300 450 -4500
 shot light-02-bot-details
 keys ctrl+shift+b
@@ -193,7 +193,7 @@ pick_purple
 shot light-03-create-bot
 keys Escape
 keys ctrl+comma
-settings_page Servers 198
+settings_page Servers 265
 shot light-04-settings-servers
 keys Escape
 theme cursor-dark

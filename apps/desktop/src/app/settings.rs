@@ -1058,34 +1058,15 @@ impl ElseApp {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let line = hairline(cx);
-        // Same height and rule as the conversation header, so the two
-        // dividers meet as one line across the window.
-        let header = h_flex()
-            .flex_none()
-            .h(HEADER_HEIGHT)
-            .px_4()
-            .gap_2()
-            .items_center()
-            .border_b_1()
-            .border_color(line)
-            .child(
-                div()
-                    .flex_1()
-                    .text_base()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Bot details"),
-            )
-            .child(
-                Button::new("close-settings")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .icon(IconName::PanelRightClose)
-                    .small()
-                    .ghost()
-                    .accessibility_label("Hide bot details")
-                    .tooltip_with_action("Hide bot details", &ToggleSettings, Some(APP_CONTEXT))
-                    .on_click(cx.listener(|app, _, window, cx| app.toggle_settings(window, cx))),
-            );
+        let close = Button::new("close-settings")
+            .focus_ring(false)
+            .cursor_pointer()
+            .icon(IconName::PanelRightClose)
+            .small()
+            .ghost()
+            .accessibility_label("Hide bot details")
+            .tooltip_with_action("Hide bot details", &ToggleSettings, Some(APP_CONTEXT))
+            .on_click(cx.listener(|app, _, window, cx| app.toggle_settings(window, cx)));
         let mut body = v_flex()
             .id("bot-settings-body")
             .flex_1()
@@ -1096,69 +1077,96 @@ impl ElseApp {
         }
         if self.details_tab == super::computer::DetailsTab::Details {
             if let Some(entry) = self.settings.get(&bot.id) {
+                // The conversation header already presents the bot, so the
+                // panel opens on what it configures; renaming and the avatar
+                // follow the sections.
                 body = body
-                    .child(self.render_details(bot.id, &entry.details, cx))
                     .child(self.render_model(bot.id, &entry.model, cx))
                     .child(self.render_rules_section(bot.id, cx))
                     .child(self.render_routines(bot.id, &entry.routines, cx))
                     .child(self.render_reminders(bot.id, &entry.routines, cx))
-                    .child(self.render_triggers(bot.id, entry, cx));
+                    .child(self.render_triggers(bot.id, entry, cx))
+                    .child(self.render_details(bot.id, &entry.details, cx));
             } else {
                 body = body.child(muted("Loading…", cx));
             }
         }
-        let mut panel = v_flex()
-            .id("bot-settings")
-            .relative()
-            .w(px(self.preferences.details_width).min((viewport - px(360.)).max(px(280.))))
-            .on_drag_move(cx.listener(Self::resize_sidebar))
-            .flex_none()
-            .h_full()
-            .bg(theme.sidebar)
-            .text_color(theme.sidebar_foreground)
-            .border_l_1()
-            .border_color(line)
-            .child(header)
-            .child(
-                h_flex()
-                    .flex_none()
-                    .px_4()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(line)
-                    .gap_1()
-                    .child(
-                        Button::new("details-tab")
-                            .cursor_pointer()
-                            .flex_1()
-                            .label("Details")
-                            .ghost()
-                            .focus_ring(false)
-                            .selected(self.details_tab == super::computer::DetailsTab::Details)
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.details_tab = super::computer::DetailsTab::Details;
-                                app.computer = None;
-                                app._computer_layout = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("computer-tab")
-                            .cursor_pointer()
-                            .flex_1()
-                            .label("Computer")
-                            .ghost()
-                            .focus_ring(false)
-                            .selected(self.details_tab == super::computer::DetailsTab::Computer)
-                            .on_click(cx.listener(|app, _, window, cx| {
-                                app.details_tab = super::computer::DetailsTab::Computer;
-                                app.ensure_settings(window, cx);
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(body)
-            .child(self.sidebar_handle(super::layout::SidebarEdge::Right, cx));
+        let mut panel =
+            v_flex()
+                .id("bot-settings")
+                .relative()
+                .w(px(self.preferences.details_width).min((viewport - px(360.)).max(px(280.))))
+                .on_drag_move(cx.listener(Self::resize_sidebar))
+                .flex_none()
+                .h_full()
+                .bg(theme.sidebar)
+                .text_color(theme.sidebar_foreground)
+                .border_l_1()
+                .border_color(line)
+                .child(
+                    // The tabs are the panel's header: same height and rule as the
+                    // conversation header, so the two dividers meet as one line.
+                    h_flex()
+                        .flex_none()
+                        .h(HEADER_HEIGHT)
+                        .pl_4()
+                        .pr_2()
+                        .items_center()
+                        .border_b_1()
+                        .border_color(line)
+                        .gap_1()
+                        .child(
+                            Button::new("details-tab")
+                                .cursor_pointer()
+                                .flex_1()
+                                .label("Details")
+                                .ghost()
+                                .focus_ring(false)
+                                .selected(self.details_tab == super::computer::DetailsTab::Details)
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.details_tab = super::computer::DetailsTab::Details;
+                                    app.computer = None;
+                                    app._computer_layout = None;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("computer-tab")
+                                .cursor_pointer()
+                                .flex_1()
+                                .label("Computer")
+                                .ghost()
+                                .focus_ring(false)
+                                .selected(self.details_tab == super::computer::DetailsTab::Computer)
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    app.details_tab = super::computer::DetailsTab::Computer;
+                                    app.ensure_settings(window, cx);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(div().flex_none().ml_2().child(close)),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .child(body)
+                        .child(
+                            // Rows dissolve under the tabs instead of being sliced
+                            // at the rule.
+                            div().absolute().top_0().left_0().right_0().h(px(16.)).bg(
+                                linear_gradient(
+                                    180.,
+                                    linear_color_stop(theme.sidebar, 0.),
+                                    linear_color_stop(theme.sidebar.opacity(0.), 1.),
+                                ),
+                            ),
+                        ),
+                )
+                .child(self.sidebar_handle(super::layout::SidebarEdge::Right, cx));
         if self.default_bot_id != Some(bot.id) {
             let id = bot.id;
             panel = panel.child(
@@ -1246,23 +1254,23 @@ impl ElseApp {
         });
         // A compact row, not a hero: the conversation header already
         // presents the bot. This is where its avatar and name are edited.
-        h_flex()
-            .w_full()
-            .px_4()
-            .py_3()
-            .items_center()
-            .gap_2()
-            .border_b_1()
-            .border_color(hairline(cx))
-            .child(self.render_avatar_editor(bot, details, cx))
+        section("Name and avatar", cx)
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_1()
-                    .child(name)
-                    .children(problem)
-                    .children(error),
+                h_flex()
+                    .w_full()
+                    .py_1()
+                    .items_center()
+                    .gap_2()
+                    .child(self.render_avatar_editor(bot, details, cx))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(name)
+                            .children(problem)
+                            .children(error),
+                    ),
             )
             .into_any_element()
     }
@@ -1321,8 +1329,9 @@ impl ElseApp {
             );
         let app = cx.entity().downgrade();
         let toggle = app.clone();
+        // The row sits at the end of the panel, so the picker opens upward.
         Popover::new("avatar-picker")
-            .anchor(Anchor::TopCenter)
+            .anchor(Anchor::BottomCenter)
             .open(details.picking)
             .on_open_change(move |open, _, cx| {
                 let _ = toggle.update(cx, |app, cx| app.set_picking(bot, *open, cx));
@@ -1390,13 +1399,8 @@ impl ElseApp {
                 };
                 v_flex()
                     .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(model_label(&choice.model)),
-                    )
-                    .child(meta(
+                    .child(item_name(model_label(&choice.model)))
+                    .child(fine(
                         format!(
                             "{} · {} reasoning · {speed}",
                             self.provider_label(&choice.provider_id),
@@ -1560,21 +1564,13 @@ impl ElseApp {
         v_flex()
             .w_full()
             .py_3()
-            .gap_0p5()
+            .gap_1()
             .group("automation-card")
             .child(
                 h_flex()
                     .gap_2()
                     .items_start()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .whitespace_normal()
-                            .child(card.title.clone()),
-                    )
+                    .child(item_name(card.title.clone()).flex_1().min_w_0())
                     .child(
                         h_flex()
                             .flex_none()
@@ -1591,7 +1587,7 @@ impl ElseApp {
                     .items_center()
                     .text_color(theme.muted_foreground)
                     .child(Icon::new(card.icon).size_3().flex_none())
-                    .child(meta(facts.join(" · "), cx)),
+                    .child(fine(facts.join(" · "), cx)),
             )
             .children(error.map(|error| alert(error, theme.danger, cx)))
             .into_any_element()
@@ -1819,7 +1815,7 @@ impl ElseApp {
             .loading(matches!(save, Some(RoutineSave::Model { .. })))
             .disabled(busy || !connected || self.caps.is_none())
             .child(
-                meta(model_summary, cx)
+                fine(model_summary, cx)
                     .w_full()
                     .min_w_0()
                     .text_left()
@@ -1832,13 +1828,7 @@ impl ElseApp {
             .id(ElementId::Name(format!("routine-pill-{id}").into()))
             .w_full()
             .gap_0p5()
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .whitespace_normal()
-                    .child(routine.name.clone()),
-            )
+            .child(item_name(routine.name.clone()))
             .child(meta(schedule.clone(), cx))
             .children(problem.map(|text| alert(text, theme.danger, cx)));
         let name = routine.name.clone();
@@ -1940,7 +1930,7 @@ impl ElseApp {
         v_flex()
             .w_full()
             .py_3()
-            .gap_0p5()
+            .gap_1()
             .group("automation-card")
             .child(
                 h_flex()
@@ -2239,9 +2229,30 @@ fn list_rows(rows: Vec<AnyElement>, cx: &App) -> impl Iterator<Item = Div> {
 /// wraps instead of truncating.
 fn meta(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
-        .text_size(px(12.5))
+        .text_size(px(13.))
         .line_height(px(18.))
         .text_color(cx.theme().muted_foreground)
+        .whitespace_normal()
+        .child(text.into())
+}
+
+/// The third text level in a row, under its name and schedule: the model
+/// it runs on, or a trigger's facts.
+fn fine(text: impl Into<SharedString>, cx: &App) -> Div {
+    div()
+        .text_size(px(12.))
+        .line_height(px(16.))
+        .text_color(cx.theme().muted_foreground.opacity(0.8))
+        .whitespace_normal()
+        .child(text.into())
+}
+
+/// An item's name in a Details row: the first of its three text levels.
+fn item_name(text: impl Into<SharedString>) -> Div {
+    div()
+        .text_size(px(14.))
+        .line_height(px(20.))
+        .font_weight(FontWeight::SEMIBOLD)
         .whitespace_normal()
         .child(text.into())
 }
