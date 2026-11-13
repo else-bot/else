@@ -1,7 +1,7 @@
 use rmcp::transport::auth::AuthorizationMetadata;
 use zeroize::Zeroizing;
 
-use super::Error;
+use super::{Error, store::Credential};
 
 /// An OAuth app registered with a provider that offers no dynamic client
 /// registration. Its secret only ever reaches the app's own token endpoint.
@@ -44,6 +44,10 @@ impl RegisteredClient {
 
     pub(super) fn applies(&self, metadata: &AuthorizationMetadata) -> bool {
         metadata.issuer.as_deref() == Some(self.issuer.as_str())
+    }
+
+    pub(super) fn issued(&self, credential: &Credential) -> bool {
+        self.applies(&credential.metadata) && self.client_id == credential.client_id
     }
 
     /// The app's own endpoints, used in place of what the MCP advertised so a

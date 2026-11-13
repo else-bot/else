@@ -32,23 +32,6 @@ pub(super) struct Credential {
 }
 
 impl Credential {
-    pub(super) fn from_stored(
-        resource: String,
-        metadata: AuthorizationMetadata,
-        client_secret: Option<String>,
-        stored: StoredCredentials,
-    ) -> Option<Self> {
-        Some(Self {
-            resource,
-            metadata,
-            client_id: stored.client_id,
-            client_secret,
-            token: stored.token_response?,
-            scopes: stored.granted_scopes,
-            received_at: stored.token_received_at.unwrap_or_else(now),
-        })
-    }
-
     pub(super) fn stored(&self) -> StoredCredentials {
         StoredCredentials::new(
             self.client_id.clone(),

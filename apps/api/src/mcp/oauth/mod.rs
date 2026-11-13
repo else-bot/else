@@ -7,17 +7,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use oauth2::TokenResponse;
-use rmcp::transport::auth::{
-    AuthError, AuthorizationMetadata, AuthorizationRequest, AuthorizationSession, CredentialStore,
-    InMemoryCredentialStore, InMemoryStateStore, OAuthClientConfig, StateStore,
-};
+use rmcp::transport::auth::{AuthError, AuthorizationMetadata};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::{Error, Transport, transport};
 pub use client::RegisteredClient;
-use protocol::{Discovery, auth_error, discover, exchange};
+use protocol::{Discovery, Flow, auth_error, discover};
 pub(super) use store::Store;
 use store::{Credential, now};
 
@@ -51,12 +48,7 @@ pub struct Complete {
 
 struct Pending {
     id: Uuid,
-    discovery: Discovery,
-    resource: String,
-    client_secret: Option<String>,
-    session: AuthorizationSession,
-    tokens: InMemoryCredentialStore,
-    states: InMemoryStateStore,
+    flow: Flow,
     expires: Instant,
     previous: Option<Box<Credential>>,
 }
@@ -118,8 +110,8 @@ impl Session {
                 }
                 State::Authorizing(pending) => (
                     "authorizing",
-                    Some(&pending.discovery.metadata),
-                    &pending.discovery.scopes,
+                    Some(&pending.flow.discovery.metadata),
+                    &pending.flow.discovery.scopes,
                 ),
                 State::Authorized(credential) => {
                     let expired = credential.expires_at().is_some_and(|at| at <= now());
@@ -242,11 +234,10 @@ impl Session {
     /// Any other provider's token is refused, so it can never reach github.com.
     fn github_token(&self) -> Result<Zeroizing<String>, Error> {
         let not_github = Error::Invalid("This MCP has no GitHub sign-in. Use the GitHub MCP's id.");
-        let (State::Authorized(credential), Some(client)) = (&self.state, self.client.as_deref())
-        else {
+        let State::Authorized(credential) = &self.state else {
             return Err(not_github);
         };
-        if !client.applies(&credential.metadata) || client.client_id != credential.client_id {
+        if self.issuer_of(credential).is_none() {
             return Err(not_github);
         }
         // GitHub reports the granted scopes as one comma-separated value.
@@ -313,17 +304,12 @@ impl Session {
             ));
         }
         self.status();
-        let mut discovery = match &self.state {
+        let discovery = match &self.state {
             State::Authorizing(_) => {
                 return Err(Error::Invalid("This MCP sign-in is already in progress."));
             }
             State::Required(discovery) | State::ReauthRequired(discovery) => discovery.clone(),
-            State::Authorized(credential) => Discovery {
-                resource: credential.resource.clone(),
-                challenge: None,
-                metadata: credential.metadata.clone(),
-                scopes: credential.scopes.clone(),
-            },
+            State::Authorized(credential) => Discovery::from(&**credential),
             State::Disconnected => {
                 let Transport::Http { url, .. } = config else {
                     return Err(Error::Invalid("This MCP does not use HTTP OAuth."));
@@ -346,62 +332,13 @@ impl Session {
             }
         };
         let registered = self.registered_client(&discovery.metadata)?;
-        let mut exchange = exchange(&discovery.resource, registered.is_some())
-            .await
-            .map_err(auth_error)?;
-        // Discovering on the client that signs in lets rmcp choose the
-        // resource the tokens are for.
-        discovery.metadata = match registered {
-            Some(client) => client.metadata(&discovery.resource)?,
-            None => {
-                exchange
-                    .manager
-                    .resolve_metadata_from_challenge(discovery.challenge.as_deref())
-                    .await
-                    .map_err(auth_error)?
-                    .metadata
-            }
-        };
-        exchange.manager.set_metadata(discovery.metadata.clone());
-        let (client_id, client_secret) = match registered {
-            Some(client) => (client.client_id.clone(), None),
-            None => {
-                let scopes: Vec<&str> = discovery.scopes.iter().map(String::as_str).collect();
-                let client = exchange
-                    .manager
-                    .register_client("else.bot", &redirect_uri, &scopes)
-                    .await
-                    .map_err(auth_error)?;
-                (client.client_id, client.client_secret)
-            }
-        };
-        let mut request = AuthorizationRequest::new(redirect_uri)
-            .with_preregistered_client(client_id)
-            .with_scopes(discovery.scopes.clone());
-        if let Some(secret) = registered
-            .map(|client| client.secret.as_str())
-            .or(client_secret.as_deref())
-        {
-            request = request.with_client_secret(secret);
-        }
-        let session = AuthorizationSession::new(exchange.manager, request)
-            .await
-            .map_err(|(_, error)| auth_error(error))?;
-        // rmcp keeps that resource private; its authorization URL carries it.
-        let resource = reqwest::Url::parse(session.get_authorization_url())
-            .ok()
-            .and_then(|url| {
-                url.query_pairs()
-                    .find(|(name, _)| name == "resource")
-                    .map(|(_, value)| value.into_owned())
-            })
-            .unwrap_or_else(|| discovery.resource.clone());
+        let flow = protocol::begin(discovery, registered, redirect_uri).await?;
         let started = Started {
             request_id: Uuid::new_v4(),
-            authorization_url: session.get_authorization_url().to_owned(),
+            authorization_url: flow.authorization_url().to_owned(),
             expires_in: AUTH_LIFETIME.as_secs(),
-            provider: discovery.metadata.issuer.clone(),
-            scopes: discovery.scopes.clone(),
+            provider: flow.discovery.metadata.issuer.clone(),
+            scopes: flow.discovery.scopes.clone(),
         };
         self.close().await;
         let previous = match std::mem::replace(&mut self.state, State::Disconnected) {
@@ -410,12 +347,7 @@ impl Session {
         };
         self.state = State::Authorizing(Box::new(Pending {
             id: started.request_id,
-            discovery,
-            resource,
-            client_secret,
-            session,
-            tokens: exchange.tokens,
-            states: exchange.states,
+            flow,
             expires: Instant::now() + AUTH_LIFETIME,
             previous,
         }));
@@ -429,9 +361,7 @@ impl Session {
                 "This MCP sign-in has expired or was already completed.",
             ));
         };
-        if callback.request_id != pending.id
-            || !matches!(pending.states.load(&callback.state).await, Ok(Some(_)))
-        {
+        if callback.request_id != pending.id || !pending.flow.expects(&callback.state).await {
             return Err(Error::Invalid("The MCP sign-in callback state is invalid."));
         }
         if pending.expires <= Instant::now() {
@@ -439,7 +369,7 @@ impl Session {
             self.cancel(id);
             return Err(Error::Invalid("This MCP sign-in has expired."));
         }
-        if !issuer_matches(&pending.discovery.metadata, callback.iss.as_deref()) {
+        if !issuer_matches(&pending.flow.discovery.metadata, callback.iss.as_deref()) {
             return Err(Error::Invalid(
                 "The MCP sign-in callback issuer is invalid.",
             ));
@@ -449,23 +379,12 @@ impl Session {
             (None, None) => Err(Error::Invalid(
                 "The MCP sign-in callback did not include a valid code.",
             )),
-            (None, Some(code)) => match pending
-                .session
-                .handle_callback_with_issuer(&code, &callback.state, callback.iss.as_deref())
-                .await
-            {
-                Err(error) => Err(auth_error(error)),
-                Ok(_) => match pending.tokens.load().await {
-                    Ok(Some(stored)) => Credential::from_stored(
-                        pending.resource.clone(),
-                        pending.discovery.metadata.clone(),
-                        pending.client_secret.clone(),
-                        stored,
-                    )
-                    .ok_or(Error::Connection),
-                    _ => Err(Error::Connection),
-                },
-            },
+            (None, Some(code)) => {
+                pending
+                    .flow
+                    .finish(&code, &callback.state, callback.iss.as_deref())
+                    .await
+            }
         };
         self.end_authorizing();
         let credential = credential?;
@@ -485,7 +404,7 @@ impl Session {
         {
             return Ok(());
         }
-        match self.refreshed(credential).await {
+        match protocol::refresh(credential, self.issuer_of(credential)).await {
             Ok(refreshed) => {
                 self.store.save(&refreshed).await?;
                 self.state = State::Authorized(Box::new(refreshed));
@@ -493,12 +412,7 @@ impl Session {
                 Ok(())
             }
             Err(AuthError::AuthorizationRequired | AuthError::TokenRefreshRejected(_)) => {
-                let discovery = Discovery {
-                    resource: credential.resource.clone(),
-                    challenge: None,
-                    metadata: credential.metadata.clone(),
-                    scopes: credential.scopes.clone(),
-                };
+                let discovery = Discovery::from(&**credential);
                 self.close().await;
                 self.store.remove().await?;
                 self.state = State::ReauthRequired(discovery);
@@ -508,36 +422,11 @@ impl Session {
         }
     }
 
-    async fn refreshed(&self, credential: &Credential) -> Result<Credential, AuthError> {
-        let registered = self.client.as_deref().filter(|client| {
-            client.applies(&credential.metadata) && client.client_id == credential.client_id
-        });
-        let mut exchange = exchange(&credential.resource, registered.is_some()).await?;
-        exchange.manager.set_metadata(credential.metadata.clone());
-        let mut config =
-            OAuthClientConfig::new(credential.client_id.clone(), credential.resource.clone());
-        if let Some(secret) = registered
-            .map(|client| client.secret.as_str())
-            .or(credential.client_secret.as_deref())
-        {
-            config = config.with_client_secret(secret);
-        }
-        exchange.manager.configure_client(config)?;
-        exchange.tokens.save(credential.stored()).await?;
-        exchange.manager.refresh_token().await?;
-        exchange
-            .tokens
-            .load()
-            .await?
-            .and_then(|stored| {
-                Credential::from_stored(
-                    credential.resource.clone(),
-                    credential.metadata.clone(),
-                    credential.client_secret.clone(),
-                    stored,
-                )
-            })
-            .ok_or(AuthError::AuthorizationRequired)
+    /// The registered app that issued `credential`, if any.
+    fn issuer_of(&self, credential: &Credential) -> Option<&RegisteredClient> {
+        self.client
+            .as_deref()
+            .filter(|client| client.issued(credential))
     }
 
     fn registered_client(
@@ -578,7 +467,7 @@ impl Session {
         {
             self.state = match pending.previous {
                 Some(credential) => State::Authorized(credential),
-                None => State::Required(pending.discovery),
+                None => State::Required(pending.flow.discovery),
             };
         }
     }

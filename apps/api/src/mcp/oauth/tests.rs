@@ -3,32 +3,10 @@ use super::*;
 
 /// A sign-in in progress against `discovery`, with the state its callback must echo.
 async fn pending(previous: Option<Credential>, discovery: Discovery) -> (Box<Pending>, String) {
-    let mut exchange = exchange(&discovery.resource, false).await.unwrap();
-    exchange.manager.set_metadata(discovery.metadata.clone());
-    let session = AuthorizationSession::new(
-        exchange.manager,
-        AuthorizationRequest::new("http://127.0.0.1:12345/callback")
-            .with_preregistered_client("public-client")
-            .with_scopes(discovery.scopes.clone()),
-    )
-    .await
-    .map_err(|(_, error)| error)
-    .unwrap();
-    let url = reqwest::Url::parse(session.get_authorization_url()).unwrap();
-    let state = url
-        .query_pairs()
-        .find(|(name, _)| name == "state")
-        .unwrap()
-        .1
-        .into_owned();
+    let (flow, state) = protocol::test_flow(discovery).await;
     let pending = Pending {
         id: Uuid::new_v4(),
-        resource: discovery.resource.clone(),
-        discovery,
-        client_secret: None,
-        session,
-        tokens: exchange.tokens,
-        states: exchange.states,
+        flow,
         expires: Instant::now() + AUTH_LIFETIME,
         previous: previous.map(Box::new),
     };
