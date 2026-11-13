@@ -224,7 +224,7 @@ impl Shell {
             .child(
                 div()
                     .pt_6()
-                    .pb_2()
+                    .pb_3()
                     .text_xs()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.muted_foreground)
@@ -242,6 +242,7 @@ impl Shell {
                     .child(error.clone()),
             );
         }
+        let mut rows = Vec::new();
         for saved in &self.registry.servers {
             let id = saved.id;
             let selected = self.active.as_ref().is_some_and(|active| active.id == id);
@@ -323,7 +324,7 @@ impl Shell {
                         }),
                 );
             }
-            let mut actions = h_flex().gap_1().flex_wrap().justify_end();
+            let mut actions = h_flex().gap_1().items_center();
             if !selected {
                 actions = actions.child(
                     Button::new(SharedString::from(format!("use-server-{id}")))
@@ -411,35 +412,21 @@ impl Shell {
                             shell.remove_server(id, window, cx)
                         })),
                 );
-            content = content.child(
+            // One grouped-list row: the server, its address and status
+            // tokens, with every action at the trailing edge.
+            rows.push(
                 v_flex()
-                    .py_4()
-                    .gap_3()
-                    .border_t_1()
-                    .border_color(theme.border)
+                    .w_full()
                     .child(
-                        h_flex()
-                            .gap_3()
-                            .items_center()
-                            .child(
-                                div()
-                                    .size_8()
-                                    .flex_none()
-                                    .rounded(theme.radius)
-                                    .bg(theme.secondary)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        Icon::new(if self.managed_server(&saved.profile) {
-                                            IconName::Laptop
-                                        } else {
-                                            IconName::Server
-                                        })
-                                        .size_4()
-                                        .text_color(theme.muted_foreground),
-                                    ),
-                            )
+                        crate::panel_kit::list_row()
+                            .child(crate::panel_kit::row_icon(
+                                Icon::new(if self.managed_server(&saved.profile) {
+                                    IconName::Laptop
+                                } else {
+                                    IconName::Server
+                                }),
+                                cx,
+                            ))
                             .child(
                                 v_flex()
                                     .flex_1()
@@ -448,61 +435,60 @@ impl Shell {
                                     .child(
                                         h_flex()
                                             .gap_2()
+                                            .items_center()
                                             .child(
                                                 div()
+                                                    .min_w_0()
+                                                    .truncate()
                                                     .text_sm()
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .child(saved.name.clone()),
                                             )
                                             .when(selected, |row| {
-                                                row.child(
-                                                    div()
-                                                        .text_xs()
-                                                        .px_1p5()
-                                                        .rounded_sm()
-                                                        .bg(theme.list_active)
-                                                        .text_color(theme.primary)
-                                                        .child("In use"),
-                                                )
+                                                row.child(crate::panel_kit::tag("In use", cx))
                                             }),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
-                                            .font_family(theme.mono_font_family.clone())
                                             .text_color(theme.muted_foreground)
                                             .truncate()
                                             .child(saved.profile.origin.as_str().to_owned()),
-                                    ),
+                                    )
+                                    .child(facts),
                             )
-                            .child(connection_actions),
-                    )
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_3()
-                            .flex_wrap()
-                            .child(div().flex_1().min_w_0().child(facts))
-                            .child(actions),
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(actions)
+                                    .child(connection_actions),
+                            ),
                     )
                     .when_some(
                         observation.and_then(|entry| entry.error.as_ref()),
                         |row, error| {
                             row.child(
                                 div()
+                                    .px_4()
+                                    .pb_3()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .child(error.clone()),
                             )
                         },
-                    ),
+                    )
+                    .into_any_element(),
             );
         }
         content
-            .child(div().border_t_1().border_color(theme.border))
+            .child(crate::panel_kit::grouped_list(rows, cx))
             .into_any_element()
     }
 
+    /// The server these settings edit, as one 12 px line under the sheet's
+    /// title: its name, health and address.
     pub(super) fn render_server_identity(&self, cx: &App) -> AnyElement {
         let Some(active) = &self.active else {
             return div().into_any_element();
@@ -516,56 +502,34 @@ impl Shell {
         let (status, color) = self.server_status(active.id, cx);
         h_flex()
             .id("settings-server-context")
-            .flex_none()
             .w_full()
             .min_w_0()
-            .h(px(32.))
-            .px(settings::SETTINGS_INSET)
+            .gap_1p5()
             .items_center()
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.secondary.opacity(0.35))
             .text_xs()
+            .line_height(px(16.))
             .text_color(theme.muted_foreground)
             .aria_label(format!(
                 "Editing settings on {name}. {}. {status}",
                 active.profile.origin.as_str()
             ))
+            .child(div().flex_none().child("Editing settings on"))
             .child(
-                h_flex()
-                    .w_full()
+                div()
+                    .flex_none()
+                    .max_w(px(220.))
+                    .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child(name.to_owned()),
+            )
+            .child(div().flex_none().size_1p5().rounded_full().bg(color))
+            .child(dot_separator(theme))
+            .child(
+                div()
                     .min_w_0()
-                    .max_w(settings::SETTINGS_COLUMN)
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        Icon::new(if self.managed_server(&active.profile) {
-                            IconName::Laptop
-                        } else {
-                            IconName::Server
-                        })
-                        .size_3()
-                        .flex_none(),
-                    )
-                    .child(div().flex_none().child("Editing settings on"))
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w(px(220.))
-                            .truncate()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.foreground)
-                            .child(name.to_owned()),
-                    )
-                    .child(div().flex_none().size_1p5().rounded_full().bg(color))
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(theme.mono_font_family.clone())
-                            .child(active.profile.origin.as_str().to_owned()),
-                    ),
+                    .truncate()
+                    .child(active.profile.origin.as_str().to_owned()),
             )
             .into_any_element()
     }

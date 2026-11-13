@@ -331,6 +331,8 @@ impl Shell {
             SettingsSection::Backups => self.render_backups(window, cx),
             SettingsSection::Updates => self.render_updates(cx),
         };
+        // Every page scrolls in the same frame, whose 32 px padding keeps
+        // its first and last lines clear of the edge fades at rest.
         let body = if section == SettingsSection::Backups {
             body
         } else if section == SettingsSection::Updates {
@@ -340,17 +342,15 @@ impl Shell {
                 .child(settings_column(body).min_h_0())
                 .into_any_element()
         } else {
-            div()
-                .size_full()
-                .child(v_flex().min_h_full().py_8().child(settings_column(body)))
-                .overflow_y_scrollbar()
-                .into_any_element()
+            crate::panel_kit::faded(
+                div()
+                    .size_full()
+                    .child(v_flex().min_h_full().py_8().child(settings_column(body)))
+                    .overflow_y_scrollbar(),
+                theme.popover,
+            )
+            .into_any_element()
         };
-        let body = v_flex()
-            .size_full()
-            .min_h_0()
-            .child(self.render_server_identity(cx))
-            .child(div().flex_1().min_h_0().child(body));
         v_flex()
             .id("app-settings")
             .track_focus(&setup.focus)
@@ -358,6 +358,7 @@ impl Shell {
             .min_h_0()
             .overflow_hidden()
             .child(
+                // One header: the sheet's title over the server it edits.
                 h_flex()
                     .flex_none()
                     .h(px(64.))
@@ -366,16 +367,18 @@ impl Shell {
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
-                        Icon::new(IconName::Settings)
-                            .size_4()
-                            .text_color(theme.muted_foreground),
-                    )
-                    .child(
-                        DialogTitle::new()
+                        v_flex()
                             .flex_1()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Settings"),
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                DialogTitle::new()
+                                    .text_size(px(15.))
+                                    .line_height(px(20.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Settings"),
+                            )
+                            .child(self.render_server_identity(cx)),
                     )
                     .child(
                         Button::new("app-settings-close")

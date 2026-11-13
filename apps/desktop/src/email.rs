@@ -249,37 +249,34 @@ impl Render for EmailSettings {
                         .child("Connect an inbox for any of your bots to use when you ask."),
                 ),
         );
-        for account in &self.accounts {
-            content = content.child(
-                h_flex()
-                    .gap_3()
-                    .justify_between()
-                    .p_3()
-                    .rounded(theme.radius)
-                    .bg(theme.secondary)
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child(account.config.address.clone()))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(account.config.provider.label()),
-                            ),
-                    )
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        if account.state == "paused" {
-                            "Paused"
-                        } else {
-                            match account.health.as_str() {
-                                "connected" => "Connected",
-                                "unknown" => "Checking connection…",
-                                _ => "Check credentials and server settings",
-                            }
-                        },
-                    )),
-            );
+        if !self.accounts.is_empty() {
+            let rows: Vec<AnyElement> = self
+                .accounts
+                .iter()
+                .map(|account| {
+                    let status = if account.state == "paused" {
+                        "Paused"
+                    } else {
+                        match account.health.as_str() {
+                            "connected" => "Connected",
+                            "unknown" => "Checking connection…",
+                            _ => "Check credentials and server settings",
+                        }
+                    };
+                    crate::panel_kit::list_row()
+                        .child(crate::panel_kit::row_icon(
+                            gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Mail),
+                            cx,
+                        ))
+                        .child(crate::panel_kit::row_text(
+                            account.config.address.clone(),
+                            format!("{} · {status}", account.config.provider.label()),
+                            cx,
+                        ))
+                        .into_any_element()
+                })
+                .collect();
+            content = content.child(crate::panel_kit::grouped_list(rows, cx));
         }
         if let Some(form) = &self.form {
             content = content.child(form.render(self.busy, cx));
