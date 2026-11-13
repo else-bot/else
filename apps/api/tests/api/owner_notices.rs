@@ -55,6 +55,15 @@ struct Delegated {
 }
 
 async fn delegated(app: &TestApp) -> Delegated {
+    delegated_with(
+        app,
+        "[synthetic:hang] triage checkout 500s",
+        vec![Tool::ReadHistory],
+    )
+    .await
+}
+
+async fn delegated_with(app: &TestApp, task: &str, tools: Vec<Tool>) -> Delegated {
     let target = app.create_bot("Tech Manager").await;
     let main = app.main_bot().await;
     let sent = app
@@ -67,7 +76,7 @@ async fn delegated(app: &TestApp) -> Delegated {
         app,
         &root_token,
         "delegate",
-        json!({ "target_bot_id": target, "task": "[synthetic:hang] triage checkout 500s" }),
+        json!({ "target_bot_id": target, "task": task }),
     )
     .await;
     assert!(!failed, "{result}");
@@ -78,7 +87,7 @@ async fn delegated(app: &TestApp) -> Delegated {
             .await
             .unwrap();
     app.wait_turn(&child.to_string(), &["running"]).await;
-    let child_token = grant(app, child, vec![Tool::ReadHistory]).await;
+    let child_token = grant(app, child, tools).await;
     Delegated {
         target,
         child,
@@ -249,4 +258,64 @@ async fn only_a_running_delegated_task_can_notify_the_owner() {
         .await
         .unwrap();
     assert_eq!(count, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeating_a_handled_notice_keeps_it_handled() {
+    let app = app().await;
+    let task = delegated(&app).await;
+    let summary = "Dev can't start the fix. Start a Dev session.";
+    let (_, flagged) = notify(&app, &task.child_token, summary).await;
+    let handled = dismiss(&app, &task.target, &flagged["notice_id"]).await;
+    assert_eq!(handled.status, StatusCode::OK, "{}", handled.body);
+
+    let (failed, again) = notify(&app, &task.child_token, summary).await;
+    assert!(!failed, "{again}");
+    assert_eq!(
+        again["notice_id"], flagged["notice_id"],
+        "the retry returns the handled notice"
+    );
+    let shown = notices(&app, &task.target, task.child).await;
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    assert_eq!(shown[0]["status"], "dismissed");
+    assert!(sidebar_status(&app, &task.target).await.is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_card_raised_after_the_notice_replaces_it() {
+    let app = app().await;
+    let task = delegated_with(
+        &app,
+        "[synthetic:slow] triage the checkout 500s: read the logs, find the failing requests, \
+         compare the webhook secrets, and report what blocks the fix.",
+        vec![Tool::ReadHistory, Tool::AskOwner],
+    )
+    .await;
+    let (failed, flagged) = tool(
+        &app,
+        &task.child_token,
+        "notify_owner",
+        json!({ "kind": "decision", "summary": "Roll back the deploy or hotfix it?" }),
+    )
+    .await;
+    assert!(!failed, "{flagged}");
+    let (failed, asked) = tool(
+        &app,
+        &task.child_token,
+        "ask_owner",
+        json!({ "question": "Roll back the deploy or hotfix it?" }),
+    )
+    .await;
+    assert!(!failed, "{asked}");
+    app.wait_turn(&task.child.to_string(), &["waiting"]).await;
+
+    let shown = notices(&app, &task.target, task.child).await;
+    assert_eq!(shown[0]["status"], "superseded", "{shown:?}");
+    let status = sidebar_status(&app, &task.target).await;
+    assert_ne!(
+        status["kind"], "needs_you",
+        "the card's own status shows: {status}"
+    );
+    let late = dismiss(&app, &task.target, &flagged["notice_id"]).await;
+    assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
 }

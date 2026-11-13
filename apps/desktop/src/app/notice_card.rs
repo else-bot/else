@@ -51,12 +51,13 @@ impl ElseApp {
         let c = view.conversation.as_ref()?;
         let notice = c.owner_notice(id)?;
         let theme = cx.theme();
-        if notice.status != OwnerNoticeStatus::Pending {
-            let label = match notice.status {
-                OwnerNoticeStatus::Replied => "You replied",
-                OwnerNoticeStatus::Dismissed => "Handled",
-                OwnerNoticeStatus::Pending => unreachable!(),
-            };
+        let settled = match notice.status {
+            OwnerNoticeStatus::Pending => None,
+            OwnerNoticeStatus::Replied => Some("You replied"),
+            OwnerNoticeStatus::Dismissed => Some("Handled"),
+            OwnerNoticeStatus::Superseded => return None,
+        };
+        if let Some(label) = settled {
             return Some(
                 div()
                     .w_full()

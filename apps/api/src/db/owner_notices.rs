@@ -4,8 +4,10 @@
 //! a card in its own chat with the owner, beside the task, so the owner sees
 //! what is needed without opening the task. It never holds the turn and
 //! outlives it. `pending` lasts until the owner messages the bot (`replied`)
-//! or marks it handled (`dismissed`). A turn has at most one pending notice:
-//! flagging again rewrites it, so a retried call converges.
+//! or marks it handled (`dismissed`), or until the attempt ends with a card
+//! for the owner pending on the turn (`superseded`), which shows instead. A
+//! turn has at most one pending notice: flagging again rewrites it, and
+//! repeating a notice the turn already has returns it unchanged.
 
 use std::collections::HashMap;
 
@@ -55,6 +57,8 @@ pub enum Status {
     Replied,
     /// The owner marked it handled.
     Dismissed,
+    /// A card for the owner on the same turn replaced it.
+    Superseded,
 }
 
 impl Status {
@@ -62,6 +66,7 @@ impl Status {
         match text {
             "replied" => Self::Replied,
             "dismissed" => Self::Dismissed,
+            "superseded" => Self::Superseded,
             _ => Self::Pending,
         }
     }
@@ -71,6 +76,7 @@ impl Status {
             Self::Pending => "pending",
             Self::Replied => "replied",
             Self::Dismissed => "dismissed",
+            Self::Superseded => "superseded",
         }
     }
 }
@@ -190,6 +196,20 @@ pub async fn create(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Not
     if super::turns::attempt_parked(&mut tx, turn_id, caller.attempt).await? {
         return Err(CreateError::AttemptParked);
     }
+    let repeated: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLUMNS} FROM owner_notices
+         WHERE turn_id = ?1 AND kind = ?2 AND summary = ?3 AND tried IS ?4
+         ORDER BY created_at DESC, id DESC LIMIT 1"
+    )))
+    .bind(turn_id)
+    .bind(spec.kind.as_str())
+    .bind(&spec.summary)
+    .bind(&spec.tried)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(row) = repeated {
+        return Ok(notice(row));
+    }
     let rewritten: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "UPDATE owner_notices SET kind = ?2, summary = ?3, tried = ?4
          WHERE turn_id = ?1 AND status = 'pending' RETURNING {COLUMNS}"
@@ -235,6 +255,30 @@ pub async fn reply_pending(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<
     for turn_id in replied {
         events::turn_changed(conn, bot_id, turn_id).await?;
     }
+    Ok(())
+}
+
+/// Supersede the turn's pending notice when the attempt ending now left a
+/// card for the owner pending on the turn: the card asks instead.
+pub async fn supersede_by_card(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE owner_notices SET status = 'superseded',
+             settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE turn_id = ?1 AND status = 'pending'
+           AND (EXISTS (SELECT 1 FROM owner_questions WHERE turn_id = ?1 AND status = 'pending')
+                OR EXISTS (SELECT 1 FROM secret_requests WHERE turn_id = ?1 AND status = 'pending')
+                OR EXISTS (SELECT 1 FROM outgoing_drafts WHERE turn_id = ?1 AND status = 'pending')
+                OR EXISTS (SELECT 1 FROM social_setups WHERE turn_id = ?1 AND status = 'pending')
+                OR EXISTS (SELECT 1 FROM skill_installs WHERE turn_id = ?1 AND status = 'pending')
+                OR EXISTS (SELECT 1 FROM computer_handoffs
+                           WHERE turn_id = ?1 AND status IN ('pending', 'taken')))",
+    )
+    .bind(turn_id)
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 
@@ -287,7 +331,9 @@ pub async fn dismiss(
     let found = found.map(notice).ok_or(DismissError::NotFound)?;
     match found.status {
         Status::Dismissed => return Ok(found),
-        Status::Replied => return Err(DismissError::Settled(Status::Replied)),
+        status @ (Status::Replied | Status::Superseded) => {
+            return Err(DismissError::Settled(status));
+        }
         Status::Pending => {}
     }
     let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(

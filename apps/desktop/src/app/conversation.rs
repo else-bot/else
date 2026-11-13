@@ -223,12 +223,19 @@ pub(super) fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
                     let anchor = c.question_anchor(turn.id, None)?;
                     Some((RowKey::ComputerHandoff(handoff.id), Some(anchor)))
                 }))
-                .chain(turn.owner_notices.iter().map(move |notice| {
-                    (
-                        RowKey::OwnerNotice(notice.id),
-                        c.question_anchor(turn.id, None),
-                    )
-                }))
+                .chain(
+                    turn.owner_notices
+                        .iter()
+                        .filter(|notice| {
+                            notice.status != crate::model::OwnerNoticeStatus::Superseded
+                        })
+                        .map(move |notice| {
+                            (
+                                RowKey::OwnerNotice(notice.id),
+                                c.question_anchor(turn.id, None),
+                            )
+                        }),
+                )
                 .chain(turn.social_setups.iter().map(move |setup| {
                     (
                         RowKey::SocialSetup(setup.id),
@@ -1089,6 +1096,20 @@ mod tests {
                 "Start a Dev session"
             );
         }
+    }
+
+    #[test]
+    fn a_superseded_owner_notice_leaves_its_card_to_ask() {
+        let mut page = card_page("sent", json!([]), None);
+        page["turns"][0]["outgoing_drafts"] = json!([]);
+        page["turns"][0]["owner_notices"] = json!([{
+            "id": Uuid::from_u128(400), "bot_id": Uuid::from_u128(80),
+            "turn_id": Uuid::from_u128(10), "kind": "decision",
+            "summary": "Roll back or hotfix?", "tried": null, "status": "superseded",
+            "created_at": "2026-11-01T00:00:01Z", "settled_at": "2026-11-01T00:00:02Z"
+        }]);
+        let c = Conversation::from_snapshot(serde_json::from_value(page).unwrap()).unwrap();
+        assert!(request_rows(&c).is_empty());
     }
 
     #[test]

@@ -423,6 +423,8 @@ pub enum OwnerNoticeStatus {
     Pending,
     Replied,
     Dismissed,
+    /// A card on the same turn asks the owner instead.
+    Superseded,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
