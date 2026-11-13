@@ -336,8 +336,8 @@ fn tool_list() -> Value {
         {
             "name": "delegation_cancel",
             "description": "Stop a task you delegated that is still in progress, by its task_id. \
-                Returns its state: stopping until the other bot's attempt ends, then cancelled \
-                with any partial reply. Cancelling an ended task returns its outcome unchanged.",
+                Returns its state: stopping until the other bot's attempt ends; the outcome, \
+                normally cancelled with any partial reply, arrives in a continuation. Cancelling an ended task returns its outcome unchanged.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

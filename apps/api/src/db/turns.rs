@@ -984,7 +984,12 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
                 coalesce(i.parts, i.assistant_parts, '[]')
          FROM items i JOIN turns t ON t.id = i.turn_id
               JOIN (SELECT session_lane AS name FROM turns WHERE id = ?3) lane
-         WHERE i.conversation_id = ?1 AND t.turn_no < ?2
+         WHERE t.turn_no < ?2
+           -- A task's replies stream into its bot's chat; a later turn of
+           -- the task, after an update, still reads them.
+           AND (i.conversation_id = ?1
+                OR (i.kind = 'assistant'
+                    AND i.turn_id IN (SELECT id FROM turns WHERE conversation_id = ?1)))
            AND i.kind IN ('user', 'routine', 'connector', 'status', 'assistant')
            AND i.routine_update IS NULL
            -- A child's reply reached this bot as its delegation outcome.
@@ -1057,7 +1062,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
     }
     // A chat turn that took tasks over answers them, so it needs their files.
     let taken_over: Vec<Json<Vec<MessagePart>>> = sqlx::query_scalar(
-        "SELECT i.parts FROM delegations d JOIN turns c ON c.id = d.child_turn_id
+        "SELECT i.parts FROM delegations d JOIN turns c ON c.conversation_id = d.conversation_id
          JOIN items i ON i.id = c.owner_item_id
          WHERE d.takeover_turn_id = ?1 AND i.parts IS NOT NULL",
     )

@@ -184,10 +184,12 @@ async fn deliver_if_ended(
     Ok(())
 }
 
-fn update_request_id(task: Uuid, message: &str) -> Uuid {
+/// One request ID per replaced turn, so each update is its own turn.
+fn update_request_id(task: Uuid, replaced: Uuid, message: &str) -> Uuid {
     let mut hasher = Sha256::new();
     hasher.update(b"delegation-update\0");
     hasher.update(task.as_bytes());
+    hasher.update(replaced.as_bytes());
     hasher.update(message.as_bytes());
     let digest = hasher.finalize();
     Uuid::from_bytes(
@@ -206,7 +208,7 @@ pub struct Updated {
 /// Steer task `task` of the running turn `caller` with `message`. The
 /// current task turn ends as superseded, and a new turn in the same task
 /// conversation carries the message; it goes ahead of the target's other
-/// queued work. The same message again returns the task without a change.
+/// queued work. Repeating the latest update returns the task unchanged.
 pub async fn update(
     pool: &SqlitePool,
     caller: Uuid,
@@ -219,20 +221,27 @@ pub async fn update(
     }
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row = owned(&mut tx, caller, task).await?;
-    let request_id = update_request_id(task, message);
+    // A retry repeats the latest update; an earlier message sent again is
+    // a new change.
     let repeated: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM turns WHERE conversation_id = ?1 AND request_id = ?2)",
+        "SELECT t.request_id <> ?2 AND i.text = ?3
+         FROM turns t JOIN items i ON i.id = t.owner_item_id WHERE t.id = ?1",
     )
-    .bind(row.conversation_id)
-    .bind(request_id)
+    .bind(row.child_turn_id)
+    .bind(task)
+    .bind(message)
     .fetch_one(&mut *tx)
     .await?;
     if repeated {
+        let task = state(&mut tx, task).await?;
+        deliver_if_ended(&mut tx, caller, &task).await?;
+        tx.commit().await?;
         return Ok(Updated {
-            task: state(&mut tx, task).await?,
+            task,
             created: false,
         });
     }
+    let request_id = update_request_id(task, row.child_turn_id, message);
     if row.status.is_ended() {
         let task = state(&mut tx, task).await?;
         deliver_if_ended(&mut tx, caller, &task).await?;
