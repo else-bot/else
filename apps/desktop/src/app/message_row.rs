@@ -156,8 +156,10 @@ impl ElseApp {
             } else {
                 body
             };
+            let (top, bottom) = self.row_rhythm(ix);
             return column
-                .py_1p5()
+                .pt(top)
+                .pb(bottom)
                 .children(row.day.map(|at| day_separator(at, cx)))
                 .children(row.unread_start.then(|| unread_divider(cx)))
                 .child(body)
@@ -600,6 +602,56 @@ fn routine_details(id: SharedString, cx: &mut Context<ElseApp>) -> Button {
                 app.toggle_settings(window, cx);
             }
         }))
+}
+
+/// The two families of one-line activity rows. A run of one family reads
+/// as one block; the next family starts a new block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventKind {
+    /// Task exchanges between bots, and the councils and hand-offs that
+    /// started them.
+    Exchange,
+    /// Changes to bots, rules and routines.
+    Change,
+}
+
+/// Rows 6 px from their neighbours; activity rows of one family 4 px apart
+/// (a 40 px pitch), and 16 px from the next family. Each row's spacing
+/// depends only on the row above it, so appending a row never changes the
+/// measured height of the rows before it.
+const ROW_PAD: Pixels = px(6.);
+const EVENT_PAD: Pixels = px(2.);
+const EVENT_GROUP_GAP: Pixels = px(16.);
+
+impl ElseApp {
+    fn event_kind(&self, ix: usize) -> Option<EventKind> {
+        let view = self.view.as_ref()?;
+        let row = view.rows.get(ix)?;
+        if row.routine.is_some() {
+            return None;
+        }
+        if row.activity.is_some() || matches!(row.key, RowKey::Handoff(_)) {
+            return Some(EventKind::Exchange);
+        }
+        let RowKey::Item(id) = row.key else {
+            return None;
+        };
+        let item = view.conversation.as_ref()?.item(id)?;
+        (item.routine_update.is_some() || item.bot_created.is_some() || item.rules_update.is_some())
+            .then_some(EventKind::Change)
+    }
+
+    /// The top and bottom padding of row `ix`.
+    fn row_rhythm(&self, ix: usize) -> (Pixels, Pixels) {
+        let above = ix.checked_sub(1).and_then(|above| self.event_kind(above));
+        match (self.event_kind(ix), above) {
+            (Some(kind), Some(previous)) if kind == previous => (EVENT_PAD, EVENT_PAD),
+            (Some(_), Some(_)) => (EVENT_GROUP_GAP - EVENT_PAD, EVENT_PAD),
+            (Some(_), None) => (ROW_PAD, EVENT_PAD),
+            (None, Some(_)) => (ROW_PAD * 2. - EVENT_PAD, ROW_PAD),
+            (None, None) => (ROW_PAD, ROW_PAD),
+        }
+    }
 }
 
 pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {

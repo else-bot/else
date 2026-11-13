@@ -173,21 +173,49 @@ impl ElseApp {
                     .children(expandable.then(chevron)),
             )
         } else if error {
+            // A short status label on its own line, then the explanation.
+            let (headline, explanation) = summary
+                .split_once(". ")
+                .map_or((summary.trim_end_matches('.'), ""), |(head, rest)| {
+                    (head, rest.trim())
+                });
             Some(
                 h_flex()
                     .min_w_0()
                     .items_start()
-                    .gap_1p5()
-                    .text_sm()
-                    .text_color(theme.foreground)
+                    .gap_2()
                     .child(
-                        div().flex_none().pt(px(3.)).child(
+                        div().flex_none().h(px(20.)).flex().items_center().child(
                             Icon::new(IconName::CircleX)
                                 .size_4()
                                 .text_color(theme.danger),
                         ),
                     )
-                    .child(div().min_w_0().text_left().child(summary.clone()))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .line_height(px(20.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.danger)
+                                    .child(headline.to_owned()),
+                            )
+                            .when(!explanation.is_empty(), |text| {
+                                text.child(
+                                    div()
+                                        .text_sm()
+                                        .line_height(relative(1.5))
+                                        .text_left()
+                                        .whitespace_normal()
+                                        .text_color(theme.foreground)
+                                        .child(explanation.to_owned()),
+                                )
+                            }),
+                    )
                     .children(updates.map(|updates| {
                         h_flex()
                             .flex_none()
