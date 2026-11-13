@@ -216,6 +216,29 @@ mod tests {
     }
 
     #[test]
+    fn find_returns_only_the_deferred_tools_a_query_names() {
+        let all = super::super::mcp::all_tools();
+        let names = |query: &str| -> Vec<String> {
+            find(&all, query)["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(names("routine_list"), ["routine_list"]);
+        assert_eq!(names("mcp__elsebot__routine_list"), ["routine_list"]);
+        assert_eq!(
+            names("routine_list, routine_update"),
+            ["routine_list", "routine_update"]
+        );
+        assert_eq!(
+            names("schema for computer_job_cancel"),
+            ["computer_job_cancel"]
+        );
+    }
+
+    #[test]
     fn use_tool_runs_only_deferred_tools_with_declared_arguments() {
         let all = super::super::mcp::all_tools();
         assert_eq!(
