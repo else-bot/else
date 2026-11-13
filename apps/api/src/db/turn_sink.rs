@@ -447,6 +447,7 @@ impl SinkState {
             }
             status
         };
+        crate::db::owner_notices::supersede_by_card(&mut tx, self.turn_id).await?;
         let finished = status.is_ended();
         let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE turns SET status = ?2, error_code = ?3, error_message = ?4,

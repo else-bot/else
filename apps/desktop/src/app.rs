@@ -18,6 +18,7 @@ mod link_target;
 mod mentions;
 mod message_menu;
 mod message_row;
+mod notice_card;
 mod pause;
 mod pending_send;
 mod question_card;

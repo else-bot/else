@@ -98,6 +98,9 @@ impl Subtitle {
             Some(SidebarStatus::NeedsTakeover { preview, .. }) => {
                 return label(Kind::Takeover, &format!("Take over · {preview}"));
             }
+            Some(SidebarStatus::NeedsYou { preview, .. }) => {
+                return label(Kind::Answer, &format!("Needs you · {preview}"));
+            }
             Some(SidebarStatus::NeedsCredentials { preview, .. }) => {
                 return label(Kind::Credentials, &format!("Needs credentials · {preview}"));
             }
@@ -261,6 +264,7 @@ mod tests {
             ("needs_approval", Kind::Approval, "Needs approval"),
             ("needs_takeover", Kind::Takeover, "Take over"),
             ("needs_credentials", Kind::Credentials, "Needs credentials"),
+            ("needs_you", Kind::Answer, "Needs you"),
         ] {
             let bot =
                 bot(json!({ "sidebar_status": { "kind": status, "preview": "Which account?" } }));
@@ -269,6 +273,19 @@ mod tests {
             assert_eq!(subtitle.text, format!("{prefix} · Which account?"));
             assert_eq!(Subtitle::new(&bot, true, true).kind, Kind::Stopping);
         }
+    }
+
+    #[test]
+    fn needs_you_status_keeps_owner_attention_while_the_bot_works() {
+        let since = "2026-11-13T12:00:00Z";
+        let bot = bot(json!({
+            "activity": {"phase": "working", "active_turn_id": null, "queued_count": 0},
+            "sidebar_status": {"kind": "needs_you", "preview": "Choose a bot", "since": since}
+        }));
+        let subtitle = Subtitle::new(&bot, true, false);
+        assert_eq!(subtitle.kind, Kind::Answer);
+        assert_eq!(subtitle.text, "Needs you · Choose a bot");
+        assert_eq!(bot.waiting().unwrap().since, Some(since.parse().unwrap()));
     }
 
     #[test]

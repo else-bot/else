@@ -524,6 +524,19 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_owner_notice_keeps_later_progress_replies_quiet() {
+        let mut inbox = Inbox::default();
+        inbox.observe(&[busy(bot(1, None, at(0, 0)), "working")]);
+        let mut working = busy(bot(1, Some((1, at(2, 7))), at(0, 0)), "working");
+        working.sidebar_status = Some(SidebarStatus::NeedsYou {
+            preview: "Choose another bot".into(),
+            since: None,
+        });
+        inbox.observe(std::slice::from_ref(&working));
+        assert!(inbox.alerts(&[working], nobody).is_empty());
+    }
+
+    #[test]
     fn a_turn_running_at_startup_is_announced_when_it_finishes() {
         let mut inbox = Inbox::default();
         assert!(!inbox.observe(&[busy(bot(1, Some((1, at(2, 7))), at(0, 0)), "working")]));

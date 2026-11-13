@@ -44,6 +44,7 @@ mod memory_summary;
 mod memory_tree;
 mod onboarding;
 mod outgoing_drafts;
+mod owner_notices;
 mod owner_questions;
 mod reads;
 mod reset;

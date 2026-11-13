@@ -281,6 +281,64 @@ pub(super) async fn computer_handoff(state: &AppState, grant: &Grant, args: &Val
     }
 }
 
+pub(super) fn notice_schema() -> Value {
+    use crate::db::owner_notices::{MAX_SUMMARY, MAX_TRIED};
+    json!({
+        "name": "notify_owner",
+        "description": "In a task another bot delegated to you, flag that it ends needing the owner: a \
+            decision, or a blocker only they can clear. Shows a Needs you card in your chat with the \
+            owner. Not for anything a card already asks (ask_owner, ask_permission, request_secret, \
+            drafts, computer_handoff). Calling again rewrites it. Still give the full result in your \
+            final message.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string", "enum": ["blocked", "decision"],
+                          "description": "blocked: something only the owner can clear stops the work. decision: the work waits on the owner's choice." },
+                "summary": { "type": "string", "minLength": 1, "maxLength": MAX_SUMMARY,
+                             "description": "What the owner must do, in one or two sentences, e.g. Dev has no eligible session, so the fix can't start. Start one, or tell me who should take it." },
+                "tried": { "type": "string", "minLength": 1, "maxLength": MAX_TRIED,
+                           "description": "What you already tried, e.g. Delegated to Dev; refused, no eligible session." },
+            },
+            "required": ["kind", "summary"],
+            "additionalProperties": false,
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                         "idempotentHint": true, "openWorldHint": false },
+    })
+}
+
+pub(super) async fn notify_owner(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    use crate::db::owner_notices::{self, CreateError, Spec};
+    let spec = match Spec::parse(args) {
+        Ok(spec) => spec,
+        Err(message) => return (tool_error(&format!("INVALID_REQUEST: {message}")), None),
+    };
+    match owner_notices::create(&state.db, grant.turn_id, &spec).await {
+        Ok(notice) => (
+            tool_result(json!({
+                "status": "pending",
+                "notice_id": notice.id,
+                "next": "The owner sees this card in your chat with them. Finish the task: your \
+                         final message still goes back to the bot that delegated it.",
+            })),
+            Some(format!("pending {}", notice.id)),
+        ),
+        Err(err) => {
+            let code = match err {
+                CreateError::NotDelegated => "NOT_DELEGATED",
+                CreateError::NotRunning => "NOT_RUNNING",
+                CreateError::AttemptParked => "ATTEMPT_PARKED",
+                CreateError::Db => "UNAVAILABLE",
+            };
+            (
+                tool_error(&format!("{code}: {err}")),
+                Some(format!("rejected {code}")),
+            )
+        }
+    }
+}
+
 pub(super) async fn request_secret(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     use crate::db::secret_requests::{self, RequestError, Spec, Status};
     let spec = match Spec::parse(args) {

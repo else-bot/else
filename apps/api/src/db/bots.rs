@@ -103,6 +103,7 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
         'Install skill ' || install.name AS skill_install_title,
         install.created_at AS skill_install_at,
         draft.content AS draft_content, draft.created_at AS draft_at,
+        notice.summary AS notice_summary, notice.created_at AS notice_at,
         (SELECT t.status FROM turns t WHERE t.conversation_id = c.id
             ORDER BY t.turn_no DESC LIMIT 1) AS latest_turn_status,
         coalesce((SELECT (i.seq, length(CAST(i.text AS BLOB)))
@@ -148,6 +149,10 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
         WHERE d.bot_id = b.id AND d.status = 'pending'
             AND t.status IN ('queued', 'preparing', 'sending', 'running', 'waiting')
         ORDER BY d.created_at, d.id LIMIT 1)
+    LEFT JOIN owner_notices notice ON notice.id = (
+        SELECT n.id FROM owner_notices n
+        WHERE n.bot_id = b.id AND n.status = 'pending'
+        ORDER BY n.created_at, n.id LIMIT 1)
     LEFT JOIN turns a ON a.bot_id = b.id
         AND a.status IN ('preparing', 'sending', 'running', 'cancelling', 'waiting')
         AND a.id = (SELECT w.id FROM turns w WHERE w.bot_id = b.id

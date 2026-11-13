@@ -216,6 +216,11 @@ pub enum SidebarStatus {
         #[serde(default)]
         since: Option<DateTime<Utc>>,
     },
+    NeedsYou {
+        preview: String,
+        #[serde(default)]
+        since: Option<DateTime<Utc>>,
+    },
     NeedsCredentials {
         preview: String,
         #[serde(default)]
@@ -240,7 +245,8 @@ impl SidebarStatus {
             Self::WaitingForAnswer { since, .. }
             | Self::NeedsApproval { since, .. }
             | Self::NeedsTakeover { since, .. }
-            | Self::NeedsCredentials { since, .. } => Some(Waiting { since: *since }),
+            | Self::NeedsCredentials { since, .. }
+            | Self::NeedsYou { since, .. } => Some(Waiting { since: *since }),
             Self::Failed | Self::Stopped | Self::Uncertain | Self::Unknown => None,
         }
     }
@@ -765,6 +771,24 @@ impl Client {
             .map(|_| ())
     }
 
+    pub async fn dismiss_owner_notice(
+        self: Arc<Self>,
+        bot: Uuid,
+        notice: Uuid,
+    ) -> Result<crate::model::OwnerNotice, ClientError> {
+        #[derive(Deserialize)]
+        struct Envelope {
+            notice: crate::model::OwnerNotice,
+        }
+        self.call::<Envelope>(
+            Method::POST,
+            format!("/v1/bots/{bot}/owner-notices/{notice}/dismiss"),
+            None,
+        )
+        .await
+        .map(|(_, envelope)| envelope.notice)
+    }
+
     /// Answer a bot's question by its selected choice ids. A stale card gets
     /// 409 `question_settled` from the server and never changes anything.
     pub async fn answer_question(
@@ -1163,6 +1187,26 @@ pub(crate) mod tests {
         client(origin).remove_mcp("t3-code".into()).await.unwrap();
         let request = server.await.unwrap();
         assert!(request.starts_with("DELETE /v1/settings/mcp/t3-code HTTP/1.1\r\n"));
+    }
+
+    #[tokio::test]
+    async fn owner_notice_dismiss_uses_the_notice_endpoint_and_reports_a_settled_conflict() {
+        let (origin, server) = serve_once(
+            "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":{\"code\":\"owner_notice_settled\",\"message\":\"You already replied\"}}",
+        ).await;
+        let bot = Uuid::from_u128(80);
+        let notice = Uuid::from_u128(400);
+        let err = client(origin)
+            .dismiss_owner_notice(bot, notice)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ClientError::Api {status: 409, ref code, ..} if code == "owner_notice_settled")
+        );
+        let request = server.await.unwrap();
+        assert!(request.starts_with(&format!(
+            "POST /v1/bots/{bot}/owner-notices/{notice}/dismiss HTTP/1.1\r\n"
+        )));
     }
 
     #[tokio::test]

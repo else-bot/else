@@ -20,6 +20,8 @@ pub(super) struct BotActivity {
     pub(super) answers: Vec<Uuid>,
     failed: Vec<Uuid>,
     stopped: Vec<Uuid>,
+    /// Its turn has a notice still waiting on the owner.
+    needs_owner: bool,
 }
 
 impl BotActivity {
@@ -40,6 +42,14 @@ fn outcome(item: &Item, conversation: Option<&Conversation>) -> Option<BotReplyS
         "interrupted" => Some(BotReplyStatus::Cancelled),
         _ => None,
     }
+}
+
+fn waits_on_owner(conversation: Option<&Conversation>, turn: Uuid) -> bool {
+    conversation.and_then(|c| c.turn(turn)).is_some_and(|turn| {
+        turn.owner_notices
+            .iter()
+            .any(|n| n.status == crate::model::OwnerNoticeStatus::Pending)
+    })
 }
 
 pub(super) fn group_activity(
@@ -77,6 +87,7 @@ pub(super) fn group_activity(
                 .then_some(item.id)
                 .into_iter()
                 .collect(),
+            needs_owner: waits_on_owner(conversation, item.turn_id),
         };
         if !row.unread_start
             && let Some(previous) = grouped.last_mut()
@@ -147,24 +158,7 @@ impl ElseApp {
         } else {
             format!("{last_sender}: {last_text}")
         };
-        let task_status = last
-            .bot_task
-            .as_ref()
-            .and_then(|_| conversation.turn(last.turn_id))
-            .map(|turn| turn.status.as_str());
-        let status = if !activity.failed.is_empty() {
-            format!("{} failed", activity.failed.len())
-        } else if !activity.stopped.is_empty() {
-            format!("{} stopped", activity.stopped.len())
-        } else if last.bot_reply.is_some() || task_status == Some("completed") {
-            "Replied".to_owned()
-        } else if task_status.is_none_or(|status| status == "queued") {
-            "Task received".to_owned()
-        } else if task_status == Some("uncertain") {
-            "Unknown result".to_owned()
-        } else {
-            "Working".to_owned()
-        };
+        let status = activity_status(activity, last, conversation);
         let messages = format!(
             "{count} {}",
             if count == 1 { "message" } else { "messages" }
@@ -212,12 +206,12 @@ impl ElseApp {
                                 div()
                                     .flex_none()
                                     .text_xs()
-                                    .text_color(if activity.failed.is_empty() {
-                                        theme.muted_foreground
-                                    } else {
-                                        theme.danger
+                                    .text_color(match status {
+                                        ActivityStatus::NeedsYou => theme.warning,
+                                        ActivityStatus::Failed(_) => theme.danger,
+                                        _ => theme.muted_foreground,
                                     })
-                                    .child(format!("{status} · {messages}")),
+                                    .child(format!("{} · {messages}", status.label())),
                             )
                             .child(
                                 Icon::new(IconName::ChevronRight)
@@ -252,7 +246,8 @@ impl ElseApp {
                     .py_2p5()
                     .rounded(theme.radius_lg)
                     .accessibility_label(format!(
-                        "Open conversation between {names}, {messages}, {status}"
+                        "Open conversation between {names}, {messages}, {}",
+                        status.label()
                     ))
                     .child(header)
                     .on_click(cx.listener(move |app, _, window, cx| {
@@ -329,6 +324,59 @@ impl ElseApp {
             });
         }
         Some(card.into_any_element())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivityStatus {
+    NeedsYou,
+    Failed(usize),
+    Stopped(usize),
+    Replied,
+    Received,
+    Uncertain,
+    Waiting,
+    Working,
+}
+
+impl ActivityStatus {
+    fn label(self) -> String {
+        match self {
+            Self::NeedsYou => "Needs you".into(),
+            Self::Failed(count) => format!("{count} failed"),
+            Self::Stopped(count) => format!("{count} stopped"),
+            Self::Replied => "Replied".into(),
+            Self::Received => "Task received".into(),
+            Self::Uncertain => "Unknown result".into(),
+            Self::Waiting => "Waiting".into(),
+            Self::Working => "Working".into(),
+        }
+    }
+}
+
+fn activity_status(activity: &BotActivity, last: &Item, c: &Conversation) -> ActivityStatus {
+    if activity.needs_owner {
+        return ActivityStatus::NeedsYou;
+    }
+    if !activity.failed.is_empty() {
+        return ActivityStatus::Failed(activity.failed.len());
+    }
+    if !activity.stopped.is_empty() {
+        return ActivityStatus::Stopped(activity.stopped.len());
+    }
+    let task_status = last
+        .bot_task
+        .as_ref()
+        .and_then(|_| c.turn(last.turn_id))
+        .map(|turn| turn.status.as_str());
+    if last.bot_reply.is_some() || task_status == Some("completed") {
+        return ActivityStatus::Replied;
+    }
+    match task_status {
+        None | Some("queued") => ActivityStatus::Received,
+        Some("uncertain") => ActivityStatus::Uncertain,
+        Some("waiting") => ActivityStatus::Waiting,
+        _ => ActivityStatus::Working,
     }
 }
 
@@ -491,7 +539,84 @@ impl ElseApp {
 
 #[cfg(test)]
 mod tests {
-    use super::note_lines;
+    use super::{ActivityStatus, BotActivity, activity_status, note_lines, waits_on_owner};
+    use crate::model::Conversation;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn received_task(status: &str, notice: Option<&str>) -> Conversation {
+        let mut turn = json!({
+            "id": Uuid::from_u128(10), "request_id": Uuid::from_u128(110), "turn_no": 1,
+            "provider_id": "codex", "status": status, "effect_uncertain": false
+        });
+        if let Some(status) = notice {
+            turn["owner_notices"] = json!([{
+                "id": Uuid::from_u128(400), "bot_id": Uuid::from_u128(80),
+                "turn_id": Uuid::from_u128(10), "kind": "decision", "summary": "Pick a bot",
+                "tried": null, "status": status, "created_at": "2026-11-01T00:00:01Z", "settled_at": null
+            }]);
+        }
+        Conversation::from_snapshot(serde_json::from_value(json!({
+            "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+            "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+            "items": [{"id": Uuid::from_u128(1), "seq": 1, "turn_id": Uuid::from_u128(10),
+                "kind": "user", "text": "Task received", "bot_task": {
+                    "sender_bot_id": Uuid::from_u128(90), "sender_name": "Sentry", "prompt": "Triage"
+                }}], "turns": [turn],
+            "activity": {"phase": "idle", "active_turn_id": null, "queued_count": 0}
+        })).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn bot_activity_status_prefers_pending_owner_notices() {
+        for (turn_status, notice, expected) in [
+            ("completed", Some("pending"), ActivityStatus::NeedsYou),
+            ("running", Some("pending"), ActivityStatus::NeedsYou),
+            ("failed", Some("pending"), ActivityStatus::NeedsYou),
+            ("completed", Some("replied"), ActivityStatus::Replied),
+            ("completed", Some("dismissed"), ActivityStatus::Replied),
+            ("waiting", None, ActivityStatus::Waiting),
+            ("running", None, ActivityStatus::Working),
+            ("queued", None, ActivityStatus::Received),
+            ("uncertain", None, ActivityStatus::Uncertain),
+        ] {
+            let c = received_task(turn_status, notice);
+            let item = c.item(Uuid::from_u128(1)).unwrap();
+            let activity = BotActivity {
+                turn: item.turn_id,
+                items: vec![item.id],
+                answers: vec![],
+                failed: if turn_status == "failed" {
+                    vec![item.id]
+                } else {
+                    vec![]
+                },
+                stopped: vec![],
+                needs_owner: waits_on_owner(Some(&c), item.turn_id),
+            };
+            assert_eq!(activity_status(&activity, item, &c), expected);
+        }
+        assert_eq!(ActivityStatus::Waiting.label(), "Waiting");
+        assert_eq!(ActivityStatus::NeedsYou.label(), "Needs you");
+    }
+
+    #[test]
+    fn owner_notice_dismiss_response_does_not_overwrite_a_replied_event() {
+        let mut c = received_task("completed", Some("replied"));
+        let mut response = c.owner_notice(Uuid::from_u128(400)).unwrap().clone();
+        response.status = crate::model::OwnerNoticeStatus::Dismissed;
+        c.apply_owner_notice(response.clone());
+        assert_eq!(
+            c.owner_notice(response.id).unwrap().status,
+            crate::model::OwnerNoticeStatus::Replied
+        );
+        let mut pending = received_task("completed", Some("pending"));
+        pending.apply_owner_notice(response.clone());
+        assert_eq!(
+            pending.owner_notice(response.id).unwrap().status,
+            crate::model::OwnerNoticeStatus::Dismissed
+        );
+    }
 
     #[test]
     fn a_failure_reason_stays_apart_from_the_progress_it_wrote() {

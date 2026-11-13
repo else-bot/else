@@ -151,6 +151,9 @@ pub struct TurnRecord {
     /// The bot's requests that the owner take over its computer.
     #[sqlx(skip)]
     pub computer_handoffs: Vec<crate::db::computer_handoffs::Handoff>,
+    /// The bot's notes that this delegated task ends needing the owner.
+    #[sqlx(skip)]
+    pub owner_notices: Vec<crate::db::owner_notices::Notice>,
 }
 
 pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id, t.turn_no,
@@ -487,6 +490,9 @@ pub async fn accept(
             })?;
     }
     crate::db::events::turn_accepted(&mut tx, req.bot_id, turn_id).await?;
+    if !req.hidden {
+        crate::db::owner_notices::reply_pending(&mut tx, req.bot_id).await?;
+    }
     let preempted = match preemption {
         Preemption::Cancel => {
             take_conversation(&mut tx, req.bot_id, conversation_id, turn_no, turn_id).await?
@@ -634,7 +640,8 @@ pub async fn load_turn(
 }
 
 /// Fill in each turn's secret requests, owner questions, drafts, social
-/// setups, delegations, pending MCP waits, and computer handoffs.
+/// setups, delegations, pending MCP waits, computer handoffs, and owner
+/// notices.
 pub async fn attach_owner_requests(
     conn: &mut SqliteConnection,
     turns: &mut [TurnRecord],
@@ -649,6 +656,7 @@ pub async fn attach_owner_requests(
     let mut job_waits = crate::db::computer_job_waits::pending_for_turns(conn, &ids).await?;
     let mut skills = crate::db::skills::for_turns(conn, &ids).await?;
     let mut handoffs = crate::db::computer_handoffs::for_turns(conn, &ids).await?;
+    let mut notices = crate::db::owner_notices::for_turns(conn, &ids).await?;
     for turn in turns {
         turn.skill_installs = skills.remove(&turn.id).unwrap_or_default();
         turn.social_setups = socials.remove(&turn.id).unwrap_or_default();
@@ -659,6 +667,7 @@ pub async fn attach_owner_requests(
         turn.mcp_waits = mcp_waits.remove(&turn.id).unwrap_or_default();
         turn.computer_job_waits = job_waits.remove(&turn.id).unwrap_or_default();
         turn.computer_handoffs = handoffs.remove(&turn.id).unwrap_or_default();
+        turn.owner_notices = notices.remove(&turn.id).unwrap_or_default();
     }
     Ok(())
 }

@@ -410,6 +410,36 @@ impl Question {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerNoticeKind {
+    Blocked,
+    Decision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerNoticeStatus {
+    Pending,
+    Replied,
+    Dismissed,
+    /// A card on the same turn asks the owner instead.
+    Superseded,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OwnerNotice {
+    pub id: Uuid,
+    pub bot_id: Uuid,
+    pub turn_id: Uuid,
+    pub kind: OwnerNoticeKind,
+    pub summary: String,
+    pub tried: Option<String>,
+    pub status: OwnerNoticeStatus,
+    pub created_at: DateTime<Utc>,
+    pub settled_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Turn {
     pub id: Uuid,
@@ -450,6 +480,8 @@ pub struct Turn {
     /// Requests that the owner take over the computer. Absent from older servers.
     #[serde(default)]
     pub computer_handoffs: Vec<ComputerHandoff>,
+    #[serde(default)]
+    pub owner_notices: Vec<OwnerNotice>,
 }
 
 /// A job in an installed MCP that a waiting turn rechecks until it ends.
@@ -959,6 +991,22 @@ impl Conversation {
         }
     }
 
+    pub fn owner_notice(&self, id: Uuid) -> Option<&OwnerNotice> {
+        self.turns
+            .values()
+            .flat_map(|t| &t.owner_notices)
+            .find(|n| n.id == id)
+    }
+
+    pub fn apply_owner_notice(&mut self, notice: OwnerNotice) {
+        if let Some(turn) = self.turns.get_mut(&notice.turn_id)
+            && let Some(current) = turn.owner_notices.iter_mut().find(|n| n.id == notice.id)
+            && current.status == OwnerNoticeStatus::Pending
+        {
+            *current = notice;
+        }
+    }
+
     pub fn computer_handoff(&self, id: Uuid) -> Option<&ComputerHandoff> {
         self.turns
             .values()
@@ -1287,6 +1335,39 @@ mod tests {
             "item.delta",
             json!({ "item_id": Uuid::from_u128(id), "offset_utf8": offset, "text": text }),
         )
+    }
+
+    #[test]
+    fn owner_notices_follow_turn_events_and_reload_from_snapshots() {
+        let mut c = Conversation::from_snapshot(snapshot(0, vec![], None)).unwrap();
+        let mut turn = json!({
+            "id": Uuid::from_u128(900), "request_id": Uuid::from_u128(901), "turn_no": 1,
+            "provider_id": "codex", "status": "completed", "effect_uncertain": false,
+            "owner_notices": [{
+                "id": Uuid::from_u128(400), "bot_id": bot(), "turn_id": Uuid::from_u128(900),
+                "kind": "decision", "summary": "Choose a bot", "tried": null,
+                "status": "pending", "created_at": "2026-11-01T00:00:00Z", "settled_at": null
+            }]
+        });
+        for (seq, status) in [(1, "pending"), (2, "replied")] {
+            turn["owner_notices"][0]["status"] = json!(status);
+            if status == "replied" {
+                turn["owner_notices"][0]["settled_at"] = json!("2026-11-01T00:01:00Z");
+            }
+            c.apply(&frame(seq, "turn.updated", json!({"turn": turn})))
+                .unwrap();
+            let mut snap = snapshot(seq, vec![], None);
+            snap.turns = serde_json::from_value(json!([turn])).unwrap();
+            let reloaded = Conversation::from_snapshot(snap).unwrap();
+            assert_eq!(
+                reloaded.owner_notice(Uuid::from_u128(400)),
+                c.owner_notice(Uuid::from_u128(400))
+            );
+        }
+        assert_eq!(
+            c.owner_notice(Uuid::from_u128(400)).unwrap().status,
+            OwnerNoticeStatus::Replied
+        );
     }
 
     #[test]

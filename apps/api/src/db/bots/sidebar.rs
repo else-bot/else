@@ -19,6 +19,8 @@ pub struct SidebarRow {
     skill_install_at: Option<DateTime<Utc>>,
     draft_content: Option<Json<Content>>,
     draft_at: Option<DateTime<Utc>>,
+    notice_summary: Option<String>,
+    notice_at: Option<DateTime<Utc>>,
     latest_turn_status: Option<TurnStatus>,
     /// The owner read the latest turn's last reply in full, such as its
     /// failure notice.
@@ -42,6 +44,11 @@ pub enum SidebarStatus {
         since: DateTime<Utc>,
     },
     NeedsCredentials {
+        preview: String,
+        since: DateTime<Utc>,
+    },
+    /// A task delegated to the bot ended needing the owner.
+    NeedsYou {
         preview: String,
         since: DateTime<Utc>,
     },
@@ -82,6 +89,12 @@ impl SidebarRow {
         if let (Some(reason), Some(since)) = (&self.credential_reason, self.credential_at) {
             return Some(SidebarStatus::NeedsCredentials {
                 preview: preview(reason),
+                since,
+            });
+        }
+        if let (Some(summary), Some(since)) = (&self.notice_summary, self.notice_at) {
+            return Some(SidebarStatus::NeedsYou {
+                preview: preview(summary),
                 since,
             });
         }

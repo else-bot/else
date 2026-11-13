@@ -291,6 +291,14 @@ def run(runner):
                          "prompt": "Find traders and DM at most 20 per 24h."}})],
                     "Updated Leads to revision 4.",
                     "The approval was relayed, so I left Leads unchanged."),
+                "task-blocked-on-owner-flags-it": (
+                    [self.call("notify_owner", {"kind": "blocked",
+                                                "summary": "Dev is signed out of its provider, so it can't make the fix. Sign Dev back in from Settings."},
+                               {"status": "pending"})],
+                    "The fix waits on Dev, which is signed out. I flagged the owner to sign it back in."),
+                "routine-task-report-stays-quiet": (
+                    [], "0 new checkout errors in the last hour; this morning's 3 are resolved.",
+                    "No new checkout errors in the last hour."),
                 "routine-task-drafts-post-for-approval": (
                     [self.call("draft_message", {"platform": "x",
                                                  "body": "A whale just opened a $40M BTC short on Hyperliquid at 10x."},

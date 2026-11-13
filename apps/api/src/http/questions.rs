@@ -1,5 +1,6 @@
-//! Owner routes for a bot's questions and standing permissions. Only the
-//! owner token reaches them; a task grant never answers a question.
+//! Owner routes for a bot's questions, owner notices, and standing
+//! permissions. Only the owner token reaches them; a task grant never
+//! answers a question.
 
 use std::sync::Arc;
 
@@ -23,6 +24,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/bots/{bot_id}/questions/{question_id}/answer",
             post(answer),
         )
+        .route(
+            "/bots/{bot_id}/owner-notices/{notice_id}/dismiss",
+            post(dismiss_notice),
+        )
         .route("/bots/{bot_id}/permissions", get(permissions))
         .route(
             "/bots/{bot_id}/permissions/{scope}",
@@ -32,6 +37,24 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/bots/{bot_id}/permissions/routines/{routine_id}",
             axum::routing::delete(revoke_routine),
         )
+}
+
+async fn dismiss_notice(
+    State(state): State<Arc<AppState>>,
+    ApiPath((bot_id, notice_id)): ApiPath<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    use crate::db::owner_notices::{self, DismissError};
+    active_bot(&state, bot_id).await?;
+    match owner_notices::dismiss(&state.db, bot_id, notice_id).await {
+        Ok(notice) => Ok(Json(json!({ "notice": notice }))),
+        Err(DismissError::NotFound) => Err(ApiError::not_found()),
+        Err(DismissError::Settled(status)) => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "owner_notice_settled",
+            format!("This notice is already {}.", status.as_str()),
+        )),
+        Err(DismissError::Db(err)) => Err(err.into()),
+    }
 }
 
 #[derive(Deserialize)]

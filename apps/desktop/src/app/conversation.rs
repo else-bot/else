@@ -25,6 +25,31 @@ pub(super) enum RowKey {
     /// The first task of a provider attempt's delegations.
     Handoff(Uuid),
     ComputerHandoff(Uuid),
+    OwnerNotice(Uuid),
+}
+
+impl RowKey {
+    pub(super) fn task_sender(self, c: &Conversation) -> Option<&str> {
+        if !matches!(
+            self,
+            Self::Question(_)
+                | Self::SecretRequest(_)
+                | Self::Draft(_)
+                | Self::Handoff(_)
+                | Self::ComputerHandoff(_)
+        ) {
+            return None;
+        }
+        let turn = c.turns_in_order().into_iter().find(|turn| match self {
+            Self::Question(id) => turn.questions.iter().any(|q| q.id == id),
+            Self::SecretRequest(id) => turn.secret_requests.iter().any(|r| r.id == id),
+            Self::Draft(id) => turn.outgoing_drafts.iter().any(|d| d.id == id),
+            Self::Handoff(id) => turn.delegations.iter().any(|d| d.id == id),
+            Self::ComputerHandoff(id) => turn.computer_handoffs.iter().any(|h| h.id == id),
+            _ => false,
+        })?;
+        Some(&c.task_receipt(turn.id)?.bot_task.as_ref()?.sender_name)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +130,9 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
             for delegation in &turn.delegations {
                 turns.insert(RowKey::Handoff(delegation.id), turn.id);
             }
+            for notice in &turn.owner_notices {
+                turns.insert(RowKey::OwnerNotice(notice.id), turn.id);
+            }
             for handoff in &turn.computer_handoffs {
                 turns.insert(RowKey::ComputerHandoff(handoff.id), turn.id);
             }
@@ -123,7 +151,8 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
             | RowKey::Draft(_)
             | RowKey::SocialSetup(_)
             | RowKey::Handoff(_)
-            | RowKey::ComputerHandoff(_) => turns.get(key).copied(),
+            | RowKey::ComputerHandoff(_)
+            | RowKey::OwnerNotice(_) => turns.get(key).copied(),
             RowKey::Task(_) | RowKey::Pending(_) => None,
         })
         .collect();
@@ -194,6 +223,21 @@ pub(super) fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
                     let anchor = c.question_anchor(turn.id, None)?;
                     Some((RowKey::ComputerHandoff(handoff.id), Some(anchor)))
                 }))
+                .chain(
+                    turn.owner_notices
+                        .iter()
+                        .filter(|notice| {
+                            notice.status != crate::model::OwnerNoticeStatus::Superseded
+                        })
+                        // A settled notice of a turn outside the loaded page
+                        // would otherwise land below newer messages.
+                        .filter_map(move |notice| {
+                            let anchor = c.question_anchor(turn.id, None);
+                            (notice.status == crate::model::OwnerNoticeStatus::Pending
+                                || anchor.is_some())
+                            .then_some((RowKey::OwnerNotice(notice.id), anchor))
+                        }),
+                )
                 .chain(turn.social_setups.iter().map(move |setup| {
                     (
                         RowKey::SocialSetup(setup.id),
@@ -693,7 +737,8 @@ impl ElseApp {
                 | RowKey::Draft(_)
                 | RowKey::SocialSetup(_)
                 | RowKey::Handoff(_)
-                | RowKey::ComputerHandoff(_) => (None, None),
+                | RowKey::ComputerHandoff(_)
+                | RowKey::OwnerNotice(_) => (None, None),
             })
             .collect();
         let unread_start =
@@ -729,6 +774,7 @@ impl ElseApp {
                     }
                     RowKey::SecretRequest(id) => c.secret_request(id).map(|r| r.status.clone()),
                     RowKey::SocialSetup(id) => c.social_setup(id).map(|s| s.status.clone()),
+                    RowKey::OwnerNotice(id) => c.owner_notice(id).map(|n| format!("{n:?}")),
                     RowKey::ComputerHandoff(id) => {
                         c.computer_handoff(id).map(|h| format!("{:?}", h.status))
                     }
@@ -1018,6 +1064,107 @@ mod tests {
 
     fn card_rows(page: serde_json::Value) -> Vec<(RowKey, Option<Uuid>)> {
         request_rows(&Conversation::from_snapshot(serde_json::from_value(page).unwrap()).unwrap())
+    }
+
+    #[test]
+    fn owner_notice_rows_stay_with_the_delegated_turn_after_settlement() {
+        let receipt = Uuid::from_u128(1);
+        for status in ["pending", "replied", "dismissed"] {
+            let mut page = card_page(
+                "sent",
+                json!([{
+                    "id": receipt, "seq": 1, "turn_id": Uuid::from_u128(10),
+                    "kind": "user", "text": "Task received",
+                    "bot_task": {"sender_bot_id": Uuid::from_u128(90),
+                        "sender_name": "Sentry", "prompt": "Triage checkout"}
+                }]),
+                None,
+            );
+            page["turns"][0]["outgoing_drafts"] = json!([]);
+            page["turns"][0]["owner_notices"] = json!([{
+                "id": Uuid::from_u128(400), "bot_id": Uuid::from_u128(80),
+                "turn_id": Uuid::from_u128(10), "kind": "blocked",
+                "summary": "Start a Dev session", "tried": "Delegate to Dev",
+                "status": status, "created_at": "2026-11-01T00:00:01Z",
+                "settled_at": if status == "pending" { None } else { Some("2026-11-01T00:01:00Z") }
+            }]);
+            let c = Conversation::from_snapshot(serde_json::from_value(page).unwrap()).unwrap();
+            assert_eq!(
+                request_rows(&c),
+                [(RowKey::OwnerNotice(Uuid::from_u128(400)), Some(receipt))]
+            );
+            assert_eq!(
+                c.owner_notice(Uuid::from_u128(400)).unwrap().summary,
+                "Start a Dev session"
+            );
+        }
+    }
+
+    #[test]
+    fn a_settled_owner_notice_outside_the_page_does_not_drop_below_newer_messages() {
+        for (status, shown) in [("pending", true), ("dismissed", false)] {
+            let mut page = card_page("sent", json!([]), Some(5));
+            page["turns"][0]["outgoing_drafts"] = json!([]);
+            page["turns"][0]["owner_notices"] = json!([{
+                "id": Uuid::from_u128(400), "bot_id": Uuid::from_u128(80),
+                "turn_id": Uuid::from_u128(10), "kind": "blocked",
+                "summary": "Start a Dev session", "tried": null, "status": status,
+                "created_at": "2026-11-01T00:00:01Z",
+                "settled_at": if status == "pending" { None } else { Some("2026-11-01T00:01:00Z") }
+            }]);
+            let rows = card_rows(page);
+            assert_eq!(rows.len(), usize::from(shown), "{status}: {rows:?}");
+        }
+    }
+
+    #[test]
+    fn a_superseded_owner_notice_leaves_its_card_to_ask() {
+        let mut page = card_page("sent", json!([]), None);
+        page["turns"][0]["outgoing_drafts"] = json!([]);
+        page["turns"][0]["owner_notices"] = json!([{
+            "id": Uuid::from_u128(400), "bot_id": Uuid::from_u128(80),
+            "turn_id": Uuid::from_u128(10), "kind": "decision",
+            "summary": "Roll back or hotfix?", "tried": null, "status": "superseded",
+            "created_at": "2026-11-01T00:00:01Z", "settled_at": "2026-11-01T00:00:02Z"
+        }]);
+        let c = Conversation::from_snapshot(serde_json::from_value(page).unwrap()).unwrap();
+        assert!(request_rows(&c).is_empty());
+    }
+
+    #[test]
+    fn owner_notice_field_is_optional_on_older_servers() {
+        let snapshot: Snapshot =
+            serde_json::from_value(card_page("pending", json!([]), None)).unwrap();
+        assert!(snapshot.turns[0].owner_notices.is_empty());
+    }
+
+    #[test]
+    fn owner_request_provenance_comes_from_the_task_receipt() {
+        let mut page = card_page(
+            "pending",
+            json!([{
+                "id": Uuid::from_u128(1), "seq": 1, "turn_id": Uuid::from_u128(10),
+                "kind": "user", "text": "Task received",
+                "bot_task": {"sender_bot_id": Uuid::from_u128(90),
+                    "sender_name": "Sentry", "prompt": "Triage checkout"}
+            }]),
+            None,
+        );
+        page["turns"][0]["questions"] = json!([{
+            "id": Uuid::from_u128(210), "kind": "external", "title": "Restart?",
+            "choices": [], "status": "pending"
+        }]);
+        let c = Conversation::from_snapshot(serde_json::from_value(page).unwrap()).unwrap();
+        assert_eq!(
+            RowKey::Draft(Uuid::from_u128(310)).task_sender(&c),
+            Some("Sentry")
+        );
+        assert_eq!(
+            RowKey::Question(Uuid::from_u128(210)).task_sender(&c),
+            Some("Sentry")
+        );
+        assert_eq!(RowKey::Question(Uuid::nil()).task_sender(&c), None);
+        assert_eq!(RowKey::Item(Uuid::from_u128(1)).task_sender(&c), None);
     }
 
     #[test]
