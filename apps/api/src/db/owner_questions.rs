@@ -176,11 +176,14 @@ pub struct RanAction {
     pub used: Use,
 }
 
-/// How many approved calls from turns that did not complete a turn is told about.
+/// How many approved calls from turns that did not complete a turn is told
+/// about, and how far back: a fresh routine session would otherwise get the
+/// same old calls on every run.
 const RAN_ACTIONS_SHOWN: i64 = 10;
+const RAN_ACTIONS_DAYS: i64 = 7;
 
-/// The latest approved tool calls that ran in this conversation's turns
-/// before `turn_no` that failed, became uncertain, or were stopped, oldest
+/// The latest approved tool calls of the past week that ran in this
+/// conversation's turns before `turn_no` that failed, became uncertain, or were stopped, oldest
 /// first. A completed turn's own reply already reported its calls.
 pub async fn ran_before(
     conn: &mut SqliteConnection,
@@ -220,13 +223,14 @@ async fn ran(
          FROM owner_questions q JOIN turns t ON t.id = q.turn_id
          WHERE ((t.conversation_id = ?1 AND t.turn_no < ?2) OR t.id = ?3)
            AND t.status IN ('failed', 'uncertain', 'interrupted')
-           AND q.used_at IS NOT NULL
+           AND q.used_at > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', ?5)
          ORDER BY q.used_at DESC, q.id LIMIT ?4",
     )
     .bind(conversation_id)
     .bind(before_turn_no)
     .bind(also_turn)
     .bind(RAN_ACTIONS_SHOWN)
+    .bind(format!("-{RAN_ACTIONS_DAYS} days"))
     .fetch_all(&mut *conn)
     .await?;
     let mut ran = rows
