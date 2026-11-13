@@ -122,7 +122,21 @@ impl ElseApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.muted_foreground)
                     .child(div().flex_1().child("Needs you"))
-                    .child(layout.waiting.len().to_string()),
+                    .child(
+                        div()
+                            .flex_none()
+                            .min_w(px(18.))
+                            .h(px(18.))
+                            .px(px(6.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(theme.foreground.opacity(0.08))
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(layout.waiting.len().to_string()),
+                    ),
             );
             for bot in layout.waiting {
                 tray = tray.child(self.render_bot_row(bot, cx));
@@ -459,14 +473,21 @@ impl ElseApp {
             .then(|| self.waiting_faces("sidebar-waiting", bot))
             .flatten();
         let working = subtitle.kind == Kind::Working && connected;
-        let color = if !connected {
+        // The status line and wait sit well below the name: about 60% ink in
+        // dark; light themes keep their readable muted tone.
+        let meta = if theme.mode.is_dark() {
+            theme.foreground.opacity(0.6)
+        } else {
             theme.muted_foreground
+        };
+        let color = if !connected {
+            meta
         } else {
             match subtitle.kind {
-                Kind::Working => theme.link,
+                Kind::Working => theme.primary,
                 Kind::Answer | Kind::Approval | Kind::Takeover | Kind::Credentials => theme.warning,
                 Kind::Failed | Kind::Uncertain | Kind::Unavailable => theme.danger,
-                _ => theme.muted_foreground,
+                _ => meta,
             }
         };
         let icon = match subtitle.kind {
@@ -496,9 +517,9 @@ impl ElseApp {
             .min_w_0()
             .gap_1()
             .items_center()
-            .text_size(px(13.))
-            .line_height(px(18.))
-            .text_color(theme.muted_foreground)
+            .text_size(px(12.5))
+            .line_height(px(17.))
+            .text_color(meta)
             .when(!pending, |line| {
                 line.group_hover("sidebar-bot-row", |style| {
                     style.text_color(theme.foreground)
@@ -564,8 +585,8 @@ impl ElseApp {
                                     .flex_none()
                                     .ml_auto()
                                     .pl_2()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
+                                    .text_size(px(11.5))
+                                    .text_color(meta)
                                     .child(waited)
                             })),
                     )
