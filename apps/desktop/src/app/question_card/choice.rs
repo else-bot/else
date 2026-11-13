@@ -581,6 +581,7 @@ mod tests {
             status: status.into(),
             answer,
             settled_at: None,
+            used: None,
         }
     }
 

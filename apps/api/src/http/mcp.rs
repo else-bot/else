@@ -612,7 +612,29 @@ fn entry_json(bot_id: Uuid, entry: &EntryRow, offset: usize, max: usize) -> Valu
 }
 
 async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Value {
-    let (result, log) = match name {
+    use crate::db::owner_questions::{self, UseOutcome};
+    let ((result, log), used) =
+        owner_questions::track_use(dispatch(state, grant, name, args)).await;
+    // A parked call may or may not have run its effect: its use stays started.
+    if let Some(question) = used.filter(|_| !crate::app::tools::parks(name, &result)) {
+        let outcome = if result["isError"] == true {
+            UseOutcome::Error
+        } else {
+            UseOutcome::Completed
+        };
+        if let Err(err) = owner_questions::record_use(&state.db, question, outcome).await {
+            tracing::warn!(error = %err, %question, "an approved call's outcome was not recorded");
+        }
+    }
+    if let Some(log) = log {
+        let logged = crate::app::tools::loggable_args(name, args);
+        record(state, grant, name, &logged, &log).await;
+    }
+    with_next(name, result)
+}
+
+async fn dispatch(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
+    match name {
         "memory_bots" => bots(state, grant).await,
         "mcp_list" | "mcp_install" | "mcp_request" | "mcp_connect" | "mcp_connection_status" => {
             super::shared_mcp::call(state, grant, name, args).await
@@ -671,13 +693,8 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         name if name.starts_with("computer_") => {
             super::guest_tools::call(state, grant, name, args).await
         }
-        _ => return tool_error("Unknown tool."),
-    };
-    if let Some(log) = log {
-        let logged = crate::app::tools::loggable_args(name, args);
-        record(state, grant, name, &logged, &log).await;
+        _ => (tool_error("Unknown tool."), None),
     }
-    with_next(name, result)
 }
 
 /// What the server tells a client about itself on initialize. Codex appends

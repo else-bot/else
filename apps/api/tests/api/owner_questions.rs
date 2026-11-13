@@ -725,6 +725,141 @@ async fn an_external_action_needs_approval_for_exactly_that_call_once() {
     assert_ne!(again["question_id"], question.to_string());
 }
 
+fn mcp_tools() -> Vec<Tool> {
+    vec![Tool::Mcp, Tool::ManageMcp, Tool::AskOwner, Tool::ReadMemory]
+}
+
+/// Installs the fixture MCP, asks for `call` (an external MCP request),
+/// approves its card, and runs it again in the resumed attempt.
+async fn approved_mcp_call(app: &TestApp, bot: &str, call: Value) -> (Uuid, Uuid, common::Reply) {
+    let (turn, _) = running(app, bot).await;
+    let token = grant(app, turn, mcp_tools()).await;
+    let installed = tool(
+        app,
+        &token,
+        "mcp_install",
+        crate::shared_mcp::installation(),
+    )
+    .await;
+    assert!(!is_error(&installed), "{}", installed.body);
+    let pending = tool_text(&tool(app, &token, "mcp_request", call.clone()).await);
+    let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
+    wait(app, turn, "waiting").await;
+    assert_eq!(
+        answer(app, bot, question, "approve").await.status,
+        StatusCode::OK
+    );
+    wait(app, turn, "completed").await;
+    let card = shown_turn(app, bot, turn).await["questions"][0].clone();
+    assert_eq!(card["used"], Value::Null, "approved but not yet run");
+    resume_finished(app, turn).await;
+    let token = grant(app, turn, mcp_tools()).await;
+    let ran = tool(app, &token, "mcp_request", call).await;
+    (turn, question, ran)
+}
+
+fn echo_call(tool: &str) -> Value {
+    json!({ "id": "t3-code", "method": "tools/call", "effect": "external",
+            "params": { "name": tool, "arguments": { "title": "Rust 1.100" } },
+            "purpose": "File the Rust 1.100 issue" })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approved_call_that_ran_before_a_failure_stays_visible() {
+    let Harness { app, synthetic } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, question, ran) = approved_mcp_call(&app, &main, echo_call("echo")).await;
+    assert!(!is_error(&ran), "the approved call ran: {}", ran.body);
+    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    assert_eq!(card["used"]["outcome"], "completed", "{card}");
+    let ran_at = card["used"]["at"]
+        .as_str()
+        .and_then(|at| at.parse::<chrono::DateTime<chrono::Utc>>().ok())
+        .unwrap_or_else(|| panic!("the card records when the call ran: {card}"));
+    assert_eq!(journaled(&app, &main, question).await["used"], card["used"]);
+
+    sqlx::query(
+        "UPDATE turns SET status = 'failed', error_code = 'provider_policy',
+             error_message = 'Claude reported native agent activity (task_started)'
+         WHERE id = ?1",
+    )
+    .bind(turn)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    let records = format!(
+        "- turn 1 (failed): mcp_request \"{}\" completed at {}\n",
+        card["title"].as_str().unwrap(),
+        ran_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    );
+    for (message, told) in [("Did you file it?", true), ("Thanks.", false)] {
+        let sent = app
+            .send(&main, Uuid::new_v4(), message, Some("synthetic"))
+            .await;
+        app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
+            .await;
+        let packet = synthetic.packets().await.last().unwrap().clone();
+        assert_eq!(
+            packet.contains("[else.bot approved actions]") && packet.contains(&records),
+            told,
+            "the warm session is told once: {packet}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approved_mcp_call_the_upstream_tool_rejects_records_an_error() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, _, ran) = approved_mcp_call(&app, &main, echo_call("reject")).await;
+    assert!(
+        is_error(&ran),
+        "the upstream error is visible: {}",
+        ran.body
+    );
+    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    assert_eq!(card["used"]["outcome"], "error", "{card}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approved_call_records_what_its_tool_returned_once() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main).await;
+    let pending = tool_text(&tool(&app, &token, "computer_run", delete_args()).await);
+    let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
+    wait(&app, turn, "waiting").await;
+    let approved = answer(&app, &main, question, "approve_forever").await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    wait(&app, turn, "completed").await;
+
+    let token = resume_finished(&app, turn).await;
+    let ran = tool(&app, &token, "computer_run", delete_args()).await;
+    assert!(
+        tool_text(&ran)
+            .as_str()
+            .is_some_and(|t| t.starts_with("COMPUTER_UNAVAILABLE")),
+        "the call under the standing grant failed before running: {}",
+        ran.body
+    );
+    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    assert_eq!(
+        card["used"]["outcome"], "error",
+        "a broad grant still marks its own card, with the tool's error: {card}"
+    );
+
+    let again = else_api::db::owner_questions::record_use(
+        &app.db.pool,
+        question,
+        else_api::db::owner_questions::UseOutcome::Completed,
+    )
+    .await
+    .unwrap();
+    assert!(!again, "a recorded outcome is final");
+    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    assert_eq!(card["used"]["outcome"], "error");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_denied_action_stays_denied_for_the_request() {
     let Harness { app, synthetic } = harness().await;
