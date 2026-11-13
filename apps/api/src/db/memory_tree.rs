@@ -850,7 +850,7 @@ pub async fn context_before(
 }
 
 /// Memory given to a new provider session, at most this many bytes.
-pub const SESSION_MEMORY_BYTES: usize = 24_000;
+pub const SESSION_MEMORY_BYTES: usize = 12_000;
 
 /// The bot's saved memory for a session that has not received it: the main
 /// view if it fits, else the coarser compaction view, else its newest nodes
