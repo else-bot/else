@@ -830,9 +830,9 @@ pub(super) fn settings_column(content: impl IntoElement) -> Div {
     )
 }
 
-/// The empty state of an inventory page (MCP, Skills): 64 px under the page
-/// intro (its 20 px gap plus 44), so it reads with the intro at every sheet height, with
-/// one supporting line and the button that fixes it.
+/// The empty state of an inventory page (MCP, Skills), optically centred
+/// in the pane: a 28 px icon, 12 px to the title, one supporting line, and
+/// 16 px to the button that fixes it.
 pub(super) fn empty_state(
     icon: IconName,
     title: &'static str,
@@ -843,29 +843,33 @@ pub(super) fn empty_state(
     let theme = cx.theme();
     v_flex()
         .w_full()
-        .pt_11()
+        .flex_1()
+        .justify_center()
+        // The page heading sits above; lifting the block by half its
+        // height puts it on the pane's centre instead of the space's.
+        .pb_16()
         .items_center()
         .text_center()
-        .gap_2()
         .child(
             Icon::new(icon)
-                .size_6()
-                .mb_1()
-                .text_color(theme.muted_foreground),
+                .size(px(28.))
+                .text_color(theme.muted_foreground.opacity(0.8)),
         )
         .child(
             div()
-                .text_base()
+                .pt_3()
+                .text_size(px(15.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(title),
         )
         .child(
             div()
+                .pt_1()
                 .text_sm()
                 .text_color(theme.muted_foreground)
                 .child(detail),
         )
-        .child(div().pt_2().child(action))
+        .child(div().pt_4().child(action))
 }
 
 pub(super) fn section_heading(title: &'static str, description: &'static str, cx: &App) -> Div {

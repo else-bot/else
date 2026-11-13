@@ -405,8 +405,9 @@ impl Shell {
             let at: chrono::DateTime<chrono::Local> = at.into();
             format!("{source} · Checked {}", at.format("%H:%M"))
         });
+        // The status block reads as the heading's answer, 16 px under it.
         let mut content = v_flex()
-            .gap_5()
+            .gap_4()
             .when(output_visible, |content| content.gap_3())
             .when(!output_visible, |content| {
                 content.child(super::settings::section_heading(
@@ -449,7 +450,8 @@ impl Shell {
                             .gap_1()
                             .child(
                                 div()
-                                    .text_base()
+                                    .text_size(px(15.))
+                                    .line_height(px(20.))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(title),
                             )
