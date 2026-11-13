@@ -464,7 +464,9 @@ impl LocalForm {
                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Daily backup time"))
                     .child(div().text_xs().text_color(theme.muted_foreground)
                         .child("else.bot pauses new work while it backs up. Running tasks finish first.")))
-                .child(h_flex().gap_2().text_xs().child("Automatic")
+                .when(managed, |row| row.child(div().text_sm().text_color(theme.muted_foreground)
+                    .child(if self.enabled { "Automatic" } else { "Automatic backups off" })))
+                .when(!managed, |row| row.child(h_flex().gap_2().text_xs().child("Automatic")
                     .child(toggle("local-backups-enabled", self.enabled, disabled)
                        .accessibility_label("Automatic daily local backups")
                         .on_click(cx.listener(|shell, enabled: &bool, _, cx| {
@@ -472,10 +474,21 @@ impl LocalForm {
                                 form.enabled = *enabled;
                             }
                             cx.notify();
-                        })))))
-            .child(presets)
-            .child(h_flex().gap_4().items_start().when(stacked, |row| row.flex_col())
-                .child(field("Exact time", &self.time)).child(field("Keep copies", &self.keep)))
+                        }))))))
+            .when(managed, |panel| {
+                // A locked schedule reads as its values, not as dead inputs.
+                let value = |label: &'static str, value: SharedString| {
+                    v_flex().flex_1().min_w_0().gap_1()
+                        .child(div().text_xs().text_color(theme.muted_foreground).child(label))
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(value))
+                };
+                panel.child(h_flex().gap_4().items_start().when(stacked, |row| row.flex_col())
+                    .child(value("Daily time", self.time.read(cx).value()))
+                    .child(value("Keep copies", self.keep.read(cx).value())))
+            })
+            .when(!managed, |panel| panel.child(presets)
+                .child(h_flex().gap_4().items_start().when(stacked, |row| row.flex_col())
+                    .child(field("Exact time", &self.time)).child(field("Keep copies", &self.keep))))
             .child(div().text_xs().text_color(theme.muted_foreground).child(note))
             .when(!managed, |panel| panel.child(h_flex().justify_end().gap_2()
                 .child(Button::new("local-backup-cancel").control(Tier::Secondary, Scale::Standard, disabled || !self.dirty(cx), cx).label("Cancel")

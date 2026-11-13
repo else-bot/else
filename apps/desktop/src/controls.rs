@@ -89,6 +89,10 @@ pub trait Control: Sized {
     /// Styles a labeled button as the kit's `tier` at `scale`, and disables
     /// it when `disabled`.
     fn control(self, tier: Tier, scale: Scale, disabled: bool, cx: &App) -> Self;
+
+    /// Pulls a ghost button left by its padding so its text, not its hover
+    /// fill, lines up with the content edge.
+    fn flush_start(self, scale: Scale) -> Self;
 }
 
 impl Control for Button {
@@ -122,6 +126,10 @@ impl Control for Button {
             .border_0()
             .bg(fill)
             .text_color(theme.button_foreground)
+    }
+
+    fn flush_start(self, scale: Scale) -> Self {
+        self.ml(-scale.padding())
     }
 }
 
@@ -216,18 +224,20 @@ pub fn toggle(id: impl Into<ElementId>, checked: bool, disabled: bool) -> Switch
 /// An editable single-line field: a fill set apart from the card or dialog
 /// behind it, darker in dark and white in light, with a visible edge.
 pub fn text_field(input: Input, cx: &App) -> Input {
-    let theme = cx.theme();
-    let (fill, edge) = field_colors(cx);
-    input
-        .focus_ring(false)
-        .bg(fill)
-        .border_color(edge)
-        .text_color(theme.foreground)
+    field_style(input.focus_ring(false), cx)
 }
 
-/// The fill and edge every editable field shares, so custom fields that
-/// are not an [`Input`] can match.
-pub fn field_colors(cx: &App) -> (Hsla, Hsla) {
+/// Gives any field-like control, such as a select, the text field's fill
+/// and edge.
+pub fn field_style<S: Styled>(control: S, cx: &App) -> S {
+    let (fill, edge) = field_colors(cx);
+    control
+        .bg(fill)
+        .border_color(edge)
+        .text_color(cx.theme().foreground)
+}
+
+fn field_colors(cx: &App) -> (Hsla, Hsla) {
     let theme = cx.theme();
     if theme.mode.is_dark() {
         (
@@ -303,7 +313,15 @@ pub fn stop_button(id: impl Into<ElementId>, stopping: bool, cx: &App) -> Button
         .border_0()
         .bg(theme.foreground)
         .text_color(theme.background)
-        .loading(stopping);
+        .loading(stopping)
+        .map(|button| {
+            if stopping {
+                // The loading spinner takes the icon's place.
+                button.icon(gpui_kit::assets::IconName::Square)
+            } else {
+                button.child(div().size(px(10.)).rounded(px(2.)).bg(theme.background))
+            }
+        });
     if stopping {
         button
     } else {

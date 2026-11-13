@@ -763,6 +763,7 @@ impl ElseApp {
                 "rules-restore-this"
             })
             .control(Tier::Ghost, Scale::Compact, restoring, cx)
+            .flush_start(Scale::Compact)
             .icon(Icon::new(icon).text_color(color))
             .label(label)
             .loading(restoring)

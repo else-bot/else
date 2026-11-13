@@ -887,7 +887,6 @@ impl ElseApp {
                     .when_some(actions.stop, |row, stopping| {
                         row.child(
                             stop_button("stop-work", stopping, cx)
-                                .icon(IconName::Square)
                                 .accessibility_label(if stopping {
                                     "Stopping work"
                                 } else {
@@ -929,7 +928,7 @@ impl ElseApp {
             )
             .child(
                 div()
-                    .px(px(13.))
+                    .px(px(22.))
                     .text_size(px(11.5))
                     .text_color(theme.foreground.opacity(super::message_row::META_OPACITY))
                     .child("Enter to send · Shift+Enter for a new line"),

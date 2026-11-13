@@ -1,7 +1,7 @@
 use super::ElseApp;
 use crate::api::{Category, CreateBotRequest};
 use crate::avatar::{Avatar, AvatarColor, AvatarPicker, AvatarShape, bot_avatar};
-use crate::controls::{Control as _, Scale, Tier, text_field};
+use crate::controls::{Control as _, Scale, Tier, field_style, text_field};
 use crate::profile_picker::ProfilePicker;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::Button;
@@ -178,7 +178,7 @@ impl ElseApp {
             if !categories.is_empty() {
                 details = details.child(
                     v_flex().gap_1().child(field_label("Category", cx)).child(
-                        Select::new(&form.category)
+                        field_style(Select::new(&form.category), cx)
                             .focus_ring(false)
                             .cursor_pointer()
                             .accessibility_label("Category")

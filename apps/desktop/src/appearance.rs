@@ -373,7 +373,6 @@ impl Palette {
             ("secondary.foreground", p.foreground),
             ("secondary.hover.background", hover),
             ("secondary.active.background", selected),
-            ("button.background", raised),
             ("button.foreground", p.foreground),
             ("button.hover.background", hover),
             ("button.active.background", active),
@@ -461,6 +460,12 @@ impl Palette {
             .into_iter()
             .map(|(key, color)| (key.to_owned(), color.hex().into()))
             .collect();
+        // Secondary buttons: a quiet tint of the text color, so they lift off
+        // whatever surface they sit on, cards and dialogs included.
+        colors.insert(
+            "button.background".to_owned(),
+            format!("{}{}", p.foreground.hex(), if dark { "14" } else { "12" }).into(),
+        );
         colors.insert(
             "overlay".to_owned(),
             if dark { "#0000008c" } else { "#0000004d" }.into(),

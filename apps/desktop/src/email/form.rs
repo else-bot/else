@@ -1,6 +1,6 @@
 use super::*;
 use crate::api::{Bot, ClientError, EmailConfig, EmailEndpoint, EmailProvider};
-use crate::controls::{Control as _, Scale, Tier, segment, segment_track, text_field};
+use crate::controls::{Control as _, Scale, Tier, field_style, segment, segment_track, text_field};
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::searchable_list::SearchableListItem;
@@ -334,7 +334,7 @@ impl Form {
         }
         form = form.child(v_flex().gap_1()
             .child(div().text_sm().font_medium().child("Ask a bot to help, optional"))
-            .child(div().max_w(px(320.)).child(Select::new(&self.bot).focus_ring(false).cursor_pointer().accessibility_label("Email bot").disabled(busy))))
+            .child(div().max_w(px(320.)).child(field_style(Select::new(&self.bot), cx).focus_ring(false).cursor_pointer().accessibility_label("Email bot").disabled(busy))))
             .child(note("The bot will ask what this inbox is for and whether you want a first triage. All your other bots can still use it when asked."));
         form.child(
             h_flex().gap_2().justify_end().child(

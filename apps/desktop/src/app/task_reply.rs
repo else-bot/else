@@ -430,7 +430,7 @@ fn working_dots(turn: Uuid, color: Hsla, still: bool) -> impl IntoElement {
                     move |dot, t| {
                         let phase = (t - ix as f32 / 6.).rem_euclid(1.);
                         let lift = (std::f32::consts::PI * (phase * 2.).min(1.)).sin();
-                        dot.opacity(0.3 + 0.7 * lift)
+                        dot.opacity(0.5 + 0.5 * lift)
                     },
                 )
                 .into_any_element()

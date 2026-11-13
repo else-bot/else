@@ -316,6 +316,8 @@ impl Render for SocialsView {
                                     cx,
                                 )
                                 .label(format!("Add {}", provider.label()))
+                                // Paired rows share one button width.
+                                .w(px(132.))
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     view.add(provider, window, cx)
                                 })),

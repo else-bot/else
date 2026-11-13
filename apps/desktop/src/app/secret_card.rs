@@ -368,6 +368,7 @@ impl ElseApp {
                 h_flex().flex_1().child(
                     Button::new(SharedString::from(format!("secret-about-{id}")))
                         .control(Tier::Ghost, Scale::Compact, false, cx)
+                        .flush_start(Scale::Compact)
                         .icon(if expanded {
                             IconName::ChevronDown
                         } else {
