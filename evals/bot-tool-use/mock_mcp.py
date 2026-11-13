@@ -52,11 +52,15 @@ def find(deferred, query, listed=()):
         # Mirrors tool_search::find for a tool that is already listed.
         return {"tools": [], "listed": f"{bare} is in your tool list, as mcp__elsebot__{bare} where "
                                        "your tools carry that prefix: call it directly."}
+    tokens = {t.removeprefix("mcp__elsebot__") for t in re.split(r"\W+", query)}
+    named = [t for t in deferred if t["name"] in tokens]
+    if named:
+        return {"tools": named}
     words = [w for w in re.split(r"[\W_]+", query) if len(w) > 2]
     scored = []
     for tool in deferred:
         name = tool["name"]
-        score = 100 if name in query else sum(
+        score = sum(
             3 if any(p.startswith(w) or w.startswith(p) for p in name.split("_"))
             else int(w in tool.get("description", "").lower()) for w in words
         )

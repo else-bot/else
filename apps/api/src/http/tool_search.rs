@@ -64,8 +64,9 @@ fn schemas() -> [Value; 2] {
     ]
 }
 
-/// The deferred tools from `all` that best match `query`: an exact name
-/// first, then by words shared with each tool's name and description.
+/// The deferred tools from `all` that best match `query`: only the ones it
+/// names exactly when it names any, else by words shared with each tool's
+/// name and description.
 pub fn find(all: &[Value], query: &str) -> Value {
     let query = query.to_lowercase();
     let bare = query.trim().trim_start_matches("mcp__elsebot__");
@@ -74,6 +75,20 @@ pub fn find(all: &[Value], query: &str) -> Value {
             "{bare} is in your tool list, as mcp__elsebot__{bare} where your tools carry that \
              prefix: call it directly."
         ) });
+    }
+    let named: Vec<&Value> = all
+        .iter()
+        .filter(|tool| {
+            tool["name"].as_str().is_some_and(|name| {
+                DEFERRED_TOOLS.contains(&name)
+                    && query
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .any(|token| token.trim_start_matches("mcp__elsebot__") == name)
+            })
+        })
+        .collect();
+    if !named.is_empty() {
+        return json!({ "tools": named });
     }
     let words: Vec<&str> = query
         .split(|c: char| !c.is_alphanumeric())
@@ -90,23 +105,19 @@ pub fn find(all: &[Value], query: &str) -> Value {
                 .as_str()
                 .unwrap_or_default()
                 .to_lowercase();
-            let score = if query.contains(name) {
-                100
-            } else {
-                words
-                    .iter()
-                    .map(|w| {
-                        if name
-                            .split('_')
-                            .any(|part| part.starts_with(w) || w.starts_with(part))
-                        {
-                            3
-                        } else {
-                            usize::from(description.contains(w))
-                        }
-                    })
-                    .sum()
-            };
+            let score: usize = words
+                .iter()
+                .map(|w| {
+                    if name
+                        .split('_')
+                        .any(|part| part.starts_with(w) || w.starts_with(part))
+                    {
+                        3
+                    } else {
+                        usize::from(description.contains(w))
+                    }
+                })
+                .sum();
             (score > 0).then_some((score, tool))
         })
         .collect();
