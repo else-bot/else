@@ -3027,3 +3027,151 @@ async fn an_update_to_an_ended_task_is_rejected_with_its_outcome() {
         "{unknown}"
     );
 }
+
+/// Writes `messages` as the child's replies, then settles it as `status`.
+async fn settle_with_messages(db: &TestDb, child: Uuid, messages: &[&str], status: &str) {
+    let (target, conversation): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT t.bot_id, c.id FROM turns t
+         JOIN conversations c ON c.bot_id = t.bot_id AND c.kind = 'owner' WHERE t.id = ?1",
+    )
+    .bind(child)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    for text in messages {
+        let seq: i64 = sqlx::query_scalar(
+            "UPDATE conversations SET last_item_seq = last_item_seq + 1 WHERE id = ?1
+             RETURNING last_item_seq",
+        )
+        .bind(conversation)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+             VALUES (?1, ?2, ?3, ?4, 'assistant', ?5)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(conversation)
+        .bind(seq)
+        .bind(child)
+        .bind(text)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
+        .bind(child)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE turns SET status = ?2,
+             error_code = CASE WHEN ?2 = 'failed' THEN 'provider_error' END,
+             error_message = CASE WHEN ?2 = 'failed' THEN 'The provider exited.' END
+         WHERE id = ?1",
+    )
+    .bind(child)
+    .bind(status)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let mut tx = db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    else_api::db::events::turn_changed(&mut tx, target, child)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// The delegating bot's copy of a returned file.
+async fn returned_text(db: &TestDb, owner: Uuid, file: Uuid) -> String {
+    let data: Vec<u8> =
+        sqlx::query_scalar("SELECT data FROM attachments WHERE id = ?1 AND bot_id = ?2")
+            .bind(file)
+            .bind(owner)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    String::from_utf8(data).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_multi_message_child_returns_its_final_message_and_every_message_as_a_file() {
+    let db = TestDb::migrated().await;
+    let (main, root, child, delegation) = seed(&db).await;
+    let messages = [
+        "Cloning the repo.",
+        "Main, please rerun harvest.js once I finish.",
+        "Final report: 3 failing tests, all in parser.rs.",
+    ];
+    settle_with_messages(&db, child, &messages, "completed").await;
+
+    let mut conn = db.pool.acquire().await.unwrap();
+    let outcomes = else_api::db::delegations::undelivered(&mut conn, root)
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].result.as_deref(), Some(messages[2]));
+    assert_eq!(outcomes[0].error, None);
+    let [file] = outcomes[0].files.as_slice() else {
+        panic!("one file with every message: {:?}", outcomes[0].files);
+    };
+    assert_eq!(file.name, format!("task-{delegation}-messages.md"));
+    assert_eq!(
+        returned_text(&db, main, file.id).await,
+        messages.join("\n\n"),
+        "the request made mid-task is in the full text"
+    );
+    let shown: String = sqlx::query_scalar("SELECT text FROM items WHERE id = ?1")
+        .bind(delegation)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        shown, messages[2],
+        "the delegating chat shows the final report"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_child_returns_its_last_checkpoint_and_the_error() {
+    let db = TestDb::migrated().await;
+    let (main, root, child, _) = seed(&db).await;
+    let messages = ["Run 1 done.", "Run 2 done. Starting run 3."];
+    settle_with_messages(&db, child, &messages, "failed").await;
+
+    let mut conn = db.pool.acquire().await.unwrap();
+    let outcomes = else_api::db::delegations::undelivered(&mut conn, root)
+        .await
+        .unwrap();
+    assert_eq!(outcomes[0].status, "failed");
+    assert_eq!(outcomes[0].result.as_deref(), Some(messages[1]));
+    assert_eq!(
+        outcomes[0].error.as_deref(),
+        Some("provider_error: The provider exited.")
+    );
+    let [file] = outcomes[0].files.as_slice() else {
+        panic!("one file with every message: {:?}", outcomes[0].files);
+    };
+    assert_eq!(
+        returned_text(&db, main, file.id).await,
+        messages.join("\n\n")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_single_message_child_returns_no_extra_file() {
+    let db = TestDb::migrated().await;
+    let (_, root, child, _) = seed(&db).await;
+    settle_with_messages(&db, child, &["Done: 3 failing tests."], "completed").await;
+
+    let mut conn = db.pool.acquire().await.unwrap();
+    let outcomes = else_api::db::delegations::undelivered(&mut conn, root)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcomes[0].result.as_deref(),
+        Some("Done: 3 failing tests.")
+    );
+    assert!(outcomes[0].files.is_empty(), "{:?}", outcomes[0].files);
+}
