@@ -150,7 +150,8 @@ impl RoutineCheck {
 /// How a routine's check job ended, read from its `guest_jobs` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckEnd {
-    /// Exit 0 without a byte of output: nothing new.
+    /// Exit 0 with only whitespace, as `echo "$found"` prints when it found
+    /// nothing: nothing new.
     Clear,
     /// Exit 0 with output for the run.
     Found(String),
@@ -194,7 +195,7 @@ impl CheckEnd {
         use crate::computers::jobs::JobStatus;
         let output = output.unwrap_or_default();
         Some(match (status, exit_code) {
-            (JobStatus::Completed, _) if output.is_empty() => Self::Clear,
+            (JobStatus::Completed, _) if output.trim().is_empty() => Self::Clear,
             (JobStatus::Completed, _) => Self::Found(output),
             (JobStatus::Failed, Some(exit_code)) => Self::Failed { exit_code, output },
             (JobStatus::Failed, None) if !leased => Self::NotStarted,
@@ -962,10 +963,10 @@ mod tests {
             AfterCheck::Wake(note) => note,
             AfterCheck::Skip(skip) => panic!("skipped: {skip:?}"),
         };
-        let note = wake(end(JobStatus::Completed, Some(0), " \n", true));
-        assert!(
-            note.ends_with("(none)"),
-            "any byte of output is new: {note}"
+        assert_eq!(
+            end(JobStatus::Completed, Some(0), " \n", true),
+            AfterCheck::Skip(CheckSkip::NothingNew),
+            "a bare newline is nothing new"
         );
         let note = wake(end(JobStatus::Completed, Some(0), "3 leads\n", true));
         assert!(note.ends_with("\n\n3 leads"), "{note}");
