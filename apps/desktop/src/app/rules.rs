@@ -122,14 +122,13 @@ fn rule_line(line: &str, cx: &App) -> StyledText {
 
 fn diff_block(diff: &[DiffLine], cx: &App) -> Div {
     let theme = cx.theme();
+    // The same surface as a code block in the transcript.
     v_flex()
         .w_full()
         .flex_none()
-        .py_1()
+        .py_3()
         .rounded(theme.radius)
-        .border_1()
-        .border_color(theme.border.opacity(0.6))
-        .bg(theme.background)
+        .bg(theme.secondary)
         .overflow_hidden()
         .font_family(theme.mono_font_family.clone())
         .text_xs()
@@ -142,7 +141,7 @@ fn diff_block(diff: &[DiffLine], cx: &App) -> Div {
             };
             h_flex()
                 .w_full()
-                .px_2p5()
+                .px_3()
                 .gap_2()
                 .items_start()
                 .when_some(fill, |row, fill| row.bg(fill))
@@ -248,7 +247,7 @@ impl ElseApp {
         let owner = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
             let dialog = crate::appearance::modal_surface(dialog, cx)
-                .w(px(680.))
+                .w(px(820.))
                 .centered();
             let Some(app) = owner.upgrade() else {
                 return dialog;
@@ -818,7 +817,7 @@ impl ElseApp {
             .iter()
             .find(|b| b.id == bot)
             .map_or_else(|| "Bot".to_owned(), |b| b.name.clone());
-        let describe = |v: &RulesVersion| -> (String, String) {
+        let describe = |v: &RulesVersion| -> (String, String, String) {
             let title = match (v.change, v.restored_from) {
                 (RuleChange::Restored, Some(0)) => "Cleared all rules".to_owned(),
                 (RuleChange::Restored, Some(from)) => format!("Restored v{from}"),
@@ -837,11 +836,11 @@ impl ElseApp {
             } else {
                 bot_name.as_str()
             };
-            (title, format!("{by} · {}", when(v.created_at)))
+            (title, by.to_owned(), when(v.created_at))
         };
         let list = v_flex()
             .id("rules-versions")
-            .w(px(200.))
+            .w(px(240.))
             .flex_none()
             .max_h(px(BODY_MAX))
             .overflow_y_scroll()
@@ -850,7 +849,7 @@ impl ElseApp {
             .border_r_1()
             .border_color(theme.border)
             .children(file.history.iter().map(|v| {
-                let (title, meta) = describe(v);
+                let (title, author, date) = describe(v);
                 let selected = v.version == picked.version;
                 let version = v.version;
                 Button::new(("rules-version", version as usize))
@@ -873,22 +872,31 @@ impl ElseApp {
                             .items_start()
                             .text_left()
                             .whitespace_normal()
+                            .gap_0p5()
                             .child(
                                 h_flex()
+                                    .w_full()
                                     .gap_1p5()
-                                    .text_xs()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(div().min_w_0().truncate().child(title))
                                     .child(
                                         div()
-                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
                                             .child(format!("v{version}")),
-                                    )
-                                    .child(div().min_w_0().truncate().child(title)),
+                                    ),
                             )
+                            // Author, then date: the date never wraps; a long
+                            // author name truncates first.
                             .child(
-                                div()
+                                h_flex()
+                                    .w_full()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child(meta),
+                                    .child(div().min_w_0().truncate().child(author))
+                                    .child(div().flex_none().child(format!(" · {date}"))),
                             ),
                     )
             }));
@@ -898,7 +906,7 @@ impl ElseApp {
             .min_w_0()
             .max_h(px(BODY_MAX))
             .overflow_y_scroll()
-            .gap_2p5()
+            .gap_4()
             .when(!picked.owner_words.is_empty(), |col| {
                 col.child(quote(&picked.owner_words, cx))
             })
@@ -907,7 +915,7 @@ impl ElseApp {
             .w_full()
             .max_h(px(BODY_MAX))
             .items_stretch()
-            .gap_3()
+            .gap_4()
             .child(list)
             .child(detail)
             .into_any_element()
