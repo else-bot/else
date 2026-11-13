@@ -11,7 +11,7 @@ use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Size, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::Duration;
@@ -60,18 +60,9 @@ impl ElseApp {
         let delegate_badge = self.face_stack(
             &format!("task-badge-{}", task.turn),
             delegates.first().copied(),
-            px(18.),
+            px(12.),
         );
         let handed_off = delegate_faces.is_some();
-        let color = if error {
-            theme.danger
-        } else if working {
-            theme.primary
-        } else if complete {
-            theme.success
-        } else {
-            theme.muted_foreground
-        };
         let show_reply =
             task.latest_kept || !matches!(task.state, ReplyState::Queued | ReplyState::Working);
         let mut history = task.history.clone();
@@ -85,217 +76,179 @@ impl ElseApp {
                     .owner_notices
                     .iter()
                     .any(|notice| notice.status == crate::model::OwnerNoticeStatus::Pending));
-        let header_padding = if complete || owner_waiting {
-            px(8.)
-        } else {
-            px(12.)
+        let meta = theme.foreground.opacity(super::message_row::META_OPACITY);
+        let chevron = || {
+            Icon::new(if expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .xsmall()
+            .flex_none()
         };
-        let header = if owner_waiting {
-            h_flex()
-                .w_full()
-                .min_w_0()
-                .gap_2()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .when(expandable, |row| {
-                    row.child("Earlier updates").child(
-                        Icon::new(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .xsmall(),
-                    )
-                })
-        } else if complete {
-            h_flex()
-                .w_full()
-                .min_w_0()
-                .items_center()
-                .gap_1p5()
-                .text_xs()
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_1()
-                        .text_color(color)
-                        .child(Icon::new(IconName::Check).xsmall().flex_none())
-                        .child(summary.clone()),
-                )
-                .children(elapsed.map(|elapsed| {
-                    div()
-                        .text_color(theme.muted_foreground)
-                        .child(format!("· {elapsed}"))
-                }))
-                .child(div().flex_1())
-                .children(expandable.then(|| {
-                    h_flex()
-                        .items_center()
-                        .gap_1()
-                        .text_color(theme.muted_foreground)
-                        .child(format!(
-                            "{} {}",
-                            history.len(),
-                            if history.len() == 1 {
-                                "update"
-                            } else {
-                                "updates"
-                            }
-                        ))
-                        .child(
-                            Icon::new(if expanded {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .xsmall()
-                            .flex_none(),
-                        )
-                }))
-        } else {
-            let label = task.state.label();
-            let pill = (error || !matches!(task.state, ReplyState::Working | ReplyState::Waiting))
-                .then_some(label);
-            let detail = (!error && summary != label).then(|| summary.clone());
-            let updates = expandable.then(|| {
-                let count = history.len();
-                format!("{count} {}", if count == 1 { "update" } else { "updates" })
-            });
-            h_flex()
-                .w_full()
-                .min_w_0()
-                .items_center()
-                .gap_3()
-                .children(bot.map(|bot| {
-                    let avatar = bot_avatar(
-                        SharedString::from(format!("task-avatar-{}", task.turn)),
-                        bot.avatar,
-                        px(28.),
-                    )
-                    .when(working, |avatar| avatar.working());
-                    h_flex()
-                        .flex_none()
-                        .size(px(40.))
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .relative()
-                                .child(
-                                    div()
-                                        .when(handed_off, |face| face.opacity(0.55))
-                                        .child(avatar),
-                                )
-                                .children(delegate_badge.map(|badge| {
-                                    div()
-                                        .absolute()
-                                        .right(px(-4.))
-                                        .bottom(px(-4.))
-                                        .rounded_full()
-                                        .border_2()
-                                        .border_color(theme.background)
-                                        .child(badge)
-                                })),
-                        )
-                }))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap(px(3.))
-                        .text_left()
-                        .child(
-                            h_flex()
-                                .min_w_0()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .truncate()
-                                        .child(title.clone()),
-                                )
-                                .children(pill.map(|label| {
-                                    h_flex()
-                                        .flex_none()
-                                        .gap_1()
-                                        .items_center()
-                                        .children(
-                                            error.then(|| Icon::new(IconName::CircleX).xsmall()),
-                                        )
-                                        .px_2()
-                                        .rounded_full()
-                                        .border_1()
-                                        .border_color(color.opacity(0.3))
-                                        .bg(color.opacity(0.08))
-                                        .text_xs()
-                                        .text_color(color)
-                                        .child(label)
-                                })),
-                        )
-                        .children(detail.map(|detail| {
-                            h_flex()
-                                .min_w_0()
-                                .gap_1p5()
-                                .items_center()
-                                .text_sm()
-                                .text_color(if working {
-                                    theme.foreground
-                                } else {
-                                    theme.muted_foreground
-                                })
-                                .children(delegate_faces)
-                                .child(div().min_w_0().truncate().child(detail))
-                        }))
-                        .when(working, |column| {
-                            column.child(work_sweep(task.turn, color, cx.reduce_motion()))
-                        }),
-                )
-                .child(
-                    v_flex()
-                        .flex_none()
-                        .items_end()
-                        .gap_1p5()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(h_flex().items_center().gap_2().children(elapsed).children(
-                            expandable.then(|| {
-                                Icon::new(if expanded {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .xsmall()
-                                .flex_none()
-                            }),
-                        ))
-                        .children(updates),
-                )
-        };
-        let mut activity = v_flex()
+        let updates = expandable.then(|| {
+            let count = history.len();
+            format!("{count} {}", if count == 1 { "update" } else { "updates" })
+        });
+        // Every assistant turn opens with the same name row as a plain reply.
+        let name_row = h_flex()
             .w_full()
             .min_w_0()
-            .child(if expandable {
+            .items_center()
+            .gap_1p5()
+            .text_size(px(13.))
+            .children(bot.map(|bot| {
+                let avatar = bot_avatar(
+                    SharedString::from(format!("task-avatar-{}", task.turn)),
+                    bot.avatar,
+                    px(18.),
+                );
+                let avatar = if working {
+                    avatar.working()
+                } else {
+                    avatar.still()
+                };
+                div()
+                    .relative()
+                    .flex_none()
+                    .child(
+                        div()
+                            .when(handed_off, |face| face.opacity(0.55))
+                            .child(avatar),
+                    )
+                    .children(delegate_badge.map(|badge| {
+                        div()
+                            .absolute()
+                            .right(px(-4.))
+                            .bottom(px(-4.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(theme.background)
+                            .child(badge)
+                    }))
+            }))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.foreground)
+                    .child(title.clone()),
+            )
+            .child(div().flex_1())
+            .children(elapsed.clone().filter(|_| working || error).map(|elapsed| {
+                div()
+                    .flex_none()
+                    .text_size(px(12.))
+                    .text_color(meta)
+                    .child(elapsed)
+            }));
+        // One quiet line says where the turn stands; it opens earlier updates when there are any.
+        let status = if owner_waiting {
+            expandable.then(|| {
+                h_flex()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(12.))
+                    .text_color(meta)
+                    .child("Earlier updates")
+                    .child(chevron())
+            })
+        } else if complete {
+            Some(
+                h_flex()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(12.))
+                    .text_color(meta)
+                    .child(
+                        Icon::new(IconName::Check)
+                            .xsmall()
+                            .flex_none()
+                            .text_color(theme.success),
+                    )
+                    .child(summary.clone())
+                    .children(elapsed.map(|elapsed| format!("· {elapsed}")))
+                    .children(updates.map(|updates| format!("· {updates}")))
+                    .children(expandable.then(chevron)),
+            )
+        } else if error {
+            Some(
+                h_flex()
+                    .min_w_0()
+                    .items_start()
+                    .gap_1p5()
+                    .text_sm()
+                    .text_color(theme.foreground)
+                    .child(
+                        div().flex_none().pt(px(3.)).child(
+                            Icon::new(IconName::CircleX)
+                                .size_4()
+                                .text_color(theme.danger),
+                        ),
+                    )
+                    .child(div().min_w_0().text_left().child(summary.clone()))
+                    .children(updates.map(|updates| {
+                        h_flex()
+                            .flex_none()
+                            .items_center()
+                            .gap_1()
+                            .pt(px(2.))
+                            .text_size(px(12.))
+                            .text_color(meta)
+                            .child(updates)
+                            .child(chevron())
+                    })),
+            )
+        } else {
+            let label = task.state.label();
+            let detail = if summary != label {
+                summary.clone()
+            } else {
+                label.to_owned()
+            };
+            Some(
+                h_flex()
+                    .min_w_0()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(13.))
+                    .text_color(theme.muted_foreground)
+                    .when(working, |line| {
+                        line.child(working_dots(task.turn, theme.primary, cx.reduce_motion()))
+                    })
+                    .children(delegate_faces)
+                    .child(div().min_w_0().truncate().child(detail))
+                    .children(updates.map(|updates| {
+                        h_flex()
+                            .flex_none()
+                            .items_center()
+                            .gap_1()
+                            .text_size(px(12.))
+                            .text_color(meta)
+                            .child(format!("· {updates}"))
+                            .child(chevron())
+                    })),
+            )
+        };
+        let status = status.map(|status| {
+            if expandable {
                 let id = task.turn;
                 Button::new(SharedString::from(format!("task-history-{id}")))
                     .ghost()
+                    .small()
                     .focus_ring(false)
                     .cursor_pointer()
                     .toggled(expanded)
-                    .with_size(Size::Size(px(16.)))
-                    .w_full()
-                    .px_3p5()
-                    .py(header_padding)
-                    .rounded(theme.radius_lg - px(1.))
-                    .when(complete, |button| button.rounded_t(px(0.)))
-                    .when(expanded, |button| button.rounded_b(px(0.)))
+                    .h_auto()
+                    .py_0p5()
+                    .px_1p5()
+                    .ml(px(-6.))
                     .accessibility_label(format!(
                         "{} activity for {title}. {summary}",
                         if expanded { "Collapse" } else { "Expand" }
                     ))
-                    .child(header)
+                    .child(status)
                     .on_click(cx.listener(move |app, _, _, cx| {
                         if let Some(view) = app.view.as_mut()
                             && !view.expanded_tasks.remove(&id)
@@ -306,64 +259,46 @@ impl ElseApp {
                     }))
                     .into_any_element()
             } else {
-                header
-                    .when(!owner_waiting, |header| header.px_3p5().py(header_padding))
-                    .into_any_element()
-            })
-            .children(error.then(|| {
-                div()
-                    .w_full()
-                    .px_3p5()
-                    .pb_2()
-                    .text_sm()
-                    .text_color(theme.foreground)
-                    .child(summary)
-            }));
-        if expanded && expandable {
-            let mut updates = v_flex().w_full().min_w_0().gap_3().px_3p5().pb_3();
+                status.into_any_element()
+            }
+        });
+        let earlier = (expanded && expandable).then(|| {
+            let mut updates = v_flex()
+                .w_full()
+                .min_w_0()
+                .gap_3()
+                .pl_3()
+                .border_l_1()
+                .border_color(theme.border);
             for id in history {
                 updates = updates.child(
                     v_flex()
                         .w_full()
                         .min_w_0()
-                        .gap_2()
+                        .gap_1()
                         .children(conversation.item(id).and_then(|item| item.created_at).map(
                             |at| {
                                 div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
+                                    .text_size(px(12.))
+                                    .text_color(meta)
                                     .child(super::message_row::stamp(at))
                             },
                         ))
                         .children(self.task_message(id, conversation.reaction_for(id), cx)),
                 );
             }
-            activity = activity.child(updates);
-        }
+            updates
+        });
         let reply = if show_reply {
             if let Some(id) = task.latest {
-                Some(
-                    div()
-                        .w_full()
-                        .px_3p5()
-                        .py_2()
-                        .when(!complete, |reply| {
-                            reply
-                                .rounded(theme.radius_lg)
-                                .border_1()
-                                .border_color(theme.border.opacity(0.6))
-                                .bg(theme.sidebar.opacity(0.6))
-                        })
-                        .children(self.task_message(id, conversation.reaction_for(id), cx)),
-                )
+                self.task_message(id, conversation.reaction_for(id), cx)
             } else if complete {
                 Some(
                     div()
-                        .px_3p5()
-                        .py_2()
                         .text_sm()
                         .text_color(theme.muted_foreground)
-                        .child("Finished without a text reply."),
+                        .child("Finished without a text reply.")
+                        .into_any_element(),
                 )
             } else {
                 None
@@ -371,67 +306,27 @@ impl ElseApp {
         } else {
             None
         };
-        let bubble =
-            v_flex()
-                .w_full()
-                .min_w_0()
-                .rounded(theme.radius_lg)
-                .when(complete, |bubble| {
-                    bubble
-                        .border_1()
-                        .border_color(theme.border.opacity(0.6))
-                        .bg(theme.sidebar.opacity(0.6))
-                });
-        let mut card = v_flex().relative().w_full().min_w_0().gap_2();
+        let mut card = v_flex()
+            .relative()
+            .w_full()
+            .min_w_0()
+            .gap_1p5()
+            .child(name_row);
         card = if complete {
-            card.child(
-                bubble
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .px_3p5()
-                            .pt_3()
-                            .pb_1()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .children(bot.map(|bot| {
-                                bot_avatar(
-                                    SharedString::from(format!("task-avatar-{}", task.turn)),
-                                    bot.avatar,
-                                    px(24.),
-                                )
-                            }))
-                            .child(div().flex_1().min_w_0().truncate().child(title)),
-                    )
-                    .children(reply)
-                    .child(
-                        div()
-                            .w_full()
-                            .mt_2()
-                            .border_t_1()
-                            .border_color(theme.border.opacity(0.6))
-                            .child(activity),
-                    ),
-            )
+            card.children(reply).children(earlier).children(status)
         } else {
-            card.child(bubble.child(activity)).children(reply)
+            card.children(status).children(earlier).children(reply)
         };
         for &id in &task.kept {
             card = card.child(
                 v_flex()
                     .w_full()
-                    .gap_2()
-                    .px_3p5()
-                    .py_2()
-                    .rounded(theme.radius_lg)
-                    .border_1()
-                    .border_color(theme.border.opacity(0.6))
-                    .bg(theme.sidebar.opacity(0.6))
+                    .gap_1()
+                    .pt_1()
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
+                            .text_size(px(12.))
+                            .text_color(meta)
                             .child("Kept from this task"),
                     )
                     .children(self.task_message(id, conversation.reaction_for(id), cx)),
@@ -514,36 +409,27 @@ impl ElseApp {
     }
 }
 
-/// A light that sweeps under a working task's text, one lap per 1.7 s like the avatar's halo.
-fn work_sweep(turn: Uuid, color: Hsla, still: bool) -> impl IntoElement {
-    let light = div()
-        .absolute()
-        .top_0()
-        .h_full()
-        .w(relative(0.4))
-        .rounded_full()
-        .bg(color);
-    div()
-        .relative()
-        .w_full()
-        .h(px(2.))
-        .mt_1p5()
-        .rounded_full()
-        .overflow_hidden()
-        .bg(color.opacity(0.08))
-        .child(if still {
-            light.left(relative(0.3)).opacity(0.4).into_any_element()
-        } else {
-            light
-                .with_animation(
-                    SharedString::from(format!("task-sweep-{turn}")),
-                    Animation::new(Duration::from_millis(1700)).repeat(),
-                    |light, t| {
-                        light
-                            .left(relative(1.4 * t - 0.4))
-                            .opacity((std::f32::consts::PI * t).sin())
+/// Three dots that pulse in turn beside a working turn's label, one lap per 1.2 s.
+fn working_dots(turn: Uuid, color: Hsla, still: bool) -> impl IntoElement {
+    h_flex()
+        .flex_none()
+        .items_center()
+        .gap(px(3.))
+        .children((0..3).map(move |ix| {
+            let dot = div().size(px(4.)).rounded_full().bg(color);
+            if still {
+                dot.opacity(0.4 + 0.3 * ix as f32).into_any_element()
+            } else {
+                dot.with_animation(
+                    SharedString::from(format!("task-dots-{turn}-{ix}")),
+                    Animation::new(Duration::from_millis(1200)).repeat(),
+                    move |dot, t| {
+                        let phase = (t - ix as f32 / 6.).rem_euclid(1.);
+                        let lift = (std::f32::consts::PI * (phase * 2.).min(1.)).sin();
+                        dot.opacity(0.3 + 0.7 * lift)
                     },
                 )
                 .into_any_element()
-        })
+            }
+        }))
 }
