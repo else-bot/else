@@ -147,9 +147,12 @@ fn the_built_in_agent_list_alone_is_not_a_violation_but_its_activity_is() {
     let mut t = tracker();
     assert!(t.on(&init(claude_home::tool_names(), connected())).is_ok());
     let violation = t
-        .on(&json!({"type":"system","subtype":"task_started","task_id":"x"}))
+        .on(&json!({"type":"system","subtype":"task_started","task_id":"x","task_type":"mcp_task","description":"elsebot/computer_run"}))
         .unwrap_err();
-    assert!(violation.message.contains("task_started"));
+    assert_eq!(
+        violation.message,
+        "Claude reported native agent activity (task_started, mcp_task, elsebot/computer_run)"
+    );
     let violation = tracker()
         .on(&json!({"type":"assistant","parent_tool_use_id":"toolu_1","message":{"model":"claude-haiku-5-5","content":[]}}))
         .unwrap_err();
