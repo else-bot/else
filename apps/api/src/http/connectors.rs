@@ -91,6 +91,12 @@ fn unavailable(error: store::StoreError) -> ApiError {
 }
 impl From<MailError> for ApiError {
     fn from(error: MailError) -> Self {
+        if error.code == "oauth_request_rejected" {
+            return ApiError::bad_request(
+                error.code,
+                "The mail provider rejected the token request. Check the OAuth app's settings, then try again.",
+            );
+        }
         if error.code == "oauth_mail_access_required" {
             return ApiError::bad_request(
                 error.code,

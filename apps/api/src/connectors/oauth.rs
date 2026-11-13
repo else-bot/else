@@ -81,9 +81,9 @@ fn redirect(uri: &str) -> Result<RedirectUrl, MailError> {
     RedirectUrl::new(uri.to_owned()).map_err(|_| MailError::new("invalid_redirect"))
 }
 
-/// Sends the token request without following redirects, and reports a
-/// throttled or failing provider as unavailable so the account is not marked
-/// for reauthentication during an outage.
+/// Sends the token request without following redirects. A 401 is returned as
+/// `PermissionDenied` so it always asks for a new sign-in, and a throttled or
+/// failing provider as an error so an outage never does.
 async fn http(request: oauth2::HttpRequest) -> Result<oauth2::HttpResponse, std::io::Error> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -95,6 +95,12 @@ async fn http(request: oauth2::HttpRequest) -> Result<oauth2::HttpResponse, std:
         .await
         .map_err(std::io::Error::other)?;
     let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "token endpoint answered 401",
+        ));
+    }
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
         return Err(std::io::Error::other(format!(
             "token endpoint answered {status}"
@@ -109,8 +115,22 @@ async fn http(request: oauth2::HttpRequest) -> Result<oauth2::HttpResponse, std:
 }
 
 fn token_error(error: RequestTokenError<std::io::Error, BasicErrorResponse>) -> MailError {
+    use oauth2::basic::BasicErrorResponseType::{InvalidClient, InvalidGrant, UnauthorizedClient};
     MailError::new(match error {
-        RequestTokenError::ServerResponse(_) => "oauth_reauthentication_required",
+        RequestTokenError::Request(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            "oauth_reauthentication_required"
+        }
+        RequestTokenError::ServerResponse(response)
+            if matches!(
+                response.error(),
+                InvalidGrant | InvalidClient | UnauthorizedClient
+            ) =>
+        {
+            "oauth_reauthentication_required"
+        }
+        RequestTokenError::ServerResponse(_) => "oauth_request_rejected",
         RequestTokenError::Request(_) => "oauth_unavailable",
         RequestTokenError::Parse(..) | RequestTokenError::Other(_) => "invalid_oauth_response",
     })
@@ -457,6 +477,66 @@ mod tests {
                 assert!(basic.is_none());
                 assert!(body.contains("client_secret=private-client-secret"));
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn only_a_401_or_revoked_grant_asks_for_a_new_sign_in() {
+        use axum::{Json, Router, http::StatusCode, routing::post};
+        let cases = [
+            (
+                StatusCode::UNAUTHORIZED,
+                "invalid_request",
+                "oauth_reauthentication_required",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "oauth_reauthentication_required",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                "invalid_client",
+                "oauth_reauthentication_required",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                "invalid_scope",
+                "oauth_request_rejected",
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                "access_denied",
+                "oauth_request_rejected",
+            ),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "slow_down",
+                "oauth_unavailable",
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "oauth_unavailable",
+            ),
+        ];
+        for (status, error, expected) in cases {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+            let router = Router::new().route(
+                "/token",
+                post(move || async move { (status, Json(serde_json::json!({"error": error}))) }),
+            );
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let result = client(Provider::Gmail, "registered-client", None)
+                .unwrap()
+                .set_token_uri(TokenUrl::new(endpoint).unwrap())
+                .exchange_refresh_token(&RefreshToken::new("refresh".into()))
+                .request_async(&http)
+                .await
+                .unwrap_err();
+            assert_eq!(token_error(result).code, expected, "{status} {error}");
+            server.abort();
         }
     }
 
