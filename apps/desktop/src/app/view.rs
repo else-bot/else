@@ -287,7 +287,7 @@ impl ElseApp {
                     .flex_none()
                     .ml_auto()
                     .pl_2()
-                    .child(kbd.text_size(px(11.5)))
+                    .child(kbd.text_size(px(11.5)).bg(theme.foreground.opacity(0.07)))
             });
         let footer =
             h_flex()
@@ -496,7 +496,8 @@ impl ElseApp {
             .min_w_0()
             .gap_1()
             .items_center()
-            .text_xs()
+            .text_size(px(13.))
+            .line_height(px(18.))
             .text_color(theme.muted_foreground)
             .when(!pending, |line| {
                 line.group_hover("sidebar-bot-row", |style| {
@@ -518,11 +519,11 @@ impl ElseApp {
         let mut row = h_flex()
             .id(SharedString::from(format!("bot-{id}")))
             .group("sidebar-bot-row")
-            .min_h(px(46.))
+            .min_h(px(44.))
             .gap_2p5()
             .items_center()
             .px_2()
-            .py_1()
+            .py(px(3.))
             .rounded(theme.radius)
             .child(self.render_bot_identity_avatar("avatar", bot, working))
             .child(
@@ -536,8 +537,9 @@ impl ElseApp {
                             .items_center()
                             .child(
                                 div()
-                                    .text_size(px(13.))
-                                    .line_height(px(18.))
+                                    .min_w_0()
+                                    .text_size(px(14.))
+                                    .line_height(px(20.))
                                     .truncate()
                                     .font_weight(FontWeight::MEDIUM)
                                     .child(bot.name.clone()),
@@ -555,19 +557,20 @@ impl ElseApp {
                                                 .text_color(theme.muted_foreground),
                                         ),
                                 )
-                            }),
+                            })
+                            // The wait sits on the title's line, at its end.
+                            .children(waited.map(|waited| {
+                                div()
+                                    .flex_none()
+                                    .ml_auto()
+                                    .pl_2()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(waited)
+                            })),
                     )
                     .child(subtitle),
             )
-            .children(waited.map(|waited| {
-                div()
-                    .flex_none()
-                    .self_start()
-                    .mt_1p5()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(waited)
-            }))
             .children(unread.then(|| div().flex_none().size_2().rounded_full().bg(theme.primary)));
         if pending {
             row = row.opacity(0.5);
