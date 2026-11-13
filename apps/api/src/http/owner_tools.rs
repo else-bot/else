@@ -231,8 +231,9 @@ pub(super) fn handoff_schema() -> Value {
         "name": "computer_handoff",
         "description": "Ask the owner to take over your computer when only they can get past something \
             on screen: a login, a captcha, a 2FA prompt, or a broken page to inspect. Pins a Take \
-            over bar and returns parked: leave the screen as it is, say what you need in your reply, \
-            and end the attempt. You continue once they hand it back, decline, or message you.",
+            over bar, shares your current screen, and returns parked: leave the screen as it is, \
+            link the shared image and say what you need in your reply, and end the attempt. You \
+            continue once they hand it back, decline, or message you.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -255,16 +256,25 @@ pub(super) async fn computer_handoff(state: &AppState, grant: &Grant, args: &Val
         Err(message) => return (tool_error(&format!("INVALID_REQUEST: {message}")), None),
     };
     match computer_handoffs::create(&state.db, grant.turn_id, &reason).await {
-        Ok(handoff) => (
-            tool_result(json!({
-                "status": "pending",
-                "parked": true,
-                "handoff_id": handoff.id,
-                "next": "End this attempt now without more computer actions. You continue when \
-                         the owner hands your computer back, declines, or messages you.",
-            })),
-            Some(format!("pending {}", handoff.id)),
-        ),
+        Ok(handoff) => {
+            const END: &str = "end this attempt now without more computer actions. You \
+                continue when the owner hands your computer back, declines, or messages you.";
+            let mut result =
+                json!({ "status": "pending", "parked": true, "handoff_id": handoff.id });
+            let mut log = format!("pending {}", handoff.id);
+            match super::guest_tools::share_screen(state, grant).await {
+                Some(rel) => {
+                    result["next"] = json!(format!(
+                        "Show the owner this screen by writing ![screen]({rel}) in your reply, \
+                         then {END}"
+                    ));
+                    log.push_str(&format!(", shared {rel}"));
+                    result["shared"] = json!(rel);
+                }
+                None => result["next"] = json!(format!("Say what you need, then {END}")),
+            }
+            (tool_result(result), Some(log))
+        }
         Err(err) => {
             let code = match err {
                 CreateError::NotAllowed => "NOT_ALLOWED",
