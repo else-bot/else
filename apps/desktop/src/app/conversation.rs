@@ -337,6 +337,9 @@ pub(super) struct Reveal {
     pub(super) row: RowKey,
     pub(super) at: std::time::Instant,
     pub(super) spot: Spot,
+    /// How strongly the highlight paints, as of the last tick, so every
+    /// paint until the next tick gives the same color.
+    pub(super) shown: f32,
 }
 
 pub(super) enum Spot {
@@ -364,12 +367,13 @@ impl Reveal {
             row,
             at: std::time::Instant::now(),
             spot,
+            shown: 1.,
         }
     }
 
     /// How strongly to paint the highlight now, from 1 down to 0 once it
     /// has faded out.
-    pub(super) fn strength(&self) -> f32 {
+    fn strength(&self) -> f32 {
         let fading = self.at.elapsed().saturating_sub(REVEAL_HOLD);
         let t = (fading.as_secs_f32() / REVEAL_FADE.as_secs_f32()).min(1.);
         1. - t * t * (3. - 2. * t)
@@ -657,10 +661,11 @@ impl ElseApp {
         let Some(view) = self.view.as_mut() else {
             return false;
         };
-        let Some(reveal) = view.revealed.as_ref() else {
+        let Some(reveal) = view.revealed.as_mut() else {
             return false;
         };
-        let live = reveal.strength() > 0.;
+        reveal.shown = reveal.strength();
+        let live = reveal.shown > 0.;
         let passage = match &reveal.spot {
             Spot::Passage { item, .. } => Some(*item),
             Spot::Row => None,
@@ -1094,6 +1099,7 @@ mod tests {
             row: RowKey::Item(Uuid::nil()),
             at: Instant::now() - ago,
             spot: Spot::Row,
+            shown: 1.,
         }
     }
 

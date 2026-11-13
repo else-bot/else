@@ -711,7 +711,7 @@ fn paint_text(
         .map(|range| (range, color))
         .collect();
     if let Some(reveal) = revealed {
-        let strength = reveal.strength();
+        let strength = reveal.shown;
         if let Spot::Passage {
             item,
             quote,

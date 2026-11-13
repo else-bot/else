@@ -362,8 +362,8 @@ impl RowText {
     /// Asks the enclosing list to scroll to `range` of the rendered text.
     /// Returns whether the request was taken.
     pub(super) fn reveal(&self, range: &Range<usize>, cx: &mut App) -> bool {
-        // Scroll to the passage's middle, but no further than a few lines
-        // in, so a long passage still starts on screen.
+        // Scroll to the passage's middle, but no more than 240 bytes in, so a
+        // long passage still starts on screen.
         const MAX_LEAD: usize = 240;
         let Widget::Markdown { state, .. } = &self.widget else {
             return false;

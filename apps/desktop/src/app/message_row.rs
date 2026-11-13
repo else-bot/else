@@ -98,7 +98,7 @@ impl ElseApp {
                 Spot::Row => div()
                     .w_full()
                     .rounded(cx.theme().radius_lg)
-                    .bg(cx.theme().primary.opacity(0.16 * reveal.strength()))
+                    .bg(cx.theme().primary.opacity(0.16 * reveal.shown))
                     .child(body)
                     .into_any_element(),
                 Spot::Passage { .. } => CenterReveal {
