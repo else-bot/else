@@ -202,4 +202,13 @@
     const held = secret ? `${now.length} characters` : JSON.stringify(now.slice(0, 200));
     return { error: `the field holds ${held} after typing; the page changed or refused the text` };
   },
+
+  // What the field now holds, to confirm what was typed; with `secret`, its
+  // length only.
+  fieldValue(secret) {
+    const e = this;
+    const now = e.isContentEditable ? e.innerText : e.value;
+    if (secret) return `(${now.length} characters)`;
+    return now;
+  },
 })

@@ -10,7 +10,7 @@ call, since a later connection can neither see nor answer it: dismissed by
 default, so a page that asks to confirm leaving keeps its input, or accepted
 with --accept-dialogs. The result lists the dialogs answered.
 """
-import fcntl, json, os, subprocess, sys, time, urllib.request
+import difflib, fcntl, json, os, subprocess, sys, time, urllib.request
 import websocket
 
 DEVTOOLS = "http://127.0.0.1:9222"
@@ -253,6 +253,60 @@ def type_into(tab, element, selector, text, secret):
     if "error" in held:
         fail(held["error"])
 
+PAGE_TEXT = "document.body ? document.body.innerText : ''"
+TEXT_LIMIT = 20000
+CHANGES_LIMIT = 4000
+
+def page_text(tab):
+    text = tab.eval(PAGE_TEXT) or ""
+    return {"text": text[:TEXT_LIMIT], "text_truncated": len(text) > TEXT_LIMIT}
+
+def changes(before, after):
+    """The lines an action added to or removed from the page text."""
+    added, removed = [], []
+    a, b = before.splitlines(), after.splitlines()
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        removed += [l for l in a[i1:i2] if l.strip()] if op in ("replace", "delete") else []
+        added += [l for l in b[j1:j2] if l.strip()] if op in ("replace", "insert") else []
+    out, size = {}, 0
+    for key, lines in (("added", added), ("removed", removed)):
+        kept = []
+        for line in lines:
+            size += len(line) + 1
+            if size > CHANGES_LIMIT:
+                out["changes_truncated"] = True
+                break
+            kept.append(line)
+        if kept:
+            out[key] = kept
+    return out
+
+def act(tab, action, expect_change):
+    """Run an action on the current page and report what it changed: the new
+    page's text when it loaded another document, else the lines that changed."""
+    marker = os.urandom(8).hex()
+    tab.eval(f"window.__elseDoc = {json.dumps(marker)}")
+    before = tab.eval(PAGE_TEXT) or ""
+    action()
+    time.sleep(0.2)
+    tab.settle()
+    navigated = lambda: tab.eval("window.__elseDoc") != marker
+    if navigated():
+        return {"navigated": True, **page_text(tab)}
+    after = tab.eval(PAGE_TEXT) or ""
+    deadline = time.monotonic() + (1 if expect_change else 0)
+    while after == before and time.monotonic() < deadline:
+        time.sleep(0.1)
+        after = tab.eval(PAGE_TEXT) or ""
+    if navigated():
+        tab.settle()
+        return {"navigated": True, **page_text(tab)}
+    diff = changes(before, after)
+    if diff or not expect_change:
+        return diff
+    return {"unchanged": True, "next": "The page text did not change. If the click starts something slow, "
+            "read the page again with text; take a screenshot for changes text does not show."}
+
 def main(argv):
     accept_dialogs = argv[:1] == ["--accept-dialogs"]
     if accept_dialogs:
@@ -272,21 +326,24 @@ def main(argv):
                                          "to discard it"}))
         time.sleep(0.3)
         tab.settle()
+        result = page_text(tab)
     elif action == "click":
-        click(tab, find(tab, rest[0]), rest[0])
-        time.sleep(0.2)
-        tab.settle()
+        element = find(tab, rest[0])
+        result = act(tab, lambda: click(tab, element, rest[0]), True)
     elif action == "type":
         element = field_of(tab, find(tab, rest[0]))
-        type_into(tab, element, rest[0], rest[1], page_step(tab, element, "secret"))
-    elif action not in ("text", "title"):
+        secret = page_step(tab, element, "secret")
+        result = act(tab, lambda: type_into(tab, element, rest[0], rest[1], secret), False)
+        if not result.get("navigated"):
+            result = {"value": page_step(tab, element, "fieldValue", secret), **result}
+    elif action in ("text", "title"):
+        result = page_text(tab) if action == "text" else {}
+    else:
         raise SystemExit(json.dumps({"error": f"unknown action {action}"}))
-    text = tab.eval("document.body ? document.body.innerText : ''") or ""
     print(json.dumps({
         "url": tab.eval("location.href"),
         "title": tab.eval("document.title"),
-        "text": text[:20000],
-        "text_truncated": len(text) > 20000,
+        **result,
         **({"dialogs": tab.dialogs} if tab.dialogs else {}),
     }))
 
