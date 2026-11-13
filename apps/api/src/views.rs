@@ -54,6 +54,7 @@ pub fn activity_json(bot: &BotRecord) -> Value {
         "phase": phase,
         "active_turn_id": bot.active_turn_id,
         "queued_count": bot.queued_count,
+        "waiting_on": bot.waiting_on.as_ref().map(|waiting| &waiting.0),
         "running_job_count": 0,
         "error": null,
     })

@@ -9,6 +9,7 @@
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
+use sqlx::types::Json;
 use uuid::Uuid;
 
 use super::installation::insert_bot;
@@ -57,6 +58,24 @@ pub struct BotRecord {
     pub read: super::reads::ReadRow,
     #[sqlx(flatten)]
     pub sidebar: sidebar::SidebarRow,
+    /// Set while its active turn waits only on tasks it handed to other bots.
+    pub waiting_on: Option<Json<WaitingOn>>,
+}
+
+/// The bots an active turn waits on, oldest task first.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct WaitingOn {
+    /// When its oldest unfinished task was handed off.
+    pub since: DateTime<Utc>,
+    pub bots: Vec<WaitingBot>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct WaitingBot {
+    pub id: Uuid,
+    pub name: String,
+    /// Its unfinished tasks from this turn.
+    pub tasks: u32,
 }
 
 impl BotRecord {
@@ -95,6 +114,17 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
         (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued') AS queued_count,
         (SELECT m.created_at FROM items m WHERE m.conversation_id = c.id
             AND m.kind IN ('user', 'assistant') AND NOT m.hidden ORDER BY m.seq DESC LIMIT 1) AS last_message_at,
+        (SELECT CASE WHEN count(*) > 0 THEN json_object('since', min(g.since),
+                'bots', json_group_array(json_object('id', g.id, 'name', g.name, 'tasks', g.tasks))) END
+            FROM (SELECT lower(hex(d.target_bot_id)) AS id, t.name, count(*) AS tasks,
+                         min(d.created_at) AS since
+                  FROM delegations d JOIN bots t ON t.id = d.target_bot_id
+                  WHERE d.root_turn_id = a.id AND d.status IN ('queued', 'running')
+                  GROUP BY d.target_bot_id ORDER BY min(d.created_at), d.target_bot_id) g
+            WHERE a.status = 'waiting'
+              AND NOT EXISTS (SELECT 1 FROM mcp_waits w WHERE w.turn_id = a.id AND w.status = 'pending')
+              AND NOT EXISTS (SELECT 1 FROM computer_job_waits w
+                              WHERE w.turn_id = a.id AND w.status = 'pending')) AS waiting_on,
         coalesce((SELECT e.seq FROM bot_events e WHERE e.bot_id = b.id
             AND e.kind = 'bot.updated' ORDER BY e.seq DESC LIMIT 1), 0) AS metadata_revision
     FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'

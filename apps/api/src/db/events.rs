@@ -148,7 +148,12 @@ pub async fn turn_changed(
     append(conn, bot_id, "turn.updated", data).await?;
     bot_updated(conn, bot_id).await?;
     crate::db::delegations::publish_reply(conn, turn_id).await?;
-    root_changed(conn, turn_id).await?;
+    // A task settling changes which bots its delegating bot waits on.
+    for parent in root_changed(conn, turn_id).await? {
+        if parent != bot_id {
+            bot_updated(conn, parent).await?;
+        }
+    }
     reply_drafts_changed(conn, turn_id).await
 }
 
@@ -183,13 +188,16 @@ pub async fn task_progressed(
     conn: &mut SqliteConnection,
     task_turn: Uuid,
 ) -> Result<(), sqlx::Error> {
-    root_changed(conn, task_turn).await
+    root_changed(conn, task_turn).await.map(drop)
 }
 
 /// Republish the delegating turns of `task_turn`, a child turn or the owner
 /// chat turn that took tasks over, so each handoff card follows its task
-/// from queued to running to its outcome.
-async fn root_changed(conn: &mut SqliteConnection, task_turn: Uuid) -> Result<(), sqlx::Error> {
+/// from queued to running to its outcome. Returns the delegating bots.
+async fn root_changed(
+    conn: &mut SqliteConnection,
+    task_turn: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
     let roots: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT DISTINCT d.parent_bot_id, d.root_turn_id FROM delegations d
          JOIN bots p ON p.id = d.parent_bot_id
@@ -198,7 +206,7 @@ async fn root_changed(conn: &mut SqliteConnection, task_turn: Uuid) -> Result<()
     .bind(task_turn)
     .fetch_all(&mut *conn)
     .await?;
-    for (bot_id, root_turn) in roots {
+    for &(bot_id, root_turn) in &roots {
         let turn = turns::load_turn(conn, root_turn).await?;
         let data = json!({
             "bot_id": bot_id,
@@ -207,7 +215,10 @@ async fn root_changed(conn: &mut SqliteConnection, task_turn: Uuid) -> Result<()
         });
         append(conn, bot_id, "turn.updated", data).await?;
     }
-    Ok(())
+    let mut parents: Vec<Uuid> = roots.into_iter().map(|(bot_id, _)| bot_id).collect();
+    parents.sort();
+    parents.dedup();
+    Ok(parents)
 }
 
 /// A new owner message: its item, its queued turn, and the bot's activity

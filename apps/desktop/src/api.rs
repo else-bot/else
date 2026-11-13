@@ -170,6 +170,25 @@ pub struct Activity {
     pub phase: String,
     pub active_turn_id: Option<Uuid>,
     pub queued_count: u32,
+    /// Set while the active turn waits only on tasks it handed to other
+    /// bots; absent from older servers.
+    #[serde(default)]
+    pub waiting_on: Option<WaitingOn>,
+}
+
+/// The bots an active turn waits on, oldest task first.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct WaitingOn {
+    /// When its oldest unfinished task was handed off.
+    pub since: DateTime<Utc>,
+    pub bots: Vec<WaitingBot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct WaitingBot {
+    pub id: Uuid,
+    pub name: String,
+    pub tasks: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

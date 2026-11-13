@@ -473,6 +473,14 @@ impl Turn {
     pub fn waits_on_job(&self) -> bool {
         !self.mcp_waits.is_empty() || !self.computer_job_waits.is_empty()
     }
+
+    /// The tasks it handed to other bots that have not ended.
+    pub fn open_delegations(&self) -> Vec<&Delegation> {
+        self.delegations
+            .iter()
+            .filter(|d| !d.status.settled())
+            .collect()
+    }
 }
 
 /// A task a turn handed to another bot. Its settled reply is the item

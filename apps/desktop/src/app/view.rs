@@ -321,6 +321,48 @@ impl ElseApp {
             .child(self.sidebar_handle(SidebarEdge::Left, cx))
     }
 
+    /// Up to three overlapping faces of the bots in `ids`, each once.
+    pub(super) fn face_stack(
+        &self,
+        key: &str,
+        ids: impl IntoIterator<Item = Uuid>,
+        size: Pixels,
+    ) -> Option<Div> {
+        let mut shown: Vec<&Bot> = Vec::new();
+        for id in ids {
+            if shown.len() < 3
+                && !shown.iter().any(|bot| bot.id == id)
+                && let Some(bot) = self.bots.iter().find(|bot| bot.id == id)
+            {
+                shown.push(bot);
+            }
+        }
+        (!shown.is_empty()).then(|| {
+            h_flex()
+                .flex_none()
+                .children(shown.into_iter().enumerate().map(|(ix, bot)| {
+                    div().when(ix > 0, |face| face.ml(px(-5.))).child(
+                        bot_avatar(
+                            SharedString::from(format!("{key}-{}", bot.id)),
+                            bot.avatar,
+                            size,
+                        )
+                        .still(),
+                    )
+                }))
+        })
+    }
+
+    /// The faces of the bots `bot` waits on, before its status text.
+    fn waiting_faces(&self, key: &str, bot: &Bot) -> Option<Div> {
+        let waiting = bot.activity.as_ref()?.waiting_on.as_ref()?;
+        self.face_stack(
+            &format!("{key}-{}", bot.id),
+            waiting.bots.iter().map(|b| b.id),
+            px(14.),
+        )
+    }
+
     fn render_bot_identity_avatar(
         &self,
         id: impl Into<ElementId>,
@@ -367,12 +409,22 @@ impl ElseApp {
         let pending = !bot.is_active();
         let muted = bot.muted && !pending;
         let connected = self.connected();
+        let subtitle = Subtitle::new(bot, connected, self.stopping.contains(&id));
+        let waiting_on = bot
+            .activity
+            .as_ref()
+            .and_then(|a| a.waiting_on.as_ref())
+            .filter(|_| subtitle.kind == Kind::Waiting);
         let waited = bot
             .waiting()
             .and_then(|w| w.since)
+            .or(waiting_on.map(|w| w.since))
             .filter(|_| self.default_bot_id != Some(id))
             .map(|since| crate::sidebar::status::waited(since, chrono::Utc::now()));
-        let subtitle = Subtitle::new(bot, connected, self.stopping.contains(&id));
+        let faces = waiting_on
+            .is_some()
+            .then(|| self.waiting_faces("sidebar-waiting", bot))
+            .flatten();
         let working = subtitle.kind == Kind::Working && connected;
         let color = if !connected {
             theme.muted_foreground
@@ -385,8 +437,9 @@ impl ElseApp {
             }
         };
         let icon = match subtitle.kind {
-            Kind::Message => None,
-            Kind::Working => None,
+            Kind::Message | Kind::Working => None,
+            Kind::Waiting if faces.is_some() => None,
+            Kind::Waiting => Some(IconName::Hourglass),
             Kind::Queued => Some(IconName::Clock),
             Kind::Answer => Some(IconName::CircleQuestionMark),
             Kind::Approval => Some(IconName::BadgeCheck),
@@ -413,6 +466,7 @@ impl ElseApp {
             .when(working, |line| {
                 line.child(working_dots(id, color, cx.reduce_motion()))
             })
+            .children(faces)
             .when_some(icon, |line, icon| {
                 line.child(
                     div()
@@ -558,11 +612,14 @@ impl ElseApp {
                             .child(bot.name.clone()),
                     )
                     .child(
-                        div()
+                        h_flex()
+                            .min_w_0()
+                            .gap_1()
+                            .items_center()
                             .text_xs()
-                            .truncate()
                             .text_color(theme.muted_foreground)
-                            .child(subtitle(bot, main)),
+                            .children(self.waiting_faces("header-waiting", bot))
+                            .child(div().min_w_0().truncate().child(subtitle(bot, main))),
                     ),
             )
             .children(unshown_status)
@@ -925,11 +982,15 @@ fn subtitle(bot: &Bot, main: bool) -> String {
     let Some(activity) = &bot.activity else {
         return idle();
     };
+    let working = match &activity.waiting_on {
+        Some(waiting) => crate::sidebar::status::waiting_label(waiting),
+        None => "Working".into(),
+    };
     match activity.phase.as_str() {
         "working" if activity.queued_count > 0 => {
-            format!("Working · {} queued", activity.queued_count)
+            format!("{working} · {} queued", activity.queued_count)
         }
-        "working" => "Working".into(),
+        "working" => working,
         "queued" => format!("{} queued", activity.queued_count),
         "cancelling" => "Stopping…".into(),
         "unavailable" => "Unavailable".into(),
