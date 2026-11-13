@@ -605,9 +605,7 @@ fn routine_banner(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> 
 }
 
 fn routine_details(id: SharedString, cx: &mut Context<ElseApp>) -> Button {
-    Button::new(id)
-        .control(Tier::Ghost, Scale::Compact, false, cx)
-        .label("View")
+    super::action_card::event_action(id, "View", false, cx)
         .accessibility_label("View routines in bot details")
         .on_click(cx.listener(|app, _, window, cx| {
             if !app.settings_open {
@@ -627,11 +625,13 @@ enum EventKind {
     Change,
 }
 
-/// Rows 6 px from their neighbours; activity rows of one family 4 px apart
-/// (a 40 px pitch), and 16 px from the next family. Each row's spacing
-/// depends only on the row above it, so appending a row never changes the
+/// Rows 6 px from their neighbours, action cards 8 px (16 px between two
+/// stacked cards); activity rows of one family 4 px apart (a 40 px pitch),
+/// and 16 px from the next family. Each row's spacing depends only on the
+/// row itself and the row above it, so appending a row never changes the
 /// measured height of the rows before it.
 const ROW_PAD: Pixels = px(6.);
+const CARD_PAD: Pixels = px(8.);
 const EVENT_PAD: Pixels = px(2.);
 const EVENT_GROUP_GAP: Pixels = px(16.);
 
@@ -656,13 +656,31 @@ impl ElseApp {
     /// The top and bottom padding of row `ix`.
     fn row_rhythm(&self, ix: usize) -> (Pixels, Pixels) {
         let above = ix.checked_sub(1).and_then(|above| self.event_kind(above));
+        let pad = if self.is_card(ix) { CARD_PAD } else { ROW_PAD };
         match (self.event_kind(ix), above) {
             (Some(kind), Some(previous)) if kind == previous => (EVENT_PAD, EVENT_PAD),
             (Some(_), Some(_)) => (EVENT_GROUP_GAP - EVENT_PAD, EVENT_PAD),
             (Some(_), None) => (ROW_PAD, EVENT_PAD),
-            (None, Some(_)) => (ROW_PAD * 2. - EVENT_PAD, ROW_PAD),
-            (None, None) => (ROW_PAD, ROW_PAD),
+            (None, Some(_)) => (pad * 2. - EVENT_PAD, pad),
+            (None, None) => (pad, pad),
         }
+    }
+
+    fn is_card(&self, ix: usize) -> bool {
+        self.view
+            .as_ref()
+            .and_then(|view| view.rows.get(ix))
+            .is_some_and(|row| {
+                matches!(
+                    row.key,
+                    RowKey::Question(_)
+                        | RowKey::SecretRequest(_)
+                        | RowKey::Draft(_)
+                        | RowKey::OwnerNotice(_)
+                        | RowKey::SkillInstall(_)
+                        | RowKey::SocialSetup(_)
+                )
+            })
     }
 }
 

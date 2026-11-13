@@ -262,9 +262,10 @@ impl ElseApp {
         let mut body = v_flex()
             .w_full()
             .gap_3()
-            .p_4()
+            .p_5()
             .rounded(theme.radius_lg)
-            .bg(theme.secondary)
+            .border_1()
+            .border_color(theme.border)
             .child(
                 div()
                     .text_xs()

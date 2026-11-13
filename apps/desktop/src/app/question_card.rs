@@ -540,11 +540,6 @@ fn receipt(
         )
 }
 
-/// A card's exact command, request, or explanation, set off by a rule.
-fn inset(text: String, theme: &Theme) -> Div {
-    super::action_card::quote(theme, text)
-}
-
 /// A red callout for an error the owner can act on.
 fn callout(text: String, theme: &Theme) -> Div {
     super::action_card::failure(theme, text)

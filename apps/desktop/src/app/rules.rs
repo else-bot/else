@@ -56,10 +56,10 @@ fn on<E: ?Sized>(
 
 fn change_label(change: RuleChange) -> &'static str {
     match change {
-        RuleChange::Added => "added the rule",
-        RuleChange::Changed => "changed the rule",
-        RuleChange::Removed => "removed the rule",
-        RuleChange::Restored => "restored the rule",
+        RuleChange::Added => "Added rule",
+        RuleChange::Changed => "Changed rule",
+        RuleChange::Removed => "Removed rule",
+        RuleChange::Restored => "Restored rule",
     }
 }
 
@@ -375,44 +375,44 @@ impl ElseApp {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let author = self.bots.iter().find(|b| b.id == bot);
-        let name = author.map_or_else(|| "Bot".to_owned(), |b| b.name.clone());
         let current = self.rules_version_of(bot) == Some(update.version);
         let restoring = self.rules.get(&bot).is_some_and(|cache| cache.restoring);
         let section = update.section.clone();
         let shown = update.version;
-        let view = Button::new(SharedString::from(format!("rules-view-{item}")))
-            .control(Tier::Ghost, Scale::Compact, false, cx)
-            .label("View")
-            .accessibility_label(format!("View the change to {}", update.section))
-            .on_click(cx.listener(move |app, _, window, cx| {
-                app.open_rules(
-                    bot,
-                    Some(section.clone()),
-                    RulesTab::History,
-                    Some(shown),
-                    window,
-                    cx,
-                )
-            }));
+        let view = super::action_card::event_action(
+            SharedString::from(format!("rules-view-{item}")),
+            "View",
+            false,
+            cx,
+        )
+        .accessibility_label(format!("View the change to {}", update.section))
+        .on_click(cx.listener(move |app, _, window, cx| {
+            app.open_rules(
+                bot,
+                Some(section.clone()),
+                RulesTab::History,
+                Some(shown),
+                window,
+                cx,
+            )
+        }));
         let previous = update.version - 1;
         let undo = current.then(|| {
-            Button::new(SharedString::from(format!("rules-undo-{item}")))
-                .control(Tier::Ghost, Scale::Compact, restoring, cx)
-                .label("Undo")
-                .loading(restoring)
-                .accessibility_label(format!("Undo the change to {}", update.section))
-                .on_click(cx.listener(move |app, _, window, cx| {
-                    app.restore_rules(bot, previous, shown, window, cx)
-                }))
+            super::action_card::event_action(
+                SharedString::from(format!("rules-undo-{item}")),
+                "Undo",
+                restoring,
+                cx,
+            )
+            .loading(restoring)
+            .accessibility_label(format!("Undo the change to {}", update.section))
+            .on_click(cx.listener(move |app, _, window, cx| {
+                app.restore_rules(bot, previous, shown, window, cx)
+            }))
         });
         let line = super::action_card::event_row(&theme)
             .id(SharedString::from(format!("message-{item}")))
             .child(self.event_faces(&format!("rules-{item}"), author.map(|b| b.id)))
-            .child(
-                super::action_card::event_actor(&theme, name)
-                    .flex_none()
-                    .max_w(px(160.)),
-            )
             .child(super::action_card::event_verb(
                 &theme,
                 change_label(update.change),

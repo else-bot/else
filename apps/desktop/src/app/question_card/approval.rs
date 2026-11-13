@@ -133,7 +133,7 @@ impl ElseApp {
                         .w_full()
                         .px_4()
                         .pb_4()
-                        .child(inset(context.clone(), &theme)),
+                        .child(super::super::action_card::body_text(context.clone())),
                 );
             }
             return card.into_any_element();
@@ -163,7 +163,7 @@ impl ElseApp {
                 (Some(short), false) => short.clone(),
                 _ => context.clone(),
             };
-            card = card.child(super::super::action_card::quote(&theme, shown));
+            card = card.child(super::super::action_card::body_text(shown));
             if short.is_some() {
                 card = card.child(
                     Button::new(SharedString::from(format!("question-details-{id}")))

@@ -207,17 +207,11 @@ impl ElseApp {
             .iter()
             .filter(|choice| answer.is_some_and(|a| a.contains(&choice.id)))
             .collect();
-        let kind = if question.multiple {
-            "Choose any"
-        } else if question.choices.is_empty() {
-            "Reply here"
-        } else {
-            "Choose one"
-        };
+        // The footer says how to answer, so the title stands alone.
         let mut body = super::super::action_card::card(
             IconName::CircleQuestionMark,
             question.title.clone(),
-            kind,
+            "",
         );
         if let Some(context) = &question.context {
             body = body.child(
@@ -390,12 +384,17 @@ impl ElseApp {
                 Button::new(SharedString::from(format!("question-{id}-write-in")))
                     .control(Tier::Primary, Scale::Compact, disabled, cx)
                     .label("Send")
-                    .children(Keystroke::parse("enter").ok().map(|key| {
-                        div()
-                            .flex_none()
-                            .text_xs()
-                            .child(Kbd::new(key).appearance(false))
-                    }))
+                    .children(
+                        Keystroke::parse("enter")
+                            .ok()
+                            .filter(|_| !empty)
+                            .map(|key| {
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .child(Kbd::new(key).appearance(false))
+                            }),
+                    )
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.send_write_in(id, window, cx);
                     })),

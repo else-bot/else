@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
@@ -56,7 +56,7 @@ impl SecretForm {
                 input: cx.new(|cx| {
                     InputState::new(window, cx)
                         .masked(true)
-                        .placeholder(format!("Paste or type {var}"))
+                        .placeholder("Paste the value")
                 }),
                 captured: None,
             })
@@ -300,7 +300,14 @@ impl ElseApp {
         let busy = form.submitting || self.connection != Connection::Connected;
         let mut fields = v_flex().w_full().gap_2();
         for (ix, field) in form.fields.iter().enumerate() {
-            let label = div().text_xs().font_semibold().child(field.var.clone());
+            // The variable's name, quiet and in its own spelling: a label,
+            // not a heading.
+            let label = div()
+                .text_size(px(12.))
+                .font_weight(FontWeight::MEDIUM)
+                .font_family(theme.mono_font_family.clone())
+                .text_color(theme.muted_foreground)
+                .child(field.var.clone());
             let control: AnyElement = match &field.captured {
                 Some(text) => h_flex()
                     .gap_2()
@@ -321,7 +328,7 @@ impl ElseApp {
                     .into_any_element(),
                 None => {
                     let app = app.clone();
-                    text_field(Input::new(&field.input), cx)
+                    text_field(Input::new(&field.input).aria_label(field.var.clone()), cx)
                         .disabled(busy)
                         .on_paste(move |item, window, cx| {
                             let Some(text) = item.text().filter(|t| is_multiline(t)) else {

@@ -2,24 +2,29 @@
 //! action cards (approvals, questions, credentials, drafts, notices) and
 //! one-line activity rows (delegations, created bots, rules, routines).
 //!
-//! An action card has one grid: a 20 px icon column, a 12 px gap, and one
-//! text column that holds the title, the source line, every body block and
-//! the footer, so all of them share one left edge. Status lives in the
-//! sidebar and the paused strip, so a card carries a tag only for a fact
-//! found nowhere else, such as "Hard to undo".
+//! An action card is a hairline frame on the page, with no fill of its own.
+//! Its icon sits inline with the title, and the body blocks and footer below
+//! start on the icon's left edge, so the card has one left edge and no
+//! indent column. Status lives in the sidebar and the paused strip, so a
+//! card carries a tag only for a fact found nowhere else, such as "Hard to
+//! undo".
 
+use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{ActiveTheme as _, Icon, Theme, h_flex, v_flex};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Theme, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-/// The icon column every action card and activity row leads with.
+/// The icon column every activity row leads with.
 const LEAD: f32 = 20.;
+/// The line height of a card title; the icon centres on it.
+const TITLE_LINE: f32 = 22.;
 
 #[derive(IntoElement)]
 pub(super) struct ActionCard {
     icon: IconName,
-    title: SharedString,
+    title: AnyElement,
     source: SharedString,
     meta: Option<SharedString>,
     tag: Option<SharedString>,
@@ -32,9 +37,19 @@ pub(super) fn card(
     title: impl Into<SharedString>,
     source: impl Into<SharedString>,
 ) -> ActionCard {
+    titled(icon, title.into(), source)
+}
+
+/// A card whose title is an element, such as an editable subject line. The
+/// card gives it the title's size and weight.
+pub(super) fn titled(
+    icon: IconName,
+    title: impl IntoElement,
+    source: impl Into<SharedString>,
+) -> ActionCard {
     ActionCard {
         icon,
-        title: title.into(),
+        title: title.into_any_element(),
         source: source.into(),
         meta: None,
         tag: None,
@@ -79,6 +94,13 @@ impl RenderOnce for ActionCard {
             .items_start()
             .gap_3()
             .child(
+                h_flex()
+                    .h(px(TITLE_LINE))
+                    .flex_none()
+                    .text_color(theme.muted_foreground)
+                    .child(Icon::new(self.icon).size_4()),
+            )
+            .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
@@ -86,7 +108,7 @@ impl RenderOnce for ActionCard {
                     .child(
                         div()
                             .text_size(px(15.))
-                            .line_height(px(22.))
+                            .line_height(px(TITLE_LINE))
                             .font_weight(FontWeight::SEMIBOLD)
                             .whitespace_normal()
                             .child(self.title),
@@ -106,7 +128,7 @@ impl RenderOnce for ActionCard {
             .children(self.meta.map(|meta| {
                 div()
                     .flex_none()
-                    .h(px(22.))
+                    .h(px(TITLE_LINE))
                     .flex()
                     .items_center()
                     .text_size(px(13.))
@@ -124,36 +146,19 @@ impl RenderOnce for ActionCard {
                     .text_color(theme.warning)
                     .child(tag)
             }));
-        h_flex()
+        v_flex()
             .w_full()
             .min_w_0()
-            .items_start()
             .gap_3()
             .p_5()
             .rounded(theme.radius_lg)
             .border_1()
             .border_color(theme.border)
-            .bg(theme.secondary)
-            .child(
-                h_flex()
-                    .w(px(LEAD))
-                    .h(px(22.))
-                    .flex_none()
-                    .justify_center()
-                    .text_color(theme.muted_foreground)
-                    .child(Icon::new(self.icon).size_4()),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_3()
-                    .child(heading)
-                    .children(self.body)
-                    .children(
-                        self.footer
-                            .map(|footer| div().w_full().pt_2().child(footer)),
-                    ),
+            .child(heading)
+            .children(self.body)
+            .children(
+                self.footer
+                    .map(|footer| div().w_full().pt_1().child(footer)),
             )
     }
 }
@@ -181,23 +186,20 @@ pub(super) fn footer_note(theme: &Theme, text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-/// Quoted context inside a card: the exact command, request, or reason,
-/// set off by a rule instead of a darker box.
-pub(super) fn quote(theme: &Theme, text: impl Into<SharedString>) -> Div {
+/// A card's body text: the exact command, request, or reason, on the
+/// card's one left edge.
+pub(super) fn body_text(text: impl Into<SharedString>) -> Div {
     div()
         .w_full()
         .min_w_0()
-        .pl_3()
-        .border_l_2()
-        .border_color(theme.border)
         .text_sm()
-        .line_height(relative(1.6))
+        .line_height(relative(1.5))
         .whitespace_normal()
         .child(text.into())
 }
 
 /// The height of a selectable option row inside a card.
-pub(super) const OPTION_HEIGHT: f32 = 40.;
+pub(super) const OPTION_HEIGHT: f32 = 44.;
 
 /// One activity row: a 36 px line with the icon column, then actor, verb
 /// and object, then right-aligned meta and quiet actions.
@@ -269,16 +271,6 @@ pub(super) fn event_icon(icon: IconName) -> Div {
     event_lead(vec![Icon::new(icon).size_4().into_any_element()])
 }
 
-/// Who acted: full strength.
-pub(super) fn event_actor(theme: &Theme, text: impl Into<SharedString>) -> Div {
-    div()
-        .min_w_0()
-        .truncate()
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(theme.foreground)
-        .child(text.into())
-}
-
 /// What they did: secondary.
 pub(super) fn event_verb(theme: &Theme, text: impl Into<SharedString>) -> Div {
     div()
@@ -298,13 +290,43 @@ pub(super) fn event_object(theme: &Theme, text: impl Into<SharedString>) -> Div 
         .child(text.into())
 }
 
+/// A quiet action at the end of an activity row: a compact ghost button
+/// whose label matches the row's 13 px text. Every trailing element ends on
+/// the edge this button's label ends on.
+pub(super) fn event_action(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    disabled: bool,
+    cx: &App,
+) -> Button {
+    Button::new(id)
+        .control(Tier::Ghost, Scale::Compact, disabled, cx)
+        .child(div().text_size(px(13.)).child(label.into()))
+}
+
+/// A trailing disclosure chevron, inset to end where an action's label ends.
+pub(super) fn event_chevron(expanded: bool) -> Div {
+    div().flex_none().mr(Scale::Compact.padding()).child(
+        Icon::new(if expanded {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        })
+        .xsmall(),
+    )
+}
+
 /// Right-aligned meta: status, count, time. Same size as the row, quieter
 /// than its verb.
 pub(super) fn event_meta(theme: &Theme, text: impl Into<SharedString>) -> Div {
     div()
         .flex_none()
         .text_size(px(13.))
-        .text_color(theme.foreground.opacity(0.55))
+        .text_color(if theme.mode.is_dark() {
+            theme.foreground.opacity(0.55)
+        } else {
+            super::message_row::meta_color(theme)
+        })
         .child(text.into())
 }
 

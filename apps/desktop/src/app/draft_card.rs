@@ -304,11 +304,10 @@ impl ElseApp {
                 })
                 .collect::<Vec<_>>()
         };
+        // A settled draft is a receipt: a quiet fill, like a settled question.
         let mut card = v_flex()
             .w_full()
             .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
             .bg(theme.secondary)
             .overflow_hidden();
         let expanded = view.expanded_drafts.contains(&id);
@@ -443,36 +442,48 @@ impl ElseApp {
         let busy = form.operation.is_some() || self.draft_in_flight(id);
         let conflict = form.baseline.version != draft.version;
         let approve_enabled = connected && !busy && !conflict && draft.can_approve;
-        // The bot's name row sits above the card, so the header is one line:
-        // what this is, with the revision as quiet meta.
-        let title = format!("{} draft", draft.content.label());
-        let mut card = super::action_card::card(content_icon, title, "")
-            .when(draft.revision > 1, |card| {
-                card.meta(format!("v{}", draft.revision))
-            })
+        // The bot's name row sits above the card. An email's editable subject
+        // is its one title, with what it is as quiet meta beside it; anything
+        // else is titled by what it is.
+        let kind = format!("{} draft", draft.content.label());
+        let revision = (draft.revision > 1).then(|| format!("v{}", draft.revision));
+        let card = match form.subject.as_ref() {
+            Some(subject) => super::action_card::titled(
+                content_icon,
+                // The input is taller than a title line; centre it on one.
+                div().h(px(22.)).flex().items_center().child(
+                    Input::new(subject)
+                        .appearance(false)
+                        .px_0()
+                        .text_size(px(15.))
+                        .disabled(busy)
+                        .aria_label("Email subject")
+                        .font_semibold(),
+                ),
+                "",
+            )
+            .meta(
+                revision
+                    .clone()
+                    .map_or(kind.clone(), |revision| format!("{kind} · {revision}")),
+            ),
+            None => super::action_card::card(content_icon, kind, "")
+                .when_some(revision, |card, revision| card.meta(revision)),
+        };
+        let mut card = card
             .when(!draft.can_approve, |card| card.tag("Reply in chat"))
             .child(
-                v_flex()
-                    .gap_2()
-                    .children(form.subject.as_ref().map(|subject| {
-                        Input::new(subject)
+                v_flex().gap_2().children(metadata()).child(
+                    // The editor pads its text by the medium input inset;
+                    // pull it back so the body starts on the card's text edge.
+                    div().mx(px(-10.)).mt_1().child(
+                        Textarea::new(&form.body)
                             .appearance(false)
-                            .px_0()
+                            .line_height(relative(1.5))
                             .disabled(busy)
-                            .aria_label("Email subject")
-                            .font_semibold()
-                    }))
-                    .children(metadata())
-                    .child(
-                        // The editor pads its text by the medium input inset;
-                        // pull it back so the body starts on the card's text edge.
-                        div().mx(px(-10.)).mt_1().line_height(relative(1.5)).child(
-                            Textarea::new(&form.body)
-                                .appearance(false)
-                                .disabled(busy)
-                                .aria_label(draft.content.body_label()),
-                        ),
+                            .aria_label(draft.content.body_label()),
                     ),
+                ),
             );
         let footer = super::action_card::footer()
             .when(draft.kind.is_some() && draft.can_approve, |row| {

@@ -4,10 +4,9 @@ use super::task_reply::state::format_elapsed;
 use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{Delegation, DelegationStatus};
 use chrono::Utc;
-use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -74,6 +73,19 @@ impl ElseApp {
         } else {
             name(group[0])
         };
+        // "Asked Research", or "Asked council Research & Code Reviewer".
+        let (verb, object) = if group.len() > 1 {
+            (
+                "Asked council",
+                group
+                    .iter()
+                    .map(|d| name(d))
+                    .collect::<Vec<_>>()
+                    .join(" & "),
+            )
+        } else {
+            ("Asked", label.clone())
+        };
         let status = match phase {
             Phase::Working => "Working",
             Phase::Replied => "Replied",
@@ -105,16 +117,10 @@ impl ElseApp {
             .child(
                 super::action_card::event_row(theme)
                     .child(faces)
-                    .child(super::action_card::event_object(theme, label))
+                    .child(super::action_card::event_verb(theme, verb))
+                    .child(super::action_card::event_object(theme, object))
                     .child(super::action_card::event_meta(theme, meta))
-                    .child(
-                        Icon::new(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .xsmall(),
-                    ),
+                    .child(super::action_card::event_chevron(expanded)),
             )
             .on_click(cx.listener(move |app, _, _, cx| {
                 if let Some(view) = app.view.as_mut()
