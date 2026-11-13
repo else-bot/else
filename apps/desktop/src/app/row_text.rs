@@ -586,12 +586,13 @@ impl RowText {
                         .with_code_background(cx.theme().secondary)
                         .with_link(cx.theme().link)
                         .with_border(cx.theme().foreground.opacity(0.08))
+                        // A 20 px document title over 16 px section headings.
                         .with_heading(|level| {
                             StyleRefinement::default()
                                 .text_size(px(match level {
-                                    1 => 22.,
-                                    2 => 18.,
-                                    3 => 16.,
+                                    1 => 20.,
+                                    2 => 16.,
+                                    3 => 15.,
                                     _ => 14.,
                                 }))
                                 .font_weight(FontWeight::SEMIBOLD)
