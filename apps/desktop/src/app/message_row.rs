@@ -21,7 +21,7 @@ pub(super) const BOT_GUTTER: Pixels = px(0.);
 
 /// Timestamps and other trailing metadata sit at this share of the foreground
 /// in dark themes.
-pub(super) const META_OPACITY: f32 = 0.45;
+pub(super) const META_OPACITY: f32 = 0.55;
 
 /// The colour of timestamps and other trailing metadata. A faded foreground
 /// stays quiet on a dark page, but on a light one it falls below 4.5:1, so
@@ -82,7 +82,7 @@ impl ElseApp {
         let body = if row.activity.is_some() {
             self.render_bot_activity(&row, cx)
         } else if let Some(task) = row.task.as_ref() {
-            self.render_task_reply(task, cx)
+            self.render_task_reply(task, row.footer_stamp, cx)
         } else {
             self.render_row_content(&row, cx)
         };
@@ -158,12 +158,6 @@ impl ElseApp {
                             }),
                     )
                     .child(body)
-                    .children(row.footer_stamp.map(|at| {
-                        div()
-                            .text_size(px(12.))
-                            .text_color(meta_color(cx.theme()))
-                            .child(clock(at))
-                    }))
                     .into_any_element()
             } else {
                 body

@@ -5,7 +5,7 @@ use super::conversation::ReplyLayout;
 use super::reply::Author;
 use super::{ElseApp, RowKey};
 use crate::avatar::bot_avatar;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::FocusableExt as _;
@@ -21,6 +21,7 @@ impl ElseApp {
     pub(super) fn render_task_reply(
         &self,
         task: &TaskReply,
+        stamp: Option<DateTime<Utc>>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let view = self.view.as_ref()?;
@@ -134,34 +135,29 @@ impl ElseApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.foreground)
                     .child(title.clone()),
-            )
-            .child(div().flex_1())
-            // A failed turn keeps only its closing timestamp.
-            .children(elapsed.clone().filter(|_| working).map(|elapsed| {
-                div()
-                    .flex_none()
-                    .text_size(px(12.))
-                    .text_color(meta)
-                    .child(elapsed)
-            }));
-        // One quiet line says where the turn stands; it opens earlier updates when there are any.
+            );
+        // One 12 px meta row under the turn says where it stands, how long it
+        // took and when it ended, and opens earlier updates when there are any.
+        let stamp = stamp.map(super::message_row::clock);
+        let tail = |row: Div| {
+            row.children(stamp.clone().map(|at| format!("· {at}")))
+                .children(updates.clone().map(|updates| format!("· {updates}")))
+                .children(expandable.then(chevron))
+        };
+        let meta_row = || {
+            h_flex()
+                .min_w_0()
+                .items_center()
+                .gap_1()
+                .text_size(px(12.))
+                .text_color(meta)
+        };
+        let mut explanation = None;
         let status = if owner_waiting {
-            expandable.then(|| {
-                h_flex()
-                    .items_center()
-                    .gap_1()
-                    .text_size(px(12.))
-                    .text_color(meta)
-                    .child("Earlier updates")
-                    .child(chevron())
-            })
+            expandable.then(|| meta_row().child("Earlier updates").child(chevron()))
         } else if complete {
-            Some(
-                h_flex()
-                    .items_center()
-                    .gap_1()
-                    .text_size(px(12.))
-                    .text_color(meta)
+            Some(tail(
+                meta_row()
                     .child(
                         Icon::new(IconName::Check)
                             .xsmall()
@@ -169,64 +165,40 @@ impl ElseApp {
                             .text_color(theme.success),
                     )
                     .child(summary.clone())
-                    .children(elapsed.map(|elapsed| format!("· {elapsed}")))
-                    .children(updates.map(|updates| format!("· {updates}")))
-                    .children(expandable.then(chevron)),
-            )
+                    .children(elapsed.map(|elapsed| format!("· {elapsed}"))),
+            ))
         } else if error {
-            let (headline, explanation) = summary
+            let (headline, detail) = summary
                 .split_once(". ")
                 .map_or((summary.trim_end_matches('.'), ""), |(head, rest)| {
                     (head, rest.trim())
                 });
-            // The icon and short label in red on one line, then the
-            // explanation in body text on the same left edge.
-            Some(
-                v_flex()
-                    .min_w_0()
-                    .gap_0p5()
+            // The reason reads as the turn's message; the red label sits in
+            // the meta row under it.
+            explanation = (!detail.is_empty()).then(|| {
+                div()
+                    .w_full()
+                    .text_sm()
+                    .line_height(relative(1.5))
+                    .whitespace_normal()
+                    .text_color(theme.foreground)
+                    .child(detail.to_owned())
+            });
+            Some(tail(
+                meta_row()
                     .child(
-                        h_flex()
-                            .min_w_0()
-                            .items_center()
-                            .gap_1p5()
-                            .child(
-                                Icon::new(IconName::CircleX)
-                                    .size_4()
-                                    .flex_none()
-                                    .text_color(theme.danger),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .line_height(px(20.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.danger)
-                                    .child(headline.to_owned()),
-                            )
-                            .children(updates.map(|updates| {
-                                h_flex()
-                                    .flex_none()
-                                    .items_center()
-                                    .gap_1()
-                                    .text_size(px(12.))
-                                    .text_color(meta)
-                                    .child(format!("· {updates}"))
-                                    .child(chevron())
-                            })),
+                        Icon::new(IconName::CircleX)
+                            .xsmall()
+                            .flex_none()
+                            .text_color(theme.danger),
                     )
-                    .when(!explanation.is_empty(), |text| {
-                        text.child(
-                            div()
-                                .text_sm()
-                                .line_height(relative(1.5))
-                                .text_left()
-                                .whitespace_normal()
-                                .text_color(theme.foreground)
-                                .child(explanation.to_owned()),
-                        )
-                    }),
-            )
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.danger)
+                            .child(headline.to_owned()),
+                    ),
+            ))
         } else {
             let label = task.state.label();
             let detail = if summary != label {
@@ -234,32 +206,37 @@ impl ElseApp {
             } else {
                 label.to_owned()
             };
+            // A working turn's label is the transcript's live edge: body size,
+            // with its elapsed time beside it as meta.
             Some(
                 h_flex()
                     .min_w_0()
                     .items_center()
                     .gap_2()
-                    .text_size(px(13.))
-                    .text_color(if working {
-                        theme.foreground.opacity(0.85)
-                    } else {
-                        theme.muted_foreground
-                    })
                     .when(working, |line| {
                         line.child(working_dots(task.turn, theme.link, cx.reduce_motion()))
                     })
                     .children(delegate_faces)
-                    .child(div().min_w_0().truncate().child(detail))
-                    .children(updates.map(|updates| {
-                        h_flex()
-                            .flex_none()
-                            .items_center()
-                            .gap_1()
-                            .text_size(px(12.))
-                            .text_color(meta)
-                            .child(format!("· {updates}"))
-                            .child(chevron())
-                    })),
+                    .child(tail(
+                        meta_row()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(if working { 14. } else { 13. }))
+                                    .text_color(if working {
+                                        theme.foreground.opacity(0.85)
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .child(detail),
+                            )
+                            .children(
+                                elapsed
+                                    .filter(|_| working)
+                                    .map(|elapsed| format!("· {elapsed}")),
+                            ),
+                    )),
             )
         };
         let status = status.map(|status| {
@@ -343,8 +320,12 @@ impl ElseApp {
             .min_w_0()
             .gap_1p5()
             .child(name_row);
-        card = if complete {
-            card.children(reply).children(earlier).children(status)
+        // A turn that ended closes on its meta row; a live one leads with it.
+        card = if complete || error {
+            card.children(reply)
+                .children(earlier)
+                .children(explanation)
+                .children(status)
         } else {
             card.children(status).children(earlier).children(reply)
         };
