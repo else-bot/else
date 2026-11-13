@@ -571,7 +571,7 @@ impl Shell {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .child(content.p_6()),
+                    .child(content.max_w(px(744.)).p_8()),
             )
             .when_some(view.error.clone(), |content, text| {
                 content.child(

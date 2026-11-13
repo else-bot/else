@@ -245,7 +245,7 @@ impl ElseApp {
         }
         let owner = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
-            let dialog = dialog.w(px(680.));
+            let dialog = dialog.w(px(680.)).centered().bg(cx.theme().popover);
             let Some(app) = owner.upgrade() else {
                 return dialog;
             };
@@ -256,7 +256,14 @@ impl ElseApp {
                 .find(|b| b.id == bot)
                 .map_or_else(|| "Bot".to_owned(), |b| b.name.clone());
             let content = app.render_rules_dialog(bot, &name, &owner, cx);
-            dialog.title(format!("{name} rules")).child(content)
+            dialog
+                .title(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(format!("{name} rules")),
+                )
+                .child(content)
         });
         self.scroll_to_focus();
         cx.notify();
@@ -372,8 +379,6 @@ impl ElseApp {
         let section = update.section.clone();
         let shown = update.version;
         let view = Button::new(SharedString::from(format!("rules-view-{item}")))
-            .ghost()
-            .xsmall()
             .focus_ring(false)
             .cursor_pointer()
             .label("View")
@@ -391,8 +396,6 @@ impl ElseApp {
         let previous = update.version - 1;
         let undo = current.then(|| {
             Button::new(SharedString::from(format!("rules-undo-{item}")))
-                .ghost()
-                .xsmall()
                 .focus_ring(false)
                 .cursor_pointer()
                 .label("Undo")
@@ -469,8 +472,6 @@ impl ElseApp {
         let only_history =
             file.is_some_and(|file| file.sections.is_empty() && !file.history.is_empty());
         let open = Button::new("rules-open")
-            .ghost()
-            .xsmall()
             .focus_ring(false)
             .cursor_pointer()
             .label("Open")
@@ -602,7 +603,9 @@ impl ElseApp {
             div()
                 .w_full()
                 .rounded(theme.radius)
-                .bg(theme.secondary)
+                .bg(theme.background)
+                .border_1()
+                .border_color(theme.border)
                 .child(card),
         )
         .into_any_element()
@@ -633,7 +636,6 @@ impl ElseApp {
                 .map(|(value, label)| {
                     Button::new(SharedString::from(format!("rules-tab-{label}")))
                         .ghost()
-                        .small()
                         .focus_ring(false)
                         .cursor_pointer()
                         .label(label)
@@ -671,8 +673,6 @@ impl ElseApp {
             )
             .child(
                 Button::new("rules-copy")
-                    .ghost()
-                    .small()
                     .focus_ring(false)
                     .cursor_pointer()
                     .icon(IconName::Copy)
@@ -684,7 +684,6 @@ impl ElseApp {
             .child(
                 Button::new("rules-ask")
                     .primary()
-                    .small()
                     .focus_ring(false)
                     .cursor_pointer()
                     .label("Ask to edit")
@@ -697,7 +696,7 @@ impl ElseApp {
             .w_full()
             .gap_3()
             .child(tabs)
-            .child(div().h(px(440.)).w_full().child(body))
+            .child(div().h(px(300.)).w_full().child(body))
             .child(footer)
             .into_any_element()
     }
@@ -818,7 +817,7 @@ impl ElseApp {
         };
         let list = v_flex()
             .id("rules-versions")
-            .w(px(220.))
+            .w(px(200.))
             .flex_none()
             .h_full()
             .overflow_y_scroll()
@@ -849,6 +848,7 @@ impl ElseApp {
                             .min_w_0()
                             .items_start()
                             .text_left()
+                            .whitespace_normal()
                             .child(
                                 h_flex()
                                     .gap_1p5()
@@ -874,8 +874,6 @@ impl ElseApp {
         let expected = file.version;
         let restore = (picked.version == file.version && target >= 0).then(|| {
             Button::new("rules-restore")
-                .ghost()
-                .small()
                 .focus_ring(false)
                 .cursor_pointer()
                 .icon(IconName::RotateCw)
@@ -893,8 +891,6 @@ impl ElseApp {
         let restore_this = (picked.version != file.version).then(|| {
             let version = picked.version;
             Button::new("rules-restore-this")
-                .ghost()
-                .small()
                 .focus_ring(false)
                 .cursor_pointer()
                 .icon(IconName::RotateCw)

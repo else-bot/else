@@ -16,8 +16,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, WindowExt as _, h_flex,
-    v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, Size,
+    WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -937,8 +937,7 @@ impl ElseApp {
                         .child(
                             Button::new("model-cancel").focus_ring(false).cursor_pointer()
                                 .label("Cancel")
-                                .ghost()
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                                                                .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("model-apply").focus_ring(false).cursor_pointer()
@@ -1119,18 +1118,17 @@ impl ElseApp {
             .child(
                 h_flex()
                     .px_4()
-                    .pb_2()
+                    .pb_4()
+                    .border_b_1()
+                    .border_color(theme.sidebar_border)
                     .gap_2()
                     .child(
                         Button::new("details-tab")
                             .cursor_pointer()
                             .label("Details")
-                            .small()
                             .ghost()
-                            .when(
-                                self.details_tab == super::computer::DetailsTab::Details,
-                                |button| button.primary(),
-                            )
+                            .focus_ring(false)
+                            .selected(self.details_tab == super::computer::DetailsTab::Details)
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.details_tab = super::computer::DetailsTab::Details;
                                 app.computer = None;
@@ -1142,12 +1140,9 @@ impl ElseApp {
                         Button::new("computer-tab")
                             .cursor_pointer()
                             .label("Computer")
-                            .small()
                             .ghost()
-                            .when(
-                                self.details_tab == super::computer::DetailsTab::Computer,
-                                |button| button.primary(),
-                            )
+                            .focus_ring(false)
+                            .selected(self.details_tab == super::computer::DetailsTab::Computer)
                             .on_click(cx.listener(|app, _, window, cx| {
                                 app.details_tab = super::computer::DetailsTab::Computer;
                                 app.ensure_settings(window, cx);
@@ -1178,7 +1173,6 @@ impl ElseApp {
                                     .hover(theme.danger.opacity(0.08))
                                     .active(theme.danger.opacity(0.14)),
                             )
-                            .small()
                             .w_full()
                             .disabled(
                                 self.connection != Connection::Connected
@@ -1239,8 +1233,6 @@ impl ElseApp {
                         .focus_ring(false)
                         .cursor_pointer()
                         .label("Retry")
-                        .xsmall()
-                        .ghost()
                         .on_click(cx.listener(move |app, _, _, cx| app.flush_details(bot, cx))),
                 )
         });
@@ -1353,8 +1345,6 @@ impl ElseApp {
                                 .focus_ring(false)
                                 .cursor_pointer()
                                 .label("Retry")
-                                .small()
-                                .ghost()
                                 .on_click(cx.listener(move |app, _, window, cx| {
                                     app.load_profile(bot, window, cx)
                                 })),
@@ -1364,8 +1354,15 @@ impl ElseApp {
             }
             ModelState::Ready(saved) => saved,
         };
-        body.child(self.render_current_model(bot, saved.as_ref(), cx))
-            .into_any_element()
+        body.child(
+            div()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().background)
+                .child(self.render_current_model(bot, saved.as_ref(), cx)),
+        )
+        .into_any_element()
     }
 
     fn render_current_model(
@@ -1386,18 +1383,22 @@ impl ElseApp {
                 let offered = self.model_available(choice);
                 v_flex()
                     .gap_1()
-                    .child(muted("Bot model", cx))
                     .child(
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(model_label(&choice.model)),
                     )
-                    .child(div().text_xs().child(format!(
-                        "{} · {} reasoning · {speed}",
-                        self.provider_label(&choice.provider_id),
-                        effort_label(&choice.reasoning_effort),
-                    )))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{} · {} reasoning · {speed}",
+                                self.provider_label(&choice.provider_id),
+                                effort_label(&choice.reasoning_effort),
+                            )),
+                    )
                     .children((!offered).then(|| {
                         note(
                             "Saved model is unavailable. Choose another model.",
@@ -1508,8 +1509,11 @@ impl ElseApp {
             .focus_ring(false)
             .cursor_pointer()
             .ghost()
+            .opacity(0.)
+            .group_hover("automation-card", |style| style.opacity(1.))
+            .focus(|style| style.opacity(1.))
             .xsmall()
-            .label("Delete")
+            .icon(gpui_kit::assets::IconName::Trash)
             .accessibility_label(format!("Delete the trigger for {}", card.title))
             .loading(matches!(save, Some(TriggerSave::Deleting { .. })))
             .disabled(disabled)
@@ -1541,7 +1545,10 @@ impl ElseApp {
             .p_3()
             .gap_3()
             .rounded(theme.radius_lg)
-            .bg(theme.sidebar_accent.opacity(0.4))
+            .group("automation-card")
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.border)
             .child(
                 h_flex()
                     .gap_2()
@@ -1559,11 +1566,20 @@ impl ElseApp {
                     )
                     .child(
                         div()
+                            .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(card.title.clone()),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .gap_1()
+                            .items_center()
+                            .child(delete)
+                            .child(switch),
                     ),
             )
             .child(div().text_sm().whitespace_normal().child(card.instructions))
@@ -1575,17 +1591,12 @@ impl ElseApp {
                     .when(!checked, |row| row.child(pill("paused".into()))),
             )
             .child(
-                h_flex()
-                    .justify_between()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .children(last_woke),
-                    )
-                    .child(h_flex().items_center().gap_1().child(delete).child(switch)),
+                h_flex().justify_between().items_center().gap_2().child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .children(last_woke),
+                ),
             )
             .children(error.map(|error| note(error, true, cx)))
             .into_any_element()
@@ -1695,6 +1706,9 @@ impl ElseApp {
             .cursor_pointer()
             .icon(gpui_kit::assets::IconName::Trash)
             .ghost()
+            .opacity(0.)
+            .group_hover("automation-card", |style| style.opacity(1.))
+            .focus(|style| style.opacity(1.))
             .xsmall()
             .loading(matches!(save, Some(RoutineSave::Deleting { .. })))
             .accessibility_label(format!("Delete {}", routine.name))
@@ -1706,8 +1720,6 @@ impl ElseApp {
             Button::new(ElementId::Name(format!("routine-dismiss-{id}").into()))
                 .focus_ring(false)
                 .cursor_pointer()
-                .ghost()
-                .xsmall()
                 .label("Dismiss")
                 .loading(matches!(save, Some(RoutineSave::Dismissing { .. })))
                 .accessibility_label(format!("Dismiss the failures of {}", routine.name))
@@ -1786,26 +1798,18 @@ impl ElseApp {
             .py_1()
             .px_0()
             .accessibility_label(format!("Change model for {}", routine.name))
-            .icon(IconName::Cpu)
             .loading(matches!(save, Some(RoutineSave::Model { .. })))
             .disabled(busy || !connected || self.caps.is_none())
             .child(
-                v_flex()
-                    .flex_1()
+                div()
+                    .w_full()
                     .min_w_0()
-                    .gap_0p5()
-                    .items_start()
                     .text_left()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
                     .whitespace_normal()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(model_title.clone()),
-                    )
-                    .child(muted(model_details.clone(), cx)),
+                    .child(format!("{model_title} · {model_details}")),
             )
-            .child(Icon::new(IconName::ChevronRight).flex_none())
             .on_click(cx.listener(move |app, _, window, cx| {
                 app.open_routine_model_dialog(bot, id, window, cx)
             }));
@@ -1922,7 +1926,10 @@ impl ElseApp {
             .p_3()
             .gap_3()
             .rounded(theme.radius_lg)
-            .bg(theme.sidebar_accent.opacity(0.4))
+            .group("automation-card")
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.border)
             .child(
                 h_flex()
                     .w_full()
@@ -1942,10 +1949,7 @@ impl ElseApp {
             .children(
                 warning.map(|warning| div().text_xs().text_color(theme.warning).child(warning)),
             )
-            .when(routine.run_at.is_none(), |card| {
-                card.child(div().w_full().h(px(1.)).bg(theme.sidebar_border))
-                    .child(model_control)
-            })
+            .when(routine.run_at.is_none(), |card| card.child(model_control))
             .into_any_element()
     }
 }

@@ -126,6 +126,7 @@ impl Shell {
                 .w((viewport.width - px(64.)).min(px(1040.)))
                 .h((viewport.height - px(64.)).min(px(760.)))
                 .centered()
+                .bg(cx.theme().popover)
                 .entrance(DialogEntrance::None)
                 .p_0()
                 .gap_0()
@@ -287,15 +288,9 @@ impl Shell {
                     .pt_6()
                     .pb_2()
                     .text_xs()
-                    .text_color(theme.primary)
+                    .text_color(theme.muted_foreground)
                     .truncate()
-                    .child(
-                        self.active
-                            .as_ref()
-                            .and_then(|active| self.registry.find(active.id))
-                            .map(|saved| saved.name.clone())
-                            .unwrap_or_else(|| "Server settings".to_owned()),
-                    ),
+                    .child("THIS SERVER"),
             )
             .child(nav_item(
                 "settings-email",
@@ -346,31 +341,24 @@ impl Shell {
         let body = if section == SettingsSection::Backups {
             body
         } else if section == SettingsSection::Updates {
-            div().size_full().p_6().child(body).into_any_element()
+            div().size_full().p_8().child(body).into_any_element()
         } else {
             div()
                 .h_full()
-                .child(div().p_8().w_full().child(body))
+                .child(
+                    div()
+                        .p_8()
+                        .w_full()
+                        .child(div().max_w(px(680.)).w_full().child(body)),
+                )
                 .overflow_y_scrollbar()
                 .into_any_element()
         };
-        let body = if matches!(
-            section,
-            SettingsSection::Email
-                | SettingsSection::Socials
-                | SettingsSection::Skills
-                | SettingsSection::Mcp
-                | SettingsSection::Backups
-        ) {
-            v_flex()
-                .size_full()
-                .min_h_0()
-                .child(self.render_server_identity(cx))
-                .child(div().flex_1().min_h_0().child(body))
-                .into_any_element()
-        } else {
-            body
-        };
+        let body = v_flex()
+            .size_full()
+            .min_h_0()
+            .child(self.render_server_identity(cx))
+            .child(div().flex_1().min_h_0().child(body));
         v_flex()
             .id("app-settings")
             .track_focus(&setup.focus)
@@ -397,7 +385,6 @@ impl Shell {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("Settings"),
                     )
-                    .child(self.render_server_switcher("settings-server-switcher", cx))
                     .child(
                         Button::new("app-settings-close")
                             .focus_ring(false)

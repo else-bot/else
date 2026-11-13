@@ -166,8 +166,7 @@ impl Shell {
                                 .focus_ring(false)
                                 .cursor_pointer()
                                 .label("Cancel")
-                                .ghost()
-                                .track_focus(&cancel)
+                                                                .track_focus(&cancel)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
@@ -243,13 +242,6 @@ impl Shell {
                 .text_color(theme.muted_foreground)
                 .child("Skills, documentation and config are shared by all bots. A signed-in OAuth account serves every bot."),
         );
-        body = body.child(
-            div().max_w(px(340.)).child(
-                Input::new(&view.search)
-                    .small()
-                    .prefix(Icon::new(IconName::Search).size_3()),
-            ),
-        );
         let error = view.error.as_ref().or(view.poll_error.as_ref());
         if let Some(error) = error {
             body = body.child(
@@ -266,8 +258,6 @@ impl Shell {
                         Button::new("mcp-retry")
                             .focus_ring(false)
                             .cursor_pointer()
-                            .small()
-                            .ghost()
                             .label("Retry")
                             .disabled(view.removing.is_some())
                             .on_click(
@@ -287,6 +277,52 @@ impl Shell {
             }
             return body.into_any_element();
         };
+        if entries.is_empty() {
+            return body
+                .child(
+                    v_flex()
+                        .w_full()
+                        .items_center()
+                        .text_center()
+                        .py_12()
+                        .gap_3()
+                        .child(
+                            Icon::new(IconName::Plug)
+                                .size_6()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("No MCPs installed yet"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("Ask a bot to install an MCP."),
+                        )
+                        .child(
+                            Button::new("empty-open-chat")
+                                .focus_ring(false)
+                                .cursor_pointer()
+                                .label("Open chat")
+                                .on_click(cx.listener(|shell, _, window, cx| {
+                                    window.close_dialog(cx);
+                                    shell.cancel(window, cx);
+                                })),
+                        ),
+                )
+                .into_any_element();
+        }
+        body = body.child(
+            div().max_w(px(340.)).child(
+                Input::new(&view.search)
+                    .small()
+                    .prefix(Icon::new(IconName::Search).size_3()),
+            ),
+        );
         let query = view.search.read(cx).value().trim().to_lowercase();
         let filtered = entries
             .iter()

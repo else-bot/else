@@ -97,26 +97,17 @@ impl ElseApp {
             list = list.child(self.render_bot_row(main, cx));
         }
         if !layout.waiting.is_empty() {
-            let mut tray = v_flex()
-                .id("waiting-tray")
-                .mt_2()
-                .p_0p5()
-                .gap_0p5()
-                .rounded(theme.radius)
-                .border_1()
-                .border_color(theme.warning.opacity(0.35))
-                .bg(theme.warning.opacity(0.06))
-                .child(
-                    h_flex()
-                        .h(px(28.))
-                        .px_2()
-                        .items_center()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.warning)
-                        .child(div().flex_1().child("Needs you"))
-                        .child(layout.waiting.len().to_string()),
-                );
+            let mut tray = v_flex().id("waiting-tray").mt_2().gap_0p5().child(
+                h_flex()
+                    .h(px(28.))
+                    .px_2()
+                    .items_center()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.muted_foreground)
+                    .child(div().flex_1().child("Needs you"))
+                    .child(layout.waiting.len().to_string()),
+            );
             for bot in layout.waiting {
                 tray = tray.child(self.render_bot_row(bot, cx));
             }
@@ -275,6 +266,8 @@ impl ElseApp {
                         .cursor_pointer()
                         .icon(IconName::FolderPlus)
                         .label("New category")
+                        .text_color(theme.muted_foreground)
+                        .text_size(px(13.))
                         .small()
                         .ghost()
                         .w_full()
@@ -313,8 +306,6 @@ impl ElseApp {
             .h_full()
             .bg(theme.sidebar)
             .text_color(theme.sidebar_foreground)
-            .border_r_1()
-            .border_color(theme.sidebar_border)
             .child(brand)
             .child(list)
             .child(footer)
@@ -372,7 +363,7 @@ impl ElseApp {
         bot: &Bot,
         working: bool,
     ) -> impl IntoElement {
-        let mut avatar = bot_avatar(id, bot.avatar, px(30.));
+        let mut avatar = bot_avatar(id, bot.avatar, px(26.));
         if !bot.is_active() {
             avatar = avatar.still();
         } else if working {
@@ -455,12 +446,19 @@ impl ElseApp {
             Kind::Unavailable => Some(IconName::CircleOff),
             Kind::Deleting => Some(IconName::Trash),
         };
+        let subtitle_text = match subtitle.kind {
+            Kind::Answer => "Answer needed".to_owned(),
+            Kind::Approval => "Needs approval".to_owned(),
+            Kind::Credentials => "Needs credentials".to_owned(),
+            Kind::Takeover => "Needs your help".to_owned(),
+            _ => subtitle.text,
+        };
         let subtitle = h_flex()
             .min_w_0()
             .gap_1()
             .items_center()
             .text_xs()
-            .text_color(color)
+            .text_color(theme.muted_foreground)
             .when(!pending, |line| {
                 line.group_hover("sidebar-bot-row", |style| {
                     style.text_color(theme.foreground)
@@ -477,7 +475,7 @@ impl ElseApp {
                         .child(Icon::new(icon).xsmall().text_color(color)),
                 )
             })
-            .child(div().flex_1().min_w_0().truncate().child(subtitle.text));
+            .child(div().flex_1().min_w_0().truncate().child(subtitle_text));
         let mut row = h_flex()
             .id(SharedString::from(format!("bot-{id}")))
             .group("sidebar-bot-row")
@@ -501,11 +499,7 @@ impl ElseApp {
                                 div()
                                     .text_sm()
                                     .truncate()
-                                    .font_weight(if unread {
-                                        FontWeight::SEMIBOLD
-                                    } else {
-                                        FontWeight::MEDIUM
-                                    })
+                                    .font_weight(FontWeight::SEMIBOLD)
                                     .child(bot.name.clone()),
                             )
                             .when(muted, |line| {
@@ -556,7 +550,7 @@ impl ElseApp {
             );
         }
         if selected {
-            row = row.bg(theme.list_active);
+            row = row.bg(theme.secondary_active);
         }
         if pending {
             return row.into_any_element();

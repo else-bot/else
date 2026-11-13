@@ -385,7 +385,9 @@ impl Shell {
                 ),
                 UpdateCheck::Failed(_) if snapshot.unavailable.is_some() => (
                     "Updates managed outside this app",
-                    "Automatic installation is unavailable for this session.".to_owned(),
+                    snapshot.unavailable.clone().unwrap_or_else(|| {
+                        "Automatic installation is unavailable for this session.".to_owned()
+                    }),
                     IconName::Laptop,
                     theme.muted_foreground,
                 ),
@@ -480,15 +482,8 @@ impl Shell {
                             .child(format!("Latest {version}"))
                     }),
             );
-        if let Some(reason) = &snapshot.unavailable {
-            content = content.child(update_notice(
-                "Installation unavailable",
-                reason.clone(),
-                IconName::Laptop,
-                theme.muted_foreground,
-                theme,
-            ));
-        } else if server
+        if snapshot.unavailable.is_none()
+            && server
             && !output_visible
             && !view.busy()
             && !matches!(
@@ -529,23 +524,29 @@ impl Shell {
         if output_visible {
             content = content.child(self.render_update_output(theme, cx));
         }
-        let mut panel = v_flex().size_full().min_h_0().gap_4().child(
-            div()
-                .id("updates-status-scroll")
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .overflow_y_scroll()
-                .track_scroll(&view.page_scroll)
-                .vertical_scrollbar(&view.page_scroll)
-                .child(
-                    content
-                        .w_full()
-                        .when(output_visible, |content| content.flex_1())
-                        .when(!output_visible, |content| content.flex_none()),
-                ),
-        );
+        let mut panel = v_flex()
+            .w_full()
+            .when(output_visible, |panel| panel.h_full())
+            .max_w(px(680.))
+            .min_h_0()
+            .gap_4()
+            .child(
+                div()
+                    .id("updates-status-scroll")
+                    .when(output_visible, |area| area.flex_1())
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .track_scroll(&view.page_scroll)
+                    .vertical_scrollbar(&view.page_scroll)
+                    .child(
+                        content
+                            .w_full()
+                            .when(output_visible, |content| content.flex_1())
+                            .when(!output_visible, |content| content.flex_none()),
+                    ),
+            );
         if view.confirm_restart {
             panel = panel.child(
                 v_flex()
@@ -667,20 +668,25 @@ impl Shell {
                     ))
                 },
             )
-            .when(view.snapshot.output.is_empty() && !view.busy(), |row| {
-                row.child(self.update_button(
-                    "updates-output-toggle",
-                    if view.show_output {
-                        "Hide output"
-                    } else {
-                        "View output"
-                    },
-                    Action::ToggleOutput,
-                    false,
-                    false,
-                    cx,
-                ))
-            })
+            .when(
+                view.snapshot.unavailable.is_none()
+                    && view.snapshot.output.is_empty()
+                    && !view.busy(),
+                |row| {
+                    row.child(self.update_button(
+                        "updates-output-toggle",
+                        if view.show_output {
+                            "Hide output"
+                        } else {
+                            "View output"
+                        },
+                        Action::ToggleOutput,
+                        false,
+                        false,
+                        cx,
+                    ))
+                },
+            )
             .into_any_element()
     }
 
@@ -817,10 +823,8 @@ impl Shell {
     ) -> Button {
         Button::new(id)
             .label(label)
-            .small()
             .focus_ring(false)
             .when(primary, |button| button.primary())
-            .when(!primary, |button| button.ghost())
             .when(!disabled, |button| button.cursor_pointer())
             .disabled(disabled)
             .on_click(cx.listener(move |shell, _, window, cx| {

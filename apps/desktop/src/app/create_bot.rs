@@ -141,7 +141,7 @@ impl ElseApp {
                         v_flex()
                             .items_center()
                             .gap_2()
-                            .child(bot_avatar("create-avatar-preview", form.avatar, px(84.)))
+                            .child(bot_avatar("create-avatar-preview", form.avatar, px(64.)))
                             .child(div().text_xs().text_color(theme.muted_foreground).child(
                                 format!(
                                     "{} · {}",
@@ -197,13 +197,7 @@ impl ElseApp {
                 );
             }
             if let Some(profile) = &form.profile {
-                details = details.child(
-                    div()
-                        .pt_4()
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .child(profile.clone()),
-                );
+                details = details.child(div().pt_2().child(profile.clone()));
             }
             if let Some(error) = &form.error {
                 details = details.child(
@@ -219,7 +213,7 @@ impl ElseApp {
                 h_flex().items_stretch()
             };
             let body = v_flex()
-                .gap_5()
+                .gap_3()
                 .child(
                     div()
                         .text_sm()
@@ -234,7 +228,14 @@ impl ElseApp {
             let app_close = app.clone();
             let mine = holder.clone();
             dialog
-                .title("Create bot")
+                .title(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Create bot"),
+                )
+                .centered()
+                .bg(theme.popover)
                 .w(px(704.))
                 .on_close(move |_, _, cx| {
                     let _ = app_close.update(cx, |app, _| {
@@ -261,7 +262,6 @@ impl ElseApp {
                                 .focus_ring(false)
                                 .cursor_pointer()
                                 .label("Cancel")
-                                .ghost()
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(

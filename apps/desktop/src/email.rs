@@ -240,16 +240,17 @@ impl EmailSettings {
 impl Render for EmailSettings {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let mut content = v_flex()
-            .gap_5()
-            .w_full()
-            .child(div().text_xl().font_semibold().child("Email"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("Connect an inbox for any of your bots to use when you ask."),
-            );
+        let mut content = v_flex().gap_5().w_full().child(
+            v_flex()
+                .gap_2()
+                .child(div().text_xl().font_semibold().child("Email"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("Connect an inbox for any of your bots to use when you ask."),
+                ),
+        );
         for account in &self.accounts {
             content = content.child(
                 h_flex()
