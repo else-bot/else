@@ -670,14 +670,14 @@ impl ComputerView {
                 color: crate::avatar::AvatarColor::Gray,
                 ..self.avatar
             };
-            // In the panel the state sits 48 px under the bot's header, the
-            // way Settings places its empty states; expanded, it centers.
+            // The state centres in the space it has, a little above the
+            // middle so it reads as centred under the panel's header.
             area = area.child(
                 v_flex()
                     .size_full()
                     .items_center()
-                    .when(self.expanded, |state| state.justify_center())
-                    .when(!self.expanded, |state| state.justify_start().pt_12())
+                    .justify_center()
+                    .when(!self.expanded, |state| state.pb_16())
                     .gap_2()
                     .text_color(cx.theme().muted_foreground)
                     .child(div().opacity(0.8).child(
@@ -685,7 +685,9 @@ impl ComputerView {
                     ))
                     .child(
                         div()
+                            .pt_1()
                             .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(cx.theme().foreground)
                             .child(text.to_owned()),
                     )

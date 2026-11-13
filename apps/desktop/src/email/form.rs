@@ -291,11 +291,15 @@ impl Form {
             providers = providers.child(
                 segment(
                     SharedString::from(format!("email-provider-{provider:?}")),
-                    provider.label(),
+                    match provider {
+                        EmailProvider::Microsoft => "Microsoft",
+                        provider => provider.label(),
+                    },
                     chosen,
                     busy,
                     cx,
                 )
+                .accessibility_label(provider.label())
                 .on_click(cx.listener(move |view, _, window, cx| {
                     if let Some(form) = &mut view.form {
                         form.clear_secrets(window, cx);
@@ -306,7 +310,8 @@ impl Form {
                 })),
             );
         }
-        // The track spans the column, so every provider keeps its whole name.
+        // The track spans the column; Microsoft 365 shows as "Microsoft" so
+        // five equal segments fit the 560 px column untruncated.
         form = form.child(providers);
         if self.provider != EmailProvider::Gmail {
             form = form.child(field("Email address", &self.address));

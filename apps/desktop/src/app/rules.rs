@@ -121,17 +121,18 @@ fn rule_line(line: &str, cx: &App) -> StyledText {
 
 fn diff_block(diff: &[DiffLine], cx: &App) -> Div {
     let theme = cx.theme();
-    // The same surface as a code block in the transcript.
+    // The same surface and radius as a code block in the transcript, with
+    // 12 px of padding on every side and 12.5 px mono at 1.6 line height.
     v_flex()
         .w_full()
         .flex_none()
-        .py_3()
+        .p_3()
         .rounded(theme.radius)
         .bg(theme.secondary)
         .overflow_hidden()
         .font_family(theme.mono_font_family.clone())
-        .text_xs()
-        .line_height(px(18.))
+        .text_size(px(12.5))
+        .line_height(px(20.))
         .children(diff.iter().map(|line| {
             // The band and the sign carry the colour; the text stays in the
             // body colour so it reads on the tint.
@@ -141,20 +142,29 @@ fn diff_block(diff: &[DiffLine], cx: &App) -> Div {
                     "+",
                     theme.success,
                     theme.foreground,
-                    Some(theme.success.opacity(0.12)),
+                    Some(theme.success.opacity(0.11)),
                 ),
                 DiffOp::Remove => (
                     "-",
                     theme.danger,
                     theme.foreground,
-                    Some(theme.danger.opacity(0.12)),
+                    Some(theme.danger.opacity(0.11)),
                 ),
             };
+            // A changed line: an 11% tint with a 2 px gutter bar in its
+            // colour. Unchanged lines keep the bar's space so text aligns.
             h_flex()
                 .w_full()
-                .px_3()
+                .pl(px(6.))
+                .pr_2()
                 .gap_2()
                 .items_start()
+                .border_l_2()
+                .border_color(if fill.is_some() {
+                    color
+                } else {
+                    transparent_black()
+                })
                 .when_some(fill, |row, fill| row.bg(fill))
                 .text_color(text)
                 .child(div().flex_none().text_color(color).child(sign))
@@ -171,6 +181,9 @@ fn diff_block(diff: &[DiffLine], cx: &App) -> Div {
 /// The tallest a tab's body grows before it scrolls; shorter content
 /// leaves the dialog shorter.
 const BODY_MAX: f32 = 380.;
+/// The shortest a tab's body gets, so the dialog keeps a stable ~420 px
+/// minimum height between tabs and versions.
+const BODY_MIN: f32 = 248.;
 
 fn quote(words: &str, cx: &App) -> Div {
     let theme = cx.theme();
@@ -461,7 +474,7 @@ impl ElseApp {
             }));
         let heading = h_flex()
             .w_full()
-            .pb_1()
+            .pb(super::settings::ROW_GAP)
             .items_center()
             .child(crate::appearance::section_label("Rules", cx).flex_1())
             .when(only_history, |row| row.child(open));
@@ -527,6 +540,7 @@ impl ElseApp {
             .cursor_pointer()
             .with_size(Size::Size(px(16.)))
             .mx(px(-8.))
+            .my(px(-8.))
             .px_2()
             .py_2()
             .accessibility_label("Open rules")
@@ -727,6 +741,7 @@ impl ElseApp {
         v_flex()
             .id("rules-sections")
             .w_full()
+            .min_h(px(BODY_MIN))
             .max_h(px(BODY_MAX))
             .overflow_y_scroll()
             .track_scroll(&dialog.scroll)
@@ -860,10 +875,10 @@ impl ElseApp {
             (title, by.to_owned(), when(v.created_at))
         };
         let list = v_flex()
-            // About a third of the body, enough for a bot's full name; the
+            // A narrow column that fits a version's title and author; the
             // diff takes the rest.
             .id("rules-versions")
-            .w(px(264.))
+            .w(px(220.))
             .flex_none()
             .max_h(px(BODY_MAX))
             .overflow_y_scroll()
@@ -934,8 +949,10 @@ impl ElseApp {
                 col.child(quote(&picked.owner_words, cx))
             })
             .child(diff_block(&picked.diff, cx));
+        // The divider runs the body's full height, however short the diff.
         h_flex()
             .w_full()
+            .min_h(px(BODY_MIN))
             .max_h(px(BODY_MAX))
             .items_stretch()
             .gap_6()

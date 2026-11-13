@@ -125,13 +125,13 @@ impl ProfilePicker {
             });
             let button_id = SharedString::from(format!("provider-{}", provider.id));
             if self.tabs {
-                return crate::panel_kit::hugging(segment(
+                return segment(
                     button_id,
                     provider.label.clone(),
                     browsing,
                     self.disabled,
                     cx,
-                ))
+                )
                 .accessibility_label(format!("{} · {status}", provider.label))
                 .on_click(select);
             }
@@ -185,9 +185,10 @@ impl ProfilePicker {
                 .on_click(select)
         });
         if self.tabs {
+            // A form field: equal segments fill the field column, edge to
+            // edge with the inputs above.
             v_flex()
                 .w_full()
-                .items_start()
                 .gap_2()
                 .child(
                     div()
@@ -196,7 +197,7 @@ impl ProfilePicker {
                         .text_color(theme.muted_foreground)
                         .child("Provider"),
                 )
-                .child(segment_track(cx).children(items))
+                .child(segment_track(cx).w_full().children(items))
                 .into_any_element()
         } else {
             v_flex()
@@ -397,6 +398,11 @@ impl ProfilePicker {
                         Button::new(SharedString::from(format!("setup-details-{}", provider.id)))
                             .control(Tier::Ghost, Scale::Compact, false, cx)
                             .label(if explained { "Hide details" } else { "Details" })
+                            .icon(if explained {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
                             .on_click(cx.listener(move |picker, _, _, cx| {
                                 picker.explained = if explained {
                                     None
@@ -466,27 +472,20 @@ impl ProfilePicker {
             .iter()
             .position(|effort| *effort == choice.reasoning_effort)
             .unwrap_or(0);
-        // Under tabs each control hugs its labels; beside the catalog the
-        // two share the row.
-        let fit = |segment: Button| {
-            if self.tabs {
-                crate::panel_kit::hugging(segment)
-            } else {
-                segment
-            }
-        };
+        // Equal segments fill each field: stacked under the provider tabs
+        // or side by side beside the catalog.
         let slider = segment_track(cx)
-            .when(!self.tabs, |track| track.w_full())
+            .w_full()
             .children(efforts.iter().enumerate().map(|(i, effort)| {
                 let value = effort.clone();
                 let on = i == index;
-                fit(segment(
+                segment(
                     SharedString::from(format!("effort-{effort}")),
                     short_effort_label(effort).to_owned(),
                     on,
                     self.disabled,
                     cx,
-                ))
+                )
                 .toggled(on)
                 .accessibility_label(format!("{} reasoning", effort_label(effort)))
                 .on_click(cx.listener(move |picker, _, _, cx| {
@@ -504,13 +503,13 @@ impl ProfilePicker {
         .map(|(tier, label, icon)| {
             let selected = choice.service_tier == tier;
             let enabled = !self.disabled && (tier != FAST || fast_offered);
-            fit(segment(
+            segment(
                 SharedString::from(format!("speed-{tier}")),
                 label,
                 selected,
                 !enabled,
                 cx,
-            ))
+            )
             .toggled(selected)
             .icon(icon)
             .accessibility_label(if enabled || tier != FAST {
@@ -530,7 +529,6 @@ impl ProfilePicker {
                 .flex_1()
                 .flex_basis(px(0.))
                 .min_w_0()
-                .when(self.tabs, |field| field.items_start())
                 .gap_2()
                 .child(
                     div()
@@ -545,7 +543,7 @@ impl ProfilePicker {
         let speed = field(
             "Speed",
             segment_track(cx)
-                .when(!self.tabs, |track| track.w_full())
+                .w_full()
                 .children(speeds)
                 .into_any_element(),
         )

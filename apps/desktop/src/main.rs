@@ -97,7 +97,8 @@ gpui_kit::assets::icon_assets!(
         Gamepad2,
         Plus,
         ExternalLink,
-        Webhook
+        Webhook,
+        Undo2
     ]
 );
 

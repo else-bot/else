@@ -1,5 +1,6 @@
 use super::{Avatar, AvatarColor, AvatarShape, bot_avatar};
 use crate::controls::{Control as _, Scale, Tier};
+use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex, v_flex};
@@ -95,6 +96,8 @@ impl RenderOnce for AvatarPicker {
                 .p(px(1.))
                 .bg(theme.border)
                 .child(div().size_full().rounded_full().bg(color.fill()));
+            // A round swatch takes a round ring: 2 px, then a 2 px gap.
+            let ring_size = swatch_size + px(8.);
             Button::new(ElementId::Name(format!("avatar-color-{color:?}").into()))
                 .focus_ring(false)
                 .cursor_pointer()
@@ -102,12 +105,18 @@ impl RenderOnce for AvatarPicker {
                 .w(size)
                 .h(size)
                 .p_0()
-                .rounded(radius)
+                .rounded(size / 2.)
                 .toggled(self.current.color == color)
                 .disabled(self.disabled)
                 .accessibility_label(format!("{} color", color.label()))
                 .tooltip(color.label())
-                .child(ring(size, radius, self.current.color == color, cx, swatch))
+                .child(ring(
+                    ring_size,
+                    ring_size / 2.,
+                    self.current.color == color,
+                    cx,
+                    swatch,
+                ))
                 .on_click(move |_, window, cx| pick(avatar, window, cx))
         });
         let reset = self.on_change;
@@ -130,6 +139,7 @@ impl RenderOnce for AvatarPicker {
                                 self.disabled || self.current == Avatar::default(),
                                 cx,
                             )
+                            .icon(IconName::Undo2)
                             .label("Reset")
                             .accessibility_label("Reset avatar")
                             .mr(-Scale::Compact.padding())
