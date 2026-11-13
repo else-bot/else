@@ -267,8 +267,9 @@ impl ElseApp {
             item_ix: ix,
             offset_in_item: px(0.),
         });
-        view.revealed = Some((view.rows[ix].key, std::time::Instant::now()));
-        cx.notify();
+        let reveal =
+            super::conversation::Reveal::new(view.rows[ix].key, super::conversation::Spot::Row);
+        self.start_reveal(reveal, cx);
     }
 
     /// The strip above the composer while the bot waits on the owner, so the

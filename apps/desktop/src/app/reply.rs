@@ -242,14 +242,39 @@ pub(super) fn quotes_whole(text: &str, original: &str) -> bool {
 /// owner selected it on screen: without Markdown, ignoring spacing and
 /// punctuation.
 pub(super) fn quotes_part(text: &str, original: &str) -> bool {
-    fn letters(text: &str) -> String {
-        text.chars()
-            .filter(|c| c.is_alphanumeric())
-            .flat_map(char::to_lowercase)
-            .collect()
-    }
     let needle = letters(original);
     !needle.is_empty() && letters(&rendered(text)).contains(&needle)
+}
+
+/// Where `quote` appears in `shown`, the text a message renders, matched as
+/// [`quotes_part`] matches it.
+pub(super) fn passage_range(shown: &str, quote: &str) -> Option<Range<usize>> {
+    let needle: Vec<char> = letters(quote).chars().collect();
+    let hay: Vec<(usize, char)> = shown
+        .char_indices()
+        .filter(|(_, c)| c.is_alphanumeric())
+        .flat_map(|(at, c)| c.to_lowercase().map(move |lower| (at, lower)))
+        .collect();
+    if needle.is_empty() {
+        return None;
+    }
+    let start = hay
+        .windows(needle.len())
+        .position(|window| window.iter().map(|(_, c)| *c).eq(needle.iter().copied()))?;
+    let (first, _) = hay[start];
+    let (last, _) = hay[start + needle.len() - 1];
+    let end = shown[last..]
+        .chars()
+        .next()
+        .map_or(last, |c| last + c.len_utf8());
+    Some(first..end)
+}
+
+fn letters(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// The text a Markdown message shows, without link destinations or markup.
@@ -370,6 +395,28 @@ pub(super) fn too_long(message: &str, limit: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_passage_is_found_in_the_rendered_text_ignoring_spacing_and_punctuation() {
+        let shown = "Fixed market list. BTC, ETH, SOL, HYPE and NVDA, nothing added.";
+        let range = passage_range(shown, "btc eth sol").unwrap();
+        assert_eq!(&shown[range], "BTC, ETH, SOL");
+        let range = passage_range(shown, "list.\nBTC").unwrap();
+        assert_eq!(&shown[range], "list. BTC");
+    }
+
+    #[test]
+    fn a_passage_range_covers_whole_characters() {
+        let shown = "Café: déjà vu";
+        let range = passage_range(shown, "café déjà").unwrap();
+        assert_eq!(&shown[range], "Café: déjà");
+    }
+
+    #[test]
+    fn a_missing_or_empty_passage_has_no_range() {
+        assert_eq!(passage_range("Fixed market list", "stocks"), None);
+        assert_eq!(passage_range("Fixed market list", "..."), None);
+    }
 
     fn reference(author: Author, text: &str) -> MessageReference {
         MessageReference {
