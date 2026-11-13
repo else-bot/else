@@ -122,10 +122,11 @@ impl Shell {
             let shell = shell.clone();
             let shell_close = shell_close.clone();
             let viewport = window.viewport_size();
+            let (top, height) = sheet_band(viewport.height);
             crate::appearance::modal_surface(dialog, cx)
                 .w((viewport.width - px(64.)).min(SETTINGS_SHEET_WIDTH))
-                .h((viewport.height - px(64.)).min(px(760.)))
-                .centered()
+                .h(height)
+                .margin_top(top)
                 .entrance(DialogEntrance::None)
                 .p_0()
                 .gap_0()
@@ -818,9 +819,29 @@ fn settings_row(
 pub(super) const SETTINGS_COLUMN: Pixels = px(640.);
 /// Inset of that column from the left edge of the Settings pane.
 pub(super) const SETTINGS_INSET: Pixels = px(32.);
-/// The sheet fits the navigation, one inset column and a matching margin,
-/// so every page keeps the same size and no page floats in a wide void.
-const SETTINGS_SHEET_WIDTH: Pixels = px(920.);
+/// The sheet fits the navigation and the column with the same inset on
+/// both sides, so every page keeps one size and no page floats in a void.
+const SETTINGS_SHEET_WIDTH: Pixels = px(840.);
+const SETTINGS_SHEET_HEIGHT: Pixels = px(640.);
+/// What the sheet keeps clear above it: the title bar and the conversation
+/// header, plus a 48 px gap, so it never slices the header's text.
+const SHEET_CLEAR_TOP: Pixels = px(136.);
+/// What it keeps clear below it: the composer and its hint, plus 48 px.
+const SHEET_CLEAR_BOTTOM: Pixels = px(144.);
+/// The smallest sheet; a shorter window lets it overlap the chrome instead.
+const SHEET_MIN_HEIGHT: Pixels = px(420.);
+
+/// The sheet's top offset and height for a window this tall: centered in
+/// the band between the header and the composer, up to its full height.
+fn sheet_band(viewport: Pixels) -> (Pixels, Pixels) {
+    let band = viewport - SHEET_CLEAR_TOP - SHEET_CLEAR_BOTTOM;
+    if band < SHEET_MIN_HEIGHT {
+        let height = SHEET_MIN_HEIGHT.min(viewport - px(32.)).max(px(0.));
+        return (((viewport - height) / 2.).max(px(0.)), height);
+    }
+    let height = band.min(SETTINGS_SHEET_HEIGHT);
+    (SHEET_CLEAR_TOP + (band - height) / 2., height)
+}
 
 /// Place `content` in the shared Settings column. The column grows to fill
 /// the pane's height, so a page can center an empty state in it.
@@ -835,9 +856,9 @@ pub(super) fn settings_column(content: impl IntoElement) -> Div {
     )
 }
 
-/// The empty state of an inventory page (MCP, Skills): centered in the
-/// space under the page heading, raised slightly so it sits optically
-/// centered, with one supporting line and the button that fixes it.
+/// The empty state of an inventory page (MCP, Skills): 64 px under the page
+/// intro (its 20 px gap plus 44), so it reads with the intro at every sheet height, with
+/// one supporting line and the button that fixes it.
 pub(super) fn empty_state(
     icon: IconName,
     title: &'static str,
@@ -847,12 +868,9 @@ pub(super) fn empty_state(
 ) -> Div {
     let theme = cx.theme();
     v_flex()
-        .flex_1()
         .w_full()
-        .min_h(px(240.))
-        .pb(px(72.))
+        .pt_11()
         .items_center()
-        .justify_center()
         .text_center()
         .gap_2()
         .child(
