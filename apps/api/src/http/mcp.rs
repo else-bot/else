@@ -136,6 +136,9 @@ pub async fn endpoint(
                     Tool::Social
                 }
                 Some("else_status") => Tool::Diagnose,
+                // Every turn may read its history; the tool itself admits
+                // only a running delegated task.
+                Some("notify_owner") => Tool::ReadHistory,
                 _ => Tool::ReadMemory,
             };
             if matches!(name, Some("delegate" | "council"))
@@ -441,6 +444,7 @@ fn tool_list() -> Value {
         super::visual_tools::schema(),
         super::owner_tools::secret_schema(),
         super::owner_tools::handoff_schema(),
+        super::owner_tools::notice_schema(),
         super::owner_tools::choice_schema(),
         super::owner_tools::permission_schema(),
         super::owner_tools::confirm_permission_schema(),
@@ -690,6 +694,7 @@ async fn dispatch(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
         | "mail_trigger_set"
         | "mail_trigger_delete" => super::connectors::call(state, grant, name, args).await,
         "computer_handoff" => super::owner_tools::computer_handoff(state, grant, args).await,
+        "notify_owner" => super::owner_tools::notify_owner(state, grant, args).await,
         name if name.starts_with("computer_") => {
             super::guest_tools::call(state, grant, name, args).await
         }
