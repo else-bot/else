@@ -58,6 +58,26 @@ pub enum Error {
     Secret(String),
 }
 
+impl Error {
+    /// A stable code for bots that branch on a failure without parsing its
+    /// message.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Invalid(_) => "invalid_request",
+            Self::NotFound => "not_found",
+            Self::Conflict => "conflict",
+            Self::Io(_) => "library_unavailable",
+            Self::Connection => "connection_failed",
+            Self::Http(_) => "http_status",
+            Self::AuthRequired(_) | Self::AuthChallenge(_) => "auth_required",
+            Self::OAuthRevoked => "reauth_required",
+            Self::Timeout => "timeout",
+            Self::Paused => "paused",
+            Self::Secret(_) => "secret_unavailable",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct PackageId(String);

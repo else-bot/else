@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::{ApiError, ApiPath};
-use super::mcp::{Outcome, tool_error, tool_result};
+use super::mcp::{Outcome, tool_result};
 use crate::grants::Grant;
 use crate::mcp::{Error, Installation, Library, PackageId};
 
@@ -190,7 +190,7 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                 }
                 _ => {
                     return (
-                        tool_error("Use an MCP id and an optional purpose of at most 300 bytes."),
+                        invalid("Use an MCP id and an optional purpose of at most 300 bytes."),
                         None,
                     );
                 }
@@ -241,7 +241,7 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
         },
         "mcp_request" => {
             if let Some(error) = args["purpose"].as_str().and_then(oversized_purpose) {
-                return (tool_error(&error), None);
+                return (invalid(&error), None);
             }
             let request = match serde_json::from_value::<RequestArgs>(args.clone()) {
                 Ok(request)
@@ -260,7 +260,7 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                 }
                 _ => {
                     return (
-                        tool_error(
+                        invalid(
                             "Use a supported MCP method with object params, and valid effect, purpose and context.",
                         ),
                         None,
@@ -275,7 +275,7 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                     Some(Effect::External) => Some(Kind::External),
                     _ => {
                         return (
-                            tool_error(
+                            invalid(
                                 "Declare effect local, destructive or external for tools/call. Nothing was done.",
                             ),
                             None,
@@ -333,7 +333,7 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                 Err(error) => Err(error),
             }
         }
-        _ => return (tool_error("Unknown MCP library tool."), None),
+        _ => return (invalid("Unknown MCP library tool."), None),
     };
     let note = approval.map(|note| format!("; {note}")).unwrap_or_default();
     match result {
@@ -342,10 +342,26 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
             Some(format!("shared MCP request completed{note}")),
         ),
         Err(error) => (
-            tool_error(&error.to_string()),
+            failure(&error),
             Some(format!("shared MCP request failed{note}")),
         ),
     }
+}
+
+/// A failed call in the same JSON shape as a result, so a bot that parses
+/// every result as JSON can read the failure too.
+fn failure(error: &Error) -> Value {
+    envelope(error.code(), &error.to_string())
+}
+
+fn invalid(message: &str) -> Value {
+    envelope("invalid_request", message)
+}
+
+fn envelope(code: &str, message: &str) -> Value {
+    let mut value = tool_result(json!({"error": {"code": code, "message": message}}));
+    value["isError"] = json!(true);
+    value
 }
 
 /// Bytes of a whole result saved for a bot to query; larger ones keep only
@@ -435,10 +451,7 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> Result<Instal
         None | Some(Value::Null) | Some(Value::Bool(false)) => false,
         Some(Value::Bool(true)) => true,
         Some(_) => {
-            return Err((
-                tool_error("replace is true or false. Nothing was done."),
-                None,
-            ));
+            return Err((invalid("replace is true or false. Nothing was done."), None));
         }
     };
     let Ok(input) = serde_json::from_value::<Installation>(fields) else {
@@ -533,7 +546,7 @@ pub(super) async fn auth_required(
     use crate::db::owner_questions::{self, Gate};
     let package = match library(state).read(id).await {
         Ok(package) => package,
-        Err(error) => return (tool_error(&error.to_string()), None),
+        Err(error) => return (failure(&error), None),
     };
     let describe = |scopes: &str| {
         format!(
