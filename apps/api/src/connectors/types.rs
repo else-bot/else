@@ -249,13 +249,21 @@ pub struct Scan {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("{code}")]
+#[error("{code}{}", .detail.map(|d| format!(": {d}")).unwrap_or_default())]
 pub struct MailError {
     pub code: &'static str,
+    /// Which field failed and its allowed values, for the bot to correct.
+    pub detail: Option<&'static str>,
 }
 impl MailError {
     pub fn new(code: &'static str) -> Self {
-        Self { code }
+        Self { code, detail: None }
+    }
+    pub fn detail(self, detail: &'static str) -> Self {
+        Self {
+            detail: Some(detail),
+            ..self
+        }
     }
 }
 
