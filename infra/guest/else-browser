@@ -213,6 +213,12 @@ def page_step(tab, element, step, *args):
     """Run one of the steps in actions.js on the element."""
     return tab.on(element, f"function(){{return ({ACTIONS}).{step}.call(this,...{json.dumps(args)})}}")
 
+def field_of(tab, element):
+    """The field to type into, resolved once (see field in actions.js)."""
+    r = tab.call("Runtime.callFunctionOn", objectId=element, returnByValue=False,
+                 functionDeclaration=f"function(){{return ({ACTIONS}).field.call(this)}}")
+    return r["result"]["objectId"]
+
 def click(tab, element, selector):
     point = page_step(tab, element, "clickPoint")
     if "error" not in point:
@@ -224,12 +230,28 @@ def click(tab, element, selector):
     for kind in ("mousePressed", "mouseReleased"):
         tab.call("Input.dispatchMouseEvent", type=kind, x=point["x"], y=point["y"], button="left", clickCount=1)
 
-def set_field(tab, selector, value):
-    element = find(tab, selector)
-    if not tab.on(element, "function(){let e=this;if(!e.matches('input,textarea,select')&&e.closest('label')?.control)"
-                  "e=e.closest('label').control;if(!e.matches('input,textarea,select'))return false;"
-                  f"e.focus();e.value={json.dumps(value)};e.dispatchEvent(new Event('input',{{bubbles:true}}));return true}}"):
-        raise SystemExit(json.dumps({"error": f"{json.dumps(selector)} is not a text field"}))
+DELETE_KEY = {"key": "Delete", "code": "Delete", "windowsVirtualKeyCode": 46}
+
+def type_into(tab, element, selector, text, secret):
+    def fail(error):
+        raise SystemExit(json.dumps({"error": f"{json.dumps(selector)}: {error}"}))
+    typed = page_step(tab, element, "typeInto", text)
+    if "error" in typed:
+        fail(typed["error"])
+    if typed.get("insert"):
+        # Text goes wherever focus is, so check it right before typing.
+        if not page_step(tab, element, "focusedField"):
+            fail("the page moved focus or the text cursor away from the field, so nothing was typed")
+        if text:
+            tab.call("Input.insertText", text=text)
+        else:
+            for kind in ("rawKeyDown", "keyUp"):
+                tab.call("Input.dispatchKeyEvent", type=kind, **DELETE_KEY)
+    # In its own call, so the page's handlers have finished.
+    held = page_step(tab, element, "holds", text if typed.get("insert") else typed["check"], secret,
+                     typed.get("index"))
+    if "error" in held:
+        fail(held["error"])
 
 def main(argv):
     accept_dialogs = argv[:1] == ["--accept-dialogs"]
@@ -255,7 +277,8 @@ def main(argv):
         time.sleep(0.2)
         tab.settle()
     elif action == "type":
-        set_field(tab, rest[0], rest[1])
+        element = field_of(tab, find(tab, rest[0]))
+        type_into(tab, element, rest[0], rest[1], page_step(tab, element, "secret"))
     elif action not in ("text", "title"):
         raise SystemExit(json.dumps({"error": f"unknown action {action}"}))
     text = tab.eval("document.body ? document.body.innerText : ''") or ""

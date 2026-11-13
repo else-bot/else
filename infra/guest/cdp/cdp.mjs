@@ -57,6 +57,7 @@ function canRun(path) {
 }
 const LOCK = "/var/lib/elsebot/browser.lock";
 const ACTIONS = fs.readFileSync(new URL("actions.js", import.meta.url), "utf8");
+const DELETE_KEY = { key: "Delete", code: "Delete", windowsVirtualKeyCode: 46 };
 export const MAX_EVALUATE_MS = 300000;
 const CONTROLLED = "/var/lib/elsebot/browser-controlled.jsonl";
 
@@ -492,9 +493,29 @@ export class Page {
     await this.call("Runtime.releaseObjectGroup", { objectGroup: "cdp-action" }, { mutating: false }).catch(() => {});
   }
 
+  /** Replace a field's content like typing, so frameworks such as React
+   * see it and the page may refuse it (CdpError); a select takes an
+   * option's value or label. */
   async fill(selector, value) {
-    const ok = await this.evaluate(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); if (!e) return false; e.focus(); e.value = ${JSON.stringify(value)}; e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
-    if (!ok) throw new CdpError(`no element matches ${selector}`);
+    try {
+      const field = await this.element(selector, { field: true });
+      const secret = await this.step(field, "secret", [], { mutating: false });
+      const typed = await this.step(field, "typeInto", [value]);
+      if (typed.error) throw new CdpError(`${selector}: ${typed.error}`);
+      if (typed.insert) {
+        // Text goes wherever focus is, so check it right before typing.
+        if (!(await this.step(field, "focusedField", [], { mutating: false }))) {
+          throw new CdpError(`${selector}: the page moved focus or the text cursor away from the field, so nothing was typed`);
+        }
+        if (value) await this.call("Input.insertText", { text: value });
+        else for (const type of ["rawKeyDown", "keyUp"]) await this.call("Input.dispatchKeyEvent", { type, ...DELETE_KEY });
+      }
+      // In its own call, so the page's handlers have finished.
+      const held = await this.step(field, "holds", [typed.insert ? value : typed.check, secret, typed.index ?? null], { mutating: false });
+      if (held.error) throw new CdpError(`${selector}: ${held.error}`);
+    } finally {
+      await this.release();
+    }
   }
 
   /** Click like a person: real mouse events on the element, after

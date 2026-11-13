@@ -46,6 +46,7 @@ MAX_EVALUATE = 300
 CONTROLLED = "/var/lib/elsebot/browser-controlled.jsonl"
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "actions.js")) as _f:
     ACTIONS = _f.read()
+DELETE_KEY = {"key": "Delete", "code": "Delete", "windowsVirtualKeyCode": 46}
 
 
 def _record(target, created):
@@ -485,12 +486,31 @@ class Page:
             pass
 
     def fill(self, selector, value):
-        ok = self.evaluate(
-            f"(() => {{ const e = document.querySelector({json.dumps(selector)}); if (!e) return false; e.focus(); "
-            f"e.value = {json.dumps(value)}; e.dispatchEvent(new Event('input', {{ bubbles: true }})); "
-            f"e.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()")
-        if not ok:
-            raise CdpError(f"no element matches {selector}")
+        """Replace a field's content like typing, so frameworks such as React
+        see it and the page may refuse it (CdpError); a select takes an
+        option's value or label."""
+        try:
+            field = self._element(selector, field=True)
+            secret = self._step(field, "secret", mutating=False)
+            typed = self._step(field, "typeInto", value)
+            if "error" in typed:
+                raise CdpError(f"{selector}: {typed['error']}")
+            if typed.get("insert"):
+                # Text goes wherever focus is, so check it right before typing.
+                if not self._step(field, "focusedField", mutating=False):
+                    raise CdpError(f"{selector}: the page moved focus or the text cursor away from the field, so nothing was typed")
+                if value:
+                    self.call("Input.insertText", {"text": value})
+                else:
+                    for kind in ("rawKeyDown", "keyUp"):
+                        self.call("Input.dispatchKeyEvent", {"type": kind, **DELETE_KEY})
+            # In its own call, so the page's handlers have finished.
+            want = value if typed.get("insert") else typed["check"]
+            held = self._step(field, "holds", want, secret, typed.get("index"), mutating=False)
+            if "error" in held:
+                raise CdpError(f"{selector}: {held['error']}")
+        finally:
+            self._release()
 
     def click(self, selector):
         """Click like a person: real mouse events on the element, after

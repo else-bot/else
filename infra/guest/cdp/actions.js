@@ -89,4 +89,117 @@
     const [x, y] = point;
     return { x, y };
   },
+
+  // The field to type into: the element, or the control of the label it is
+  // in. Callers resolve it once and run every typing step on it, so the page
+  // cannot point the label at another field halfway through.
+  field() {
+    const e = this;
+    if (!e.matches("input,textarea,select") && !e.isContentEditable && e.closest("label")?.control) return e.closest("label").control;
+    return e;
+  },
+
+  // Whether the field is a password. Callers ask before typing and pass the
+  // answer to the steps below, because the page's handlers can change the
+  // field's type while it takes the text.
+  secret() {
+    return this.type === "password";
+  },
+
+  // Get the field ready for `value`. A text field or editor is focused with
+  // its content selected and returns {insert: true}: the caller checks it
+  // still has focus with `focusedField`, types through Input.insertText
+  // (which edits like a keyboard, so the page's input handlers run and may
+  // refuse it), then confirms with `holds`. A select or a picker input
+  // (date, color, ...) is set here with the prototype's setter, which
+  // framework value trackers do not intercept, and returns {check: value}:
+  // the caller confirms that value with `holds` in a later call, after the
+  // page's handlers, including their queued microtasks, have run.
+  typeInto(value) {
+    const e = this;
+    const fire = () => {
+      e.dispatchEvent(new Event("input", { bubbles: true }));
+      e.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    if (!e.isConnected) return { error: "the field is no longer on the page" };
+    if (e.matches(":disabled") || e.readOnly) return { error: "the field is disabled or read-only" };
+    if (e.tagName === "SELECT") {
+      const norm = (s) => s.replace(/\s+/g, " ").trim();
+      const options = [...e.options].filter((o) => !o.matches(":disabled"));
+      const option = options.find((o) => o.value === value) || options.find((o) => norm(o.text) === norm(value));
+      if (!option) return { error: `the select has no option ${JSON.stringify(value)}; options: ${[...e.options].slice(0, 20).map((o) => JSON.stringify(norm(o.text)) + (o.matches(":disabled") ? " (disabled)" : "")).join(", ")}` };
+      // Kept as plain values: the page's handlers can change the option
+      // itself. Selected by index, since several options can share a value.
+      const want = option.value, index = option.index;
+      e.focus();
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "selectedIndex").set.call(e, index);
+      fire();
+      return { check: want, index };
+    }
+    if (e.tagName === "INPUT" && /^(checkbox|radio|file|submit|button|image|reset|hidden)$/.test(e.type)) return { error: `a ${e.type} input is not a text field; click it instead` };
+    if (e.tagName === "INPUT" && /^(date|time|datetime-local|month|week|color|range)$/.test(e.type)) {
+      e.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(e, value);
+      fire();
+      return { check: value };
+    }
+    if (!e.matches("input,textarea") && !e.isContentEditable) return { error: "it is not a text field" };
+    e.focus();
+    if (e.isContentEditable) {
+      const range = document.createRange();
+      range.selectNodeContents(e);
+      getSelection().removeAllRanges();
+      getSelection().addRange(range);
+    } else {
+      e.select();
+    }
+    return { insert: true };
+  },
+
+  // Whether focus is on the field typeInto prepared, checked in its own call
+  // just before the text goes in: typed text goes wherever focus is.
+  // When it is, also cancels the coming edit if the page's own beforeinput
+  // handlers move focus or the selection elsewhere first.
+  focusedField() {
+    const e = this;
+    const onTarget = () => {
+      const active = e.getRootNode().activeElement;
+      // In an editor, focus sits on its editing host, which may contain the
+      // element; a control inside the element has its own focus and does
+      // not count.
+      if (active !== e && !(e.isContentEditable && !!active?.isContentEditable && active.contains(e))) return false;
+      // In an editor the text goes to the selection, which must still
+      // cover only this element.
+      if (!e.isContentEditable) return true;
+      const sel = e.getRootNode().getSelection ? e.getRootNode().getSelection() : getSelection();
+      return !!sel && sel.rangeCount > 0 && e.contains(sel.anchorNode) && e.contains(sel.focusNode);
+    };
+    if (!onTarget()) return false;
+    // Listens last (bubbling on window), after the page's handlers.
+    // holds removes it, so it never touches later input.
+    const guard = (event) => { if (!onTarget()) event.preventDefault(); };
+    const key = Symbol.for("else.typingGuard");
+    if (window[key]) removeEventListener("beforeinput", window[key]);
+    window[key] = guard;
+    addEventListener("beforeinput", guard, { once: true });
+    setTimeout(() => removeEventListener("beforeinput", guard), 2000);
+    return true;
+  },
+
+  // {done: true} when the field is still on the page and holds exactly
+  // `value` (for a select, the option at `index`), else {error}. With
+  // `secret` (from `secret`), errors give only the length.
+  holds(value, secret, index) {
+    const e = this;
+    removeEventListener("beforeinput", window[Symbol.for("else.typingGuard")]);
+    if (!e.isConnected) return { error: "the page replaced the field while typing, so the text did not stay in it" };
+    if (index != null && (e.selectedIndex !== index || e.options[index].matches(":disabled"))) {
+      return { error: `the select has ${JSON.stringify(e.options[e.selectedIndex]?.text.trim() ?? "nothing")} selected; the page changed or refused the option` };
+    }
+    const norm = (s) => s.replace(/[\u200b\ufeff]/g, "").replace(/\s+/g, " ").trim();
+    const now = e.isContentEditable ? e.innerText : e.value;
+    if (e.isContentEditable ? norm(now) === norm(value) : now === value) return { done: true };
+    const held = secret ? `${now.length} characters` : JSON.stringify(now.slice(0, 200));
+    return { error: `the field holds ${held} after typing; the page changed or refused the text` };
+  },
 })
