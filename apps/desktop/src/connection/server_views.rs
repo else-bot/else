@@ -1,5 +1,6 @@
 use super::servers::{Editor, Health, ReleaseStatus};
 use super::*;
+use crate::app::Link;
 use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
@@ -19,9 +20,13 @@ impl Shell {
         }
     }
 
+    /// The server switcher: the current server's name and status dot,
+    /// opening the server menu. It sits in the sidebar header beside the
+    /// brand, so it stays as quiet as secondary text.
     pub(super) fn render_server_switcher(
         &self,
         id: &'static str,
+        link: Link,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(active) = &self.active else {
@@ -32,27 +37,18 @@ impl Shell {
             .find(active.id)
             .map(|s| s.name.clone())
             .unwrap_or_else(|| active.profile.origin.as_str().to_owned());
-        let (_, observed_color) = self.server_status(active.id, cx);
-        let color = if active.app.read(cx).connected() {
-            observed_color
-        } else if active.app.read(cx).status_text().1 {
-            cx.theme().danger
-        } else {
-            cx.theme().warning
+        let theme = cx.theme();
+        let color = match link {
+            Link::Connected => self.server_status(active.id, cx).1,
+            Link::Failed => theme.danger,
+            Link::Connecting => theme.warning,
         };
-        let icon = if self.managed_server(&active.profile) {
-            IconName::Laptop
-        } else {
-            IconName::Server
-        };
+        let text = theme.muted_foreground;
         let owner = cx.weak_entity();
         let toggle = owner.clone();
         Popover::new(id)
             .anchor(Anchor::TopLeft)
-            .open(
-                self.server_menu
-                    && (id == "settings-server-switcher") == self.settings_section().is_some(),
-            )
+            .open(self.server_menu && self.settings_section().is_none())
             .on_open_change(move |open, _, cx| {
                 let _ = toggle.update(cx, |shell, cx| {
                     shell.server_menu = *open;
@@ -61,20 +57,25 @@ impl Shell {
             })
             .trigger(
                 Button::new(SharedString::from(format!("{id}-trigger")))
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .ghost()
-                    .xsmall()
+                    .control(Tier::Ghost, Scale::Compact, false, cx)
+                    .px_2()
                     .loading(self.switch_attempt.is_some())
                     .accessibility_label(format!("Switch server. Current server {name}"))
                     .child(
                         h_flex()
                             .min_w_0()
-                            .gap_2()
-                            .child(Icon::new(icon).size_3())
-                            .child(div().max_w(px(170.)).truncate().child(name))
-                            .child(div().size_1p5().rounded_full().bg(color))
-                            .child(Icon::new(IconName::ChevronDown).size_3()),
+                            .gap(px(6.))
+                            .items_center()
+                            .text_size(px(13.))
+                            .text_color(text)
+                            .child(div().flex_none().size(px(6.)).rounded_full().bg(color))
+                            .child(div().min_w_0().truncate().child(name))
+                            .child(
+                                Icon::new(IconName::ChevronDown)
+                                    .flex_none()
+                                    .size_3()
+                                    .text_color(text),
+                            ),
                     ),
             )
             .content(move |_, _, cx| {

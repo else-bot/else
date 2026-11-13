@@ -60,7 +60,7 @@ theme() { omabox -b "$BOX" run -- omarchy-theme-set "$1" >"$OUT/theme-$1.log" 2>
 select_bot() {
   # The pinned main row has no accessibility node. This anchor also restores
   # GPUI app focus after a modal closes. Remaining navigation uses sidebar keys.
-  click 130 100
+  click 130 75
   keys Escape
   case $1 in
     main) ;;
@@ -121,20 +121,20 @@ select_bot travel
 shot dark-06-secret-request
 select_bot working
 # The main working pulse animates too; keep its screenshot instant and deliberate.
-omabox -b "$BOX" wait --timeout 3s still --window "$W" --ignore '0,0 238x850' --ignore '240,30 1200x740' >/dev/null
+omabox -b "$BOX" wait --timeout 3s still --window "$W" --ignore '0,0 238x850' --ignore '240,0 1200x770' >/dev/null
 png=$(omabox -b "$BOX" shot --window "$W")
 command cp -f "$png" "$OUT/dark-07-working.png"
 select_bot main
 main_bottom
 keys ctrl+shift+b
-# Details tab at x=1188,y=58; the tabs are the panel header. GPUI does not expose it to AT-SPI.
-click 1188 58
+# Details tab at x=1188,y=28; the tabs are the panel header. GPUI does not expose it to AT-SPI.
+click 1188 28
 scroll 1300 450 -4500
 shot dark-08-bot-details
 scroll 1300 650 4500
 shot dark-09-schedules-and-triggers
-# Computer tab at x=1327,y=58; the two tabs share the header beside the hide button.
-click 1327 58
+# Computer tab at x=1327,y=28; the two tabs share the header beside the hide button.
+click 1327 28
 shot dark-10-computer
 keys ctrl+shift+b
 select_bot empty
@@ -167,10 +167,10 @@ keys Escape
 # One additional dark shot opens the saved rules version from the Details pane.
 select_bot main
 keys ctrl+shift+b
-click 1188 58
+click 1188 28
 scroll 1300 450 -4500
-# Rules summary row at x=1260,y=292 in the default Details layout.
-click 1260 292
+# Rules summary row at x=1260,y=262 in the default Details layout.
+click 1260 262
 click_named History
 shot dark-20-rules-diff
 keys Escape
@@ -181,7 +181,7 @@ select_bot main
 main_bottom
 shot light-01-release-plan
 keys ctrl+shift+b
-click 1188 58
+click 1188 28
 scroll 1300 450 -4500
 shot light-02-bot-details
 keys ctrl+shift+b

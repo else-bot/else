@@ -7,6 +7,7 @@ use super::{
 };
 use crate::api::Bot;
 use crate::avatar::bot_avatar;
+use crate::connection::{OpenAppSettings, SHELL_CONTEXT};
 use crate::controls::{
     COMPOSER_ACTION, Control as _, Scale, Tier, Turn, composer_actions, send_button, stop_button,
 };
@@ -51,6 +52,18 @@ impl Render for BotDrag {
 impl ElseApp {
     pub(crate) fn connected(&self) -> bool {
         self.connection == Connection::Connected
+    }
+
+    pub(crate) fn link(&self) -> super::Link {
+        match self.connection {
+            Connection::Connecting => super::Link::Connecting,
+            Connection::Connected => super::Link::Connected,
+            Connection::Disconnected(_) | Connection::InvalidCredentials(_) => super::Link::Failed,
+        }
+    }
+
+    pub(crate) fn set_server_switcher(&mut self, switcher: super::ServerSwitcher) {
+        self.server_switcher = Some(switcher);
     }
 
     pub(crate) fn status_text(&self) -> (SharedString, bool) {
@@ -230,19 +243,31 @@ impl ElseApp {
             }
             list = list.child(zone);
         }
+        let switcher = self
+            .server_switcher
+            .clone()
+            .map(|switcher| switcher(self.link(), cx));
         let brand = h_flex()
             .flex_none()
             .h(px(52.))
             .pl_4()
             .pr_2()
+            .gap_1()
             .items_center()
-            .justify_between()
             .child(
                 h_flex()
+                    .flex_none()
                     .text_xl()
                     .font_weight(FontWeight::BOLD)
                     .child("else")
                     .child(div().text_color(theme.primary).child(".")),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .children(switcher),
             )
             .child(
                 Button::new("new-bot")
@@ -256,36 +281,48 @@ impl ElseApp {
                     .disabled(!can_edit)
                     .on_click(cx.listener(|app, _, window, cx| app.open_create_dialog(window, cx))),
             );
+        let settings_key = Kbd::binding_for_action(&OpenAppSettings, Some(SHELL_CONTEXT), window)
+            .map(|kbd| {
+                div()
+                    .flex_none()
+                    .ml_auto()
+                    .pl_2()
+                    .child(kbd.text_size(px(11.5)))
+            });
         let footer =
             h_flex()
                 .flex_none()
                 .px_2()
                 .py_2()
+                .gap_1()
+                .items_center()
                 .border_t_1()
                 .border_color(theme.sidebar_border)
+                .child(
+                    Button::new("app-settings-open")
+                        .control(Tier::Ghost, Scale::Compact, false, cx)
+                        .px_2()
+                        .flex_1()
+                        .min_w_0()
+                        .justify_start()
+                        .icon(IconName::Settings)
+                        .accessibility_label("Settings")
+                        .child(div().text_size(px(13.)).child("Settings"))
+                        .children(settings_key)
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(OpenAppSettings), cx)
+                        }),
+                )
                 .child(
                     Button::new("new-category")
                         .focus_ring(false)
                         .cursor_pointer()
                         .icon(IconName::FolderPlus)
-                        .accessibility_label("New category")
-                        .child(div().text_size(px(13.)).child("New category"))
-                        .text_color(theme.muted_foreground)
                         .small()
                         .ghost()
-                        .w_full()
-                        .justify_start()
-                        .children(
-                            Kbd::binding_for_action(&NewCategory, Some(APP_CONTEXT), window).map(
-                                |kbd| {
-                                    div()
-                                        .flex_none()
-                                        .ml_auto()
-                                        .pl_2()
-                                        .child(kbd.text_size(px(11.5)))
-                                },
-                            ),
-                        )
+                        .text_color(theme.muted_foreground)
+                        .accessibility_label("New category")
+                        .tooltip_with_action("New category", &NewCategory, Some(APP_CONTEXT))
                         .disabled(!can_edit)
                         .on_click(cx.listener(|app, _, window, cx| {
                             app.open_category_dialog(None, window, cx)
