@@ -594,6 +594,8 @@ impl ElseApp {
         h_flex()
             .flex_none()
             .h(HEADER_HEIGHT)
+            .border_b_1()
+            .border_color(theme.foreground.opacity(0.06))
             .px_5()
             .gap_3()
             .items_center()
@@ -610,6 +612,7 @@ impl ElseApp {
                     .flex_1()
                     .child(
                         div()
+                            .text_size(px(16.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .truncate()
                             .child(bot.name.clone()),
@@ -640,20 +643,33 @@ impl ElseApp {
         let transcript: AnyElement = match view {
             Some(view) if view.conversation.is_some() || !view.rows.is_empty() => {
                 if view.rows.is_empty() {
-                    div()
+                    v_flex()
                         .flex_1()
-                        .flex()
+                        .min_w_0()
                         .items_center()
                         .justify_center()
-                        .text_color(theme.muted_foreground)
-                        .child("No messages yet. Say hello.")
+                        .gap_3()
+                        .px_5()
+                        .child(bot_avatar("empty-conversation-avatar", bot.avatar, px(40.)).still())
+                        .child(
+                            div()
+                                .text_size(px(18.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(bot.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .text_color(theme.muted_foreground)
+                                .child("Send a message to get started."),
+                        )
                         .into_any_element()
                 } else {
                     let older = view
                         .conversation
                         .as_ref()
                         .is_some_and(|c| c.older_before_seq.is_some());
-                    let mut column = v_flex().flex_1().min_h_0();
+                    let mut column = v_flex().flex_1().min_w_0().min_h_0();
                     if older {
                         let loading = view.loading_older;
                         column =
@@ -676,12 +692,13 @@ impl ElseApp {
                                 ),
                             );
                     }
-                    let mut transcript = div().relative().flex_1().min_h_0().child(
+                    let mut transcript = div().relative().flex_1().min_w_0().min_h_0().child(
                         list(
                             view.list.clone(),
                             cx.processor(|app, ix, window, cx| {
                                 h_flex()
                                     .w_full()
+                                    .min_w_0()
                                     .justify_center()
                                     .child(app.render_row(ix, window, cx))
                                     .into_any_element()
@@ -801,10 +818,11 @@ impl ElseApp {
                 app.mention_action(MentionAction::Dismiss, window, cx);
             }))
             .w_full()
-            .gap_1()
-            .px_2()
-            .pt_1()
-            .pb_2()
+            .min_w_0()
+            .relative()
+            .pl_3()
+            .pr(px(if working && can_send { 88. } else { 48. }))
+            .py_2()
             .rounded(theme.radius_lg)
             .border_1()
             .border_color(theme.border)
@@ -816,6 +834,10 @@ impl ElseApp {
             .child(
                 Textarea::new(&self.composer)
                     .appearance(false)
+                    .bordered(false)
+                    .min_w_0()
+                    .min_h(px(40.))
+                    .text_size(px(14.))
                     .token(move |token, _, cx| {
                         super::attachments::draft_chip(token, &files, owner.clone(), cx)
                     })
@@ -837,9 +859,11 @@ impl ElseApp {
             )
             .child(
                 h_flex()
+                    .absolute()
+                    .right_2()
+                    .bottom_2()
                     .gap_2()
                     .items_center()
-                    .child(div().flex_1())
                     .when(!working || can_send, |row| {
                         row.child(
                             Button::new("send")
@@ -848,6 +872,7 @@ impl ElseApp {
                                 .icon(IconName::ArrowUp)
                                 .primary()
                                 .small()
+                                .size(px(32.))
                                 .accessibility_label("Send message")
                                 .disabled(!can_send)
                                 .on_click(cx.listener(|app, _, window, cx| app.send(window, cx))),
@@ -859,8 +884,8 @@ impl ElseApp {
                                 .focus_ring(false)
                                 .when(!stopping, |button| button.cursor_pointer())
                                 .icon(IconName::Square)
-                                .danger()
                                 .small()
+                                .size(px(32.))
                                 .accessibility_label(if stopping {
                                     "Stopping work"
                                 } else {
@@ -1007,10 +1032,16 @@ fn subtitle(bot: &Bot, main: bool) -> String {
 }
 
 pub(super) const HEADER_HEIGHT: Pixels = px(56.);
-const READING_WIDTH: Pixels = px(760.);
+pub(super) const READING_WIDTH: Pixels = px(760.);
 
 pub(super) fn reading_column() -> Div {
-    v_flex().w_full().max_w(READING_WIDTH).mx_auto().px_5()
+    v_flex()
+        .flex_none()
+        .w_full()
+        .min_w_0()
+        .max_w(READING_WIDTH)
+        .mx_auto()
+        .px_5()
 }
 
 impl Render for ElseApp {

@@ -505,6 +505,8 @@ impl RowText {
                 .readonly(true)
                 .appearance(false)
                 .bordered(false)
+                .min_w_0()
+                .text_size(px(14.))
                 .token(move |token, _, cx| {
                     if let Some(file) = file_id(token.token().id()).and_then(|id| files.get(&id)) {
                         return super::attachments::chip(
@@ -535,24 +537,54 @@ impl RowText {
             Widget::Markdown { state, .. } => TextView::new(state)
                 .style(
                     TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
-                        .with_code_background(cx.theme().muted)
+                        .with_code_background(cx.theme().secondary)
                         .with_link(cx.theme().link)
+                        .with_border(cx.theme().foreground.opacity(0.08))
+                        .with_heading(|level| {
+                            StyleRefinement::default()
+                                .text_size(px(match level {
+                                    1 => 22.,
+                                    2 => 18.,
+                                    3 => 16.,
+                                    _ => 14.,
+                                }))
+                                .font_weight(FontWeight::SEMIBOLD)
+                        })
                         .with_code_block(
                             StyleRefinement::default()
                                 .rounded(cx.theme().radius)
-                                .pt(px(36.)),
+                                .border_0()
+                                .pt(px(28.))
+                                .text_size(px(13.))
+                                .line_height(px(21.)),
                         )
-                        .with_table(StyleRefinement::default().rounded(cx.theme().radius))
+                        .with_table({
+                            let mut table = StyleRefinement::default()
+                                .min_w_0()
+                                .border_0()
+                                .bg(cx.theme().background.opacity(0.));
+                            table.overflow.x = Some(Overflow::Scroll);
+                            table
+                        })
                         .with_table_head(
                             StyleRefinement::default()
-                                .bg(cx.theme().table_head)
-                                .text_color(cx.theme().table_head_foreground),
+                                .bg(cx.theme().background.opacity(0.))
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .with_table_cell(
+                            StyleRefinement::default()
+                                .border_color(cx.theme().foreground.opacity(0.))
+                                .py_2(),
                         ),
                 )
                 .code_block_actions(|block, _, cx| {
                     let code = block.code();
                     h_flex()
+                        .h(px(16.))
                         .gap_2()
+                        .items_center()
                         .font_family(cx.theme().font_family.clone())
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
@@ -561,6 +593,7 @@ impl RowText {
                             Button::new("copy-code")
                                 .ghost()
                                 .xsmall()
+                                .size(px(16.))
                                 .focus_ring(false)
                                 .cursor_pointer()
                                 .icon(IconName::Copy)
@@ -580,8 +613,9 @@ impl RowText {
                         .plugin(UnavailableImage),
                 )
                 .w_full()
-                .text_sm()
-                .line_height(rems(1.375))
+                .min_w_0()
+                .text_size(px(14.))
+                .line_height(px(22.))
                 .scrollable(false)
                 .selectable(true)
                 .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
@@ -627,6 +661,7 @@ impl RowText {
         use gpui_kit::prelude::FluentBuilder as _;
         gpui_kit::component::v_flex()
             .w_full()
+            .min_w_0()
             .gap_2()
             .children(self.render_quote_preview(cx))
             .when(!self.display.text.trim().is_empty(), |column| column.child(body))

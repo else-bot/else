@@ -16,8 +16,8 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-/// Right gutter that sets the width of bot-side bubbles and cards.
-pub(super) const BOT_GUTTER: Pixels = px(60.);
+/// Bot-side cards use the full shared reading column.
+pub(super) const BOT_GUTTER: Pixels = px(0.);
 
 impl ElseApp {
     pub(super) fn render_row(
@@ -244,7 +244,7 @@ impl ElseApp {
         let footer = row.footer_stamp.filter(|_| !grouped).map(stamp);
         let theme = cx.theme().clone();
         let card = |text: &RowText, user: bool| {
-            let card = div().w_full();
+            let card = div().w_full().min_w_0();
             if user {
                 card.px_3p5()
                     .py_2()
@@ -252,34 +252,17 @@ impl ElseApp {
                     .bg(theme.secondary)
                     .child(text.render(cx))
             } else {
-                card.px_3p5()
-                    .py_2()
-                    .rounded(theme.radius_lg)
-                    .border_1()
-                    .border_color(theme.border.opacity(0.6))
-                    .bg(theme.sidebar.opacity(0.6))
-                    .child(text.render(cx))
+                card.py_1().child(text.render(cx))
             }
         };
-        // Wrapped text needs a definite width.
-        let side = |user: bool, card: AnyElement| {
-            let side = div().w_full();
-            let side = if grouped {
-                side
-            } else if user {
-                side.pl(relative(0.15))
-            } else {
-                side.pr(BOT_GUTTER)
-            };
-            side.child(card)
-        };
+        let side = |card: AnyElement| div().w_full().min_w_0().child(card);
         let note = |text: String, error: bool| {
             div()
-                .text_xs()
+                .text_size(px(12.))
                 .text_color(if error {
                     theme.danger
                 } else {
-                    theme.muted_foreground
+                    theme.foreground.opacity(0.48)
                 })
                 .child(text)
         };
@@ -318,8 +301,8 @@ impl ElseApp {
                 }
                 // Children stretch so bubbles get a definite width; notes
                 // are aligned to the bubble's side.
-                let mut column = gpui_kit::component::v_flex().w_full().gap_1();
-                let mut card = card(text, user).id(SharedString::from(format!("message-{id}")));
+                let mut column = gpui_kit::component::v_flex().w_full().min_w_0().gap_1();
+                let card = card(text, user).id(SharedString::from(format!("message-{id}")));
                 if !user
                     && run.first
                     && turn.and_then(|t| t.routine.as_ref()).is_none()
@@ -329,18 +312,12 @@ impl ElseApp {
                         h_flex()
                             .gap_1p5()
                             .items_center()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
                             .child(bot_avatar("message-author", bot.avatar, px(18.)).still())
                             .child(bot.name.clone()),
                     );
-                }
-                if grouped {
-                    card = card
-                        .border_0()
-                        .rounded(theme.radius)
-                        .bg(theme.secondary.opacity(0.4))
-                        .pr(px(60.));
                 }
                 let card = if conversation
                     .latest_reply()
@@ -386,19 +363,19 @@ impl ElseApp {
                         .relative()
                         .group("message-bubble")
                         .w_full()
-                        .child(side(user, card))
+                        .child(side(card))
                         .child(
                             div()
                                 .absolute()
                                 .top_1()
-                                .when(user, |this| this.left(relative(0.15)).ml(px(-28.)))
+                                .when(user, |this| this.left(px(-28.)))
                                 .when(!user, |this| this.right(px(4.)))
                                 .invisible()
                                 .group_hover("message-bubble", |this| this.visible())
                                 .child(self.message_actions(view.bot_id, id, author, cx)),
                         )
                         .into_any_element(),
-                    None => side(user, card).into_any_element(),
+                    None => side(card).into_any_element(),
                 };
                 column = column
                     .child(card)
@@ -414,24 +391,14 @@ impl ElseApp {
                     .children(footer.map(|at| note(at, false)))
                     .into_any_element()
             }
-            RowKey::SkillInstall(id) => {
-                side(false, self.render_skill_card(id, cx)).into_any_element()
-            }
-            RowKey::SecretRequest(id) => {
-                side(false, self.render_secret_card(id, cx)).into_any_element()
-            }
-            RowKey::Question(id) => {
-                side(false, self.render_question_card(id, cx)).into_any_element()
-            }
-            RowKey::Draft(id) => side(false, self.render_draft_card(id, cx)).into_any_element(),
-            RowKey::SocialSetup(id) => {
-                side(false, self.render_social_card(id, cx)).into_any_element()
-            }
+            RowKey::SkillInstall(id) => side(self.render_skill_card(id, cx)).into_any_element(),
+            RowKey::SecretRequest(id) => side(self.render_secret_card(id, cx)).into_any_element(),
+            RowKey::Question(id) => side(self.render_question_card(id, cx)).into_any_element(),
+            RowKey::Draft(id) => side(self.render_draft_card(id, cx)).into_any_element(),
+            RowKey::SocialSetup(id) => side(self.render_social_card(id, cx)).into_any_element(),
             RowKey::Handoff(id) => self.render_handoff(id, cx),
             RowKey::ComputerHandoff(id) => self.render_handoff_row(id, cx),
-            RowKey::OwnerNotice(id) => {
-                side(false, self.render_notice_card(id, cx)?).into_any_element()
-            }
+            RowKey::OwnerNotice(id) => side(self.render_notice_card(id, cx)?).into_any_element(),
             RowKey::Pending(request_id) => {
                 let pending = self
                     .selected
@@ -443,10 +410,9 @@ impl ElseApp {
                     pending.delivery(),
                     Delivery::Unknown { .. } | Delivery::Rejected { .. }
                 );
-                let mut column = gpui_kit::component::v_flex().w_full().gap_1();
+                let mut column = gpui_kit::component::v_flex().w_full().min_w_0().gap_1();
                 if mark.is_none() {
                     column = column.child(side(
-                        true,
                         card(text, true)
                             .id(SharedString::from(format!("pending-{request_id}")))
                             .into_any_element(),
