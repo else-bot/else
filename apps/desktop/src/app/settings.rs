@@ -2220,16 +2220,8 @@ pub(super) fn section_frame(cx: &App) -> Div {
         .border_color(hairline(cx))
 }
 
-pub(super) fn section_label(title: &'static str, cx: &App) -> Div {
-    div()
-        .text_xs()
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(cx.theme().muted_foreground)
-        .child(title)
-}
-
 fn section(title: &'static str, cx: &App) -> Div {
-    section_frame(cx).child(section_label(title, cx).pb_1())
+    section_frame(cx).child(crate::appearance::section_label(title, cx).pb_1())
 }
 
 /// Rows separated by hairlines, without a rule above the first.

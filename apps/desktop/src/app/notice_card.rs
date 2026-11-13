@@ -1,9 +1,10 @@
 use super::{Connection, ElseApp};
 use crate::api::ClientError;
+use crate::appearance::{Tier, Tiered as _};
 use crate::model::{OwnerNoticeKind, OwnerNoticeStatus};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, FocusableExt as _, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, FocusableExt as _, Sizable as _};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -111,7 +112,7 @@ impl ElseApp {
         let actions = super::action_card::footer()
             .child(
                 button("open", "Open task".into())
-                    .disabled(anchor.is_none())
+                    .tier(Tier::Secondary, anchor.is_none(), cx)
                     .on_click(cx.listener(move |app, _, window, cx| {
                         if let Some(anchor) = anchor {
                             app.open_bot_exchange(anchor, exchange_title.clone(), window, cx);
@@ -120,7 +121,7 @@ impl ElseApp {
             )
             .child(
                 button("dismiss", "Mark handled".into())
-                    .disabled(!connected)
+                    .tier(Tier::Secondary, !connected, cx)
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.dismiss_owner_notice(bot, id, window, cx);
                     })),

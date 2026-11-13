@@ -78,14 +78,14 @@ click_named() {
   local point
   # GPUI reports physical screenshot pixels; omabox --find currently treats
   # them as logical pixels at scale 2. Convert the tree bounds explicitly.
-  point=$(omabox -b "$BOX" tree --window "$W" --find "$1" | python3 "$H/tree_point.py" "$1" "${TREE_SCALE:-2}") || return 1
+  point=$(omabox -b "$BOX" tree --window "$W" --all --find "$1" | python3 "$H/tree_point.py" "$1" "${TREE_SCALE:-2}") || return 1
   local x y
   read -r x y <<< "$point"
   click "$x" "$y"
 }
 pick_purple() {
   local point x y
-  point=$(omabox -b "$BOX" tree --window "$W" --find 'House shape' | python3 "$H/tree_point.py" 'House shape' "${TREE_SCALE:-2}")
+  point=$(omabox -b "$BOX" tree --window "$W" --all --find 'House shape' | python3 "$H/tree_point.py" 'House shape' "${TREE_SCALE:-2}")
   read -r x y <<< "$point"
   # Both are column four; the narrower color cells shift their center 2 px left.
   # From the House center: 17 px to its edge, 12 gap, 30 first row, 4 gap, 15 center.

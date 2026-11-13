@@ -205,12 +205,7 @@ impl ElseApp {
                 .child(
                     v_flex()
                         .gap_3()
-                        .child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(theme.muted_foreground)
-                                .child("WHAT CHANGES"),
-                        )
+                        .child(crate::appearance::section_label("What changes", cx))
                         .child(first.render(cx))
                         .child(
                             div()

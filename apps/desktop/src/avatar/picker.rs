@@ -118,13 +118,10 @@ impl RenderOnce for AvatarPicker {
                 h_flex()
                     .items_center()
                     .justify_between()
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.muted_foreground)
-                            .child(if self.compact { "SHAPE" } else { "AVATAR" }),
-                    )
+                    .child(crate::appearance::section_label(
+                        if self.compact { "Shape" } else { "Avatar" },
+                        cx,
+                    ))
                     .child(
                         Button::new("reset-avatar")
                             .focus_ring(false)

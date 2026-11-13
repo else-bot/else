@@ -1,5 +1,6 @@
 use super::servers::{Editor, Health, ReleaseStatus};
 use super::*;
+use crate::appearance::{Tier, Tiered as _};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -208,7 +209,7 @@ impl Shell {
                                     "Update all"
                                 })
                                 .loading(updating)
-                                .disabled(updating)
+                                .tier(Tier::Secondary, updating, cx)
                                 .on_click(
                                     cx.listener(|shell, _, _, cx| shell.update_all_servers(cx)),
                                 ),
