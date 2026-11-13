@@ -568,3 +568,57 @@ async fn without_a_project_a_result_keeps_the_larger_budget() {
         "a 14 KB result still arrives whole"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn else_side_mcp_request_failures_use_the_json_error_envelope() {
+    let app = TestApp::installed().await;
+    let bot = app.create_bot("Parser").await;
+    let (_, token) = grant(&app, &bot, vec![Tool::Mcp, Tool::ManageMcp]).await;
+    let mut broken = installation();
+    broken["id"] = json!("broken");
+    broken["config"]["args"] = json!(["-c", "import sys; sys.exit(1)"]);
+    result(&tool(&app, &token, "mcp_install", broken).await);
+    let envelope = |reply: &common::Reply| -> Value {
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        assert_eq!(reply.body["result"]["isError"], true, "{}", reply.body);
+        let text = reply.body["result"]["content"][0]["text"].as_str().unwrap();
+        serde_json::from_str(text).unwrap_or_else(|_| panic!("not JSON: {text}"))
+    };
+    let failed = envelope(
+        &tool(
+            &app,
+            &token,
+            "mcp_request",
+            json!({"id":"broken","method":"tools/list","params":{}}),
+        )
+        .await,
+    );
+    assert_eq!(failed["error"]["code"], "connection_failed", "{failed}");
+    assert!(
+        failed["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("connection failed"),
+        "{failed}"
+    );
+    let missing = envelope(
+        &tool(
+            &app,
+            &token,
+            "mcp_request",
+            json!({"id":"nowhere","method":"tools/list","params":{}}),
+        )
+        .await,
+    );
+    assert_eq!(missing["error"]["code"], "not_found", "{missing}");
+    let invalid = envelope(
+        &tool(
+            &app,
+            &token,
+            "mcp_request",
+            json!({"id":"broken","method":"tools/call","params":{"name":"echo","arguments":{}}}),
+        )
+        .await,
+    );
+    assert_eq!(invalid["error"]["code"], "invalid_request", "{invalid}");
+}
