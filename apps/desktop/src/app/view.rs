@@ -1,9 +1,9 @@
 use super::layout::{CategoryDrag, SidebarEdge};
 use super::mentions::MentionAction;
 use super::{
-    APP_CONTEXT, COMPOSER_CONTEXT, CommentSelection, Connection, DeleteBot, ElseApp, FocusComposer,
-    FocusSidebar, LoadOlder, MoveBot, NewBot, NewCategory, QuoteSelection, SIDEBAR_CONTEXT,
-    SelectNext, SelectPrev, StopWork, TakeOverComputer, ToggleSettings,
+    APP_CONTEXT, COMPOSER_CONTEXT, CiteSelection, Connection, DeleteBot, ElseApp, FocusComposer,
+    FocusSidebar, LoadOlder, MoveBot, NewBot, NewCategory, SIDEBAR_CONTEXT, SelectNext, SelectPrev,
+    StopWork, TakeOverComputer, ToggleSettings,
 };
 use crate::api::Bot;
 use crate::avatar::bot_avatar;
@@ -1082,12 +1082,9 @@ impl Render for ElseApp {
             .on_action(
                 cx.listener(|app, _: &ToggleSettings, window, cx| app.toggle_settings(window, cx)),
             )
-            .on_action(cx.listener(|app, _: &QuoteSelection, window, cx| {
-                app.quote_selection(false, window, cx)
-            }))
-            .on_action(cx.listener(|app, _: &CommentSelection, window, cx| {
-                app.quote_selection(true, window, cx)
-            }))
+            .on_action(
+                cx.listener(|app, _: &CiteSelection, window, cx| app.cite_selection(window, cx)),
+            )
             .capture_any_mouse_down(cx.listener(|app, event: &MouseDownEvent, _, _| {
                 if event.button == MouseButton::Left {
                     app.quote_press = Some(event.position);
