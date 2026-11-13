@@ -19,6 +19,9 @@ use gpui_kit::*;
 /// Bot-side cards use the full shared reading column.
 pub(super) const BOT_GUTTER: Pixels = px(0.);
 
+/// Timestamps and other trailing metadata sit at this share of the foreground.
+pub(super) const META_OPACITY: f32 = 0.45;
+
 impl ElseApp {
     pub(super) fn render_row(
         &mut self,
@@ -145,9 +148,9 @@ impl ElseApp {
                     .child(body)
                     .children(row.footer_stamp.map(|at| {
                         div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(stamp(at))
+                            .text_size(px(12.))
+                            .text_color(cx.theme().foreground.opacity(META_OPACITY))
+                            .child(clock(at))
                     }))
                     .into_any_element()
             } else {
@@ -155,6 +158,7 @@ impl ElseApp {
             };
             return column
                 .py_1p5()
+                .children(row.day.map(|at| day_separator(at, cx)))
                 .children(row.unread_start.then(|| unread_divider(cx)))
                 .child(body)
                 .into_any_element();
@@ -172,7 +176,6 @@ impl ElseApp {
             .checked_sub(1)
             .and_then(|ix| view.rows.get(ix))
             .is_some_and(|row| row.key == RowKey::Task(group.turn));
-        let theme = cx.theme().clone();
         let actionable = matches!(
             row.key,
             RowKey::Question(_)
@@ -180,37 +183,20 @@ impl ElseApp {
                 | RowKey::Draft(_)
                 | RowKey::OwnerNotice(_)
         );
+        // A routine's rows sit on the page like any other reply; its banner names the run.
         let frame = gpui_kit::component::v_flex()
             .w_full()
-            .when(!actionable, |frame| {
-                frame
-                    .border_l_1()
-                    .border_r_1()
-                    .border_color(theme.primary.opacity(0.25))
-                    .bg(theme.sidebar.opacity(0.6))
-                    .when(group.first, |frame| {
-                        frame.border_t_1().rounded_t(theme.radius_lg)
-                    })
-                    .when(group.last, |frame| {
-                        frame.border_b_1().rounded_b(theme.radius_lg)
-                    })
-            })
             .children(
                 turn.routine
                     .as_ref()
                     .filter(|_| group.first && !follows_task)
                     .map(|run| routine_banner(run, cx)),
             )
-            .child(
-                div()
-                    .w_full()
-                    .when(!actionable, |body| body.px_1().pt_1())
-                    .child(body),
-            )
-            .when(group.last && !actionable, |frame| frame.pb_1());
+            .child(div().w_full().child(body));
         column
             .when(group.first, |column| column.pt_1p5())
             .when(group.last, |column| column.pb_1p5())
+            .children(row.day.map(|at| day_separator(at, cx)))
             .children(row.unread_start.then(|| unread_divider(cx)))
             .child(
                 div()
@@ -266,18 +252,27 @@ impl ElseApp {
         let view = self.view.as_ref()?;
         let key = row.key;
         let grouped = row.routine.is_some();
-        let footer = row.footer_stamp.filter(|_| !grouped).map(stamp);
+        let footer = row.footer_stamp.filter(|_| !grouped).map(clock);
         let theme = cx.theme().clone();
+        // The owner's bubble hugs its text up to three quarters of the column, with
+        // the same 12×16 padding whether or not it carries an attachment. The text
+        // widget may draw part of that padding itself.
         let card = |text: &RowText, user: bool| {
-            let card = div().w_full().min_w_0();
             if user {
-                card.px_3p5()
-                    .py_2()
+                let (inset_x, inset_y) = text.inset();
+                let (pad_x, pad_y) = (px(16.) - inset_x, px(12.) - inset_y);
+                div()
+                    .min_w_0()
+                    .when_some(text.natural_width(cx), |card, width| {
+                        card.w(width + pad_x * 2.)
+                    })
+                    .px(pad_x)
+                    .py(pad_y)
                     .rounded(theme.radius_lg)
                     .bg(theme.secondary)
                     .child(text.render(cx))
             } else {
-                card.py_1().child(text.render(cx))
+                div().w_full().min_w_0().py_1().child(text.render(cx))
             }
         };
         let side = |card: AnyElement| div().w_full().min_w_0().child(card);
@@ -287,7 +282,7 @@ impl ElseApp {
                 .text_color(if error {
                     theme.danger
                 } else {
-                    theme.foreground.opacity(0.48)
+                    theme.foreground.opacity(META_OPACITY)
                 })
                 .child(text)
         };
@@ -387,8 +382,15 @@ impl ElseApp {
                     Some(author) => div()
                         .relative()
                         .group("message-bubble")
-                        .w_full()
-                        .child(side(card))
+                        .when(!user, |bubble| bubble.w_full())
+                        .when(user, |bubble| {
+                            bubble.flex().justify_end().max_w(relative(0.75))
+                        })
+                        .child(if user {
+                            card
+                        } else {
+                            side(card).into_any_element()
+                        })
                         .child(
                             div()
                                 .absolute()
@@ -401,6 +403,16 @@ impl ElseApp {
                         )
                         .into_any_element(),
                     None => side(card).into_any_element(),
+                };
+                let card = if user {
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .justify_end()
+                        .child(card)
+                        .into_any_element()
+                } else {
+                    card
                 };
                 column = column
                     .child(card)
@@ -437,11 +449,13 @@ impl ElseApp {
                 );
                 let mut column = gpui_kit::component::v_flex().w_full().min_w_0().gap_1();
                 if mark.is_none() {
-                    column = column.child(side(
-                        card(text, true)
-                            .id(SharedString::from(format!("pending-{request_id}")))
-                            .into_any_element(),
-                    ));
+                    column = column.child(
+                        h_flex().w_full().min_w_0().justify_end().child(
+                            card(text, true)
+                                .max_w(relative(0.75))
+                                .id(SharedString::from(format!("pending-{request_id}"))),
+                        ),
+                    );
                     if !settled {
                         column = column.children(footer.map(|at| beside(true, note(at, false))));
                     }
@@ -702,6 +716,36 @@ fn unread_divider(cx: &App) -> Div {
         .child(line())
 }
 
+/// A transcript stamp: the time only, because a day separator names the day.
+pub(super) fn clock(at: DateTime<Utc>) -> String {
+    at.with_timezone(&Local).format("%H:%M").to_string()
+}
+
+fn day_label_in<Tz: TimeZone>(at: DateTime<Utc>, now: DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let at = at.with_timezone(&now.timezone());
+    let days = (now.date_naive() - at.date_naive()).num_days();
+    match days {
+        0 => "Today".to_owned(),
+        1 => "Yesterday".to_owned(),
+        _ if at.year() == now.year() => at.format("%A, %-d %B").to_string(),
+        _ => at.format("%-d %B %Y").to_string(),
+    }
+}
+
+fn day_separator(at: DateTime<Utc>, cx: &App) -> Div {
+    h_flex()
+        .w_full()
+        .justify_center()
+        .pt_4()
+        .pb_2()
+        .text_size(px(12.))
+        .text_color(cx.theme().foreground.opacity(META_OPACITY))
+        .child(day_label_in(at, Local::now()))
+}
+
 pub(super) fn stamp(at: DateTime<Utc>) -> String {
     stamp_in(at, Local::now())
 }
@@ -795,7 +839,7 @@ impl Element for CenterReveal {
 
 #[cfg(test)]
 mod tests {
-    use super::{stamp_in, turn_label};
+    use super::{day_label_in, stamp_in, turn_label};
     use chrono::{DateTime, FixedOffset, Utc};
 
     #[test]
@@ -876,6 +920,26 @@ mod tests {
         assert_eq!(
             stamp_in(at("2025-12-31T21:59:00Z"), now),
             "31 Dec 2025, 23:59"
+        );
+    }
+
+    #[test]
+    fn day_separators_name_recent_days_and_other_years() {
+        let zone = FixedOffset::east_opt(2 * 3600).unwrap();
+        let now = "2026-11-04T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .unwrap()
+            .with_timezone(&zone);
+        let at = |text: &str| text.parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(day_label_in(at("2026-11-03T22:30:00Z"), now), "Today");
+        assert_eq!(day_label_in(at("2026-11-03T21:30:00Z"), now), "Yesterday");
+        assert_eq!(
+            day_label_in(at("2026-10-29T10:00:00Z"), now),
+            "Thursday, 29 October"
+        );
+        assert_eq!(
+            day_label_in(at("2025-12-31T21:59:00Z"), now),
+            "31 December 2025"
         );
     }
 }

@@ -701,6 +701,24 @@ impl ElseApp {
                         .size_full()
                         .py_2(),
                     );
+                    // Rows dissolve under the header and above the composer instead of
+                    // meeting them at a hard clipped edge. Plain divs take no pointer input.
+                    let page = theme.background;
+                    let fade = |angle: f32| {
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .h(px(24.))
+                            .bg(linear_gradient(
+                                angle,
+                                linear_color_stop(page, 0.),
+                                linear_color_stop(page.opacity(0.), 1.),
+                            ))
+                    };
+                    transcript = transcript
+                        .child(fade(180.).top_0())
+                        .child(fade(0.).bottom_0());
                     if self.unseen_below() {
                         transcript = transcript.child(
                             h_flex()
@@ -915,8 +933,8 @@ impl ElseApp {
             .child(
                 div()
                     .px_1()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
+                    .text_size(px(11.5))
+                    .text_color(theme.foreground.opacity(super::message_row::META_OPACITY))
                     .child("Enter to send · Shift+Enter for a new line"),
             );
         v_flex()

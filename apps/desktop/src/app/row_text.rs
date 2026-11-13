@@ -308,6 +308,52 @@ impl RowText {
         }
     }
 
+    /// The width an owner message needs with one line per paragraph, so its
+    /// bubble can hug the text. Rich text and text carrying attachment chips
+    /// report only their narrowest layout, so this measures their widest line;
+    /// plain text without chips sizes itself and returns `None`.
+    pub(super) fn natural_width(&self, cx: &App) -> Option<Pixels> {
+        let text = match &self.widget {
+            Widget::Markdown { state, .. } => state.read(cx).rendered_text().as_str().to_owned(),
+            Widget::Plain(_) if !self.files.is_empty() => self.source.clone(),
+            Widget::Plain(_) => return None,
+        };
+        let system = cx.text_system();
+        let font_id = system.resolve_font(&font(cx.theme().font_family.clone()));
+        let measure = |line: &str| {
+            line.chars()
+                .map(|ch| {
+                    system
+                        .advance(font_id, px(14.), ch)
+                        .map_or(px(8.), |size| size.width)
+                })
+                .fold(px(0.), |sum, width| sum + width)
+        };
+        // An attachment chip adds its icon, padding and size label to the file name.
+        let chips = self
+            .files
+            .values()
+            .map(|file| measure(&file.name) + px(64.));
+        let widest = text
+            .lines()
+            .map(measure)
+            .chain(chips)
+            .fold(px(0.), Pixels::max);
+        // Plain text also needs its own inset and the textarea's 10 px caret margin.
+        let (inset_x, _) = self.inset();
+        let caret = if inset_x > px(0.) { px(10.) } else { px(0.) };
+        Some(widest + inset_x * 2. + caret + px(4.))
+    }
+
+    /// The horizontal and vertical padding the widget draws inside itself: a
+    /// read-only textarea keeps the medium input's editor padding.
+    pub(super) fn inset(&self) -> (Pixels, Pixels) {
+        match &self.widget {
+            Widget::Plain(_) => (px(10.), px(8.)),
+            Widget::Markdown { .. } => (px(0.), px(0.)),
+        }
+    }
+
     pub(super) fn rendered_bytes(&self, cx: &App) -> Option<usize> {
         match &self.widget {
             Widget::Plain(_) => Some(self.source.len()),

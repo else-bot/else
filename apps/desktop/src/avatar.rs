@@ -628,7 +628,7 @@ fn focus_blink(elapsed: f32) -> f32 {
     }
 }
 
-/// A concentric working ring contained inside the avatar's layout bounds.
+/// A concentric working light contained inside the avatar's layout bounds.
 fn paint_halo(
     center: Point<Pixels>,
     unit: f32,
@@ -645,16 +645,8 @@ fn paint_halo(
             center.y + px(radius * angle.sin()),
         )
     });
-    let mut track = PathBuilder::stroke(px((0.035 * unit).max(1.)));
-    track.move_to(points[0]);
-    for p in &points[1..] {
-        track.line_to(*p);
-    }
-    track.close();
-    if let Ok(path) = track.build() {
-        window.paint_path(path, color.opacity(0.16 * work));
-    }
-
+    // No static track: a dim full ring reads as a dark crescent beside the
+    // lit arc, so only the moving light is drawn.
     const LIT: usize = SAMPLES * 38 / 100;
     let at = |i: isize| points[i.rem_euclid(SAMPLES as isize) as usize];
     let head = (elapsed / 1.7).fract() * SAMPLES as f32;
