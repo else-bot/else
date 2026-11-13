@@ -7,6 +7,9 @@ use super::{
 };
 use crate::api::Bot;
 use crate::avatar::bot_avatar;
+use crate::controls::{
+    COMPOSER_ACTION, Control as _, Scale, Tier, Turn, composer_actions, send_button, stop_button,
+};
 use crate::sidebar::status::{Kind, Subtitle};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
@@ -423,7 +426,7 @@ impl ElseApp {
             theme.muted_foreground
         } else {
             match subtitle.kind {
-                Kind::Working => theme.primary,
+                Kind::Working => theme.link,
                 Kind::Answer | Kind::Approval | Kind::Takeover | Kind::Credentials => theme.warning,
                 Kind::Failed | Kind::Uncertain | Kind::Unavailable => theme.danger,
                 _ => theme.muted_foreground,
@@ -670,16 +673,12 @@ impl ElseApp {
                             column.child(
                                 h_flex().justify_center().py_1().child(
                                     Button::new("load-older")
-                                        .focus_ring(false)
-                                        .cursor_pointer()
+                                        .control(Tier::Ghost, Scale::Compact, loading, cx)
                                         .label(if loading {
                                             "Loading…"
                                         } else {
                                             "Load older messages"
                                         })
-                                        .xsmall()
-                                        .ghost()
-                                        .disabled(loading)
                                         .on_click(cx.listener(|app, _, window, cx| {
                                             app.load_older(window, cx)
                                         })),
@@ -728,12 +727,9 @@ impl ElseApp {
                                 .justify_center()
                                 .child(
                                     Button::new("jump-to-latest")
-                                        .focus_ring(false)
-                                        .cursor_pointer()
+                                        .control(Tier::Primary, Scale::Compact, false, cx)
                                         .label("New messages")
                                         .icon(IconName::ArrowDown)
-                                        .small()
-                                        .primary()
                                         .rounded_full()
                                         .shadow_md()
                                         .on_click(cx.listener(|app, _, window, cx| {
@@ -797,9 +793,21 @@ impl ElseApp {
             .and_then(|v| v.conversation.as_ref())
             .and_then(|c| c.activity.clone())
             .or(bot.activity.clone());
-        let requested_stop = self.stopping.contains(&bot.id);
-        let working = requested_stop || activity.as_ref().is_some_and(|a| a.phase != "idle");
-        let stopping = requested_stop || activity.as_ref().is_some_and(|a| a.phase == "cancelling");
+        // A turn that only waits for the owner is not running: stop stays
+        // reachable from the menu and its shortcut, not as a composer button.
+        let phase = activity.as_ref().map_or("idle", |a| a.phase.as_str());
+        let turn = if self.stopping.contains(&bot.id) || phase == "cancelling" {
+            Turn::Stopping
+        } else if matches!(phase, "working" | "queued") && bot.waiting().is_none() {
+            Turn::Running
+        } else {
+            Turn::Idle
+        };
+        let actions = composer_actions(turn, can_send);
+        let reserved = match (actions.send, actions.stop) {
+            (Some(_), Some(_)) => 2. * COMPOSER_ACTION + px(8. + 12.),
+            _ => COMPOSER_ACTION + px(12.),
+        };
         let mut frame = v_flex()
             .key_context(COMPOSER_CONTEXT)
             .capture_action(
@@ -833,8 +841,8 @@ impl ElseApp {
             .min_w_0()
             .relative()
             .pl_3()
-            .pr(px(if working && can_send { 88. } else { 48. }))
-            .py_2()
+            .pr(reserved)
+            .py(px(7.))
             .rounded(theme.radius_lg)
             .border_1()
             .border_color(theme.border)
@@ -848,7 +856,7 @@ impl ElseApp {
                     .appearance(false)
                     .bordered(false)
                     .min_w_0()
-                    .min_h(px(40.))
+                    .min_h(COMPOSER_ACTION)
                     .text_size(px(14.))
                     .token(move |token, _, cx| {
                         super::attachments::draft_chip(token, &files, owner.clone(), cx)
@@ -872,32 +880,14 @@ impl ElseApp {
             .child(
                 h_flex()
                     .absolute()
-                    .right_2()
-                    .bottom_2()
+                    .right(px(7.))
+                    .bottom(px(7.))
                     .gap_2()
                     .items_center()
-                    .when(!working || can_send, |row| {
+                    .when_some(actions.stop, |row, stopping| {
                         row.child(
-                            Button::new("send")
-                                .focus_ring(false)
-                                .when(can_send, |button| button.cursor_pointer())
-                                .icon(IconName::ArrowUp)
-                                .primary()
-                                .small()
-                                .size(px(32.))
-                                .accessibility_label("Send message")
-                                .disabled(!can_send)
-                                .on_click(cx.listener(|app, _, window, cx| app.send(window, cx))),
-                        )
-                    })
-                    .when(working, |row| {
-                        row.child(
-                            Button::new("stop-work")
-                                .focus_ring(false)
-                                .when(!stopping, |button| button.cursor_pointer())
+                            stop_button("stop-work", stopping, cx)
                                 .icon(IconName::Square)
-                                .small()
-                                .size(px(28.))
                                 .accessibility_label(if stopping {
                                     "Stopping work"
                                 } else {
@@ -908,10 +898,17 @@ impl ElseApp {
                                     &StopWork,
                                     Some(APP_CONTEXT),
                                 )
-                                .loading(stopping)
                                 .on_click(
                                     cx.listener(|app, _, window, cx| app.stop_work(window, cx)),
                                 ),
+                        )
+                    })
+                    .when_some(actions.send, |row, ready| {
+                        row.child(
+                            send_button("send", ready, cx)
+                                .icon(IconName::ArrowUp)
+                                .accessibility_label("Send message")
+                                .on_click(cx.listener(|app, _, window, cx| app.send(window, cx))),
                         )
                     }),
             );
@@ -932,7 +929,7 @@ impl ElseApp {
             )
             .child(
                 div()
-                    .px_1()
+                    .px(px(13.))
                     .text_size(px(11.5))
                     .text_color(theme.foreground.opacity(super::message_row::META_OPACITY))
                     .child("Enter to send · Shift+Enter for a new line"),
@@ -975,10 +972,8 @@ impl ElseApp {
         if self.connection == Connection::Connected {
             body = body.child(
                 Button::new("empty-create")
-                    .focus_ring(false)
-                    .cursor_pointer()
+                    .control(Tier::Primary, Scale::Standard, false, cx)
                     .label("Create bot")
-                    .primary()
                     .on_click(cx.listener(|app, _, window, cx| app.open_create_dialog(window, cx))),
             );
         }
@@ -995,7 +990,7 @@ pub(super) fn working_dots(id: Uuid, color: Hsla, still: bool) -> impl IntoEleme
         .items_center()
         .justify_center()
         .children((0..3).map(move |i| {
-            let dot = div().relative().size(px(3.)).rounded_full().bg(color);
+            let dot = div().relative().size(px(3.5)).rounded_full().bg(color);
             if still {
                 return dot.into_any_element();
             }
@@ -1004,7 +999,7 @@ pub(super) fn working_dots(id: Uuid, color: Hsla, still: bool) -> impl IntoEleme
                 Animation::new(std::time::Duration::from_millis(1050)).repeat(),
                 move |dot, t| {
                     let lift = (std::f32::consts::TAU * t - i as f32 * 0.75).sin().max(0.);
-                    dot.top(px(-2.6 * lift * lift)).opacity(0.45 + 0.55 * lift)
+                    dot.top(px(-2.6 * lift * lift)).opacity(0.6 + 0.4 * lift)
                 },
             )
             .into_any_element()

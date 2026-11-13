@@ -1,4 +1,5 @@
 use super::ElseApp;
+use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -300,19 +301,15 @@ impl ElseApp {
                         .gap_2()
                         .child(
                             Button::new("delete-cancel")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Ghost, Scale::Standard, false, cx)
                                 .label("Cancel")
-                                .ghost()
                                 .track_focus(&cancel)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("delete-confirm")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Danger, Scale::Standard, false, cx)
                                 .label(format!("Delete {kind}"))
-                                .danger()
                                 .track_focus(&confirm)
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);

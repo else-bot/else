@@ -1,13 +1,11 @@
+use crate::controls::{Control as _, Scale, Tier, text_field};
 use std::collections::BTreeMap;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Sizable as _, StyledExt as _,
-    h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Icon, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -102,12 +100,8 @@ impl Render for SkillKeys {
                     ))
                     .child(
                         Button::new(("skill-key-replace", ix))
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Ghost, Scale::Compact, self.busy, cx)
                             .label("Replace")
-                            .xsmall()
-                            .ghost()
-                            .disabled(self.busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.fields[ix].captured = None;
                                 this.fields[ix]
@@ -119,8 +113,7 @@ impl Render for SkillKeys {
                     .into_any_element()
             } else {
                 let this = cx.weak_entity();
-                Input::new(&field.input)
-                    .focus_ring(false)
+                text_field(Input::new(&field.input), cx)
                     .aria_label(field.var.clone())
                     .disabled(self.busy)
                     .on_paste(move |item, window, cx| {
@@ -282,10 +275,7 @@ impl SkillFiles {
 pub(crate) fn source(source: &SkillSource, cx: &App) -> AnyElement {
     let url = source.url.clone();
     Button::new(SharedString::from(format!("skill-source-{}", source.url)))
-        .focus_ring(false)
-        .cursor_pointer()
-        .ghost()
-        .xsmall()
+        .control(Tier::Ghost, Scale::Compact, false, cx)
         .label(source.label())
         .text_color(cx.theme().primary)
         .on_click(move |_, _, cx| cx.open_url(&url))

@@ -1,7 +1,8 @@
 use super::{Avatar, AvatarColor, AvatarShape, bot_avatar};
+use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex, v_flex};
 use gpui_kit::*;
 use std::rc::Rc;
 
@@ -124,12 +125,13 @@ impl RenderOnce for AvatarPicker {
                     ))
                     .child(
                         Button::new("reset-avatar")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(
+                                Tier::Ghost,
+                                Scale::Compact,
+                                self.disabled || self.current == Avatar::default(),
+                                cx,
+                            )
                             .label("Reset")
-                            .xsmall()
-                            .ghost()
-                            .disabled(self.disabled || self.current == Avatar::default())
                             .on_click(move |_, window, cx| reset(Avatar::default(), window, cx)),
                     ),
             )

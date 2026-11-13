@@ -4,6 +4,7 @@
 //! they agree to.
 
 use super::*;
+use crate::controls::{Scale, Tier};
 use crate::model::QuestionChoice;
 use gpui_kit::component::radio::Radio;
 
@@ -279,11 +280,8 @@ impl ElseApp {
         if question.choices.iter().any(|c| c.id == DENY) {
             footer = footer.child(
                 Button::new(SharedString::from(format!("question-{id}-{DENY}")))
-                    .focus_ring(false)
-                    .small()
+                    .control(Tier::Secondary, Scale::Compact, locked, cx)
                     .label(sending(DENY).unwrap_or("Deny"))
-                    .disabled(locked)
-                    .when(!locked, |button| button.cursor_pointer())
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.answer_question(id, QuestionAnswer::Single(DENY.into()), window, cx)
                     })),
@@ -298,16 +296,12 @@ impl ElseApp {
             let choice_id = choice.id.clone();
             footer = footer.child(
                 Button::new(SharedString::from(format!("question-{id}-approve")))
-                    .focus_ring(false)
-                    .primary()
-                    .small()
+                    .control(Tier::Primary, Scale::Compact, locked, cx)
                     .label(label)
                     .accessibility_label(format!(
                         "{label}: {}",
                         scope(choice, question, bot_name).0
                     ))
-                    .disabled(locked)
-                    .when(!locked, |button| button.cursor_pointer())
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.answer_question(
                             id,

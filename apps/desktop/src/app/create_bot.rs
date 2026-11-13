@@ -1,7 +1,7 @@
 use super::ElseApp;
 use crate::api::{Category, CreateBotRequest};
-use crate::appearance::{Tier, Tiered as _};
 use crate::avatar::{Avatar, AvatarColor, AvatarPicker, AvatarShape, bot_avatar};
+use crate::controls::{Control as _, Scale, Tier, text_field};
 use crate::profile_picker::ProfilePicker;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::Button;
@@ -170,8 +170,7 @@ impl ElseApp {
                     ));
             let mut details = v_flex().flex_1().min_w_0().gap_4().child(
                 v_flex().gap_1().child(field_label("Bot name", cx)).child(
-                    Input::new(&form.name)
-                        .focus_ring(false)
+                    text_field(Input::new(&form.name), cx)
                         .aria_label("Bot name")
                         .disabled(locked),
                 ),
@@ -249,18 +248,15 @@ impl ElseApp {
                         .gap_2()
                         .child(
                             Button::new("create-cancel")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Secondary, Scale::Standard, false, cx)
                                 .label("Cancel")
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("create-submit")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Primary, Scale::Standard, busy || !can_submit, cx)
                                 .label("Create bot")
                                 .loading(busy)
-                                .tier(Tier::Primary, busy || !can_submit, cx)
                                 .on_click(move |_, window, cx| {
                                     let _ = app_create
                                         .update(cx, |app, cx| app.submit_create(window, cx));

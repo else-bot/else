@@ -4,15 +4,13 @@
 //! to the owner API; they are cleared on success, decline, navigation, and
 //! disconnect, and never enter a draft, a pending message, or the chat.
 
+use crate::controls::{Control as _, Scale, Tier, text_field};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::FocusableExt as _;
 use std::collections::BTreeMap;
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
@@ -314,12 +312,8 @@ impl ElseApp {
                     )))
                     .child(
                         Button::new(SharedString::from(format!("secret-replace-{id}-{ix}")))
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Ghost, Scale::Compact, busy, cx)
                             .label("Replace")
-                            .xsmall()
-                            .ghost()
-                            .disabled(busy)
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 app.replace_paste(id, ix, window, cx)
                             })),
@@ -327,8 +321,7 @@ impl ElseApp {
                     .into_any_element(),
                 None => {
                     let app = app.clone();
-                    Input::new(&field.input)
-                        .focus_ring(false)
+                    text_field(Input::new(&field.input), cx)
                         .disabled(busy)
                         .on_paste(move |item, window, cx| {
                             let Some(text) = item.text().filter(|t| is_multiline(t)) else {
@@ -374,10 +367,7 @@ impl ElseApp {
             .child(
                 h_flex().flex_1().child(
                     Button::new(SharedString::from(format!("secret-about-{id}")))
-                        .small()
-                        .ghost()
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Ghost, Scale::Compact, false, cx)
                         .icon(if expanded {
                             IconName::ChevronDown
                         } else {
@@ -405,27 +395,20 @@ impl ElseApp {
             )
             .child(
                 Button::new(SharedString::from(format!("secret-decline-{id}")))
-                    .focus_ring(false)
-                    .cursor_pointer()
+                    .control(Tier::Secondary, Scale::Compact, busy, cx)
                     .label("Decline")
-                    .small()
-                    .disabled(busy)
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.answer_secret(id, false, window, cx)
                     })),
             )
             .child(
                 Button::new(SharedString::from(format!("secret-save-{id}")))
-                    .focus_ring(false)
-                    .cursor_pointer()
+                    .control(Tier::Primary, Scale::Compact, busy, cx)
                     .label(if form.submitting {
                         "Saving…"
                     } else {
                         "Save and continue"
                     })
-                    .small()
-                    .primary()
-                    .disabled(busy)
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.answer_secret(id, true, window, cx)
                     })),

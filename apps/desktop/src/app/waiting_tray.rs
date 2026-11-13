@@ -1,11 +1,11 @@
 use super::ElseApp;
 use super::task_reply::state::format_elapsed;
 use crate::avatar::bot_avatar;
+use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{Delegation, DelegationStatus};
 use chrono::Utc;
-use gpui_kit::component::FocusableExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -82,10 +82,7 @@ impl ElseApp {
             .child(div().flex_1())
             .child(
                 Button::new("waiting-tray-toggle")
-                    .ghost()
-                    .xsmall()
-                    .focus_ring(false)
-                    .cursor_pointer()
+                    .control(Tier::Ghost, Scale::Compact, false, cx)
                     .label(if collapsed { "Show" } else { "Hide" })
                     .accessibility_label(if collapsed {
                         "Show the tasks this bot is waiting on"
@@ -216,10 +213,7 @@ impl ElseApp {
                             )
                             .children(bot(target).map(|b| {
                                 Button::new(SharedString::from(format!("tray-open-{}", d.id)))
-                                    .ghost()
-                                    .xsmall()
-                                    .focus_ring(false)
-                                    .cursor_pointer()
+                                    .control(Tier::Ghost, Scale::Compact, false, cx)
                                     .label("Open chat")
                                     .accessibility_label(format!("Open chat with {}", b.name))
                                     .on_click(cx.listener(move |app, _, window, cx| {

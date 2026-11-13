@@ -4,12 +4,11 @@
 //! Hand back button that continues the bot. A one-line row in the
 //! transcript records how it ended.
 
+use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::kbd::Kbd;
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Sizable as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
@@ -89,12 +88,8 @@ impl ElseApp {
     fn hand_back_button(&self, id: Uuid, cx: &mut Context<Self>) -> Button {
         let connected = self.connection == super::Connection::Connected;
         Button::new(SharedString::from(format!("hand-back-{id}")))
-            .focus_ring(false)
-            .when(connected, |button| button.cursor_pointer())
+            .control(Tier::Primary, Scale::Compact, !connected, cx)
             .label("Hand back")
-            .primary()
-            .small()
-            .disabled(!connected)
             .on_click(cx.listener(|app, _, window, cx| app.hand_back_computer(window, cx)))
     }
 
@@ -115,11 +110,8 @@ impl ElseApp {
             format!("{} is waiting on you", bot.name)
         };
         let open = Button::new(SharedString::from(format!("take-over-{id}")))
-            .focus_ring(false)
-            .when(connected, |button| button.cursor_pointer())
+            .control(Tier::Secondary, Scale::Compact, !connected, cx)
             .label(if taken { "Open screen" } else { "Take over" })
-            .small()
-            .disabled(!connected)
             .map(|button| {
                 if taken {
                     button.ghost()
@@ -174,12 +166,8 @@ impl ElseApp {
             } else {
                 row.child(
                     Button::new(SharedString::from(format!("handoff-decline-{id}")))
-                        .focus_ring(false)
-                        .when(connected, |button| button.cursor_pointer())
+                        .control(Tier::Ghost, Scale::Compact, !connected, cx)
                         .label("Not now")
-                        .ghost()
-                        .small()
-                        .disabled(!connected)
                         .on_click(cx.listener(move |app, _, window, cx| {
                             app.settle_handoff(bot_id, id, HandoffAction::Dismiss, window, cx)
                         })),

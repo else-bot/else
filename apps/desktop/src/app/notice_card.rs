@@ -1,10 +1,10 @@
 use super::{Connection, ElseApp};
 use crate::api::ClientError;
-use crate::appearance::{Tier, Tiered as _};
+use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{OwnerNoticeKind, OwnerNoticeStatus};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, FocusableExt as _, Sizable as _};
+use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::button::Button;
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -101,35 +101,37 @@ impl ElseApp {
         let exchange_title =
             sender.map_or_else(|| name.to_owned(), |sender| format!("{sender} & {name}"));
         let connected = self.connection == Connection::Connected;
-        let button = |action: &str, label: String| {
+        let button = |action: &str, label: String, tier: Tier, disabled: bool| {
             Button::new(SharedString::from(format!("notice-{id}-{action}")))
-                .focus_ring(false)
-                .cursor_pointer()
-                .small()
+                .control(tier, Scale::Compact, disabled, cx)
                 .accessibility_label(label.clone())
                 .label(label)
         };
         let actions = super::action_card::footer()
             .children(anchor.map(|anchor| {
-                button("open", "Open task".into())
-                    .ghost()
-                    .on_click(cx.listener(move |app, _, window, cx| {
+                button("open", "Open task".into(), Tier::Ghost, false).on_click(cx.listener(
+                    move |app, _, window, cx| {
                         app.open_bot_exchange(anchor, exchange_title.clone(), window, cx);
-                    }))
+                    },
+                ))
             }))
             .child(
-                button("dismiss", "Mark handled".into())
-                    .tier(Tier::Secondary, !connected, cx)
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        app.dismiss_owner_notice(bot, id, window, cx);
-                    })),
+                button(
+                    "dismiss",
+                    "Mark handled".into(),
+                    Tier::Secondary,
+                    !connected,
+                )
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    app.dismiss_owner_notice(bot, id, window, cx);
+                })),
             )
             .child(
-                button("reply", format!("Reply to {name}"))
-                    .primary()
-                    .on_click(cx.listener(|app, _, window, cx| {
+                button("reply", format!("Reply to {name}"), Tier::Primary, false).on_click(
+                    cx.listener(|app, _, window, cx| {
                         app.composer.read(cx).focus_handle(cx).focus(window, cx);
-                    })),
+                    }),
+                ),
             );
         Some(
             super::action_card::card(IconName::TriangleAlert, title, subtitle)

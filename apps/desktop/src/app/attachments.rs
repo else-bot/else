@@ -1,5 +1,5 @@
 mod view;
-use gpui_kit::component::FocusableExt as _;
+use crate::controls::{Control as _, Scale, Tier};
 use view::{Preview, show_preview};
 pub(super) use view::{chip, draft_chip};
 
@@ -568,13 +568,12 @@ impl ElseApp {
             if let Some(error) = error {
                 let owner = cx.entity().downgrade();
                 let (name, id) = (file.name.clone(), file.id);
-                window.open_dialog(cx, move |dialog, _, _| {
+                window.open_dialog(cx, move |dialog, _, cx| {
                     let owner = owner.clone();
                     dialog.title(name.clone()).child(error.clone()).footer(
                         h_flex().child(
                             Button::new("retry-file-upload")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Secondary, Scale::Standard, false, cx)
                                 .label("Retry upload")
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);

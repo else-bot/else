@@ -1,10 +1,8 @@
+use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::FocusableExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Icon, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
@@ -397,12 +395,8 @@ impl ElseApp {
                         .child(div().flex_1())
                         .child(
                             Button::new(SharedString::from(format!("draft-stop-always-{id}")))
-                                .focus_ring(false)
+                                .control(Tier::Ghost, Scale::Compact, !connected, cx)
                                 .label("Stop approving always")
-                                .small()
-                                .ghost()
-                                .disabled(!connected)
-                                .when(connected, |b| b.cursor_pointer())
                                 .on_click(cx.listener(move |app, _, window, cx| {
                                     app.stop_approving_always(id, window, cx)
                                 })),
@@ -486,11 +480,8 @@ impl ElseApp {
             })
             .child(
                 Button::new(SharedString::from(format!("draft-discard-{id}")))
-                    .focus_ring(false)
+                    .control(Tier::Secondary, Scale::Compact, !connected || busy, cx)
                     .label("Discard")
-                    .small()
-                    .disabled(!connected || busy)
-                    .when(connected && !busy, |b| b.cursor_pointer())
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.act_on_draft(id, Choice::Discard, window, cx)
                     })),
@@ -498,11 +489,8 @@ impl ElseApp {
             .when(draft.kind.is_some(), |row| {
                 row.child(
                     Button::new(SharedString::from(format!("draft-approve-always-{id}")))
-                        .focus_ring(false)
+                        .control(Tier::Secondary, Scale::Compact, !approve_enabled, cx)
                         .label("Approve always")
-                        .small()
-                        .disabled(!approve_enabled)
-                        .when(approve_enabled, |b| b.cursor_pointer())
                         .on_click(cx.listener(move |app, _, window, cx| {
                             app.act_on_draft(id, Choice::ApproveAlways, window, cx)
                         })),
@@ -510,16 +498,12 @@ impl ElseApp {
             })
             .child(
                 Button::new(SharedString::from(format!("draft-approve-{id}")))
-                    .focus_ring(false)
+                    .control(Tier::Primary, Scale::Compact, !approve_enabled, cx)
                     .label(if busy {
                         "Saving…"
                     } else {
                         draft.content.approve_label()
                     })
-                    .small()
-                    .primary()
-                    .disabled(!approve_enabled)
-                    .when(approve_enabled, |b| b.cursor_pointer())
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.act_on_draft(id, Choice::Approve, window, cx)
                     })),
@@ -532,16 +516,12 @@ impl ElseApp {
             card = card.child(
                 h_flex().justify_end().child(
                     Button::new(SharedString::from(format!("draft-recover-{id}")))
-                        .focus_ring(false)
+                        .control(Tier::Ghost, Scale::Compact, !connected, cx)
                         .label(if retry {
                             "Retry same action"
                         } else {
                             "Load latest draft"
                         })
-                        .small()
-                        .ghost()
-                        .disabled(!connected)
-                        .when(connected, |b| b.cursor_pointer())
                         .on_click(cx.listener(move |app, _, window, cx| {
                             if retry {
                                 app.act_on_draft(id, Choice::Approve, window, cx);

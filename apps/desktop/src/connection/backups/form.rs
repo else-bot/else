@@ -1,12 +1,10 @@
 use super::*;
 use crate::api::{BackupDestinationInput, BackupService, LocalBackupSettings};
+use crate::controls::{Control as _, Scale, Tier, segment, segment_track, text_field, toggle};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{
-    Disableable as _, FocusableExt as _, Icon, Selectable as _, Sizable as _, h_flex,
-};
+use gpui_kit::component::{Icon, Selectable as _, h_flex};
 
 pub(super) enum Editor {
     Destination(DestinationForm),
@@ -140,15 +138,14 @@ impl DestinationForm {
         Ok(destination)
     }
 
-    fn field(&self, label: &'static str, state: &Entity<InputState>, busy: bool) -> Div {
+    fn field(&self, label: &'static str, state: &Entity<InputState>, busy: bool, cx: &App) -> Div {
         v_flex()
             .flex_1()
             .min_w_0()
             .gap_1p5()
             .child(div().text_xs().child(label))
             .child(
-                Input::new(state)
-                    .focus_ring(false)
+                text_field(Input::new(state), cx)
                     .aria_label(label)
                     .disabled(busy),
             )
@@ -156,24 +153,21 @@ impl DestinationForm {
 
     pub fn render(&self, busy: bool, stacked: bool, cx: &mut Context<Shell>) -> Div {
         let theme = cx.theme();
-        let mut services = h_flex().gap_2().w_full();
+        let mut services = segment_track(cx).w_full();
         for service in [
             BackupService::R2,
             BackupService::S3,
             BackupService::Compatible,
         ] {
             services = services.child(
-                Button::new(ElementId::Name(
-                    format!("backup-service-{service:?}").into(),
-                ))
-                .focus_ring(false)
-                .cursor_pointer()
-                .small()
-                .label(service.label())
-                .flex_1()
-                .selected(self.service == service)
+                segment(
+                    ElementId::Name(format!("backup-service-{service:?}").into()),
+                    service.label(),
+                    self.service == service,
+                    busy,
+                    cx,
+                )
                 .toggled(self.service == service)
-                .disabled(busy)
                 .on_click(cx.listener(move |shell, _, window, cx| {
                     shell.select_backup_service(service, window, cx)
                 })),
@@ -182,16 +176,16 @@ impl DestinationForm {
         v_flex().gap_4()
             .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Backup destination"))
             .child(v_flex().gap_2().child(div().text_xs().child("Storage service")).child(services))
-            .child(self.field("Endpoint URL", &self.endpoint, busy))
-            .child(h_flex().items_start().gap_4().when(stacked, |row| row.flex_col()).child(self.field("Bucket", &self.bucket, busy)).child(self.field("Folder / key prefix", &self.prefix, busy)))
-            .child(h_flex().items_start().gap_4().when(stacked, |row| row.flex_col()).child(self.field("Access key ID", &self.access, busy)).child(self.field("Secret access key", &self.secret, busy)))
+            .child(self.field("Endpoint URL", &self.endpoint, busy, cx))
+            .child(h_flex().items_start().gap_4().when(stacked, |row| row.flex_col()).child(self.field("Bucket", &self.bucket, busy, cx)).child(self.field("Folder / key prefix", &self.prefix, busy, cx)))
+            .child(h_flex().items_start().gap_4().when(stacked, |row| row.flex_col()).child(self.field("Access key ID", &self.access, busy, cx)).child(self.field("Secret access key", &self.secret, busy, cx)))
             .child(div().text_xs().text_color(theme.muted_foreground).child(if self.saved_secret { "Leave the secret blank to keep the saved key. A new key replaces it only after saving." } else { "Credentials are encrypted on the workspace server." }))
             .child(div().text_xs().text_color(theme.muted_foreground).child("Backups share unchanged data between copies. Do not add a bucket rule that expires objects under this prefix: it would delete data newer backups still use."))
-            .child(Button::new("backup-advanced").focus_ring(false).cursor_pointer().small().label(if self.advanced { "Hide advanced settings" } else { "Advanced connection settings" }).disabled(busy).on_click(cx.listener(|shell, _, _, cx| {
+            .child(Button::new("backup-advanced").control(Tier::Ghost, Scale::Compact, busy, cx).label(if self.advanced { "Hide advanced settings" } else { "Advanced connection settings" }).on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(Editor::Destination(form)) = shell.backups.as_mut().and_then(|view| view.editor.as_mut()) { form.advanced.toggle(); }
                 cx.notify();
             })))
-            .when(self.advanced, |content| content.child(self.field("Region", &self.region, busy)).child(h_flex().gap_3().child(Switch::new("backup-path-style").focus_ring(false).cursor_pointer().small().checked(self.path_style).disabled(busy).accessibility_label("Use path-style addressing").on_click(cx.listener(|shell, checked: &bool, _, cx| {
+            .when(self.advanced, |content| content.child(self.field("Region", &self.region, busy, cx)).child(h_flex().gap_3().child(toggle("backup-path-style", self.path_style, busy).accessibility_label("Use path-style addressing").on_click(cx.listener(|shell, checked: &bool, _, cx| {
                 if let Some(Editor::Destination(form)) = shell.backups.as_mut().and_then(|view| view.editor.as_mut()) { form.path_style = *checked; form.verified = false; }
                 cx.notify();
             }))).child(div().text_xs().child("Use path-style addressing"))))
@@ -265,8 +259,7 @@ impl PolicyForm {
                 .gap_1p5()
                 .child(div().text_xs().child(label))
                 .child(
-                    Input::new(state)
-                        .focus_ring(false)
+                    text_field(Input::new(state), cx)
                         .aria_label(label)
                         .disabled(busy),
                 )
@@ -280,11 +273,8 @@ impl PolicyForm {
         ] {
             presets = presets.child(
                 Button::new(ElementId::Name(format!("backup-interval-{seconds}").into()))
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .small()
+                    .control(Tier::Secondary, Scale::Compact, busy, cx)
                     .label(label)
-                    .disabled(busy)
                     .on_click(cx.listener(move |shell, _, window, cx| {
                         if let Some(Editor::Policy(form)) =
                             shell.backups.as_mut().and_then(|view| view.editor.as_mut())
@@ -417,7 +407,6 @@ impl LocalForm {
         stacked: bool,
         cx: &mut Context<Shell>,
     ) -> Div {
-        use gpui_kit::component::button::ButtonVariants as _;
         let theme = cx.theme();
         let managed = local.managed_by_env;
         let disabled = busy || managed;
@@ -426,9 +415,7 @@ impl LocalForm {
         for time in ["01:00", "02:00", "03:00", "04:00", "05:00"] {
             presets = presets.child(
                 Button::new(ElementId::Name(format!("local-backup-{time}").into()))
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .small()
+                    .control(Tier::Secondary, Scale::Compact, disabled, cx)
                     .label(if time == "03:00" {
                         "03:00 · recommended"
                     } else {
@@ -436,7 +423,6 @@ impl LocalForm {
                     })
                     .selected(selected.as_ref() == time)
                     .toggled(selected.as_ref() == time)
-                    .disabled(disabled)
                     .on_click(cx.listener(move |shell, _, window, cx| {
                         if let Some(form) = shell
                             .backups
@@ -457,8 +443,7 @@ impl LocalForm {
                 .gap_2()
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
                 .child(
-                    Input::new(state)
-                        .focus_ring(false)
+                    text_field(Input::new(state), cx)
                         .aria_label(label)
                         .disabled(disabled),
                 )
@@ -480,8 +465,8 @@ impl LocalForm {
                     .child(div().text_xs().text_color(theme.muted_foreground)
                         .child("else.bot pauses new work while it backs up. Running tasks finish first.")))
                 .child(h_flex().gap_2().text_xs().child("Automatic")
-                    .child(Switch::new("local-backups-enabled").focus_ring(false).cursor_pointer().small()
-                        .checked(self.enabled).disabled(disabled).accessibility_label("Automatic daily local backups")
+                    .child(toggle("local-backups-enabled", self.enabled, disabled)
+                       .accessibility_label("Automatic daily local backups")
                         .on_click(cx.listener(|shell, enabled: &bool, _, cx| {
                             if let Some(form) = shell.backups.as_mut().and_then(|view| view.local_form.as_mut()) {
                                 form.enabled = *enabled;
@@ -493,12 +478,10 @@ impl LocalForm {
                 .child(field("Exact time", &self.time)).child(field("Keep copies", &self.keep)))
             .child(div().text_xs().text_color(theme.muted_foreground).child(note))
             .when(!managed, |panel| panel.child(h_flex().justify_end().gap_2()
-                .child(Button::new("local-backup-cancel").focus_ring(false).cursor_pointer().label("Cancel")
-                    .disabled(disabled || !self.dirty(cx))
+                .child(Button::new("local-backup-cancel").control(Tier::Secondary, Scale::Standard, disabled || !self.dirty(cx), cx).label("Cancel")
                     .on_click(cx.listener(|shell, _, window, cx| shell.cancel_local_backup_edit(window, cx))))
-                .child(Button::new("local-backup-save").focus_ring(false).cursor_pointer().label("Save schedule").primary()
+                .child(Button::new("local-backup-save").control(Tier::Primary, Scale::Standard, disabled || !self.dirty(cx), cx).label("Save schedule")
                     .loading(saving)
-                    .disabled(disabled || !self.dirty(cx))
                     .on_click(cx.listener(|shell, _, window, cx| shell.save_local_backup_schedule(window, cx))))))
     }
 }

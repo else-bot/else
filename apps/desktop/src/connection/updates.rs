@@ -1,5 +1,5 @@
 use super::*;
-use crate::appearance::{Tier, Tiered as _};
+use crate::controls::{Control as _, Scale, Tier};
 use crate::updates::{
     Channel as UpdateChannel, Check as UpdateCheck, Commands, Operation, Snapshot, Work,
 };
@@ -829,14 +829,13 @@ impl Shell {
     ) -> Button {
         Button::new(id)
             .label(label)
-            .focus_ring(false)
-            .when(!disabled, |button| button.cursor_pointer())
-            .tier(
+            .control(
                 if primary {
                     Tier::Primary
                 } else {
                     Tier::Secondary
                 },
+                Scale::Standard,
                 disabled,
                 cx,
             )

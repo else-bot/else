@@ -346,7 +346,7 @@ color8 = "#555753"
             assert!(
                 palette.background.contrast(border) < palette.background.contrast(palette.border)
             );
-            assert_eq!((config.radius, config.radius_lg), (Some(7), Some(12)));
+            assert_eq!((config.radius, config.radius_lg), (Some(8), Some(12)));
             assert_eq!(config.mode, palette.mode);
             assert_eq!(
                 colors.foreground.as_deref(),
@@ -360,9 +360,10 @@ color8 = "#555753"
                 colors.selection.as_deref(),
                 Some(palette.accent.hex().as_str())
             );
-            assert_eq!(
-                colors.switch.as_deref(),
-                Some(palette.border.hex().as_str())
+            let track = Rgb::parse(colors.switch.as_deref().unwrap()).unwrap();
+            assert!(
+                palette.background.contrast(track) >= 1.5,
+                "an off switch stays visible"
             );
             assert_eq!(
                 colors.scrollbar_thumb.as_deref(),

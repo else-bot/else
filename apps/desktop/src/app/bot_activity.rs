@@ -1,5 +1,6 @@
 use super::conversation::{ReplyLayout, TranscriptRow};
 use super::{ElseApp, RowKey};
+use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{BotCreated, BotReplyStatus, Conversation, Item};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
@@ -361,10 +362,7 @@ impl ElseApp {
             .child(super::action_card::event_object(&theme, name.clone()))
             .child(
                 Button::new(SharedString::from(format!("created-details-{item}")))
-                    .small()
-                    .ghost()
-                    .focus_ring(false)
-                    .cursor_pointer()
+                    .control(Tier::Ghost, Scale::Compact, false, cx)
                     .label("Details")
                     .accessibility_label("Show created bot details")
                     .on_click(cx.listener(move |app, _, _, cx| {
@@ -379,10 +377,7 @@ impl ElseApp {
             .children(child.map(|bot| {
                 let id = bot.id;
                 Button::new(SharedString::from(format!("open-created-{item}")))
-                    .ghost()
-                    .small()
-                    .focus_ring(false)
-                    .cursor_pointer()
+                    .control(Tier::Ghost, Scale::Compact, false, cx)
                     .label("Open chat")
                     .accessibility_label(format!("Open chat with {name}"))
                     .on_click(cx.listener(move |app, _, window, cx| app.open_bot(id, window, cx)))

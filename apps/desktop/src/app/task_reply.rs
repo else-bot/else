@@ -213,9 +213,13 @@ impl ElseApp {
                     .items_center()
                     .gap_2()
                     .text_size(px(13.))
-                    .text_color(theme.muted_foreground)
+                    .text_color(if working {
+                        theme.foreground.opacity(0.85)
+                    } else {
+                        theme.muted_foreground
+                    })
                     .when(working, |line| {
-                        line.child(working_dots(task.turn, theme.primary, cx.reduce_motion()))
+                        line.child(working_dots(task.turn, theme.link, cx.reduce_motion()))
                     })
                     .children(delegate_faces)
                     .child(div().min_w_0().truncate().child(detail))

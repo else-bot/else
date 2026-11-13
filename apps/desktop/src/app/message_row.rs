@@ -4,15 +4,15 @@ use super::reply::Author;
 use super::row_text::RowText;
 use super::{ElseApp, RowKey};
 use crate::avatar::bot_avatar;
+use crate::controls::{Control as _, Scale, Tier};
 use crate::model::ReactionKind;
 use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
-use gpui_kit::component::FocusableExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -269,7 +269,13 @@ impl ElseApp {
                     .px(pad_x)
                     .py(pad_y)
                     .rounded(theme.radius_lg)
-                    .bg(theme.secondary)
+                    // The owner's words sit a step above the page: lighter
+                    // than it in both themes.
+                    .bg(if theme.mode.is_dark() {
+                        theme.secondary
+                    } else {
+                        theme.popover
+                    })
                     .child(text.render(cx))
             } else {
                 div().w_full().min_w_0().py_1().child(text.render(cx))
@@ -463,10 +469,7 @@ impl ElseApp {
                 let subject = mark.map_or_else(String::new, |mark| format!("{mark} "));
                 let action = |id: &str, label: &'static str| {
                     Button::new(SharedString::from(format!("{id}-{request_id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .link()
-                        .xsmall()
+                        .control(Tier::Ghost, Scale::Compact, false, cx)
                         .label(label)
                 };
                 let failed = |status: &str, color: Hsla, reason: &str, retry: bool| {
@@ -589,10 +592,7 @@ fn routine_banner(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> 
 
 fn routine_details(id: SharedString, cx: &mut Context<ElseApp>) -> Button {
     Button::new(id)
-        .small()
-        .ghost()
-        .focus_ring(false)
-        .cursor_pointer()
+        .control(Tier::Ghost, Scale::Compact, false, cx)
         .label("View")
         .accessibility_label("View routines in bot details")
         .on_click(cx.listener(|app, _, window, cx| {

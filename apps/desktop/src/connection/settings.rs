@@ -1,14 +1,13 @@
 use super::view::{missing_local, notice};
 use super::*;
+use crate::controls::{Control as _, Scale, Tier, segment, segment_track, text_field};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogEntrance, DialogTitle};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{
-    Disableable as _, FocusableExt as _, Icon, Selectable as _, Sizable as _, Theme, h_flex,
-};
+use gpui_kit::component::{FocusableExt as _, Icon, Selectable as _, Theme, h_flex};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SettingsSection {
@@ -379,11 +378,8 @@ impl Shell {
                     )
                     .child(
                         Button::new("app-settings-close")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Ghost, Scale::Compact, false, cx)
                             .icon(IconName::Close)
-                            .ghost()
-                            .small()
                             .label("Esc")
                             .accessibility_label("Close settings, Escape")
                             .on_click(cx.listener(|shell, _, window, cx| {
@@ -444,10 +440,7 @@ impl Shell {
                 .gap_4()
                 .child(
                     Button::new("server-update-back")
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .ghost()
-                        .small()
+                        .control(Tier::Ghost, Scale::Compact, false, cx)
                         .label("Back to servers")
                         .on_click(cx.listener(|shell, _, window, cx| {
                             shell.close_server_update(window, cx)
@@ -506,64 +499,53 @@ impl Shell {
             .text_color(status_color)
             .child(div().size_1p5().rounded_full().bg(status_color))
             .child(status);
-        let location = h_flex()
-            .p_1()
-            .gap_1()
-            .rounded(theme.radius)
-            .bg(theme.secondary.opacity(0.45))
+        let location = segment_track(cx)
+            .w_full()
             .when(self.launch.local.is_ok(), |row| {
                 row.child(
-                    Button::new("settings-local-server")
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .label("This machine")
-                        .ghost()
-                        .small()
-                        .flex_1()
-                        .min_w_0()
-                        .selected(matches!(setup.page, Page::Welcome))
-                        .toggled(matches!(setup.page, Page::Welcome))
-                        .on_click(cx.listener(|shell, _, window, cx| {
-                            if shell
-                                .setup
-                                .as_ref()
-                                .is_some_and(|setup| !matches!(setup.page, Page::Welcome))
-                            {
-                                shell.back_to_welcome(window, cx);
-                            }
-                        })),
-                )
-            })
-            .child(
-                Button::new("settings-remote-server")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .label("Remote server")
-                    .ghost()
-                    .small()
-                    .flex_1()
-                    .min_w_0()
-                    .selected(matches!(setup.page, Page::Remote(_)))
-                    .toggled(matches!(setup.page, Page::Remote(_)))
+                    segment(
+                        "settings-local-server",
+                        "This machine",
+                        matches!(setup.page, Page::Welcome),
+                        false,
+                        cx,
+                    )
+                    .toggled(matches!(setup.page, Page::Welcome))
                     .on_click(cx.listener(|shell, _, window, cx| {
                         if shell
                             .setup
                             .as_ref()
-                            .is_some_and(|setup| !matches!(setup.page, Page::Remote(_)))
+                            .is_some_and(|setup| !matches!(setup.page, Page::Welcome))
                         {
-                            let profile =
-                                shell.active.as_ref().map(|active| active.profile.clone());
-                            shell.open_remote(profile.as_ref(), window, cx);
+                            shell.back_to_welcome(window, cx);
                         }
                     })),
+                )
+            })
+            .child(
+                segment(
+                    "settings-remote-server",
+                    "Remote server",
+                    matches!(setup.page, Page::Remote(_)),
+                    false,
+                    cx,
+                )
+                .toggled(matches!(setup.page, Page::Remote(_)))
+                .on_click(cx.listener(|shell, _, window, cx| {
+                    if shell
+                        .setup
+                        .as_ref()
+                        .is_some_and(|setup| !matches!(setup.page, Page::Remote(_)))
+                    {
+                        let profile = shell.active.as_ref().map(|active| active.profile.clone());
+                        shell.open_remote(profile.as_ref(), window, cx);
+                    }
+                })),
             );
         let mut content = v_flex()
             .child(
                 Button::new("connection-editor-back")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .ghost()
-                    .small()
+                    .control(Tier::Ghost, Scale::Compact, false, cx)
                     .label("Back to servers")
                     .on_click(
                         cx.listener(|shell, _, window, cx| shell.close_server_editor(window, cx)),
@@ -582,9 +564,7 @@ impl Shell {
             .child(settings_row(
                 "Name",
                 "A name for this connection",
-                Input::new(&setup.name)
-                    .focus_ring(false)
-                    .aria_label("Server name"),
+                text_field(Input::new(&setup.name), cx).aria_label("Server name"),
                 stacked,
                 theme,
             ))
@@ -676,12 +656,9 @@ impl Shell {
                     };
                     (!connected || busy.is_some()).then(|| {
                         Button::new("connection-start")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Primary, Scale::Standard, busy.is_some(), cx)
                             .label(label)
-                            .primary()
                             .loading(busy.is_some())
-                            .disabled(busy.is_some())
                             .on_click(
                                 cx.listener(|shell, _, window, cx| shell.start_local(window, cx)),
                             )
@@ -696,8 +673,7 @@ impl Shell {
                         v_flex()
                             .gap_2()
                             .child(
-                                Input::new(&form.origin)
-                                    .focus_ring(false)
+                                text_field(Input::new(&form.origin), cx)
                                     .aria_label("Server address"),
                             )
                             .when(active.is_some(), |column| column.child(status)),
@@ -710,8 +686,7 @@ impl Shell {
                         v_flex()
                             .gap_2()
                             .child(
-                                Input::new(&form.token)
-                                    .focus_ring(false)
+                                text_field(Input::new(&form.token), cx)
                                     .aria_label("Owner key")
                                     .mask_toggle(),
                             )
@@ -726,16 +701,13 @@ impl Shell {
                     ));
                 Some(
                     Button::new("connection-connect")
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Primary, Scale::Standard, busy.is_some(), cx)
                         .label(if busy.is_some() {
                             "Connecting…"
                         } else {
                             "Test and save ↵"
                         })
-                        .primary()
                         .loading(busy.is_some())
-                        .disabled(busy.is_some())
                         .on_click(
                             cx.listener(|shell, _, window, cx| shell.connect_remote(window, cx)),
                         ),
@@ -764,8 +736,7 @@ impl Shell {
                 |row| {
                     row.child(
                         Button::new("app-settings-done")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Secondary, Scale::Standard, false, cx)
                             .label("Done")
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.cancel(window, cx);
