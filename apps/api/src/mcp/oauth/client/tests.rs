@@ -15,6 +15,7 @@ use uuid::Uuid;
 fn github() -> Discovery {
     Discovery {
         resource: "https://api.githubcopilot.com/mcp/".into(),
+        challenge: None,
         metadata: fixtures::metadata("https://github.com/login/oauth", "https://attacker.test"),
         scopes: vec!["repo".into()],
     }
@@ -89,6 +90,7 @@ async fn registered_signin_exchanges_and_refreshes_with_a_secret_without_registr
     let base = format!("http://{}", listener.local_addr().unwrap());
     let discovery = Discovery {
         resource: format!("{base}/mcp"),
+        challenge: None,
         metadata: fixtures::metadata(&base, "https://attacker.test"),
         scopes: vec!["repo".into()],
     };

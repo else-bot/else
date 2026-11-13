@@ -23,6 +23,7 @@ pub(super) fn metadata(issuer: &str, endpoints: &str) -> AuthorizationMetadata {
 pub(super) fn discovery() -> Discovery {
     Discovery {
         resource: "https://mcp.example.com/mcp".into(),
+        challenge: None,
         metadata: metadata("https://auth.example.com", "https://auth.example.com"),
         scopes: vec!["read:issues".into()],
     }

@@ -3,9 +3,8 @@ use super::*;
 
 /// A sign-in in progress against `discovery`, with the state its callback must echo.
 async fn pending(previous: Option<Credential>, discovery: Discovery) -> (Box<Pending>, String) {
-    let exchange = exchange(&discovery.resource, discovery.metadata.clone(), false)
-        .await
-        .unwrap();
+    let mut exchange = exchange(&discovery.resource, false).await.unwrap();
+    exchange.manager.set_metadata(discovery.metadata.clone());
     let session = AuthorizationSession::new(
         exchange.manager,
         AuthorizationRequest::new("http://127.0.0.1:12345/callback")
@@ -24,6 +23,7 @@ async fn pending(previous: Option<Credential>, discovery: Discovery) -> (Box<Pen
         .into_owned();
     let pending = Pending {
         id: Uuid::new_v4(),
+        resource: discovery.resource.clone(),
         discovery,
         client_secret: None,
         session,
@@ -340,14 +340,32 @@ async fn a_sign_in_saved_before_the_rmcp_client_still_refreshes() {
 }
 
 #[tokio::test]
-async fn a_secret_from_dynamic_registration_is_kept_for_refresh() {
-    use axum::{Form, Json, Router, routing::post};
+async fn sign_in_and_refresh_use_rmcps_resource_and_a_registration_secret() {
+    use axum::{Form, Json, Router, routing::get, routing::post};
     use serde_json::json;
     use std::collections::HashMap;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
+    let resource_document =
+        json!({"resource": format!("{base}/"), "authorization_servers": [base]});
+    let server_document = json!({
+        "issuer": base,
+        "authorization_endpoint": format!("{base}/authorize"),
+        "token_endpoint": format!("{base}/token"),
+        "registration_endpoint": format!("{base}/register"),
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": ["client_secret_post"],
+    });
     let (sent, mut received) = tokio::sync::mpsc::channel(2);
     let router = Router::new()
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(move || async move { Json(resource_document) }),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(move || async move { Json(server_document) }),
+        )
         .route(
             "/register",
             post(|| async { Json(json!({"client_id":"dynamic-client","client_secret":"dynamic-secret","redirect_uris":[]})) }),
@@ -366,41 +384,38 @@ async fn a_secret_from_dynamic_registration_is_kept_for_refresh() {
     let dir = tempfile::tempdir().unwrap();
     let store = store(dir.path().into());
     let mut session = Session::open(store.clone(), None).await.unwrap();
-    let mut discovery = discovery();
-    discovery.resource = format!("{base}/mcp");
-    discovery.metadata = metadata("https://auth.example.com", &base);
-    discovery.metadata.additional_fields.insert(
-        "token_endpoint_auth_methods_supported".into(),
-        json!(["client_secret_post"]),
-    );
-    session.state = State::Required(discovery.clone());
+    let url = format!("{base}/mcp");
+    let challenge =
+        format!(r#"Bearer resource_metadata="{base}/.well-known/oauth-protected-resource""#);
+    session.state = State::Required(protocol::discover(&url, &challenge).await.unwrap());
     let started = session
         .authorize(
             &Transport::Http {
                 secrets: Vec::new(),
-                url: discovery.resource,
+                url,
                 headers: Default::default(),
             },
             "http://127.0.0.1:49177/mcp/callback".into(),
         )
         .await
         .unwrap();
-    let url = reqwest::Url::parse(&started.authorization_url).unwrap();
-    let state = url
-        .query_pairs()
-        .find(|(name, _)| name == "state")
+    let query: HashMap<_, _> = reqwest::Url::parse(&started.authorization_url)
         .unwrap()
-        .1
-        .into_owned();
-    let mut response = callback(started.request_id, &state);
+        .query_pairs()
+        .into_owned()
+        .collect();
+    assert_eq!(query["resource"], format!("{base}/"));
+    let mut response = callback(started.request_id, &query["state"]);
     response.error = None;
     response.code = Some("authorization-code".into());
+    response.iss = Some(base.clone());
     session.complete(response).await.unwrap();
     let mut reopened = Session::open(store, None).await.unwrap();
     reopened.refresh(true).await.unwrap();
     for grant in ["authorization_code", "refresh_token"] {
         let fields = received.recv().await.unwrap();
         assert_eq!(fields["grant_type"], grant);
+        assert_eq!(fields["resource"], format!("{base}/"));
         assert_eq!(fields["client_id"], "dynamic-client");
         assert_eq!(fields["client_secret"], "dynamic-secret");
     }

@@ -52,6 +52,7 @@ pub struct Complete {
 struct Pending {
     id: Uuid,
     discovery: Discovery,
+    resource: String,
     client_secret: Option<String>,
     session: AuthorizationSession,
     tokens: InMemoryCredentialStore,
@@ -319,6 +320,7 @@ impl Session {
             State::Required(discovery) | State::ReauthRequired(discovery) => discovery.clone(),
             State::Authorized(credential) => Discovery {
                 resource: credential.resource.clone(),
+                challenge: None,
                 metadata: credential.metadata.clone(),
                 scopes: credential.scopes.clone(),
             },
@@ -344,16 +346,23 @@ impl Session {
             }
         };
         let registered = self.registered_client(&discovery.metadata)?;
-        if let Some(client) = registered {
-            discovery.metadata = client.metadata(&discovery.resource)?;
-        }
-        let mut exchange = exchange(
-            &discovery.resource,
-            discovery.metadata.clone(),
-            registered.is_some(),
-        )
-        .await
-        .map_err(auth_error)?;
+        let mut exchange = exchange(&discovery.resource, registered.is_some())
+            .await
+            .map_err(auth_error)?;
+        // Discovering on the client that signs in lets rmcp choose the
+        // resource the tokens are for.
+        discovery.metadata = match registered {
+            Some(client) => client.metadata(&discovery.resource)?,
+            None => {
+                exchange
+                    .manager
+                    .resolve_metadata_from_challenge(discovery.challenge.as_deref())
+                    .await
+                    .map_err(auth_error)?
+                    .metadata
+            }
+        };
+        exchange.manager.set_metadata(discovery.metadata.clone());
         let (client_id, client_secret) = match registered {
             Some(client) => (client.client_id.clone(), None),
             None => {
@@ -378,6 +387,15 @@ impl Session {
         let session = AuthorizationSession::new(exchange.manager, request)
             .await
             .map_err(|(_, error)| auth_error(error))?;
+        // rmcp keeps that resource private; its authorization URL carries it.
+        let resource = reqwest::Url::parse(session.get_authorization_url())
+            .ok()
+            .and_then(|url| {
+                url.query_pairs()
+                    .find(|(name, _)| name == "resource")
+                    .map(|(_, value)| value.into_owned())
+            })
+            .unwrap_or_else(|| discovery.resource.clone());
         let started = Started {
             request_id: Uuid::new_v4(),
             authorization_url: session.get_authorization_url().to_owned(),
@@ -393,6 +411,7 @@ impl Session {
         self.state = State::Authorizing(Box::new(Pending {
             id: started.request_id,
             discovery,
+            resource,
             client_secret,
             session,
             tokens: exchange.tokens,
@@ -438,7 +457,7 @@ impl Session {
                 Err(error) => Err(auth_error(error)),
                 Ok(_) => match pending.tokens.load().await {
                     Ok(Some(stored)) => Credential::from_stored(
-                        pending.discovery.resource.clone(),
+                        pending.resource.clone(),
                         pending.discovery.metadata.clone(),
                         pending.client_secret.clone(),
                         stored,
@@ -476,6 +495,7 @@ impl Session {
             Err(AuthError::AuthorizationRequired | AuthError::TokenRefreshRejected(_)) => {
                 let discovery = Discovery {
                     resource: credential.resource.clone(),
+                    challenge: None,
                     metadata: credential.metadata.clone(),
                     scopes: credential.scopes.clone(),
                 };
@@ -492,12 +512,8 @@ impl Session {
         let registered = self.client.as_deref().filter(|client| {
             client.applies(&credential.metadata) && client.client_id == credential.client_id
         });
-        let mut exchange = exchange(
-            &credential.resource,
-            credential.metadata.clone(),
-            registered.is_some(),
-        )
-        .await?;
+        let mut exchange = exchange(&credential.resource, registered.is_some()).await?;
+        exchange.manager.set_metadata(credential.metadata.clone());
         let mut config =
             OAuthClientConfig::new(credential.client_id.clone(), credential.resource.clone());
         if let Some(secret) = registered

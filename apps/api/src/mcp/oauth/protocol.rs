@@ -11,16 +11,18 @@ use super::Error;
 #[derive(Clone)]
 pub(super) struct Discovery {
     pub(super) resource: String,
+    pub(super) challenge: Option<String>,
     pub(super) metadata: AuthorizationMetadata,
     pub(super) scopes: Vec<String>,
 }
 
 pub(super) async fn discover(resource: &str, challenge: &str) -> Result<Discovery, Error> {
+    let challenge = Some(challenge.to_owned()).filter(|value| !value.is_empty());
     let mut manager = AuthorizationManager::new(resource)
         .await
         .map_err(auth_error)?;
     let metadata = manager
-        .resolve_metadata_from_challenge(Some(challenge).filter(|value| !value.is_empty()))
+        .resolve_metadata_from_challenge(challenge.as_deref())
         .await
         .map_err(auth_error)?
         .metadata;
@@ -28,6 +30,7 @@ pub(super) async fn discover(resource: &str, challenge: &str) -> Result<Discover
     let scopes = manager.select_initial_scopes(&[]).await;
     Ok(Discovery {
         resource: resource.into(),
+        challenge,
         metadata,
         scopes,
     })
@@ -43,11 +46,7 @@ pub(super) struct Exchange {
 
 /// `github` routes the token requests of the registered GitHub app, whose
 /// endpoints are fixed, through [`GitHubErrors`].
-pub(super) async fn exchange(
-    resource: &str,
-    metadata: AuthorizationMetadata,
-    github: bool,
-) -> Result<Exchange, AuthError> {
+pub(super) async fn exchange(resource: &str, github: bool) -> Result<Exchange, AuthError> {
     let mut manager = if github {
         AuthorizationManager::new_with_oauth_http_client(
             resource,
@@ -57,7 +56,6 @@ pub(super) async fn exchange(
     } else {
         AuthorizationManager::new(resource).await?
     };
-    manager.set_metadata(metadata);
     let tokens = InMemoryCredentialStore::new();
     let states = InMemoryStateStore::new();
     manager.set_credential_store(tokens.clone());
