@@ -47,13 +47,17 @@ impl EventHub {
     }
 }
 
+/// Poll every `POLL` while reads succeed. After consecutive failures, wait
+/// twice as long each time up to `MAX_RETRY`, so an outage is not hammered.
 async fn watch(
     mut read: impl AsyncFnMut() -> sqlx::Result<i64>,
     tx: broadcast::Sender<Uuid>,
     stop: CancellationToken,
 ) {
     const POLL: Duration = Duration::from_millis(100);
+    const MAX_RETRY: Duration = Duration::from_secs(5);
     let mut version = None;
+    let mut delay = POLL;
     loop {
         match read().await {
             Ok(current) => {
@@ -61,12 +65,16 @@ async fn watch(
                     let _ = tx.send(Uuid::nil());
                 }
                 version = Some(current);
+                delay = POLL;
             }
-            Err(_) => version = None,
+            Err(_) => {
+                version = None;
+                delay = (delay * 2).min(MAX_RETRY);
+            }
         }
         tokio::select! {
             _ = stop.cancelled() => return,
-            _ = tokio::time::sleep(POLL) => {}
+            _ = tokio::time::sleep(delay) => {}
         }
     }
 }
