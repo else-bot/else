@@ -134,9 +134,8 @@ impl ElseApp {
                     .items_center()
                     .justify_center()
                     .gap_5()
-                    .border_color(theme.border)
-                    .when(stacked, |studio| studio.w_full().pb_5().border_b_1())
-                    .when(!stacked, |studio| studio.w(px(248.)).pr_6().border_r_1())
+                    .when(stacked, |studio| studio.w_full().pb_2())
+                    .when(!stacked, |studio| studio.w(px(248.)))
                     .child(
                         v_flex()
                             .items_center()
@@ -161,13 +160,14 @@ impl ElseApp {
                         .compact()
                         .disabled(locked || !avatar_supported),
                     )
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        if avatar_supported {
-                            "Your bot's look in the sidebar."
-                        } else {
-                            "Update the server to choose an avatar."
-                        },
-                    ));
+                    .when(!avatar_supported, |studio| {
+                        studio.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("Update the server to choose an avatar."),
+                        )
+                    });
             let mut details = v_flex().flex_1().min_w_0().gap_4().child(
                 v_flex().gap_1().child(field_label("Bot name", cx)).child(
                     Input::new(&form.name)
@@ -211,7 +211,7 @@ impl ElseApp {
                         .text_color(theme.muted_foreground)
                         .child("A new bot for whatever you have in mind."),
                 )
-                .child(columns.gap_6().child(studio).child(details));
+                .child(columns.gap_8().child(studio).child(details));
             let app_create = app.clone();
             let busy = form.busy;
             let can_submit = !form.name.read(cx).value().trim().is_empty();

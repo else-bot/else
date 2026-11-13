@@ -356,11 +356,21 @@ impl ProfilePicker {
                     .font_weight(FontWeight::MEDIUM)
                     .child(format!("Connect {}", provider.label)),
             )
+            // Why the provider can't run, as a warning rather than body text.
             .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(reason),
+                h_flex()
+                    .gap_1p5()
+                    .items_start()
+                    .text_size(px(13.))
+                    .line_height(px(18.))
+                    .text_color(theme.warning)
+                    .child(
+                        Icon::new(IconName::TriangleAlert)
+                            .size_3p5()
+                            .mt(px(2.))
+                            .flex_none(),
+                    )
+                    .child(div().flex_1().min_w_0().whitespace_normal().child(reason)),
             )
             .children(command.map(|command| {
                 let provider_id = provider.id.clone();
@@ -527,20 +537,14 @@ impl ProfilePicker {
                 .child(control)
         };
         let reasoning = field("Reasoning", slider.into_any_element()).flex_grow(3.);
-        let speed = h_flex()
-            .gap_3()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("Speed"),
-            )
-            .child(
-                crate::appearance::segment_track(cx)
-                    .flex_1()
-                    .children(speeds),
-            )
-            .flex_grow(2.);
+        let speed = field(
+            "Speed",
+            crate::appearance::segment_track(cx)
+                .w_full()
+                .children(speeds)
+                .into_any_element(),
+        )
+        .flex_grow(2.);
         let row = if self.tabs {
             v_flex().gap_3()
         } else {
