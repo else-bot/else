@@ -216,9 +216,7 @@ impl MailCommand {
             | Self::Delete { message } => msg(message),
             Self::Attachment { message, part } => msg(message) && *part < 1000,
             Self::Move { message, folder: f } => msg(message) && folder(f),
-            Self::Draft { draft: d } | Self::Send { draft: d } => {
-                draft(d) && d.reply_to.as_ref().is_none_or(msg)
-            }
+            Self::Send { draft: d } => draft(d) && d.reply_to.as_ref().is_none_or(msg),
             Self::Reply { message, body, .. } => msg(message) && body.len() <= 32_000,
             Self::Forward {
                 message, to, body, ..

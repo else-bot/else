@@ -1055,6 +1055,34 @@ async fn a_mail_event_drafts_a_reply_the_owner_approves_in_a_card() {
     .await;
     let (_, token) = h.started(turn).await;
 
+    let message = json!({ "folder": folder, "uid_validity": 1, "uid": 9 });
+    for command in [
+        json!({ "operation": "draft", "draft": { "to": ["customer@example.com"],
+                "subject": "Re: Support", "body": "Thanks.", "reply_to": message } }),
+        json!({ "operation": "reply", "message": message, "body": "Thanks." }),
+        json!({ "operation": "reply", "message": message, "body": "Thanks.", "send": false }),
+        json!({ "operation": "forward", "message": message, "to": ["team@example.com"],
+                "body": "FYI" }),
+    ] {
+        let saved = tool(
+            &h.app,
+            &token,
+            "mail_action",
+            json!({ "account_id": account.id, "action_id": Uuid::new_v4(), "command": command }),
+        )
+        .await;
+        assert!(
+            saved.error && saved.body.to_string().contains("draft_email"),
+            "a mailbox draft is refused toward the card: {}",
+            saved.body
+        );
+    }
+    assert_eq!(
+        transport.sends.load(Ordering::SeqCst),
+        0,
+        "no mailbox draft was saved"
+    );
+
     let reply = json!({ "account_id": account.id,
                         "reply_to": { "folder": folder, "uid_validity": 1, "uid": 9 },
                         "to": ["customer@example.com"], "subject": "Re: Support",

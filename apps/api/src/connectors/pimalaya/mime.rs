@@ -109,31 +109,17 @@ pub(super) fn compose(
     draft: &Draft,
     reply: Option<ThreadHeaders>,
 ) -> Result<Vec<u8>, MailError> {
-    build(from, draft, reply, false, None)
+    build(from, draft, reply, None)
 }
 
-pub(super) fn compose_draft(
-    from: &str,
-    draft: &Draft,
-    reply: Option<ThreadHeaders>,
-) -> Result<Vec<u8>, MailError> {
-    build(from, draft, reply, true, None)
-}
-
-pub(super) fn compose_forward(
-    from: &str,
-    draft: &Draft,
-    raw: &[u8],
-    is_draft: bool,
-) -> Result<Vec<u8>, MailError> {
-    build(from, draft, None, is_draft, Some(raw))
+pub(super) fn compose_forward(from: &str, draft: &Draft, raw: &[u8]) -> Result<Vec<u8>, MailError> {
+    build(from, draft, None, Some(raw))
 }
 
 fn build(
     from: &str,
     draft: &Draft,
     reply: Option<ThreadHeaders>,
-    is_draft: bool,
     forwarded: Option<&[u8]>,
 ) -> Result<Vec<u8>, MailError> {
     smtp_address(from)?;
@@ -156,9 +142,6 @@ fn build(
         .text_body(draft.body.clone());
     if !draft.cc.is_empty() {
         builder = builder.cc(draft.cc.clone());
-    }
-    if is_draft && !draft.bcc.is_empty() {
-        builder = builder.bcc(draft.bcc.clone());
     }
     let mut attachment_bytes = 0;
     if draft.attachments.len() > 10 {

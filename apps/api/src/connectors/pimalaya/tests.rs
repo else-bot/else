@@ -574,17 +574,16 @@ fn attachments_round_trip_and_forward_preserves_the_original_message() {
         Some("document.txt")
     );
     assert!(parsed.bcc().is_none());
-    let saved = compose_draft("owner@example.org", &draft, None).unwrap();
-    let saved = MessageParser::default().parse(&saved).unwrap();
-    assert_eq!(addresses(saved.bcc()), vec!["blind@example.org"]);
-    let forwarded = compose_forward("owner@example.org", &draft, &raw, false).unwrap();
+    let forwarded = compose_forward("owner@example.org", &draft, &raw).unwrap();
     let forwarded = MessageParser::default().parse(&forwarded).unwrap();
     assert_eq!(forwarded.attachment_count(), 2);
     assert_eq!(
         forwarded.attachment(1).unwrap().attachment_name(),
         Some("forwarded.eml")
     );
-    let with_blind = compose_draft("owner@example.org", &draft, None).unwrap();
+    let with_blind = [b"Bcc: blind@example.org\r\n".as_slice(), &raw].concat();
+    let parsed = MessageParser::default().parse(&with_blind).unwrap();
+    assert_eq!(addresses(parsed.bcc()), vec!["blind@example.org"]);
     let redacted = mime::forward_source(&with_blind).unwrap();
     let redacted = MessageParser::default().parse(&redacted).unwrap();
     assert!(redacted.bcc().is_none());

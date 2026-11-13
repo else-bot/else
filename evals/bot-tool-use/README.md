@@ -56,7 +56,7 @@ python3 -I evals/bot-tool-use/codex.py --case correction-saves-rule,delegate-par
 
 ## Add a case
 
-Add one JSON object per line to `cases/*.ndjson`. Use a unique filesystem-safe `id`, a `kind` of `bad`, `guard`, or `control`, and an `experience` sentence explaining the mistake or behavior. `bad` reproduces a mistake, `guard` protects correct behavior, and `control` checks ordinary work. An optional `turn` of `delegated-task` exports `else-api context delegated-task` instead: Research working on a task the main bot delegated for an owner request, with no registry and the task as the latest message. `delegated-routine-task` is the same task delegated during a routine run. The default is `owner`.
+Add one JSON object per line to `cases/*.ndjson`. Use a unique filesystem-safe `id`, a `kind` of `bad`, `guard`, or `control`, and an `experience` sentence explaining the mistake or behavior. `bad` reproduces a mistake, `guard` protects correct behavior, and `control` checks ordinary work. An optional `turn` of `delegated-task` exports `else-api context delegated-task` instead: Research working on a task the main bot delegated for an owner request, with no registry and the task as the latest message. `delegated-routine-task` is the same task delegated during a routine run. `mail-event` is Research woken by new mail in an inbox it watches, under the incoming-mail instructions; its prompt carries the `[else.bot email event]` framing production adds. The default is `owner`.
 
 `setup` contains:
 
