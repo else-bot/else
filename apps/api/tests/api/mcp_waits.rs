@@ -197,9 +197,10 @@ async fn a_status_that_cannot_be_read_never_counts_as_the_job_finishing() {
     misspelled["status_pointer"] = json!("/work_state");
     let refused = tool(&app, &token, "mcp_wait", misspelled).await;
     assert_eq!(refused["isError"], true, "{refused}");
-    assert!(
-        refused.to_string().contains("UNREADABLE_STATUS"),
-        "{refused}"
+    assert_eq!(
+        error_code(&refused),
+        "unreadable_status",
+        "a refusal is the JSON error envelope: {refused}"
     );
     assert!(refused.to_string().contains("/work_state"), "{refused}");
 
@@ -281,7 +282,7 @@ async fn a_status_tool_not_declared_repeatable_is_refused_and_a_deadline_ends_a_
     poke["tool"] = json!("task_poke");
     let refused = tool(&app, &token, "mcp_wait", poke).await;
     assert_eq!(refused["isError"], true, "{refused}");
-    assert!(refused.to_string().contains("NOT_REPEATABLE"), "{refused}");
+    assert_eq!(error_code(&refused), "not_repeatable", "{refused}");
     assert!(!else_api::app::tools::parks("mcp_wait", &refused));
     let held: i64 = sqlx::query_scalar("SELECT count(*) FROM turn_holds WHERE turn_id = ?1")
         .bind(turn)
@@ -504,4 +505,14 @@ async fn a_delegated_task_waits_on_a_job_and_its_delegator_resumes_only_when_it_
         "{:?}",
         packets.last()
     );
+}
+
+/// The code of a refused call's JSON error envelope.
+fn error_code(result: &Value) -> String {
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
+    let envelope: Value = serde_json::from_str(text).unwrap_or_default();
+    envelope["error"]["code"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
 }

@@ -7,12 +7,17 @@
 //! delegation's outcome follows the new turn. A cancel commits the stop
 //! (the turn moves to `interrupted` or `cancelling`) before the scheduler
 //! interrupts the provider; the task reports `stopping` until the turn ends.
+//! Neither delivers an ended task's outcome: that stays with the
+//! continuation, which carries its error, checkpoint and files.
 
 use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use super::{MAX_TASK_BYTES, events, lock_targets_of_root, mark_delivered, stop_children};
+use super::{
+    MAX_TASK_BYTES, announce_task_turn, end_child_turn, lock_targets_of_root, next_item_seq,
+    stop_children,
+};
 use crate::db::turns::TurnStatus;
 
 /// A delegation's lifecycle, as stored in `delegations.status`.
@@ -49,11 +54,7 @@ pub enum TaskState {
     Running,
     /// A stop was committed; the target's provider has not ended yet.
     Stopping,
-    Ended {
-        status: Status,
-        /// The task's reply, or its error.
-        outcome: Option<String>,
-    },
+    Ended(Status),
 }
 
 impl TaskState {
@@ -62,7 +63,7 @@ impl TaskState {
             Self::Queued => "queued",
             Self::Running => "running",
             Self::Stopping => "stopping",
-            Self::Ended { status, .. } => status.as_str(),
+            Self::Ended(status) => status.as_str(),
         }
     }
 }
@@ -138,23 +139,18 @@ async fn owned(conn: &mut SqliteConnection, caller: Uuid, task: Uuid) -> Result<
 
 /// The task as stored now, read back after any change.
 pub async fn state(conn: &mut SqliteConnection, task: Uuid) -> Result<Task, sqlx::Error> {
-    let (target_bot_id, target_name, status, outcome, turn): (
-        Uuid,
-        String,
-        Status,
-        Option<String>,
-        TurnStatus,
-    ) = sqlx::query_as(
-        "SELECT d.target_bot_id, b.name, d.status, coalesce(d.result, d.error), t.status
+    let (target_bot_id, target_name, status, turn): (Uuid, String, Status, TurnStatus) =
+        sqlx::query_as(
+            "SELECT d.target_bot_id, b.name, d.status, t.status
          FROM delegations d JOIN bots b ON b.id = d.target_bot_id
          JOIN turns t ON t.id = coalesce(d.takeover_turn_id, d.child_turn_id)
          WHERE d.id = ?1",
-    )
-    .bind(task)
-    .fetch_one(&mut *conn)
-    .await?;
+        )
+        .bind(task)
+        .fetch_one(&mut *conn)
+        .await?;
     let state = match status {
-        status if status.is_ended() => TaskState::Ended { status, outcome },
+        status if status.is_ended() => TaskState::Ended(status),
         _ if turn == TurnStatus::Cancelling => TaskState::Stopping,
         Status::Queued => TaskState::Queued,
         _ => TaskState::Running,
@@ -167,24 +163,12 @@ pub async fn state(conn: &mut SqliteConnection, task: Uuid) -> Result<Task, sqlx
     })
 }
 
-/// A result that shows an ended task's outcome delivers it to the caller's
-/// current attempt, so no continuation repeats it.
-async fn deliver_if_ended(
-    conn: &mut SqliteConnection,
-    caller: Uuid,
-    task: &Task,
-) -> Result<(), sqlx::Error> {
-    if matches!(task.state, TaskState::Ended { .. }) {
-        let attempt: i32 = sqlx::query_scalar("SELECT attempt FROM turns WHERE id = ?1")
-            .bind(caller)
-            .fetch_one(&mut *conn)
-            .await?;
-        mark_delivered(conn, caller, attempt, &[task.id]).await?;
-    }
-    Ok(())
-}
-
 /// One request ID per replaced turn, so each update is its own turn.
+///
+/// This is how SQL tells a task's turns apart: the first turn of a task
+/// carries the delegation's ID as its `request_id`, and an update turn
+/// carries this derived ID, so `request_id <> delegation id` means "an
+/// update turn". Queries that rely on it point here.
 fn update_request_id(task: Uuid, replaced: Uuid, message: &str) -> Uuid {
     let mut hasher = Sha256::new();
     hasher.update(b"delegation-update\0");
@@ -222,7 +206,8 @@ pub async fn update(
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row = owned(&mut tx, caller, task).await?;
     // A retry repeats the latest update; an earlier message sent again is
-    // a new change.
+    // a new change. An update turn is one whose request is not the task's
+    // (see `update_request_id`).
     let repeated: bool = sqlx::query_scalar(
         "SELECT t.request_id <> ?2 AND i.text = ?3
          FROM turns t JOIN items i ON i.id = t.owner_item_id WHERE t.id = ?1",
@@ -234,7 +219,6 @@ pub async fn update(
     .await?;
     if repeated {
         let task = state(&mut tx, task).await?;
-        deliver_if_ended(&mut tx, caller, &task).await?;
         tx.commit().await?;
         return Ok(Updated {
             task,
@@ -243,10 +227,7 @@ pub async fn update(
     }
     let request_id = update_request_id(task, row.child_turn_id, message);
     if row.status.is_ended() {
-        let task = state(&mut tx, task).await?;
-        deliver_if_ended(&mut tx, caller, &task).await?;
-        tx.commit().await?;
-        return Err(ControlError::Ended(Box::new(task)));
+        return Err(ControlError::Ended(Box::new(state(&mut tx, task).await?)));
     }
     if row.takeover_turn_id.is_some() {
         return Err(ControlError::TakenOver(Box::new(
@@ -270,22 +251,8 @@ pub async fn update(
         .await?;
 
     let turn_no = last_turn_no + 1;
-    let receipt_seq: i64 = sqlx::query_scalar(
-        "UPDATE conversations SET last_turn_no = ?2, last_item_seq = last_item_seq + 1
-         WHERE id = ?1 RETURNING last_item_seq",
-    )
-    .bind(owner_conversation)
-    .bind(turn_no)
-    .fetch_one(&mut *tx)
-    .await?;
-    let item_seq: i64 = sqlx::query_scalar(
-        "UPDATE conversations SET last_turn_no = ?2, last_item_seq = last_item_seq + 1
-         WHERE id = ?1 RETURNING last_item_seq",
-    )
-    .bind(row.conversation_id)
-    .bind(turn_no)
-    .fetch_one(&mut *tx)
-    .await?;
+    let receipt_seq = next_item_seq(&mut tx, owner_conversation, turn_no).await?;
+    let item_seq = next_item_seq(&mut tx, row.conversation_id, turn_no).await?;
     let new_turn = Uuid::new_v4();
     let item_id = Uuid::new_v4();
     let request_hash = Sha256::digest(message.as_bytes()).to_vec();
@@ -330,39 +297,24 @@ pub async fn update(
     if moved != 1 {
         return Err(ControlError::Db);
     }
-    let superseded = sqlx::query(
-        "UPDATE turns SET
-             status = CASE WHEN status IN ('queued', 'waiting') THEN 'interrupted' ELSE 'cancelling' END,
-             error_code = 'superseded', error_message = ?2,
-             finished_at = CASE WHEN status IN ('queued', 'waiting') THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') ELSE finished_at END,
-             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE id = ?1 AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running')",
+    end_child_turn(
+        &mut tx,
+        row.child_turn_id,
+        row.target_bot_id,
+        "superseded",
+        &format!("{sender} updated the task before this attempt finished."),
     )
-    .bind(row.child_turn_id)
-    .bind(format!("{sender} updated the task before this attempt finished."))
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if superseded > 0 {
-        events::turn_changed(&mut tx, row.target_bot_id, row.child_turn_id).await?;
-    }
-    let receipt_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-         VALUES (?1, ?2, ?3, ?4, 'status', ?5)",
-    )
-    .bind(receipt_id)
-    .bind(owner_conversation)
-    .bind(receipt_seq)
-    .bind(new_turn)
-    .bind(format!(
-        "Received an update from {sender} on its task.\n\n{message}"
-    ))
-    .execute(&mut *tx)
     .await?;
-    crate::db::memory::log_item(&mut tx, item_id).await?;
-    events::item_upsert(&mut tx, row.target_bot_id, receipt_id).await?;
-    events::turn_changed(&mut tx, row.target_bot_id, new_turn).await?;
+    announce_task_turn(
+        &mut tx,
+        row.target_bot_id,
+        owner_conversation,
+        receipt_seq,
+        new_turn,
+        item_id,
+        &format!("Received an update from {sender} on its task.\n\n{message}"),
+    )
+    .await?;
     let task = state(&mut tx, task).await?;
     tx.commit().await?;
     Ok(Updated {
@@ -391,7 +343,6 @@ pub async fn cancel(pool: &SqlitePool, caller: Uuid, task: Uuid) -> Result<Task,
         .await?;
     }
     let task = state(&mut tx, task).await?;
-    deliver_if_ended(&mut tx, caller, &task).await?;
     tx.commit().await?;
     Ok(task)
 }

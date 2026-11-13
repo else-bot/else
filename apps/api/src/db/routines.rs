@@ -40,12 +40,17 @@ use super::{bot_profiles, events};
 use crate::app::messages::MAX_QUEUED_TURNS;
 use crate::app::providers::{Availability, Origin, Profile, RoutineRun};
 use crate::app::routines::{
-    ActiveHours, AfterCheck, CHECK_DURATION, CheckEnd, CheckSkip, InvalidRoutine, MAX_PER_BOT,
-    ModelSetting, RoutineCheck, RoutineModel, RoutineName, RoutinePrompt, Schedule, run_prompt,
+    ActiveHours, AfterCheck, CheckSkip, InvalidRoutine, MAX_PER_BOT, ModelSetting, RoutineCheck,
+    RoutineModel, RoutineName, RoutinePrompt, Schedule, run_prompt,
 };
 use crate::computers::ComputerManager;
-use crate::computers::jobs::JobStatus;
 use crate::providers::Registry;
+
+mod checks;
+
+pub(crate) use checks::stop_checks;
+pub use checks::{Check, SETTLE_BATCH, settle_checks};
+use checks::{CheckedJob, skip_checks};
 
 /// Due routines admitted per scheduler scan.
 pub const ADMIT_BATCH: i64 = 8;
@@ -121,7 +126,7 @@ pub struct LastRun {
     /// `checking`, `queued`, `running`, `skipped`, or the turn's terminal
     /// status.
     pub status: String,
-    pub skip_reason: Option<String>,
+    pub skip_reason: Option<Skip>,
     pub turn_id: Option<Uuid>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
@@ -180,7 +185,7 @@ struct Row {
     failed_runs: i64,
     paused_reason: Option<String>,
     run_due_at: Option<DateTime<Utc>>,
-    skip_reason: Option<String>,
+    skip_reason: Option<Skip>,
     turn_id: Option<Uuid>,
     turn_status: Option<TurnStatus>,
     error_code: Option<String>,
@@ -188,17 +193,43 @@ struct Row {
     finished_at: Option<DateTime<Utc>>,
 }
 
+/// Where a run is, decoded from its row; the table's checks keep a turn
+/// and a skip reason exclusive, and a run with neither awaits its check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunState {
+    Checking,
+    Skipped(Skip),
+    Turn(TurnStatus),
+}
+
+impl RunState {
+    fn of(turn: Option<TurnStatus>, skip: Option<Skip>) -> Self {
+        match (turn, skip) {
+            (Some(status), _) => Self::Turn(status),
+            (None, Some(skip)) => Self::Skipped(skip),
+            (None, None) => Self::Checking,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Checking => "checking",
+            Self::Skipped(_) => "skipped",
+            Self::Turn(status) => match status.phase() {
+                Phase::Active | Phase::Waiting => "running",
+                Phase::Queued | Phase::Ended => status.as_str(),
+            },
+        }
+    }
+}
+
 impl From<Row> for Routine {
     fn from(row: Row) -> Self {
         let last_run = row.run_due_at.map(|due_at| LastRun {
             due_at,
-            status: match row.turn_status.map(|status| (status, status.phase())) {
-                None if row.skip_reason.is_none() => "checking",
-                None => "skipped",
-                Some((_, Phase::Active | Phase::Waiting)) => "running",
-                Some((status, Phase::Queued | Phase::Ended)) => status.as_str(),
-            }
-            .to_owned(),
+            status: RunState::of(row.turn_status, row.skip_reason)
+                .label()
+                .to_owned(),
             skip_reason: row.skip_reason,
             turn_id: row.turn_id,
             error_code: row.error_code,
@@ -695,6 +726,11 @@ pub async fn delete(pool: &SqlitePool, by: By, id: Uuid) -> Result<bool, Routine
             .bind(id)
             .execute(&mut *tx)
             .await?;
+            // A check still running for this routine must not queue a turn
+            // for it; its job is asked to stop.
+            for job in skip_checks(&mut tx, by.bot_id(), Some(id)).await? {
+                crate::computers::jobs::request_cancel(&mut *tx, by.bot_id(), Some(job)).await?;
+            }
             events::bot_updated(&mut tx, by.bot_id()).await?;
             tx.commit().await?;
             Ok(true)
@@ -791,9 +827,8 @@ pub async fn run_now(
     .await?
     {
         Ok(turn_id) => turn_id,
-        Err(Skip::QueueFull) => return Err(RoutineError::QueueFull),
-        Err(Skip::ProviderUnavailable) => return Err(RoutineError::ProviderUnavailable),
-        Err(Skip::Overlap | Skip::Check(_)) => return Err(RoutineError::AlreadyRunning),
+        Err(QueueRefusal::QueueFull) => return Err(RoutineError::QueueFull),
+        Err(QueueRefusal::ProviderUnavailable) => return Err(RoutineError::ProviderUnavailable),
     };
     // Later than every earlier run, so it is the routine's last run.
     let due = last_due_at.map_or(now, |last| {
@@ -896,28 +931,6 @@ struct EndedRun {
     check_job_id: Option<Uuid>,
     #[sqlx(flatten)]
     check: CheckedJob,
-}
-
-#[derive(sqlx::FromRow)]
-struct CheckedJob {
-    check_status: Option<JobStatus>,
-    check_exit: Option<i32>,
-    check_output: Option<String>,
-    check_leased: Option<bool>,
-}
-
-impl CheckedJob {
-    const COLUMNS: &str = "j.status AS check_status, j.exit_code AS check_exit,
-        j.output_tail AS check_output, j.lease_id IS NOT NULL AS check_leased";
-
-    fn end(self) -> Option<CheckEnd> {
-        CheckEnd::of(
-            self.check_status?,
-            self.check_exit,
-            self.check_output,
-            self.check_leased.unwrap_or(false),
-        )
-    }
 }
 
 async fn review(
@@ -1142,15 +1155,6 @@ pub struct Admitted {
     pub checks: Vec<Check>,
 }
 
-/// A reserved check job to launch with
-/// [`ComputerManager::launch_reserved`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Check {
-    pub bot_id: Uuid,
-    pub job_id: Uuid,
-    pub command: String,
-}
-
 enum Admit {
     Nothing,
     Queued,
@@ -1193,24 +1197,41 @@ pub async fn admit_due(
     Ok(admitted)
 }
 
-/// Why a due run queued no turn.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum Skip {
+/// Why a due run queued no turn, as stored in `routine_runs.skip_reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum Skip {
     Overlap,
     QueueFull,
     ProviderUnavailable,
-    Check(CheckSkip),
+    NothingNew,
+    CheckCancelled,
+    CheckUnavailable,
 }
 
-impl Skip {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Skip::Overlap => "overlap",
-            Skip::QueueFull => "queue_full",
-            Skip::ProviderUnavailable => "provider_unavailable",
-            Skip::Check(CheckSkip::NothingNew) => "nothing_new",
-            Skip::Check(CheckSkip::Cancelled) => "check_cancelled",
-            Skip::Check(CheckSkip::Unavailable) => "check_unavailable",
+impl From<CheckSkip> for Skip {
+    fn from(skip: CheckSkip) -> Self {
+        match skip {
+            CheckSkip::NothingNew => Self::NothingNew,
+            CheckSkip::Cancelled => Self::CheckCancelled,
+            CheckSkip::Unavailable => Self::CheckUnavailable,
+        }
+    }
+}
+
+/// Why [`queue_saved_task`] queued no turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueueRefusal {
+    QueueFull,
+    ProviderUnavailable,
+}
+
+impl From<QueueRefusal> for Skip {
+    fn from(refusal: QueueRefusal) -> Self {
+        match refusal {
+            QueueRefusal::QueueFull => Self::QueueFull,
+            QueueRefusal::ProviderUnavailable => Self::ProviderUnavailable,
         }
     }
 }
@@ -1292,14 +1313,14 @@ pub(crate) async fn queue_saved_task(
     tag: &[u8],
     prompt: &str,
     run_on: RunOn<'_>,
-) -> Result<Result<Uuid, Skip>, sqlx::Error> {
+) -> Result<Result<Uuid, QueueRefusal>, sqlx::Error> {
     let queued: i64 =
         sqlx::query_scalar("SELECT count(*) FROM turns WHERE bot_id = ?1 AND status = 'queued'")
             .bind(bot_id)
             .fetch_one(&mut *conn)
             .await?;
     if queued >= MAX_QUEUED_TURNS {
-        return Ok(Err(Skip::QueueFull));
+        return Ok(Err(QueueRefusal::QueueFull));
     }
     let chosen = match run_on {
         RunOn::Routine(_, Some(own)) => own_model(registry, own),
@@ -1317,7 +1338,7 @@ pub(crate) async fn queue_saved_task(
         profile,
     }) = chosen
     else {
-        return Ok(Err(Skip::ProviderUnavailable));
+        return Ok(Err(QueueRefusal::ProviderUnavailable));
     };
     let (last_turn_no, last_item_seq): (i64, i64) =
         sqlx::query_as("SELECT last_turn_no, last_item_seq FROM conversations WHERE id = ?1")
@@ -1445,44 +1466,8 @@ async fn admit(
     let queued = if unfinished {
         Err(Skip::Overlap)
     } else if let Some(command) = check_command {
-        let reserved = match computers {
-            Some(computers) => {
-                computers
-                    .reserve_job(&mut tx, bot_id, None, &command, CHECK_DURATION, &[], None)
-                    .await?
-            }
-            None => None,
-        };
-        let Some(job_id) = reserved else {
-            return skip(
-                tx,
-                bot_id,
-                id,
-                run_id,
-                &due_at,
-                &name,
-                Skip::Check(CheckSkip::Unavailable),
-            )
+        return checks::admit_check(tx, computers, bot_id, id, run_id, &due_at, &name, command)
             .await;
-        };
-        sqlx::query(
-            "INSERT INTO routine_runs (id, routine_id, due_at, name, check_job_id)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-        )
-        .bind(run_id)
-        .bind(id)
-        .bind(&due_at)
-        .bind(&name)
-        .bind(job_id)
-        .execute(&mut *tx)
-        .await?;
-        events::bot_updated(&mut tx, bot_id).await?;
-        tx.commit().await?;
-        return Ok(Admit::Checking(Check {
-            bot_id,
-            job_id,
-            command,
-        }));
     } else {
         let run_on = RunOn::routine(id, &model);
         queue_saved_task(
@@ -1496,6 +1481,7 @@ async fn admit(
             run_on,
         )
         .await?
+        .map_err(Skip::from)
     };
     let turn_id = match queued {
         Ok(turn_id) => turn_id,
@@ -1535,146 +1521,10 @@ async fn skip(
     .bind(routine_id)
     .bind(due_at)
     .bind(name)
-    .bind(reason.as_str())
+    .bind(reason)
     .execute(&mut *tx)
     .await?;
     events::bot_updated(&mut tx, bot_id).await?;
     tx.commit().await?;
     Ok(Admit::Nothing)
-}
-
-/// Checking runs settled per scheduler scan.
-pub const SETTLE_BATCH: i64 = 8;
-
-/// Settle up to `limit` checking runs whose check job has ended, per
-/// [`CheckEnd::after`]: skip the run, or queue its turn with the routine's
-/// current prompt and what the check reported. A run whose bot stopped or
-/// left is skipped as `check_cancelled`; Stop settles its runs itself, see
-/// [`stop_checks`]. Returns how many turns were
-/// queued. The caller holds a maintenance admission.
-pub async fn settle_checks(
-    pool: &SqlitePool,
-    registry: &Registry,
-    limit: i64,
-) -> Result<usize, sqlx::Error> {
-    let ended: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT rr.id FROM routine_runs rr JOIN guest_jobs j ON j.id = rr.check_job_id
-         WHERE {UNSETTLED} AND j.status IN ('completed', 'failed', 'cancelled', 'lost')
-         ORDER BY rr.due_at, rr.id LIMIT ?1"
-    )))
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-    let mut queued = 0;
-    for id in ended {
-        if settle_check(pool, registry, id).await? {
-            queued += 1;
-        }
-    }
-    Ok(queued)
-}
-
-#[derive(sqlx::FromRow)]
-struct Checked {
-    routine_id: Uuid,
-    bot_id: Uuid,
-    conversation_id: Uuid,
-    prompt: String,
-    prompt_revision: i64,
-    model: Option<Json<RoutineModel>>,
-    live: bool,
-    #[sqlx(flatten)]
-    check: CheckedJob,
-}
-
-async fn settle_check(
-    pool: &SqlitePool,
-    registry: &Registry,
-    run_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let row: Option<Checked> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT rr.routine_id, r.bot_id, r.conversation_id, r.prompt, r.prompt_revision, r.model,
-                b.status = 'active' AND NOT b.cancel_pending AS live, {checked}
-         FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id
-         JOIN bots b ON b.id = r.bot_id JOIN guest_jobs j ON j.id = rr.check_job_id
-         WHERE rr.id = ?1 AND {UNSETTLED}",
-        checked = CheckedJob::COLUMNS
-    )))
-    .bind(run_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some(run) = row else {
-        return Ok(false);
-    };
-    let Some(end) = run.check.end() else {
-        return Ok(false);
-    };
-    let after = if run.live {
-        end.after()
-    } else {
-        AfterCheck::Skip(CheckSkip::Cancelled)
-    };
-    let queued = match after {
-        AfterCheck::Skip(reason) => Err(Skip::Check(reason)),
-        AfterCheck::Wake(note) => {
-            queue_saved_task(
-                &mut tx,
-                registry,
-                run.bot_id,
-                run.conversation_id,
-                run_id,
-                b"routine-run\0",
-                &run_prompt(&run.prompt, Some(&note)),
-                RunOn::routine(run.routine_id, &run.model),
-            )
-            .await?
-        }
-    };
-    let (turn_id, reason) = match queued {
-        Ok(turn_id) => (Some(turn_id), None),
-        Err(reason) => (None, Some(reason.as_str())),
-    };
-    let settled = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE routine_runs AS rr SET turn_id = ?2, skip_reason = ?3, prompt_revision = ?4
-         WHERE rr.id = ?1 AND {UNSETTLED}"
-    )))
-    .bind(run_id)
-    .bind(turn_id)
-    .bind(reason)
-    .bind(turn_id.map(|_| run.prompt_revision))
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if settled != 1 {
-        return Ok(false);
-    }
-    match turn_id {
-        Some(turn_id) => events::turn_accepted(&mut tx, run.bot_id, turn_id).await?,
-        None => events::bot_updated(&mut tx, run.bot_id).await?,
-    }
-    tx.commit().await?;
-    Ok(turn_id.is_some())
-}
-
-/// Skip every unsettled check run of the bot as `check_cancelled`, inside a
-/// Stop's or deletion's immediate transaction, so a check that already
-/// ended cannot queue its turn after the stop.
-pub(crate) async fn stop_checks(
-    conn: &mut SqliteConnection,
-    bot_id: Uuid,
-) -> Result<(), sqlx::Error> {
-    let stopped = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE routine_runs AS rr SET skip_reason = 'check_cancelled'
-         WHERE {UNSETTLED} AND rr.check_job_id IS NOT NULL
-           AND rr.routine_id IN (SELECT id FROM routines WHERE bot_id = ?1)"
-    )))
-    .bind(bot_id)
-    .execute(&mut *conn)
-    .await?
-    .rows_affected();
-    if stopped > 0 {
-        events::bot_updated(conn, bot_id).await?;
-    }
-    Ok(())
 }

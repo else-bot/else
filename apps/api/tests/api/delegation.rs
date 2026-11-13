@@ -1199,6 +1199,59 @@ async fn a_child_settling_while_the_parent_parks_still_requeues_it() {
     );
 }
 
+/// A child turn ending requeues its waiting root by the shared
+/// `turns_continuable` rule: once nothing else holds the root it continues,
+/// even when its task's result was already delivered; a pending secret
+/// request still holds it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_ending_continues_its_root_only_when_nothing_else_holds_it() {
+    for held in [false, true] {
+        let db = TestDb::migrated().await;
+        let (_, root, child, delegation) = seed(&db).await;
+        if held {
+            sqlx::query(
+                "INSERT INTO secret_requests (id, bot_id, turn_id, attempt, name, reason, env_names)
+                 SELECT ?1, bot_id, id, attempt, 'login', 'Authenticate', '[\"LOGIN_TOKEN\"]'
+                 FROM turns WHERE id = ?2",
+            )
+            .bind(Uuid::new_v4())
+            .bind(root)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query("UPDATE turns SET status = 'waiting' WHERE id = ?1")
+            .bind(root)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE delegations SET status = 'completed', delivered_attempt = 1,
+                 finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE id = ?1",
+        )
+        .bind(delegation)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE turns SET status = 'completed',
+                 finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
+        )
+        .bind(child)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+            .bind(root)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        let expected = if held { "waiting" } else { "queued" };
+        assert_eq!(status, expected, "held by a secret request: {held}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_reconciliation_ends_the_children_of_an_ended_root() {
     let db = TestDb::migrated().await;
@@ -2816,16 +2869,6 @@ async fn a_delegating_bot_updates_a_running_task_and_gets_the_updated_reply() {
         second,
         "a retry changes nothing"
     );
-    let delivered: Option<i64> =
-        sqlx::query_scalar("SELECT delivered_attempt FROM delegations WHERE id = ?1")
-            .bind(task)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
-    assert!(
-        delivered.is_some(),
-        "the retry's outcome is not delivered again"
-    );
 }
 
 async fn app_with_synthetic() -> (TestApp, Arc<else_api::providers::synthetic::Synthetic>) {
@@ -2982,7 +3025,17 @@ async fn a_delegating_bot_cancels_a_running_task() {
     .await;
     assert!(!failed, "{again}");
     assert_eq!(again["status"], "cancelled");
-    assert!(again["outcome"].as_str().is_some(), "{again}");
+    assert!(
+        again["next"].as_str().unwrap().contains("continuation"),
+        "{again}"
+    );
+    let delivered: Option<i64> =
+        sqlx::query_scalar("SELECT delivered_attempt FROM delegations WHERE id = ?1")
+            .bind(task)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(delivered, None, "the outcome is left for the continuation");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3016,7 +3069,14 @@ async fn an_update_to_an_ended_task_is_rejected_with_its_outcome() {
         "{rejected}"
     );
     assert_eq!(rejected["task"]["status"], "completed");
-    assert_eq!(rejected["task"]["outcome"].as_str(), result.as_deref());
+    assert!(result.is_some());
+    assert!(
+        rejected["task"]["next"]
+            .as_str()
+            .unwrap()
+            .contains("continuation"),
+        "{rejected}"
+    );
     assert_eq!(child_of(&app, task).await, child, "nothing was changed");
 
     let (failed, unknown) = control(
@@ -3162,6 +3222,66 @@ async fn a_failed_child_returns_its_last_checkpoint_and_the_error() {
     assert_eq!(
         returned_text(&db, main, file.id).await,
         messages.join("\n\n")
+    );
+}
+
+async fn approved_call_ran(
+    db: &TestDb,
+    turn: Uuid,
+    title: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) {
+    sqlx::query(
+        "INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, choices, action,
+             status, answer, consumed_attempt, used_at, use_outcome)
+         SELECT ?1, bot_id, id, 1, 'external', ?3, '[]',
+                json_object('tool', 'mcp_request', 'args', json_object()), 'answered',
+                '\"approve\"', 1, ?4, 'completed'
+         FROM turns WHERE id = ?2",
+    )
+    .bind(Uuid::new_v4())
+    .bind(turn)
+    .bind(title)
+    .bind(at.format("%Y-%m-%dT%H:%M:%S%.3f+00:00").to_string())
+    .execute(&db.pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_child_names_the_approved_calls_it_made() {
+    let db = TestDb::migrated().await;
+    let (_, root, child, _) = seed(&db).await;
+    let at = chrono::Utc::now() - chrono::Duration::hours(1);
+    approved_call_ran(&db, child, "Merge the news recap", at).await;
+    approved_call_ran(
+        &db,
+        child,
+        "Merge last week's recap",
+        chrono::Utc::now() - chrono::Duration::days(8),
+    )
+    .await;
+    settle_with_messages(&db, child, &["Merging now."], "failed").await;
+
+    let mut conn = db.pool.acquire().await.unwrap();
+    let outcomes = else_api::db::delegations::undelivered(&mut conn, root)
+        .await
+        .unwrap();
+    let ran = &outcomes[0].ran;
+    assert_eq!(
+        ran.len(),
+        1,
+        "a call older than a week is left out: {ran:?}"
+    );
+    assert_eq!(ran[0].tool, "mcp_request");
+    assert_eq!(ran[0].title, "Merge the news recap");
+    assert_eq!(
+        ran[0].used.describe(),
+        format!(
+            "completed at {}",
+            at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        ),
+        "the delegating bot learns the merge ran despite the failure"
     );
 }
 

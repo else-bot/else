@@ -373,3 +373,40 @@ async fn stop_work_settles_a_checking_run_before_its_check_can_report() {
         "a check that reports after Stop never queues its turn"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_routine_settles_its_checking_run_and_stops_the_check() {
+    let s = setup("./new-leads.sh").await;
+    let (run, job) = checking(&s).await;
+
+    let deleted = s
+        .app
+        .owner(
+            "DELETE",
+            &format!("/v1/bots/{}/routines/{}", s.bot, s.routine),
+            None,
+        )
+        .await;
+    assert!(deleted.status.is_success(), "{}", deleted.body);
+    let row = runs(&s.app, s.routine).await.remove(0);
+    assert_eq!(
+        (row.id, row.skip_reason.as_deref(), row.turn_id),
+        (run, Some("check_cancelled"), None),
+        "deletion skips the run in its own transaction"
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = ?1")
+        .bind(job)
+        .fetch_one(&s.app.db.pool)
+        .await
+        .unwrap();
+    assert_ne!(status, "running", "the check job is asked to stop");
+
+    let turns = bot_turns(&s.app, &s.bot).await;
+    check_ends(&s, job, "done 0\n2 new leads\n").await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        bot_turns(&s.app, &s.bot).await,
+        turns,
+        "a deleted routine's check never queues a turn"
+    );
+}

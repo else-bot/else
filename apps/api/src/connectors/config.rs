@@ -160,79 +160,140 @@ impl Credential {
     }
 }
 
+/// A rule a mail command broke, named for the bot: which field and its range.
+type Rule = Result<(), &'static str>;
+
+fn ensure(ok: bool, rule: &'static str) -> Rule {
+    if ok { Ok(()) } else { Err(rule) }
+}
+
+fn message_ref(m: &MessageRef) -> Rule {
+    ensure(folder(&m.folder), "folder must be 1 to 512 bytes of text")?;
+    ensure(
+        m.uid > 0 && m.uid_validity > 0,
+        "message needs its uid and uid_validity from a search",
+    )
+}
+
+fn body(text: &str) -> Rule {
+    ensure(text.len() <= 32_000, "body must be at most 32000 bytes")
+}
+
+fn recipients<'a>(mut all: impl Iterator<Item = &'a String>) -> Rule {
+    ensure(
+        all.all(|s| address(s)),
+        "each recipient must be one email address",
+    )
+}
+
+fn draft(d: &Draft) -> Rule {
+    use base64::Engine;
+    ensure(
+        d.attachments.len() <= 10,
+        "a draft takes at most 10 attachments",
+    )?;
+    let mut bytes = 0;
+    for a in &d.attachments {
+        ensure(
+            text(&a.name, 255) && !a.name.contains(['/', '\\']),
+            "an attachment name must be 1 to 255 bytes without slashes",
+        )?;
+        ensure(
+            text(&a.media_type, 127)
+                && a.media_type.is_ascii()
+                && a.media_type.contains('/')
+                && !a.media_type.contains([' ', ';']),
+            "an attachment media_type must look like text/plain",
+        )?;
+        let data = (a.data_base64.len() <= 1_400_000)
+            .then(|| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(&a.data_base64)
+                    .ok()
+            })
+            .flatten();
+        let Some(data) = data else {
+            return Err("an attachment must be base64 of at most 1 MiB");
+        };
+        bytes += data.len();
+    }
+    ensure(bytes <= 1_048_576, "attachments must total at most 1 MiB")?;
+    ensure(!d.to.is_empty(), "to needs at least one address")?;
+    ensure(
+        d.to.len() + d.cc.len() + d.bcc.len() <= 50,
+        "to, cc and bcc take at most 50 addresses together",
+    )?;
+    recipients(d.to.iter().chain(&d.cc).chain(&d.bcc))?;
+    ensure(
+        d.subject.len() <= 998 && !d.subject.contains(['\r', '\n']),
+        "subject must be one line of at most 998 bytes",
+    )?;
+    body(&d.body)
+}
+
 impl MailCommand {
     pub fn validate(&self) -> Result<(), MailError> {
-        fn msg(m: &MessageRef) -> bool {
-            folder(&m.folder) && m.uid > 0 && m.uid_validity > 0
-        }
-        fn draft(d: &Draft) -> bool {
-            use base64::Engine;
-            let mut bytes = 0;
-            if d.attachments.len() > 10
-                || d.attachments.iter().any(|a| {
-                    if !text(&a.name, 255)
-                        || a.name.contains(['/', '\\'])
-                        || !text(&a.media_type, 127)
-                        || !a.media_type.is_ascii()
-                        || !a.media_type.contains('/')
-                        || a.media_type.contains([' ', ';'])
-                        || a.data_base64.len() > 1_400_000
-                    {
-                        return true;
-                    }
-                    match base64::engine::general_purpose::STANDARD.decode(&a.data_base64) {
-                        Ok(data) => {
-                            bytes += data.len();
-                            bytes > 1_048_576
-                        }
-                        Err(_) => true,
-                    }
-                })
-            {
-                return false;
-            }
-            d.to.len() + d.cc.len() + d.bcc.len() <= 50
-                && !d.to.is_empty()
-                && d.to.iter().chain(&d.cc).chain(&d.bcc).all(|s| address(s))
-                && d.subject.len() <= 998
-                && !d.subject.contains(['\r', '\n'])
-                && d.body.len() <= 32_000
-        }
-        if let Self::Search { limit, .. } = self
-            && !(1..=100).contains(limit)
-        {
-            return Err(MailError::new("invalid_mail_command").detail("limit must be 1 to 100"));
-        }
-        let valid = match self {
-            Self::Folders => true,
+        self.rule()
+            .map_err(|rule| MailError::new("invalid_mail_command").detail(rule))
+    }
+
+    fn rule(&self) -> Rule {
+        let folder_name = |f: &str| ensure(folder(f), "folder must be 1 to 512 bytes of text");
+        match self {
+            Self::Folders => Ok(()),
             Self::Search {
-                folder: f, query, ..
-            } => folder(f) && query.as_ref().is_none_or(|s| text(s, 1024)),
+                folder: f,
+                query,
+                limit,
+                ..
+            } => {
+                folder_name(f)?;
+                ensure(
+                    query.as_ref().is_none_or(|s| text(s, 1024)),
+                    "query must be 1 to 1024 bytes of text",
+                )?;
+                ensure((1..=100).contains(limit), "limit must be 1 to 100")
+            }
             Self::Read { message }
             | Self::SetRead { message, .. }
             | Self::SetFlagged { message, .. }
             | Self::Archive { message }
             | Self::Trash { message }
-            | Self::Delete { message } => msg(message),
-            Self::Attachment { message, part } => msg(message) && *part < 1000,
-            Self::Move { message, folder: f } => msg(message) && folder(f),
-            Self::Send { draft: d } => draft(d) && d.reply_to.as_ref().is_none_or(msg),
-            Self::Reply { message, body, .. } => msg(message) && body.len() <= 32_000,
-            Self::Forward {
-                message, to, body, ..
-            } => {
-                msg(message)
-                    && (1..=50).contains(&to.len())
-                    && to.iter().all(|s| address(s))
-                    && body.len() <= 32_000
+            | Self::Delete { message } => message_ref(message),
+            Self::Attachment { message, part } => {
+                message_ref(message)?;
+                ensure(*part < 1000, "part must be below 1000")
             }
-            Self::CreateFolder { folder: f } | Self::DeleteFolder { folder: f } => folder(f),
-            Self::RenameFolder { folder: f, name } => folder(f) && folder(name),
-        };
-        if valid {
-            Ok(())
-        } else {
-            Err(MailError::new("invalid_mail_command"))
+            Self::Move { message, folder: f } => {
+                message_ref(message)?;
+                folder_name(f)
+            }
+            Self::Send { draft: d } => {
+                draft(d)?;
+                d.reply_to.as_ref().map_or(Ok(()), message_ref)
+            }
+            Self::Reply {
+                message, body: b, ..
+            } => {
+                message_ref(message)?;
+                body(b)
+            }
+            Self::Forward {
+                message,
+                to,
+                body: b,
+                ..
+            } => {
+                message_ref(message)?;
+                ensure((1..=50).contains(&to.len()), "to takes 1 to 50 addresses")?;
+                recipients(to.iter())?;
+                body(b)
+            }
+            Self::CreateFolder { folder: f } | Self::DeleteFolder { folder: f } => folder_name(f),
+            Self::RenameFolder { folder: f, name } => {
+                folder_name(f)?;
+                ensure(folder(name), "name must be 1 to 512 bytes of text")
+            }
         }
     }
 }
@@ -263,7 +324,47 @@ mod tests {
             attachments: vec![],
             reply_to: None,
         };
-        assert!(MailCommand::Send { draft }.validate().is_err());
+        assert_eq!(
+            MailCommand::Send { draft }
+                .validate()
+                .unwrap_err()
+                .to_string(),
+            "invalid_mail_command: subject must be one line of at most 998 bytes"
+        );
+        let message = MessageRef {
+            folder: "INBOX".into(),
+            uid_validity: 1,
+            uid: 0,
+        };
+        for (command, rule) in [
+            (
+                MailCommand::Search {
+                    folder: String::new(),
+                    query: None,
+                    limit: 10,
+                },
+                "folder must be 1 to 512 bytes of text",
+            ),
+            (
+                MailCommand::Read {
+                    message: message.clone(),
+                },
+                "message needs its uid and uid_validity from a search",
+            ),
+            (
+                MailCommand::RenameFolder {
+                    folder: "INBOX".into(),
+                    name: String::new(),
+                },
+                "name must be 1 to 512 bytes of text",
+            ),
+        ] {
+            assert_eq!(
+                command.validate().unwrap_err().to_string(),
+                format!("invalid_mail_command: {rule}"),
+                "each rule names its field"
+            );
+        }
         let search = |limit| MailCommand::Search {
             folder: "INBOX".into(),
             query: None,

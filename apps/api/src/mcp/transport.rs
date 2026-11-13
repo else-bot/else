@@ -424,7 +424,15 @@ for line in sys.stdin:
             let turn = marker.rsplit_once(':').unwrap().1.parse().unwrap();
             let host = Host::new(dir.path(), dir.path());
             let descendant = report["descendant"].as_i64().unwrap() as i32;
-            assert!(host.live_processes(turn).contains(&descendant));
+            // Popen returns once the child begins its exec, before the kernel
+            // records its environment, so the marker can show up a moment later.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while !host.live_processes(turn).contains(&descendant) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the MCP server's descendant carries its marker");
             if explicit_shutdown {
                 connection.shutdown().await;
             }

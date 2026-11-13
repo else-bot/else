@@ -98,6 +98,12 @@ def run(runner):
                     "name": "routine_run", "arguments": {"routine_id": routine_id}})], "Queued."),
                 "pause-routine-discovers-update": ([self.call("find_tool", {"query": "routine_update"}), self.call("use_tool", {
                     "name": "routine_update", "arguments": {"routine_id": routine_id, "enabled": False}})], "Paused Daily digest."),
+                "recurring-watch-saves-a-check": ([self.call("use_tool", {
+                    "name": "routine_create", "arguments": {
+                        "name": "Changelog watch", "cron": "0 * * * *",
+                        "prompt": "Summarize the new changelog entries.",
+                        "check": "curl -fsS https://status.example.com/changelog.txt | diff ~/seen.txt - | grep '^>' || true"}})],
+                                                  "Saved an hourly watch that only wakes me when the changelog changes."),
                 "one-off-check-is-a-reminder": ([self.call("find_tool", {"query": "reminder_create"}), self.call("use_tool", {
                     "name": "reminder_create", "arguments": {"name": "Scout check", "in_minutes": 360,
                                                              "prompt": "Check whether Scout sent 2-3 DMs."}})],
