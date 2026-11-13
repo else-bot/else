@@ -7,7 +7,6 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::component::{Disableable as _, FocusableExt as _};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -80,80 +79,50 @@ impl ElseApp {
             Phase::Failed => "Failed",
             Phase::Stopped => "Stopped",
         };
-        let faces = self.face_stack(
+        let faces = self.event_faces(
             &format!("handoff-{id}"),
             group.iter().map(|d| d.target_bot_id),
-            px(16.),
         );
-        let mut row = super::action_card::event_row(theme)
-            .children(faces)
-            .child(
-                Button::new(SharedString::from(format!("handoff-details-{id}")))
-                    .ghost()
-                    .small()
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .flex_1()
-                    .min_w_0()
-                    .justify_start()
-                    .accessibility_label(format!(
-                        "{label}: {status}. {} tasks. Expand details",
-                        group.len()
-                    ))
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .min_w_0()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(label),
-                            )
-                            .child(div().text_color(theme.muted_foreground).child(status))
-                            .child(
-                                Icon::new(if expanded {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .xsmall(),
-                            ),
-                    )
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        if let Some(view) = app.view.as_mut()
-                            && !view.expanded_councils.remove(&id)
-                        {
-                            view.expanded_councils.insert(id);
-                        }
-                        app.remeasure_row(RowKey::Handoff(id), cx);
-                    })),
-            )
-            .when(group.len() > 1, |row| {
-                row.child(format!("{replied}/{}", group.len()))
-            })
-            .child(div().flex_none().text_xs().child(elapsed));
-        if group.len() == 1
-            && let Some(bot) = self
-                .bots
-                .iter()
-                .find(|bot| bot.id == group[0].target_bot_id)
-        {
-            let target = bot.id;
-            row = row.child(
-                Button::new(SharedString::from(format!("handoff-open-{id}")))
-                    .ghost()
-                    .small()
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .label("Open chat")
-                    .accessibility_label(format!("Open chat with {}", bot.name))
-                    .on_click(
-                        cx.listener(move |app, _, window, cx| app.open_bot(target, window, cx)),
-                    ),
-            );
+        let mut meta = vec![status.to_owned()];
+        if group.len() > 1 {
+            meta.push(format!("{replied}/{}", group.len()));
         }
+        meta.push(elapsed);
+        let meta = meta.join(" · ");
+        let row = Button::new(SharedString::from(format!("handoff-details-{id}")))
+            .ghost()
+            .focus_ring(false)
+            .cursor_pointer()
+            .w_full()
+            .h_auto()
+            .p_0()
+            .accessibility_label(format!(
+                "{label}: {meta}. {} tasks. {} details",
+                group.len(),
+                if expanded { "Hide" } else { "Show" }
+            ))
+            .child(
+                super::action_card::event_row(theme)
+                    .child(faces)
+                    .child(super::action_card::event_object(theme, label))
+                    .child(super::action_card::event_meta(theme, meta))
+                    .child(
+                        Icon::new(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .xsmall(),
+                    ),
+            )
+            .on_click(cx.listener(move |app, _, _, cx| {
+                if let Some(view) = app.view.as_mut()
+                    && !view.expanded_councils.remove(&id)
+                {
+                    view.expanded_councils.insert(id);
+                }
+                app.remeasure_row(RowKey::Handoff(id), cx);
+            }));
         let mut content = v_flex().w_full().min_w_0().child(row);
         if expanded {
             let mut details = v_flex().w_full().min_w_0().gap_3().p_4();

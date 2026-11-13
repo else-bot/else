@@ -1,12 +1,11 @@
 use super::conversation::{ReplyLayout, TranscriptRow};
 use super::{ElseApp, RowKey};
-use crate::avatar::bot_avatar;
 use crate::model::{BotCreated, BotReplyStatus, Conversation, Item};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
@@ -158,35 +157,16 @@ impl ElseApp {
             "{count} {}",
             if count == 1 { "message" } else { "messages" }
         );
-        let mut avatars = h_flex().flex_none().items_center().gap_1();
-        for (id, _) in participants.iter().take(3) {
-            if let Some(bot) = self.bots.iter().find(|bot| bot.id == *id) {
-                avatars = avatars.child(
-                    bot_avatar(
-                        SharedString::from(format!("activity-{anchor}-{id}")),
-                        bot.avatar,
-                        px(20.),
-                    )
-                    .still(),
-                );
-            }
-        }
         let header = super::action_card::event_row(&theme)
-            .children([avatars.into_any_element()])
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(names.clone()),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .child(format!("{} · {messages}", status.label())),
-            )
+            .child(self.event_faces(
+                &format!("activity-{anchor}"),
+                participants.iter().map(|(id, _)| *id),
+            ))
+            .child(super::action_card::event_object(&theme, names.clone()))
+            .child(super::action_card::event_meta(
+                &theme,
+                format!("{} · {messages}", status.label()),
+            ))
             .child(Icon::new(IconName::ChevronRight).xsmall());
         let title = names.clone();
         let mut card = v_flex().w_full().min_w_0().child(
@@ -376,23 +356,9 @@ impl ElseApp {
             .as_ref()
             .is_some_and(|view| view.expanded_events.contains(&item));
         let row = super::action_card::event_row(&theme)
-            .children(child.map(|bot| {
-                bot_avatar(
-                    SharedString::from(format!("created-{item}")),
-                    bot.avatar,
-                    px(16.),
-                )
-                .still()
-            }))
-            .child(div().flex_none().child("Created bot"))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(name.clone()),
-            )
+            .child(self.event_faces(&format!("created-{item}"), child.map(|bot| bot.id)))
+            .child(super::action_card::event_verb(&theme, "Created bot"))
+            .child(super::action_card::event_object(&theme, name.clone()))
             .child(
                 Button::new(SharedString::from(format!("created-details-{item}")))
                     .small()

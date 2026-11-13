@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 
 use super::ElseApp;
-use crate::avatar::bot_avatar;
 use crate::model::{DiffLine, DiffOp, RuleChange, RulesFile, RulesUpdate, RulesVersion};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
@@ -380,6 +379,8 @@ impl ElseApp {
         let shown = update.version;
         let view = Button::new(SharedString::from(format!("rules-view-{item}")))
             .focus_ring(false)
+            .ghost()
+            .small()
             .cursor_pointer()
             .label("View")
             .accessibility_label(format!("View the change to {}", update.section))
@@ -397,6 +398,8 @@ impl ElseApp {
         let undo = current.then(|| {
             Button::new(SharedString::from(format!("rules-undo-{item}")))
                 .focus_ring(false)
+                .ghost()
+                .small()
                 .cursor_pointer()
                 .label("Undo")
                 .loading(restoring)
@@ -408,36 +411,20 @@ impl ElseApp {
         });
         let line = super::action_card::event_row(&theme)
             .id(SharedString::from(format!("message-{item}")))
-            .children(author.map(|b| {
-                bot_avatar(
-                    SharedString::from(format!("rules-{item}")),
-                    b.avatar,
-                    px(16.),
-                )
-                .still()
-            }))
+            .child(self.event_faces(&format!("rules-{item}"), author.map(|b| b.id)))
             .child(
-                div()
-                    .min_w_0()
-                    .max_w(px(160.))
-                    .truncate()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(name),
-            )
-            .child(
-                div()
+                super::action_card::event_actor(&theme, name)
                     .flex_none()
-                    .text_color(theme.muted_foreground)
-                    .child(change_label(update.change)),
+                    .max_w(px(160.)),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(update.section.clone()),
-            )
+            .child(super::action_card::event_verb(
+                &theme,
+                change_label(update.change),
+            ))
+            .child(super::action_card::event_object(
+                &theme,
+                update.section.clone(),
+            ))
             .child(view)
             .children(undo);
         let _ = stamp;

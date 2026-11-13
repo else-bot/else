@@ -12,7 +12,7 @@ use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -123,18 +123,15 @@ impl ElseApp {
                             .and_then(|conversation| conversation.turn(task.turn))
                             .and_then(|turn| turn.routine.as_ref())
                             .map(|run| {
-                                super::action_card::event_row(cx.theme())
-                                    .child(Icon::new(IconName::Clock).size_4())
-                                    .child(run.label())
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(run.name.clone()),
-                                    )
-                                    .child(div().flex_none().text_xs().child(stamp(run.due_at)))
+                                let theme = cx.theme();
+                                super::action_card::event_row(theme)
+                                    .child(super::action_card::event_icon(IconName::Clock))
+                                    .child(super::action_card::event_verb(theme, run.label()))
+                                    .child(super::action_card::event_object(
+                                        theme,
+                                        run.name.clone(),
+                                    ))
+                                    .child(super::action_card::event_meta(theme, stamp(run.due_at)))
                                     .child(routine_details(
                                         SharedString::from(format!(
                                             "routine-{}-{}",
@@ -301,16 +298,12 @@ impl ElseApp {
                 if let Some(update) = &item.routine_update {
                     return Some(
                         super::action_card::event_row(&theme)
-                            .child(Icon::new(IconName::Clock).size_4())
-                            .child("Updated routine")
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(update.name.clone()),
-                            )
+                            .child(super::action_card::event_icon(IconName::Clock))
+                            .child(super::action_card::event_verb(&theme, "Updated routine"))
+                            .child(super::action_card::event_object(
+                                &theme,
+                                update.name.clone(),
+                            ))
                             .child(routine_details(
                                 SharedString::from(format!("routine-update-{id}")),
                                 cx,
@@ -559,24 +552,16 @@ pub(super) fn with_reaction(
 fn routine_banner(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> AnyElement {
     let theme = cx.theme();
     super::action_card::event_row(theme)
-        .child(Icon::new(IconName::Clock).size_4())
-        .child(run.label())
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(run.name.clone()),
-        )
-        .child(
-            div().flex_none().text_xs().child(
-                run.due_at
-                    .with_timezone(&Local)
-                    .format("%e %b · %H:%M %Z")
-                    .to_string(),
-            ),
-        )
+        .child(super::action_card::event_icon(IconName::Clock))
+        .child(super::action_card::event_verb(theme, run.label()))
+        .child(super::action_card::event_object(theme, run.name.clone()))
+        .child(super::action_card::event_meta(
+            theme,
+            run.due_at
+                .with_timezone(&Local)
+                .format("%e %b · %H:%M %Z")
+                .to_string(),
+        ))
         .child(routine_details(
             SharedString::from(format!(
                 "routine-{}-{}",
