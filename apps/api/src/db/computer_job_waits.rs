@@ -102,6 +102,23 @@ pub async fn create(
     Ok(Created::Waiting(id))
 }
 
+/// Publish each turn whose wait on `job_id` the job's end just settled, in
+/// the transaction that ended it, so the owner sees it queued even while
+/// dispatch is blocked; the status trigger requeued it.
+pub async fn publish_settled(conn: &mut SqliteConnection, job_id: Uuid) -> Result<(), sqlx::Error> {
+    let turns: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT DISTINCT bot_id, turn_id FROM computer_job_waits
+         WHERE job_id = ?1 AND status = 'settled' AND delivered_attempt IS NULL",
+    )
+    .bind(job_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for (bot_id, turn_id) in turns {
+        events::turn_changed(conn, bot_id, turn_id).await?;
+    }
+    Ok(())
+}
+
 /// A wait whose job still runs, as the owner's turn view shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow)]
 pub struct Pending {

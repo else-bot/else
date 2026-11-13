@@ -402,9 +402,8 @@ fn job_json(job: &crate::computers::jobs::JobState) -> Value {
     })
 }
 
-/// Park the request on job `id` until it ends, or return its result when it
-/// already has. The attempt is read before the guest is probed, so a slow
-/// probe cannot park a later attempt.
+/// The attempt is read before the guest is probed, so a slow probe cannot
+/// park a later attempt.
 async fn wait_job(
     state: &AppState,
     grant: &Grant,

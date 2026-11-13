@@ -260,6 +260,11 @@ async fn a_request_parked_on_a_job_continues_with_its_exit_status_when_it_fails(
     );
     assert_eq!(text(&parked)["status"], "waiting");
     settle(&app, turn, "waiting").await;
+    let parked_at: i64 = sqlx::query_scalar("SELECT max(seq) FROM bot_events WHERE bot_id = ?1")
+        .bind(bot.parse::<Uuid>().unwrap())
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
     let shown = shown_waits(&app, &bot, turn).await;
     assert_eq!(shown[0]["job_id"], job.to_string(), "{shown}");
 
@@ -277,6 +282,17 @@ async fn a_request_parked_on_a_job_continues_with_its_exit_status_when_it_fails(
     guest.report("done 3\nTimeoutError: page.goto exceeded 30000 ms\n");
     manager.job(bot.parse().unwrap(), job).await.unwrap();
     settle(&app, turn, "completed").await;
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bot_events WHERE kind = 'turn.updated'
+           AND json_extract(data, '$.turn.id') = ?1
+           AND json_extract(data, '$.turn.status') = 'queued' AND seq > ?2",
+    )
+    .bind(turn.to_string())
+    .bind(parked_at)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert!(queued >= 1, "the owner sees the request queued again");
     assert_eq!(attempts(&app, turn).await, 2, "the same request continued");
     assert_eq!(wait_row(&app, turn).await, ("settled".into(), Some(2)));
     assert_eq!(shown_waits(&app, &bot, turn).await, json!([]));
