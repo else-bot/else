@@ -2,6 +2,11 @@ use super::{ComputerError, ComputerManager, ExecOutput};
 use std::time::Duration;
 use uuid::Uuid;
 
+const WRITE_FILE: &str = r#"cd "$HOME/work" 2>/dev/null || cd "$HOME"; mkdir -p -- "$(dirname -- "$1")" && printf %s "$2" | base64 -d > "$1""#;
+
+const READ_FILE: &str = r#"cd "$HOME/work" 2>/dev/null || cd "$HOME"; [ -f "$1" ] || { echo "not a regular file" >&2; exit 1; }
+stat -c %s -- "$1" && tail -c +"$(($2 + 1))" -- "$1" | head -c "$3" | base64 -w0"#;
+
 struct CheckedArtifact {
     bytes: u64,
     digest: Vec<u8>,
@@ -179,7 +184,7 @@ impl ComputerManager {
         let encoded = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
         self.guest(
             lease,
-            r#"cd "$HOME/work" 2>/dev/null || cd "$HOME"; mkdir -p -- "$(dirname -- "$1")" && printf %s "$2" | base64 -d > "$1""#,
+            WRITE_FILE,
             &[path, &encoded],
             Duration::from_secs(30),
         )
@@ -201,8 +206,7 @@ impl ComputerManager {
         let out = self
             .guest(
                 lease,
-                r#"cd "$HOME/work" 2>/dev/null || cd "$HOME"; [ -f "$1" ] || { echo "not a regular file" >&2; exit 1; }
-stat -c %s -- "$1" && tail -c +"$(($2 + 1))" -- "$1" | head -c "$3" | base64 -w0"#,
+                READ_FILE,
                 &[path, &offset_arg, &length_arg],
                 Duration::from_secs(30),
             )
@@ -218,5 +222,85 @@ stat -c %s -- "$1" && tail -c +"$(($2 + 1))" -- "$1" | head -c "$3" | base64 -w0
                 ComputerError::Runtime(crate::computers::RuntimeError::Unavailable(e.to_string()))
             })?;
         Ok(Ok((size, bytes)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{READ_FILE, WRITE_FILE};
+    use base64::Engine;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn run(home: &Path, script: &str, args: &[&str]) -> (bool, String, String) {
+        let out = Command::new("/bin/sh")
+            .args(["-c", script, "sh"])
+            .args(args)
+            .env("HOME", home)
+            .output()
+            .expect("sh runs");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    fn write(home: &Path, path: &str, content: &str) -> (bool, String) {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(content);
+        let (ok, _, err) = run(home, WRITE_FILE, &[path, &encoded]);
+        (ok, err)
+    }
+
+    fn read(home: &Path, path: &str) -> Result<String, String> {
+        let (ok, out, err) = run(home, READ_FILE, &[path, "0", "4096"]);
+        if !ok {
+            return Err(err.trim().to_owned());
+        }
+        let (_, encoded) = out.split_once('\n').expect("size line");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded.trim())
+            .expect("base64");
+        Ok(String::from_utf8(bytes).expect("utf-8"))
+    }
+
+    #[test]
+    fn file_paths_resolve_relative_absolute_and_home_forms() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        std::fs::create_dir(home.join("work")).unwrap();
+        let absolute = home.join("abs.txt");
+        let absolute = absolute.to_str().unwrap();
+        for (path, on_disk) in [
+            ("notes/rel.txt", "work/notes/rel.txt"),
+            (absolute, "abs.txt"),
+            ("~/work/tilde.txt", "work/tilde.txt"),
+            ("$HOME/work/var.txt", "work/var.txt"),
+        ] {
+            assert_eq!(
+                write(home, path, path),
+                (true, String::new()),
+                "write {path}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(home.join(on_disk)).ok().as_deref(),
+                Some(path),
+                "{path} lands at {on_disk}"
+            );
+            assert_eq!(read(home, path).as_deref(), Ok(path), "read {path}");
+        }
+        assert!(!home.join("work/~").exists(), "no literal ~ directory");
+    }
+
+    #[test]
+    fn read_tells_a_missing_file_from_a_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        std::fs::create_dir_all(home.join("work/dir")).unwrap();
+        assert_eq!(
+            read(home, "~/work/missing.txt"),
+            Err("no such file: ~/work/missing.txt".to_owned())
+        );
+        assert_eq!(read(home, "dir"), Err("not a regular file: dir".to_owned()));
     }
 }
