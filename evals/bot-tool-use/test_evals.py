@@ -266,6 +266,19 @@ def run(runner):
                     [self.call("rules_update", {"section": "Summaries",
                                                 "content": "Use a plain bullet list with a heading per repository."})],
                     "Saved."),
+                "owner-answer-rides-with-delegation": (
+                    [self.call("delegate", {"target_bot_id": "00000000-0000-0000-0000-000000000004",
+                                            "task": "Drop the 14-day requirement and raise the DM cap to 20 per 24h.",
+                                            "owner_answer": "40000000-0000-0000-0000-000000000002"},
+                               {"status": "pending", "parked": True})],
+                    "Research is applying your choice."),
+                "answered-task-updates-own-routine": (
+                    [self.call("find_tool", {"query": "routine_update"}),
+                     self.call("use_tool", {"name": "routine_update", "arguments": {
+                         "routine_id": "10000000-0000-0000-0000-000000000007",
+                         "prompt": "Find traders and DM at most 20 per 24h."}})],
+                    "Updated Leads to revision 4.",
+                    "The approval was relayed, so I left Leads unchanged."),
                 "routine-task-drafts-post-for-approval": (
                     [self.call("draft_message", {"platform": "x",
                                                  "body": "A whale just opened a $40M BTC short on Hyperliquid at 10x."},

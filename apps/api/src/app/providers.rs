@@ -314,6 +314,10 @@ pub struct DelegationContext {
     pub delegated_task: bool,
     /// For a delegated task: the bot that delegated it, ID and name.
     pub delegated_by: Option<(Uuid, String)>,
+    /// For a delegated task: the owner's answer on a card the delegating
+    /// bot asked. It lets the task manage its own routines and changes no
+    /// other permission.
+    pub owner_answer: Option<OwnerAnswer>,
     pub main_bot: bool,
     /// An owner request in this bot's own conversation.
     pub can_create_bot: bool,
@@ -325,6 +329,16 @@ pub struct DelegationContext {
     /// Tasks this turn still waits on, including those an earlier owner
     /// message started and this one carried forward.
     pub in_progress: Vec<DelegationInProgress>,
+}
+
+/// The owner's answer on a card, as else.bot recorded it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerAnswer {
+    pub question: String,
+    pub context: Option<String>,
+    pub answered_at: chrono::DateTime<chrono::Utc>,
+    /// The labels of the choices the owner selected.
+    pub chosen: Vec<String>,
 }
 
 /// A delegated task with no outcome yet; its result arrives later as a
@@ -352,10 +366,11 @@ impl DelegationContext {
         !self.delegated_task || matches!(self.origin, Origin::OwnerRequest | Origin::RoutineRun)
     }
 
-    /// A bot manages its own routines only for work rooted in an owner
-    /// message, never for a routine run or a task one delegated.
+    /// A bot manages its own routines for work rooted in an owner message,
+    /// or for a task delegated with the owner's answer on a card; never for
+    /// a routine run or another task one delegated.
     pub fn can_manage_routines(&self) -> bool {
-        self.origin == Origin::OwnerRequest
+        self.origin == Origin::OwnerRequest || self.owner_answer.is_some()
     }
 
     /// A bot edits its rules only while answering the owner directly in its

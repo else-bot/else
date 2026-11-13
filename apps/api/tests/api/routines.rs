@@ -683,8 +683,15 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
     .await;
     assert_eq!(created.status, StatusCode::FORBIDDEN, "{}", created.body);
     assert_eq!(
-        else_api::db::delegations::create(&h.app.db.pool, child, main.parse().unwrap(), "x", &[])
-            .await,
+        else_api::db::delegations::create(
+            &h.app.db.pool,
+            child,
+            main.parse().unwrap(),
+            "x",
+            &[],
+            None
+        )
+        .await,
         Err(else_api::db::delegations::DelegateError::NotAllowed),
         "one hop, even with a forged grant"
     );
@@ -855,6 +862,145 @@ async fn routine_runs_and_their_delegated_tasks_cannot_manage_routines() {
     h.release(child).await;
     h.app.wait_turn(&run.to_string(), &["completed"]).await;
     assert!(owner_routines(&h.app, &leaf).await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_answer_in_a_routine_run_lets_the_delegated_bot_change_its_routine() {
+    let h = harness().await;
+    let manager = h.app.main_bot().await;
+    let scout = h.app.create_bot("Scout").await;
+    let (setup, token) = h.running(&scout, GATE_EVERY_ATTEMPT).await;
+    let asked = tool(
+        &h.app,
+        &token,
+        "ask_owner",
+        json!({ "question": "Name the routine Leads?", "choices": ["Yes", "No"] }),
+    )
+    .await;
+    let foreign = asked.result["question_id"].as_str().unwrap().to_owned();
+    h.release(setup).await;
+    h.app.wait_turn(&setup.to_string(), &["waiting"]).await;
+    let chosen = h
+        .app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{scout}/questions/{foreign}/answer"),
+            Some(json!({ "choice": "a" })),
+        )
+        .await;
+    assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.body);
+    let token = h.continued(setup, &token).await;
+    let leads = create(
+        &h.app,
+        &token,
+        json!({ "name": "Leads", "prompt": "Find leads; DM at most 5 per day.", "cron": "0 9 1 6 *" }),
+    )
+    .await;
+    h.release(setup).await;
+    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    let (setup, token) = h.running(&manager, GATE).await;
+    let audit = create(
+        &h.app,
+        &token,
+        digest(&format!("{GATE_EVERY_ATTEMPT} audit Scout's lead runs.")),
+    )
+    .await;
+    h.release(setup).await;
+    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    assert_eq!(fire(&h.app, at(&audit["next_run_at"])).await, 1);
+    let run = runs(&h.app, audit["id"].as_str().unwrap()).await[0]
+        .0
+        .unwrap();
+
+    let (_, run_token) = h.started(run).await;
+    let asked = tool(
+        &h.app,
+        &run_token,
+        "ask_owner",
+        json!({ "question": "Raise Scout's DM cap?", "choices": ["Keep 5", "Raise to 20"] }),
+    )
+    .await;
+    let question = asked.result["question_id"].as_str().unwrap().to_owned();
+    h.release(run).await;
+    h.app.wait_turn(&run.to_string(), &["waiting"]).await;
+    let chosen = h
+        .app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{manager}/questions/{question}/answer"),
+            Some(json!({ "choice": "b" })),
+        )
+        .await;
+    assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.body);
+    let run_token = h.continued(run, &run_token).await;
+
+    let task = "[gate] Raise your Leads routine's DM cap to 20 per day.";
+    for ineligible in [Uuid::new_v4().to_string(), foreign] {
+        let refused = tool(
+            &h.app,
+            &run_token,
+            "delegate",
+            json!({ "target_bot_id": scout, "task": task, "owner_answer": ineligible }),
+        )
+        .await;
+        assert_eq!(refused.code(), "ANSWER_UNAVAILABLE", "{}", refused.body);
+    }
+    let pending = tool(
+        &h.app,
+        &run_token,
+        "delegate",
+        json!({ "target_bot_id": scout, "task": task, "owner_answer": question }),
+    )
+    .await;
+    assert_eq!(pending.result["status"], "pending", "{}", pending.body);
+    let child = child_of(&h.app, run).await;
+    h.release(run).await;
+
+    let (_, child_token) = h.started(child).await;
+    let rules = else_api::providers::prompt::instructions(&h.inputs(child).await[0], "/p");
+    assert!(
+        rules.contains("[else.bot verified owner answer]"),
+        "{rules}"
+    );
+    assert!(rules.contains("Card: Raise Scout's DM cap?"), "{rules}");
+    assert!(rules.contains("The owner chose:\n- Raise to 20"), "{rules}");
+    assert!(!rules.contains("- Keep 5"), "{rules}");
+    assert!(rules.contains("you may set up, change, or remove your OWN routines"));
+    let edited = tool(
+        &h.app,
+        &child_token,
+        "routine_update",
+        json!({ "routine_id": leads["id"], "prompt": "Find leads; DM at most 20 per day." }),
+    )
+    .await;
+    assert!(!edited.error, "{}", edited.body);
+    let mut conn = h.app.db.pool.acquire().await.unwrap();
+    assert_eq!(
+        else_api::db::delegations::origin(&mut conn, child)
+            .await
+            .unwrap(),
+        else_api::app::providers::Origin::RoutineRun,
+        "the answer unlocks routines, not the owner-request permissions"
+    );
+    drop(conn);
+    for (name, args) in [
+        ("rename_bot", json!({ "bot_id": manager, "name": "Boss" })),
+        ("mcp_install", json!({ "id": "github" })),
+    ] {
+        let refused = tool(&h.app, &child_token, name, args).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::FORBIDDEN,
+            "{name}: {}",
+            refused.body
+        );
+    }
+    h.release(child).await;
+    h.app.wait_turn(&child.to_string(), &["completed"]).await;
+    assert_eq!(
+        owner_routines(&h.app, &scout).await[0]["prompt"],
+        "Find leads; DM at most 20 per day."
+    );
 }
 
 #[tokio::test]

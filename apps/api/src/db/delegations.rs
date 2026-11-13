@@ -77,6 +77,8 @@ pub enum DelegateError {
     NotRunning,
     #[error("a council needs 1 to 32 distinct bot IDs")]
     InvalidCouncil,
+    #[error("owner_answer must name a choice card the owner answered in this request")]
+    AnswerUnavailable,
     #[error("database error")]
     Db,
 }
@@ -156,15 +158,18 @@ pub async fn for_turns(
 
 /// Accept a delegation from the provider attempt of `turn_id`. The target
 /// receives its own copies of `files`, attached to the task message.
+/// `owner_answer` names a choice card this turn asked and the owner
+/// answered; the task then sees it and may manage its own routines.
 pub async fn create(
     pool: &SqlitePool,
     turn_id: Uuid,
     target: Uuid,
     task: &str,
     files: &[OutputFile],
+    owner_answer: Option<Uuid>,
 ) -> Result<Accepted, DelegateError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let accepted = create_in(&mut tx, turn_id, target, task, files, false).await?;
+    let accepted = create_in(&mut tx, turn_id, target, task, files, owner_answer, false).await?;
     tx.commit().await?;
     Ok(accepted)
 }
@@ -191,7 +196,7 @@ pub async fn council(
     let parked = super::turns::attempt_parked(&mut tx, turn_id, attempt).await?;
     let mut accepted = Vec::with_capacity(count);
     for target in targets {
-        let result = create_in(&mut tx, turn_id, target, task, &[], true).await?;
+        let result = create_in(&mut tx, turn_id, target, task, &[], None, true).await?;
         if parked && result.created {
             return Err(DelegateError::AttemptParked);
         }
@@ -207,6 +212,7 @@ async fn create_in(
     target: Uuid,
     task: &str,
     files: &[OutputFile],
+    owner_answer: Option<Uuid>,
     council: bool,
 ) -> Result<Accepted, DelegateError> {
     let task = task.trim();
@@ -251,6 +257,21 @@ async fn create_in(
     if target == parent {
         return Err(DelegateError::SelfTarget);
     }
+    if let Some(question) = owner_answer {
+        let answered: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM owner_questions
+                            WHERE id = ?1 AND turn_id = ?2 AND bot_id = ?3
+                              AND kind = 'choice' AND status = 'answered')",
+        )
+        .bind(question)
+        .bind(turn_id)
+        .bind(parent)
+        .fetch_one(&mut *conn)
+        .await?;
+        if !answered {
+            return Err(DelegateError::AnswerUnavailable);
+        }
+    }
     let mut hasher = Sha256::new();
     hasher.update(target.as_bytes());
     hasher.update(task.as_bytes());
@@ -261,6 +282,10 @@ async fn create_in(
         hasher.update(file.file.name.as_bytes());
         hasher.update(b"\0");
         hasher.update(Sha256::digest(&file.data));
+    }
+    if let Some(question) = owner_answer {
+        hasher.update(b"\0owner_answer\0");
+        hasher.update(question.as_bytes());
     }
     let hash = hasher.finalize().to_vec();
     let existing: Option<(Uuid, Uuid, String, String, Option<String>)> = sqlx::query_as(
@@ -428,8 +453,8 @@ async fn create_in(
     .await?;
     sqlx::query(
         "INSERT INTO delegations (id, root_turn_id, parent_attempt, parent_bot_id, target_bot_id,
-             task, task_hash, conversation_id, child_turn_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             task, task_hash, conversation_id, child_turn_id, owner_question_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
     )
     .bind(delegation_id)
     .bind(turn_id)
@@ -440,6 +465,7 @@ async fn create_in(
     .bind(&hash)
     .bind(conversation_id)
     .bind(child_turn)
+    .bind(owner_answer)
     .execute(&mut *conn)
     .await?;
     let sender: String = sqlx::query_scalar("SELECT name FROM bots WHERE id = ?1")
@@ -1016,6 +1042,21 @@ pub async fn origin(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Origin
     })
 }
 
+/// Whether `turn_id` is a task delegated with the owner's answer on a card,
+/// which lets it manage its own routines whatever its origin.
+pub async fn carries_owner_answer(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM delegations
+                        WHERE child_turn_id = ?1 AND owner_question_id IS NOT NULL)",
+    )
+    .bind(turn_id)
+    .fetch_one(&mut *conn)
+    .await
+}
+
 pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Context, sqlx::Error> {
     let (bot, kind, main): (Uuid, String, Option<Uuid>) = sqlx::query_as(
         "SELECT t.bot_id, c.kind, (SELECT default_bot_id FROM installation)
@@ -1026,17 +1067,34 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
     .await?;
     let origin = origin(conn, turn_id).await?;
     if kind == "task" {
-        let parent: Option<(Uuid, String)> = sqlx::query_as(
-            "SELECT d.parent_bot_id, b.name FROM delegations d JOIN bots b ON b.id = d.parent_bot_id
+        let parent: Option<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+            "SELECT d.parent_bot_id, b.name, d.owner_question_id
+             FROM delegations d JOIN bots b ON b.id = d.parent_bot_id
              WHERE d.child_turn_id = ?1",
         )
         .bind(turn_id)
         .fetch_optional(&mut *conn)
         .await?;
+        let owner_answer = match parent.as_ref().and_then(|(_, _, question)| *question) {
+            Some(question) => {
+                super::owner_questions::get(conn, question)
+                    .await?
+                    .and_then(|question| {
+                        Some(crate::app::providers::OwnerAnswer {
+                            chosen: question.selected().into_iter().map(|c| c.label).collect(),
+                            answered_at: question.settled_at?,
+                            question: question.title,
+                            context: question.context,
+                        })
+                    })
+            }
+            None => None,
+        };
         return Ok(Context {
             origin,
             delegated_task: true,
-            delegated_by: parent,
+            delegated_by: parent.map(|(id, name, _)| (id, name)),
+            owner_answer,
             ..Context::default()
         });
     }
@@ -1066,6 +1124,7 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
         origin,
         delegated_task: false,
         delegated_by: None,
+        owner_answer: None,
         main_bot: main == Some(bot),
         can_create_bot: origin == Origin::OwnerRequest,
         registry,

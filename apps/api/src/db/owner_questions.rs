@@ -552,6 +552,20 @@ pub struct Settled {
     pub requeued: bool,
 }
 
+/// One question by its ID, in any state.
+pub async fn get(
+    conn: &mut SqliteConnection,
+    question_id: Uuid,
+) -> Result<Option<QuestionInfo>, sqlx::Error> {
+    let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLUMNS} FROM owner_questions WHERE id = ?1"
+    )))
+    .bind(question_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    row.map(info).transpose()
+}
+
 async fn load(
     conn: &mut SqliteConnection,
     bot_id: Uuid,
