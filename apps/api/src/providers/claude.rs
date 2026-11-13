@@ -297,6 +297,13 @@ impl Claude {
         }
         let mut env = ready.config.env();
         env.push(("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned()));
+        // Otherwise the CLI may move a slow MCP call into a background task
+        // and report task_started, which ends the turn as native agent
+        // activity.
+        env.push((
+            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".to_owned(),
+            "1".to_owned(),
+        ));
         if let (Some(_), Some(grant)) = (tool_url, grant) {
             env.push((GRANT_ENV.to_owned(), grant.to_owned()));
         }

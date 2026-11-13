@@ -262,8 +262,13 @@ impl Protocol for Tracker {
                 "init" => self.on_init(event)?,
                 "compact_boundary" => events.push(Event::Compacted),
                 sub if sub.starts_with("task_") || sub.contains("agent") => {
+                    let detail = ["task_type", "description"]
+                        .iter()
+                        .filter_map(|key| event[key].as_str())
+                        .map(|value| format!(", {value}"))
+                        .collect::<String>();
                     return Err(Violation::policy(format!(
-                        "Claude reported native agent activity ({sub})"
+                        "Claude reported native agent activity ({sub}{detail})"
                     )));
                 }
                 _ => {}

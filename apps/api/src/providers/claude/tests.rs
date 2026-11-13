@@ -147,9 +147,12 @@ fn the_built_in_agent_list_alone_is_not_a_violation_but_its_activity_is() {
     let mut t = tracker();
     assert!(t.on(&init(claude_home::tool_names(), connected())).is_ok());
     let violation = t
-        .on(&json!({"type":"system","subtype":"task_started","task_id":"x"}))
+        .on(&json!({"type":"system","subtype":"task_started","task_id":"x","task_type":"mcp_task","description":"elsebot/computer_run"}))
         .unwrap_err();
-    assert!(violation.message.contains("task_started"));
+    assert_eq!(
+        violation.message,
+        "Claude reported native agent activity (task_started, mcp_task, elsebot/computer_run)"
+    );
     let violation = tracker()
         .on(&json!({"type":"assistant","parent_tool_use_id":"toolu_1","message":{"model":"claude-haiku-5-5","content":[]}}))
         .unwrap_err();
@@ -442,7 +445,7 @@ fn fake_claude(dir: &std::path::Path) -> (Claude, std::path::PathBuf) {
         &program,
         format!(
             r#"#!/usr/bin/env python3
-import json, sys
+import json, os, sys
 a = sys.argv[1:]
 if a[:1] == ["--version"]: print("2.1.999 (Claude Code)"); sys.exit()
 if a[:1] == ["auth"]: print('{{"loggedIn":true}}'); sys.exit()
@@ -453,6 +456,9 @@ out({{"type": "system", "subtype": "init", "model": a[a.index("--model") + 1],
 msg = json.loads(sys.stdin.readline())
 with open({received:?}, "a") as f: f.write(json.dumps(msg["message"]["content"]) + "\n")
 out({{"type": "user", "uuid": msg["uuid"], "isReplay": True}})
+if os.environ.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS") != "1":
+    out({{"type": "system", "subtype": "task_started", "task_id": "b1", "task_type": "mcp_task",
+         "description": "elsebot/computer_run"}})
 out({{"type": "result", "subtype": "success", "is_error": False, "result": "ok", "num_turns": 1}})
 "#
         ),
