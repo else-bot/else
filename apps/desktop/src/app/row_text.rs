@@ -3,7 +3,7 @@ use super::images::{MessageImages, UnavailableImage, without_images};
 use super::link_target::LinkTarget;
 use super::reply::{Author, Passage, QuotedReply};
 use super::{ElseApp, RowKey};
-use crate::attachments::{Attachment, MessagePart, file_id, file_size, input_content};
+use crate::attachments::{Attachment, MessagePart, byte_size, file_id, input_content};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::FocusableExt;
 use gpui_kit::base::text::{
@@ -511,7 +511,7 @@ impl RowText {
                             token,
                             file,
                             None,
-                            file_size(file.size),
+                            byte_size(file.size),
                             None,
                             cx,
                         );
@@ -614,7 +614,7 @@ impl RowText {
                         "Go to the original message".to_owned()
                     } else {
                         match linked_file(url).and_then(|id| tooltip_files.get(&id)) {
-                            Some(file) => format!("{} · {}", file.name, file_size(file.size)),
+                            Some(file) => format!("{} · {}", file.name, byte_size(file.size)),
                             None => LinkTarget::parse(url)
                                 .map_or_else(|| url.to_string(), |target| target.destination()),
                         }

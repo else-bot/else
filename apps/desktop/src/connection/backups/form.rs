@@ -301,7 +301,7 @@ impl PolicyForm {
             .child(h_flex().gap_4().items_start().when(stacked, |row| row.flex_col()).child(field("Remote interval (hours)", &self.hours)).child(field("Backups to keep", &self.keep)))
             .child(div().text_xs().text_color(theme.muted_foreground).child("Use 0 hours for manual backups. Local backups keep their existing schedule."))
             .child(div().text_xs().text_color(theme.muted_foreground).child("Only complete remote backups count. Older copies are removed after a new backup is verified. The last full workspace backup may be kept in addition to this count."))
-            .when_some(snapshot.estimate.as_ref().zip(self.values(cx).ok()), |content, (estimate, (_, keep))| content.child(div().text_xs().child(format!("The first upload is about {}. Later backups add only what changed, so {keep} copies store far less than {keep} full copies.", super::view::bytes(estimate.bytes)))))
+            .when_some(snapshot.estimate.as_ref().zip(self.values(cx).ok()), |content, (estimate, (_, keep))| content.child(div().text_xs().child(format!("The first upload is about {}. Later backups add only what changed, so {keep} copies store far less than {keep} full copies.", byte_size(estimate.bytes)))))
     }
 }
 

@@ -8,6 +8,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
+use xkeysym::Keysym;
 
 use crate::api::{
     Client, ClientError, ComputerState, ComputerUpgrade, DesktopCommand, DesktopCommands,
@@ -1024,38 +1025,38 @@ fn pastes(stroke: &Keystroke) -> bool {
 
 fn keysym(stroke: &Keystroke) -> Option<u32> {
     let named = match stroke.key.as_str() {
-        "backspace" => 0xff08,
-        "tab" if stroke.modifiers.shift => 0xfe20,
-        "tab" => 0xff09,
-        "enter" => 0xff0d,
-        "escape" => 0xff1b,
-        "delete" => 0xffff,
-        "insert" => 0xff63,
-        "home" => 0xff50,
-        "end" => 0xff57,
-        "pageup" => 0xff55,
-        "pagedown" => 0xff56,
-        "left" => 0xff51,
-        "up" => 0xff52,
-        "right" => 0xff53,
-        "down" => 0xff54,
-        "space" => 0x20,
+        "backspace" => Keysym::BackSpace,
+        "tab" if stroke.modifiers.shift => Keysym::ISO_Left_Tab,
+        "tab" => Keysym::Tab,
+        "enter" => Keysym::Return,
+        "escape" => Keysym::Escape,
+        "delete" => Keysym::Delete,
+        "insert" => Keysym::Insert,
+        "home" => Keysym::Home,
+        "end" => Keysym::End,
+        "pageup" => Keysym::Page_Up,
+        "pagedown" => Keysym::Page_Down,
+        "left" => Keysym::Left,
+        "up" => Keysym::Up,
+        "right" => Keysym::Right,
+        "down" => Keysym::Down,
+        "space" => Keysym::space,
         key if key.starts_with('f')
             && key[1..].parse::<u32>().is_ok_and(|n| (1..=12).contains(&n)) =>
         {
-            0xffbd + key[1..].parse::<u32>().ok()?
+            Keysym::new(Keysym::F1.raw() + key[1..].parse::<u32>().ok()? - 1)
         }
         _ => {
             let text = stroke.key_char.as_deref().unwrap_or(&stroke.key);
             let mut chars = text.chars();
-            let ch = chars.next()? as u32;
+            let ch = chars.next()?;
             if chars.next().is_some() {
                 return None;
             }
-            return Some(if ch <= 0xff { ch } else { 0x01000000 | ch });
+            Keysym::from_char(ch)
         }
     };
-    Some(named)
+    Some(named.raw())
 }
 
 #[cfg(test)]

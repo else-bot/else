@@ -1,5 +1,4 @@
-use std::io::Write as _;
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -89,16 +88,5 @@ fn save(path: &Path, frame: Frame) -> std::io::Result<()> {
             .mode(0o700)
             .create(parent)?;
     }
-    let staged = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
-    let written = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&staged)
-        .and_then(|mut file| file.write_all(&serde_json::to_vec(&frame)?))
-        .and_then(|_| std::fs::rename(&staged, path));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&staged);
-    }
-    written
+    crate::config::replace_private(path, &serde_json::to_vec(&frame)?)
 }

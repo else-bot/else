@@ -379,69 +379,36 @@ pub fn prune_in_project(
     folder: &str,
     keep: usize,
 ) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::fs::File;
-    use std::os::fd::{AsRawFd as _, FromRawFd as _};
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let root = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(project)?;
-    let name = CString::new(folder).map_err(std::io::Error::other)?;
-    // SAFETY: `root` is an open directory and `name` a valid C string.
-    let fd = unsafe {
-        libc::openat(
-            root.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: `fd` was just opened by this function and is owned here.
-    let dir = unsafe { File::from_raw_fd(fd) };
+    use rustix::fs::{AtFlags, Dir, FileType};
+    let root = open_dir(rustix::fs::CWD, project)?;
+    let dir = open_dir(&root, folder)?;
     let mut files = Vec::new();
-    // SAFETY: a duplicate of `dir` goes to fdopendir, which owns and closes it.
-    let stream = unsafe { libc::fdopendir(libc::dup(dir.as_raw_fd())) };
-    if stream.is_null() {
-        return Err(std::io::Error::last_os_error());
-    }
-    loop {
-        // SAFETY: `stream` is an open directory stream; the entry is read
-        // before the next readdir call.
-        let entry = unsafe { libc::readdir(stream) };
-        if entry.is_null() {
-            break;
-        }
-        // SAFETY: d_name is a NUL-terminated name inside the entry.
-        let entry = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_owned();
+    for entry in Dir::read_from(&dir)? {
+        let entry = entry?.file_name().to_owned();
         if entry.as_bytes().starts_with(b".") {
             // `.`, `..`, or a write in progress whose rename lands it later.
             continue;
         }
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: `dir` is open, `entry` a valid C string, `stat` writable.
-        let rc = unsafe {
-            libc::fstatat(
-                dir.as_raw_fd(),
-                entry.as_ptr(),
-                &mut stat,
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if rc == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFREG {
+        if let Ok(stat) = rustix::fs::statat(&dir, &*entry, AtFlags::SYMLINK_NOFOLLOW)
+            && FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+        {
             files.push(((stat.st_mtime, stat.st_mtime_nsec), entry));
         }
     }
-    // SAFETY: closes the stream opened above, and its duplicate descriptor.
-    unsafe { libc::closedir(stream) };
     files.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
     for (_, entry) in files.into_iter().skip(keep) {
-        // SAFETY: removes one non-directory name inside the open `dir`.
-        unsafe { libc::unlinkat(dir.as_raw_fd(), entry.as_ptr(), 0) };
+        let _ = rustix::fs::unlinkat(&dir, &*entry, AtFlags::empty());
     }
     Ok(())
+}
+
+fn open_dir(
+    at: impl std::os::fd::AsFd,
+    path: impl rustix::path::Arg,
+) -> std::io::Result<std::os::fd::OwnedFd> {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    Ok(rustix::fs::openat(at, path, flags, Mode::empty())?)
 }
 
 /// Write `data` as `folder/name` in a bot's project, creating `folder`,
@@ -452,72 +419,28 @@ pub fn write_in_project(
     name: &str,
     data: &[u8],
 ) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::fs::File;
     use std::io::Write as _;
-    use std::os::fd::{AsRawFd as _, FromRawFd as _};
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let cstr = |s: &str| CString::new(s).map_err(std::io::Error::other);
-    let check = |rc: libc::c_int| {
-        if rc < 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(rc)
-        }
-    };
-    let root = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(project)?;
-    let screens = cstr(folder)?;
-    // SAFETY: `root` is an open directory and `screens` a valid C string.
-    if unsafe { libc::mkdirat(root.as_raw_fd(), screens.as_ptr(), 0o755) } < 0 {
-        let err = std::io::Error::last_os_error();
-        if err.kind() != std::io::ErrorKind::AlreadyExists {
-            return Err(err);
-        }
+
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    let root = open_dir(rustix::fs::CWD, project)?;
+    match rustix::fs::mkdirat(&root, folder, Mode::from_raw_mode(0o755)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(err) => return Err(err.into()),
     }
-    // SAFETY: as above; the flags refuse a link or a non-directory.
-    let dir = check(unsafe {
-        libc::openat(
-            root.as_raw_fd(),
-            screens.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    })?;
-    // SAFETY: `dir` is a descriptor this function just opened and owns.
-    let dir = unsafe { File::from_raw_fd(dir) };
-    let temp = cstr(&format!(".{}.partial", Uuid::new_v4()))?;
-    let target = cstr(name)?;
-    // SAFETY: `dir` is open; O_EXCL with O_NOFOLLOW creates a new file only.
-    let fd = check(unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            temp.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o644 as libc::c_uint,
-        )
-    })?;
-    // SAFETY: `fd` was just created by this function and is owned here.
-    let mut out = unsafe { File::from_raw_fd(fd) };
+    let dir = open_dir(&root, folder)?;
+    let temp = format!(".{}.partial", Uuid::new_v4());
+    let mut out = std::fs::File::from(rustix::fs::openat(
+        &dir,
+        &temp,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o644),
+    )?);
     let written = out
         .write_all(data)
         .and_then(|()| out.sync_all())
-        // SAFETY: both names are valid C strings relative to the open `dir`.
-        .and_then(|()| {
-            check(unsafe {
-                libc::renameat(
-                    dir.as_raw_fd(),
-                    temp.as_ptr(),
-                    dir.as_raw_fd(),
-                    target.as_ptr(),
-                )
-            })
-            .map(drop)
-        });
+        .and_then(|()| Ok(rustix::fs::renameat(&dir, &temp, &dir, name)?));
     if written.is_err() {
-        // SAFETY: removes only the temporary name inside the open `dir`.
-        unsafe { libc::unlinkat(dir.as_raw_fd(), temp.as_ptr(), 0) };
+        let _ = rustix::fs::unlinkat(&dir, &temp, AtFlags::empty());
     }
     written
 }

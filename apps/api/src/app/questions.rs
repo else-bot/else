@@ -114,9 +114,12 @@ impl GrantReach {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "lowercase")]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum Kind {
     Choice,
     Destructive,
@@ -125,11 +128,7 @@ pub enum Kind {
 
 impl Kind {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Choice => "choice",
-            Self::Destructive => "destructive",
-            Self::External => "external",
-        }
+        self.into()
     }
 
     /// The effect a bot may declare for an approval: never `choice`.
@@ -142,9 +141,12 @@ impl Kind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "lowercase")]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum Status {
     Pending,
     Answered,
@@ -154,12 +156,7 @@ pub enum Status {
 
 impl Status {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Answered => "answered",
-            Self::Skipped => "skipped",
-            Self::Cancelled => "cancelled",
-        }
+        self.into()
     }
 }
 
@@ -291,8 +288,9 @@ impl TaskScope {
 
 /// Which gated calls a task grant covers. MCP tools/call is never one of
 /// them: a grant for MCP work is an `mcp_tool` grant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum Covers {
     /// Host actions approved through `ask_permission`.
     Host,
@@ -305,11 +303,7 @@ pub enum Covers {
 
 impl Covers {
     fn as_str(self) -> &'static str {
-        match self {
-            Self::Host => "host",
-            Self::Computer => "computer",
-            Self::Both => "both",
-        }
+        self.into()
     }
 }
 

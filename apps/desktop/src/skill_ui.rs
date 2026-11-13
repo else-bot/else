@@ -214,7 +214,7 @@ impl SkillFiles {
                             .flex_none()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(size(file.size)),
+                            .child(crate::attachments::byte_size(file.size)),
                     )
                     .on_click(move |_, window, cx| pick(path.clone(), window, cx)),
             );
@@ -276,15 +276,6 @@ impl SkillFiles {
                     ),
             )
             .into_any_element()
-    }
-}
-
-/// A byte count as people read it: 840 B, 6.2 KB.
-pub(crate) fn size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
     }
 }
 

@@ -269,13 +269,13 @@ fn decode(output: &[u8]) -> Result<Rendered, Error> {
 /// and exit. The host binary calls this when started with [`WORKER_ARG`].
 pub fn run_worker() -> ! {
     #[cfg(target_os = "linux")]
-    unsafe {
-        let limit = libc::rlimit {
-            rlim_cur: ADDRESS_LIMIT,
-            rlim_max: ADDRESS_LIMIT,
-        };
-        libc::setrlimit(libc::RLIMIT_AS, &limit);
-    }
+    let _ = rustix::process::setrlimit(
+        rustix::process::Resource::As,
+        rustix::process::Rlimit {
+            current: Some(ADDRESS_LIMIT),
+            maximum: Some(ADDRESS_LIMIT),
+        },
+    );
     let mut input = Vec::new();
     if std::io::stdin().read_to_end(&mut input).is_err() {
         std::process::exit(1);
@@ -339,8 +339,7 @@ fn resident_bytes(pid: u32) -> Option<u64> {
 fn resident_bytes(pid: u32) -> Option<u64> {
     let statm = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
     let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
-    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    Some(pages * u64::try_from(page).ok()?)
+    Some(pages * u64::try_from(rustix::param::page_size()).ok()?)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]

@@ -243,7 +243,9 @@ async fn ls_remote(
         .process_group(0)
         .spawn()
         .map_err(|err| format!("Cannot run git to check for updates: {err}."))?;
-    let group = child.id().map(|pid| pid as libc::pid_t);
+    let group = child
+        .id()
+        .and_then(|pid| rustix::process::Pid::from_raw(pid as i32));
     let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
     let run = async {
         let (out, err, status) = tokio::join!(
@@ -255,9 +257,7 @@ async fn ls_remote(
     };
     let Ok((out, err, status)) = tokio::time::timeout(limit, run).await else {
         if let Some(group) = group {
-            // SAFETY: git was spawned as the leader of this process group;
-            // its transport helpers are in it too.
-            unsafe { libc::kill(-group, libc::SIGKILL) };
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         }
         return Err(format!(
             "The release list at {repo} did not answer within {} s.",

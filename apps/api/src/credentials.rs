@@ -187,8 +187,7 @@ fn check_dir(path: &Path, what: &'static str) -> Result<(), CredentialError> {
 }
 
 pub fn current_uid() -> u32 {
-    // SAFETY: getuid has no preconditions and cannot fail.
-    unsafe { libc::getuid() }
+    rustix::process::getuid().as_raw()
 }
 
 /// Provision the owner token file once. An existing file is validated and

@@ -1,40 +1,81 @@
+/// Characters a terminal escape may run before the log gives up on it and
+/// shows what follows, so a broken sequence never hides the rest.
 const MAX_ESCAPE: usize = 256;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Escape {
-    None,
-    Start,
-    Csi,
-    Osc,
-    OscEnd,
+pub struct Log {
+    parser: vte::Parser,
+    screen: Screen,
+    partial: Vec<u8>,
+    cap: usize,
 }
 
-#[derive(Debug)]
-pub struct Log {
+#[derive(Default)]
+struct Screen {
     text: String,
     line_start: usize,
-    partial: Vec<u8>,
-    escape: Escape,
-    escape_len: usize,
     carriage_return: bool,
-    cap: usize,
+    pending: usize,
+}
+
+impl vte::Perform for Screen {
+    fn print(&mut self, c: char) {
+        self.pending = 0;
+        if !c.is_control() {
+            self.put(c);
+        }
+    }
+
+    fn execute(&mut self, byte: u8) {
+        match byte {
+            b'\r' => self.carriage_return = true,
+            b'\n' => {
+                self.carriage_return = false;
+                self.text.push('\n');
+                self.line_start = self.text.len();
+            }
+            b'\t' => self.put('\t'),
+            _ => {}
+        }
+    }
+
+    fn csi_dispatch(&mut self, _: &vte::Params, _: &[u8], _: bool, _: char) {
+        self.pending = 0;
+    }
+
+    fn esc_dispatch(&mut self, _: &[u8], _: bool, _: u8) {
+        self.pending = 0;
+    }
+
+    fn osc_dispatch(&mut self, _: &[&[u8]], _: bool) {
+        self.pending = 0;
+    }
+
+    fn unhook(&mut self) {
+        self.pending = 0;
+    }
+}
+
+impl Screen {
+    fn put(&mut self, c: char) {
+        if std::mem::take(&mut self.carriage_return) {
+            self.text.truncate(self.line_start);
+        }
+        self.text.push(c);
+    }
 }
 
 impl Log {
     pub fn new(cap: usize) -> Self {
         Self {
-            text: String::new(),
-            line_start: 0,
+            parser: vte::Parser::new(),
+            screen: Screen::default(),
             partial: Vec::new(),
-            escape: Escape::None,
-            escape_len: 0,
-            carriage_return: false,
             cap,
         }
     }
 
     pub fn text(&self) -> &str {
-        &self.text
+        &self.screen.text
     }
 
     pub fn push(&mut self, bytes: &[u8]) {
@@ -77,64 +118,33 @@ impl Log {
 
     fn chars(&mut self, text: &str) {
         for c in text.chars() {
-            self.char(c);
-        }
-    }
-
-    fn char(&mut self, c: char) {
-        if self.escape != Escape::None {
-            self.escape_len += 1;
-            self.escape = match (self.escape, c) {
-                _ if self.escape_len > MAX_ESCAPE => Escape::None,
-                (Escape::Start, '[') => Escape::Csi,
-                (Escape::Start, ']') => Escape::Osc,
-                (Escape::Csi, '@'..='~') => Escape::None,
-                (Escape::Osc, '\u{7}') => Escape::None,
-                (Escape::Osc | Escape::OscEnd, '\u{1b}') => Escape::OscEnd,
-                (Escape::OscEnd, '\\') => Escape::None,
-                (Escape::Csi, _) => Escape::Csi,
-                (Escape::Osc | Escape::OscEnd, _) => Escape::Osc,
-                (Escape::Start | Escape::None, _) => Escape::None,
-            };
-            return;
-        }
-        match c {
-            '\u{1b}' => {
-                self.escape = Escape::Start;
-                self.escape_len = 0;
-            }
-            '\r' => self.carriage_return = true,
-            '\n' => {
-                self.carriage_return = false;
-                self.text.push('\n');
-                self.line_start = self.text.len();
-            }
-            c if c.is_control() && c != '\t' => {}
-            c => {
-                if std::mem::take(&mut self.carriage_return) {
-                    self.text.truncate(self.line_start);
-                }
-                self.text.push(c);
+            self.screen.pending += 1;
+            self.parser
+                .advance(&mut self.screen, c.encode_utf8(&mut [0; 4]).as_bytes());
+            if self.screen.pending > MAX_ESCAPE {
+                self.parser = vte::Parser::new();
+                self.screen.pending = 0;
             }
         }
     }
 
     fn trim(&mut self) {
-        if self.text.len() <= self.cap {
+        let screen = &mut self.screen;
+        if screen.text.len() <= self.cap {
             return;
         }
-        let mut cut = self.text.len() - self.cap;
-        while !self.text.is_char_boundary(cut) {
+        let mut cut = screen.text.len() - self.cap;
+        while !screen.text.is_char_boundary(cut) {
             cut += 1;
         }
-        if self.text.as_bytes()[cut - 1] != b'\n'
-            && let Some(newline) = self.text[cut..].find('\n')
-            && cut + newline + 1 < self.text.len()
+        if screen.text.as_bytes()[cut - 1] != b'\n'
+            && let Some(newline) = screen.text[cut..].find('\n')
+            && cut + newline + 1 < screen.text.len()
         {
             cut += newline + 1;
         }
-        self.text.drain(..cut);
-        self.line_start = self.line_start.saturating_sub(cut);
+        screen.text.drain(..cut);
+        screen.line_start = screen.line_start.saturating_sub(cut);
     }
 }
 
@@ -168,6 +178,32 @@ mod tests {
             b"    \x1b[32m\xe2\x9c\x93\x1b[0m done\n\x1b]0;title\x07next\x1b]8;;u\x1b\\link\n";
         assert_eq!(render(&[colored], 1024), "    ✓ done\nnextlink\n");
         assert_eq!(render(&[b"a\x1b", b"[1", b"mb\n"], 1024), "ab\n");
+        assert_eq!(
+            render(&[b"\x1b[1mbold\x1b(B\x1b[m plain\n"], 1024),
+            "bold plain\n"
+        );
+        assert_eq!(render(&[b"a\x1bP1$r\x1b\\b\n"], 1024), "ab\n");
+    }
+
+    #[test]
+    fn an_unterminated_escape_stops_hiding_text_after_its_limit() {
+        let mut stream = b"start\n\x1b]0;".to_vec();
+        stream.extend(std::iter::repeat_n(b'x', MAX_ESCAPE));
+        stream.extend(b"\nvisible\n");
+        let shown = render(&[&stream], 4096);
+        assert!(shown.starts_with("start\n"), "{shown:?}");
+        assert!(shown.ends_with("visible\n"), "{shown:?}");
+    }
+
+    #[test]
+    fn line_breaks_inside_an_unfinished_escape_count_toward_its_limit() {
+        let mut stream = b"\x1b[".to_vec();
+        for _ in 0..100 {
+            stream.extend(b"1234\n");
+        }
+        stream.extend(b"VISIBLE\n");
+        let shown = render(&[&stream], 4096);
+        assert!(shown.ends_with("VISIBLE\n"), "{shown:?}");
     }
 
     #[test]

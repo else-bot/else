@@ -20,6 +20,7 @@ pub mod http;
 pub mod maintenance;
 pub mod mcp;
 pub mod memory_worker;
+mod private_file;
 pub mod providers;
 pub mod runtime_lock;
 pub mod scheduler;

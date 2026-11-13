@@ -10,6 +10,9 @@ use std::time::Duration;
 
 use base64::Engine;
 use hmac::{Hmac, Mac};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+use serde::Deserialize;
+use serde::de::{DeserializeOwned, IgnoredAny};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -76,17 +79,19 @@ pub struct S3 {
     authority: String,
 }
 
+/// SigV4 `UriEncode`: every byte but the unreserved ones.
+const UNRESERVED: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+/// [`UNRESERVED`] that also keeps the slashes of an object key.
+const KEY_PATH: &AsciiSet = &UNRESERVED.remove(b'/');
+
 fn uri_encode(text: &str, keep_slash: bool) -> String {
-    let mut out = String::with_capacity(text.len());
-    for b in text.bytes() {
-        let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
-        if unreserved || (keep_slash && b == b'/') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
+    let set = if keep_slash { KEY_PATH } else { UNRESERVED };
+    utf8_percent_encode(text, set).to_string()
 }
 
 fn hmac(key: &[u8], data: &str) -> Vec<u8> {
@@ -95,29 +100,95 @@ fn hmac(key: &[u8], data: &str) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
-fn xml_unescape(text: &str) -> String {
-    text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
+fn parse<T: DeserializeOwned>(xml: &str) -> Result<T, S3Error> {
+    quick_xml::de::from_str(xml)
+        .map_err(|err| S3Error::Protocol(format!("unreadable S3 response: {err}")))
 }
 
-fn tags(xml: &str, name: &str) -> Vec<String> {
-    let (open, close) = (format!("<{name}>"), format!("</{name}>"));
-    let mut out = Vec::new();
-    let mut rest = xml;
-    while let Some(start) = rest.find(&open) {
-        let after = &rest[start + open.len()..];
-        let Some(end) = after.find(&close) else { break };
-        out.push(after[..end].to_owned());
-        rest = &after[end + close.len()..];
-    }
-    out
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ErrorResponse {
+    code: Option<String>,
 }
 
-fn tag(xml: &str, name: &str) -> Option<String> {
-    tags(xml, name).into_iter().next().map(|t| xml_unescape(&t))
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct InitiateMultipartUploadResult {
+    upload_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ListMultipartUploadsResult {
+    #[serde(default)]
+    upload: Vec<Upload>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Upload {
+    key: Option<String>,
+    upload_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ListBucketResult {
+    #[serde(default)]
+    contents: Vec<Contents>,
+    #[serde(default)]
+    is_truncated: bool,
+    next_continuation_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Contents {
+    key: Option<String>,
+    size: Option<String>,
+    last_modified: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct LifecycleConfiguration {
+    #[serde(default)]
+    rule: Vec<Rule>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Rule {
+    #[serde(rename = "ID")]
+    id: Option<String>,
+    status: Option<String>,
+    expiration: Option<Expiration>,
+    filter: Option<Filter>,
+    /// The filter prefix of the original, pre-`Filter` rule format.
+    prefix: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Expiration {
+    days: Option<String>,
+    date: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Filter {
+    prefix: Option<String>,
+    tag: Option<IgnoredAny>,
+    and: Option<FilterAnd>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct FilterAnd {
+    prefix: Option<String>,
+    #[serde(default)]
+    tag: Vec<IgnoredAny>,
 }
 
 impl S3 {
@@ -281,7 +352,11 @@ impl S3 {
         let body = response.text().await.unwrap_or_default();
         Err(S3Error::Status {
             status,
-            code: match tag(&body, "Code").as_deref() {
+            code: match parse::<ErrorResponse>(&body)
+                .ok()
+                .and_then(|e| e.code)
+                .as_deref()
+            {
                 Some("BucketAlreadyOwnedByYou") => "BucketAlreadyOwnedByYou",
                 Some("BucketAlreadyExists") => "BucketAlreadyExists",
                 _ => "RemoteError",
@@ -399,7 +474,9 @@ impl S3 {
             .text()
             .await
             .map_err(|e| S3Error::Transport(e.to_string()))?;
-        tag(&body, "UploadId").ok_or_else(|| S3Error::Protocol("no UploadId".into()))
+        parse::<InitiateMultipartUploadResult>(&body)?
+            .upload_id
+            .ok_or_else(|| S3Error::Protocol("no UploadId".into()))
     }
 
     pub async fn upload_part(
@@ -497,10 +574,7 @@ impl S3 {
             .text()
             .await
             .map_err(|e| S3Error::Transport(e.to_string()))?;
-        Ok(tags(&body, "Upload")
-            .iter()
-            .filter_map(|upload| Some((tag(upload, "Key")?, tag(upload, "UploadId")?)))
-            .collect())
+        uploads(&body)
     }
 
     /// Every object under `prefix`, following pagination.
@@ -519,24 +593,22 @@ impl S3 {
                 .text()
                 .await
                 .map_err(|e| S3Error::Transport(e.to_string()))?;
-            for contents in tags(&body, "Contents") {
-                if let Some(key) = tag(&contents, "Key") {
-                    out.push(Object {
-                        key,
-                        size: tag(&contents, "Size")
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(0),
-                        modified: tag(&contents, "LastModified")
-                            .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
-                            .map(|t| t.with_timezone(&chrono::Utc)),
-                    });
-                }
-            }
-            if tag(&body, "IsTruncated").as_deref() != Some("true") {
+            let page = parse::<ListBucketResult>(&body)?;
+            out.extend(page.contents.into_iter().filter_map(|contents| {
+                Some(Object {
+                    key: contents.key?,
+                    size: contents.size.and_then(|s| s.parse().ok()).unwrap_or(0),
+                    modified: contents
+                        .last_modified
+                        .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
+                        .map(|t| t.with_timezone(&chrono::Utc)),
+                })
+            }));
+            if !page.is_truncated {
                 return Ok(out);
             }
             token =
-                Some(tag(&body, "NextContinuationToken").ok_or_else(|| {
+                Some(page.next_continuation_token.ok_or_else(|| {
                     S3Error::Protocol("truncated listing without a token".into())
                 })?);
         }
@@ -581,7 +653,7 @@ impl S3 {
             Err(S3Error::Status { status: 404, .. }) => return Ok(None),
             Err(err) => return Err(err),
         };
-        Ok(expiring_rule(&body, prefix))
+        expiring_rule(&body, prefix)
     }
 
     pub async fn delete(&self, key: &str) -> Result<(), S3Error> {
@@ -593,19 +665,33 @@ impl S3 {
     }
 }
 
-fn expiring_rule(xml: &str, prefix: &str) -> Option<String> {
-    tags(xml, "Rule").into_iter().find_map(|rule| {
-        let enabled = tag(&rule, "Status").as_deref() == Some("Enabled");
-        let expires =
-            tag(&rule, "Expiration").is_some_and(|e| e.contains("<Days>") || e.contains("<Date>"));
-        let filter = tag(&rule, "Filter").unwrap_or_default();
-        let rule_prefix = tag(&filter, "Prefix")
-            .or_else(|| tag(&rule, "Prefix"))
+fn uploads(xml: &str) -> Result<Vec<(String, String)>, S3Error> {
+    Ok(parse::<ListMultipartUploadsResult>(xml)?
+        .upload
+        .into_iter()
+        .filter_map(|upload| Some((upload.key?, upload.upload_id?)))
+        .collect())
+}
+
+fn expiring_rule(xml: &str, prefix: &str) -> Result<Option<String>, S3Error> {
+    let rules = parse::<LifecycleConfiguration>(xml)?.rule;
+    Ok(rules.into_iter().find_map(|rule| {
+        let enabled = rule.status.as_deref() == Some("Enabled");
+        let expires = rule
+            .expiration
+            .is_some_and(|e| e.days.is_some() || e.date.is_some());
+        let filter = rule.filter.unwrap_or_default();
+        let tagged =
+            filter.tag.is_some() || filter.and.as_ref().is_some_and(|and| !and.tag.is_empty());
+        let rule_prefix = filter
+            .prefix
+            .or_else(|| filter.and.and_then(|and| and.prefix))
+            .or(rule.prefix)
             .unwrap_or_default();
         let overlaps = prefix.starts_with(&rule_prefix) || rule_prefix.starts_with(prefix);
-        (enabled && expires && overlaps && !filter.contains("<Tag>"))
-            .then(|| tag(&rule, "ID").unwrap_or_else(|| "unnamed".into()))
-    })
+        (enabled && expires && overlaps && !tagged)
+            .then(|| rule.id.unwrap_or_else(|| "unnamed".into()))
+    }))
 }
 
 #[cfg(test)]
@@ -632,14 +718,48 @@ mod tests {
         assert_eq!(uri_encode("sets/a b+c.age", true), "sets/a%20b%2Bc.age");
         assert_eq!(uri_encode("a/b", false), "a%2Fb");
         let xml = "<R><Upload><Key>p/x&amp;y</Key><UploadId>u1</UploadId></Upload><Upload><Key>q</Key><UploadId>u2</UploadId></Upload></R>";
-        let uploads: Vec<_> = tags(xml, "Upload")
-            .iter()
-            .map(|u| (tag(u, "Key").unwrap(), tag(u, "UploadId").unwrap()))
-            .collect();
         assert_eq!(
-            uploads,
+            uploads(xml).unwrap(),
             [("p/x&y".into(), "u1".into()), ("q".into(), "u2".into())]
         );
+    }
+
+    #[test]
+    fn listings_read_escapes_cdata_and_a_namespaced_root() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <IsTruncated>true</IsTruncated>
+  <NextContinuationToken>t&#x31;</NextContinuationToken>
+  <Contents><Key>a&#38;b</Key><Size>12</Size><LastModified>2026-01-02T03:04:05.000Z</LastModified></Contents>
+  <Contents><Key><![CDATA[c<d]]></Key><Size>x</Size></Contents>
+  <Contents><Size>1</Size></Contents>
+</ListBucketResult>"#;
+        let page = parse::<ListBucketResult>(xml).unwrap();
+        assert!(page.is_truncated);
+        assert_eq!(page.next_continuation_token.as_deref(), Some("t1"));
+        let keys: Vec<_> = page.contents.iter().map(|c| c.key.as_deref()).collect();
+        assert_eq!(keys, [Some("a&b"), Some("c<d"), None]);
+        assert!(parse::<ListBucketResult>("<ListBucketResult/>").is_ok_and(|p| !p.is_truncated));
+        assert!(parse::<ListBucketResult>("not xml <").is_err());
+    }
+
+    #[test]
+    fn an_error_body_yields_its_code_and_an_empty_body_none() {
+        let xml = "<Error><Code>BucketAlreadyOwnedByYou</Code><Message>m</Message></Error>";
+        assert_eq!(
+            parse::<ErrorResponse>(xml).unwrap().code.as_deref(),
+            Some("BucketAlreadyOwnedByYou")
+        );
+        assert!(
+            parse::<ErrorResponse>("")
+                .ok()
+                .and_then(|e| e.code)
+                .is_none()
+        );
+    }
+
+    fn expiring_rule_of(xml: &str, prefix: &str) -> Option<String> {
+        expiring_rule(xml, prefix).unwrap()
     }
 
     #[test]
@@ -656,27 +776,37 @@ mod tests {
             )
         };
         let whole = config(&[rule("all", "<Filter></Filter>")]);
-        assert_eq!(expiring_rule(&whole, "else/chunks/"), Some("all".into()));
+        assert_eq!(expiring_rule_of(&whole, "else/chunks/"), Some("all".into()));
         let other = config(&[rule("logs", "<Filter><Prefix>logs/</Prefix></Filter>")]);
-        assert_eq!(expiring_rule(&other, "else/chunks/"), None);
+        assert_eq!(expiring_rule_of(&other, "else/chunks/"), None);
         let ours = config(&[rule("x", "<Filter><Prefix>else/ch</Prefix></Filter>")]);
-        assert_eq!(expiring_rule(&ours, "else/chunks/"), Some("x".into()));
+        assert_eq!(expiring_rule_of(&ours, "else/chunks/"), Some("x".into()));
         let inside = config(&[rule(
             "y",
             "<Filter><Prefix>else/chunks/ab</Prefix></Filter>",
         )]);
-        assert_eq!(expiring_rule(&inside, "else/chunks/"), Some("y".into()));
+        assert_eq!(expiring_rule_of(&inside, "else/chunks/"), Some("y".into()));
         let legacy = config(&[rule("z", "<Prefix></Prefix>")]);
-        assert_eq!(expiring_rule(&legacy, "else/chunks/"), Some("z".into()));
+        assert_eq!(expiring_rule_of(&legacy, "else/chunks/"), Some("z".into()));
         let tagged = config(&[rule(
             "t",
             "<Filter><And><Prefix>else/</Prefix><Tag><Key>k</Key><Value>v</Value></Tag></And></Filter>",
         )]);
-        assert_eq!(expiring_rule(&tagged, "else/chunks/"), None);
+        assert_eq!(expiring_rule_of(&tagged, "else/chunks/"), None);
         let disabled = whole.replace("Enabled", "Disabled");
-        assert_eq!(expiring_rule(&disabled, "else/chunks/"), None);
+        assert_eq!(expiring_rule_of(&disabled, "else/chunks/"), None);
         let abort = "<LifecycleConfiguration><Rule><ID>a</ID><Status>Enabled</Status><Filter></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>";
-        assert_eq!(expiring_rule(abort, "else/chunks/"), None);
+        assert_eq!(expiring_rule_of(abort, "else/chunks/"), None);
+        let tagged_alone = config(&[rule(
+            "u",
+            "<Filter><Tag><Key>k</Key><Value>v</Value></Tag></Filter>",
+        )]);
+        assert_eq!(expiring_rule_of(&tagged_alone, "else/chunks/"), None);
+        let and_prefix = config(&[rule(
+            "v",
+            "<Filter><And><Prefix>logs/</Prefix><ObjectSizeGreaterThan>1</ObjectSizeGreaterThan></And></Filter>",
+        )]);
+        assert_eq!(expiring_rule_of(&and_prefix, "else/chunks/"), None);
     }
 
     #[test]

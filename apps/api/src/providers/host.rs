@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use rustix::process::{Pid, Signal};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -358,7 +359,10 @@ fn passed_env() -> impl Iterator<Item = (OsString, OsString)> {
 #[cfg(target_os = "linux")]
 mod procs {
     use std::fs;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::fd::OwnedFd;
+
+    use rustix::event::{PollFd, PollFlags, Timespec};
+    use rustix::process::{Pid, PidfdFlags, Signal};
     use std::os::unix::fs::MetadataExt;
     use std::time::Duration;
 
@@ -371,8 +375,7 @@ mod procs {
 
     /// Scan `/proc`.
     pub fn marked(wanted: &str) -> Vec<i32> {
-        // SAFETY: getuid has no preconditions.
-        let uid = unsafe { libc::getuid() };
+        let uid = rustix::process::getuid().as_raw();
         let Ok(entries) = fs::read_dir("/proc") else {
             return Vec::new();
         };
@@ -393,39 +396,23 @@ mod procs {
     /// Pin `pid`, then confirm (through the pinned process) that it carries
     /// the marker.
     pub fn pin(pid: i32, wanted: &str) -> Option<Pinned> {
-        // SAFETY: pidfd_open takes a pid and flags and returns a new fd or -1.
-        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-        if fd < 0 {
-            return None;
-        }
-        // SAFETY: a non-negative return is a fresh descriptor we now own.
-        let pinned = Pinned(unsafe { OwnedFd::from_raw_fd(fd as i32) });
+        let pinned =
+            Pinned(rustix::process::pidfd_open(Pid::from_raw(pid)?, PidfdFlags::empty()).ok()?);
         environ_has(pid, wanted).then_some(pinned)
     }
 
     impl Pinned {
         pub fn kill(&self) -> bool {
-            // SAFETY: signals exactly the process the pidfd refers to.
-            unsafe {
-                libc::syscall(
-                    libc::SYS_pidfd_send_signal,
-                    self.0.as_raw_fd(),
-                    libc::SIGKILL,
-                    std::ptr::null::<libc::siginfo_t>(),
-                    0,
-                ) == 0
-            }
+            rustix::process::pidfd_send_signal(&self.0, Signal::KILL).is_ok()
         }
 
         /// A pidfd becomes readable when its process exits.
         pub fn wait(&self, timeout: Duration) -> bool {
-            let mut poll = libc::pollfd {
-                fd: self.0.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
+            let Ok(timeout) = Timespec::try_from(timeout) else {
+                return false;
             };
-            // SAFETY: one valid pollfd for the duration of the call.
-            unsafe { libc::poll(&mut poll, 1, timeout.as_millis() as i32) > 0 }
+            let mut fds = [PollFd::new(&self.0, PollFlags::IN)];
+            rustix::event::poll(&mut fds, Some(&timeout)).is_ok_and(|ready| ready > 0)
         }
     }
 }
@@ -515,8 +502,7 @@ mod procs {
     }
 
     pub fn marked(wanted: &str) -> Vec<i32> {
-        // SAFETY: getuid has no preconditions.
-        let uid = unsafe { libc::getuid() };
+        let uid = rustix::process::getuid().as_raw();
         // SAFETY: a count query with a null buffer.
         let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
         if count <= 0 {
@@ -556,8 +542,10 @@ mod procs {
         }
 
         pub fn kill(&self) -> bool {
-            // SAFETY: signals `pid`, checked to still be the pinned process.
-            self.alive() && unsafe { libc::kill(self.pid, libc::SIGKILL) } == 0
+            self.alive()
+                && rustix::process::Pid::from_raw(self.pid).is_some_and(|pid| {
+                    rustix::process::kill_process(pid, rustix::process::Signal::KILL).is_ok()
+                })
         }
 
         pub fn wait(&self, timeout: Duration) -> bool {
@@ -622,25 +610,24 @@ impl Supervised {
     /// Signal the process group, only while its leader is unreaped: until
     /// then the group ID cannot belong to anything else. After the leader is
     /// reaped this does nothing; survivors are reached by their marker.
-    pub fn signal(&self, signal: i32) {
-        if self.pgid > 0 && self.child.id().is_some() {
-            // SAFETY: signalling our own child's process group.
-            unsafe {
-                libc::kill(-self.pgid, signal);
-            }
+    pub fn signal(&self, signal: Signal) {
+        if let Some(pgid) = Pid::from_raw(self.pgid)
+            && self.child.id().is_some()
+        {
+            let _ = rustix::process::kill_process_group(pgid, signal);
         }
     }
 
     /// SIGKILL the process group and reap its leader.
     pub async fn kill(&mut self) {
-        self.signal(libc::SIGKILL);
+        self.signal(Signal::KILL);
         let _ = self.child.wait().await;
     }
 
     /// SIGTERM the process group, then SIGKILL after `grace`, and wait for
     /// the process to exit.
     pub async fn terminate(&mut self, grace: Duration) {
-        self.signal(libc::SIGTERM);
+        self.signal(Signal::TERM);
         if tokio::time::timeout(grace, self.child.wait())
             .await
             .is_err()
@@ -652,6 +639,6 @@ impl Supervised {
 
 impl Drop for Supervised {
     fn drop(&mut self) {
-        self.signal(libc::SIGKILL);
+        self.signal(Signal::KILL);
     }
 }

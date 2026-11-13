@@ -581,30 +581,9 @@ pub fn sync_dir(path: &Path) -> Result<(), BackupError> {
 
 /// Rename without ever replacing an existing destination.
 pub fn rename_noreplace(from: &Path, to: &Path) -> Result<(), BackupError> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).expect("no NUL");
-    let (a, b) = (c(from), c(to));
-    // SAFETY: two valid NUL-terminated paths relative to the cwd.
-    #[cfg(target_os = "linux")]
-    let rc = unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            a.as_ptr(),
-            libc::AT_FDCWD,
-            b.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    // SAFETY: as above; macOS spells the same guarantee RENAME_EXCL.
-    #[cfg(target_os = "macos")]
-    let rc = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_EXCL) };
-    if rc != 0 {
-        return Err(BackupError::io(
-            to.display(),
-            std::io::Error::last_os_error(),
-        ));
-    }
-    Ok(())
+    use rustix::fs::{CWD, RenameFlags};
+    rustix::fs::renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE)
+        .map_err(|err| BackupError::io(to.display(), err.into()))
 }
 
 /// Set IDs are UTC timestamps with a random suffix; anything else under the
@@ -757,7 +736,6 @@ impl Drop for DirLock {
 }
 
 pub fn try_lock(dir: &Path) -> Result<Option<DirLock>, BackupError> {
-    use std::os::fd::AsRawFd;
     ensure_private_dir(dir)?;
     let path = dir.join(".lock");
     let file = OpenOptions::new()
@@ -769,17 +747,11 @@ pub fn try_lock(dir: &Path) -> Result<Option<DirLock>, BackupError> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(&path)
         .map_err(|e| BackupError::io(path.display(), e))?;
-    // SAFETY: a valid descriptor owned by `file`.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        return if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            Ok(None)
-        } else {
-            Err(BackupError::io(path.display(), err))
-        };
+    match file.try_lock() {
+        Ok(()) => Ok(Some(DirLock(file))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(err)) => Err(BackupError::io(path.display(), err)),
     }
-    Ok(Some(DirLock(file)))
 }
 
 pub fn staging_path(dir: &Path, set_id: &str) -> PathBuf {
@@ -818,6 +790,20 @@ impl DatabaseParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rename_never_replaces_an_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+        fs::write(&from, "new").unwrap();
+        fs::write(&to, "old").unwrap();
+        assert!(rename_noreplace(&from, &to).is_err());
+        assert_eq!(fs::read_to_string(&to).unwrap(), "old");
+        fs::remove_file(&to).unwrap();
+        rename_noreplace(&from, &to).unwrap();
+        assert_eq!(fs::read_to_string(&to).unwrap(), "new");
+        assert!(!from.exists());
+    }
 
     #[test]
     fn directory_lock_release_does_not_wait_for_duplicated_descriptors() {

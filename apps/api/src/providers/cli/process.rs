@@ -62,7 +62,7 @@ impl Scope {
 
     /// Ask the process group to stop (SIGINT), as a terminal would.
     pub fn interrupt(&self) {
-        self.process.signal(libc::SIGINT);
+        self.process.signal(rustix::process::Signal::INT);
     }
 
     /// Stop the process tree and verify that nothing under the marker
@@ -94,7 +94,7 @@ impl Drop for Scope {
         if self.finished {
             return;
         }
-        self.process.signal(libc::SIGKILL);
+        self.process.signal(rustix::process::Signal::KILL);
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let host = self.host.clone();
             let marker = self.marker;

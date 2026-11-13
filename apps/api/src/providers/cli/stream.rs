@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::process::{ChildStdin, ChildStdout};
 
 use super::attempt::{self, Channel, Ended, Protocol};
@@ -29,7 +29,7 @@ pub enum Interrupt {
 pub struct StreamAttempt {
     scope: Scope,
     stdin: Option<ChildStdin>,
-    events: JsonLines<BufReader<ChildStdout>>,
+    events: JsonLines<ChildStdout>,
     stderr: Stderr,
     interrupt: Interrupt,
     label: &'static str,
@@ -62,7 +62,7 @@ impl StreamAttempt {
         Ok(Self {
             scope,
             stdin,
-            events: JsonLines::new(BufReader::new(stdout), label),
+            events: JsonLines::new(stdout, label),
             stderr: Stderr::collect(stderr, spec),
             interrupt,
             label,

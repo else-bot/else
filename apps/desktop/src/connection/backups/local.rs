@@ -2,7 +2,7 @@ use super::*;
 use crate::api::{LocalBackupSettings, LocalBackupStatus, PauseReason};
 use chrono::{DateTime, FixedOffset, Offset as _, Utc};
 use gpui_kit::component::{Theme, h_flex};
-use view::{bytes, message, metric};
+use view::{message, metric};
 
 fn server_timestamp(value: &str, timezone: &str, offset: i32) -> String {
     match DateTime::parse_from_rfc3339(value) {
@@ -115,7 +115,7 @@ impl Shell {
             .map(|run| {
                 let size = run
                     .bytes
-                    .map(bytes)
+                    .map(byte_size)
                     .unwrap_or_else(|| "Size unknown".into());
                 run.took_secs
                     .map(|seconds| format!("{size} · took {}", duration(seconds)))
@@ -123,8 +123,12 @@ impl Shell {
             })
             .unwrap_or_else(|| "After your first local backup".into());
         let disk = match local.free_bytes {
-            Some(free) => format!("{} on disk · {} free", bytes(local.bytes), bytes(free)),
-            None => format!("{} on disk · free space unknown", bytes(local.bytes)),
+            Some(free) => format!(
+                "{} on disk · {} free",
+                byte_size(local.bytes),
+                byte_size(free)
+            ),
+            None => format!("{} on disk · free space unknown", byte_size(local.bytes)),
         };
         let mut history = v_flex().gap_2().child(
             div()
@@ -164,7 +168,7 @@ impl Shell {
                                 .gap_3()
                                 .items_center()
                                 .child(cell(stamp(&run.started_at)))
-                                .child(cell(run.bytes.map(bytes).unwrap_or_else(|| "—".into())))
+                                .child(cell(run.bytes.map(byte_size).unwrap_or_else(|| "—".into())))
                                 .child(cell(
                                     run.took_secs.map(duration).unwrap_or_else(|| "—".into()),
                                 ))

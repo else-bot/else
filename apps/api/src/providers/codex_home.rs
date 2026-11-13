@@ -82,52 +82,49 @@ pub fn sandbox_mode(host_tools: bool) -> &'static str {
 /// The configuration for one launch. `host_tools` gives a turn Codex's own
 /// shell and file tools on the host; a summary runs without.
 pub fn config_toml(tool_url: Option<&str>, host_tools: bool) -> String {
-    let mut text = format!(
-        "# Written by else.bot before every launch; edits are overwritten.\n\
-         approval_policy = \"never\"\n\
-         sandbox_mode = \"{sandbox}\"\n\
-         web_search = \"disabled\"\n\
-         project_doc_max_bytes = 0\n\
-         check_for_update_on_startup = false\n\
-         model_auto_compact_token_limit = {AUTO_COMPACT_TOKENS}\n\
-         \n\
-         [agents]\n\
-         enabled = false\n\
-         \n\
-         [features]\n\
-         shell_tool = {host_tools}\n",
-        sandbox = sandbox_mode(host_tools),
-    );
-    for feature in DISABLED_FEATURES {
-        text.push_str(&format!("{feature} = false\n"));
-    }
+    let mut features: serde_json::Map<String, Value> = DISABLED_FEATURES
+        .iter()
+        .map(|feature| ((*feature).to_owned(), false.into()))
+        .collect();
+    features.insert("shell_tool".into(), host_tools.into());
     // Codex reaches its shell, file edits, and MCP tools only through its
     // code-mode host; a summary has none of them to call.
-    let code_mode = host_tools || tool_url.is_some();
-    text.push_str(&format!("code_mode_host = {code_mode}\n"));
+    features.insert(
+        "code_mode_host".into(),
+        (host_tools || tool_url.is_some()).into(),
+    );
+    let mut config = json!({
+        "approval_policy": "never",
+        "sandbox_mode": sandbox_mode(host_tools),
+        "web_search": "disabled",
+        "project_doc_max_bytes": 0,
+        "check_for_update_on_startup": false,
+        "model_auto_compact_token_limit": AUTO_COMPACT_TOKENS,
+        "agents": { "enabled": false },
+        "features": features,
+        "mcp_servers": {},
+    });
     if !host_tools {
-        text.push_str("\n[tools]\nupdate_plan = { enabled = false }\nexperimental_request_user_input = { enabled = false }\n");
+        config["tools"] = json!({
+            "update_plan": { "enabled": false },
+            "experimental_request_user_input": { "enabled": false },
+        });
     }
-    text.push_str("\n[mcp_servers]\n");
     if let Some(url) = tool_url {
-        let tools: Vec<String> = crate::app::tools::TOOL_NAMES
-            .iter()
-            .map(|t| format!("\"{t}\""))
-            .collect();
-        text.push_str(&format!(
-            "\n[mcp_servers.{name}]\n\
-             url = \"{url}\"\n\
-             bearer_token_env_var = \"{GRANT_ENV}\"\n\
-             enabled_tools = [{tools}]\n\
-             required = true\n\
-             default_tools_approval_mode = \"approve\"\n\
-             startup_timeout_sec = 15\n\
-             tool_timeout_sec = 360\n",
-            name = crate::app::tools::SERVER_NAME,
-            tools = tools.join(", "),
-        ));
+        config["mcp_servers"][crate::app::tools::SERVER_NAME] = json!({
+            "url": url,
+            "bearer_token_env_var": GRANT_ENV,
+            "enabled_tools": crate::app::tools::TOOL_NAMES,
+            "required": true,
+            "default_tools_approval_mode": "approve",
+            "startup_timeout_sec": 15,
+            "tool_timeout_sec": 360,
+        });
     }
-    text
+    format!(
+        "# Written by else.bot before every launch; edits are overwritten.\n{}",
+        toml::to_string(&config).expect("the launch configuration is valid TOML")
+    )
 }
 
 /// Where the host's Codex login lives: `$CODEX_HOME/auth.json`, else
@@ -246,85 +243,95 @@ pub fn prepare(
 mod tests {
     use super::*;
 
+    const URL: &str = "http://127.0.0.1:7878/tools/v1/mcp";
+
+    fn config(tool_url: Option<&str>, host_tools: bool) -> Value {
+        let table: toml::Table = toml::from_str(&config_toml(tool_url, host_tools)).unwrap();
+        serde_json::to_value(table).unwrap()
+    }
+
     #[test]
     fn config_disables_native_agents_and_tools() {
-        let text = config_toml(None, false);
-        assert!(text.contains("[agents]\nenabled = false"));
-        for flag in [
-            "multi_agent = false",
-            "multi_agent_v2 = false",
-            "shell_tool = false",
-        ] {
-            assert!(text.contains(flag), "{flag}");
+        let config = config(None, false);
+        assert_eq!(config["agents"], json!({ "enabled": false }));
+        for flag in ["multi_agent", "multi_agent_v2", "shell_tool"] {
+            assert_eq!(config["features"][flag], false, "{flag}");
         }
-        assert!(text.contains("sandbox_mode = \"read-only\""));
-        assert!(text.contains("web_search = \"disabled\""));
+        assert_eq!(config["sandbox_mode"], "read-only");
+        assert_eq!(config["web_search"], "disabled");
     }
 
     #[test]
     fn host_tools_add_the_shell_with_full_access_and_nothing_else() {
-        let text = config_toml(None, true);
-        assert!(text.contains("shell_tool = true"));
-        assert!(text.contains("sandbox_mode = \"danger-full-access\""));
-        assert!(text.contains("approval_policy = \"never\""));
-        for flag in ["multi_agent = false", "multi_agent_v2 = false"] {
-            assert!(text.contains(flag), "{flag}");
+        let config = config(None, true);
+        assert_eq!(config["features"]["shell_tool"], true);
+        assert_eq!(config["sandbox_mode"], "danger-full-access");
+        assert_eq!(config["approval_policy"], "never");
+        for flag in ["multi_agent", "multi_agent_v2"] {
+            assert_eq!(config["features"][flag], false, "{flag}");
         }
-        assert!(text.contains("web_search = \"disabled\""));
-        assert!(
-            text.contains("\nmodel_auto_compact_token_limit = 200000\n"),
+        assert_eq!(config["web_search"], "disabled");
+        assert_eq!(
+            config["model_auto_compact_token_limit"], 200_000,
             "long threads compact well before the context window"
         );
     }
 
     #[test]
     fn code_mode_runs_whenever_the_launch_has_a_tool_to_call() {
-        let url = Some("http://127.0.0.1:7878/tools/v1/mcp");
         for (tool_url, host_tools, code_mode) in [
             (None, true, true),
-            (url, true, true),
-            (url, false, true),
+            (Some(URL), true, true),
+            (Some(URL), false, true),
             (None, false, false),
         ] {
-            let text = config_toml(tool_url, host_tools);
-            assert!(
-                text.contains(&format!("code_mode_host = {code_mode}\n")),
+            let config = config(tool_url, host_tools);
+            assert_eq!(
+                config["features"]["code_mode_host"], code_mode,
                 "{tool_url:?} {host_tools}"
             );
-            assert!(text.contains("[agents]\nenabled = false"));
-            assert!(text.contains("multi_agent = false\nmulti_agent_v2 = false\n"));
+            assert_eq!(config["agents"]["enabled"], false);
+            assert_eq!(config["features"]["multi_agent"], false);
+            assert_eq!(config["features"]["multi_agent_v2"], false);
         }
     }
 
     #[test]
     fn elsebot_tools_without_host_tools_keep_code_mode_and_drop_the_shell() {
-        let text = config_toml(Some("http://127.0.0.1:7878/tools/v1/mcp"), false);
-        assert!(text.contains("shell_tool = false\n"));
-        assert!(text.contains("sandbox_mode = \"read-only\""));
-        assert!(text.contains("approval_policy = \"never\""));
-        assert!(text.contains("code_mode_host = true\n"));
-        assert!(text.contains("[mcp_servers.elsebot]"));
-        assert!(text.contains("web_search = \"disabled\""));
+        let config = config(Some(URL), false);
+        assert_eq!(config["features"]["shell_tool"], false);
+        assert_eq!(config["sandbox_mode"], "read-only");
+        assert_eq!(config["approval_policy"], "never");
+        assert_eq!(config["features"]["code_mode_host"], true);
+        assert!(config["mcp_servers"]["elsebot"].is_object());
+        assert_eq!(config["web_search"], "disabled");
         for feature in DISABLED_FEATURES {
-            assert!(text.contains(&format!("{feature} = false\n")), "{feature}");
+            assert_eq!(config["features"][feature], false, "{feature}");
         }
     }
 
     #[test]
     fn config_offers_only_elsebot_tools_with_the_grant_from_the_environment() {
-        assert!(!config_toml(None, true).contains("[mcp_servers."));
-        let text = config_toml(Some("http://127.0.0.1:7878/tools/v1/mcp"), true);
-        assert!(
-            text.contains("[mcp_servers.elsebot]\nurl = \"http://127.0.0.1:7878/tools/v1/mcp\"")
+        assert_eq!(config(None, true)["mcp_servers"], json!({}));
+        let server = &config(Some(URL), true)["mcp_servers"]["elsebot"];
+        assert_eq!(server["url"], URL);
+        assert_eq!(server["bearer_token_env_var"], "ELSE_TASK_GRANT");
+        assert_eq!(
+            server["enabled_tools"],
+            json!(crate::app::tools::TOOL_NAMES)
         );
-        assert!(text.contains("bearer_token_env_var = \"ELSE_TASK_GRANT\""));
-        let expected: Vec<String> = crate::app::tools::TOOL_NAMES
-            .iter()
-            .map(|t| format!("\"{t}\""))
-            .collect();
-        assert!(text.contains(&format!("enabled_tools = [{}]", expected.join(", "))));
-        assert!(text.contains("\"memory_search\""));
-        assert!(!text.contains("tg_"));
+        let tools = server["enabled_tools"].to_string();
+        assert!(tools.contains("\"memory_search\""));
+        assert!(!tools.contains("tg_"));
+    }
+
+    #[test]
+    fn a_tool_url_with_quotes_stays_one_toml_string() {
+        let url = "http://127.0.0.1:7878/\"x\" = 1\n[evil]";
+        assert_eq!(
+            config(Some(url), true)["mcp_servers"]["elsebot"]["url"],
+            url
+        );
     }
 
     #[test]

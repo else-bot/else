@@ -1068,7 +1068,8 @@ pub async fn record_scan(
     Ok(true)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "lowercase")]
 pub enum ActionStatus {
     Dispatching,
     Succeeded,
@@ -1079,12 +1080,7 @@ pub enum ActionStatus {
 
 impl ActionStatus {
     fn as_str(self) -> &'static str {
-        match self {
-            Self::Dispatching => "dispatching",
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-            Self::Uncertain => "uncertain",
-        }
+        self.into()
     }
 }
 

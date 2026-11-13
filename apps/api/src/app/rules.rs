@@ -3,7 +3,10 @@
 //! edits one section at a time, so a change never rewrites rules it did not
 //! mention, and every change carries a line diff for the owner's card.
 
+use std::time::{Duration, Instant};
+
 use serde::{Deserialize, Serialize};
+use similar::{Algorithm, ChangeTag};
 
 pub const MAX_TITLE_CHARS: usize = 80;
 /// Instructions outside ``` fences. The bot rereads every rule each turn, so
@@ -58,8 +61,9 @@ pub struct Rules {
     pub sections: Vec<Section>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ChangeKind {
     Added,
     Changed,
@@ -69,12 +73,7 @@ pub enum ChangeKind {
 
 impl ChangeKind {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Added => "added",
-            Self::Changed => "changed",
-            Self::Removed => "removed",
-            Self::Restored => "restored",
-        }
+        self.into()
     }
 }
 
@@ -346,82 +345,27 @@ pub fn document_diff(old: &str, new: &str) -> Vec<DiffLine> {
     diff_lines(&old, &new)
 }
 
-/// Cells allowed in the longest-common-subsequence table (4 MiB of `u32`).
-const MAX_DIFF_CELLS: usize = 1 << 20;
+/// How long a diff may search for the shortest edit before it settles for
+/// a coarser one that still lists every change.
+const DIFF_DEADLINE: Duration = Duration::from_millis(500);
 
-/// Line diff: shared leading and trailing lines stay as context, and the
-/// middle uses a longest-common-subsequence table when it fits in
-/// [`MAX_DIFF_CELLS`]; a larger middle shows as removed then added.
 fn diff_lines(old: &[String], new: &[String]) -> Vec<DiffLine> {
-    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
-    let suffix = old[prefix..]
-        .iter()
-        .rev()
-        .zip(new[prefix..].iter().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let same = |text: &String| DiffLine {
-        op: DiffOp::Same,
-        text: text.clone(),
-    };
-    let mut out: Vec<DiffLine> = old[..prefix].iter().map(same).collect();
-    let (mid_old, mid_new) = (
-        &old[prefix..old.len() - suffix],
-        &new[prefix..new.len() - suffix],
-    );
-    if (mid_old.len() + 1).saturating_mul(mid_new.len() + 1) <= MAX_DIFF_CELLS {
-        out.extend(lcs_diff(mid_old, mid_new));
-    } else {
-        out.extend(mid_old.iter().map(|text| DiffLine {
-            op: DiffOp::Remove,
-            text: text.clone(),
-        }));
-        out.extend(mid_new.iter().map(|text| DiffLine {
-            op: DiffOp::Add,
-            text: text.clone(),
-        }));
-    }
-    out.extend(old[old.len() - suffix..].iter().map(same));
-    out
+    diff_lines_until(old, new, Instant::now() + DIFF_DEADLINE)
 }
 
-fn lcs_diff(old: &[String], new: &[String]) -> Vec<DiffLine> {
-    let (n, m) = (old.len(), new.len());
-    let mut lcs = vec![vec![0u32; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            lcs[i][j] = if old[i] == new[j] {
-                lcs[i + 1][j + 1] + 1
-            } else {
-                lcs[i + 1][j].max(lcs[i][j + 1])
-            };
-        }
-    }
-    let mut out = Vec::with_capacity(n.max(m));
-    let (mut i, mut j) = (0, 0);
-    while i < n || j < m {
-        if i < n && j < m && old[i] == new[j] {
-            out.push(DiffLine {
-                op: DiffOp::Same,
-                text: old[i].clone(),
-            });
-            i += 1;
-            j += 1;
-        } else if i < n && (j == m || lcs[i + 1][j] >= lcs[i][j + 1]) {
-            out.push(DiffLine {
-                op: DiffOp::Remove,
-                text: old[i].clone(),
-            });
-            i += 1;
-        } else {
-            out.push(DiffLine {
-                op: DiffOp::Add,
-                text: new[j].clone(),
-            });
-            j += 1;
-        }
-    }
-    out
+fn diff_lines_until(old: &[String], new: &[String], deadline: Instant) -> Vec<DiffLine> {
+    similar::capture_diff_slices_deadline(Algorithm::Myers, old, new, Some(deadline))
+        .iter()
+        .flat_map(|op| op.iter_changes(old, new))
+        .map(|change| DiffLine {
+            op: match change.tag() {
+                ChangeTag::Equal => DiffOp::Same,
+                ChangeTag::Delete => DiffOp::Remove,
+                ChangeTag::Insert => DiffOp::Add,
+            },
+            text: change.value(),
+        })
+        .collect()
 }
 
 /// The rules as the bot reads them at the start of every turn. Once a bot
@@ -637,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn a_diff_too_large_for_the_table_still_lists_every_change() {
+    fn a_diff_with_no_shared_lines_lists_every_change() {
         let old: String = (0..2_000).map(|i| format!("a{i}\n")).collect();
         let new: String = (0..2_000).map(|i| format!("b{i}\n")).collect();
         let diff = document_diff(&format!("## A\n{old}end\n"), &format!("## A\n{new}end\n"));
@@ -646,6 +590,21 @@ mod tests {
         assert_eq!(diff[1].op, DiffOp::Remove);
         assert_eq!(diff[2_001].op, DiffOp::Add);
         assert_eq!(diff[4_001].op, DiffOp::Same);
+    }
+
+    #[test]
+    fn a_diff_past_its_deadline_still_rebuilds_both_sides() {
+        let old: Vec<String> = (0..2_000).map(|n| format!("{}", n % 7)).collect();
+        let new: Vec<String> = (0..2_000).map(|n| format!("{}", n % 5)).collect();
+        let diff = diff_lines_until(&old, &new, Instant::now());
+        let side = |skip| {
+            diff.iter()
+                .filter(|line| line.op != skip)
+                .map(|line| line.text.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(side(DiffOp::Add), old);
+        assert_eq!(side(DiffOp::Remove), new);
     }
 
     #[test]

@@ -23,8 +23,19 @@ use crate::skills::{FileInfo, Package, Source, secret_name};
 pub const MAX_PER_TURN: i64 = 3;
 pub const MAX_REASON: usize = 500;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    serde::Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
+)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum Scope {
     All,
     Bot,
@@ -32,18 +43,7 @@ pub enum Scope {
 
 impl Scope {
     fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::Bot => "bot",
-        }
-    }
-
-    fn parse(text: &str) -> Option<Self> {
-        match text {
-            "all" => Some(Self::All),
-            "bot" => Some(Self::Bot),
-            _ => None,
-        }
+        self.into()
     }
 }
 
@@ -141,7 +141,7 @@ fn install(
         files: files.0,
         env: env.0,
         status: Status::parse(&status),
-        scope: scope.as_deref().and_then(Scope::parse),
+        scope: scope.as_deref().and_then(|s| s.parse().ok()),
         key_stored,
         created_at,
         settled_at,
@@ -494,7 +494,7 @@ pub async fn undelivered(
             id,
             skill_id,
             installed: status == "installed",
-            scope: scope.as_deref().and_then(Scope::parse),
+            scope: scope.as_deref().and_then(|s| s.parse().ok()),
             env: env.0,
             key_stored,
         })
@@ -600,7 +600,7 @@ fn skill(row: SkillRow, files: Vec<FileInfo>) -> SkillInfo {
         name,
         description,
         source: source.0,
-        scope: Scope::parse(&scope).unwrap_or(Scope::All),
+        scope: scope.parse().unwrap_or(Scope::All),
         bot_id,
         bot_name,
         installed_by: by,

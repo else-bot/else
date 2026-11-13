@@ -108,22 +108,14 @@ pub async fn table_digests(
 
 fn publish_completion(set_dir: &Path, completion: &Completion) -> Result<(), BackupError> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let temp = set_dir.join(".complete.tmp");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp)
-        .map_err(|e| BackupError::io(temp.display(), e))?;
+    let path = set_dir.join(COMPLETE);
+    let fail = |e| BackupError::io(path.display(), e);
+    let mut file = crate::private_file::staged(set_dir, &path).map_err(fail)?;
     let bytes = serde_json::to_vec_pretty(completion).expect("serializable");
     file.write_all(&bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|e| BackupError::io(temp.display(), e))?;
-    drop(file);
-    let linked = std::fs::hard_link(&temp, set_dir.join(COMPLETE));
-    let _ = std::fs::remove_file(&temp);
-    linked.map_err(|e| BackupError::io(set_dir.join(COMPLETE).display(), e))?;
+        .and_then(|()| file.as_file().sync_all())
+        .map_err(fail)?;
+    file.persist_noclobber(&path).map_err(|e| fail(e.error))?;
     super::sync_dir(set_dir)
 }
 

@@ -1,5 +1,5 @@
 use std::io::{Read as _, Seek as _};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -260,10 +260,8 @@ fn read_operation(home: &Path, id: Uuid) -> Result<Operation, ApiError> {
         .ok()
         .and_then(|pid| pid.trim().parse::<i32>().ok())
         .filter(|pid| *pid > 1)
-        .is_some_and(|pid| {
-            // SAFETY: signal zero only probes a positive process ID.
-            unsafe { libc::kill(pid, 0) == 0 }
-        });
+        .and_then(rustix::process::Pid::from_raw)
+        .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok());
     let (state, error) = match result.as_deref().map(str::trim) {
         Some("0") => (State::Succeeded, None),
         Some(_) => (State::Failed, Some("The installer failed. Review its output and try again.".into())),
@@ -302,22 +300,7 @@ fn private_directory(path: &Path) -> Result<(), ApiError> {
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), ApiError> {
-    use std::io::Write as _;
-    let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temporary)
-        .map_err(|_| storage_error())?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| std::fs::rename(&temporary, path))
-        .and_then(|()| {
-            std::fs::File::open(path.parent().expect("update files have a directory"))?.sync_all()
-        })
-        .map_err(|_| storage_error())
+    crate::private_file::replace(path, bytes).map_err(|_| storage_error())
 }
 
 fn tail(path: &Path) -> Result<String, ApiError> {

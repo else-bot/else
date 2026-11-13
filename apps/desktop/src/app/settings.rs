@@ -1992,12 +1992,39 @@ const WEEKDAYS: [&str; 7] = [
     "Saturdays",
 ];
 
+/// A short phrase for the common schedules. Any other schedule the server
+/// accepts shows croner's description beside its expression, because that
+/// description can blur cron's rules (`*/7` restarts every hour). Any other
+/// expression shows as written.
 fn describe_cron(expr: &str) -> String {
     let fields: Vec<&str> = expr.split_whitespace().collect();
+    let server_grammar = fields.len() == 5
+        && fields.iter().all(|field| {
+            field
+                .chars()
+                .all(|c| c.is_ascii_digit() || "*,-/".contains(c))
+        });
     fields
         .try_into()
         .ok()
         .and_then(describe_cron_fields)
+        .or_else(|| {
+            if !server_grammar {
+                return None;
+            }
+            use croner::parser::{CronParser, Seconds, Year};
+            let parser = CronParser::builder()
+                .seconds(Seconds::Disallowed)
+                .year(Year::Disallowed)
+                .build();
+            let cron = parser.parse(expr).ok()?;
+            let description = cron.describe();
+            Some(format!(
+                "{} ({})",
+                description.trim_end_matches('.'),
+                expr.trim()
+            ))
+        })
         .unwrap_or_else(|| expr.to_owned())
 }
 
@@ -2505,32 +2532,35 @@ mod tests {
     }
 
     #[test]
-    fn schedules_without_a_faithful_description_keep_their_cron() {
+    fn uncommon_schedules_show_a_description_beside_their_cron() {
+        for (cron, readable) in [
+            ("*/7 * * * *", "At every 7 minutes (*/7 * * * *)"),
+            (
+                "0 9 * * 1,3",
+                "At 09:00, on Monday and Wednesday (0 9 * * 1,3)",
+            ),
+            ("0 9-17 * * *", "At minute 0, of hour 9-17 (0 9-17 * * *)"),
+        ] {
+            assert_eq!(describe_cron(cron), readable, "{cron}");
+        }
+    }
+
+    #[test]
+    fn schedules_croner_or_the_server_rejects_keep_their_cron() {
         for cron in [
-            "*/7 * * * *",
-            "0 */5 * * *",
+            "@daily",
+            "0 9 * * MON",
             "*/0 * * * *",
-            "*/60 * * * *",
-            "0 9 1 * 1",
-            "0,30 * * * *",
-            "0 9-17 * * *",
-            "0 9 * * 1-3",
-            "0 9 * * 1,3",
-            "*/5 9 * * *",
-            "0 */6 * * 1",
             "60 9 * * *",
             "0 24 * * *",
             "0 9 0 * *",
             "0 9 32 * *",
-            "0 9 30 2 *",
-            "0 9 31 4 *",
             "0 9 1 13 *",
             "0 9 * * 8",
             "+5 9 * * *",
             "0 9 * *",
             "0 9 * * * *",
             "",
-            "@daily",
         ] {
             assert_eq!(describe_cron(cron), cron);
         }

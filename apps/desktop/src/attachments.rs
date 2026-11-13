@@ -58,19 +58,22 @@ pub fn input_content(text: &str, parts: &[MessagePart]) -> InputContent {
     content
 }
 
-pub fn file_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{} KB", bytes.div_ceil(1024))
-    } else {
-        format!("{:.1} MB", bytes as f64 / (1024. * 1024.))
-    }
+/// A byte count in decimal units, as people read file sizes: 840 B, 6.2 kB.
+pub fn byte_size(bytes: u64) -> String {
+    bytesize::ByteSize::b(bytes).display().si().to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_sizes_use_decimal_units() {
+        assert_eq!(byte_size(840), "840 B");
+        assert_eq!(byte_size(6_200), "6.2 kB");
+        assert_eq!(byte_size(5_120_000), "5.1 MB");
+        assert_eq!(byte_size(2_500_000_000), "2.5 GB");
+    }
 
     #[test]
     fn files_stay_between_their_surrounding_unicode_text() {

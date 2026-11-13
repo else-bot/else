@@ -1,5 +1,4 @@
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::Write;
 use std::net::SocketAddr;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -142,20 +141,8 @@ impl RuntimeLock {
             url: format!("http://{addr}"),
         };
         let path = self.data_dir.join(MANIFEST);
-        let staged = self.data_dir.join(format!("{MANIFEST}.tmp"));
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&staged)
-            .map_err(io_error(&staged))?;
         let body = serde_json::to_vec(&manifest).expect("manifest serializes");
-        file.write_all(&body)
-            .and_then(|()| file.sync_all())
-            .map_err(io_error(&staged))?;
-        std::fs::rename(&staged, &path).map_err(io_error(&path))?;
+        crate::private_file::replace(&path, &body).map_err(io_error(&path))?;
         Ok(Published { path, _lock: self })
     }
 }

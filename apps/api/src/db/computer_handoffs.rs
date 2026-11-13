@@ -22,8 +22,9 @@ use super::events;
 
 pub const MAX_REASON: usize = 200;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, strum::EnumString)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Status {
     Pending,
     Taken,
@@ -34,26 +35,8 @@ pub enum Status {
 }
 
 impl Status {
-    fn parse(text: &str) -> Self {
-        match text {
-            "taken" => Self::Taken,
-            "handed_back" => Self::HandedBack,
-            "dismissed" => Self::Dismissed,
-            "skipped" => Self::Skipped,
-            "cancelled" => Self::Cancelled,
-            _ => Self::Pending,
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Taken => "taken",
-            Self::HandedBack => "handed_back",
-            Self::Dismissed => "dismissed",
-            Self::Skipped => "skipped",
-            Self::Cancelled => "cancelled",
-        }
+        self.into()
     }
 }
 
@@ -90,7 +73,7 @@ fn handoff(
         bot_id,
         turn_id,
         reason,
-        status: Status::parse(&status),
+        status: status.parse().unwrap_or(Status::Pending),
         created_at,
         taken_at,
         settled_at,
@@ -240,7 +223,7 @@ pub async fn undelivered(
         .map(|(id, reason, status)| Outcome {
             id,
             reason,
-            status: Status::parse(&status),
+            status: status.parse().unwrap_or(Status::Pending),
         })
         .collect())
 }

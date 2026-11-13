@@ -2,6 +2,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::Context;
+use clap::{Parser, Subcommand, ValueEnum};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -14,61 +15,112 @@ use tokio_util::sync::CancellationToken;
 
 mod reset;
 
-const USAGE: &str = "usage: else-api [serve|setup|migrate|backup|version|context]\n       \
-else-api backup --database-only\n       \
-else-api restore <set-dir> <new-database-file> [<new-data-dir>]\n       \
-else-api restore-remote <set-id> <new-database-file> [<new-data-dir>]\n       \
-else-api upgrade-computer <bot-id> <image> [--network <profile>]\n       \
-else-api rollback-computer <bot-id>\n       \
-else-api context [delegated-task|delegated-routine-task|mail-event|delegated-answer-task]\n\n\
-commands:\n  \
-serve    apply pending migrations and run the API (default)\n  \
-setup    provision missing credentials, apply migrations, and create the main\n           \
-bot and default provider profiles once; never replaces existing state\n  \
-migrate  apply pending versioned migrations only\n  \
-backup   capture one encrypted backup set now (the whole assistant when bot\n           \
-computers are available); --database-only captures just the database into\n           \
-the before-update folder, apart from the schedule and remote uploads\n  \
-restore  verify a backup set and restore it into new paths; new-data-dir is required for sets with shared MCPs, projects, computers, or files\n  \
-restore-remote  download a completed set from the configured bucket, then restore it\n  \
-upgrade-computer  move an existing bot computer to a new guest image, keeping its\n           \
-files, environments, browser profile, and network profile (--network picks\n           \
-another); the old computer is kept stopped\n  \
-rollback-computer  switch a bot back to the computer its last upgrade replaced\n  \
-reset --yes  erase this installation's local state; use `elsebot reset`\n  \
-remove-state --yes  erase local state without setup; used by `elsebot remove`\n  \
-version  print this build's version\n  \
-context  print representative bot instructions, tool schemas, and byte counts as JSON\n           \
-for the main bot's owner turn, or for a task delegated to another bot for an\n           \
-owner request, a routine run, or an owner's card answer; or for a bot woken by new mail\n";
+/// The else.bot API server.
+#[derive(Parser)]
+#[command(name = "else-api", version = else_api::VERSION)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Apply pending migrations and run the API (the default)
+    Serve,
+    /// Provision missing credentials, apply migrations, and create the main
+    /// bot and default provider profiles once; never replaces existing state
+    Setup,
+    /// Apply pending versioned migrations only
+    Migrate,
+    /// Capture one encrypted backup set now (the whole assistant when bot
+    /// computers are available); `backup --database-only` captures just the
+    /// database into the before-update folder, apart from the schedule and
+    /// remote uploads
+    Backup {
+        #[arg(long)]
+        database_only: bool,
+    },
+    /// Verify a backup set and restore it into new paths; NEW_DATA_DIR is
+    /// required for sets with shared MCPs, projects, computers, or files
+    Restore {
+        set_dir: String,
+        new_database_file: String,
+        new_data_dir: Option<String>,
+    },
+    /// Download a completed set from the configured bucket, then restore it
+    RestoreRemote {
+        set_id: String,
+        new_database_file: String,
+        new_data_dir: Option<String>,
+    },
+    /// Move an existing bot computer to a new guest image, keeping its files,
+    /// environments, browser profile, and network profile (--network picks
+    /// another); the old computer is kept stopped
+    UpgradeComputer {
+        bot_id: String,
+        image: String,
+        #[arg(long, value_name = "PROFILE")]
+        network: Option<String>,
+    },
+    /// Switch a bot back to the computer its last upgrade replaced
+    RollbackComputer { bot_id: String },
+    /// Erase this installation's local state (`reset --yes`); use `elsebot reset`
+    Reset {
+        #[arg(long, required = true)]
+        yes: bool,
+    },
+    /// Erase local state without setup (`remove-state --yes`); used by
+    /// `elsebot remove`
+    RemoveState {
+        #[arg(long, required = true)]
+        yes: bool,
+    },
+    /// Print this build's version
+    Version,
+    /// Print representative bot instructions, tool schemas, and byte counts as
+    /// JSON for the main bot's owner turn, or for the given kind of turn
+    Context { kind: Option<ContextKind> },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ContextKind {
+    /// A task delegated to another bot for an owner request
+    DelegatedTask,
+    /// A task delegated during a routine run
+    DelegatedRoutineTask,
+    /// A bot woken by new mail
+    MailEvent,
+    /// A task answered with an owner's card answer
+    DelegatedAnswerTask,
+}
+
+fn context_turn(kind: Option<ContextKind>) -> http::context::Turn {
+    use http::context::Turn;
+    match kind {
+        None => Turn::Owner,
+        Some(ContextKind::DelegatedTask) => Turn::DelegatedTask,
+        Some(ContextKind::DelegatedRoutineTask) => Turn::RoutineTask,
+        Some(ContextKind::MailEvent) => Turn::MailEvent,
+        Some(ContextKind::DelegatedAnswerTask) => Turn::AnsweredTask,
+    }
+}
 
 fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some(else_visual::isolate::WORKER_ARG) {
         else_visual::isolate::run_worker();
     }
     else_visual::isolate::use_this_executable();
-    if std::env::args().nth(1).as_deref() == Some("context") {
-        let args: Vec<String> = std::env::args().skip(2).collect();
-        let turn = match args.as_slice() {
-            [] => http::context::Turn::Owner,
-            [kind] if kind == "delegated-task" => http::context::Turn::DelegatedTask,
-            [kind] if kind == "delegated-routine-task" => http::context::Turn::RoutineTask,
-            [kind] if kind == "mail-event" => http::context::Turn::MailEvent,
-            [kind] if kind == "delegated-answer-task" => http::context::Turn::AnsweredTask,
-            _ => {
-                eprintln!("{USAGE}");
-                return ExitCode::from(2);
-            }
-        };
-        println!("{}", http::context::export(turn));
-        return ExitCode::SUCCESS;
-    }
-    if matches!(
-        std::env::args().nth(1).as_deref(),
-        Some("version" | "--version" | "-V")
-    ) {
-        println!("else-api {}", else_api::VERSION);
-        return ExitCode::SUCCESS;
+    let command = Cli::parse().command.unwrap_or(Command::Serve);
+    match command {
+        Command::Context { kind } => {
+            println!("{}", http::context::export(context_turn(kind)));
+            return ExitCode::SUCCESS;
+        }
+        Command::Version => {
+            println!("else-api {}", else_api::VERSION);
+            return ExitCode::SUCCESS;
+        }
+        _ => {}
     }
     if let Err(err) = dotenvy::dotenv()
         && !err.not_found()
@@ -91,41 +143,30 @@ fn main() -> ExitCode {
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let command = args.first().map(String::as_str).unwrap_or("serve");
-    let arity_ok = match command {
-        "restore" | "restore-remote" => args.len() == 3 || args.len() == 4,
-        "upgrade-computer" => args.len() == 3 || (args.len() == 5 && args[3] == "--network"),
-        "rollback-computer" => args.len() == 2,
-        "backup" => args.len() == 1 || (args.len() == 2 && args[1] == "--database-only"),
-        "reset" | "remove-state" => args.len() == 2 && args[1] == "--yes",
-        _ => args.len() <= 1,
-    };
-    if !arity_ok {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
-    }
     let result = match command {
-        "serve" => run_serve(),
-        "backup" => run_backup(args.len() == 2),
-        "restore" => run_restore(&args[1], &args[2], args.get(3).map(String::as_str)),
-        "restore-remote" => run_restore_remote(&args[1], &args[2], args.get(3).map(String::as_str)),
-        "upgrade-computer" => {
-            run_upgrade_computer(&args[1], Some(&args[2]), args.get(4).map(String::as_str))
-        }
-        "rollback-computer" => run_upgrade_computer(&args[1], None, None),
-        "setup" => run_setup(),
-        "reset" => run_reset(true),
-        "remove-state" => run_reset(false),
-        "migrate" => run_migrate(),
-        "-h" | "--help" | "help" => {
-            print!("{USAGE}");
-            return ExitCode::SUCCESS;
-        }
-        _ => {
-            eprintln!("unknown command `{command}`\n\n{USAGE}");
-            return ExitCode::from(2);
-        }
+        Command::Serve => run_serve(),
+        Command::Backup { database_only } => run_backup(database_only),
+        Command::Restore {
+            set_dir,
+            new_database_file,
+            new_data_dir,
+        } => run_restore(&set_dir, &new_database_file, new_data_dir.as_deref()),
+        Command::RestoreRemote {
+            set_id,
+            new_database_file,
+            new_data_dir,
+        } => run_restore_remote(&set_id, &new_database_file, new_data_dir.as_deref()),
+        Command::UpgradeComputer {
+            bot_id,
+            image,
+            network,
+        } => run_upgrade_computer(&bot_id, Some(&image), network.as_deref()),
+        Command::RollbackComputer { bot_id } => run_upgrade_computer(&bot_id, None, None),
+        Command::Setup => run_setup(),
+        Command::Reset { .. } => run_reset(true),
+        Command::RemoveState { .. } => run_reset(false),
+        Command::Migrate => run_migrate(),
+        Command::Version | Command::Context { .. } => unreachable!("handled before setup"),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -789,4 +830,44 @@ fn install_shutdown_signals() -> anyhow::Result<impl std::future::Future<Output 
             _ = interrupt.recv() => {}
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory as _;
+
+    use super::*;
+
+    #[test]
+    fn the_installer_finds_what_it_greps_for_in_help_and_version() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("backup --database-only"), "{help}");
+        assert!(help.contains("remove-state --yes"), "{help}");
+        assert_eq!(
+            Cli::command().render_version(),
+            format!("else-api {}\n", else_api::VERSION)
+        );
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn commands_keep_their_arguments_and_refuse_a_missing_confirmation() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["else-api"], args].concat());
+        assert!(parse(&[]).unwrap().command.is_none());
+        assert!(matches!(
+            parse(&["upgrade-computer", "b", "img", "--network", "p"]).unwrap().command,
+            Some(Command::UpgradeComputer { network: Some(p), .. }) if p == "p"
+        ));
+        assert!(matches!(
+            parse(&["context", "delegated-routine-task"])
+                .unwrap()
+                .command,
+            Some(Command::Context {
+                kind: Some(ContextKind::DelegatedRoutineTask)
+            })
+        ));
+        assert!(parse(&["reset"]).is_err());
+        assert!(parse(&["restore", "only-one"]).is_err());
+        assert!(parse(&["serve", "extra"]).is_err());
+    }
 }

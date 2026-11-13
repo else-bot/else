@@ -418,8 +418,7 @@ mod tests {
 
     #[test]
     fn unreadable_entries_are_reported_and_left_out() {
-        // SAFETY: geteuid has no preconditions.
-        if unsafe { libc::geteuid() } == 0 {
+        if rustix::process::geteuid().is_root() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
