@@ -259,7 +259,9 @@ impl ElseApp {
         window.open_dialog(cx, move |dialog, _, cx| {
             // One 24 px inset for the title, body and footer.
             let dialog = crate::appearance::modal_surface(dialog, cx)
-                .w(px(820.))
+                // Wide enough that its edges clear the sidebar and the
+                // Details panel divider instead of resting on them.
+                .w(px(880.))
                 .p_6()
                 .centered();
             let Some(app) = owner.upgrade() else {
@@ -583,18 +585,19 @@ impl ElseApp {
                 .child("Loading…")
                 .into_any_element();
         };
-        // The switch spans the dialog: it governs everything under it.
-        let tabs = segment_track(cx).w_full().children(
+        // The switch hugs its two labels at the leading edge, above
+        // everything it governs.
+        let tabs = segment_track(cx).children(
             [(RulesTab::Rules, "Rules"), (RulesTab::History, "History")]
                 .into_iter()
                 .map(|(value, label)| {
-                    segment(
+                    crate::panel_kit::hugging(segment(
                         SharedString::from(format!("rules-tab-{label}")),
                         label,
                         value == tab,
                         false,
                         cx,
-                    )
+                    ))
                     .on_click(on(owner, move |app, _, cx| app.set_rules_tab(value, cx)))
                 }),
         );
@@ -656,7 +659,7 @@ impl ElseApp {
         v_flex()
             .w_full()
             .gap_4()
-            .child(tabs)
+            .child(h_flex().child(tabs))
             .child(div().w_full().child(body))
             .child(footer)
             .into_any_element()
@@ -854,6 +857,8 @@ impl ElseApp {
             (title, by.to_owned(), when(v.created_at))
         };
         let list = v_flex()
+            // About a third of the body, enough for a bot's full name; the
+            // diff takes the rest.
             .id("rules-versions")
             .w(px(264.))
             .flex_none()
