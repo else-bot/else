@@ -580,137 +580,146 @@ impl RowText {
                     }
                 })
                 .into_any_element(),
-            Widget::Markdown { state, .. } => TextView::new(state)
-                .style(
-                    TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
-                        .with_code_background(cx.theme().secondary)
-                        .with_link(cx.theme().link)
-                        .with_border(cx.theme().foreground.opacity(0.08))
-                        // A reply's title (H1, H2) leads at 18–19 px with 20 px
-                        // above it (8 px plus the paragraph gap) and 8 px below;
-                        // sections (H3) at 16 px; deeper levels at body size.
-                        .with_heading(|level| {
-                            let style = StyleRefinement::default()
-                                .text_size(px(match level {
-                                    1 => 19.,
-                                    2 => 18.,
-                                    3 => 16.,
-                                    _ => 14.,
-                                }))
-                                .font_weight(FontWeight::SEMIBOLD);
-                            if level <= 2 {
-                                style.pt(px(8.)).pb(px(8.))
-                            } else {
-                                style
-                            }
-                        })
-                        .with_code_block(
-                            StyleRefinement::default()
-                                .rounded(cx.theme().radius)
-                                .border_0()
-                                .pt(px(28.))
-                                .text_size(px(13.))
-                                .line_height(px(21.)),
-                        )
-                        .with_table({
-                            let mut table = StyleRefinement::default()
-                                .min_w_0()
-                                .border_0()
-                                .bg(cx.theme().background.opacity(0.));
-                            table.overflow.x = Some(Overflow::Scroll);
-                            table
-                        })
-                        .with_table_head(
-                            StyleRefinement::default()
-                                .bg(cx.theme().background.opacity(0.))
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                        .with_table_cell(
-                            StyleRefinement::default()
-                                .border_color(cx.theme().foreground.opacity(0.))
-                                .py_2(),
-                        ),
-                )
-                .code_block_actions(|block, _, cx| {
-                    let code = block.code();
-                    h_flex()
-                        .h(px(16.))
-                        .gap_2()
-                        .items_center()
-                        .font_family(cx.theme().font_family.clone())
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .children(block.lang())
-                        .child(
-                            Button::new("copy-code")
-                                .ghost()
-                                .xsmall()
-                                .size(px(16.))
-                                .focus_ring(false)
-                                .cursor_pointer()
-                                .icon(IconName::Copy)
-                                .accessibility_label("Copy code")
-                                .on_click(move |_, window, cx| {
-                                    cx.stop_propagation();
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        code.to_string(),
-                                    ));
-                                    window.push_notification("Code copied to clipboard.", cx);
-                                }),
-                        )
-                })
-                .markdown_extensions(
-                    MarkdownExtensions::default()
-                        .plugin(MentionPlugin(mentions))
-                        .plugin(UnavailableImage),
-                )
-                .w_full()
-                .min_w_0()
-                .text_size(px(14.))
-                .line_height(px(22.))
-                .scrollable(false)
-                .selectable(true)
-                .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
-                .on_link_click(move |url, event, window, cx| {
-                    if !activates_link(event) {
-                        return;
-                    }
-                    if let Some(passage) = quoted_passage(url).and_then(|n| passages.get(n)) {
-                        let passage = passage.clone();
-                        let _ = link_owner.update(cx, |app, cx| {
-                            app.reveal_quoted(
-                                bot,
-                                key,
-                                passage.author,
-                                &passage.original,
-                                window,
-                                cx,
+            Widget::Markdown { state, .. } => {
+                let heading_ink = crate::appearance::tone(crate::appearance::Tone::Strong, cx);
+                TextView::new(state)
+                    .style(
+                        TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
+                            .with_code_background(cx.theme().secondary)
+                            .with_link(cx.theme().link)
+                            .with_border(cx.theme().foreground.opacity(0.08))
+                            // A reply's title (H1, H2) leads at 18–19 px with 20 px
+                            // above it (8 px plus the paragraph gap) and 8 px below;
+                            // sections (H3) at 16 px; deeper levels at body size.
+                            .with_heading(move |level| {
+                                let style = StyleRefinement::default()
+                                    .text_size(px(match level {
+                                        1 => 19.,
+                                        2 => 18.,
+                                        3 => 16.,
+                                        _ => 14.,
+                                    }))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(heading_ink);
+                                if level <= 2 {
+                                    style.pt(px(8.)).pb(px(8.))
+                                } else {
+                                    style
+                                }
+                            })
+                            .with_code_block(
+                                StyleRefinement::default()
+                                    .rounded(cx.theme().radius)
+                                    .border_0()
+                                    .pt(px(28.))
+                                    .text_size(px(13.))
+                                    .line_height(px(21.)),
                             )
-                        });
-                    } else if let Some(file) = linked_file(url).and_then(|id| link_files.get(&id)) {
-                        let file = file.clone();
-                        let _ = link_owner
-                            .update(cx, |app, cx| app.preview_attachment(bot, file, window, cx));
-                    } else if let Some(target) = LinkTarget::parse(url) {
-                        target.open(cx);
-                    }
-                })
-                .link_tooltip(move |url, window, cx| {
-                    let destination = if quoted_passage(url).is_some() {
-                        "Go to the original message".to_owned()
-                    } else {
-                        match linked_file(url).and_then(|id| tooltip_files.get(&id)) {
-                            Some(file) => format!("{} · {}", file.name, byte_size(file.size)),
-                            None => LinkTarget::parse(url)
-                                .map_or_else(|| url.to_string(), |target| target.destination()),
+                            .with_table({
+                                let mut table = StyleRefinement::default()
+                                    .min_w_0()
+                                    .border_0()
+                                    .bg(cx.theme().background.opacity(0.));
+                                table.overflow.x = Some(Overflow::Scroll);
+                                table
+                            })
+                            .with_table_head(
+                                StyleRefinement::default()
+                                    .bg(cx.theme().background.opacity(0.))
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .with_table_cell(
+                                StyleRefinement::default()
+                                    .border_color(cx.theme().foreground.opacity(0.))
+                                    .py_2(),
+                            ),
+                    )
+                    .code_block_actions(|block, _, cx| {
+                        let code = block.code();
+                        h_flex()
+                            .h(px(16.))
+                            .gap_2()
+                            .items_center()
+                            .font_family(cx.theme().font_family.clone())
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .children(block.lang())
+                            .child(
+                                Button::new("copy-code")
+                                    .ghost()
+                                    .xsmall()
+                                    .size(px(16.))
+                                    .focus_ring(false)
+                                    .cursor_pointer()
+                                    .icon(IconName::Copy)
+                                    .accessibility_label("Copy code")
+                                    .on_click(move |_, window, cx| {
+                                        cx.stop_propagation();
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            code.to_string(),
+                                        ));
+                                        window.push_notification("Code copied to clipboard.", cx);
+                                    }),
+                            )
+                    })
+                    .markdown_extensions(
+                        MarkdownExtensions::default()
+                            .plugin(MentionPlugin(mentions))
+                            .plugin(UnavailableImage),
+                    )
+                    .w_full()
+                    .min_w_0()
+                    .text_size(px(14.))
+                    .line_height(px(22.))
+                    .scrollable(false)
+                    .selectable(true)
+                    .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
+                    .on_link_click(move |url, event, window, cx| {
+                        if !activates_link(event) {
+                            return;
                         }
-                    };
-                    Tooltip::element(move |_, _| div().max_w(rems(32.)).child(destination.clone()))
+                        if let Some(passage) = quoted_passage(url).and_then(|n| passages.get(n)) {
+                            let passage = passage.clone();
+                            let _ = link_owner.update(cx, |app, cx| {
+                                app.reveal_quoted(
+                                    bot,
+                                    key,
+                                    passage.author,
+                                    &passage.original,
+                                    window,
+                                    cx,
+                                )
+                            });
+                        } else if let Some(file) =
+                            linked_file(url).and_then(|id| link_files.get(&id))
+                        {
+                            let file = file.clone();
+                            let _ = link_owner.update(cx, |app, cx| {
+                                app.preview_attachment(bot, file, window, cx)
+                            });
+                        } else if let Some(target) = LinkTarget::parse(url) {
+                            target.open(cx);
+                        }
+                    })
+                    .link_tooltip(move |url, window, cx| {
+                        let destination = if quoted_passage(url).is_some() {
+                            "Go to the original message".to_owned()
+                        } else {
+                            match linked_file(url).and_then(|id| tooltip_files.get(&id)) {
+                                Some(file) => format!("{} · {}", file.name, byte_size(file.size)),
+                                None => LinkTarget::parse(url)
+                                    .map_or_else(|| url.to_string(), |target| target.destination()),
+                            }
+                        };
+                        Tooltip::element(move |_, _| {
+                            div().max_w(rems(32.)).child(destination.clone())
+                        })
                         .build(window, cx)
-                })
-                .into_any_element(),
+                    })
+                    .into_any_element()
+            }
         };
         use gpui_kit::prelude::FluentBuilder as _;
         gpui_kit::component::v_flex()
