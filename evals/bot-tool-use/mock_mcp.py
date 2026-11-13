@@ -82,7 +82,9 @@ def too_long(schema, arguments):
 
 
 def tool_result(value, error=False):
-    result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}]}
+    # Production sends a plain-text refusal as is, not as a JSON string.
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    result = {"content": [{"type": "text", "text": text}]}
     if error:
         result["isError"] = True
     return result

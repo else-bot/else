@@ -48,7 +48,7 @@ Live runs append each sample to `results.jsonl` before starting the next sample,
 
 ## Codex code mode
 
-Codex declares else.bot's tools only on launches without host tools. An owner turn finds them through `ALL_TOOLS` inside `exec`. `codex.py` replays cases through `codex exec` with the same mock MCP and grader. It uses Codex's full catalog, so the tools stay deferred, and a read-only sandbox without the shell. It appends the exported `codex_deferred_tools` text to the instructions, as `providers/codex/turn.rs` does. Each row counts `exec` calls, `ALL_TOOLS` scans and their output bytes, and token usage from the rollout. These runs spend Codex model calls on the host login (`~/.codex/auth.json`).
+Codex declares else.bot's tools only on launches without host tools. An owner turn finds them through `ALL_TOOLS` inside `exec`. `codex.py` replays cases through `codex exec` with the same mock MCP and grader. It uses Codex's full catalog, so the tools stay deferred, and a read-only sandbox without the shell. It appends the exported `codex_deferred_tools` text to the instructions, as `providers/codex/turn.rs` does. Each row counts `exec` calls, `ALL_TOOLS` scans and their output bytes, and token usage from the rollout. A sample fails when an `exec` cell throws a JSON parse error. These runs spend Codex model calls on the host login (`~/.codex/auth.json`).
 
 ```sh
 python3 -I evals/bot-tool-use/codex.py --case correction-saves-rule,delegate-parks --samples 2 --out evals/bot-tool-use/runs/codex
@@ -63,7 +63,7 @@ Add one JSON object per line to `cases/*.ndjson`. Use a unique filesystem-safe `
 - `prompt`: the latest owner message.
 - `prior`: optional history objects with `kind`, `text`, and optional `status`, default `completed`. Use `user` or `assistant` for ordinary history.
 - `context_blocks`: optional extra text blocks for the packet. The registry, saved-permission, and installed-MCP blocks a first owner turn carries are exported from Rust and always come first, so cases never copy their wording.
-- `mocks`: optional ordered selectors with a `result`. The first matching mock wins. Unmatched tools return `{"status":"ok"}`. A mock with `"error": true` returns its result as a tool error, as production does for a refusal. Select inner tool names for deferred mocks, such as `routine_run`, while expectations select the actual `use_tool` wrapper.
+- `mocks`: optional ordered selectors with a `result`. The first matching mock wins. Unmatched tools return `{"status":"ok"}`. A mock with `"error": true` returns its result as a tool error, as production does for a refusal. A string result is sent as plain text and any other result as JSON, as production does. Select inner tool names for deferred mocks, such as `routine_run`, while expectations select the actual `use_tool` wrapper.
 
 For example, this mock parks delegation:
 

@@ -41,6 +41,9 @@ FEATURES_OFF = ["multi_agent", "multi_agent_v2", "shell_snapshot", "apps", "plug
 # Anything that matches names or descriptions by pattern is broad.
 EXACT = re.compile(r"\.name\s*===|\]\s*\.includes\(\s*\w+\.name\s*\)")
 BROAD = re.compile(r"\.(test|match|search|startsWith|endsWith|indexOf)\(|\.includes\(\s*['\"`]|description")
+# A cell that throws reports "Script error:" first; V8 names JSON in every
+# JSON.parse SyntaxError. Outputs may be JSON-encoded, so match either newline.
+PARSE_ERROR = re.compile(r"Script error:(?:\n|\\n)SyntaxError: [^\n]{0,200}?JSON")
 
 
 def toml_str(s):
@@ -99,12 +102,14 @@ def sample(case, context, out, model, effort):
     scans = [cid for cid, code in execs.items() if "ALL_TOOLS" in code]
     exact = [cid for cid in scans if EXACT.search(execs[cid]) and not BROAD.search(execs[cid])]
     scan_bytes = sum(len(outputs.get(cid, "")) for cid in scans)
+    parse_errors = sum(bool(PARSE_ERROR.search(o)) for o in outputs.values())
     calls = [json.loads(l) for l in (out / "calls.jsonl").read_text().splitlines()] \
         if (out / "calls.jsonl").exists() else []
     if proc.returncode != 0:
         raise RuntimeError(f"codex exec exited {proc.returncode}; see {out / 'stderr.txt'}")
     checks = run.grade(case["expect"], calls, final, (), context.get("parking_tools"))
-    row = {"case": case["id"], "pass": all(c["pass"] for c in checks),
+    checks.append({"check": "no JSON parse errors in exec cells", "pass": parse_errors == 0})
+    row = {"case": case["id"], "pass": all(c["pass"] for c in checks), "parse_errors": parse_errors,
            "execs": len(execs), "scans": len(scans), "exact_scans": len(exact), "scan_bytes": scan_bytes,
            "calls": [c["name"] for c in calls], "errors": sum(bool(c["result"].get("isError")) for c in calls),
            "input": (usage or {}).get("input_tokens"), "cached": (usage or {}).get("cached_input_tokens"),
