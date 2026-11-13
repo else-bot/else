@@ -87,10 +87,10 @@ pick_purple() {
   local point x y
   point=$(omabox -b "$BOX" tree --window "$W" --all --find 'House shape' | python3 "$H/tree_point.py" 'House shape' "${TREE_SCALE:-2}")
   read -r x y <<< "$point"
-  # Both are column four; the narrower color cells shift their center 2 px left.
-  # From the House center: 17 px to its edge, 8 gap, the 32 px Color label,
-  # 8 gap, 30 first row, 4 gap, 15 center (117 measured at 1440x900).
-  click "$((x - 2))" "$((y + 117))"
+  # Shapes and colors share one 6-column grid of 36 px cells, so purple sits
+  # straight under House. From the House center: 18 px to its edge, 8 gap,
+  # 8 margin, the 28 px Color row, 8 gap, a 36 px row, 8 gap, 18 to center.
+  click "$x" "$((y + 132))"
 }
 settings_page() {
   local label=$1 fallback_y=$2
@@ -128,14 +128,14 @@ command cp -f "$png" "$OUT/dark-07-working.png"
 select_bot main
 main_bottom
 keys ctrl+shift+b
-# Details tab at x=1188,y=28; the tabs are the panel header. GPUI does not expose it to AT-SPI.
-click 1188 28
+# Details tab at x=1163,y=28; the tabs are the panel header. GPUI does not expose it to AT-SPI.
+click 1163 28
 scroll 1300 450 -4500
 shot dark-08-bot-details
 scroll 1300 650 4500
 shot dark-09-schedules-and-triggers
-# Computer tab at x=1327,y=28; the two tabs share the header beside the hide button.
-click 1327 28
+# Computer tab at x=1253,y=28; the two tabs hug their labels at the header's leading edge.
+click 1253 28
 shot dark-10-computer
 keys ctrl+shift+b
 select_bot empty
@@ -150,28 +150,28 @@ shot dark-12-create-bot
 keys Escape
 # Shell-level settings shortcut survives focus restoration after a modal.
 keys ctrl+comma
-settings_page Servers 265
+settings_page Servers 224
 shot dark-13-settings-servers
-settings_page 'App updates' 301
+settings_page 'App updates' 260
 shot dark-14-settings-updates
-settings_page Email 392
+settings_page Email 351
 shot dark-15-settings-email
-settings_page Socials 428
+settings_page Socials 387
 shot dark-16-settings-socials
-settings_page MCP 464
+settings_page MCP 423
 shot dark-17-settings-mcp
-settings_page Skills 500
+settings_page Skills 459
 shot dark-18-settings-skills
-settings_page Backups 536
+settings_page Backups 495
 shot dark-19-settings-backups
 keys Escape
 # One additional dark shot opens the saved rules version from the Details pane.
 select_bot main
 keys ctrl+shift+b
-click 1188 28
+click 1163 28
 scroll 1300 450 -4500
-# Rules summary row at x=1260,y=262 in the default Details layout.
-click 1260 262
+# Rules summary row at x=1260,y=334 in the default Details layout, under the identity header.
+click 1260 334
 click_named History
 shot dark-20-rules-diff
 keys Escape
@@ -182,7 +182,7 @@ select_bot main
 main_bottom
 shot light-01-release-plan
 keys ctrl+shift+b
-click 1188 28
+click 1163 28
 scroll 1300 450 -4500
 shot light-02-bot-details
 keys ctrl+shift+b
@@ -194,7 +194,7 @@ pick_purple
 shot light-03-create-bot
 keys Escape
 keys ctrl+comma
-settings_page Servers 265
+settings_page Servers 224
 shot light-04-settings-servers
 keys Escape
 theme cursor-dark

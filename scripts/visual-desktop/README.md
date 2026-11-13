@@ -114,8 +114,8 @@ Use a fresh output directory for each comparison round.
   Settings navigation, House shape and History where available. GPUI currently
   reports physical bounds; `tree_point.py` divides them by `TREE_SCALE` (default 2).
 - Controls missing accessible nodes use documented logical coordinates in
-  `shoot.sh`: main sidebar anchor `(130,75)`, Details `(1188,28)`, Computer
-  `(1327,28)`, rules summary `(1260,262)` and Backups `(340,536)`. The purple
+  `shoot.sh`: main sidebar anchor `(130,75)`, Details `(1163,28)`, Computer
+  `(1253,28)`, rules summary `(1260,334)` and Backups `(340,495)`. The purple
   swatch is anchored to the House shape node. Settings has fallback rows at x=340. Transcript and panel scrolling
   also use fixed anchors and wheel deltas. Recalibrate these after layout changes
   and visually inspect every PNG before scoring.
