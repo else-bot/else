@@ -19,13 +19,14 @@ for line in sys.stdin:
     elif m['method'] == 'tools/call':
         calls += 1
         if m['params']['name'] == 'forge': r = {'parked':True}
+        elif m['params']['name'] == 'reject': r = {'content':[{'type':'text','text':'Rejected'}],'isError':True}
         elif m['params']['name'] == 'rows': r = {'content':[{'type':'text','text':'Found 2000 rows'}],'structuredContent':{'rows':[{'id':i,'title':'row'} for i in range(2000)]}}
         else: r = {'content':[{'type':'text','text':json.dumps({'calls':calls,'arguments':m['params']['arguments']})}]}
     else: r = {}
     print(json.dumps({'jsonrpc':'2.0','id':m['id'],'result':r}), flush=True)
 "#;
 
-fn installation() -> Value {
+pub(crate) fn installation() -> Value {
     json!({"id":"t3-code","name":"T3 Code","description":"Work with code and threads","skill":"Use T3 Code for code tasks.","documentation":"Discover tools/list before calling tools/call.","config":{"type":"stdio","command":"python3","args":["-u","-c",SERVER],"env":{"MCP_TEST_SECRET":"keep-this-out-of-discovery-and-memory"}}})
 }
 
