@@ -1024,7 +1024,7 @@ async fn a_scoped_computer_call_can_be_always_allowed_for_its_task_and_target() 
     assert_eq!(
         listed.body["permissions"][0]["target"],
         json!({ "scope": "task", "task": "Unfollow X accounts that never replied",
-                "target": account, "kind": "external" }),
+                "target": account, "kind": "external", "covers": "computer" }),
         "{}",
         listed.body
     );

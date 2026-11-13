@@ -370,8 +370,8 @@ fn questions_block(input: &TurnInput) -> String {
                         " The owner also allowed this task category, target and effect for this bot's \
                          future owner requests, including tasks delegated to it for one, and its \
                          scheduled routine runs. Reuse the exact saved task and target as task_scope \
-                         for matching host actions and computer tool calls. Other work, targets, \
-                         effects and bots are not covered. Check ask_permission before each \
+                         on the same kind of call this card approved: a host action or a computer \
+                         tool call. Other kinds of call, work, targets, effects and bots are not covered. Check ask_permission before each \
                          sensitive host action."
                     }
                     _ => "",

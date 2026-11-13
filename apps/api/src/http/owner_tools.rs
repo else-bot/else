@@ -118,7 +118,7 @@ pub(super) fn confirm_permission_schema() -> Value {
                     "properties": {
                         "scope": { "type": "string", "enum": ["bot", "routine", "mcp_tool", "task"] },
                         "task": { "type": "string", "minLength": 1, "maxLength": crate::app::questions::MAX_TASK_SCOPE,
-                            "description": "Required only for task scope: recurring category of host work, at most 200 UTF-8 bytes." },
+                            "description": "Required only for task scope: recurring category of host or computer work, at most 200 UTF-8 bytes." },
                         "target": { "type": "string", "minLength": 1, "maxLength": crate::app::questions::MAX_TASK_SCOPE,
                             "description": "Required only for task scope: specific resource and access method, at most 200 UTF-8 bytes." },
                         "routine_id": { "type": "string", "format": "uuid",
@@ -130,6 +130,8 @@ pub(super) fn confirm_permission_schema() -> Value {
                             "description": "Exact discovered MCP tool name. Required only for mcp_tool scope." },
                         "kind": { "type": "string", "enum": ["destructive", "external"],
                             "description": "Effect to remember. Required for mcp_tool or task scope." },
+                        "covers": { "type": "string", "enum": ["host", "computer"],
+                            "description": "Required only for task scope: host for ask_permission actions, computer for computer tool calls. MCP work needs mcp_tool scope." },
                     },
                     "required": ["scope"],
                     "additionalProperties": false,
@@ -147,7 +149,7 @@ pub(super) fn confirm_permission_schema() -> Value {
 }
 
 pub(super) async fn confirm_permission(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    use crate::app::questions::PermissionTarget;
+    use crate::app::questions::{Covers, PermissionTarget};
     use crate::db::owner_questions::standing::{self, ConfirmError};
 
     #[derive(serde::Deserialize)]
@@ -156,12 +158,24 @@ pub(super) async fn confirm_permission(state: &AppState, grant: &Grant, args: &V
         target: PermissionTarget,
         authorization: String,
     }
+    let target = &args["target"];
+    if target["scope"] == "task" && !matches!(target["covers"].as_str(), Some("host" | "computer"))
+    {
+        let result = json!({
+            "error": "INVALID_COVERS: task scope covers host (ask_permission actions) or computer (computer tool calls). Nothing was saved.",
+            "next": "A task grant never covers MCP tools/call. For MCP work, save an mcp_tool grant for that one tool; if it would drop a limit the owner gave, save nothing and tell them.",
+        });
+        return (
+            tool_error(&result.to_string()),
+            Some("rejected INVALID_COVERS".into()),
+        );
+    }
     let args = match serde_json::from_value::<Args>(args.clone()) {
         Ok(args) => args,
         Err(_) => {
             return (
                 tool_error(
-                    "INVALID_REQUEST: pass target and authorization; task scope requires task, target and kind; routine scope requires routine_id and prompt_revision",
+                    "INVALID_REQUEST: pass target and authorization; task scope requires task, target, kind and covers; routine scope requires routine_id and prompt_revision",
                 ),
                 None,
             );
@@ -176,12 +190,19 @@ pub(super) async fn confirm_permission(state: &AppState, grant: &Grant, args: &V
                 "question_id": confirmed.question.id,
                 "next": if !confirmed.active {
                     "The owner withdrew this permission. This retry grants nothing; a new explicit owner request is required."
-                } else if matches!(target, PermissionTarget::Task { .. }) {
-                    "Standing permission is recorded for host actions and computer tool calls \
-                     declaring this task_scope; it never covers MCP tools/call. An MCP tool needs \
-                     mcp_tool scope, which covers that tool with that effect whatever the arguments; \
-                     if the owner limited the work more narrowly, save nothing and tell them. Declare each effect \
-                     honestly. Sensitive actions outside this scope still need approval."
+                } else if let PermissionTarget::Task { covers, .. } = target {
+                    match covers {
+                        Covers::Computer => "Standing permission is recorded for computer tool calls \
+                            declaring this task_scope. Host actions and MCP tools/call are not covered. \
+                            Declare each effect honestly. Sensitive actions outside this scope still need approval.",
+                        Covers::Host => "Standing permission is recorded for host actions \
+                            declaring this task_scope; call ask_permission before each one. Computer \
+                            tool calls and MCP tools/call are not covered. Sensitive actions outside \
+                            this scope still need approval.",
+                        Covers::Both => "Standing permission is recorded for host actions and \
+                            computer tool calls declaring this task_scope. MCP tools/call is not \
+                            covered. Sensitive actions outside this scope still need approval.",
+                    }
                 } else {
                     "Standing permission is recorded for this scope. Declare each effect honestly. \
                      Routine reversible work needs no card. Sensitive actions outside this scope still need approval."

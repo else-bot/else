@@ -278,13 +278,38 @@ impl TaskScope {
         Self::new(&self.task, &self.target).as_ref() == Some(self)
     }
 
-    fn key(&self, kind: Kind) -> String {
+    fn key(&self, covers: Covers, kind: Kind) -> String {
         format!(
-            "task:{}:{}:{}",
+            "task:{}:{}:{}:{}",
+            covers.as_str(),
             kind.as_str(),
             hex::encode(self.task.to_lowercase()),
             hex::encode(&self.target),
         )
+    }
+}
+
+/// Which gated calls a task grant covers. MCP tools/call is never one of
+/// them: a grant for MCP work is an `mcp_tool` grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Covers {
+    /// Host actions approved through `ask_permission`.
+    Host,
+    /// Computer tool calls.
+    Computer,
+    /// A grant saved through `confirm_permission` before grants named what
+    /// they cover. A bot can no longer save one.
+    Both,
+}
+
+impl Covers {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Computer => "computer",
+            Self::Both => "both",
+        }
     }
 }
 
@@ -323,6 +348,7 @@ pub enum PermissionTarget {
         task: String,
         target: String,
         kind: Kind,
+        covers: Covers,
     },
 }
 
@@ -359,12 +385,18 @@ impl PermissionTarget {
     /// The target with a task scope normalized, or `None` when it is invalid.
     pub fn canonical(self) -> Option<Self> {
         let target = match self {
-            Self::Task { task, target, kind } => {
+            Self::Task {
+                task,
+                target,
+                kind,
+                covers,
+            } => {
                 let scope = TaskScope::new(&task, &target)?;
                 Self::Task {
                     task: scope.task,
                     target: scope.target,
                     kind,
+                    covers,
                 }
             }
             other => other,
@@ -393,26 +425,59 @@ impl PermissionTarget {
                 kind.as_str(),
                 hex::encode(tool),
             )),
-            Self::Task { kind, .. } => Some(self.task_scope()?.key(*kind)),
+            Self::Task { kind, covers, .. } => Some(self.task_scope()?.key(*covers, *kind)),
         }
+    }
+
+    /// The approval hash of a `confirm_permission` question for this task
+    /// target saved before task grants named what they cover.
+    pub fn legacy_permission_hash(&self) -> Option<[u8; 32]> {
+        let Self::Task { kind, .. } = self else {
+            return None;
+        };
+        let scope = self.task_scope()?;
+        let key = format!(
+            "task:{}:{}:{}",
+            kind.as_str(),
+            hex::encode(scope.task.to_lowercase()),
+            hex::encode(&scope.target),
+        );
+        Some(hash(&[b"standing_permission", key.as_bytes()]))
+    }
+
+    /// The saved scopes that would cover this target: its own, and for a
+    /// task, also a grant saved before grants named what they cover.
+    pub fn covering_scopes(&self) -> Vec<String> {
+        let mut scopes = Vec::from_iter(self.bot_scope());
+        if let Self::Task { kind, .. } = self
+            && let Some(scope) = self.task_scope()
+        {
+            scopes.push(scope.key(Covers::Both, *kind));
+        }
+        scopes.dedup();
+        scopes
     }
 
     /// The standing grant that would cover this approved action: an MCP tool
     /// call, or a host action or computer tool call declared with a task scope.
     pub fn for_action(kind: Kind, action: &Action) -> Option<Self> {
-        if let Action::Host {
-            task_scope: Some(scope),
-            ..
-        }
-        | Action::Tool {
-            task_scope: Some(scope),
-            ..
-        } = action
-        {
+        let declared = match action {
+            Action::Host {
+                task_scope: Some(scope),
+                ..
+            } => Some((scope, Covers::Host)),
+            Action::Tool {
+                task_scope: Some(scope),
+                ..
+            } => Some((scope, Covers::Computer)),
+            _ => None,
+        };
+        if let Some((scope, covers)) = declared {
             let target = Self::Task {
                 task: scope.task.clone(),
                 target: scope.target.clone(),
                 kind,
+                covers,
             };
             return target.valid().then_some(target);
         }
@@ -553,8 +618,21 @@ impl Spec {
                     _ => unreachable!(),
                 },
                 Standing::Task => match &target {
-                    PermissionTarget::Task { task, target, kind } => {
-                        format!("Always allow {} actions: {task} on {target}", kind.as_str())
+                    PermissionTarget::Task {
+                        task,
+                        target,
+                        kind,
+                        covers,
+                    } => {
+                        let calls = match covers {
+                            Covers::Host => " host",
+                            Covers::Computer => " computer",
+                            Covers::Both => "",
+                        };
+                        format!(
+                            "Always allow {}{calls} actions: {task} on {target}",
+                            kind.as_str()
+                        )
                     }
                     _ => unreachable!(),
                 },
@@ -813,7 +891,7 @@ mod tests {
         assert_eq!(
             serialized,
             json!({ "scope": "task", "task": "Manage Tailscale via SSH",
-                    "target": "omarchy-m1", "kind": "destructive" })
+                    "target": "omarchy-m1", "kind": "destructive", "covers": "host" })
         );
         assert_eq!(
             serde_json::from_value::<PermissionTarget>(serialized).unwrap(),
@@ -849,6 +927,7 @@ mod tests {
                 task: task.into(),
                 target: target.into(),
                 kind,
+                covers: Covers::Host,
             }
             .bot_scope()
             .unwrap()
@@ -889,8 +968,21 @@ mod tests {
             key("a", "b:c", Kind::Destructive),
             "separators inside the text cannot collide"
         );
-        assert!(base.starts_with("task:destructive:"));
+        assert!(base.starts_with("task:host:destructive:"));
         assert_ne!(base, DESTRUCTIVE_SCOPE);
+        let computer = PermissionTarget::Task {
+            task: "Manage Tailscale via SSH".into(),
+            target: "omarchy-m1".into(),
+            kind: Kind::Destructive,
+            covers: Covers::Computer,
+        };
+        let both = base.replacen("task:host:", "task:both:", 1);
+        assert_ne!(computer.bot_scope().unwrap(), base);
+        assert_eq!(
+            computer.covering_scopes(),
+            [computer.bot_scope().unwrap(), both.clone()],
+            "a grant saved before covers existed still covers computer calls"
+        );
     }
 
     #[test]
@@ -933,6 +1025,7 @@ mod tests {
             task: " Manage  Tailscale ".into(),
             target: "omarchy-m1".into(),
             kind: Kind::External,
+            covers: Covers::Host,
         };
         assert!(!raw.valid(), "only normalized targets are valid");
         assert_eq!(
@@ -941,6 +1034,7 @@ mod tests {
                 task: "Manage Tailscale".into(),
                 target: "omarchy-m1".into(),
                 kind: Kind::External,
+                covers: Covers::Host,
             })
         );
         for bad in [
@@ -948,11 +1042,13 @@ mod tests {
                 task: "".into(),
                 target: "omarchy-m1".into(),
                 kind: Kind::External,
+                covers: Covers::Host,
             },
             PermissionTarget::Task {
                 task: "Manage".into(),
                 target: "omarchy-m1".into(),
                 kind: Kind::Choice,
+                covers: Covers::Host,
             },
         ] {
             assert_eq!(bad.canonical(), None);

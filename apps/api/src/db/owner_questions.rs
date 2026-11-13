@@ -199,16 +199,7 @@ async fn find_same(
     spec: &Spec,
 ) -> Result<Option<QuestionInfo>, sqlx::Error> {
     let row: Option<Row> = match &spec.approval {
-        Some(approval) => {
-            sqlx::query_as(sqlx::AssertSqlSafe(format!(
-                "SELECT {COLUMNS} FROM owner_questions WHERE turn_id = ?1 AND action_hash = ?2
-                 ORDER BY created_at DESC, id DESC LIMIT 1"
-            )))
-            .bind(turn_id)
-            .bind(approval.hash.as_slice())
-            .fetch_optional(&mut *conn)
-            .await?
-        }
+        Some(approval) => return find_hash(conn, turn_id, &approval.hash).await,
         None => {
             sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "SELECT {COLUMNS} FROM owner_questions
@@ -221,6 +212,23 @@ async fn find_same(
             .await?
         }
     };
+    row.map(info).transpose()
+}
+
+/// The latest question of `turn_id` bound to the action `hash`.
+async fn find_hash(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+    hash: &[u8; 32],
+) -> Result<Option<QuestionInfo>, sqlx::Error> {
+    let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLUMNS} FROM owner_questions WHERE turn_id = ?1 AND action_hash = ?2
+         ORDER BY created_at DESC, id DESC LIMIT 1"
+    )))
+    .bind(turn_id)
+    .bind(hash.as_slice())
+    .fetch_optional(&mut *conn)
+    .await?;
     row.map(info).transpose()
 }
 
@@ -436,14 +444,15 @@ pub async fn gate_host(
         .as_ref()
         .and_then(|a| PermissionTarget::for_action(spec.kind, &a.action))
         .filter(|t| reach.covers(t));
-    let granted = match &target {
-        Some(target)
-            if has_permission(&mut tx, caller.bot_id, &target.bot_scope().unwrap()).await? =>
-        {
-            Some(target.standing())
+    let mut granted = None;
+    if let Some(target) = &target {
+        for scope in target.covering_scopes() {
+            if has_permission(&mut tx, caller.bot_id, &scope).await? {
+                granted = Some(target.standing());
+                break;
+            }
         }
-        _ => None,
-    };
+    }
     if spec.kind == Kind::Destructive {
         let standing = match scope {
             Scope::Bot if has_permission(&mut tx, caller.bot_id, DESTRUCTIVE_SCOPE).await? => {
