@@ -591,6 +591,9 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
     .await;
     assert_eq!(init.body["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(init.body["result"]["serverInfo"]["name"], "elsebot");
+    // Codex copies the server instructions into every tool's description.
+    let instructions = init.body["result"]["instructions"].as_str().unwrap();
+    assert!(instructions.len() <= 40, "{instructions}");
     let note = app
         .call(
             "POST",

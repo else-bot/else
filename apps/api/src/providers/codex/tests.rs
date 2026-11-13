@@ -550,6 +550,13 @@ async fn a_connector_event_launches_without_host_tools_but_keeps_elsebot_tools()
         };
         assert_eq!(thread["sandbox"], sandbox, "{origin:?}");
         assert_eq!(thread["approvalPolicy"], "never", "{origin:?}");
+        // Only the full catalog defers else.bot's tools behind ALL_TOOLS.
+        let instructions = thread["developerInstructions"].as_str().unwrap();
+        assert_eq!(
+            instructions.contains("ALL_TOOLS.filter(t =>"),
+            host_tools,
+            "{origin:?}"
+        );
         let launches = launches(dir.path());
         if host_tools {
             assert_eq!(launches, vec![vec!["app-server".to_owned()]], "{origin:?}");

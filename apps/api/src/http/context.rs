@@ -112,6 +112,7 @@ pub fn export(turn: Turn) -> Value {
         "deferred_tools": deferred,
         "context_blocks": blocks,
         "server_instructions": super::mcp::SERVER_INSTRUCTIONS,
+        "codex_deferred_tools": crate::providers::codex::deferred_tools(),
         "parked_next": super::mcp::PARKED_NEXT,
         "parking_tools": crate::app::tools::PARKING_TOOLS,
         "host_tools": crate::providers::claude_home::HOST_TOOLS,

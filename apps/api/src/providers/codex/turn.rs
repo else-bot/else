@@ -15,6 +15,15 @@ use crate::providers::cli::session::{Opened, PreparedTurn};
 
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
 
+fn instructions(input: &TurnInput, cwd: &str) -> String {
+    let mut text = prompt::instructions(input, cwd);
+    if input.delegation.host_tools() {
+        text.push_str("\n\n");
+        text.push_str(&super::deferred_tools());
+    }
+    text
+}
+
 /// The running native turn, read through the app-server.
 struct Running<'s> {
     server: &'s mut AppServer,
@@ -119,7 +128,7 @@ impl Codex {
             "cwd": server.cwd,
             "approvalPolicy": "never",
             "sandbox": codex_home::sandbox_mode(input.delegation.host_tools()),
-            "developerInstructions": prompt::instructions(input, &server.cwd),
+            "developerInstructions": instructions(input, &server.cwd),
             "config": config,
         });
         if let Some(session) = input

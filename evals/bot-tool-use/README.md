@@ -46,6 +46,14 @@ Options:
 
 Live runs append each sample to `results.jsonl` before starting the next sample, then print per-case and overall pass rates. Rows contain checks, raw calls and results, final text, usage, model, sizes, and artifact paths. Execution errors are reported separately and excluded from pass rates; they still cause a nonzero exit. Any graded failure also exits nonzero. Each sample keeps `context.json`, `case.json`, `mcp.json`, `settings.json`, `stdin.jsonl`, `request.json`, `stream.jsonl`, `stderr.txt`, and `calls.jsonl`. Dry runs omit stream and call logs. `runs/` is ignored by Git.
 
+## Codex code mode
+
+Codex declares else.bot's tools only on launches without host tools. An owner turn finds them through `ALL_TOOLS` inside `exec`. `codex.py` replays cases through `codex exec` with the same mock MCP and grader. It uses Codex's full catalog, so the tools stay deferred, and a read-only sandbox without the shell. It appends the exported `codex_deferred_tools` text to the instructions, as `providers/codex/turn.rs` does. Each row counts `exec` calls, `ALL_TOOLS` scans and their output bytes, and token usage from the rollout. These runs spend Codex model calls on the host login (`~/.codex/auth.json`).
+
+```sh
+python3 -I evals/bot-tool-use/codex.py --case correction-saves-rule,delegate-parks --samples 2 --out evals/bot-tool-use/runs/codex
+```
+
 ## Add a case
 
 Add one JSON object per line to `cases/*.ndjson`. Use a unique filesystem-safe `id`, a `kind` of `bad`, `guard`, or `control`, and an `experience` sentence explaining the mistake or behavior. `bad` reproduces a mistake, `guard` protects correct behavior, and `control` checks ordinary work. An optional `turn` of `delegated-task` exports `else-api context delegated-task` instead: Research working on a task the main bot delegated for an owner request, with no registry and the task as the latest message. `delegated-routine-task` is the same task delegated during a routine run. The default is `owner`.
