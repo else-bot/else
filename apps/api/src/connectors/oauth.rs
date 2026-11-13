@@ -3,11 +3,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use oauth2::{
+    AuthType, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointNotSet,
+    EndpointSet, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken, RequestTokenError,
+    Scope, TokenResponse, TokenUrl,
+    basic::{BasicClient, BasicErrorResponse, BasicTokenResponse},
+};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
 
 use super::types::{Credential, MailError, Provider};
 use crate::actor::Actor;
@@ -40,8 +44,8 @@ pub struct Started {
 
 struct Pending {
     request: Start,
-    state_hash: [u8; 32],
-    verifier: Zeroizing<String>,
+    state: CsrfToken,
+    verifier: PkceCodeVerifier,
     expires: Instant,
 }
 impl Drop for Start {
@@ -55,10 +59,66 @@ pub struct OAuth {
     pending: Actor<HashMap<Uuid, Pending>>,
 }
 
-fn nonce() -> String {
-    let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).expect("OS entropy");
-    URL_SAFE_NO_PAD.encode(bytes)
+type Client = BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
+
+fn client(provider: Provider, id: &str, secret: Option<&str>) -> Result<Client, MailError> {
+    let (authorize, token, _) = provider.oauth_endpoints()?;
+    let client = BasicClient::new(ClientId::new(id.to_owned()))
+        .set_auth_uri(AuthUrl::new(authorize.into()).expect("fixed provider URL"))
+        .set_token_uri(TokenUrl::new(token.into()).expect("fixed provider URL"))
+        .set_auth_type(if provider == Provider::Yahoo {
+            AuthType::BasicAuth
+        } else {
+            AuthType::RequestBody
+        });
+    Ok(match secret {
+        Some(secret) => client.set_client_secret(ClientSecret::new(secret.to_owned())),
+        None => client,
+    })
+}
+
+fn redirect(uri: &str) -> Result<RedirectUrl, MailError> {
+    RedirectUrl::new(uri.to_owned()).map_err(|_| MailError::new("invalid_redirect"))
+}
+
+/// Sends the token request without following redirects, and reports a
+/// throttled or failing provider as unavailable so the account is not marked
+/// for reauthentication during an outage.
+async fn http(request: oauth2::HttpRequest) -> Result<oauth2::HttpResponse, std::io::Error> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(std::io::Error::other)?;
+    let response = client
+        .execute(request.try_into().map_err(std::io::Error::other)?)
+        .await
+        .map_err(std::io::Error::other)?;
+    let status = response.status();
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+        return Err(std::io::Error::other(format!(
+            "token endpoint answered {status}"
+        )));
+    }
+    let headers = response.headers().clone();
+    let body = response.bytes().await.map_err(std::io::Error::other)?;
+    let mut reply = oauth2::HttpResponse::new(body.to_vec());
+    *reply.status_mut() = status;
+    *reply.headers_mut() = headers;
+    Ok(reply)
+}
+
+fn token_error(error: RequestTokenError<std::io::Error, BasicErrorResponse>) -> MailError {
+    MailError::new(match error {
+        RequestTokenError::ServerResponse(_) => "oauth_reauthentication_required",
+        RequestTokenError::Request(_) => "oauth_unavailable",
+        RequestTokenError::Parse(..) | RequestTokenError::Other(_) => "invalid_oauth_response",
+    })
+}
+
+fn expires_at(token: &BasicTokenResponse) -> i64 {
+    let seconds = token.expires_in().map_or(3600, |ttl| ttl.as_secs());
+    chrono::Utc::now().timestamp() + seconds.clamp(60, 86_400) as i64
 }
 
 impl OAuth {
@@ -80,16 +140,16 @@ impl OAuth {
                 .config(request.address.clone())?
                 .validate()?;
         }
-        let redirect = reqwest::Url::parse(&request.redirect_uri)
+        let redirect_url = reqwest::Url::parse(&request.redirect_uri)
             .map_err(|_| MailError::new("invalid_redirect"))?;
         let loopback = matches!(
-            redirect.host_str(),
+            redirect_url.host_str(),
             Some("localhost" | "127.0.0.1" | "[::1]")
         );
-        if !(redirect.scheme() == "https" || (redirect.scheme() == "http" && loopback))
-            || redirect.fragment().is_some()
-            || !redirect.username().is_empty()
-            || redirect.password().is_some()
+        if !(redirect_url.scheme() == "https" || (redirect_url.scheme() == "http" && loopback))
+            || redirect_url.fragment().is_some()
+            || !redirect_url.username().is_empty()
+            || redirect_url.password().is_some()
             || request.client_id.is_empty()
             || request.client_id.len() > 1024
             || request
@@ -99,30 +159,28 @@ impl OAuth {
         {
             return Err(MailError::new("invalid_oauth_client"));
         }
-        let (authorize, _, scopes) = request.provider.oauth_endpoints()?;
-        let request_id = Uuid::new_v4();
-        let state = nonce();
-        let verifier = Zeroizing::new(nonce());
-        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        let mut url = reqwest::Url::parse(authorize).expect("fixed provider URL");
-        url.query_pairs_mut().extend_pairs([
-            ("client_id", request.client_id.as_str()),
-            ("redirect_uri", request.redirect_uri.as_str()),
-            ("response_type", "code"),
-            ("scope", scopes),
-            ("state", state.as_str()),
-            ("code_challenge", challenge.as_str()),
-            ("code_challenge_method", "S256"),
-            ("access_type", "offline"),
-            ("prompt", "consent"),
-        ]);
+        let (_, _, scopes) = request.provider.oauth_endpoints()?;
+        let client = client(
+            request.provider,
+            &request.client_id,
+            request.client_secret.as_deref(),
+        )?
+        .set_redirect_uri(redirect(&request.redirect_uri)?);
+        let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
+        let mut authorization = client
+            .authorize_url(CsrfToken::new_random)
+            .add_scopes(scopes.split(' ').map(|scope| Scope::new(scope.into())))
+            .set_pkce_challenge(challenge)
+            .add_extra_param("access_type", "offline")
+            .add_extra_param("prompt", "consent");
         if !request.address.is_empty() {
-            url.query_pairs_mut()
-                .append_pair("login_hint", &request.address);
+            authorization = authorization.add_extra_param("login_hint", request.address.as_str());
         }
+        let (url, state) = authorization.url();
+        let request_id = Uuid::new_v4();
         let pending = Pending {
             request,
-            state_hash: Sha256::digest(state.as_bytes()).into(),
+            state,
             verifier,
             expires: Instant::now() + Duration::from_secs(600),
         };
@@ -155,55 +213,55 @@ impl OAuth {
             .call(move |map| map.remove(&request.request_id))
             .await
             .ok_or_else(|| MailError::new("oauth_setup_expired"))?;
-        use subtle::ConstantTimeEq;
-        let hash: [u8; 32] = Sha256::digest(request.state.as_bytes()).into();
-        if pending.expires <= Instant::now() || !bool::from(hash.ct_eq(&pending.state_hash)) {
+        if pending.expires <= Instant::now() || pending.state != CsrfToken::new(request.state) {
             return Err(MailError::new("invalid_oauth_state"));
         }
-        let mut fields = vec![
-            ("grant_type", "authorization_code".to_owned()),
-            ("code", request.code),
-            ("redirect_uri", pending.request.redirect_uri.clone()),
-            ("client_id", pending.request.client_id.clone()),
-            ("code_verifier", pending.verifier.to_string()),
-        ];
-        if let Some(secret) = &pending.request.client_secret {
-            fields.push(("client_secret", secret.clone()));
-        }
-        let result = token(pending.request.provider, &fields).await;
-        for (_, value) in &mut fields {
-            value.zeroize();
-        }
-        let token = result?;
-        if pending.request.provider == Provider::Gmail
-            && token.scope.as_deref().is_some_and(|scope| {
-                !scope
-                    .split_whitespace()
-                    .any(|s| s == "https://mail.google.com/")
+        let Pending {
+            request: setup,
+            verifier,
+            ..
+        } = pending;
+        let token = client(
+            setup.provider,
+            &setup.client_id,
+            setup.client_secret.as_deref(),
+        )?
+        .set_redirect_uri(redirect(&setup.redirect_uri)?)
+        .exchange_code(AuthorizationCode::new(request.code))
+        .set_pkce_verifier(verifier)
+        .request_async(&http)
+        .await
+        .map_err(token_error)?;
+        if setup.provider == Provider::Gmail
+            && token.scopes().is_some_and(|scopes| {
+                !scopes
+                    .iter()
+                    .any(|scope| scope.as_str() == "https://mail.google.com/")
             })
         {
             return Err(MailError::new("oauth_mail_access_required"));
         }
-        let address = if pending.request.provider == Provider::Gmail {
+        let access_token = token.access_token().secret();
+        let address = if setup.provider == Provider::Gmail {
             gmail_address(
                 "https://gmail.googleapis.com/gmail/v1/users/me/profile",
-                &token.access_token,
+                access_token,
             )
             .await?
         } else {
-            pending.request.address.clone()
+            setup.address.clone()
         };
         let refresh_token = token
-            .refresh_token
+            .refresh_token()
             .ok_or_else(|| MailError::new("oauth_refresh_token_required"))?;
         let credential = Credential::OAuth2 {
-            client_id: pending.request.client_id.clone(),
-            client_secret: pending.request.client_secret.clone(),
-            refresh_token,
-            access_token: Some(token.access_token),
-            expires_at: Some(chrono::Utc::now().timestamp() + token.expires_in.clamp(60, 86_400)),
+            client_id: setup.client_id.clone(),
+            client_secret: setup.client_secret.clone(),
+            refresh_token: refresh_token.secret().clone(),
+            access_token: Some(access_token.clone()),
+            expires_at: Some(expires_at(&token)),
         };
-        Ok((pending.request.provider, address, credential))
+        Ok((setup.provider, address, credential))
     }
 }
 
@@ -218,7 +276,7 @@ async fn gmail_address(endpoint: &str, access_token: &str) -> Result<String, Mai
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|_| MailError::new("oauth_unavailable"))?;
-    let mut response = client
+    let response = client
         .get(endpoint)
         .bearer_auth(access_token)
         .send()
@@ -227,96 +285,14 @@ async fn gmail_address(endpoint: &str, access_token: &str) -> Result<String, Mai
     if !response.status().is_success() {
         return Err(MailError::new("oauth_reauthentication_required"));
     }
-    let mut bytes = Zeroizing::new(Vec::new());
-    while let Some(chunk) = response
-        .chunk()
+    let profile: Profile = response
+        .json()
         .await
-        .map_err(|_| MailError::new("oauth_unavailable"))?
-    {
-        if bytes.len() + chunk.len() > 16_384 {
-            return Err(MailError::new("oauth_response_too_large"));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let profile: Profile =
-        serde_json::from_slice(&bytes).map_err(|_| MailError::new("invalid_oauth_response"))?;
+        .map_err(|_| MailError::new("invalid_oauth_response"))?;
     Provider::Gmail
         .config(profile.address.clone())?
         .validate()?;
     Ok(profile.address)
-}
-
-#[derive(Deserialize)]
-struct Token {
-    access_token: String,
-    refresh_token: Option<String>,
-    scope: Option<String>,
-    #[serde(default = "hour")]
-    expires_in: i64,
-}
-fn hour() -> i64 {
-    3600
-}
-
-async fn token(provider: Provider, fields: &[(&str, String)]) -> Result<Token, MailError> {
-    let (_, endpoint, _) = provider.oauth_endpoints()?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|_| MailError::new("oauth_unavailable"))?;
-    let body: Vec<_> = fields
-        .iter()
-        .filter(|(name, _)| {
-            provider != Provider::Yahoo || !matches!(*name, "client_id" | "client_secret")
-        })
-        .map(|(name, value)| (*name, value.as_str()))
-        .collect();
-    let mut request = client.post(endpoint).form(&body);
-    if provider == Provider::Yahoo {
-        let id = fields
-            .iter()
-            .find(|(k, _)| *k == "client_id")
-            .map(|(_, v)| v.as_str())
-            .unwrap_or_default();
-        let secret = fields
-            .iter()
-            .find(|(k, _)| *k == "client_secret")
-            .map(|(_, v)| v.as_str());
-        request = request.basic_auth(id, secret);
-    }
-    let mut response = request
-        .send()
-        .await
-        .map_err(|_| MailError::new("oauth_unavailable"))?;
-    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-        || response.status().is_server_error()
-    {
-        return Err(MailError::new("oauth_unavailable"));
-    }
-    if !response.status().is_success() {
-        return Err(MailError::new("oauth_reauthentication_required"));
-    }
-    let mut bytes = Zeroizing::new(Vec::new());
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| MailError::new("oauth_unavailable"))?
-    {
-        if bytes.len() + chunk.len() > 65_536 {
-            return Err(MailError::new("oauth_response_too_large"));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let token: Token =
-        serde_json::from_slice(&bytes).map_err(|_| MailError::new("invalid_oauth_response"))?;
-    if token.access_token.is_empty()
-        || token.access_token.len() > 16_384
-        || token.refresh_token.as_ref().is_some_and(|s| s.len() > 8192)
-    {
-        return Err(MailError::new("invalid_oauth_response"));
-    }
-    Ok(token)
 }
 
 pub async fn refresh(provider: Provider, credential: &mut Credential) -> Result<bool, MailError> {
@@ -325,36 +301,27 @@ pub async fn refresh(provider: Provider, credential: &mut Credential) -> Result<
         client_secret,
         refresh_token,
         access_token,
-        expires_at,
+        expires_at: expiry,
     } = credential
     else {
         return Ok(false);
     };
-    if access_token.is_some()
-        && expires_at.is_some_and(|at| at > chrono::Utc::now().timestamp() + 120)
+    if access_token.is_some() && expiry.is_some_and(|at| at > chrono::Utc::now().timestamp() + 120)
     {
         return Ok(false);
     }
-    let mut fields = vec![
-        ("grant_type", "refresh_token".into()),
-        ("client_id", client_id.clone()),
-        ("refresh_token", refresh_token.clone()),
-    ];
-    if let Some(secret) = client_secret {
-        fields.push(("client_secret", secret.clone()));
-    }
-    let result = token(provider, &fields).await;
-    for (_, value) in &mut fields {
-        value.zeroize();
-    }
-    let token = result?;
+    let token = client(provider, client_id, client_secret.as_deref())?
+        .exchange_refresh_token(&RefreshToken::new(refresh_token.clone()))
+        .request_async(&http)
+        .await
+        .map_err(token_error)?;
     access_token.zeroize();
-    *access_token = Some(token.access_token);
-    if let Some(rotated) = token.refresh_token {
+    *access_token = Some(token.access_token().secret().clone());
+    if let Some(rotated) = token.refresh_token() {
         refresh_token.zeroize();
-        *refresh_token = rotated;
+        *refresh_token = rotated.secret().clone();
     }
-    *expires_at = Some(chrono::Utc::now().timestamp() + token.expires_in.clamp(60, 86_400));
+    *expiry = Some(expires_at(&token));
     Ok(true)
 }
 
@@ -451,6 +418,45 @@ mod tests {
         for _ in 0..40 {
             let started = oauth.start(request()).await.unwrap();
             oauth.cancel(started.request_id).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn yahoo_authenticates_with_basic_auth_and_others_send_the_secret_in_the_body() {
+        for provider in [Provider::Yahoo, Provider::Gmail] {
+            let sent = std::sync::Mutex::new(None);
+            let token = client(provider, "registered-client", Some("private-client-secret"))
+                .unwrap()
+                .exchange_refresh_token(&RefreshToken::new("private-refresh".into()))
+                .request_async(&|request: oauth2::HttpRequest| {
+                    *sent.lock().unwrap() = Some(request);
+                    async {
+                        let mut response = oauth2::HttpResponse::new(
+                            br#"{"access_token":"fresh","token_type":"bearer","expires_in":10}"#
+                                .to_vec(),
+                        );
+                        response.headers_mut().insert(
+                            reqwest::header::CONTENT_TYPE,
+                            "application/json".parse().unwrap(),
+                        );
+                        Ok::<_, std::io::Error>(response)
+                    }
+                })
+                .await
+                .unwrap();
+            assert_eq!(token.access_token().secret(), "fresh");
+            assert!((60..=61).contains(&(expires_at(&token) - chrono::Utc::now().timestamp())));
+            let request = sent.into_inner().unwrap().unwrap();
+            let body = String::from_utf8(request.body().clone()).unwrap();
+            assert!(body.contains("refresh_token=private-refresh"));
+            let basic = request.headers().get(reqwest::header::AUTHORIZATION);
+            if provider == Provider::Yahoo {
+                assert!(basic.unwrap().to_str().unwrap().starts_with("Basic "));
+                assert!(!body.contains("client_secret"));
+            } else {
+                assert!(basic.is_none());
+                assert!(body.contains("client_secret=private-client-secret"));
+            }
         }
     }
 
