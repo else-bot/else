@@ -874,7 +874,7 @@ impl ElseApp {
                             .child(muted("Follow the bot's model, including future changes.", cx)),
                     )
                     .child(
-                        toggle("routine-inherit-model", form.inherits(), saving || !connected)
+                        toggle("routine-inherit-model", form.inherits(), saving || !connected, cx)
                             .accessibility_label("Use bot model")
                             .on_click(move |enabled: &bool, window, cx| {
                                 inherit_holder.update(cx, |form, cx| {
@@ -1527,6 +1527,7 @@ impl ElseApp {
             ElementId::Name(format!("trigger-{key}").into()),
             checked,
             disabled,
+            cx,
         )
         .accessibility_label(format!("Run the trigger for {}", card.title))
         .on_click(cx.listener(move |app, enabled: &bool, window, cx| {
@@ -1690,6 +1691,7 @@ impl ElseApp {
             ElementId::Name(format!("routine-{id}").into()),
             checked,
             busy || !connected || passed,
+            cx,
         )
         .accessibility_label(format!("Run {}", routine.name))
         .on_click(cx.listener(move |app, enabled: &bool, window, cx| {

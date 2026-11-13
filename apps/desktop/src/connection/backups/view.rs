@@ -248,6 +248,7 @@ impl Shell {
                             "remote-backups-enabled",
                             snapshot.enabled,
                             busy || unavailable || !has_destination || view.editor.is_some(),
+                            cx,
                         )
                         .accessibility_label("Automatic remote backups")
                         .tooltip(if snapshot.enabled {

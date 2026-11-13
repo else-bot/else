@@ -883,8 +883,17 @@ impl ElseApp {
             .py(px(7.))
             .rounded(theme.radius_lg)
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover);
+            // Dark: a hairline on the page. Light: a white field on the
+            // tinted page, so it still reads as the place to type.
+            .map(|frame| {
+                if theme.mode.is_dark() {
+                    frame
+                        .border_color(theme.foreground.opacity(0.12))
+                        .bg(theme.background)
+                } else {
+                    frame.border_color(theme.border).bg(theme.popover)
+                }
+            });
         if let Some(quotes) = self.render_quote_stack(bot.id, &bot.name, cx) {
             frame = frame.child(quotes);
         }
@@ -949,6 +958,10 @@ impl ElseApp {
                         )
                     }),
             );
+        let hint = {
+            let composer = self.composer.read(cx);
+            composer.value().is_empty() && composer.focus_handle(cx).is_focused(window)
+        };
         let footer = reading_column()
             .flex_none()
             .gap_1p5()
@@ -965,10 +978,14 @@ impl ElseApp {
                     .children(self.render_mentions(cx)),
             )
             .child(
+                // The hint shows only while it helps: the composer is focused
+                // and empty. Its line stays reserved so the composer never
+                // moves.
                 div()
                     .px(px(22.))
                     .text_size(px(11.5))
                     .text_color(theme.foreground.opacity(super::message_row::META_OPACITY))
+                    .when(!hint, |line| line.invisible())
                     .child("Enter to send · Shift+Enter for a new line"),
             );
         v_flex()
