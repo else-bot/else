@@ -59,7 +59,11 @@ async fn watch(
     let mut version = None;
     let mut delay = POLL;
     loop {
-        match read().await {
+        let result = tokio::select! {
+            _ = stop.cancelled() => return,
+            result = read() => result,
+        };
+        match result {
             Ok(current) => {
                 if version != Some(current) {
                     let _ = tx.send(Uuid::nil());
@@ -128,7 +132,12 @@ mod tests {
             "doubling retry capped at 5 s, 100 ms poll after a success",
         );
         let mut woken = 0;
-        while wakes.try_recv().is_ok() {
+        while let Ok(wake) = wakes.try_recv() {
+            assert_eq!(
+                wake,
+                Uuid::nil(),
+                "a data version change wakes every stream"
+            );
             woken += 1;
         }
         assert_eq!(
