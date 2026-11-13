@@ -1,4 +1,4 @@
-use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
+use crate::controls::{Control as _, Scale, Tier, hugging_segment, segment_track};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use gpui_kit::assets::IconName;
@@ -945,9 +945,8 @@ impl Render for ComputerView {
                     .child({
                         let locked = self.mode_pending || !matches!(self.screen, Screen::Live);
                         segment_track(cx)
-                            .w(px(260.))
                             .child(
-                                segment(
+                                hugging_segment(
                                     "watch-computer",
                                     "Watching",
                                     mode == DesktopMode::Watch,
@@ -962,7 +961,7 @@ impl Render for ComputerView {
                                 )),
                             )
                             .child(
-                                segment(
+                                hugging_segment(
                                     "control-computer",
                                     if self.mode_pending {
                                         "Switching…"

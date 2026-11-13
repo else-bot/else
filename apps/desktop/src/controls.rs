@@ -65,26 +65,21 @@ impl Scale {
     }
 }
 
-/// How strongly a disabled control fades. Disabled keeps the control's own
-/// shape on a neutral fill, never a dimmed accent.
-pub const DISABLED_OPACITY: f32 = 0.4;
-/// Ghost and unselected segment labels sit below body text and come up to
-/// full strength on hover or selection.
+/// How strongly a disabled control fades. A disabled control is the same
+/// control, fill and label included, at this opacity, so it still reads as
+/// the action it will become rather than a hole in the surface.
+pub const DISABLED_OPACITY: f32 = 0.45;
+/// Ghost labels sit below body text and come up to full strength on hover.
 const QUIET_TEXT: f32 = 0.72;
-const SEGMENT_TEXT: f32 = 0.55;
+/// Unselected segment labels: quieter than the selected one, but clearly
+/// available rather than disabled. Light themes' mid-tone ink needs more.
+const SEGMENT_TEXT_DARK: f32 = 0.68;
+const SEGMENT_TEXT_LIGHT: f32 = 0.8;
 const RADIUS: Pixels = px(8.);
 const THUMB_RADIUS: Pixels = px(6.);
 const INSET: Pixels = px(2.);
-const TOGGLE_SATURATION: f32 = 0.6;
-
-/// The fill a tier shows while disabled: accent and danger fills turn
-/// neutral so a disabled action never reads as a muddy accent.
-pub const fn disabled_tier(tier: Tier) -> Tier {
-    match tier {
-        Tier::Primary | Tier::Danger | Tier::Secondary => Tier::Secondary,
-        Tier::Ghost => Tier::Ghost,
-    }
-}
+/// A hugging segment's horizontal padding around its label.
+const HUG_PADDING: Pixels = px(16.);
 
 pub trait Control: Sized {
     /// Styles a labeled button as the kit's `tier` at `scale`, and disables
@@ -118,15 +113,19 @@ impl Control for Button {
         if !disabled {
             return button.cursor_pointer();
         }
-        let fill = match disabled_tier(tier) {
-            Tier::Ghost => theme.transparent,
-            _ => theme.button,
+        // The library paints disabled buttons in its own faint style; replay
+        // the tier's normal fill and label so only the opacity changes.
+        let (fill, label) = match tier {
+            Tier::Primary => (theme.button_primary, theme.button_primary_foreground),
+            Tier::Danger => (theme.button_danger, theme.button_danger_foreground),
+            Tier::Secondary => (theme.button, theme.button_foreground),
+            Tier::Ghost => (theme.transparent, theme.foreground.opacity(QUIET_TEXT)),
         };
         button
             .opacity(DISABLED_OPACITY)
             .border_0()
             .bg(fill)
-            .text_color(theme.button_foreground)
+            .text_color(label)
     }
 
     fn flush_start(self, scale: Scale) -> Self {
@@ -135,7 +134,17 @@ impl Control for Button {
 }
 
 /// The well behind a segmented control: 32 px tall with a 2 px inset, one
-/// faint step off the surface it sits on.
+/// faint step off the surface it sits on. Give it a width (or `w_full`) for
+/// equal [`Segment::segment`]s. With [`hugging_segment`]s it takes their
+/// width: in a row as it is, in a column with `.self_start()` so the column
+/// doesn't stretch it.
+///
+/// ```ignore
+/// segment_track(cx).self_start().children([
+///     hugging_segment("details", "Details", true, false, cx),
+///     hugging_segment("computer", "Computer", false, false, cx),
+/// ])
+/// ```
 pub fn segment_track(cx: &App) -> Div {
     let theme = cx.theme();
     div()
@@ -151,51 +160,77 @@ pub fn segment_track(cx: &App) -> Div {
             .opacity(if theme.mode.is_dark() { 0.05 } else { 0.06 }))
 }
 
-/// The selected segment: in dark, a clearly lighter step over the track
-/// (about 10% lightness); in light, the raised sheet color.
+/// The selected segment: in dark, a moderate step over the track so a
+/// stack of controls doesn't read as heavy bars; in light, the raised sheet
+/// color.
 fn segment_thumb(cx: &App) -> Hsla {
     let theme = cx.theme();
     if theme.mode.is_dark() {
-        theme.foreground.opacity(0.17)
+        theme.foreground.opacity(0.13)
     } else {
         theme.popover
     }
 }
 
+/// How a segment takes its share of the track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fit {
+    /// Equal widths across the whole track.
+    Fill,
+    /// As wide as its label plus 16 px on each side.
+    Hug,
+}
+
 pub trait Segment: Sized {
     /// Styles a button as one equal-width segment of a [`segment_track`].
     fn segment(self, selected: bool, disabled: bool, cx: &App) -> Self;
+
+    /// Styles a button as a segment that hugs its label (16 px either side,
+    /// 28 px tall in a [`segment_track`]).
+    fn hugging_segment(self, selected: bool, disabled: bool, cx: &App) -> Self;
 }
 
 impl Segment for Button {
     fn segment(self, selected: bool, disabled: bool, cx: &App) -> Self {
-        let theme = cx.theme();
-        let segment = self
-            .ghost()
-            .focus_ring(false)
-            .with_size(Size::Small)
-            .flex_1()
-            .flex_basis(px(0.))
-            .min_w_0()
-            .h_full()
-            .px_3()
-            .rounded(THUMB_RADIUS)
-            .font_weight(FontWeight::MEDIUM)
-            .selected(selected)
-            .disabled(disabled);
-        let segment = if selected {
-            segment
-                .bg(segment_thumb(cx))
-                .shadow_xs()
-                .text_color(theme.foreground)
+        styled_segment(self, Fit::Fill, selected, disabled, cx)
+    }
+
+    fn hugging_segment(self, selected: bool, disabled: bool, cx: &App) -> Self {
+        styled_segment(self, Fit::Hug, selected, disabled, cx)
+    }
+}
+
+fn styled_segment(button: Button, fit: Fit, selected: bool, disabled: bool, cx: &App) -> Button {
+    let theme = cx.theme();
+    let segment = button
+        .ghost()
+        .focus_ring(false)
+        .with_size(Size::Small)
+        .map(|segment| match fit {
+            Fit::Fill => segment.flex_1().flex_basis(px(0.)).min_w_0().px_3(),
+            Fit::Hug => segment.flex_none().px(HUG_PADDING),
+        })
+        .h_full()
+        .rounded(THUMB_RADIUS)
+        .font_weight(FontWeight::MEDIUM)
+        .selected(selected)
+        .disabled(disabled);
+    let segment = if selected {
+        segment
+            .bg(segment_thumb(cx))
+            .shadow_xs()
+            .text_color(theme.foreground)
+    } else {
+        segment.text_color(theme.foreground.opacity(if theme.mode.is_dark() {
+            SEGMENT_TEXT_DARK
         } else {
-            segment.text_color(theme.foreground.opacity(SEGMENT_TEXT))
-        };
-        if disabled {
-            segment.opacity(DISABLED_OPACITY)
-        } else {
-            segment.cursor_pointer()
-        }
+            SEGMENT_TEXT_LIGHT
+        }))
+    };
+    if disabled {
+        segment.opacity(DISABLED_OPACITY)
+    } else {
+        segment.cursor_pointer()
     }
 }
 
@@ -207,11 +242,25 @@ pub fn segment(
     disabled: bool,
     cx: &App,
 ) -> Button {
+    labeled_segment(id, label).segment(selected, disabled, cx)
+}
+
+/// A text segment that hugs its label; see [`segment_track`].
+pub fn hugging_segment(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    selected: bool,
+    disabled: bool,
+    cx: &App,
+) -> Button {
+    labeled_segment(id, label).hugging_segment(selected, disabled, cx)
+}
+
+fn labeled_segment(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
     let label = label.into();
     Button::new(id)
         .accessibility_label(label.clone())
         .child(div().text_size(px(13.)).truncate().child(label))
-        .segment(selected, disabled, cx)
 }
 
 /// A 36×20 switch with a solid 16 px knob. Its name comes from the call
@@ -219,24 +268,15 @@ pub fn segment(
 pub fn toggle(id: impl Into<ElementId>, checked: bool, disabled: bool, cx: &App) -> Switch {
     Switch::new(id)
         .focus_ring(false)
-        .color(toggle_on(cx))
+        .color(cx.theme().primary)
         .checked(checked)
         .disabled(disabled)
         .when(!disabled, |switch| switch.cursor_pointer())
 }
 
-/// The checked track: the primary's hue with less saturation, so a stack
-/// of switches reads as state rather than a column of calls to action.
-fn toggle_on(cx: &App) -> Hsla {
-    let primary = cx.theme().primary;
-    Hsla {
-        s: primary.s * TOGGLE_SATURATION,
-        ..primary
-    }
-}
-
-/// An editable single-line field: a fill set apart from the card or dialog
-/// behind it, darker in dark and white in light, with a visible edge.
+/// An editable single-line field: one step lighter than whatever card,
+/// dialog or page it sits on in dark, white in light, always with a visible
+/// edge, so it reads as a field on any surface.
 pub fn text_field(input: Input, cx: &App) -> Input {
     field_style(input.focus_ring(false), cx)
 }
@@ -255,8 +295,8 @@ fn field_colors(cx: &App) -> (Hsla, Hsla) {
     let theme = cx.theme();
     if theme.mode.is_dark() {
         (
-            gpui_kit::black().opacity(0.22),
-            theme.foreground.opacity(0.12),
+            theme.foreground.opacity(0.05),
+            theme.foreground.opacity(0.14),
         )
     } else {
         (gpui_kit::white(), theme.foreground.opacity(0.16))
@@ -357,14 +397,6 @@ mod tests {
             let padding = scale.padding();
             assert!(padding >= px(12.) && padding <= px(14.));
         }
-    }
-
-    #[test]
-    fn a_disabled_accent_turns_neutral() {
-        assert_eq!(disabled_tier(Tier::Primary), Tier::Secondary);
-        assert_eq!(disabled_tier(Tier::Danger), Tier::Secondary);
-        assert_eq!(disabled_tier(Tier::Secondary), Tier::Secondary);
-        assert_eq!(disabled_tier(Tier::Ghost), Tier::Ghost);
     }
 
     #[test]
