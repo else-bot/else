@@ -243,11 +243,13 @@ pub async fn update_for_turn(
         owner_words,
         diff,
     };
-    let seq: i64 = sqlx::query_scalar(
+    // A task's own conversation is hidden from the owner, so the card goes
+    // to the bot's chat with the owner, as a task's routine change does.
+    let (conversation, seq): (Uuid, i64) = sqlx::query_as(
         "UPDATE conversations SET last_item_seq = last_item_seq + 1
-         WHERE id = ?1 RETURNING last_item_seq",
+         WHERE bot_id = ?1 AND kind = 'owner' RETURNING id, last_item_seq",
     )
-    .bind(caller.conversation_id)
+    .bind(caller.bot_id)
     .fetch_one(&mut *tx)
     .await?;
     let item_id = Uuid::new_v4();
@@ -261,7 +263,7 @@ pub async fn update_for_turn(
          VALUES (?1, ?2, ?3, ?4, 'status', ?5, ?6)",
     )
     .bind(item_id)
-    .bind(caller.conversation_id)
+    .bind(conversation)
     .bind(seq)
     .bind(caller.turn_id)
     .bind(format!("{verb} rule: {}", update.section))

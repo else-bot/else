@@ -430,6 +430,17 @@ async fn an_owner_answer_lets_the_delegated_bot_save_its_rule_in_the_owners_word
     assert!(!saved.error, "{}", saved.body);
     assert_eq!(saved.result["version"], 1, "{}", saved.body);
     assert_eq!(cards(&h.app, child).await.len(), 1);
+    let chat = h
+        .app
+        .owner("GET", &format!("/v1/bots/{scout}/conversation"), None)
+        .await;
+    let card = chat.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["rules_update"].is_object())
+        .unwrap_or_else(|| panic!("no rules card in Scout's chat: {}", chat.body));
+    assert_eq!(card["rules_update"]["section"], "DM cap");
     h.release(child).await;
     h.app.wait_turn(&child.to_string(), &["completed"]).await;
 
