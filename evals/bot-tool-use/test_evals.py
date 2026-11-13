@@ -291,6 +291,12 @@ def run(runner):
                          "prompt": "Find traders and DM at most 20 per 24h."}})],
                     "Updated Leads to revision 4.",
                     "The approval was relayed, so I left Leads unchanged."),
+                "answered-task-updates-own-rules": (
+                    [self.call("rules_update", {"section": "DM cap",
+                                                "content": "DM at most 20 traders per rolling 24h.",
+                                                "owner_words": "Apply it, raise to 20 DMs per 24h"})],
+                    "Saved DM cap at version 2.",
+                    "The approval was relayed, so I left my rules unchanged."),
                 "task-blocked-on-owner-flags-it": (
                     [self.call("notify_owner", {"kind": "blocked",
                                                 "summary": "Dev is signed out of its provider, so it can't make the fix. Sign Dev back in from Settings."},

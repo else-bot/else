@@ -2,7 +2,7 @@ use crate::common;
 
 use axum::http::StatusCode;
 use common::TestApp;
-use common::recorder::{GATE, harness, tool};
+use common::recorder::{GATE, GATE_EVERY_ATTEMPT, harness, tool};
 use else_api::grants::{DEFAULT_TTL, Tool};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -362,6 +362,95 @@ async fn delegated_tasks_and_routine_runs_cannot_edit_rules() {
     assert_eq!(rules(&h.app, &worker).await["version"], 0);
     h.release(child).await;
     h.release(root).await;
+}
+
+#[tokio::test]
+async fn an_owner_answer_lets_the_delegated_bot_save_its_rule_in_the_owners_words() {
+    let h = harness(2).await;
+    let manager = h.app.main_bot().await;
+    let scout = h.app.create_bot("Scout").await;
+    let (root, token) = h.running(&manager, GATE_EVERY_ATTEMPT).await;
+    let asked = tool(
+        &h.app,
+        &token,
+        "ask_owner",
+        json!({ "question": "Scout's DM cap?", "choices": ["Keep 1 per run", "3 per run, 20 per 24h"] }),
+    )
+    .await;
+    let question = asked.result["question_id"].as_str().unwrap().to_owned();
+    h.release(root).await;
+    h.app.wait_turn(&root.to_string(), &["waiting"]).await;
+    let chosen = h
+        .app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{manager}/questions/{question}/answer"),
+            Some(json!({ "choice": "b" })),
+        )
+        .await;
+    assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.body);
+    let token = h.continued(root, &token).await;
+    let pending = tool(
+        &h.app,
+        &token,
+        "delegate",
+        json!({
+            "target_bot_id": scout,
+            "task": format!("{GATE} Replace your DM cap rule with 3 per run, 20 per 24h."),
+            "owner_answer": question,
+        }),
+    )
+    .await;
+    assert!(!pending.error, "{}", pending.body);
+    let child: Uuid =
+        sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
+            .bind(root)
+            .fetch_one(&h.app.db.pool)
+            .await
+            .unwrap();
+    h.release(root).await;
+
+    let (_, child_token) = h.started(child).await;
+    let instructions = else_api::providers::prompt::instructions(&h.inputs(child).await[0], "/p");
+    assert!(
+        instructions.contains("your own routines and rules"),
+        "{instructions}"
+    );
+    let saved = tool(
+        &h.app,
+        &child_token,
+        "rules_update",
+        update(
+            "DM cap",
+            "Do: send at most 3 DMs per run and 20 per rolling 24h.",
+            "Marketing Manager said the owner wants 3 per run.",
+        ),
+    )
+    .await;
+    assert!(!saved.error, "{}", saved.body);
+    assert_eq!(saved.result["version"], 1, "{}", saved.body);
+    assert_eq!(cards(&h.app, child).await.len(), 1);
+    let chat = h
+        .app
+        .owner("GET", &format!("/v1/bots/{scout}/conversation"), None)
+        .await;
+    let card = chat.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["rules_update"].is_object())
+        .unwrap_or_else(|| panic!("no rules card in Scout's chat: {}", chat.body));
+    assert_eq!(card["rules_update"]["section"], "DM cap");
+    h.release(child).await;
+    h.app.wait_turn(&child.to_string(), &["completed"]).await;
+
+    let saved = rules(&h.app, &scout).await;
+    assert_eq!(saved["sections"][0]["title"], "DM cap");
+    assert_eq!(
+        saved["history"][0]["owner_words"], "3 per run, 20 per 24h",
+        "the owner's verified pick, not the words the task relayed"
+    );
+    assert_eq!(rules(&h.app, &manager).await["version"], 0);
 }
 
 #[tokio::test]

@@ -1,6 +1,7 @@
 //! Saved versions of each bot's rules file. A bot edits its own rules only
-//! from a turn answering the owner in its owner conversation; the owner can
-//! restore any earlier version. Every save appends a version.
+//! from a turn answering the owner in its owner conversation, or from a task
+//! delegated with the owner's answer on a card; the owner can restore any
+//! earlier version. Every save appends a version.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -11,11 +12,16 @@ use uuid::Uuid;
 use super::events;
 use super::turns::TurnStatus;
 use crate::app::providers::Origin;
-use crate::app::rules::{Applied, ChangeKind, DiffLine, Edit, InvalidRules, Rules, RulesUpdate};
+use crate::app::rules::{
+    Applied, ChangeKind, DiffLine, Edit, InvalidRules, MAX_OWNER_WORDS_CHARS, Rules, RulesUpdate,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RulesError {
-    #[error("only a turn answering the owner in this bot's own conversation can change its rules")]
+    #[error(
+        "only a turn answering the owner in this bot's own conversation, or a task delegated \
+         with the owner's answer, can change its rules"
+    )]
     NotAllowed,
     #[error("this turn is no longer running")]
     NotRunning,
@@ -90,30 +96,63 @@ pub async fn history(
     .await
 }
 
-async fn authorize_turn(conn: &mut SqliteConnection, caller: Caller) -> Result<(), RulesError> {
-    let row: Option<(Uuid, TurnStatus, String, Uuid)> = sqlx::query_as(
-        "SELECT t.bot_id, t.status, b.status, o.id
+/// Whose decision a turn's rule change records.
+enum Authority {
+    /// The owner's message the turn answers; the bot quotes their words.
+    OwnerRequest,
+    /// The owner's pick on a card another bot asked, verified by else.bot.
+    OwnerAnswer(String),
+}
+
+async fn authorize_turn(
+    conn: &mut SqliteConnection,
+    caller: Caller,
+) -> Result<Authority, RulesError> {
+    let row: Option<(Uuid, TurnStatus, String, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT t.bot_id, t.status, b.status, c.kind, d.owner_question_id
          FROM turns t JOIN bots b ON b.id = t.bot_id
-         JOIN conversations o ON o.bot_id = t.bot_id AND o.kind = 'owner'
+         JOIN conversations c ON c.id = t.conversation_id AND c.bot_id = t.bot_id
+         LEFT JOIN delegations d ON d.child_turn_id = t.id
          WHERE t.id = ?1 AND t.conversation_id = ?2",
     )
     .bind(caller.turn_id)
     .bind(caller.conversation_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((bot, status, bot_status, owner_conversation)) = row else {
+    let Some((bot, status, bot_status, kind, question)) = row else {
         return Err(RulesError::NotRunning);
     };
-    if bot != caller.bot_id || owner_conversation != caller.conversation_id {
+    if bot != caller.bot_id {
         return Err(RulesError::NotAllowed);
     }
-    if super::delegations::origin(conn, caller.turn_id).await? != Origin::OwnerRequest {
-        return Err(RulesError::NotAllowed);
-    }
+    let authority = match (kind.as_str(), question) {
+        ("owner", _)
+            if super::delegations::origin(conn, caller.turn_id).await? == Origin::OwnerRequest =>
+        {
+            Authority::OwnerRequest
+        }
+        ("task", Some(question)) => {
+            let chosen: Vec<String> = super::owner_questions::get(conn, question)
+                .await?
+                .map(|question| question.selected().into_iter().map(|c| c.label).collect())
+                .unwrap_or_default();
+            if chosen.is_empty() {
+                return Err(RulesError::NotAllowed);
+            }
+            Authority::OwnerAnswer(
+                chosen
+                    .join("; ")
+                    .chars()
+                    .take(MAX_OWNER_WORDS_CHARS)
+                    .collect(),
+            )
+        }
+        _ => return Err(RulesError::NotAllowed),
+    };
     if !status.serves_tools() || bot_status != "active" {
         return Err(RulesError::NotRunning);
     }
-    Ok(())
+    Ok(authority)
 }
 
 struct NewVersion<'a> {
@@ -165,7 +204,10 @@ pub async fn update_for_turn(
     owner_words: &str,
 ) -> Result<Saved, RulesError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    authorize_turn(&mut tx, caller).await?;
+    let owner_words = match authorize_turn(&mut tx, caller).await? {
+        Authority::OwnerRequest => owner_words.to_owned(),
+        Authority::OwnerAnswer(chosen) => chosen,
+    };
     let current = current(&mut tx, caller.bot_id).await?;
     let (current_version, markdown) = current.unwrap_or_default();
     let Applied::Changed {
@@ -186,7 +228,7 @@ pub async fn update_for_turn(
             markdown: &rules.render(),
             section: &section,
             change,
-            owner_words,
+            owner_words: &owner_words,
             author: "bot",
             restored_from: None,
             diff: &diff,
@@ -198,14 +240,16 @@ pub async fn update_for_turn(
         version,
         section,
         change,
-        owner_words: owner_words.to_owned(),
+        owner_words,
         diff,
     };
-    let seq: i64 = sqlx::query_scalar(
+    // A task's own conversation is hidden from the owner, so the card goes
+    // to the bot's chat with the owner, as a task's routine change does.
+    let (conversation, seq): (Uuid, i64) = sqlx::query_as(
         "UPDATE conversations SET last_item_seq = last_item_seq + 1
-         WHERE id = ?1 RETURNING last_item_seq",
+         WHERE bot_id = ?1 AND kind = 'owner' RETURNING id, last_item_seq",
     )
-    .bind(caller.conversation_id)
+    .bind(caller.bot_id)
     .fetch_one(&mut *tx)
     .await?;
     let item_id = Uuid::new_v4();
@@ -219,7 +263,7 @@ pub async fn update_for_turn(
          VALUES (?1, ?2, ?3, ?4, 'status', ?5, ?6)",
     )
     .bind(item_id)
-    .bind(caller.conversation_id)
+    .bind(conversation)
     .bind(seq)
     .bind(caller.turn_id)
     .bind(format!("{verb} rule: {}", update.section))
