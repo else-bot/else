@@ -44,6 +44,8 @@ SCREEN = "/tmp/.X11-unix/X99"
 LOCK = "/var/lib/elsebot/browser.lock"
 MAX_EVALUATE = 300
 CONTROLLED = "/var/lib/elsebot/browser-controlled.jsonl"
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "actions.js")) as _f:
+    ACTIONS = _f.read()
 
 
 def _record(target, created):
@@ -450,6 +452,38 @@ class Page:
                 raise error(f"timed out after {timeout} s waiting for {what or expression}")
             time.sleep(0.15)
 
+    def _element(self, selector, field=False):
+        """The remote object of the element the selector finds (or, with
+        field, the field it types into), resolved once so every step of an
+        action runs on that element even if the page swaps in another."""
+        r = self.call("Runtime.evaluate", {"expression": f"document.querySelector({json.dumps(selector)})",
+                                           "objectGroup": "elsecdp-action"}, mutating=False)
+        if r.get("result", {}).get("subtype") == "null" or "objectId" not in r.get("result", {}):
+            raise CdpError(f"no element matches {selector}")
+        element = r["result"]["objectId"]
+        if field:
+            element = self.call("Runtime.callFunctionOn", {
+                "objectId": element, "objectGroup": "elsecdp-action",
+                "functionDeclaration": f"function(){{return ({ACTIONS}).field.call(this)}}"}, mutating=False)["result"]["objectId"]
+        return element
+
+    def _step(self, element, step, *args, mutating=True):
+        """Run one of the steps in actions.js on the element."""
+        r = self.call("Runtime.callFunctionOn", {
+            "objectId": element, "returnByValue": True, "awaitPromise": True,
+            "functionDeclaration": f"function(){{return ({ACTIONS}).{step}.call(this, ...{json.dumps(args)})}}"},
+            mutating=mutating)
+        if "exceptionDetails" in r:
+            d = r["exceptionDetails"]
+            raise CdpError(f"page script failed: {d.get('exception', {}).get('description', d.get('text'))}")
+        return r.get("result", {}).get("value")
+
+    def _release(self):
+        try:
+            self.call("Runtime.releaseObjectGroup", {"objectGroup": "elsecdp-action"}, mutating=False)
+        except CdpError:
+            pass
+
     def fill(self, selector, value):
         ok = self.evaluate(
             f"(() => {{ const e = document.querySelector({json.dumps(selector)}); if (!e) return false; e.focus(); "
@@ -459,9 +493,22 @@ class Page:
             raise CdpError(f"no element matches {selector}")
 
     def click(self, selector):
-        ok = self.evaluate(f"(() => {{ const e = document.querySelector({json.dumps(selector)}); if (!e) return false; e.click(); return true; }})()")
-        if not ok:
-            raise CdpError(f"no element matches {selector}")
+        """Click like a person: real mouse events on the element, after
+        checking that it is visible, enabled, and not covered (CdpError if not)."""
+        try:
+            element = self._element(selector)
+            point = self._step(element, "clickPoint", mutating=False)
+            if "error" not in point:
+                self.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": point["x"], "y": point["y"]})
+                # Hovering can open a menu or move the page; check the point again.
+                point = self._step(element, "clickPoint", point["x"], point["y"], mutating=False)
+            if "error" in point:
+                raise CdpError(f"{point['error']} ({selector})")
+            for kind in ("mousePressed", "mouseReleased"):
+                self.call("Input.dispatchMouseEvent", {"type": kind, "x": point["x"], "y": point["y"],
+                                                       "button": "left", "clickCount": 1})
+        finally:
+            self._release()
 
     def show(self):
         """Make this the tab shown in the visible browser window."""

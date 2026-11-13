@@ -56,6 +56,7 @@ function canRun(path) {
   }
 }
 const LOCK = "/var/lib/elsebot/browser.lock";
+const ACTIONS = fs.readFileSync(new URL("actions.js", import.meta.url), "utf8");
 export const MAX_EVALUATE_MS = 300000;
 const CONTROLLED = "/var/lib/elsebot/browser-controlled.jsonl";
 
@@ -469,14 +470,51 @@ export class Page {
     }
   }
 
+  /** The remote object of the element the selector finds (or, with
+   * `field`, the field it types into), resolved once so every step of an
+   * action runs on that element even if the page swaps in another. */
+  async element(selector, { field = false } = {}) {
+    const r = await this.call("Runtime.evaluate", { expression: `document.querySelector(${JSON.stringify(selector)})`, objectGroup: "cdp-action" }, { mutating: false });
+    if (!r.result?.objectId) throw new CdpError(`no element matches ${selector}`);
+    if (!field) return r.result.objectId;
+    const f = await this.call("Runtime.callFunctionOn", { objectId: r.result.objectId, objectGroup: "cdp-action", functionDeclaration: `function(){return (${ACTIONS}).field.call(this)}` }, { mutating: false });
+    return f.result.objectId;
+  }
+
+  /** Run one of the steps in actions.js on the element. */
+  async step(element, step, args = [], { mutating = true } = {}) {
+    const r = await this.call("Runtime.callFunctionOn", { objectId: element, returnByValue: true, awaitPromise: true, functionDeclaration: `function(){return (${ACTIONS}).${step}.call(this, ...${JSON.stringify(args)})}` }, { mutating });
+    if (r.exceptionDetails) throw new CdpError(`page script failed: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
+    return r.result?.value;
+  }
+
+  async release() {
+    await this.call("Runtime.releaseObjectGroup", { objectGroup: "cdp-action" }, { mutating: false }).catch(() => {});
+  }
+
   async fill(selector, value) {
     const ok = await this.evaluate(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); if (!e) return false; e.focus(); e.value = ${JSON.stringify(value)}; e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
     if (!ok) throw new CdpError(`no element matches ${selector}`);
   }
 
+  /** Click like a person: real mouse events on the element, after
+   * checking that it is visible, enabled, and not covered (CdpError if not). */
   async click(selector) {
-    const ok = await this.evaluate(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); if (!e) return false; e.click(); return true; })()`);
-    if (!ok) throw new CdpError(`no element matches ${selector}`);
+    try {
+      const element = await this.element(selector);
+      let point = await this.step(element, "clickPoint", [], { mutating: false });
+      if (!point.error) {
+        await this.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y });
+        // Hovering can open a menu or move the page; check the point again.
+        point = await this.step(element, "clickPoint", [point.x, point.y], { mutating: false });
+      }
+      if (point.error) throw new CdpError(`${point.error} (${selector})`);
+      for (const type of ["mousePressed", "mouseReleased"]) {
+        await this.call("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "left", clickCount: 1 });
+      }
+    } finally {
+      await this.release();
+    }
   }
 
   async show() {

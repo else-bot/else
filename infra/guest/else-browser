@@ -64,6 +64,10 @@ class Tab:
                                  "params": {"accept": self.accept_dialogs}}))
         self.dialogs.append({"type": dialog.get("type"), "message": dialog.get("message", "")[:500],
                              "answer": "accepted" if self.accept_dialogs else "dismissed"})
+    def on(self, element, function):
+        r = self.call("Runtime.callFunctionOn", objectId=element, functionDeclaration=function,
+                      returnByValue=True, awaitPromise=True)
+        return r.get("result", {}).get("value")
     def eval(self, expression):
         r = self.call("Runtime.evaluate", expression=expression, returnByValue=True, awaitPromise=True)
         return r.get("result", {}).get("value")
@@ -174,25 +178,25 @@ if(hits.length)return {state:'several',count:hits.length,tags:hits.slice(0,5).ma
 return {state:'missing',near:[...new Set(deepest(near).map(name))].slice(0,5)};
 }"""
 
-def on_element(tab, selector, script):
+def find(tab, selector):
+    """The one element a selector names, as a remote object ID."""
     if selector.startswith("text="):
         label = selector[5:].strip()
         if len(label) > 1 and label[0] == label[-1] and label[0] in "\"'":
             label = label[1:-1]
-        find = f"const r=({BY_TEXT})({json.dumps(label)});if(!r.el)return r;let e=r.el;"
+        body = f"const r=({BY_TEXT})({json.dumps(label)});return r.el||r;"
     else:
         label = None
-        find = (f"let e;try{{e=document.querySelector({json.dumps(selector)})}}catch(_){{return {{state:'invalid'}}}}"
-                "if(!e)return {state:'missing'};")
-    found = tab.eval(f"(()=>{{{find}{script}return {{state:'ok'}}}})()") or {"state": "missing"}
-    state = found["state"]
-    if state == "ok":
-        return
+        body = (f"let e;try{{e=document.querySelector({json.dumps(selector)})}}catch(_){{return {{state:'invalid'}}}}"
+                "return e||{state:'missing'};")
+    result = tab.call("Runtime.evaluate", expression=f"(()=>{{{body}}})()")["result"]
+    if result.get("subtype") == "node":
+        return result["objectId"]
+    found = tab.on(result["objectId"], "function(){return this}") if "objectId" in result else {}
+    state = found.get("state")
     if state == "invalid":
         error = (f"{json.dumps(selector)} is not a CSS selector; use CSS such as #id, .class, or "
                  "button[type=submit], or text=Label, not XPath")
-    elif state == "not_field":
-        error = f"{json.dumps(selector)} is not a text field"
     elif state == "several":
         error = (f"{found['count']} visible elements have the text {json.dumps(label)}, in page order: "
                  f"{', '.join(found['tags'])}; use a CSS selector")
@@ -202,6 +206,30 @@ def on_element(tab, selector, script):
         similar = ", ".join(json.dumps(n) for n in found.get("near", []))
         error = f"no visible element has the text {json.dumps(label)}" + (f"; similar: {similar}" if similar else "")
     raise SystemExit(json.dumps({"error": error}))
+
+ACTIONS = open("/usr/local/lib/elsebot/cdp/actions.js").read()
+
+def page_step(tab, element, step, *args):
+    """Run one of the steps in actions.js on the element."""
+    return tab.on(element, f"function(){{return ({ACTIONS}).{step}.call(this,...{json.dumps(args)})}}")
+
+def click(tab, element, selector):
+    point = page_step(tab, element, "clickPoint")
+    if "error" not in point:
+        tab.call("Input.dispatchMouseEvent", type="mouseMoved", x=point["x"], y=point["y"])
+        # Hovering can open a menu or move the page; check the point again.
+        point = page_step(tab, element, "clickPoint", point["x"], point["y"])
+    if "error" in point:
+        raise SystemExit(json.dumps({"error": f"{point['error']} ({json.dumps(selector)})"}))
+    for kind in ("mousePressed", "mouseReleased"):
+        tab.call("Input.dispatchMouseEvent", type=kind, x=point["x"], y=point["y"], button="left", clickCount=1)
+
+def set_field(tab, selector, value):
+    element = find(tab, selector)
+    if not tab.on(element, "function(){let e=this;if(!e.matches('input,textarea,select')&&e.closest('label')?.control)"
+                  "e=e.closest('label').control;if(!e.matches('input,textarea,select'))return false;"
+                  f"e.focus();e.value={json.dumps(value)};e.dispatchEvent(new Event('input',{{bubbles:true}}));return true}}"):
+        raise SystemExit(json.dumps({"error": f"{json.dumps(selector)} is not a text field"}))
 
 def main(argv):
     accept_dialogs = argv[:1] == ["--accept-dialogs"]
@@ -223,13 +251,11 @@ def main(argv):
         time.sleep(0.3)
         tab.settle()
     elif action == "click":
-        on_element(tab, rest[0], "e.click();")
+        click(tab, find(tab, rest[0]), rest[0])
         time.sleep(0.2)
         tab.settle()
     elif action == "type":
-        on_element(tab, rest[0], "if(!e.matches('input,textarea,select')&&e.closest('label')?.control)e=e.closest('label').control;"
-                   "if(!e.matches('input,textarea,select'))return {state:'not_field'};"
-                   f"e.focus();e.value={json.dumps(rest[1])};e.dispatchEvent(new Event('input',{{bubbles:true}}));")
+        set_field(tab, rest[0], rest[1])
     elif action not in ("text", "title"):
         raise SystemExit(json.dumps({"error": f"unknown action {action}"}))
     text = tab.eval("document.body ? document.body.innerText : ''") or ""
