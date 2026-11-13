@@ -7,13 +7,16 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::super::codex_rpc::{AppServer, Incoming, RpcError};
-use super::policy::{Reported, TurnEvents};
+use super::policy::{Refusal, Reported, TurnEvents};
 use super::{Codex, RPC_TIMEOUT, Ready, codex_home, failed, prompt, skills};
 use crate::app::providers::{Profile, Stop, TurnInput, TurnOutcome, TurnSink};
 use crate::providers::cli::attempt::{self, Channel, Ended};
 use crate::providers::cli::session::{Opened, PreparedTurn};
 
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long to wait before listing an MCP server that reported no tools
+/// again; each listing reconnects to it.
+const INVENTORY_RETRY: Duration = Duration::from_secs(1);
 
 fn instructions(input: &TurnInput, cwd: &str) -> String {
     let mut text = prompt::instructions(input, cwd);
@@ -78,12 +81,20 @@ pub(super) fn turn_input(segments: &[prompt::Segment<'_>], project: &std::path::
 impl Codex {
     /// Verify the MCP servers and return the account's non-secret identity.
     async fn preflight(&self, server: &AppServer) -> Result<String, TurnOutcome> {
-        let status = server
-            .request("mcpServerStatus/list", json!({}), RPC_TIMEOUT)
-            .await
-            .map_err(|err| failed("provider_unavailable", err.to_string()))?;
-        if let Err(reason) = self.check_servers(&status["data"], true) {
-            return Err(failed("policy_violation", reason));
+        let checked = match self.list_servers(server).await? {
+            Err(Refusal::Unavailable(reason)) => {
+                tracing::info!(%reason, "else.bot's MCP server has no tools; listing once more");
+                tokio::time::sleep(INVENTORY_RETRY).await;
+                self.list_servers(server).await?
+            }
+            first => first,
+        };
+        match checked {
+            Ok(()) => {}
+            Err(Refusal::Unavailable(reason)) => {
+                return Err(failed("provider_unavailable", reason));
+            }
+            Err(Refusal::Policy(reason)) => return Err(failed("policy_violation", reason)),
         }
         // Codex looks up workspace routing on chatgpt.com here, under its own
         // 15-second timeout, and caches only a successful lookup.
@@ -107,6 +118,14 @@ impl Codex {
             account["type"].as_str().unwrap_or_default(),
             account["email"].as_str().unwrap_or_default()
         ))
+    }
+
+    async fn list_servers(&self, server: &AppServer) -> Result<Result<(), Refusal>, TurnOutcome> {
+        let status = server
+            .request("mcpServerStatus/list", json!({}), RPC_TIMEOUT)
+            .await
+            .map_err(|err| failed("provider_unavailable", err.to_string()))?;
+        Ok(self.check_servers(&status["data"], true))
     }
 
     /// Resume the bot's thread when its fingerprint matches and Codex still

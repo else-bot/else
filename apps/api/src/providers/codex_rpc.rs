@@ -21,7 +21,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 use super::cli::attempt::{self, Ended};
 use super::cli::lines::{JsonLines, LineError};
-use super::cli::process::{Finish, Scope};
+use super::cli::process::{Finish, Scope, Stderr, last_lines};
 use super::host::{Host, LaunchSpec};
 use crate::app::providers::{TurnOutcome, TurnSink};
 
@@ -33,6 +33,8 @@ pub enum RpcError {
     Spawn(String),
     #[error("the provider process exited")]
     Closed,
+    #[error("the provider process exited: {0}")]
+    Exited(String),
     #[error("the provider did not answer {0} in time")]
     Timeout(String),
     #[error("{method} failed: {message} ({code})")]
@@ -80,6 +82,7 @@ pub struct AppServer {
     /// The bot's project directory, for `cwd`.
     pub cwd: String,
     scope: Scope,
+    stderr: Stderr,
     commands: mpsc::Sender<Command>,
     slots: Arc<Semaphore>,
     next_id: AtomicI64,
@@ -116,16 +119,20 @@ impl AppServer {
 
     /// Start the server on the host without its handshake.
     pub fn spawn(host: &Host, spec: &LaunchSpec) -> Result<Self, RpcError> {
-        let mut scope = Scope::spawn(host, spec, Stdio::piped(), Stdio::null())
+        let mut spec = spec.clone();
+        spec.env.push(("NO_COLOR".into(), "1".into()));
+        let mut scope = Scope::spawn(host, &spec, Stdio::piped(), Stdio::piped())
             .map_err(|err| RpcError::Spawn(err.to_string()))?;
         let stdin = scope.child().stdin.take().ok_or(RpcError::Closed)?;
         let stdout = scope.child().stdout.take().ok_or(RpcError::Closed)?;
+        let stderr = scope.child().stderr.take().ok_or(RpcError::Closed)?;
         let (tx, incoming) = mpsc::channel(MAX_QUEUED);
         let (commands, command_rx) = mpsc::channel(MAX_REQUESTS);
         tokio::spawn(io_loop(stdout, stdin, command_rx, tx));
         Ok(Self {
             cwd: spec.dirs.project.to_string_lossy().into_owned(),
             scope,
+            stderr: Stderr::collect(stderr, &spec),
             commands,
             slots: Arc::new(Semaphore::new(MAX_REQUESTS)),
             next_id: AtomicI64::new(1),
@@ -180,13 +187,14 @@ impl AppServer {
                 Err(_) => Err(RpcError::Closed),
             }
         };
-        tokio::time::timeout(timeout, exchange)
+        let result = tokio::time::timeout(timeout, exchange)
             .await
-            .map_err(|_| RpcError::Timeout(method.to_owned()))?
+            .map_err(|_| RpcError::Timeout(method.to_owned()))?;
+        self.explain(result).await
     }
 
     pub async fn notify(&self, method: &str, params: Value) -> Result<(), RpcError> {
-        tokio::time::timeout(Duration::from_secs(10), async {
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
             let (tx, rx) = oneshot::channel();
             self.commands
                 .send(Command::Notify {
@@ -198,7 +206,23 @@ impl AppServer {
             rx.await.map_err(|_| RpcError::Closed)?
         })
         .await
-        .map_err(|_| RpcError::Timeout(method.to_owned()))?
+        .map_err(|_| RpcError::Timeout(method.to_owned()))?;
+        self.explain(result).await
+    }
+
+    /// Name a closed connection's cause from the end of the process's
+    /// stderr, and log the whole tail.
+    async fn explain<T>(&self, result: Result<T, RpcError>) -> Result<T, RpcError> {
+        let Err(RpcError::Closed) = result else {
+            return result;
+        };
+        let tail = self.stderr.tail().await;
+        let lines = last_lines(&tail, 3);
+        if lines.is_empty() {
+            return Err(RpcError::Closed);
+        }
+        tracing::warn!(stderr = %tail, "Codex closed its connection");
+        Err(RpcError::Exited(lines.join(" / ")))
     }
 
     /// The next notification or refused request; `None` once the process

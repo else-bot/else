@@ -5,8 +5,10 @@ use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, ChildStderr};
+use tokio::sync::watch;
 use uuid::Uuid;
 
+use super::files::GRANT_ENV;
 use crate::providers::host::{Host, LaunchSpec, Supervised};
 
 /// How long a process that reported its terminal result may take to exit
@@ -105,12 +107,19 @@ impl Drop for Scope {
     }
 }
 
-/// The tail of a process's stderr, collected in the background.
-pub struct Stderr(tokio::task::JoinHandle<String>);
+/// The tail of a process's stderr, collected in the background, with the
+/// launch's tool grant hidden. Set once the pipe closes.
+pub struct Stderr(watch::Receiver<Option<String>>);
 
 impl Stderr {
-    pub fn collect(stderr: ChildStderr) -> Self {
-        Self(tokio::spawn(async move {
+    pub fn collect(stderr: ChildStderr, spec: &LaunchSpec) -> Self {
+        let grant = spec
+            .env
+            .iter()
+            .find(|(key, value)| key == GRANT_ENV && !value.is_empty())
+            .map(|(_, value)| value.clone());
+        let (done, tail) = watch::channel(None);
+        tokio::spawn(async move {
             let mut stderr = stderr;
             let mut tail = Vec::new();
             let mut buf = [0u8; 4096];
@@ -123,22 +132,35 @@ impl Stderr {
                     tail.drain(..tail.len() - STDERR_TAIL);
                 }
             }
-            String::from_utf8_lossy(&tail).into_owned()
-        }))
+            let mut text = String::from_utf8_lossy(&tail).into_owned();
+            if let Some(grant) = grant {
+                text = text.replace(&grant, "[tool grant]");
+            }
+            let _ = done.send(Some(text));
+        });
+        Self(tail)
     }
 
-    /// The last non-empty line, waiting briefly for the pipe to close.
-    pub async fn last_line(self) -> String {
-        let text = tokio::time::timeout(Duration::from_secs(2), self.0)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default();
-        text.lines()
-            .rev()
-            .map(str::trim)
-            .find(|l| !l.is_empty())
-            .unwrap_or_default()
-            .to_owned()
+    /// The tail, waiting briefly for the pipe to close; empty if it stays
+    /// open.
+    pub async fn tail(&self) -> String {
+        let mut tail = self.0.clone();
+        match tokio::time::timeout(Duration::from_secs(2), tail.wait_for(Option::is_some)).await {
+            Ok(Ok(text)) => text.clone().unwrap_or_default(),
+            _ => String::new(),
+        }
     }
+}
+
+/// The last `count` non-empty lines of `text`, oldest first.
+pub fn last_lines(text: &str, count: usize) -> Vec<&str> {
+    let mut lines: Vec<&str> = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(count)
+        .collect();
+    lines.reverse();
+    lines
 }
