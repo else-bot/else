@@ -2,10 +2,27 @@ use super::{ComputerError, ComputerManager, ExecOutput};
 use std::time::Duration;
 use uuid::Uuid;
 
-const WRITE_FILE: &str = r#"cd "$HOME/work" 2>/dev/null || cd "$HOME"; mkdir -p -- "$(dirname -- "$1")" && printf %s "$2" | base64 -d > "$1""#;
+/// Resolves the bot's path `$1` into `$p`: relative to `~/work`, with a
+/// leading `~` or `$HOME` expanded, since `"$1"` stays unexpanded.
+macro_rules! guest_path {
+    ($rest:literal) => {
+        concat!(
+            r#"cd "$HOME/work" 2>/dev/null || cd "$HOME"
+case $1 in "~"|'$HOME') p=$HOME ;; "~/"*) p=$HOME/${1#"~/"} ;; '$HOME/'*) p=$HOME/${1#'$HOME/'} ;; *) p=$1 ;; esac
+"#,
+            $rest
+        )
+    };
+}
 
-const READ_FILE: &str = r#"cd "$HOME/work" 2>/dev/null || cd "$HOME"; [ -f "$1" ] || { echo "not a regular file" >&2; exit 1; }
-stat -c %s -- "$1" && tail -c +"$(($2 + 1))" -- "$1" | head -c "$3" | base64 -w0"#;
+const WRITE_FILE: &str =
+    guest_path!(r#"mkdir -p -- "$(dirname -- "$p")" && printf %s "$2" | base64 -d > "$p""#);
+
+const READ_FILE: &str = guest_path!(
+    r#"[ -e "$p" ] || { echo "no such file: $1" >&2; exit 1; }
+[ -f "$p" ] || { echo "not a regular file: $1" >&2; exit 1; }
+stat -c %s -- "$p" && tail -c +"$(($2 + 1))" -- "$p" | head -c "$3" | base64 -w0"#
+);
 
 struct CheckedArtifact {
     bytes: u64,
