@@ -160,8 +160,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                 reply.reactions.push((item.id, kind));
             }
             if let Some(previous) = reply.latest.replace(item.id) {
-                // The last reply of an earlier attempt was the answer the
-                // owner read while the turn waited; it never folds away.
+                // The owner read an earlier attempt's last reply as the answer.
                 let ended_attempt = conversation
                     .item(previous)
                     .and_then(|previous| previous.attempt)
@@ -180,12 +179,14 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             reply.anchor = Some(item.id);
         }
     }
+    // A queued turn runs no attempt, so its latest reply ended one.
     for (turn, reply) in &mut replies {
         let attempt = reply.latest.and_then(|id| conversation.item(id)?.attempt);
         reply.latest_kept |= attempt.is_some()
-            && conversation
-                .turn(*turn)
-                .is_some_and(|turn| turn.attempt > attempt);
+            && (reply.state == ReplyState::Queued
+                || conversation
+                    .turn(*turn)
+                    .is_some_and(|turn| turn.attempt > attempt));
     }
     // A finished turn kept only for its pending computer handoff has no
     // history on this page; the composer bar shows it instead of a row.
@@ -790,6 +791,12 @@ mod tests {
             turn
         };
         let items = vec![item(1, 10, "user"), reply(2, 1), reply(3, 1), result];
+
+        let requeued = conversation(items.clone(), vec![attempt("queued", 1)]);
+        assert!(
+            task_replies(&requeued)[&id(10)].latest_kept,
+            "the read reply stays on screen while the result waits for a slot"
+        );
 
         let resumed = conversation(items.clone(), vec![attempt("running", 2)]);
         let working = &task_replies(&resumed)[&id(10)];
