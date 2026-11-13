@@ -11,7 +11,8 @@
 
 use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::FocusableExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Theme, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -20,6 +21,12 @@ use gpui_kit::*;
 const LEAD: f32 = 20.;
 /// The line height of a card title; the icon centres on it.
 const TITLE_LINE: f32 = 22.;
+/// The disclosure column every activity row reserves at its right end.
+const CHEVRON: f32 = 12.;
+/// A card footer's helper line.
+const NOTE_TEXT: f32 = 12.;
+/// An activity row action's label, as a share of the foreground.
+const ACTION_TEXT: f32 = 0.7;
 
 #[derive(IntoElement)]
 pub(super) struct ActionCard {
@@ -146,14 +153,11 @@ impl RenderOnce for ActionCard {
                     .text_color(theme.warning)
                     .child(tag)
             }));
-        v_flex()
+        surface(v_flex(), theme)
             .w_full()
             .min_w_0()
             .gap_3()
             .p_5()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
             .child(heading)
             .children(self.body)
             .children(
@@ -163,27 +167,108 @@ impl RenderOnce for ActionCard {
     }
 }
 
-/// A card's footer row: optional helper text on the left, then the buttons
-/// on the right.
-pub(super) fn footer() -> Div {
-    h_flex()
-        .w_full()
-        .min_w_0()
-        .justify_end()
-        .items_center()
-        .flex_wrap()
-        .gap_2()
+/// The surface of a card in the conversation: a faint step off the page
+/// and a quiet edge, so it reads as part of the conversation rather than a
+/// form box.
+pub(super) fn surface<E: Styled>(element: E, theme: &Theme) -> E {
+    let (fill, edge) = if theme.mode.is_dark() {
+        (
+            theme.foreground.opacity(0.025),
+            theme.foreground.opacity(0.06),
+        )
+    } else {
+        (
+            gpui_kit::white().opacity(0.6),
+            theme.foreground.opacity(0.08),
+        )
+    };
+    element
+        .rounded(theme.radius_lg)
+        .bg(fill)
+        .border_1()
+        .border_color(edge)
 }
 
-/// The helper text that leads a footer and takes its free width.
-pub(super) fn footer_note(theme: &Theme, text: impl Into<SharedString>) -> Div {
-    div()
-        .flex_1()
-        .min_w(px(160.))
-        .text_xs()
-        .whitespace_normal()
-        .text_color(theme.muted_foreground)
-        .child(text.into())
+/// A card's footer: an optional helper line, then the buttons on a row of
+/// their own, right-aligned and 8 px apart.
+#[derive(IntoElement)]
+pub(super) struct Footer {
+    note: Vec<AnyElement>,
+    buttons: Vec<AnyElement>,
+}
+
+pub(super) fn footer() -> Footer {
+    Footer {
+        note: Vec::new(),
+        buttons: Vec::new(),
+    }
+}
+
+impl Footer {
+    /// Helper text for the footer's note line.
+    pub(super) fn note(mut self, text: impl Into<SharedString>) -> Self {
+        self.note.push(
+            div()
+                .min_w_0()
+                .whitespace_normal()
+                .child(text.into())
+                .into_any_element(),
+        );
+        self
+    }
+
+    /// An inline link that ends the note line, such as "About saving".
+    pub(super) fn note_link(mut self, link: Button) -> Self {
+        self.note.push(
+            link.link()
+                .xsmall()
+                .focus_ring(false)
+                .cursor_pointer()
+                .h_auto()
+                .text_size(px(NOTE_TEXT))
+                .into_any_element(),
+        );
+        self
+    }
+}
+
+impl ParentElement for Footer {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.buttons.extend(elements);
+    }
+}
+
+impl RenderOnce for Footer {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .gap_3()
+            .when(!self.note.is_empty(), |footer| {
+                footer.child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .flex_wrap()
+                        .gap_x_1()
+                        .text_size(px(NOTE_TEXT))
+                        .text_color(theme.muted_foreground)
+                        .children(self.note),
+                )
+            })
+            .when(!self.buttons.is_empty(), |footer| {
+                footer.child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .justify_end()
+                        .flex_wrap()
+                        .gap_2()
+                        .children(self.buttons),
+                )
+            })
+    }
 }
 
 /// A card's body text: the exact command, request, or reason, on the
@@ -202,9 +287,8 @@ pub(super) fn body_text(text: impl Into<SharedString>) -> Div {
 pub(super) const OPTION_HEIGHT: f32 = 44.;
 
 /// One activity row: a 36 px line with the icon column, then actor, verb
-/// and object. Its right end follows one grammar: meta, then at most two
-/// actions, then a chevron only when the row expands in place. Each ends on
-/// the same edge, the card content inset.
+/// and object, then [`event_end`]. Rows of one family sit 4 px apart, a
+/// 40 px pitch.
 pub(super) fn event_row(theme: &Theme) -> Div {
     h_flex()
         .w_full()
@@ -217,6 +301,51 @@ pub(super) fn event_row(theme: &Theme) -> Div {
         .text_size(px(13.))
         .text_color(theme.muted_foreground)
         .hover(|style| style.bg(theme.muted.opacity(0.5)))
+}
+
+/// What an activity row shows in its one right-hand slot.
+pub(super) enum EventEnd {
+    /// Status, count or time.
+    Meta(SharedString),
+    /// At most two [`event_action`]s.
+    Actions(Vec<Button>),
+}
+
+/// How a row's disclosure column reads. Every row reserves the column, so
+/// meta and action labels end on one edge whether or not a row expands.
+#[derive(Clone, Copy)]
+pub(super) enum Disclosure {
+    None,
+    Collapsed,
+    Expanded,
+}
+
+/// The right end of an activity row: its one slot, then the disclosure
+/// column. Meta is inset by a compact button's padding so its text ends
+/// where an action's label ends.
+pub(super) fn event_end(theme: &Theme, end: EventEnd, disclosure: Disclosure) -> Div {
+    let slot = match end {
+        EventEnd::Meta(meta) => h_flex().child(
+            div()
+                .mr(Scale::Compact.padding())
+                .text_size(px(12.5))
+                .text_color(super::message_row::meta_color(theme))
+                .child(meta),
+        ),
+        EventEnd::Actions(actions) => h_flex().gap_1().children(actions),
+    };
+    let chevron = match disclosure {
+        Disclosure::None => None,
+        Disclosure::Collapsed => Some(IconName::ChevronRight),
+        Disclosure::Expanded => Some(IconName::ChevronDown),
+    };
+    h_flex().flex_none().items_center().child(slot).child(
+        h_flex()
+            .flex_none()
+            .w(px(CHEVRON))
+            .justify_end()
+            .children(chevron.map(|icon| Icon::new(icon).xsmall())),
+    )
 }
 
 /// The fixed icon column of an activity row. Two faces overlap diagonally
@@ -292,46 +421,22 @@ pub(super) fn event_object(theme: &Theme, text: impl Into<SharedString>) -> Div 
         .child(text.into())
 }
 
-/// A quiet action at the end of an activity row: a compact ghost button
-/// whose label matches the row's 13 px text. Every trailing element ends on
-/// the edge this button's label ends on.
+/// A quiet action in an activity row's slot: a compact ghost button with a
+/// 13 px label a step below the row's object, full strength on hover, so it
+/// sits between the row's words and its meta.
 pub(super) fn event_action(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     disabled: bool,
     cx: &App,
 ) -> Button {
-    Button::new(id)
-        .control(Tier::Ghost, Scale::Compact, disabled, cx)
-        .child(div().text_size(px(13.)).child(label.into()))
-}
-
-/// The disclosure chevron of a row that expands in place, inset to end where
-/// an action's label ends.
-pub(super) fn event_chevron(expanded: bool) -> Div {
-    div().flex_none().mr(Scale::Compact.padding()).child(
-        Icon::new(if expanded {
-            IconName::ChevronDown
-        } else {
-            IconName::ChevronRight
-        })
-        .xsmall(),
-    )
-}
-
-/// Right-aligned meta: status, count, time. A step smaller and quieter than
-/// the row's words and its actions, so it never reads as a control.
-pub(super) fn event_meta(theme: &Theme, text: impl Into<SharedString>) -> Div {
-    div()
-        .flex_none()
-        .text_size(px(12.))
-        .text_color(super::message_row::meta_color(theme))
-        .child(text.into())
-}
-
-/// Meta that ends its row, inset to end where an action's label ends.
-pub(super) fn event_meta_end(theme: &Theme, text: impl Into<SharedString>) -> Div {
-    event_meta(theme, text).mr(Scale::Compact.padding())
+    let button = Button::new(id).control(Tier::Ghost, Scale::Compact, disabled, cx);
+    let button = if disabled {
+        button
+    } else {
+        button.text_color(cx.theme().foreground.opacity(ACTION_TEXT))
+    };
+    button.child(div().text_size(px(13.)).child(label.into()))
 }
 
 pub(super) fn failure(theme: &Theme, text: String) -> Div {

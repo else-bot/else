@@ -270,7 +270,7 @@ impl ElseApp {
             return div().into_any_element();
         };
         let theme = cx.theme().clone();
-        let row = v_flex().w_full().py_1p5();
+        let row = v_flex().w_full();
         let muted = |text: String| {
             div()
                 .text_xs()
@@ -487,12 +487,9 @@ impl ElseApp {
             );
         let footer = super::action_card::footer()
             .when(draft.kind.is_some() && draft.can_approve, |row| {
-                row.child(super::action_card::footer_note(
-                    &theme,
-                    format!(
-                        "Approve always also approves later {} without asking.",
-                        draft.content.kind_label()
-                    ),
+                row.note(format!(
+                    "Approve always also approves later {} without asking.",
+                    draft.content.kind_label()
                 ))
             })
             .child(

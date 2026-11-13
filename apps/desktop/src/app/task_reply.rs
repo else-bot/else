@@ -71,12 +71,7 @@ impl ElseApp {
             history.push(id);
         }
         let expandable = !history.is_empty();
-        let owner_waiting = task.state == ReplyState::Waiting
-            && (turn.waits_on_owner()
-                || turn
-                    .owner_notices
-                    .iter()
-                    .any(|notice| notice.status == crate::model::OwnerNoticeStatus::Pending));
+        let owner_waiting = waits_on_owner(task, turn);
         let meta = super::message_row::meta_color(&theme);
         let chevron = || {
             Icon::new(if expanded {
@@ -206,8 +201,8 @@ impl ElseApp {
             } else {
                 label.to_owned()
             };
-            // A working turn's label is the transcript's live edge: body size,
-            // with its elapsed time beside it as meta.
+            // A working turn's label reads like every other status line, with
+            // the accent dots marking it live.
             Some(
                 h_flex()
                     .min_w_0()
@@ -219,18 +214,7 @@ impl ElseApp {
                     .children(delegate_faces)
                     .child(tail(
                         meta_row()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(if working { 14. } else { 13. }))
-                                    .text_color(if working {
-                                        theme.foreground.opacity(0.85)
-                                    } else {
-                                        theme.muted_foreground
-                                    })
-                                    .child(detail),
-                            )
+                            .child(div().min_w_0().truncate().child(detail))
                             .children(
                                 elapsed
                                     .filter(|_| working)
@@ -422,13 +406,31 @@ impl ElseApp {
 }
 
 /// Three dots that pulse in turn beside a working turn's label, one lap per 1.2 s.
+fn waits_on_owner(task: &TaskReply, turn: &crate::model::Turn) -> bool {
+    task.state == ReplyState::Waiting
+        && (turn.waits_on_owner()
+            || turn
+                .owner_notices
+                .iter()
+                .any(|notice| notice.status == crate::model::OwnerNoticeStatus::Pending))
+}
+
+/// Whether a task row shows only its bot's name: the turn waits on the
+/// owner and has said nothing yet, so the card under it speaks for it.
+pub(super) fn shows_only_name(task: &TaskReply, turn: &crate::model::Turn) -> bool {
+    waits_on_owner(task, turn)
+        && task.latest.is_none()
+        && task.history.is_empty()
+        && task.kept.is_empty()
+}
+
 fn working_dots(turn: Uuid, color: Hsla, still: bool) -> impl IntoElement {
     h_flex()
         .flex_none()
         .items_center()
         .gap(px(3.))
         .children((0..3).map(move |ix| {
-            let dot = div().size(px(4.)).rounded_full().bg(color);
+            let dot = div().size(px(5.)).rounded_full().bg(color);
             if still {
                 dot.opacity(0.4 + 0.3 * ix as f32).into_any_element()
             } else {

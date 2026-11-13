@@ -259,13 +259,10 @@ impl ElseApp {
             .find(|b| b.id == view.bot_id)
             .map(|b| b.name.as_str())
             .unwrap_or("Bot");
-        let mut body = v_flex()
+        let mut body = super::action_card::surface(v_flex(), &theme)
             .w_full()
             .gap_3()
             .p_5()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
             .child(
                 div()
                     .text_xs()

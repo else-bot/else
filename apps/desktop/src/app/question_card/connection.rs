@@ -372,13 +372,10 @@ impl ElseApp {
             _ => pill(id, "Checking", theme.muted_foreground, true, still),
         };
         let ready_label = form.map_or("Connect in browser", |f| f.flow.ready_label());
-        let mut card = v_flex()
+        let mut card = super::super::action_card::surface(v_flex(), &theme)
             .w_full()
             .gap_3()
             .p_5()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
             .child(
                 h_flex()
                     .w_full()

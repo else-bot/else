@@ -343,9 +343,6 @@ impl ElseApp {
             };
             fields = fields.child(v_flex().gap_1p5().child(label).child(control));
         }
-        let fields = fields.child(note(
-            "Encrypted on this server. Values stay out of chat.".into(),
-        ));
         let expanded = view.expanded_events.contains(&id);
         let mut card =
             super::action_card::card(IconName::Lock, format!("Save {}", request.name), "")
@@ -368,35 +365,27 @@ impl ElseApp {
             card = card.child(super::action_card::failure(&theme, error.clone()));
         }
         let footer = super::action_card::footer()
-            .child(
-                h_flex().flex_1().child(
-                    Button::new(SharedString::from(format!("secret-about-{id}")))
-                        .control(Tier::Ghost, Scale::Compact, false, cx)
-                        .flush_start(Scale::Compact)
-                        .icon(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::CircleQuestionMark
-                        })
-                        .label(if expanded {
-                            "Hide details"
-                        } else {
-                            "About saving"
-                        })
-                        .accessibility_label(if expanded {
-                            "Hide details about saving credentials"
-                        } else {
-                            "About saving credentials"
-                        })
-                        .on_click(cx.listener(move |app, _, _, cx| {
-                            if let Some(view) = app.view.as_mut()
-                                && !view.expanded_events.remove(&id)
-                            {
-                                view.expanded_events.insert(id);
-                            }
-                            app.remeasure_row(super::RowKey::SecretRequest(id), cx);
-                        })),
-                ),
+            .note("Encrypted on this server. Values stay out of chat.")
+            .note_link(
+                Button::new(SharedString::from(format!("secret-about-{id}")))
+                    .label(if expanded {
+                        "Hide details"
+                    } else {
+                        "About saving"
+                    })
+                    .accessibility_label(if expanded {
+                        "Hide details about saving credentials"
+                    } else {
+                        "About saving credentials"
+                    })
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        if let Some(view) = app.view.as_mut()
+                            && !view.expanded_events.remove(&id)
+                        {
+                            view.expanded_events.insert(id);
+                        }
+                        app.remeasure_row(super::RowKey::SecretRequest(id), cx);
+                    })),
             )
             .child(
                 Button::new(SharedString::from(format!("secret-decline-{id}")))

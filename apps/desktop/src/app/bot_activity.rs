@@ -1,3 +1,4 @@
+use super::action_card::{Disclosure, EventEnd};
 use super::conversation::{ReplyLayout, TranscriptRow};
 use super::{ElseApp, RowKey};
 use crate::model::{BotCreated, BotReplyStatus, Conversation, Item};
@@ -180,9 +181,10 @@ impl ElseApp {
             ))
             .child(super::action_card::event_verb(&theme, verb))
             .child(super::action_card::event_object(&theme, object))
-            .child(super::action_card::event_meta_end(
+            .child(super::action_card::event_end(
                 &theme,
-                format!("{} · {messages}", status.label()),
+                EventEnd::Meta(format!("{} · {messages}", status.label()).into()),
+                Disclosure::None,
             ));
         let title = names.clone();
         let mut card = v_flex().w_full().min_w_0().child(
@@ -371,38 +373,41 @@ impl ElseApp {
             .view
             .as_ref()
             .is_some_and(|view| view.expanded_events.contains(&item));
+        let details = super::action_card::event_action(
+            SharedString::from(format!("created-details-{item}")),
+            "Details",
+            false,
+            cx,
+        )
+        .accessibility_label("Show created bot details")
+        .on_click(cx.listener(move |app, _, _, cx| {
+            if let Some(view) = app.view.as_mut()
+                && !view.expanded_events.remove(&item)
+            {
+                view.expanded_events.insert(item);
+            }
+            app.remeasure_row(RowKey::Item(item), cx);
+        }));
+        let open = child.map(|bot| {
+            let id = bot.id;
+            super::action_card::event_action(
+                SharedString::from(format!("open-created-{item}")),
+                "Open chat",
+                false,
+                cx,
+            )
+            .accessibility_label(format!("Open chat with {name}"))
+            .on_click(cx.listener(move |app, _, window, cx| app.open_bot(id, window, cx)))
+        });
         let row = super::action_card::event_row(&theme)
             .child(self.event_faces(&format!("created-{item}"), child.map(|bot| bot.id)))
             .child(super::action_card::event_verb(&theme, "Created bot"))
             .child(super::action_card::event_object(&theme, name.clone()))
-            .child(
-                super::action_card::event_action(
-                    SharedString::from(format!("created-details-{item}")),
-                    "Details",
-                    false,
-                    cx,
-                )
-                .accessibility_label("Show created bot details")
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    if let Some(view) = app.view.as_mut()
-                        && !view.expanded_events.remove(&item)
-                    {
-                        view.expanded_events.insert(item);
-                    }
-                    app.remeasure_row(RowKey::Item(item), cx);
-                })),
-            )
-            .children(child.map(|bot| {
-                let id = bot.id;
-                super::action_card::event_action(
-                    SharedString::from(format!("open-created-{item}")),
-                    "Open chat",
-                    false,
-                    cx,
-                )
-                .accessibility_label(format!("Open chat with {name}"))
-                .on_click(cx.listener(move |app, _, window, cx| app.open_bot(id, window, cx)))
-            }));
+            .child(super::action_card::event_end(
+                &theme,
+                EventEnd::Actions(std::iter::once(details).chain(open).collect()),
+                Disclosure::None,
+            ));
         v_flex()
             .w_full()
             .min_w_0()

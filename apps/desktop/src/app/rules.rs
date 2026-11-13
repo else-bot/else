@@ -437,8 +437,11 @@ impl ElseApp {
                 &theme,
                 update.section.clone(),
             ))
-            .child(view)
-            .children(undo);
+            .child(super::action_card::event_end(
+                &theme,
+                super::action_card::EventEnd::Actions(std::iter::once(view).chain(undo).collect()),
+                super::action_card::Disclosure::None,
+            ));
         let _ = stamp;
         line.into_any_element()
     }

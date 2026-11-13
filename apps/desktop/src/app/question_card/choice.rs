@@ -1,4 +1,4 @@
-use crate::controls::{Control as _, Scale, Tier, text_field};
+use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -12,7 +12,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
-use super::super::action_card::{OPTION_HEIGHT, footer_note};
+use super::super::action_card::OPTION_HEIGHT;
 use super::{Connection, ElseApp, QuestionForm, RowKey, SubmitState, callout, letter, receipt};
 use crate::model::{Question, QuestionAnswer};
 
@@ -133,6 +133,7 @@ impl ElseApp {
         question: &Question,
         form: Option<&QuestionForm>,
         bot_name: &str,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(view) = self.view.as_ref() else {
@@ -313,13 +314,8 @@ impl ElseApp {
         }
         if let Some(write_in) = view.write_ins.get(&id).filter(|_| takes_write_in(question)) {
             let index = question.choices.len();
-            let row = self.render_write_in(id, question, write_in, locked, cx);
-            // The last option closes the list with the same hairline, so the
-            // footer reads apart from the options.
-            rows = rows.child(
-                separated(index, row.into_any_element())
-                    .when(index > 0, |cell| cell.border_b_1().border_color(line)),
-            );
+            let row = self.render_write_in(id, question, write_in, locked, window, cx);
+            rows = rows.child(separated(index, row.into_any_element()));
         }
         body = body.child(rows);
         let hint = if question.multiple {
@@ -329,7 +325,7 @@ impl ElseApp {
         } else {
             "Choose an answer or type your own. Sending a new message skips this.".to_owned()
         };
-        let mut footer = super::super::action_card::footer().child(footer_note(&theme, hint));
+        let mut footer = super::super::action_card::footer().note(hint);
         if question.multiple {
             let answer = QuestionAnswer::Multiple(selected.iter().map(|c| c.id.clone()).collect());
             let disabled = locked || selected.is_empty();
@@ -354,6 +350,7 @@ impl ElseApp {
         question: &Question,
         write_in: &WriteIn,
         locked: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
@@ -363,56 +360,59 @@ impl ElseApp {
             .and_then(|c| c.id.chars().next())
             .and_then(|c| char::from_u32(c as u32 + 1))
             .map(|c| letter(&c.to_string()));
-        let empty = write_in.input.read(cx).value().trim().is_empty();
-        let disabled = locked || empty;
+        let input = write_in.input.read(cx);
+        let empty = input.value().trim().is_empty();
+        let focused = input.focus_handle(cx).is_focused(window);
+        let fill = theme.muted.opacity(0.5);
         h_flex()
             .w_full()
             .min_h(px(OPTION_HEIGHT))
             .gap_2p5()
-            .pl_2()
-            .pr_1()
+            .px_2()
             .py_1()
-            .rounded(theme.radius)
             .children(next.map(|next| key_chip(theme, next)))
-            // An editable field, so it never reads as a fourth fixed option.
+            // A borderless field whose text starts on the answers' text
+            // column; it fills on hover and while focused.
             .child(
-                div().flex_1().min_w_0().child(
-                    text_field(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .ml(-WRITE_IN_INSET)
+                    .rounded(theme.radius)
+                    .when(focused, |field| field.bg(fill))
+                    .when(!focused && !locked, |field| {
+                        field.hover(|style| style.bg(fill))
+                    })
+                    .child(
                         Input::new(&write_in.input)
+                            .appearance(false)
+                            .focus_ring(false)
                             .aria_label("Your own answer")
                             .disabled(locked),
-                        cx,
-                    )
-                    .h(px(32.)),
-                ),
+                    ),
             )
-            // Quiet until there is an answer to send.
-            .child(
-                Button::new(SharedString::from(format!("question-{id}-write-in")))
-                    .control(
-                        if empty { Tier::Ghost } else { Tier::Primary },
-                        Scale::Compact,
-                        disabled,
-                        cx,
-                    )
-                    .label("Send")
-                    .children(
-                        Keystroke::parse("enter")
-                            .ok()
-                            .filter(|_| !empty)
-                            .map(|key| {
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .child(Kbd::new(key).appearance(false))
-                            }),
-                    )
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        app.send_write_in(id, window, cx);
-                    })),
-            )
+            .when(!empty, |row| {
+                row.child(
+                    Button::new(SharedString::from(format!("question-{id}-write-in")))
+                        .control(Tier::Primary, Scale::Compact, locked, cx)
+                        .label("Send")
+                        .children(Keystroke::parse("enter").ok().map(|key| {
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .child(Kbd::new(key).appearance(false))
+                        }))
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.send_write_in(id, window, cx);
+                        })),
+                )
+            })
     }
 }
+
+/// The free-text field's own text inset, pulled back so its text lines up
+/// with the answers' labels.
+const WRITE_IN_INSET: Pixels = px(10.);
 
 /// The letter that leads an option row.
 fn key_chip(theme: &Theme, key: String) -> Div {

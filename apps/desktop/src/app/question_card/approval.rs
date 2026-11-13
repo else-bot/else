@@ -268,15 +268,11 @@ impl ElseApp {
                     _ => None,
                 })
         };
-        let mut footer =
-            super::super::action_card::footer().child(super::super::action_card::footer_note(
-                &theme,
-                if grants.len() > 1 {
-                    "Sending a new message skips this."
-                } else {
-                    "Covers exactly this action, once. Sending a new message skips this."
-                },
-            ));
+        let mut footer = super::super::action_card::footer().note(if grants.len() > 1 {
+            "Sending a new message skips this."
+        } else {
+            "Covers exactly this action, once. Sending a new message skips this."
+        });
         if question.choices.iter().any(|c| c.id == DENY) {
             footer = footer.child(
                 Button::new(SharedString::from(format!("question-{id}-{DENY}")))

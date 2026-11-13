@@ -9,7 +9,8 @@ use crate::model::ReactionKind;
 use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::FocusableExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Theme, h_flex};
@@ -38,7 +39,7 @@ impl ElseApp {
     pub(super) fn render_row(
         &mut self,
         ix: usize,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(row) = self
@@ -84,7 +85,7 @@ impl ElseApp {
         } else if let Some(task) = row.task.as_ref() {
             self.render_task_reply(task, row.footer_stamp, cx)
         } else {
-            self.render_row_content(&row, cx)
+            self.render_row_content(&row, window, cx)
         };
         let Some(body) = body else {
             return div().into_any_element();
@@ -137,25 +138,7 @@ impl ElseApp {
                             .and_then(|view| view.conversation.as_ref())
                             .and_then(|conversation| conversation.turn(task.turn))
                             .and_then(|turn| turn.routine.as_ref())
-                            .map(|run| {
-                                let theme = cx.theme();
-                                super::action_card::event_row(theme)
-                                    .child(super::action_card::event_icon(IconName::Clock))
-                                    .child(super::action_card::event_verb(theme, run.label()))
-                                    .child(super::action_card::event_object(
-                                        theme,
-                                        run.name.clone(),
-                                    ))
-                                    .child(super::action_card::event_meta(theme, stamp(run.due_at)))
-                                    .child(routine_details(
-                                        SharedString::from(format!(
-                                            "routine-{}-{}",
-                                            run.routine_id,
-                                            run.due_at.timestamp()
-                                        )),
-                                        cx,
-                                    ))
-                            }),
+                            .map(|run| routine_run(run, cx)),
                     )
                     .child(body)
                     .into_any_element()
@@ -184,6 +167,7 @@ impl ElseApp {
             .checked_sub(1)
             .and_then(|ix| view.rows.get(ix))
             .is_some_and(|row| row.key == RowKey::Task(group.turn));
+        let follows_name = self.follows_name(ix);
         let actionable = matches!(
             row.key,
             RowKey::Question(_)
@@ -198,11 +182,17 @@ impl ElseApp {
                 turn.routine
                     .as_ref()
                     .filter(|_| group.first && !follows_task)
-                    .map(|run| routine_banner(run, cx)),
+                    .map(|run| routine_run(run, cx)),
             )
             .child(div().w_full().child(body));
         column
-            .when(group.first, |column| column.pt_1p5())
+            .when(group.first, |column| {
+                column.pt(if follows_name {
+                    LABEL_GAP - ROW_PAD
+                } else {
+                    ROW_PAD
+                })
+            })
             .when(group.last, |column| column.pb_1p5())
             .children(row.day.map(|at| day_separator(at, cx)))
             .children(row.unread_start.then(|| unread_divider(cx)))
@@ -255,6 +245,7 @@ impl ElseApp {
     pub(super) fn render_row_content(
         &mut self,
         row: &super::conversation::TranscriptRow,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let view = self.view.as_ref()?;
@@ -313,9 +304,13 @@ impl ElseApp {
                                 &theme,
                                 update.name.clone(),
                             ))
-                            .child(routine_details(
-                                SharedString::from(format!("routine-update-{id}")),
-                                cx,
+                            .child(super::action_card::event_end(
+                                &theme,
+                                super::action_card::EventEnd::Actions(vec![routine_details(
+                                    SharedString::from(format!("routine-update-{id}")),
+                                    cx,
+                                )]),
+                                super::action_card::Disclosure::None,
                             ))
                             .into_any_element(),
                     );
@@ -444,7 +439,9 @@ impl ElseApp {
             }
             RowKey::SkillInstall(id) => side(self.render_skill_card(id, cx)).into_any_element(),
             RowKey::SecretRequest(id) => side(self.render_secret_card(id, cx)).into_any_element(),
-            RowKey::Question(id) => side(self.render_question_card(id, cx)).into_any_element(),
+            RowKey::Question(id) => {
+                side(self.render_question_card(id, window, cx)).into_any_element()
+            }
             RowKey::Draft(id) => side(self.render_draft_card(id, cx)).into_any_element(),
             RowKey::SocialSetup(id) => side(self.render_social_card(id, cx)).into_any_element(),
             RowKey::Handoff(id) => self.render_handoff(id, cx),
@@ -574,38 +571,56 @@ pub(super) fn with_reaction(
         .into_any_element()
 }
 
-fn routine_banner(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> AnyElement {
+/// The row naming a routine run: when it was due in the row's slot, and the
+/// whole row opens the routines in bot details.
+fn routine_run(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> Button {
     let theme = cx.theme();
-    super::action_card::event_row(theme)
-        .child(super::action_card::event_icon(IconName::Clock))
-        .child(super::action_card::event_verb(theme, run.label()))
-        .child(super::action_card::event_object(theme, run.name.clone()))
-        .child(super::action_card::event_meta(
-            theme,
-            run.due_at
-                .with_timezone(&Local)
-                .format("%e %b · %H:%M %Z")
-                .to_string(),
-        ))
-        .child(routine_details(
-            SharedString::from(format!(
-                "routine-{}-{}",
-                run.routine_id,
-                run.due_at.timestamp()
+    Button::new(SharedString::from(format!(
+        "routine-{}-{}",
+        run.routine_id,
+        run.due_at.timestamp()
+    )))
+    .ghost()
+    .focus_ring(false)
+    .cursor_pointer()
+    .w_full()
+    .h_auto()
+    .p_0()
+    .accessibility_label(format!(
+        "{} {}, {}. View routines in bot details",
+        run.label(),
+        run.name,
+        stamp(run.due_at)
+    ))
+    .child(
+        super::action_card::event_row(theme)
+            .child(super::action_card::event_icon(IconName::Clock))
+            .child(super::action_card::event_verb(theme, run.label()))
+            .child(super::action_card::event_object(theme, run.name.clone()))
+            .child(super::action_card::event_end(
+                theme,
+                super::action_card::EventEnd::Meta(stamp(run.due_at).into()),
+                super::action_card::Disclosure::None,
             )),
-            cx,
-        ))
-        .into_any_element()
+    )
+    .on_click(cx.listener(open_routines))
+}
+
+fn open_routines(
+    app: &mut ElseApp,
+    _: &ClickEvent,
+    window: &mut Window,
+    cx: &mut Context<ElseApp>,
+) {
+    if !app.settings_open {
+        app.toggle_settings(window, cx);
+    }
 }
 
 fn routine_details(id: SharedString, cx: &mut Context<ElseApp>) -> Button {
     super::action_card::event_action(id, "View", false, cx)
         .accessibility_label("View routines in bot details")
-        .on_click(cx.listener(|app, _, window, cx| {
-            if !app.settings_open {
-                app.toggle_settings(window, cx);
-            }
-        }))
+        .on_click(cx.listener(open_routines))
 }
 
 /// The two families of one-line activity rows. A run of one family reads
@@ -628,6 +643,7 @@ const ROW_PAD: Pixels = px(6.);
 const CARD_PAD: Pixels = px(8.);
 const EVENT_PAD: Pixels = px(2.);
 const EVENT_GROUP_GAP: Pixels = px(16.);
+const LABEL_GAP: Pixels = px(8.);
 
 impl ElseApp {
     fn event_kind(&self, ix: usize) -> Option<EventKind> {
@@ -651,6 +667,9 @@ impl ElseApp {
     fn row_rhythm(&self, ix: usize) -> (Pixels, Pixels) {
         let above = ix.checked_sub(1).and_then(|above| self.event_kind(above));
         let pad = if self.is_card(ix) { CARD_PAD } else { ROW_PAD };
+        if self.follows_name(ix) {
+            return (LABEL_GAP - ROW_PAD, pad);
+        }
         match (self.event_kind(ix), above) {
             (Some(kind), Some(previous)) if kind == previous => (EVENT_PAD, EVENT_PAD),
             (Some(_), Some(_)) => (EVENT_GROUP_GAP - EVENT_PAD, EVENT_PAD),
@@ -658,6 +677,24 @@ impl ElseApp {
             (None, Some(_)) => (pad * 2. - EVENT_PAD, pad),
             (None, None) => (pad, pad),
         }
+    }
+
+    /// Whether row `ix` sits right under a task row that shows only its
+    /// bot's name; the row then reads as that name's content, 8 px below it.
+    fn follows_name(&self, ix: usize) -> bool {
+        let Some(view) = self.view.as_ref() else {
+            return false;
+        };
+        let Some(above) = ix.checked_sub(1).and_then(|above| view.rows.get(above)) else {
+            return false;
+        };
+        let (Some(task), Some(conversation)) = (above.task.as_ref(), view.conversation.as_ref())
+        else {
+            return false;
+        };
+        conversation
+            .turn(task.turn)
+            .is_some_and(|turn| super::task_reply::shows_only_name(task, turn))
     }
 
     fn is_card(&self, ix: usize) -> bool {

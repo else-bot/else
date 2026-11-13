@@ -119,8 +119,15 @@ impl ElseApp {
                     .child(faces)
                     .child(super::action_card::event_verb(theme, verb))
                     .child(super::action_card::event_object(theme, object))
-                    .child(super::action_card::event_meta(theme, meta))
-                    .child(super::action_card::event_chevron(expanded)),
+                    .child(super::action_card::event_end(
+                        theme,
+                        super::action_card::EventEnd::Meta(meta.into()),
+                        if expanded {
+                            super::action_card::Disclosure::Expanded
+                        } else {
+                            super::action_card::Disclosure::Collapsed
+                        },
+                    )),
             )
             .on_click(cx.listener(move |app, _, _, cx| {
                 if let Some(view) = app.view.as_mut()

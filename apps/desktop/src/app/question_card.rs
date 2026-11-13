@@ -207,7 +207,12 @@ impl ElseApp {
         self.remeasure_row(RowKey::Question(question), cx);
     }
 
-    pub(super) fn render_question_card(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_question_card(
+        &self,
+        id: Uuid,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(view) = self.view.as_ref() else {
             return div().into_any_element();
         };
@@ -223,7 +228,7 @@ impl ElseApp {
             .unwrap_or_default();
         let waiting = question.is_pending() && !submit.is_some_and(QuestionForm::locks);
         let card = if !question.is_approval() {
-            self.render_choice_card(question, submit, &bot_name, cx)
+            self.render_choice_card(question, submit, &bot_name, window, cx)
         } else if question.mcp_connection().is_some() || question.email_connection().is_some() {
             self.render_connection_card(question, &bot_name, cx)
         } else {
