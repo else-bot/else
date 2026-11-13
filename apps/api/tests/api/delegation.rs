@@ -631,6 +631,30 @@ async fn a_pending_child_parks_the_parent_and_a_continuation_uses_its_result() {
             .unwrap();
     assert_eq!(children, 1, "retries created no second child");
 
+    let parent = app
+        .owner("GET", &format!("/v1/bots/{main}/conversation"), None)
+        .await
+        .body;
+    let replies: Vec<&Value> = parent["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["turn_id"] == root.to_string().as_str() && i["kind"] == "assistant")
+        .map(|i| &i["attempt"])
+        .collect();
+    assert_eq!(
+        replies,
+        [&json!(1), &json!(2)],
+        "each reply keeps its attempt: {parent}"
+    );
+    let turn = parent["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == root.to_string().as_str())
+        .unwrap();
+    assert_eq!(turn["attempt"], 2);
+
     let snapshot = app
         .owner("GET", &format!("/v1/bots/{school}/conversation"), None)
         .await

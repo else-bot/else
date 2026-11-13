@@ -70,6 +70,7 @@ pub fn turn_json(turn: &TurnRecord) -> Value {
         "bot_id": turn.bot_id,
         "request_id": turn.request_id,
         "turn_no": turn.turn_no,
+        "attempt": turn.attempt,
         "provider_id": turn.provider_id,
         "profile_revision": turn.profile_revision,
         "status": turn.status,
@@ -110,6 +111,7 @@ pub fn item_json(item: &ItemRecord) -> Value {
         "bot_created": item.bot_created,
         "rules_update": item.rules_update,
         "parts": item.parts.as_ref().map_or(&[][..], |parts| &parts.0[..]),
+        "attempt": item.attempt,
     })
 }
 

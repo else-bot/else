@@ -160,7 +160,13 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                 reply.reactions.push((item.id, kind));
             }
             if let Some(previous) = reply.latest.replace(item.id) {
-                if reply.latest_kept {
+                // The last reply of an earlier attempt was the answer the
+                // owner read while the turn waited; it never folds away.
+                let ended_attempt = conversation
+                    .item(previous)
+                    .and_then(|previous| previous.attempt)
+                    .is_some_and(|previous| item.attempt > Some(previous));
+                if reply.latest_kept || ended_attempt {
                     reply.kept.push(previous)
                 } else {
                     reply.history.push(previous)
@@ -173,6 +179,13 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
         } else if reply.latest.is_none() && item.routine_update.is_none() {
             reply.anchor = Some(item.id);
         }
+    }
+    for (turn, reply) in &mut replies {
+        let attempt = reply.latest.and_then(|id| conversation.item(id)?.attempt);
+        reply.latest_kept |= attempt.is_some()
+            && conversation
+                .turn(*turn)
+                .is_some_and(|turn| turn.attempt > attempt);
     }
     // A finished turn kept only for its pending computer handoff has no
     // history on this page; the composer bar shows it instead of a row.

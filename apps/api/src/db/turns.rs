@@ -206,6 +206,8 @@ pub struct ItemRecord {
     pub rules_update: Option<Json<crate::app::rules::RulesUpdate>>,
     /// Ordered text and file parts; `None` for plain text.
     pub parts: Option<Json<Vec<MessagePart>>>,
+    /// The provider attempt that wrote an assistant item.
+    pub attempt: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -244,7 +246,7 @@ pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kin
                      WHERE c.id = coalesce(d.takeover_turn_id, d.child_turn_id)) END)
          FROM delegations d JOIN bots b ON b.id = d.target_bot_id WHERE d.id = i.id)
     END AS bot_reply, coalesce(i.parts, i.assistant_parts) AS parts, i.routine_update,
-    i.bot_created, i.rules_update";
+    i.bot_created, i.rules_update, i.attempt";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AcceptError {
