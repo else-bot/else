@@ -122,6 +122,23 @@ impl ComputerManager {
         }
     }
 
+    /// Whether the bot's desktop already runs on its current boot, so a
+    /// use of it wakes or starts nothing.
+    pub async fn desktop_running(&self, bot_id: Uuid) -> Result<bool, ComputerError> {
+        if !self.config.desktop {
+            return Ok(false);
+        }
+        let running: Option<bool> = sqlx::query_scalar(
+            "SELECT observed_state = 'running' AND desired_state = 'auto'
+                    AND desktop_generation IS NOT DISTINCT FROM generation
+             FROM bot_computers WHERE bot_id = ?1",
+        )
+        .bind(bot_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(running == Some(true))
+    }
+
     /// End the owner's desktop session.
     pub async fn close_desktop(&self, bot_id: Uuid) -> Result<(), ComputerError> {
         let lease: Option<Uuid> = sqlx::query_scalar(

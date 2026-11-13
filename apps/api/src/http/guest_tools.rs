@@ -512,9 +512,9 @@ async fn shown(
     (tool_image(meta, png), Some(log))
 }
 
-/// Copy a screenshot to `screens/` in the bot's project and return its
-/// path there, which a reply links to show it.
-async fn shared(
+/// Copy a screenshot to `screens/` in the bot's project and return the
+/// path a reply links to show it.
+pub(super) async fn shared(
     state: &AppState,
     grant: &Grant,
     id: Uuid,
@@ -543,25 +543,26 @@ async fn shared(
     Ok(rel)
 }
 
-/// Capture the bot's screen and share it, for a handoff that asks the owner
-/// to look at it. `None` when there is no screen to show.
-pub(super) async fn share_screen(state: &AppState, grant: &Grant) -> Option<String> {
+/// The bot's screen as an ID and PNG, for a handoff that shows the owner
+/// what it asks about. `None` unless the desktop already runs: a handoff
+/// never wakes a computer.
+pub(super) async fn current_screen(state: &AppState, grant: &Grant) -> Option<(Uuid, Vec<u8>)> {
     let computers = state.computers.as_ref()?;
+    if !computers.desktop_running(grant.bot_id).await.ok()? {
+        return None;
+    }
     let lease = lease(state, grant, true).await.ok()?;
-    let shot = match computers
+    match computers
         .capture_screen(lease, grant.bot_id, Some(grant.turn_id), false)
         .await
     {
-        Ok(Ok(shot)) => shot,
-        Ok(Err(_)) => return None,
+        Ok(Ok(shot)) => Some((shot.meta.capture_id, shot.png)),
+        Ok(Err(_)) => None,
         Err(err) => {
             tracing::warn!(error = %err, "capturing the screen for a handoff failed");
-            return None;
+            None
         }
-    };
-    shared(state, grant, shot.meta.capture_id, &shot.png)
-        .await
-        .ok()
+    }
 }
 
 fn end_turn_on_drop(

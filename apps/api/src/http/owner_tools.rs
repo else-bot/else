@@ -255,6 +255,7 @@ pub(super) async fn computer_handoff(state: &AppState, grant: &Grant, args: &Val
         Ok(reason) => reason,
         Err(message) => return (tool_error(&format!("INVALID_REQUEST: {message}")), None),
     };
+    let screen = super::guest_tools::current_screen(state, grant).await;
     match computer_handoffs::create(&state.db, grant.turn_id, &reason).await {
         Ok(handoff) => {
             const END: &str = "end this attempt now without more computer actions. You \
@@ -262,7 +263,13 @@ pub(super) async fn computer_handoff(state: &AppState, grant: &Grant, args: &Val
             let mut result =
                 json!({ "status": "pending", "parked": true, "handoff_id": handoff.id });
             let mut log = format!("pending {}", handoff.id);
-            match super::guest_tools::share_screen(state, grant).await {
+            let shared = match &screen {
+                Some((id, png)) => super::guest_tools::shared(state, grant, *id, png)
+                    .await
+                    .ok(),
+                None => None,
+            };
+            match shared {
                 Some(rel) => {
                     result["next"] = json!(format!(
                         "Show the owner this screen by writing ![screen]({rel}) in your reply, \
