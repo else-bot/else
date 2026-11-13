@@ -136,7 +136,8 @@ impl ElseApp {
                     .child(title.clone()),
             )
             .child(div().flex_1())
-            .children(elapsed.clone().filter(|_| working || error).map(|elapsed| {
+            // A failed turn keeps only its closing timestamp.
+            .children(elapsed.clone().filter(|_| working).map(|elapsed| {
                 div()
                     .flex_none()
                     .text_size(px(12.))
@@ -173,29 +174,28 @@ impl ElseApp {
                     .children(expandable.then(chevron)),
             )
         } else if error {
-            // A short status label on its own line, then the explanation.
             let (headline, explanation) = summary
                 .split_once(". ")
                 .map_or((summary.trim_end_matches('.'), ""), |(head, rest)| {
                     (head, rest.trim())
                 });
+            // The icon and short label in red on one line, then the
+            // explanation in body text on the same left edge.
             Some(
-                h_flex()
+                v_flex()
                     .min_w_0()
-                    .items_start()
-                    .gap_2()
+                    .gap_0p5()
                     .child(
-                        div().flex_none().h(px(20.)).flex().items_center().child(
-                            Icon::new(IconName::CircleX)
-                                .size_4()
-                                .text_color(theme.danger),
-                        ),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
+                        h_flex()
                             .min_w_0()
-                            .gap_0p5()
+                            .items_center()
+                            .gap_1p5()
+                            .child(
+                                Icon::new(IconName::CircleX)
+                                    .size_4()
+                                    .flex_none()
+                                    .text_color(theme.danger),
+                            )
                             .child(
                                 div()
                                     .text_size(px(13.))
@@ -204,29 +204,28 @@ impl ElseApp {
                                     .text_color(theme.danger)
                                     .child(headline.to_owned()),
                             )
-                            .when(!explanation.is_empty(), |text| {
-                                text.child(
-                                    div()
-                                        .text_sm()
-                                        .line_height(relative(1.5))
-                                        .text_left()
-                                        .whitespace_normal()
-                                        .text_color(theme.foreground)
-                                        .child(explanation.to_owned()),
-                                )
-                            }),
+                            .children(updates.map(|updates| {
+                                h_flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap_1()
+                                    .text_size(px(12.))
+                                    .text_color(meta)
+                                    .child(format!("· {updates}"))
+                                    .child(chevron())
+                            })),
                     )
-                    .children(updates.map(|updates| {
-                        h_flex()
-                            .flex_none()
-                            .items_center()
-                            .gap_1()
-                            .pt(px(2.))
-                            .text_size(px(12.))
-                            .text_color(meta)
-                            .child(updates)
-                            .child(chevron())
-                    })),
+                    .when(!explanation.is_empty(), |text| {
+                        text.child(
+                            div()
+                                .text_sm()
+                                .line_height(relative(1.5))
+                                .text_left()
+                                .whitespace_normal()
+                                .text_color(theme.foreground)
+                                .child(explanation.to_owned()),
+                        )
+                    }),
             )
         } else {
             let label = task.state.label();
