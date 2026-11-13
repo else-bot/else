@@ -227,6 +227,10 @@ def run(runner):
                                                  "body": "Long ETH from $3,120, target $3,400, stop $2,980. Up 4.2% so far."},
                                {"status": "pending", "parked": True})],
                     "Drafted as approved; my no-double-review rule skips the staleness check."),
+                "newer-owner-word-replaces-rule": (
+                    [self.call("rules_update", {"section": "Summaries",
+                                                "content": "Use a plain bullet list with a heading per repository."})],
+                    "Saved."),
                 "routine-task-drafts-post-for-approval": (
                     [self.call("draft_message", {"platform": "x",
                                                  "body": "A whale just opened a $40M BTC short on Hyperliquid at 10x."},
