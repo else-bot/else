@@ -408,13 +408,31 @@ pub struct Fenced;
 
 /// Tokens one provider report counted. `input` is every prompt token,
 /// cached ones included, so providers that count cache reads separately
-/// (Claude) and those that count them inside input (Codex) compare.
+/// (Claude, Grok) and those that count them inside input (Codex) compare.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Usage {
     pub input: i64,
     pub cached_input: i64,
     pub cache_write: i64,
     pub output: i64,
+}
+
+impl Usage {
+    /// Reads the `usage` of a Claude or Grok stream result, whose
+    /// `input_tokens` leaves out cache reads and writes. `None` when the
+    /// result reports no usage.
+    pub fn from_result(event: &serde_json::Value) -> Option<Self> {
+        let usage = event.get("usage")?;
+        let count = |key: &str| usage[key].as_i64().unwrap_or(0).max(0);
+        let cached_input = count("cache_read_input_tokens");
+        let cache_write = count("cache_creation_input_tokens");
+        Some(Self {
+            input: count("input_tokens") + cached_input + cache_write,
+            cached_input,
+            cache_write,
+            output: count("output_tokens"),
+        })
+    }
 }
 
 /// Durable progress reporting for one turn. Lifecycle transitions persist

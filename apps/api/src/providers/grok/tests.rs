@@ -173,6 +173,33 @@ fn errors_are_classified_by_their_cause() {
 }
 
 #[test]
+fn the_result_reports_the_turns_token_usage_with_cache_reads_in_input() {
+    // Grok 1.0.77's result for a turn of two model calls, verbatim apart from
+    // the session ID. Its session log recorded 19869 input tokens, 13056
+    // of them cached, and 144 output tokens for this turn.
+    let recorded = json!({"type":"result","subtype":"success","is_error":false,"duration_ms":3289,"duration_api_ms":3021,"num_turns":2,"result":"hello","stop_reason":"end_turn","total_cost_usd":0.00714612,"usage":{"input_tokens":6813,"output_tokens":144,"cache_read_input_tokens":13056,"cache_creation_input_tokens":0,"server_tool_use":{"web_search_requests":0}},"modelUsage":{"grok-4.7-build":{"inputTokens":6813,"outputTokens":144,"cacheReadInputTokens":13056,"cacheCreationInputTokens":0,"webSearchRequests":0,"costUSD":0.00714612}},"session_id":"session","uuid":"9bd84552-0452-4c22-8875-df2c0cbca4dd"});
+    let mut t = tracker(true);
+    t.on(&init(true)).unwrap();
+    let events = t.on(&recorded).unwrap();
+    assert_eq!(
+        events.first(),
+        Some(&Event::Usage(crate::app::providers::Usage {
+            input: 19869,
+            cached_input: 13056,
+            cache_write: 0,
+            output: 144,
+        }))
+    );
+    assert!(matches!(events.last(), Some(Event::Finished(_))));
+
+    let events = t.on(&result("end_turn")).unwrap();
+    assert!(
+        matches!(events.as_slice(), [Event::Finished(_)]),
+        "no usage when Grok reports none: {events:?}"
+    );
+}
+
+#[test]
 fn a_grok_that_fails_before_opening_a_session_reports_its_own_error() {
     // Grok 1.0.77's output, verbatim apart from usage fields, for an expired login.
     let unopened = json!({"type":"system","subtype":"init","session_id":"","apiKeySource":"user","model":"unknown","cwd":"","permissionMode":"default","tools":[],"slash_commands":[],"mcp_servers":[],"skills":[],"uuid":"82a378fb-dfaf-4779-b369-29be16172cff"});

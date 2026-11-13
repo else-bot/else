@@ -33,6 +33,20 @@ async fn ask(app: &TestApp, bot: &str, provider: &str, text: &str) -> (Uuid, Str
     ).bind(turn.parse::<Uuid>().unwrap()).fetch_one(&app.db.pool).await.unwrap();
     eprintln!("{provider}: {status}, {error:?}, {answer}");
     assert_eq!(status, "completed", "{error:?}");
+    if provider == "grok" {
+        let (input, cached, output): (Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT input_tokens, cached_input_tokens, output_tokens FROM turns WHERE id=?1",
+        )
+        .bind(turn.parse::<Uuid>().unwrap())
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+        let (input, cached, output) = (input.unwrap(), cached.unwrap(), output.unwrap());
+        assert!(
+            input > cached && output > 0,
+            "Grok turn usage: {input} input, {cached} cached, {output} output"
+        );
+    }
     (turn.parse().unwrap(), answer)
 }
 
