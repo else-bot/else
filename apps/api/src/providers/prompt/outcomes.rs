@@ -196,8 +196,8 @@ fn secrets_block(input: &TurnInput) -> String {
     for secret in &input.secrets {
         text.push_str(&format!(
             "<secret name=\"{}\" env=\"{}\" status=\"{}\"/>\n",
-            secret.name,
-            secret.env.join(","),
+            escape(&secret.name),
+            escape(&secret.env.join(",")),
             if secret.stored { "stored" } else { "declined" },
         ));
     }
