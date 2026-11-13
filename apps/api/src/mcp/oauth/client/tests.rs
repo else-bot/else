@@ -1,6 +1,6 @@
 use super::*;
 use crate::mcp::Transport;
-use crate::mcp::oauth::{Complete, Session, State, Store, fixtures};
+use crate::mcp::oauth::{Complete, Session, State, Store, fixtures, protocol::Discovery};
 use axum::{Form, Json, Router, http::HeaderMap, routing::post};
 use serde_json::json;
 use std::{
@@ -15,38 +15,32 @@ use uuid::Uuid;
 fn github() -> Discovery {
     Discovery {
         resource: "https://api.githubcopilot.com/mcp/".into(),
-        issuer: "https://github.com/login/oauth".into(),
-        authorization_endpoint: "https://github.com/login/oauth/authorize".into(),
-        token_endpoint: "https://github.com/login/oauth/access_token".into(),
-        registration_endpoint: None,
+        metadata: fixtures::metadata("https://github.com/login/oauth", "https://attacker.test"),
         scopes: vec!["repo".into()],
-        require_iss: true,
     }
 }
 
 #[test]
-fn registered_credentials_are_bound_to_trusted_github_endpoints() {
+fn registered_credentials_only_reach_the_apps_own_endpoints_and_mcp() {
     let client = RegisteredClient::github("registered-id".into(), "private-secret".into()).unwrap();
-    let valid = github();
-    client.validate(&valid).unwrap();
-    for field in ["resource", "issuer", "authorization", "token"] {
-        let mut changed = valid.clone();
-        match field {
-            "resource" => {
-                changed.resource = "https://api.githubcopilot.com.attacker.test/mcp/".into()
-            }
-            "issuer" => changed.issuer = "https://attacker.test/login/oauth".into(),
-            "authorization" => {
-                changed.authorization_endpoint = "https://attacker.test/authorize".into()
-            }
-            "token" => changed.token_endpoint = "https://attacker.test/token".into(),
-            _ => unreachable!(),
-        }
-        assert!(client.validate(&changed).is_err(), "{field}");
+    let pinned = client
+        .metadata("https://api.githubcopilot.com/mcp/")
+        .unwrap();
+    assert_eq!(
+        pinned.token_endpoint,
+        "https://github.com/login/oauth/access_token"
+    );
+    assert_eq!(
+        pinned.authorization_endpoint,
+        "https://github.com/login/oauth/authorize"
+    );
+    for resource in [
+        "https://api.githubcopilot.com.attacker.test/mcp/",
+        "http://api.githubcopilot.com/mcp/",
+        "https://attacker.test/mcp/",
+    ] {
+        assert!(client.metadata(resource).is_err(), "{resource}");
     }
-    let mut insecure = valid.clone();
-    insecure.resource = "http://api.githubcopilot.com/mcp/".into();
-    assert!(client.validate(&insecure).is_err());
     let debug = format!("{client:?}");
     assert!(!debug.contains("private-secret"));
     assert!(!debug.contains("registered-id"));
@@ -79,6 +73,7 @@ async fn compiled_registration_starts_signin_without_runtime_credentials() {
     if let Some(client) = config.github_oauth {
         let started = started.unwrap();
         let url = reqwest::Url::parse(&started.authorization_url).unwrap();
+        assert_eq!(url.origin().ascii_serialization(), "https://github.com");
         let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(query["client_id"], client.client_id);
         assert_eq!(query["code_challenge_method"], "S256");
@@ -92,16 +87,16 @@ async fn compiled_registration_starts_signin_without_runtime_credentials() {
 async fn registered_signin_exchanges_and_refreshes_with_a_secret_without_registration() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let mut discovery = github();
-    discovery.resource = format!("{base}/mcp");
-    discovery.issuer = base.clone();
-    discovery.authorization_endpoint = format!("{base}/authorize");
-    discovery.token_endpoint = format!("{base}/token");
+    let discovery = Discovery {
+        resource: format!("{base}/mcp"),
+        metadata: fixtures::metadata(&base, "https://attacker.test"),
+        scopes: vec!["repo".into()],
+    };
     let registration = Arc::new(RegisteredClient {
-        resource_origin: base,
-        issuer: discovery.issuer.clone(),
-        authorization_endpoint: discovery.authorization_endpoint.clone(),
-        token_endpoint: discovery.token_endpoint.clone(),
+        resource_origin: base.clone(),
+        issuer: base.clone(),
+        authorization_endpoint: format!("{base}/authorize"),
+        token_endpoint: format!("{base}/token"),
         client_id: "registered-id".into(),
         secret: Zeroizing::new("private-secret".into()),
     });
@@ -117,9 +112,9 @@ async fn registered_signin_exchanges_and_refreshes_with_a_secret_without_registr
             assert_eq!(fields["client_secret"], "private-secret");
             sent.send(fields).await.unwrap();
             if revoked {
-                return Json(json!({"error":"bad_refresh_token"}));
+                return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":"invalid_grant"})));
             }
-            Json(json!({"access_token":"private-access", "refresh_token":"private-refresh", "token_type":"bearer", "expires_in":3600}))
+            (axum::http::StatusCode::OK, Json(json!({"access_token":"private-access", "refresh_token":"private-refresh", "token_type":"bearer", "expires_in":3600})))
         }
     }));
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -142,6 +137,7 @@ async fn registered_signin_exchanges_and_refreshes_with_a_secret_without_registr
         .await
         .unwrap();
     let url = reqwest::Url::parse(&started.authorization_url).unwrap();
+    assert_eq!(url.origin().ascii_serialization(), base);
     let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
     assert_eq!(query["client_id"], "registered-id");
     assert_eq!(query["code_challenge_method"], "S256");
@@ -152,7 +148,7 @@ async fn registered_signin_exchanges_and_refreshes_with_a_secret_without_registr
             state: query["state"].clone(),
             code: Some("private-code".into()),
             error: None,
-            iss: Some(discovery.issuer.clone()),
+            iss: Some(base.clone()),
         })
         .await
         .unwrap();

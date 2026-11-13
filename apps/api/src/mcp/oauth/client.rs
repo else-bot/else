@@ -1,7 +1,10 @@
+use rmcp::transport::auth::AuthorizationMetadata;
 use zeroize::Zeroizing;
 
-use super::{Error, protocol::Discovery};
+use super::Error;
 
+/// An OAuth app registered with a provider that offers no dynamic client
+/// registration. Its secret only ever reaches the app's own token endpoint.
 pub struct RegisteredClient {
     resource_origin: String,
     issuer: String,
@@ -39,22 +42,31 @@ impl RegisteredClient {
         })
     }
 
-    pub(super) fn applies(&self, discovery: &Discovery) -> bool {
-        discovery.issuer == self.issuer
+    pub(super) fn applies(&self, metadata: &AuthorizationMetadata) -> bool {
+        metadata.issuer.as_deref() == Some(self.issuer.as_str())
     }
 
-    pub(super) fn validate(&self, discovery: &Discovery) -> Result<(), Error> {
-        let resource = super::protocol::safe_url(&discovery.resource)?;
-        if !self.applies(discovery)
-            || resource.origin().ascii_serialization() != self.resource_origin
-            || discovery.authorization_endpoint != self.authorization_endpoint
-            || discovery.token_endpoint != self.token_endpoint
-        {
+    /// The app's own endpoints, used in place of what the MCP advertised so a
+    /// server cannot redirect the secret or the sign-in elsewhere. The app's
+    /// tokens are only for the MCP it was registered for.
+    pub(super) fn metadata(&self, resource: &str) -> Result<AuthorizationMetadata, Error> {
+        let origin = reqwest::Url::parse(resource)
+            .map(|url| url.origin().ascii_serialization())
+            .map_err(|_| Error::Invalid("Invalid MCP URL."))?;
+        if origin != self.resource_origin {
             return Err(Error::Invalid(
-                "The MCP OAuth metadata does not match the registered app's trusted endpoints.",
+                "This MCP names the registered OAuth app's provider but is not the app's MCP.",
             ));
         }
-        Ok(())
+        Ok(serde_json::from_value(serde_json::json!({
+            "issuer": self.issuer,
+            "authorization_endpoint": self.authorization_endpoint,
+            "token_endpoint": self.token_endpoint,
+            "code_challenge_methods_supported": ["S256"],
+            "token_endpoint_auth_methods_supported": ["client_secret_post"],
+            "authorization_response_iss_parameter_supported": true,
+        }))
+        .expect("registered OAuth metadata"))
     }
 }
 

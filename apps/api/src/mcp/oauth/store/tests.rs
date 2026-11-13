@@ -1,4 +1,4 @@
-use super::super::fixtures::{credential, key};
+use super::super::fixtures::{credential, key, token};
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
@@ -22,10 +22,10 @@ async fn credentials_are_encrypted_private_and_bound_to_bot_and_package() {
         0o600
     );
     let opened = store.load().await.unwrap().unwrap();
-    assert_eq!(opened.access_token, "private-access-token");
+    assert_eq!(opened.token.access_token().secret(), "private-access-token");
     assert_eq!(
-        opened.refresh_token.as_deref(),
-        Some("private-refresh-token")
+        opened.token.refresh_token().unwrap().secret(),
+        "private-refresh-token"
     );
     let another_bot = Uuid::new_v4();
     std::fs::copy(&stored, path.join(filename(another_bot))).unwrap();
@@ -55,8 +55,8 @@ async fn the_shared_store_adopts_the_latest_expiring_per_bot_sign_in_and_removes
     let (older, newer) = (Uuid::new_v4(), Uuid::new_v4());
     let fresh = credential();
     let mut stale = credential();
-    stale.access_token = "older-bot-token".into();
-    stale.expires_at = fresh.expires_at.map(|at| at - 3600);
+    stale.token = token("older-bot-token", None, 3600);
+    stale.received_at -= 3600;
     Store::for_bot(path.clone(), newer, Some(key.clone()))
         .save(&fresh)
         .await
@@ -69,7 +69,10 @@ async fn the_shared_store_adopts_the_latest_expiring_per_bot_sign_in_and_removes
 
     let shared = Store::new(path.clone(), Some(key));
     let adopted = shared.load().await.unwrap().unwrap();
-    assert_eq!(adopted.access_token, "private-access-token");
+    assert_eq!(
+        adopted.token.access_token().secret(),
+        "private-access-token"
+    );
     for bot in [older, newer] {
         assert!(
             !path.join(filename(bot)).exists(),

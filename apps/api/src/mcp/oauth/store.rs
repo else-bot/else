@@ -1,31 +1,134 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use oauth2::{AccessToken, RefreshToken, TokenResponse, basic::BasicTokenType};
+use rmcp::transport::auth::{
+    AuthorizationMetadata, OAuthTokenResponse, StoredCredentials, VendorExtraTokenFields,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
-use super::{Error, protocol::Discovery};
+use super::Error;
 use crate::credentials::SecretKey;
 
 const MAX_BODY: usize = 64 * 1024;
 
+/// A saved sign-in: the provider's metadata and the token the MCP accepts.
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Credential {
-    pub(super) discovery: Discovery,
+    pub(super) resource: String,
+    pub(super) metadata: AuthorizationMetadata,
     pub(super) client_id: String,
-    pub(super) access_token: String,
-    pub(super) refresh_token: Option<String>,
-    pub(super) expires_at: Option<i64>,
+    pub(super) token: OAuthTokenResponse,
+    pub(super) scopes: Vec<String>,
+    pub(super) received_at: u64,
 }
 
-impl Drop for Credential {
-    fn drop(&mut self) {
-        self.access_token.zeroize();
-        self.refresh_token.zeroize();
+impl Credential {
+    pub(super) fn from_stored(
+        resource: String,
+        metadata: AuthorizationMetadata,
+        stored: StoredCredentials,
+    ) -> Option<Self> {
+        Some(Self {
+            resource,
+            metadata,
+            client_id: stored.client_id,
+            token: stored.token_response?,
+            scopes: stored.granted_scopes,
+            received_at: stored.token_received_at.unwrap_or_else(now),
+        })
     }
+
+    pub(super) fn stored(&self) -> StoredCredentials {
+        StoredCredentials::new(
+            self.client_id.clone(),
+            Some(self.token.clone()),
+            self.scopes.clone(),
+            Some(self.received_at),
+        )
+        .with_issuer(self.metadata.issuer.clone())
+    }
+
+    pub(super) fn expires_at(&self) -> Option<u64> {
+        self.token
+            .expires_in()
+            .map(|ttl| self.received_at.saturating_add(ttl.as_secs()))
+    }
+}
+
+pub(super) fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Sign-ins saved before the move to rmcp's OAuth client.
+#[derive(Deserialize)]
+struct Legacy {
+    discovery: LegacyDiscovery,
+    client_id: String,
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct LegacyDiscovery {
+    resource: String,
+    issuer: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    registration_endpoint: Option<String>,
+    scopes: Vec<String>,
+    require_iss: bool,
+}
+
+impl From<Legacy> for Credential {
+    fn from(legacy: Legacy) -> Self {
+        let received_at = now();
+        let mut token = OAuthTokenResponse::new(
+            AccessToken::new(legacy.access_token),
+            BasicTokenType::Bearer,
+            VendorExtraTokenFields::default(),
+        );
+        token.set_refresh_token(legacy.refresh_token.map(RefreshToken::new));
+        token.set_expires_in(
+            legacy
+                .expires_at
+                .map(|at| Duration::from_secs(at.saturating_sub(received_at as i64).max(0) as u64))
+                .as_ref(),
+        );
+        let discovery = legacy.discovery;
+        let metadata = serde_json::from_value(serde_json::json!({
+            "issuer": discovery.issuer,
+            "authorization_endpoint": discovery.authorization_endpoint,
+            "token_endpoint": discovery.token_endpoint,
+            "registration_endpoint": discovery.registration_endpoint,
+            "authorization_response_iss_parameter_supported": discovery.require_iss,
+        }))
+        .expect("legacy OAuth metadata");
+        Self {
+            resource: discovery.resource,
+            metadata,
+            client_id: legacy.client_id,
+            token,
+            scopes: discovery.scopes,
+            received_at,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Saved {
+    Current(Box<Credential>),
+    Legacy(Box<Legacy>),
 }
 
 /// The package's one saved sign-in, shared by every bot. It keeps the file
@@ -124,7 +227,12 @@ fn filename(bot: Uuid) -> String {
     format!("oauth-{bot}.json")
 }
 
-fn save(path: &Path, bot: Uuid, key: &SecretKey, credential: &Credential) -> Result<(), Error> {
+pub(super) fn save(
+    path: &Path,
+    bot: Uuid,
+    key: &SecretKey,
+    credential: &impl Serialize,
+) -> Result<(), Error> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut salt = [0u8; 32];
     getrandom::fill(&mut salt).expect("OS entropy");
@@ -196,8 +304,12 @@ fn load(path: &Path, bot: Uuid, key: Option<&SecretKey>) -> Result<Option<Creden
         .map_err(|_| Error::Invalid("The MCP credentials could not be decrypted."))?;
     let mut plain = Zeroizing::new(Vec::new());
     reader.read_to_end(&mut plain)?;
-    let credential = serde_json::from_slice(&plain)
-        .map_err(|_| Error::Invalid("Invalid decrypted MCP credentials."))?;
+    let credential = match serde_json::from_slice(&plain)
+        .map_err(|_| Error::Invalid("Invalid decrypted MCP credentials."))?
+    {
+        Saved::Current(credential) => *credential,
+        Saved::Legacy(legacy) => (*legacy).into(),
+    };
     Ok(Some(credential))
 }
 
@@ -229,7 +341,7 @@ fn adopt_per_bot(path: &Path, shared: Uuid, key: &SecretKey) -> Result<(), Error
         let newest = per_bot
             .iter()
             .filter_map(|(modified, bot)| match load(path, *bot, Some(key)) {
-                Ok(credential) => credential.map(|c| (c.expires_at, *modified, c)),
+                Ok(credential) => credential.map(|c| (c.expires_at(), *modified, c)),
                 Err(_) => {
                     tracing::warn!("Skipping an unreadable per-bot MCP sign-in");
                     None
