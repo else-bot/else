@@ -231,8 +231,8 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
 /// Moves the earlier replies the owner still needs from `history` to `kept`:
 /// a reacted reply, the reply that ended the most recent earlier attempt, and
 /// a reply with a file no later reply delivers again. A bot that restates its
-/// work after each park re-uploads the same file, often under another name,
-/// so a file is matched by type and size.
+/// work after each park re-uploads the same file, sometimes renaming an image,
+/// so an image of the same type and byte size counts as the same file.
 fn keep_earlier_replies(
     conversation: &Conversation,
     reactions: &HashMap<Uuid, crate::model::ReactionKind>,
@@ -248,9 +248,7 @@ fn keep_earlier_replies(
             .into_iter()
             .flat_map(|item| &item.parts)
             .filter_map(|part| match part {
-                crate::attachments::MessagePart::File { file } => {
-                    Some((file.media_type.as_str(), file.size))
-                }
+                crate::attachments::MessagePart::File { file } => Some(file),
                 crate::attachments::MessagePart::Text { .. } => None,
             })
             .collect::<Vec<_>>()
@@ -261,11 +259,18 @@ fn keep_earlier_replies(
         .rev()
         .find(|pair| attempt(pair[0]).is_some_and(|ended| attempt(pair[1]) > Some(ended)))
         .map(|pair| pair[0]);
-    let mut delivered_later: HashSet<_> = files(latest).into_iter().collect();
+    let same = |a: &crate::attachments::Attachment, b: &crate::attachments::Attachment| {
+        a.media_type == b.media_type
+            && a.size == b.size
+            && (a.name == b.name || a.media_type.starts_with("image/"))
+    };
+    let mut delivered_later = files(latest);
     let mut kept = Vec::new();
     for &id in reply.history.iter().rev() {
         let files = files(id);
-        let new_file = files.iter().any(|file| !delivered_later.contains(file));
+        let new_file = files
+            .iter()
+            .any(|file| !delivered_later.iter().any(|later| same(file, later)));
         delivered_later.extend(files);
         if new_file || reactions.contains_key(&id) || ended_attempt == Some(id) {
             kept.push(id);
@@ -918,6 +923,27 @@ mod tests {
                 item(1, 10, "user"),
                 file(2, 10),
                 file(3, 20),
+                item(4, 10, "assistant"),
+            ],
+            vec![turn(10, "completed")],
+        );
+        assert_eq!(task_replies(&c)[&id(10)].kept, [id(2), id(3)]);
+    }
+
+    #[test]
+    fn a_text_file_of_the_same_size_but_another_name_stays_kept() {
+        let file = |number: u128, name: &str| {
+            let mut reply = item(number, 10, "assistant");
+            reply["parts"] = json!([{"type": "file", "file": {
+                "id": id(1000 + number), "name": name, "media_type": "application/json", "size": 11
+            }}]);
+            reply
+        };
+        let c = conversation(
+            vec![
+                item(1, 10, "user"),
+                file(2, "before.json"),
+                file(3, "after.json"),
                 item(4, 10, "assistant"),
             ],
             vec![turn(10, "completed")],
