@@ -110,8 +110,10 @@ pub(super) fn in_progress_block(input: &TurnInput) -> String {
     let mut text = String::from(
         "[else.bot tasks in progress] Tasks you delegated that have no result yet, including \
          ones started for an earlier owner message. They keep running; each result arrives as \
-         a continuation of the current request. Do not delegate them again. This list \
-         replaces earlier ones.\n",
+         a continuation of the current request. Do not delegate them again: a new delegate \
+         call queues separate work that runs after the current one. To change or stop one, \
+         call delegation_update or delegation_cancel with its id. This list replaces earlier \
+         ones.\n",
     );
     if delegation.in_progress.is_empty() {
         text.push_str("None.\n");

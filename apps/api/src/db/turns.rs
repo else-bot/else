@@ -224,8 +224,13 @@ pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kin
     i.provider_id, i.created_at, i.hidden,
     CASE WHEN i.kind = 'user' THEN t.request_id END AS request_id, i.reaction,
     CASE WHEN i.kind = 'status' AND i.routine_update IS NULL AND i.conversation_id <> t.conversation_id THEN
-        (SELECT json_object('sender_bot_id', lower(hex(d.parent_bot_id)), 'sender_name', b.name, 'prompt', d.task)
-         FROM delegations d JOIN bots b ON b.id = d.parent_bot_id WHERE d.child_turn_id = i.turn_id)
+        (SELECT json_object('sender_bot_id', lower(hex(d.parent_bot_id)), 'sender_name', b.name,
+                'prompt', CASE WHEN t.request_id = d.id THEN d.task
+                               ELSE (SELECT s.text FROM items s WHERE s.id = t.owner_item_id) END)
+         FROM delegations d JOIN bots b ON b.id = d.parent_bot_id
+         -- A task's first turn carries the delegation's ID as its request.
+         WHERE d.id = (SELECT f.request_id FROM turns f WHERE f.conversation_id = t.conversation_id
+                       ORDER BY f.turn_no LIMIT 1))
     END AS bot_task,
     CASE WHEN i.kind = 'status' AND i.conversation_id = t.conversation_id THEN
         (SELECT json_object('sender_bot_id', lower(hex(d.target_bot_id)), 'sender_name', b.name, 'prompt', d.task, 'status', d.status,
@@ -832,8 +837,9 @@ pub struct Claimed {
 }
 
 /// Claim the oldest queued turn of the next eligible bot, oldest first
-/// across bots. A bot's owner message that took over its delegated work goes
-/// ahead of the bot's other queued turns, so the steer is not left behind. A bot is eligible when it is active, not stopping work, and
+/// across bots. A bot's owner message that took over its delegated work, and
+/// a delegating bot's update to a task, go ahead of the bot's other queued
+/// turns, so the steer is not left behind. A bot is eligible when it is active, not stopping work, and
 /// has no turn in an active status. A waiting owner turn holds only owner
 /// work, and a waiting task holds nothing. The claimed turn moves to
 /// `preparing` and is returned; the caller must start it before claiming
@@ -854,7 +860,8 @@ pub async fn claim_next(
                    row_number() OVER (
                        PARTITION BY t.bot_id
                        ORDER BY EXISTS (SELECT 1 FROM delegations d
-                                        WHERE d.takeover_turn_id = t.id
+                                        WHERE (d.takeover_turn_id = t.id
+                                               OR (d.child_turn_id = t.id AND d.id <> t.request_id))
                                           AND d.status IN ('queued', 'running')) DESC,
                                 t.turn_no) AS queue_rank
             FROM turns t JOIN bots b ON b.id = t.bot_id

@@ -36,6 +36,9 @@ use crate::app::messages::{Attachment, MessagePart};
 use crate::app::providers::Profile;
 use crate::providers::output_files::OutputFile;
 
+mod control;
+pub use control::{ControlError, Status, Task, TaskState, Updated, cancel, update};
+
 /// Child limit when accepting an individual delegation.
 pub const MAX_CHILDREN: i64 = 2;
 /// Individual delegations per provider attempt; a council parks after its group.
