@@ -27,6 +27,7 @@ gpui_kit::assets::icon_assets!(
     AppIcons,
     [
         FolderInput,
+        Hourglass,
         BellDot,
         Bell,
         BellOff,

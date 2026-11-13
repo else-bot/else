@@ -42,6 +42,27 @@ impl ElseApp {
             _ => status,
         };
         let elapsed = task.elapsed(Utc::now());
+        // Parked on other bots' tasks: their faces show who has the work.
+        let delegates: Vec<Uuid> =
+            if task.state == ReplyState::Waiting && !error && turn.waits_on_bots() {
+                turn.open_delegations()
+                    .iter()
+                    .map(|d| d.target_bot_id)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        let delegate_faces = self.face_stack(
+            &format!("task-delegates-{}", task.turn),
+            delegates.iter().copied(),
+            px(16.),
+        );
+        let delegate_badge = self.face_stack(
+            &format!("task-badge-{}", task.turn),
+            delegates.first().copied(),
+            px(18.),
+        );
+        let handed_off = delegate_faces.is_some();
         let color = if error {
             theme.danger
         } else if working {
@@ -123,18 +144,35 @@ impl ElseApp {
                 .items_center()
                 .gap_4()
                 .children(bot.map(|bot| {
+                    let avatar = bot_avatar(
+                        SharedString::from(format!("task-avatar-{}", task.turn)),
+                        bot.avatar,
+                        px(38.),
+                    )
+                    .when(working, |avatar| avatar.working());
                     h_flex()
                         .flex_none()
                         .size(px(56.))
                         .items_center()
                         .justify_center()
                         .child(
-                            bot_avatar(
-                                SharedString::from(format!("task-avatar-{}", task.turn)),
-                                bot.avatar,
-                                px(38.),
-                            )
-                            .when(working, |avatar| avatar.working()),
+                            div()
+                                .relative()
+                                .child(
+                                    div()
+                                        .when(handed_off, |face| face.opacity(0.55))
+                                        .child(avatar),
+                                )
+                                .children(delegate_badge.map(|badge| {
+                                    div()
+                                        .absolute()
+                                        .right(px(-4.))
+                                        .bottom(px(-4.))
+                                        .rounded_full()
+                                        .border_2()
+                                        .border_color(theme.background)
+                                        .child(badge)
+                                })),
                         )
                 }))
                 .child(
@@ -170,15 +208,18 @@ impl ElseApp {
                                 })),
                         )
                         .children(detail.map(|detail| {
-                            div()
+                            h_flex()
+                                .min_w_0()
+                                .gap_1p5()
+                                .items_center()
                                 .text_sm()
                                 .text_color(if working {
                                     theme.foreground
                                 } else {
                                     theme.muted_foreground
                                 })
-                                .truncate()
-                                .child(detail)
+                                .children(delegate_faces)
+                                .child(div().min_w_0().truncate().child(detail))
                         }))
                         .when(working, |column| {
                             column.child(work_sweep(task.turn, color, cx.reduce_motion()))

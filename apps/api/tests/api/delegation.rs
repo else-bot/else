@@ -1155,6 +1155,56 @@ async fn the_delegating_turn_shows_its_handoff_as_the_child_progresses() {
     );
 }
 
+/// A delegating bot's activity names the bots it waits on only while its
+/// turn is parked on their tasks.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_delegating_bot_shows_whom_it_waits_on_until_the_task_ends() {
+    let db = TestDb::migrated().await;
+    let (main, root, child, _) = seed(&db).await;
+    let target: Uuid = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
+        .bind(child)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let waiting_on = || async {
+        let bot = else_api::db::bots::find(&db.pool, main)
+            .await
+            .unwrap()
+            .unwrap();
+        else_api::views::bot_json(&bot)["activity"]["waiting_on"].clone()
+    };
+    assert_eq!(waiting_on().await, Value::Null, "a running turn is working");
+
+    sqlx::query("UPDATE turns SET status = 'waiting' WHERE id = ?1")
+        .bind(root)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let shown = waiting_on().await;
+    assert_eq!(
+        shown["bots"],
+        json!([{ "id": target.to_string(), "name": "Target", "tasks": 1 }])
+    );
+    assert!(shown["since"].is_string(), "{shown}");
+
+    for status in ["running", "completed"] {
+        sqlx::query("UPDATE turns SET status = ?1 WHERE id = ?2")
+            .bind(status)
+            .bind(child)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        if status == "running" {
+            assert_eq!(waiting_on().await["bots"][0]["tasks"], 1, "a running task");
+        }
+    }
+    assert_eq!(
+        waiting_on().await,
+        Value::Null,
+        "the ended task woke the turn"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_settling_while_the_parent_parks_still_requeues_it() {
     let db = TestDb::migrated().await;

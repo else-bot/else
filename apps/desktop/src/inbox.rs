@@ -457,6 +457,7 @@ mod tests {
             phase: phase.into(),
             active_turn_id: (phase == "working").then(|| turn(1)),
             queued_count: u32::from(phase == "queued"),
+            waiting_on: None,
         });
         bot
     }

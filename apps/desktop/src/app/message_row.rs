@@ -638,18 +638,16 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
             ("Waiting for you to connect an account…".into(), false)
         }
         "waiting" => {
-            let mut waiting_on = turn
-                .delegations
-                .iter()
-                .filter(|d| !d.status.settled())
-                .map(|d| d.target_name.as_str())
-                .collect::<Vec<_>>();
-            waiting_on.dedup();
-            match waiting_on.as_slice() {
-                [] => ("Waiting for another bot…".into(), false),
-                [name] => (format!("Waiting for {name}…"), false),
-                many => (format!("Waiting for {} bots…", many.len()), false),
+            let open = turn.open_delegations();
+            let mut bots: Vec<(uuid::Uuid, &str)> = Vec::new();
+            for task in &open {
+                if !bots.iter().any(|(id, _)| *id == task.target_bot_id) {
+                    bots.push((task.target_bot_id, &task.target_name));
+                }
             }
+            let names: Vec<&str> = bots.into_iter().map(|(_, name)| name).collect();
+            let label = crate::sidebar::status::waiting_for(&names, open.len());
+            (format!("{label}…"), false)
         }
         "interrupted" => (
             if turn.error.as_ref().is_some_and(|e| e.code == "cancelled") {

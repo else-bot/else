@@ -473,6 +473,37 @@ impl Turn {
     pub fn waits_on_job(&self) -> bool {
         !self.mcp_waits.is_empty() || !self.computer_job_waits.is_empty()
     }
+
+    /// The tasks it handed to other bots that have not ended.
+    pub fn open_delegations(&self) -> Vec<&Delegation> {
+        self.delegations
+            .iter()
+            .filter(|d| !d.status.settled())
+            .collect()
+    }
+
+    /// Whether the owner holds it: a pending skill install, secret, draft,
+    /// question, or account setup.
+    pub fn waits_on_owner(&self) -> bool {
+        self.skill_installs
+            .iter()
+            .any(|r| r.status == SkillInstallStatus::Pending)
+            || self.secret_requests.iter().any(|r| r.is_pending())
+            || self
+                .outgoing_drafts
+                .iter()
+                .any(|d| d.status == DraftStatus::Pending)
+            || self.questions.iter().any(|q| q.is_pending())
+            || self.social_setups.iter().any(|setup| setup.is_pending())
+    }
+
+    /// Parked only on tasks it handed to other bots.
+    pub fn waits_on_bots(&self) -> bool {
+        self.status == "waiting"
+            && !self.waits_on_job()
+            && !self.waits_on_owner()
+            && !self.open_delegations().is_empty()
+    }
 }
 
 /// A task a turn handed to another bot. Its settled reply is the item

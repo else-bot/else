@@ -545,6 +545,38 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_waiting_on_bots_counts_each_bot_and_yields_to_the_owner() {
+        let task = |n: u128, bot: u128, name: &str| {
+            json!({ "id": id(n), "attempt": 0, "target_bot_id": id(bot), "target_name": name,
+                    "task": "Fix it", "status": "running", "created_at": "2026-11-05T10:02:00Z" })
+        };
+        let mut parked = turn(11, "waiting");
+        parked["delegations"] =
+            json!([task(40, 50, "Dev"), task(41, 51, "QA"), task(42, 52, "Dev")]);
+        let mut asking = parked.clone();
+        asking["id"] = json!(id(12));
+        asking["request_id"] = json!(id(112));
+        asking["questions"] = json!([{ "id": id(60), "kind": "choice", "title": "Which repo?",
+            "choices": [], "status": "pending" }]);
+        let c = conversation(
+            vec![item(1, 11, "assistant"), item(2, 12, "assistant")],
+            vec![parked, asking],
+        );
+        let label = |n| crate::app::message_row::turn_label(c.turn(id(n)).unwrap()).0;
+        assert_eq!(
+            label(11),
+            "Waiting for 3 bots…",
+            "two bots named Dev are two bots"
+        );
+        assert!(c.turn(id(11)).unwrap().waits_on_bots());
+        assert_eq!(label(12), "Waiting for your answer…");
+        assert!(
+            !c.turn(id(12)).unwrap().waits_on_bots(),
+            "an owner question outranks the carried tasks"
+        );
+    }
+
+    #[test]
     fn feedback_keeps_an_earlier_update_visible() {
         let mut feedback = item(4, 11, "user");
         feedback["reaction"] = json!({"item_id": id(2), "kind": "thumbs_up"});

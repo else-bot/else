@@ -67,22 +67,7 @@ impl ElseApp {
             .when(!collapsed, |row| {
                 row.border_b_1().border_color(theme.border.opacity(0.6))
             })
-            .child(
-                h_flex()
-                    .flex_none()
-                    .children(tasks.iter().take(3).enumerate().filter_map(|(ix, d)| {
-                        bot(d.target_bot_id).map(|b| {
-                            div().when(ix > 0, |d| d.ml(px(-5.))).child(
-                                bot_avatar(
-                                    SharedString::from(format!("tray-stack-{}", d.id)),
-                                    b.avatar,
-                                    px(16.),
-                                )
-                                .still(),
-                            )
-                        })
-                    })),
-            )
+            .children(self.face_stack("tray-stack", tasks.iter().map(|d| d.target_bot_id), px(16.)))
             .child(
                 div()
                     .min_w_0()

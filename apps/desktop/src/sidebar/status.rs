@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 
-use crate::api::{Bot, SidebarStatus};
+use crate::api::{Bot, SidebarStatus, WaitingOn};
 
 /// How long a request has waited, in its largest whole unit: `now`, `5m`,
 /// `2h`, `3d`.
@@ -14,10 +14,34 @@ pub fn waited(since: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
+/// What a bot waiting on other bots shows: `Waiting for Dev`,
+/// `Waiting for Dev · 3 tasks`, `Waiting for 2 bots · 4 tasks`. The count
+/// appears only when it adds to the names.
+pub fn waiting_for(names: &[&str], tasks: usize) -> String {
+    let who = match names {
+        [] => "another bot".to_owned(),
+        [name] => (*name).to_owned(),
+        many => format!("{} bots", many.len()),
+    };
+    if tasks > names.len().max(1) {
+        format!("Waiting for {who} · {tasks} tasks")
+    } else {
+        format!("Waiting for {who}")
+    }
+}
+
+pub fn waiting_label(waiting: &WaitingOn) -> String {
+    let names: Vec<&str> = waiting.bots.iter().map(|b| b.name.as_str()).collect();
+    let tasks = waiting.bots.iter().map(|b| b.tasks as usize).sum();
+    waiting_for(&names, tasks)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Message,
     Working,
+    /// Parked on tasks other bots are doing; nothing for the owner to do.
+    Waiting,
     Queued,
     Answer,
     Approval,
@@ -82,12 +106,16 @@ impl Subtitle {
         if let Some(activity) = &bot.activity {
             match activity.phase.as_str() {
                 "working" => {
+                    let (kind, text) = match &activity.waiting_on {
+                        Some(waiting) => (Kind::Waiting, waiting_label(waiting)),
+                        None => (Kind::Working, "Working".to_owned()),
+                    };
                     return label(
-                        Kind::Working,
+                        kind,
                         &if activity.queued_count > 0 {
-                            format!("Working · {} queued", activity.queued_count)
+                            format!("{text} · {} queued", activity.queued_count)
                         } else {
-                            "Working".to_owned()
+                            text
                         },
                     );
                 }
@@ -241,6 +269,32 @@ mod tests {
             assert_eq!(subtitle.text, format!("{prefix} · Which account?"));
             assert_eq!(Subtitle::new(&bot, true, true).kind, Kind::Stopping);
         }
+    }
+
+    #[test]
+    fn a_turn_parked_on_other_bots_waits_instead_of_working() {
+        let waiting = |bots: Value, queued: u32| {
+            let bot = bot(json!({ "activity": {
+                "phase": "working", "active_turn_id": null, "queued_count": queued,
+                "waiting_on": { "since": "2026-11-13T12:00:00Z", "bots": bots } } }));
+            let subtitle = Subtitle::new(&bot, true, false);
+            (subtitle.kind, subtitle.text)
+        };
+        let dev = |tasks| json!({ "id": uuid::Uuid::nil(), "name": "Dev", "tasks": tasks });
+        let qa = json!({ "id": uuid::Uuid::max(), "name": "QA", "tasks": 1 });
+        for (bots, queued, text) in [
+            (json!([dev(1)]), 0, "Waiting for Dev"),
+            (json!([dev(3)]), 0, "Waiting for Dev · 3 tasks"),
+            (json!([dev(1), qa.clone()]), 0, "Waiting for 2 bots"),
+            (
+                json!([dev(3), qa]),
+                1,
+                "Waiting for 2 bots · 4 tasks · 1 queued",
+            ),
+        ] {
+            assert_eq!(waiting(bots, queued), (Kind::Waiting, text.to_owned()));
+        }
+        assert_eq!(waiting_for(&[], 0), "Waiting for another bot");
     }
 
     #[test]
