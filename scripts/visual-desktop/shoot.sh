@@ -127,14 +127,14 @@ command cp -f "$png" "$OUT/dark-07-working.png"
 select_bot main
 main_bottom
 keys ctrl+shift+b
-# Details tab at x=1152,y=98; GPUI does not expose it to AT-SPI.
-click 1152 98
+# Details tab at x=1152,y=110, under the panel header; GPUI does not expose it to AT-SPI.
+click 1152 110
 scroll 1300 450 -4500
 shot dark-08-bot-details
 scroll 1300 650 4500
 shot dark-09-schedules-and-triggers
-# Computer tab at x=1230,y=98, beside Details.
-click 1230 98
+# Computer tab at x=1340,y=110; the two tabs share the panel width.
+click 1340 110
 shot dark-10-computer
 keys ctrl+shift+b
 select_bot empty
@@ -167,10 +167,10 @@ keys Escape
 # One additional dark shot opens the saved rules version from the Details pane.
 select_bot main
 keys ctrl+shift+b
-click 1152 98
+click 1152 110
 scroll 1300 450 -4500
-# Rules summary card at x=1260,y=428 in the default Details layout.
-click 1260 428
+# Rules summary row at x=1260,y=387 in the default Details layout.
+click 1260 387
 click_named History
 shot dark-20-rules-diff
 keys Escape
@@ -181,7 +181,7 @@ select_bot main
 main_bottom
 shot light-01-release-plan
 keys ctrl+shift+b
-click 1152 98
+click 1152 110
 scroll 1300 450 -4500
 shot light-02-bot-details
 keys ctrl+shift+b
