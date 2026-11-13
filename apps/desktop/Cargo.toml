@@ -5,54 +5,54 @@ edition.workspace = true
 rust-version.workspace = true
 
 [build-dependencies]
-serde_json = "1.0.154"
-uuid = "1.29.0"
+serde_json = { workspace = true }
+uuid = { workspace = true }
 
 [dependencies]
-else-tailnet = { path = "../../crates/tailnet" }
-else-visual = { path = "../../crates/visual" }
-anyhow = "1.0.104"
-axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
-base64 = "0.22.1"
-chrono = { version = "0.4.45", default-features = false, features = ["serde", "clock", "std"] }
+else-tailnet = { workspace = true }
+else-visual = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true, features = ["http1", "tokio"] }
+base64 = { workspace = true }
+chrono = { workspace = true, features = ["serde", "clock", "std"] }
 bytesize = "2.7.0"
-chrono-tz = "0.10.4"
-croner = "4.0.2"
-dotenvy = "0.15.7"
-futures-util = "0.3.34"
+chrono-tz = { workspace = true }
+croner = { workspace = true }
+dotenvy = { workspace = true }
+futures-util = { workspace = true }
 gpui-kit = { version = "=0.9.0", features = ["syntect"] }
-iana-time-zone = "0.1.65"
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "ico"] }
-libc = "0.2.191"
-rustix = { version = "1.1.6", features = ["event", "process", "std"] }
-markdown = "1.0.0"
+iana-time-zone = { workspace = true }
+image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "ico"] }
+libc = { workspace = true }
+rustix = { workspace = true, features = ["event", "process", "std"] }
+markdown = { workspace = true }
 rand = "0.10.3"
-mime_guess = "2.0.5"
-reqwest = { version = "0.13.5", default-features = false, features = ["stream", "json", "rustls"] }
-rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
-rustls-platform-verifier = "0.7.1"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
-tempfile = "3.27.0"
-thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "time", "sync", "macros", "process", "fs", "io-util", "net"] }
-tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
+mime_guess = { workspace = true }
+reqwest = { workspace = true, features = ["stream", "json", "rustls"] }
+rustls = { workspace = true, features = ["aws-lc-rs", "std", "tls12"] }
+rustls-platform-verifier = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "macros", "process", "fs", "io-util", "net"] }
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
 url = "2.5.8"
-uuid = { version = "1.29.0", features = ["v4", "serde"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
 vte = "0.14.1"
 xkeysym = "0.2.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 notify = "8.2.1"
-toml = "0.8.23"
+toml = { workspace = true }
 wl-clipboard-rs = "0.9.5"
 
 [dev-dependencies]
-axum = { version = "0.8.9", default-features = false, features = ["json"] }
-futures-util = "0.3.34"
+axum = { workspace = true, features = ["json"] }
+futures-util = { workspace = true }
 proc-macro2 = "1.0.107"
-sha2 = "0.11.1"
-tokio = { version = "1.54.1", features = ["io-util", "net"] }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net"] }
 
 [lints]
 workspace = true
