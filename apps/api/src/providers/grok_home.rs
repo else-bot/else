@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde_json::json;
+
 use super::cli::files::{GRANT_ENV, link_login, replace_private};
 use super::host::BotDirs;
 use crate::app::tools::SERVER_NAME;
@@ -117,34 +119,46 @@ pub fn prepare(
     host_tools: bool,
 ) -> std::io::Result<()> {
     link_login(&dirs.provider_home, "auth.json", &login.join("auth.json"))?;
-    let mut config = CONFIG.to_owned();
     // Grok checks permission on the requested name before resolving it, so a
     // headless turn cancels on mcp__elsebot__<tool> unless that spelling is
     // allowed through to Grok's own "Tool not found" reply.
-    config.push_str(&format!(
-        "\n[permission]\nallow = [\"MCPTool({SERVER_NAME}__*)\", \"MCPTool(mcp__{SERVER_NAME}__*)\"]\n"
-    ));
+    let mut launch = json!({
+        "permission": {
+            "allow": [
+                format!("MCPTool({SERVER_NAME}__*)"),
+                format!("MCPTool(mcp__{SERVER_NAME}__*)"),
+            ],
+        },
+    });
     if !host_tools {
-        config.push_str("deny = [\"Read(**)\"]\n");
+        launch["permission"]["deny"] = json!(["Read(**)"]);
     }
     if let Some(url) = tool_url {
-        config.push_str(&format!(
-            "\n[mcp_servers.{SERVER_NAME}]\nurl = {}\nstartup_timeout_sec = 30\n\
-             [mcp_servers.{SERVER_NAME}.headers]\nAuthorization = \"Bearer ${{{GRANT_ENV}}}\"\n",
-            serde_json::to_string(url)?,
-        ));
+        launch["mcp_servers"] = json!({
+            SERVER_NAME: {
+                "url": url,
+                "startup_timeout_sec": 30,
+                "headers": { "Authorization": format!("Bearer ${{{GRANT_ENV}}}") },
+            },
+        });
     }
+    let config = format!("{CONFIG}\n{}", toml(&launch)?);
     replace_private(&dirs.provider_home, "config.toml", config.as_bytes())?;
     replace_private(&dirs.provider_home, PROMPT_FILE, prompt.as_bytes())?;
-    let allowed = tool_url.map_or_else(
-        || "[]".into(),
-        |url| format!("[{{serverUrl = {}}}]", serde_json::to_string(url).unwrap()),
-    );
+    let allowed: Vec<_> = tool_url
+        .map(|url| json!({ "serverUrl": url }))
+        .into_iter()
+        .collect();
+    let managed = json!({ "allow_managed_hooks_only": true, "allowedMcpServers": allowed });
     replace_private(
         &dirs.provider_home,
         "managed_config.toml",
-        format!("allow_managed_hooks_only = true\nallowedMcpServers = {allowed}\n").as_bytes(),
+        toml(&managed)?.as_bytes(),
     )
+}
+
+fn toml(value: &serde_json::Value) -> std::io::Result<String> {
+    toml::to_string(value).map_err(std::io::Error::other)
 }
 
 pub fn session_exists(home: &Path, project: &Path, id: &str) -> bool {
