@@ -24,6 +24,13 @@ const READ_FILE: &str = guest_path!(
 stat -c %s -- "$p" && tail -c +"$(($2 + 1))" -- "$p" | head -c "$3" | base64 -w0"#
 );
 
+/// Prints the size and then the absolute path, which the runtime's copy
+/// needs: it neither expands `~` nor starts in `~/work`.
+const FETCH_FILE: &str = guest_path!(
+    r#"case $p in /*) ;; *) p=$PWD/$p ;; esac
+[ -f "$p" ] && [ ! -L "$p" ] && stat -c %s -- "$p" && printf '%s\n' "$p""#
+);
+
 struct CheckedArtifact {
     bytes: u64,
     digest: Vec<u8>,
@@ -50,15 +57,19 @@ impl ComputerManager {
         if lease_bot != bot_id {
             return Err(ComputerError::LeaseEnded);
         }
-        let (program, mut args) =
-            self.as_guest_user(r#"[ -f "$1" ] && [ ! -L "$1" ] && stat -c %s -- "$1""#);
+        let (program, mut args) = self.as_guest_user(FETCH_FILE);
         args.push(guest_path.to_owned());
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        let size = self
+        let found = self
             .runtime
             .exec(&name, &program, &argv, Duration::from_secs(30))
             .await?;
-        let Ok(bytes) = size.stdout.trim().parse::<u64>() else {
+        let resolved = found
+            .stdout
+            .strip_suffix('\n')
+            .and_then(|out| out.split_once('\n'))
+            .and_then(|(size, path)| Some((size.parse::<u64>().ok()?, path)));
+        let Some((bytes, guest_path)) = resolved else {
             return Ok(Err("not a regular file (or not readable)".into()));
         };
         if bytes > max {
