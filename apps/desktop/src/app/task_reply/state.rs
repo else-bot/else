@@ -160,16 +160,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                 reply.reactions.push((item.id, kind));
             }
             if let Some(previous) = reply.latest.replace(item.id) {
-                // The owner read an earlier attempt's last reply as the answer.
-                let ended_attempt = conversation
-                    .item(previous)
-                    .and_then(|previous| previous.attempt)
-                    .is_some_and(|previous| item.attempt > Some(previous));
-                if reply.latest_kept || ended_attempt {
-                    reply.kept.push(previous)
-                } else {
-                    reply.history.push(previous)
-                }
+                reply.history.push(previous);
             }
             reply.latest_kept = reaction.is_some() || has_file;
             reply.anchor = Some(item.id);
@@ -178,6 +169,9 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
         } else if reply.latest.is_none() && item.routine_update.is_none() {
             reply.anchor = Some(item.id);
         }
+    }
+    for reply in replies.values_mut() {
+        keep_earlier_replies(conversation, &reactions, reply);
     }
     // A queued turn runs no attempt, so its latest reply ended one.
     for (turn, reply) in &mut replies {
@@ -232,6 +226,59 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             });
     }
     replies
+}
+
+/// Moves the earlier replies the owner still needs from `history` to `kept`:
+/// a reacted reply, the reply that ended the most recent earlier attempt, and
+/// a reply with a file no later reply delivers again. A bot that restates its
+/// work after each park re-uploads the same file, sometimes renaming an image,
+/// so an image of the same type and byte size counts as the same file.
+fn keep_earlier_replies(
+    conversation: &Conversation,
+    reactions: &HashMap<Uuid, crate::model::ReactionKind>,
+    reply: &mut TaskReply,
+) {
+    let Some(latest) = reply.latest else {
+        return;
+    };
+    let attempt = |id| conversation.item(id).and_then(|item| item.attempt);
+    let files = |id| {
+        conversation
+            .item(id)
+            .into_iter()
+            .flat_map(|item| &item.parts)
+            .filter_map(|part| match part {
+                crate::attachments::MessagePart::File { file } => Some(file),
+                crate::attachments::MessagePart::Text { .. } => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let replies: Vec<_> = reply.history.iter().copied().chain([latest]).collect();
+    let ended_attempt = replies
+        .windows(2)
+        .rev()
+        .find(|pair| attempt(pair[0]).is_some_and(|ended| attempt(pair[1]) > Some(ended)))
+        .map(|pair| pair[0]);
+    let same = |a: &crate::attachments::Attachment, b: &crate::attachments::Attachment| {
+        a.media_type == b.media_type
+            && a.size == b.size
+            && (a.name == b.name || a.media_type.starts_with("image/"))
+    };
+    let mut delivered_later = files(latest);
+    let mut kept = Vec::new();
+    for &id in reply.history.iter().rev() {
+        let files = files(id);
+        let new_file = files
+            .iter()
+            .any(|file| !delivered_later.iter().any(|later| same(file, later)));
+        delivered_later.extend(files);
+        if new_file || reactions.contains_key(&id) || ended_attempt == Some(id) {
+            kept.push(id);
+        }
+    }
+    reply.history.retain(|id| !kept.contains(id));
+    kept.reverse();
+    reply.kept = kept;
 }
 
 #[cfg(test)]
@@ -818,5 +865,89 @@ mod tests {
         assert_eq!(finished.latest, Some(id(5)));
         assert_eq!(finished.kept, [id(3)]);
         assert_eq!(finished.history, [id(2)]);
+    }
+
+    /// #393, shaped like production turn 42: every resumed attempt restated
+    /// the work and re-attached the same card, once under another name.
+    #[test]
+    fn a_turn_that_parks_repeatedly_keeps_one_copy_of_a_restated_reply() {
+        let reply = |number: u128, attempt: Option<i64>, file: Option<&str>| {
+            let mut reply = item(number, 10, "assistant");
+            reply["attempt"] = json!(attempt);
+            if let Some(name) = file {
+                reply["parts"] = json!([{"type": "file", "file": {
+                    "id": id(1000 + number), "name": name,
+                    "media_type": "image/png", "size": 572_211
+                }}]);
+            }
+            reply
+        };
+        let card = Some("recap-final.png");
+        for attempts in [false, true] {
+            let at = |attempt| attempts.then_some(attempt);
+            let items = vec![
+                item(1, 10, "user"),
+                reply(2, at(1), None),
+                reply(3, at(1), Some("recap.png")),
+                reply(4, at(1), card),
+                reply(5, at(2), card),
+                reply(6, at(2), card),
+                reply(7, at(3), card),
+                reply(8, at(3), card),
+                reply(9, at(4), None),
+            ];
+            let mut finished = turn(10, "completed");
+            finished["attempt"] = json!(4);
+            let task = &task_replies(&conversation(items, vec![finished]))[&id(10)];
+            assert_eq!(task.latest, Some(id(9)), "attempts={attempts}");
+            assert_eq!(
+                task.kept,
+                [id(8)],
+                "attempts={attempts}: one copy of the card and the last park's reply"
+            );
+            assert_eq!(task.history, [id(2), id(3), id(4), id(5), id(6), id(7)]);
+        }
+    }
+
+    #[test]
+    fn a_distinct_earlier_file_stays_beside_a_later_one() {
+        let file = |number: u128, size: u64| {
+            let mut reply = item(number, 10, "assistant");
+            reply["parts"] = json!([{"type": "file", "file": {
+                "id": id(1000 + number), "name": "chart.png", "media_type": "image/png", "size": size
+            }}]);
+            reply
+        };
+        let c = conversation(
+            vec![
+                item(1, 10, "user"),
+                file(2, 10),
+                file(3, 20),
+                item(4, 10, "assistant"),
+            ],
+            vec![turn(10, "completed")],
+        );
+        assert_eq!(task_replies(&c)[&id(10)].kept, [id(2), id(3)]);
+    }
+
+    #[test]
+    fn a_text_file_of_the_same_size_but_another_name_stays_kept() {
+        let file = |number: u128, name: &str| {
+            let mut reply = item(number, 10, "assistant");
+            reply["parts"] = json!([{"type": "file", "file": {
+                "id": id(1000 + number), "name": name, "media_type": "application/json", "size": 11
+            }}]);
+            reply
+        };
+        let c = conversation(
+            vec![
+                item(1, 10, "user"),
+                file(2, "before.json"),
+                file(3, "after.json"),
+                item(4, 10, "assistant"),
+            ],
+            vec![turn(10, "completed")],
+        );
+        assert_eq!(task_replies(&c)[&id(10)].kept, [id(2), id(3)]);
     }
 }
