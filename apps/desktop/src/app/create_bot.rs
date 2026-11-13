@@ -142,7 +142,7 @@ impl ElseApp {
                         v_flex()
                             .items_center()
                             .gap_2()
-                            .child(bot_avatar("create-avatar-preview", form.avatar, px(104.)))
+                            .child(bot_avatar("create-avatar-preview", form.avatar, px(120.)))
                             .child(div().text_xs().text_color(theme.muted_foreground).child(
                                 format!(
                                     "{} · {}",
