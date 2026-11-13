@@ -240,6 +240,21 @@ impl Codex {
     }
 }
 
+/// How a turn with host tools reaches else.bot's tools. Codex's full catalog
+/// defers MCP tools, so their declarations reach the model only through
+/// `ALL_TOOLS`; naming the tools saves a scan to discover them.
+pub(crate) fn deferred_tools() -> String {
+    format!(
+        "Your else.bot tools are deferred: exec's description does not declare them. Each is \
+         mcp__elsebot__ followed by one of: {}. Before you first call any of them, read the \
+         declarations of every one the task needs in a single lookup by exact name, such as \
+         `text(ALL_TOOLS.filter(t => [\"mcp__elsebot__find_tool\", \
+         \"mcp__elsebot__use_tool\"].includes(t.name)))`. Never print ALL_TOOLS in full or \
+         filtered by a pattern.",
+        crate::app::tools::TOOL_NAMES.join(", ")
+    )
+}
+
 fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
     TurnOutcome::Failed {
         code: code.to_owned(),
