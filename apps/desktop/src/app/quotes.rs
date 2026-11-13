@@ -1,6 +1,6 @@
 use super::conversation::ConversationView;
 use super::reply::{Author, MessageReference, Quote};
-use super::{APP_CONTEXT, CommentSelection, ElseApp, QuoteSelection, RowKey};
+use super::{APP_CONTEXT, CiteSelection, ElseApp, RowKey};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::TextSelection;
 use gpui_kit::base::input::InputEvent;
@@ -107,12 +107,7 @@ impl ElseApp {
         })
     }
 
-    pub(super) fn quote_selection(
-        &mut self,
-        comment: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn cite_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(prompt) = self
             .quote_prompt
             .take()
@@ -123,11 +118,7 @@ impl ElseApp {
         TextSelection::clear(window, cx);
         let below = prompt.below();
         let quote = Quote::new(prompt.source, prompt.highlight);
-        if comment {
-            self.open_quote_editor(prompt.bot, quote, below, window, cx);
-        } else {
-            self.add_quote(prompt.bot, quote, window, cx);
-        }
+        self.open_quote_editor(prompt.bot, quote, below, window, cx);
         cx.notify();
     }
 
@@ -303,26 +294,18 @@ impl ElseApp {
             return None;
         }
         let theme = cx.theme();
-        let action = |id: &'static str,
-                      label: &'static str,
-                      icon: IconName,
-                      action: &dyn Action,
-                      comment: bool| {
-            Button::new(id)
-                .focus_ring(false)
-                .cursor_pointer()
-                .ghost()
-                .small()
-                .icon(icon)
-                .label(label)
-                .children(
-                    Kbd::binding_for_action(action, Some(APP_CONTEXT), window)
-                        .map(|kbd| div().flex_none().text_xs().child(kbd.appearance(false))),
-                )
-                .on_click(
-                    cx.listener(move |app, _, window, cx| app.quote_selection(comment, window, cx)),
-                )
-        };
+        let cite = Button::new("cite-selection")
+            .focus_ring(false)
+            .cursor_pointer()
+            .ghost()
+            .small()
+            .icon(IconName::Pencil)
+            .label("Cite")
+            .children(
+                Kbd::binding_for_action(&CiteSelection, Some(APP_CONTEXT), window)
+                    .map(|kbd| div().flex_none().text_xs().child(kbd.appearance(false))),
+            )
+            .on_click(cx.listener(|app, _, window, cx| app.cite_selection(window, cx)));
         Some(
             deferred(
                 anchored()
@@ -347,20 +330,7 @@ impl ElseApp {
                             .bg(theme.popover)
                             .text_color(theme.popover_foreground)
                             .shadow_lg()
-                            .child(action(
-                                "quote-selection",
-                                "Quote",
-                                IconName::Reply,
-                                &QuoteSelection,
-                                false,
-                            ))
-                            .child(action(
-                                "comment-selection",
-                                "Comment",
-                                IconName::Pencil,
-                                &CommentSelection,
-                                true,
-                            )),
+                            .child(cite),
                     ),
             )
             .with_priority(2)
