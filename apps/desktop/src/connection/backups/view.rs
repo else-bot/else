@@ -309,18 +309,12 @@ impl Shell {
             content = content.when(
                 !matches!(view.editor, Some(Editor::Destination(_))),
                 |content| {
-                    content.child(
-                        h_flex()
-                            .items_center()
-                            .gap_3()
-                            .pb_4()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .child(
-                                Icon::new(IconName::CloudUpload)
-                                    .size_5()
-                                    .text_color(theme.muted_foreground),
-                            )
+                    content.child(crate::panel_kit::grouped_list(
+                        [crate::panel_kit::list_row()
+                            .child(crate::panel_kit::row_icon(
+                                Icon::new(IconName::CloudUpload),
+                                cx,
+                            ))
                             .child(
                                 v_flex()
                                     .flex_1()
@@ -354,8 +348,10 @@ impl Shell {
                                     .on_click(cx.listener(|shell, _, window, cx| {
                                         shell.edit_backup_destination(window, cx)
                                     })),
-                            ),
-                    )
+                            )
+                            .into_any_element()],
+                        cx,
+                    ))
                 },
             );
         } else {
@@ -401,18 +397,9 @@ impl Shell {
         content = content.when(
             !matches!(view.editor, Some(Editor::Destination(_))),
             |content| {
-                content.child(
-                    h_flex()
-                        .items_center()
-                        .gap_3()
-                        .pb_4()
-                        .border_b_1()
-                        .border_color(theme.border)
-                        .child(
-                            Icon::new(IconName::Clock)
-                                .size_5()
-                                .text_color(theme.muted_foreground),
-                        )
+                content.child(crate::panel_kit::grouped_list(
+                    [crate::panel_kit::list_row()
+                        .child(crate::panel_kit::row_icon(Icon::new(IconName::Clock), cx))
                         .child(
                             v_flex()
                                 .flex_1()
@@ -444,8 +431,10 @@ impl Shell {
                                 .on_click(cx.listener(|shell, _, window, cx| {
                                     shell.edit_backup_policy(window, cx)
                                 })),
-                        ),
-                )
+                        )
+                        .into_any_element()],
+                    cx,
+                ))
             },
         );
         if let Some(Editor::Policy(form)) = &view.editor {
@@ -584,12 +573,14 @@ impl Shell {
             .size_full()
             .min_h_0()
             .child(
-                div()
-                    .id("backup-settings-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .child(div().py_8().child(settings_column(page.child(content)))),
+                div().flex_1().min_h_0().child(crate::panel_kit::faded(
+                    div()
+                        .id("backup-settings-scroll")
+                        .size_full()
+                        .overflow_y_scrollbar()
+                        .child(div().py_8().child(settings_column(page.child(content)))),
+                    theme.popover,
+                )),
             )
             .when_some(view.error.clone(), |content, text| {
                 content.child(status_line(text, theme.warning))

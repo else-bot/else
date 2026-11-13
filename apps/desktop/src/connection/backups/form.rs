@@ -505,20 +505,25 @@ impl LocalForm {
                             .child(heading("Daily backup time"))
                             .child(explanation),
                     )
-                    .when(managed, |row| {
-                        row.child(div().text_sm().text_color(theme.muted_foreground).child(
-                            if self.enabled {
-                                "Automatic"
-                            } else {
-                                "Automatic backups off"
-                            },
-                        ))
-                    })
-                    .when(!managed, |row| {
-                        row.child(
-                            h_flex().gap_2().text_xs().child("Automatic").child(
+                    // A locked schedule keeps its switch, disabled, so its
+                    // state reads the same way as an editable one.
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .text_xs()
+                            .when(managed, |row| {
+                                row.text_color(theme.muted_foreground)
+                                    .child(Icon::new(IconName::Lock).size_3())
+                            })
+                            .child("Automatic")
+                            .child(
                                 toggle("local-backups-enabled", self.enabled, disabled, cx)
-                                    .accessibility_label("Automatic daily local backups")
+                                    .accessibility_label(if managed {
+                                        "Automatic daily local backups, locked by the server"
+                                    } else {
+                                        "Automatic daily local backups"
+                                    })
                                     .on_click(cx.listener(|shell, enabled: &bool, _, cx| {
                                         if let Some(form) = shell
                                             .backups
@@ -530,8 +535,7 @@ impl LocalForm {
                                         cx.notify();
                                     })),
                             ),
-                        )
-                    }),
+                    ),
             )
             .when(managed, |panel| {
                 panel.child(
@@ -553,11 +557,13 @@ impl LocalForm {
                         .child(div().flex_1().min_w_0()),
                 )
             })
-            .child(note(format!(
-                "Times use the server's timezone ({}). A missed backup runs at the next \
-                 scheduled time.",
-                local.timezone
-            )));
+            // The summary above names the server's timezone; this note
+            // does not repeat it.
+            .child(note(
+                "Times use the server's timezone. A missed backup runs at the next scheduled \
+                 time."
+                    .into(),
+            ));
         let retention = v_flex()
             .gap_4()
             .child(

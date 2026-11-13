@@ -1063,10 +1063,14 @@ impl ElseApp {
             .accessibility_label("Hide bot details")
             .tooltip_with_action("Hide bot details", &ToggleSettings, Some(APP_CONTEXT))
             .on_click(cx.listener(|app, _, window, cx| app.toggle_settings(window, cx)));
+        // The padding keeps the first and last rows clear of the edge fades
+        // at rest.
         let mut body = v_flex()
             .id("bot-settings-body")
             .flex_1()
             .min_h_0()
+            .pt_2()
+            .pb_6()
             .overflow_y_scroll();
         if let Some(computer) = &self.computer {
             body = body.child(v_flex().flex_1().p_4().child(computer.clone()));
@@ -1087,90 +1091,77 @@ impl ElseApp {
                 body = body.child(muted("Loading…", cx));
             }
         }
-        let mut panel =
-            v_flex()
-                .id("bot-settings")
-                .relative()
-                .w(px(self.preferences.details_width).min((viewport - px(360.)).max(px(280.))))
-                .on_drag_move(cx.listener(Self::resize_sidebar))
-                .flex_none()
-                .h_full()
-                .bg(theme.sidebar)
-                .text_color(theme.sidebar_foreground)
-                .border_l_1()
-                .border_color(line)
-                .child(
-                    // The tabs are the panel's header: same height and rule as the
-                    // conversation header, so the two dividers meet as one line.
-                    h_flex()
-                        .flex_none()
-                        .h(HEADER_HEIGHT)
-                        .pl_4()
-                        .pr_2()
-                        .items_center()
-                        .border_b_1()
-                        .border_color(line)
-                        .gap_2()
-                        .child(
-                            segment_track(cx)
-                                .flex_1()
-                                .child(
-                                    segment(
-                                        "details-tab",
-                                        "Details",
-                                        self.details_tab == super::computer::DetailsTab::Details,
-                                        false,
-                                        cx,
-                                    )
-                                    .on_click(cx.listener(
-                                        |app, _, _, cx| {
-                                            app.details_tab = super::computer::DetailsTab::Details;
-                                            app.computer = None;
-                                            app._computer_layout = None;
-                                            cx.notify();
-                                        },
-                                    )),
+        let mut panel = v_flex()
+            .id("bot-settings")
+            .relative()
+            .w(px(self.preferences.details_width).min((viewport - px(360.)).max(px(280.))))
+            .on_drag_move(cx.listener(Self::resize_sidebar))
+            .flex_none()
+            .h_full()
+            .bg(theme.sidebar)
+            .text_color(theme.sidebar_foreground)
+            .border_l_1()
+            .border_color(line)
+            .child(
+                // The tabs are the panel's header: same height and rule as the
+                // conversation header, so the two dividers meet as one line.
+                h_flex()
+                    .flex_none()
+                    .h(HEADER_HEIGHT)
+                    .pl_4()
+                    .pr_2()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(line)
+                    .gap_2()
+                    .child(
+                        segment_track(cx)
+                            .flex_1()
+                            .child(
+                                segment(
+                                    "details-tab",
+                                    "Details",
+                                    self.details_tab == super::computer::DetailsTab::Details,
+                                    false,
+                                    cx,
                                 )
-                                .child(
-                                    segment(
-                                        "computer-tab",
-                                        "Computer",
-                                        self.details_tab == super::computer::DetailsTab::Computer,
-                                        false,
-                                        cx,
-                                    )
-                                    .on_click(cx.listener(
-                                        |app, _, window, cx| {
-                                            app.details_tab = super::computer::DetailsTab::Computer;
-                                            app.ensure_settings(window, cx);
-                                            cx.notify();
-                                        },
-                                    )),
-                                ),
-                        )
-                        .child(div().flex_none().child(close)),
-                )
-                .child(
-                    div()
-                        .relative()
-                        .flex_1()
-                        .min_h_0()
-                        .flex()
-                        .flex_col()
-                        .child(body)
-                        .child(
-                            // Rows dissolve under the tabs instead of being sliced
-                            // at the rule.
-                            div().absolute().top_0().left_0().right_0().h(px(16.)).bg(
-                                linear_gradient(
-                                    180.,
-                                    linear_color_stop(theme.sidebar, 0.),
-                                    linear_color_stop(theme.sidebar.opacity(0.), 1.),
-                                ),
+                                .on_click(cx.listener(
+                                    |app, _, _, cx| {
+                                        app.details_tab = super::computer::DetailsTab::Details;
+                                        app.computer = None;
+                                        app._computer_layout = None;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                segment(
+                                    "computer-tab",
+                                    "Computer",
+                                    self.details_tab == super::computer::DetailsTab::Computer,
+                                    false,
+                                    cx,
+                                )
+                                .on_click(cx.listener(
+                                    |app, _, window, cx| {
+                                        app.details_tab = super::computer::DetailsTab::Computer;
+                                        app.ensure_settings(window, cx);
+                                        cx.notify();
+                                    },
+                                )),
                             ),
-                        ),
-                )
-                .child(self.sidebar_handle(super::layout::SidebarEdge::Right, cx));
+                    )
+                    .child(div().flex_none().child(close)),
+            )
+            .child(
+                // Rows dissolve under the tabs and the footer instead of
+                // being sliced at the rule.
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(crate::panel_kit::faded(body, theme.sidebar)),
+            )
+            .child(self.sidebar_handle(super::layout::SidebarEdge::Right, cx));
         if self.default_bot_id != Some(bot.id) {
             let id = bot.id;
             panel = panel.child(
@@ -1399,9 +1390,9 @@ impl ElseApp {
                     "Standard speed"
                 };
                 v_flex()
-                    .gap_1()
+                    .gap_0p5()
                     .child(item_name(model_label(&choice.model)))
-                    .child(fine(
+                    .child(meta(
                         format!(
                             "{} · {} reasoning · {speed}",
                             self.provider_label(&choice.provider_id),
@@ -1562,16 +1553,41 @@ impl ElseApp {
                 at.with_timezone(&chrono::Local).format("%a %-d %b, %H:%M")
             ));
         }
+        // Same anatomy as a routine: the name over one meta line, beside a
+        // centred switch. What the trigger asks for follows as its body.
+        let mut tokens = vec![
+            h_flex()
+                .flex_none()
+                .gap_1p5()
+                .items_center()
+                .text_color(theme.muted_foreground)
+                .child(Icon::new(card.icon).size_3().flex_none())
+                .child(meta(facts.first().cloned().unwrap_or_default(), cx).whitespace_nowrap())
+                .into_any_element(),
+        ];
+        tokens.extend(facts.into_iter().skip(1).map(|fact| {
+            meta(fact, cx)
+                .flex_none()
+                .whitespace_nowrap()
+                .into_any_element()
+        }));
         v_flex()
             .w_full()
-            .py_3()
+            .py(px(10.))
             .gap_1()
             .group("automation-card")
             .child(
                 h_flex()
                     .gap_2()
-                    .items_start()
-                    .child(item_name(card.title.clone()).flex_1().min_w_0())
+                    .items_center()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(item_name(card.title.clone()))
+                            .child(meta_line(tokens, cx)),
+                    )
                     .child(
                         h_flex()
                             .flex_none()
@@ -1581,15 +1597,7 @@ impl ElseApp {
                             .child(switch),
                     ),
             )
-            .child(meta(card.instructions, cx))
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .items_center()
-                    .text_color(theme.muted_foreground)
-                    .child(Icon::new(card.icon).size_3().flex_none())
-                    .child(fine(facts.join(" · "), cx)),
-            )
+            .child(meta(card.instructions, cx).pt_0p5())
             .children(error.map(|error| alert(error, theme.danger, cx)))
             .into_any_element()
     }
@@ -1722,20 +1730,20 @@ impl ElseApp {
                     app.dismiss_routine_failures(bot, id, window, cx)
                 }))
         });
-        let schedule = match (routine.run_at, &routine.active_hours) {
-            (Some(at), _) => format!(
-                "Once · {} · {}",
-                local_time(at, &routine.timezone),
-                routine.timezone
-            ),
-            (None, Some(hours)) => format!(
-                "{} · {} · {}",
-                describe_cron(&routine.cron),
-                describe_hours(hours),
-                routine.timezone
-            ),
-            (None, None) => format!("{} · {}", describe_cron(&routine.cron), routine.timezone),
+        // Whole tokens, so a narrow panel wraps between them and never
+        // inside "Europe/Paris".
+        let when = match (routine.run_at, &routine.active_hours) {
+            (Some(at), _) => format!("Once · {}", local_time(at, &routine.timezone)),
+            (None, Some(hours)) => {
+                format!(
+                    "{} · {}",
+                    describe_cron(&routine.cron),
+                    describe_hours(hours)
+                )
+            }
+            (None, None) => describe_cron(&routine.cron),
         };
+        let schedule = format!("{when} · {}", routine.timezone);
         let last = last_run(routine);
         let problem = match save {
             Some(RoutineSave::Failed(err)) => Some(err.clone()),
@@ -1775,7 +1783,6 @@ impl ElseApp {
             .model
             .as_ref()
             .is_some_and(|choice| !self.model_available(choice));
-        let theme = cx.theme();
         let warning = routine
             .requested_model
             .as_ref()
@@ -1783,51 +1790,54 @@ impl ElseApp {
             .or_else(|| {
                 unavailable.then(|| "Saved model is unavailable. Choose another model.".to_owned())
             });
-        let model_summary = choice
-            .map(|choice| {
-                format!(
-                    "{} · {} · {}",
-                    model_label(&choice.model),
-                    effort_label(&choice.reasoning_effort),
-                    if choice.service_tier == "priority" {
-                        "Fast"
-                    } else {
-                        "Standard"
-                    }
-                )
-            })
-            .unwrap_or_else(|| "Choose a model".to_owned());
-        let model_control = Button::new(ElementId::Name(format!("routine-model-{id}").into()))
-            .focus_ring(false)
-            .cursor_pointer()
-            .ghost()
-            .with_size(Size::Size(px(16.)))
-            .mx(-ROW_BLEED)
-            .px(ROW_BLEED)
-            .py_0p5()
-            .accessibility_label(format!(
-                "Change model for {}. {model_title}. {model_details}",
-                routine.name
-            ))
-            .loading(matches!(save, Some(RoutineSave::Model { .. })))
-            .disabled(busy || !connected || self.caps.is_none())
-            .child(
-                fine(model_summary, cx)
-                    .w_full()
-                    .min_w_0()
-                    .text_left()
-                    .truncate(),
-            )
-            .on_click(cx.listener(move |app, _, window, cx| {
-                app.open_routine_model_dialog(bot, id, window, cx)
-            }));
+        // The model is changed from the row's actions, beside Delete. The
+        // meta line names it only when the routine overrides the bot model
+        // shown above, so a routine reads as one line.
+        let model_control = routine.run_at.is_none().then(|| {
+            Button::new(ElementId::Name(format!("routine-model-{id}").into()))
+                .focus_ring(false)
+                .cursor_pointer()
+                .ghost()
+                .opacity(0.)
+                .group_hover("automation-card", |style| style.opacity(1.))
+                .focus(|style| style.opacity(1.))
+                .xsmall()
+                .icon(IconName::Cpu)
+                .accessibility_label(format!(
+                    "Change model for {}. {model_title}. {model_details}",
+                    routine.name
+                ))
+                .loading(matches!(save, Some(RoutineSave::Model { .. })))
+                .disabled(busy || !connected || self.caps.is_none())
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    app.open_routine_model_dialog(bot, id, window, cx)
+                }))
+        });
+        let mut tokens = vec![
+            meta(when, cx).min_w_0().into_any_element(),
+            meta(routine.timezone.clone(), cx)
+                .flex_none()
+                .whitespace_nowrap()
+                .into_any_element(),
+        ];
+        if let Some(choice) = routine.model.as_ref().filter(|_| routine.run_at.is_none()) {
+            tokens.push(
+                meta(model_label(&choice.model), cx)
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .into_any_element(),
+            );
+        }
         let summary = v_flex()
             .id(ElementId::Name(format!("routine-pill-{id}").into()))
             .w_full()
             .gap_0p5()
             .child(item_name(routine.name.clone()))
-            .child(meta(schedule.clone(), cx))
-            .children(problem.map(|text| alert(text, theme.danger, cx)));
+            .child(meta_line(tokens, cx));
+        let model_line = routine
+            .run_at
+            .is_none()
+            .then(|| format!("{model_title} · {model_details}"));
         let name = routine.name.clone();
         let prompt = routine.prompt.clone();
         let next = match (routine.enabled, routine.next_run_at) {
@@ -1877,6 +1887,11 @@ impl ElseApp {
                         v_flex()
                             .gap_0p5()
                             .child(line(schedule.clone(), theme.muted_foreground))
+                            .children(
+                                model_line
+                                    .clone()
+                                    .map(|text| line(text, theme.muted_foreground)),
+                            )
                             .children(next.clone().map(|text| line(text, theme.muted_foreground)))
                             .children(last.clone().map(|(text, error)| {
                                 line(
@@ -1926,14 +1941,14 @@ impl ElseApp {
         let theme = cx.theme();
         v_flex()
             .w_full()
-            .py_3()
+            .py(px(10.))
             .gap_1()
             .group("automation-card")
             .child(
                 h_flex()
                     .w_full()
                     .gap_2()
-                    .items_start()
+                    .items_center()
                     .child(div().flex_1().min_w_0().child(description))
                     .child(
                         h_flex()
@@ -1941,11 +1956,12 @@ impl ElseApp {
                             .gap_1()
                             .items_center()
                             .children(dismiss)
+                            .children(model_control)
                             .child(delete)
                             .child(switch),
                     ),
             )
-            .when(routine.run_at.is_none(), |card| card.child(model_control))
+            .children(problem.map(|text| alert(text, theme.danger, cx)))
             .children(warning.map(|warning| alert(warning, theme.warning, cx)))
             .into_any_element()
     }
@@ -2226,30 +2242,48 @@ fn list_rows(rows: Vec<AnyElement>, cx: &App) -> impl Iterator<Item = Div> {
 /// wraps instead of truncating.
 fn meta(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
-        .text_size(px(13.))
+        .text_size(px(12.5))
         .line_height(px(18.))
         .text_color(cx.theme().muted_foreground)
         .whitespace_normal()
         .child(text.into())
 }
 
-/// The third text level in a row, under its name and schedule: the model
-/// it runs on, or a trigger's facts.
-fn fine(text: impl Into<SharedString>, cx: &App) -> Div {
-    div()
-        .text_size(px(12.))
-        .line_height(px(16.))
-        .text_color(cx.theme().muted_foreground.opacity(0.8))
-        .whitespace_normal()
-        .child(text.into())
+/// A row's one meta line: whole tokens joined by "·". The separator stays
+/// with the token before it, so a narrow panel wraps between tokens and
+/// never starts a line with a dot.
+fn meta_line(tokens: Vec<AnyElement>, cx: &App) -> Div {
+    let last = tokens.len().saturating_sub(1);
+    let separator = cx.theme().muted_foreground.opacity(0.6);
+    h_flex()
+        .w_full()
+        .flex_wrap()
+        .items_center()
+        .gap_x_1()
+        .children(tokens.into_iter().enumerate().map(move |(index, token)| {
+            h_flex()
+                .min_w_0()
+                .gap_x_1()
+                .items_center()
+                .child(token)
+                .when(index < last, |token| {
+                    token.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(12.5))
+                            .text_color(separator)
+                            .child("·"),
+                    )
+                })
+        }))
 }
 
-/// An item's name in a Details row: the first of its three text levels.
-fn item_name(text: impl Into<SharedString>) -> Div {
+/// An item's name in a Details row, over its one meta line.
+pub(super) fn item_name(text: impl Into<SharedString>) -> Div {
     div()
         .text_size(px(14.))
         .line_height(px(20.))
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(FontWeight::MEDIUM)
         .whitespace_normal()
         .child(text.into())
 }

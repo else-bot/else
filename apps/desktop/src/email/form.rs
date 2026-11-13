@@ -251,10 +251,12 @@ impl Form {
                         .disabled(busy),
                 )
         };
-        let mut form = v_flex()
-            .gap_4()
-            .w_full()
-            .child(div().text_base().font_semibold().child("Add email account"));
+        let mut form = v_flex().gap_4().w_full().child(
+            div()
+                .text_size(px(15.))
+                .font_semibold()
+                .child("Add email account"),
+        );
         if let Some(authorization) = &self.authorization {
             let waiting = matches!(authorization, Authorization::Waiting(_));
             form = form.child(note(&if waiting {
@@ -305,7 +307,8 @@ impl Form {
                 })),
             );
         }
-        form = form.child(div().max_w(px(520.)).child(providers));
+        // The track spans the column, so every provider keeps its whole name.
+        form = form.child(providers);
         if self.provider != EmailProvider::Gmail {
             form = form.child(field("Email address", &self.address));
         }
@@ -333,11 +336,19 @@ impl Form {
             }
         }
         form = form.child(v_flex().gap_1()
-            .child(div().text_sm().font_medium().child("Ask a bot to help, optional"))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().text_sm().font_medium().child("Ask a bot to help"))
+                    .child(crate::panel_kit::tag("Optional", cx)),
+            )
             .child(div().max_w(px(320.)).child(field_style(Select::new(&self.bot), cx).focus_ring(false).cursor_pointer().accessibility_label("Email bot").disabled(busy))))
             .child(note("The bot will ask what this inbox is for and whether you want a first triage. All your other bots can still use it when asked."));
+        // The action closes the form at its left edge, under the last
+        // helper line, where the eye ends up.
         form.child(
-            h_flex().gap_2().justify_end().child(
+            h_flex().gap_2().child(
                 Button::new("email-connect")
                     .control(
                         Tier::Primary,

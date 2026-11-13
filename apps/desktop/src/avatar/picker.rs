@@ -112,17 +112,16 @@ impl RenderOnce for AvatarPicker {
                 .on_click(move |_, window, cx| pick(avatar, window, cx))
         });
         let reset = self.on_change;
+        let muted = theme.muted_foreground;
+        // Shape and Color each get a label; Reset is a quiet 12 px action.
         v_flex()
             .w(px(if self.compact { 224. } else { 288. }))
-            .gap_3()
+            .gap_2()
             .child(
                 h_flex()
                     .items_center()
                     .justify_between()
-                    .child(crate::appearance::section_label(
-                        if self.compact { "Shape" } else { "Avatar" },
-                        cx,
-                    ))
+                    .child(crate::appearance::section_label("Shape", cx))
                     .child(
                         Button::new("reset-avatar")
                             .control(
@@ -131,7 +130,8 @@ impl RenderOnce for AvatarPicker {
                                 self.disabled || self.current == Avatar::default(),
                                 cx,
                             )
-                            .label("Reset")
+                            .accessibility_label("Reset avatar")
+                            .child(div().text_xs().text_color(muted).child("Reset"))
                             .on_click(move |_, window, cx| reset(Avatar::default(), window, cx)),
                     ),
             )
@@ -142,6 +142,7 @@ impl RenderOnce for AvatarPicker {
                     .justify_center()
                     .children(shapes),
             )
+            .child(crate::appearance::section_label("Color", cx).pt_3().pb_1())
             .child(
                 h_flex()
                     .flex_wrap()
@@ -154,8 +155,9 @@ impl RenderOnce for AvatarPicker {
 
 fn ring(size: Pixels, radius: Pixels, picked: bool, cx: &App, content: impl IntoElement) -> Div {
     let theme = cx.theme();
+    // A picked item: a 2 px accent ring, then a 2 px gap.
     let (ring, gap) = if picked {
-        (theme.ring, theme.popover)
+        (theme.primary, theme.popover)
     } else {
         (transparent_black(), transparent_black())
     };

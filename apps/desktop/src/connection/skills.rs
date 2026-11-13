@@ -464,7 +464,8 @@ impl Shell {
                     "Ask a bot to install a skill from a GitHub link.",
                     Button::new("empty-open-chat")
                         .control(Tier::Secondary, Scale::Standard, false, cx)
-                        .label("Open chat")
+                        .icon(IconName::MessageSquare)
+                        .label("Ask a bot in chat")
                         .on_click(cx.listener(|shell, _, window, cx| {
                             window.close_dialog(cx);
                             shell.cancel(window, cx);

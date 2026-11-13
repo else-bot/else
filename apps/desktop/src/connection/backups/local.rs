@@ -86,7 +86,7 @@ impl Shell {
                 } else if local.enabled {
                     local.timezone.clone()
                 } else {
-                    "Enable automatic backups to schedule".into()
+                    "Automatic backups off".into()
                 }
             });
         let latest = local.recent.iter().find(|run| {
@@ -191,7 +191,7 @@ impl Shell {
                     .when(stacked, |row| row.flex_col().items_start())
                     .child(
                         div()
-                            .text_base()
+                            .text_size(px(15.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("On this server"),
                     )
