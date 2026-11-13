@@ -19,7 +19,7 @@ use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::model::{
     APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, DENY, Question,
-    QuestionAnswer,
+    QuestionAnswer, QuestionUse,
 };
 
 mod approval;
@@ -49,6 +49,24 @@ impl QuestionForm {
 }
 
 fn outcome(question: &Question, bot_name: &str) -> String {
+    use super::message_row::stamp;
+    let decision = decision(question, bot_name);
+    match question.used {
+        Some(QuestionUse::Completed { at }) => format!("{decision} Ran at {}.", stamp(at)),
+        Some(QuestionUse::Error { at }) => {
+            format!("{decision} Tried at {}; it returned an error.", stamp(at))
+        }
+        Some(QuestionUse::Started { at }) => {
+            format!(
+                "{decision} Started at {}; no result recorded yet.",
+                stamp(at)
+            )
+        }
+        None => decision,
+    }
+}
+
+fn decision(question: &Question, bot_name: &str) -> String {
     match question.status.as_str() {
         "answered" => match (question.is_approval(), question.answer.as_ref().and_then(QuestionAnswer::single)) {
             (true, Some(APPROVE)) => "Approved once.".into(),
@@ -457,7 +475,7 @@ fn callout(text: String, theme: &Theme) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{letter, outcome};
-    use crate::model::{APPROVE, DENY, Question, QuestionAnswer, QuestionChoice};
+    use crate::model::{APPROVE, DENY, Question, QuestionAnswer, QuestionChoice, QuestionUse};
     use uuid::Uuid;
 
     fn question(kind: &str, status: &str, answer: Option<&str>) -> Question {
@@ -495,6 +513,7 @@ mod tests {
             status: status.into(),
             answer: answer.map(|id| QuestionAnswer::Single(id.to_owned())),
             settled_at: None,
+            used: None,
         }
     }
 
@@ -515,6 +534,31 @@ mod tests {
         assert!(outcome(&question("choice", "cancelled", None), "Mail").starts_with("Withdrawn"));
         assert_eq!(outcome(&question("choice", "pending", None), "Mail"), "");
         assert_eq!(letter("c"), "C");
+    }
+
+    #[test]
+    fn an_approval_says_whether_its_call_ran() {
+        let mut card = question("external", "answered", Some(APPROVE));
+        assert_eq!(outcome(&card, "Mail"), "Approved once.");
+        let at = "2026-11-13T07:14:47Z".parse().unwrap();
+        let stamp = super::super::message_row::stamp(at);
+        for (used, said) in [
+            (
+                QuestionUse::Completed { at },
+                format!("Approved once. Ran at {stamp}."),
+            ),
+            (
+                QuestionUse::Error { at },
+                format!("Approved once. Tried at {stamp}; it returned an error."),
+            ),
+            (
+                QuestionUse::Started { at },
+                format!("Approved once. Started at {stamp}; no result recorded yet."),
+            ),
+        ] {
+            card.used = Some(used);
+            assert_eq!(outcome(&card, "Mail"), said);
+        }
     }
 
     #[test]

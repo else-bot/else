@@ -60,6 +60,7 @@ fn input(history: Vec<(i64, &str, &str)>) -> TurnInput {
         skill_installs: Vec::new(),
         computer_handoffs: Vec::new(),
         computer_control: None,
+        ran_actions: Vec::new(),
         skills: None,
         mcps: None,
         handoff: None,

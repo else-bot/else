@@ -177,6 +177,7 @@ pub(crate) fn oversized_purpose(purpose: &str) -> Option<String> {
 
 pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
     let mut approval = None;
+    let mut upstream_error = false;
     let result = match name {
         "mcp_connect" | "mcp_connection_status" => {
             let input = match serde_json::from_value::<ConnectArgs>(args.clone()) {
@@ -291,7 +292,9 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                     }
                 }
             }
-            match list_or_request(state, &request.id, request.method, request.params).await {
+            let result = list_or_request(state, &request.id, request.method, request.params).await;
+            upstream_error = matches!(&result, Ok((value, _)) if value["isError"] == true);
+            match result {
                 Ok((result, true)) => {
                     let mut value = json!({"mcp_id": request.id, "result": result});
                     super::mcp_result::drop_structured_copy(&mut value);
@@ -337,6 +340,15 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
     };
     let note = approval.map(|note| format!("; {note}")).unwrap_or_default();
     match result {
+        // The upstream tool's own error flag stays visible outside its result.
+        Ok(result) if upstream_error => {
+            let mut value = tool_result(result);
+            value["isError"] = json!(true);
+            (
+                value,
+                Some(format!("shared MCP request returned an error{note}")),
+            )
+        }
         Ok(result) => (
             tool_result(result),
             Some(format!("shared MCP request completed{note}")),

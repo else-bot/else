@@ -636,6 +636,41 @@ fn computer_handoffs_block(input: &TurnInput) -> String {
     text
 }
 
+/// Owner-approved calls made in turns that did not complete, whose replies
+/// may still say the call was not made.
+pub(super) fn ran_actions_block(input: &TurnInput) -> String {
+    use crate::db::owner_questions::Use;
+    if input.ran_actions.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from(
+        "[else.bot approved actions] Owner-approved calls made in requests that did not \
+         complete. A reply from those requests saying a completed call was not made is \
+         outdated. Check a call's result before repeating it. This list replaces earlier \
+         ones.\n",
+    );
+    for ran in &input.ran_actions {
+        let at = ran
+            .used
+            .at()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let outcome = match ran.used {
+            Use::Completed { .. } => format!("completed at {at}"),
+            Use::Error { .. } => format!("returned an error at {at}"),
+            Use::Started { .. } => format!("started at {at}, outcome unknown"),
+        };
+        text.push_str(&format!(
+            "- turn {} ({}): {} \"{}\" {outcome}\n",
+            ran.turn_no,
+            ran.turn_status.as_str(),
+            ran.tool,
+            ran.title,
+        ));
+    }
+    text.push('\n');
+    text
+}
+
 /// Whether the owner still holds the bot's computer from a take-over it
 /// asked for. Empty until the owner first takes one over.
 pub(super) fn computer_control_block(input: &TurnInput) -> String {

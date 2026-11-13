@@ -808,6 +808,59 @@ async fn an_approved_call_that_ran_before_a_failure_stays_visible() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_approved_mcp_call_the_upstream_tool_rejects_records_an_error() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, _, ran) = approved_mcp_call(&app, &main, echo_call("reject")).await;
+    assert!(
+        is_error(&ran),
+        "the upstream error is visible: {}",
+        ran.body
+    );
+    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    assert_eq!(card["used"]["outcome"], "error", "{card}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approved_call_records_what_its_tool_returned_once() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main).await;
+    let pending = tool_text(&tool(&app, &token, "computer_run", delete_args()).await);
+    let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
+    wait(&app, turn, "waiting").await;
+    let approved = answer(&app, &main, question, "approve_forever").await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    wait(&app, turn, "completed").await;
+
+    let token = resume_finished(&app, turn).await;
+    let ran = tool(&app, &token, "computer_run", delete_args()).await;
+    assert!(
+        tool_text(&ran)
+            .as_str()
+            .is_some_and(|t| t.starts_with("COMPUTER_UNAVAILABLE")),
+        "the call under the standing grant failed before running: {}",
+        ran.body
+    );
+    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    assert_eq!(
+        card["used"]["outcome"], "error",
+        "a broad grant still marks its own card, with the tool's error: {card}"
+    );
+
+    let again = else_api::db::owner_questions::record_use(
+        &app.db.pool,
+        question,
+        else_api::db::owner_questions::UseOutcome::Completed,
+    )
+    .await
+    .unwrap();
+    assert!(!again, "a recorded outcome is final");
+    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    assert_eq!(card["used"]["outcome"], "error");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_denied_action_stays_denied_for_the_request() {
     let Harness { app, synthetic } = harness().await;
     let main = app.main_bot().await;

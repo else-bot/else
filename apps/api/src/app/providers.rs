@@ -187,6 +187,9 @@ pub struct TurnInput {
     pub run: Option<SavedRun>,
     /// The bot's current rules file, given at the start of every turn.
     pub rules: Option<String>,
+    /// Owner-approved calls that ran in recent turns of this conversation
+    /// that did not complete, oldest first.
+    pub ran_actions: Vec<crate::db::owner_questions::RanAction>,
 }
 
 /// One shared MCP as a turn lists it.

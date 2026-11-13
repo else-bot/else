@@ -311,6 +311,25 @@ pub struct Question {
     pub answer: Option<QuestionAnswer>,
     #[serde(default)]
     pub settled_at: Option<DateTime<Utc>>,
+    /// What became of the approved tool call once it was let run.
+    #[serde(default)]
+    pub used: Option<QuestionUse>,
+}
+
+/// An approved tool call the server let run, and what its tool returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(tag = "outcome", rename_all = "lowercase")]
+pub enum QuestionUse {
+    /// No result recorded yet: still running, or lost.
+    Started {
+        at: DateTime<Utc>,
+    },
+    Completed {
+        at: DateTime<Utc>,
+    },
+    Error {
+        at: DateTime<Utc>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

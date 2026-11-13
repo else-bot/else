@@ -573,6 +573,28 @@ fn routine_banner(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> 
 }
 
 pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
+    use crate::model::QuestionUse;
+    let (label, error) = status_label(turn);
+    if !matches!(turn.status.as_str(), "failed" | "uncertain" | "interrupted") {
+        return (label, error);
+    }
+    let used = |pick: fn(&QuestionUse) -> bool| {
+        turn.questions
+            .iter()
+            .any(|q| q.used.as_ref().is_some_and(pick))
+    };
+    let note = if used(|u| matches!(u, QuestionUse::Completed { .. })) {
+        "An approved action had already run."
+    } else if used(|u| matches!(u, QuestionUse::Started { .. })) {
+        "An approved action had started; its outcome is unknown."
+    } else {
+        return (label, error);
+    };
+    let label = label.trim_end().trim_end_matches('.');
+    (format!("{label}. {note}"), error)
+}
+
+fn status_label(turn: &crate::model::Turn) -> (String, bool) {
     let detail = turn
         .error
         .as_ref()
@@ -710,6 +732,46 @@ mod tests {
             turn_label(&turn),
             ("Waiting for you to connect an account…".into(), false)
         );
+    }
+
+    #[test]
+    fn a_failed_turn_says_whether_an_approved_action_ran() {
+        let failed = |used: serde_json::Value| {
+            serde_json::from_value(serde_json::json!({
+                "id": uuid::Uuid::nil(),
+                "request_id": uuid::Uuid::nil(),
+                "turn_no": 1,
+                "provider_id": "claude",
+                "status": "failed",
+                "error": { "code": "provider_policy",
+                           "message": "Claude reported native agent activity (task_started)" },
+                "effect_uncertain": false,
+                "questions": [{
+                    "id": uuid::Uuid::nil(), "kind": "external", "title": "Call github issue_write",
+                    "choices": [], "status": "answered", "answer": "approve", "used": used
+                }]
+            }))
+            .unwrap()
+        };
+        let reason = "Failed. Claude reported native agent activity (task_started)";
+        let at = "2026-11-13T07:14:47Z";
+        for (used, label) in [
+            (serde_json::json!(null), reason.to_owned()),
+            (
+                serde_json::json!({ "outcome": "error", "at": at }),
+                reason.to_owned(),
+            ),
+            (
+                serde_json::json!({ "outcome": "completed", "at": at }),
+                format!("{reason}. An approved action had already run."),
+            ),
+            (
+                serde_json::json!({ "outcome": "started", "at": at }),
+                format!("{reason}. An approved action had started; its outcome is unknown."),
+            ),
+        ] {
+            assert_eq!(turn_label(&failed(used)), (label, true));
+        }
     }
 
     #[test]
