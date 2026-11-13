@@ -762,24 +762,29 @@ impl ElseApp {
                         .size_full()
                         .py(TRANSCRIPT_FADE),
                     );
-                    // Rows dissolve under the header and above the composer instead of
-                    // meeting them at a hard clipped edge. The band next to each edge is
-                    // fully opaque, so a sliced line never shows as half-legible text.
-                    // Plain divs take no pointer input.
+                    // Rows dissolve under the header and above the composer only
+                    // where rows have actually scrolled past that edge; a resting
+                    // transcript shows every row at full strength. The band next to
+                    // each edge is opaque, so a sliced line never shows as
+                    // half-legible text. Plain divs take no pointer input.
                     let page = theme.background;
                     let fade =
                         |angle: f32| {
                             div().absolute().left_0().right_0().h(TRANSCRIPT_FADE).bg(
                                 linear_gradient(
                                     angle,
-                                    linear_color_stop(page, 0.6),
+                                    linear_color_stop(page, 0.35),
                                     linear_color_stop(page.opacity(0.), 1.),
                                 ),
                             )
                         };
+                    let past_top = view.list.scroll_px_offset_for_scrollbar().y < px(0.);
+                    let past_bottom = view.list.is_scrolled_to_end() == Some(false);
                     transcript = transcript
-                        .child(fade(180.).top_0())
-                        .child(fade(0.).bottom_0());
+                        .when(past_top, |transcript| transcript.child(fade(180.).top_0()))
+                        .when(past_bottom, |transcript| {
+                            transcript.child(fade(0.).bottom_0())
+                        });
                     if self.unseen_below() {
                         transcript = transcript.child(
                             h_flex()
@@ -1121,8 +1126,8 @@ fn subtitle(bot: &Bot, main: bool) -> String {
 
 pub(super) const HEADER_HEIGHT: Pixels = px(56.);
 /// The transcript's edge fade and the matching list padding, so a resting
-/// transcript starts and ends below the fade's opaque band.
-const TRANSCRIPT_FADE: Pixels = px(40.);
+/// transcript starts and ends clear of the fade.
+const TRANSCRIPT_FADE: Pixels = px(24.);
 pub(super) const READING_WIDTH: Pixels = px(760.);
 
 pub(super) fn reading_column() -> Div {
