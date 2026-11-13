@@ -222,8 +222,13 @@ impl Palette {
     fn config(&self, name: &str, style: Style) -> ThemeConfig {
         let p = self;
         let dark = p.mode.is_dark();
-        let highlight = |base: Rgb| base.mix(p.foreground, if dark { 0.15 } else { 0.10 });
-        let hover = highlight(p.raised);
+        let highlight = |base: Rgb| base.mix(p.foreground, 0.15);
+        let raised = if dark {
+            p.raised
+        } else {
+            p.background.mix(p.foreground, 0.025)
+        };
+        let hover = highlight(raised);
         let active = highlight(hover);
         let on = |fill: Rgb| text_on(fill, p.background, p.foreground);
         let button_state = |fill: Rgb, text: Rgb, amount| {
@@ -244,8 +249,17 @@ impl Palette {
                 .unwrap_or_else(|| on(hover))
         };
         let danger = readable(p.red);
+        let warning = readable(p.yellow);
         let on_danger = on(danger);
         let popover = if dark { p.raised } else { p.background };
+        let sidebar = if dark {
+            p.surface
+        } else {
+            p.background.mix(p.foreground, 0.045)
+        };
+        let selected = p
+            .background
+            .mix(p.foreground, if dark { 0.14 } else { 0.10 });
         let border = p.background.mix(p.border, style.border_strength);
         let roles = [
             ("background", p.background),
@@ -253,13 +267,13 @@ impl Palette {
             ("border", border),
             ("input.border", border),
             ("window.border", border),
-            ("muted.background", p.raised),
+            ("muted.background", raised),
             ("muted.foreground", readable(p.muted_foreground)),
-            ("secondary.background", p.raised),
+            ("secondary.background", raised),
             ("secondary.foreground", p.foreground),
             ("secondary.hover.background", hover),
-            ("secondary.active.background", active),
-            ("button.background", p.raised),
+            ("secondary.active.background", selected),
+            ("button.background", raised),
             ("button.foreground", p.foreground),
             ("button.hover.background", hover),
             ("button.active.background", active),
@@ -267,6 +281,18 @@ impl Palette {
             ("accent.foreground", p.foreground),
             ("primary.background", p.accent),
             ("primary.foreground", p.on_accent),
+            ("button.primary.background", p.accent),
+            ("button.primary.foreground", p.on_accent),
+            (
+                "button.primary.hover.background",
+                button_state(p.accent, p.on_accent, 0.12),
+            ),
+            (
+                "button.primary.active.background",
+                button_state(p.accent, p.on_accent, 0.20),
+            ),
+            ("tab.active.background", selected),
+            ("tab.active.foreground", p.foreground),
             (
                 "primary.hover.background",
                 button_state(p.accent, p.on_accent, 0.12),
@@ -282,11 +308,11 @@ impl Palette {
             ("selection.background", p.accent),
             ("list.background", p.background),
             ("list.hover.background", hover),
-            ("list.active.background", p.selection),
+            ("list.active.background", selected),
             ("list.active.border", p.accent),
             ("popover.background", popover),
             ("popover.foreground", p.foreground),
-            ("sidebar.background", p.surface),
+            ("sidebar.background", sidebar),
             ("sidebar.foreground", p.foreground),
             ("sidebar.border", border),
             ("sidebar.accent.background", hover),
@@ -314,8 +340,8 @@ impl Palette {
                 "button.danger.active.background",
                 button_state(danger, on_danger, 0.20),
             ),
-            ("warning.background", p.yellow),
-            ("warning.foreground", on(p.yellow)),
+            ("warning.background", warning),
+            ("warning.foreground", on(warning)),
             ("success.background", p.green),
             ("success.foreground", on(p.green)),
             ("info.background", p.cyan),
@@ -327,10 +353,14 @@ impl Palette {
             ("base.magenta", p.magenta),
             ("base.cyan", p.cyan),
         ];
-        let colors: serde_json::Map<_, _> = roles
+        let mut colors: serde_json::Map<_, _> = roles
             .into_iter()
             .map(|(key, color)| (key.to_owned(), color.hex().into()))
             .collect();
+        colors.insert(
+            "overlay".to_owned(),
+            if dark { "#00000073" } else { "#00000038" }.into(),
+        );
         let syntax: serde_json::Map<_, _> = [
             ("keyword", p.magenta),
             ("string", p.green),
@@ -424,6 +454,42 @@ mod tests {
         }
     }
 
+    fn latte() -> Palette {
+        Palette {
+            background: Rgb(0xeff1f5),
+            surface: Rgb(0xe3e4e8),
+            raised: Rgb(0xdce0e8),
+            foreground: Rgb(0x4c4f69),
+            muted_foreground: Rgb(0x7b7e8f),
+            accent: Rgb(0x1e66f5),
+            on_accent: WHITE,
+            ..QUIET_LIGHT
+        }
+    }
+
+    #[test]
+    fn primary_buttons_are_solid_and_selections_are_neutral() {
+        let rgb = |color: gpui_kit::Hsla| Rgb(u32::from(gpui_kit::Rgba::from(color)) >> 8);
+        for palette in [QUIET_LIGHT, QUIET_DARK, cursor_dark(), latte()] {
+            let mut theme = Theme::default();
+            theme.apply_config(&Rc::new(palette.config("test", Style::OMARCHY)));
+            for (actual, expected) in rgb(theme.button_primary)
+                .channels()
+                .into_iter()
+                .zip(palette.accent.channels())
+            {
+                assert!(actual.abs_diff(expected) <= 1);
+            }
+            assert_eq!(theme.button_primary.a, 1.);
+            assert!(
+                rgb(theme.button_primary).contrast(rgb(theme.button_primary_foreground)) >= 4.5
+            );
+            assert_ne!(rgb(theme.secondary_active), palette.accent);
+            assert!(rgb(theme.secondary_active).contrast(rgb(theme.secondary_foreground)) >= 4.5);
+            assert!(theme.overlay.a >= 0.2 && theme.overlay.a <= 0.5);
+        }
+    }
+
     #[test]
     fn input_selection_is_distinct_and_keeps_text_readable() {
         for (name, palette) in [
@@ -459,7 +525,7 @@ mod tests {
         assert_eq!(colors.border.as_deref(), Some("#3a3a3e"));
         assert_eq!(colors.primary.as_deref(), Some("#69a9ff"));
         assert_eq!(colors.sidebar.as_deref(), Some("#28282b"));
-        assert_eq!(colors.list_active.as_deref(), Some("#35445a"));
+        assert_eq!(colors.list_active.as_deref(), Some("#3d3d3f"));
     }
 
     #[test]
