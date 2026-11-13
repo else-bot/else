@@ -288,10 +288,10 @@ fn tool_list() -> Value {
         {
             "name": "delegate",
             "description": "Hand one subtask to another registered bot (the main bot included) \
-                from your registry or a create_bot result, by its exact bot_id. Not available in a \
-                delegated task. Returns status pending with a task_id at once; it does not wait. \
-                After a pending result, tell the owner briefly and end this attempt; the other \
-                bot's reply arrives later in a continuation. At most one per attempt and two per \
+                from your registry or a create_bot result, by its exact bot_id. It is for work, not \
+                status reports. Not available in a delegated task. Returns status pending with a \
+                task_id at once. Then tell the owner briefly and end this attempt; the other bot's \
+                reply arrives later in a continuation. At most one per attempt and two per \
                 request.",
             "inputSchema": {
                 "type": "object",
