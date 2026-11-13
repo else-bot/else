@@ -20,7 +20,7 @@ else-api restore <set-dir> <new-database-file> [<new-data-dir>]\n       \
 else-api restore-remote <set-id> <new-database-file> [<new-data-dir>]\n       \
 else-api upgrade-computer <bot-id> <image> [--network <profile>]\n       \
 else-api rollback-computer <bot-id>\n       \
-else-api context [delegated-task|delegated-routine-task|mail-event]\n\n\
+else-api context [delegated-task|delegated-routine-task|mail-event|delegated-answer-task]\n\n\
 commands:\n  \
 serve    apply pending migrations and run the API (default)\n  \
 setup    provision missing credentials, apply migrations, and create the main\n           \
@@ -40,7 +40,7 @@ remove-state --yes  erase local state without setup; used by `elsebot remove`\n 
 version  print this build's version\n  \
 context  print representative bot instructions, tool schemas, and byte counts as JSON\n           \
 for the main bot's owner turn, or for a task delegated to another bot for an\n           \
-owner request or a routine run, or for a bot woken by new mail\n";
+owner request, a routine run, or an owner's card answer; or for a bot woken by new mail\n";
 
 fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some(else_visual::isolate::WORKER_ARG) {
@@ -54,6 +54,7 @@ fn main() -> ExitCode {
             [kind] if kind == "delegated-task" => http::context::Turn::DelegatedTask,
             [kind] if kind == "delegated-routine-task" => http::context::Turn::RoutineTask,
             [kind] if kind == "mail-event" => http::context::Turn::MailEvent,
+            [kind] if kind == "delegated-answer-task" => http::context::Turn::AnsweredTask,
             _ => {
                 eprintln!("{USAGE}");
                 return ExitCode::from(2);

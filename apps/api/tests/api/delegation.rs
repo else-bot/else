@@ -223,7 +223,7 @@ async fn a_delegation_receipt_is_shown_once_before_the_child_runs() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    let retry = else_api::db::delegations::create(&db.pool, root, target, "seeded task", &[])
+    let retry = else_api::db::delegations::create(&db.pool, root, target, "seeded task", &[], None)
         .await
         .unwrap();
     assert_eq!((retry.created, retry.delegation_id), (false, delegation));
@@ -741,6 +741,7 @@ async fn delegation_limits_fail_in_code() {
         family.parse().unwrap(),
         "second in the same attempt",
         &[],
+        None,
     )
     .await;
     assert!(
@@ -774,6 +775,7 @@ async fn delegation_limits_fail_in_code() {
         family.parse().unwrap(),
         "loop back",
         &[],
+        None,
     )
     .await;
     assert!(
@@ -807,6 +809,7 @@ async fn delegation_limits_fail_in_code() {
             target.parse().unwrap(),
             &format!("task {n}"),
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -822,7 +825,8 @@ async fn delegation_limits_fail_in_code() {
             root,
             work.parse().unwrap(),
             "a third",
-            &[]
+            &[],
+            None
         )
         .await,
         Err(else_api::db::delegations::DelegateError::BudgetExhausted)
@@ -1090,9 +1094,10 @@ async fn seed(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid) {
     .execute(&db.pool)
     .await
     .unwrap();
-    let accepted = else_api::db::delegations::create(&db.pool, root, target, "seeded task", &[])
-        .await
-        .unwrap();
+    let accepted =
+        else_api::db::delegations::create(&db.pool, root, target, "seeded task", &[], None)
+            .await
+            .unwrap();
     let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
         .bind(accepted.delegation_id)
         .fetch_one(&db.pool)
@@ -1238,7 +1243,7 @@ async fn the_same_task_to_another_bot_is_a_different_child() {
         .execute(&db.pool)
         .await
         .unwrap();
-    let second = else_api::db::delegations::create(&db.pool, root, other, "seeded task", &[])
+    let second = else_api::db::delegations::create(&db.pool, root, other, "seeded task", &[], None)
         .await
         .unwrap();
     assert!(second.created);
@@ -1258,7 +1263,7 @@ async fn the_same_task_to_another_bot_is_a_different_child() {
         .execute(&db.pool)
         .await
         .unwrap();
-    let retry = else_api::db::delegations::create(&db.pool, root, target, "seeded task", &[])
+    let retry = else_api::db::delegations::create(&db.pool, root, target, "seeded task", &[], None)
         .await
         .unwrap();
     assert!(!retry.created);
@@ -2190,7 +2195,7 @@ async fn a_follow_up_does_not_wait_on_a_task_that_waits_on_it() {
     set_status(&db, child, "interrupted").await;
     set_status(&db, root, "waiting").await;
     let inbound =
-        else_api::db::delegations::create(&db.pool, approval, main, "check with main", &[])
+        else_api::db::delegations::create(&db.pool, approval, main, "check with main", &[], None)
             .await
             .unwrap()
             .delegation_id;

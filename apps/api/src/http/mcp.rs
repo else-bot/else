@@ -307,6 +307,9 @@ fn tool_list() -> Value {
                                "description": "Project paths of files the other bot needs, up to 10 MiB \
                                    each. It gets exact copies, never your project. Its replies can \
                                    attach files back the same way you attach them for the owner." },
+                    "owner_answer": { "type": "string", "format": "uuid",
+                                      "description": "ID of a choice card the owner answered in this request that \
+                                          decides this task. The other bot sees the answer as the owner's own words." },
                 },
                 "required": ["target_bot_id", "task"],
                 "additionalProperties": false,
@@ -1098,6 +1101,18 @@ async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     let Some(task) = args["task"].as_str() else {
         return (tool_error("task is required."), None);
     };
+    let owner_answer = match &args["owner_answer"] {
+        Value::Null => None,
+        value => match value.as_str().and_then(|s| s.parse::<Uuid>().ok()) {
+            Some(id) => Some(id),
+            None => {
+                return (
+                    tool_error("owner_answer must be the ID of an answered choice card."),
+                    None,
+                );
+            }
+        },
+    };
     let paths: Vec<String> = match &args["files"] {
         Value::Null => Vec::new(),
         Value::Array(paths) if paths.len() <= crate::app::messages::MAX_MESSAGE_FILES => {
@@ -1163,7 +1178,7 @@ async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             })
         })
         .collect();
-    match delegations::create(&state.db, grant.turn_id, target, task, &files).await {
+    match delegations::create(&state.db, grant.turn_id, target, task, &files, owner_answer).await {
         Ok(accepted) if !matches!(accepted.status.as_str(), "queued" | "running") => {
             let log = format!("already {} {}", accepted.status, accepted.delegation_id);
             let result = json!({
@@ -1206,6 +1221,7 @@ async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 DelegateError::AttemptParked => "ATTEMPT_PARKED",
                 DelegateError::InvalidTask => "INVALID_TASK",
                 DelegateError::InvalidCouncil => "INVALID_COUNCIL",
+                DelegateError::AnswerUnavailable => "ANSWER_UNAVAILABLE",
                 DelegateError::NotRunning => "NOT_RUNNING",
                 DelegateError::Db => "UNAVAILABLE",
             };

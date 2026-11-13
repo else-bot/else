@@ -323,7 +323,9 @@ pub(crate) async fn authorized_owner_conversation(
     if bot != caller.bot_id || conversation != caller.conversation_id {
         return Err(RoutineError::NotAllowed);
     }
-    if super::delegations::origin(conn, caller.turn_id).await? != Origin::OwnerRequest {
+    if super::delegations::origin(conn, caller.turn_id).await? != Origin::OwnerRequest
+        && !super::delegations::carries_owner_answer(conn, caller.turn_id).await?
+    {
         return Err(RoutineError::NotAllowed);
     }
     if !status.serves_tools() || bot_status != "active" {

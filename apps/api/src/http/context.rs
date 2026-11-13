@@ -17,6 +17,9 @@ pub enum Turn {
     RoutineTask,
     /// Research woken by new mail in an inbox it watches.
     MailEvent,
+    /// A task the main bot delegated to Research during a routine run,
+    /// with the owner's answer on a card that run asked.
+    AnsweredTask,
 }
 
 /// A representative turn. Keep schemas on the same path as MCP tools/list.
@@ -33,14 +36,25 @@ pub fn export(turn: Turn) -> Value {
             remaining: crate::db::delegations::MAX_CHILDREN,
             ..DelegationContext::default()
         },
-        Turn::DelegatedTask | Turn::RoutineTask => DelegationContext {
-            origin: if turn == Turn::RoutineTask {
+        Turn::DelegatedTask | Turn::RoutineTask | Turn::AnsweredTask => DelegationContext {
+            origin: if matches!(turn, Turn::RoutineTask | Turn::AnsweredTask) {
                 Origin::RoutineRun
             } else {
                 Origin::OwnerRequest
             },
             delegated_task: true,
             delegated_by: Some((Uuid::from_u128(1), "Main".into())),
+            owner_answer: (turn == Turn::AnsweredTask).then(|| {
+                crate::app::providers::OwnerAnswer {
+                    question: "Apply the lead filter change to Research's Leads routine?".into(),
+                    context: Some(
+                        "Drop the 14-day trading requirement; the cap is 5 DMs per 24h now.".into(),
+                    ),
+                    chosen: vec!["Apply it, raise to 20 DMs per 24h".into()],
+                    answered_at: chrono::DateTime::from_timestamp(1_794_000_000, 0)
+                        .expect("valid timestamp"),
+                }
+            }),
             ..DelegationContext::default()
         },
         Turn::MailEvent => DelegationContext {
@@ -51,14 +65,18 @@ pub fn export(turn: Turn) -> Value {
     let input = TurnInput {
         bot_id: match turn {
             Turn::Owner => Uuid::from_u128(1),
-            Turn::DelegatedTask | Turn::RoutineTask | Turn::MailEvent => Uuid::from_u128(4),
+            Turn::DelegatedTask | Turn::RoutineTask | Turn::MailEvent | Turn::AnsweredTask => {
+                Uuid::from_u128(4)
+            }
         },
         conversation_id: Uuid::from_u128(2),
         turn_id: Uuid::from_u128(3),
         turn_no: 1,
         bot_name: match turn {
             Turn::Owner => "Main".into(),
-            Turn::DelegatedTask | Turn::RoutineTask | Turn::MailEvent => "Research".into(),
+            Turn::DelegatedTask | Turn::RoutineTask | Turn::MailEvent | Turn::AnsweredTask => {
+                "Research".into()
+            }
         },
         text: "Help me with my tasks.".into(),
         parts: vec![],
