@@ -1190,30 +1190,14 @@ fn install(
 /// Atomically swap two directories, so a crash leaves either package whole.
 /// The old one is left at `a`, under a staging name that startup cleanup removes.
 fn exchange(a: &Path, b: &Path) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = |p: &Path| {
-        std::ffi::CString::new(p.as_os_str().as_bytes())
-            .map_err(|_| std::io::Error::from(ErrorKind::InvalidInput))
-    };
-    let (a, b) = (c(a)?, c(b)?);
-    // SAFETY: two valid NUL-terminated paths relative to the cwd.
-    #[cfg(target_os = "linux")]
-    let rc = unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            a.as_ptr(),
-            libc::AT_FDCWD,
-            b.as_ptr(),
-            libc::RENAME_EXCHANGE,
-        )
-    };
-    // SAFETY: as above; macOS spells the exchange RENAME_SWAP.
-    #[cfg(target_os = "macos")]
-    let rc = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
+    use rustix::fs::{CWD, RenameFlags};
+    Ok(rustix::fs::renameat_with(
+        CWD,
+        a,
+        CWD,
+        b,
+        RenameFlags::EXCHANGE,
+    )?)
 }
 
 /// The packages installed under `root`, sorted by name. Reads only the

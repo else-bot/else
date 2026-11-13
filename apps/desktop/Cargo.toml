@@ -22,6 +22,7 @@ gpui-kit = { version = "=0.9.0", features = ["syntect"] }
 iana-time-zone = "0.1.65"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "ico"] }
 libc = "0.2.191"
+rustix = { version = "1.1.6", features = ["event", "process", "std"] }
 markdown = "1.0.0"
 rand = "0.10.3"
 mime_guess = "2.0.5"

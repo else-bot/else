@@ -39,6 +39,7 @@ mail-parser = "0.11.3"
 mail-builder = "0.4.4"
 zeroize = "1.8.2"
 libc = "0.2.191"
+rustix = { version = "1.1.6", features = ["fs", "process", "event", "param", "std"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 markdown = "1.0.0"
 mime_guess = "2.0.5"

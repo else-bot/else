@@ -1,14 +1,12 @@
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read as _};
 use std::ops::Range;
-use std::os::fd::{AsRawFd as _, FromRawFd as _};
-use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Component, Path, PathBuf};
 
 use markdown::mdast::Node;
+use rustix::fs::{Mode, OFlags};
 use uuid::Uuid;
 
 use crate::app::messages::{
@@ -182,20 +180,17 @@ fn open_beneath(root: &File, path: &Path) -> Option<File> {
             return None;
         };
         let last = index == components.len() - 1;
-        let name = CString::new(component.as_bytes()).ok()?;
-        let flags = libc::O_RDONLY
-            | libc::O_CLOEXEC
-            | libc::O_NOFOLLOW
+        let flags = OFlags::RDONLY
+            | OFlags::CLOEXEC
+            | OFlags::NOFOLLOW
             | if last {
-                libc::O_NONBLOCK
+                OFlags::NONBLOCK
             } else {
-                libc::O_DIRECTORY
+                OFlags::DIRECTORY
             };
-        let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
-        if fd < 0 {
-            return None;
-        }
-        directory = unsafe { File::from_raw_fd(fd) };
+        directory = rustix::fs::openat(&directory, *component, flags, Mode::empty())
+            .ok()?
+            .into();
     }
     Some(directory)
 }

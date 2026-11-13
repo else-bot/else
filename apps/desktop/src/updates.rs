@@ -846,12 +846,7 @@ fn detached(
         .stderr(log.try_clone()?);
     // SAFETY: setsid is async-signal-safe.
     unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+        command.pre_exec(|| Ok(rustix::process::setsid().map(drop)?));
     }
     Ok(command)
 }

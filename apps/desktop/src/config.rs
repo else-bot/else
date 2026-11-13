@@ -555,8 +555,7 @@ impl ProfileStore {
 }
 
 pub(crate) fn current_uid() -> u32 {
-    // SAFETY: getuid has no preconditions.
-    unsafe { libc::getuid() }
+    rustix::process::getuid().as_raw()
 }
 
 pub(crate) fn read_private(path: &Path) -> Result<Option<String>, String> {

@@ -668,24 +668,8 @@ fn server_timezone() -> String {
 
 /// Bytes available to this user on the file system holding `path`.
 fn free_space(path: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // SAFETY: `path` is NUL-terminated and `stat` is written by statvfs
-    // before it is read, only when the call succeeds.
-    let stat = unsafe {
-        if libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) != 0 {
-            return None;
-        }
-        stat.assume_init()
-    };
-    // The field types are u64 on Linux and narrower on macOS.
-    #[allow(
-        clippy::unnecessary_cast,
-        reason = "statvfs field widths differ by platform"
-    )]
-    let (available, fragment) = (stat.f_bavail as u64, stat.f_frsize as u64);
-    Some(available.saturating_mul(fragment))
+    let stat = rustix::fs::statvfs(path).ok()?;
+    Some(stat.f_bavail.saturating_mul(stat.f_frsize))
 }
 
 fn size(path: &Path) -> u64 {

@@ -192,7 +192,7 @@ impl Connection {
 
     pub(super) async fn shutdown(&mut self) {
         if let Some(mut process) = self.process.take() {
-            process.signal(libc::SIGKILL);
+            process.signal(rustix::process::Signal::KILL);
             let _ = tokio::time::timeout(CLOSE_TIMEOUT, process.child.wait()).await;
         }
         let _ = self.service.close_with_timeout(CLOSE_TIMEOUT).await;
@@ -346,7 +346,7 @@ for line in sys.stdin:
             .await
             .unwrap();
         assert_eq!(listed["tools"][0]["name"], "environment");
-        let mut pid = 0;
+        let mut pid = None;
         for expected in [1, 2] {
             let called = connection
                 .request(
@@ -365,13 +365,16 @@ for line in sys.stdin:
                     .unwrap(),
                 dir.path().canonicalize().unwrap()
             );
-            pid = environment["pid"].as_i64().unwrap() as libc::pid_t;
+            pid = rustix::process::Pid::from_raw(environment["pid"].as_i64().unwrap() as i32);
             for key in environment["env"].as_object().unwrap().keys() {
                 assert!(allowed.contains(key), "unexpected inherited variable {key}");
             }
         }
         connection.shutdown().await;
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "MCP child exited");
+        assert!(
+            rustix::process::test_kill_process(pid.expect("the child reported its pid")).is_err(),
+            "MCP child exited"
+        );
         assert!(
             connection
                 .request("tools/list".into(), json!({}))

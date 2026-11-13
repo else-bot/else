@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Component, Path};
 
@@ -30,19 +29,19 @@ fn valid_id(id: &str) -> bool {
 }
 
 fn open_at(dir: &File, name: &str, directory: bool) -> Result<File, BackupError> {
-    let name = std::ffi::CString::new(name).map_err(invalid)?;
-    let flags = libc::O_RDONLY
-        | libc::O_CLOEXEC
-        | libc::O_NOFOLLOW
-        | libc::O_NONBLOCK
-        | if directory { libc::O_DIRECTORY } else { 0 };
-    // SAFETY: the borrowed directory descriptor and NUL-terminated name are valid.
-    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
-    if fd < 0 {
-        return Err(invalid(std::io::Error::last_os_error()));
-    }
-    // SAFETY: openat returned a new descriptor owned exclusively by this File.
-    Ok(unsafe { File::from_raw_fd(fd) })
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::RDONLY
+        | OFlags::CLOEXEC
+        | OFlags::NOFOLLOW
+        | OFlags::NONBLOCK
+        | if directory {
+            OFlags::DIRECTORY
+        } else {
+            OFlags::empty()
+        };
+    rustix::fs::openat(dir, name, flags, Mode::empty())
+        .map(File::from)
+        .map_err(|err| invalid(std::io::Error::from(err)))
 }
 
 pub fn archive(dir: &Path, target: &Path, limit: u64) -> Result<(), BackupError> {

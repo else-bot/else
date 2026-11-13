@@ -431,3 +431,16 @@ fn header_placeholders_name_task_secret_variables() {
             .ends_with("from task secrets vendor")
     );
 }
+
+#[test]
+fn an_exchange_swaps_two_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    for (path, name) in [(&a, "a"), (&b, "b")] {
+        std::fs::create_dir(path).unwrap();
+        std::fs::write(path.join(name), "").unwrap();
+    }
+    exchange(&a, &b).unwrap();
+    assert!(a.join("b").exists() && b.join("a").exists());
+    assert!(exchange(&a, &dir.path().join("missing")).is_err());
+}

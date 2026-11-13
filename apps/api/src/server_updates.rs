@@ -260,10 +260,8 @@ fn read_operation(home: &Path, id: Uuid) -> Result<Operation, ApiError> {
         .ok()
         .and_then(|pid| pid.trim().parse::<i32>().ok())
         .filter(|pid| *pid > 1)
-        .is_some_and(|pid| {
-            // SAFETY: signal zero only probes a positive process ID.
-            unsafe { libc::kill(pid, 0) == 0 }
-        });
+        .and_then(rustix::process::Pid::from_raw)
+        .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok());
     let (state, error) = match result.as_deref().map(str::trim) {
         Some("0") => (State::Succeeded, None),
         Some(_) => (State::Failed, Some("The installer failed. Review its output and try again.".into())),

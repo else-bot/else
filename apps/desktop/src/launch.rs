@@ -17,6 +17,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustix::process::{Pid, Signal};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
@@ -589,7 +590,10 @@ impl Service {
                 LocalError::StartFailed(format!("cannot run {}: {err}", program.display()))
             })?;
         let mut child = Starter {
-            group: child.id().expect("spawned child has a process id") as libc::pid_t,
+            group: child
+                .id()
+                .and_then(|id| Pid::from_raw(id as i32))
+                .expect("spawned child has a process id"),
             child,
         };
         match tokio::time::timeout(limit, child.child.wait()).await {
@@ -610,14 +614,13 @@ impl Service {
 
 struct Starter {
     child: tokio::process::Child,
-    group: libc::pid_t,
+    group: Pid,
 }
 
 impl Starter {
     fn stop(&mut self) {
         if self.child.id().is_some() {
-            // SAFETY: the child was spawned as the leader of this process group.
-            unsafe { libc::kill(-self.group, libc::SIGKILL) };
+            let _ = rustix::process::kill_process_group(self.group, Signal::KILL);
         }
     }
 }
@@ -1259,15 +1262,17 @@ mod tests {
             matches!(&result, Err(LocalError::StartFailed(why)) if why.contains("did not finish")),
             "{result:?}"
         );
-        let pid: libc::pid_t = std::fs::read_to_string(fixture.home.join("pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let pid = Pid::from_raw(
+            std::fs::read_to_string(fixture.home.join("pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
         let mut gone = false;
         for _ in 0..50 {
-            // SAFETY: signal 0 only checks for existence.
-            if unsafe { libc::kill(pid, 0) } != 0 {
+            if rustix::process::test_kill_process(pid).is_err() {
                 gone = true;
                 break;
             }
@@ -1290,16 +1295,18 @@ mod tests {
         })
         .await
         .unwrap();
-        let pid: libc::pid_t = std::fs::read_to_string(pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let pid = Pid::from_raw(
+            std::fs::read_to_string(pid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         tokio::time::timeout(Duration::from_secs(2), async {
-            // SAFETY: signal zero only checks whether the process exists.
-            while unsafe { libc::kill(pid, 0) } == 0 {
+            while rustix::process::test_kill_process(pid).is_ok() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })

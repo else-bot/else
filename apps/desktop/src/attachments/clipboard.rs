@@ -1,7 +1,9 @@
 use std::io::Read;
-use std::os::fd::AsRawFd;
+use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+use rustix::event::{PollFd, PollFlags, Timespec};
 
 pub fn candidate(text: Option<&str>) -> bool {
     text.is_none_or(|text| {
@@ -38,26 +40,18 @@ pub fn file_paths() -> Option<Result<Vec<PathBuf>, String>> {
     )
 }
 
-fn read_list(pipe: &mut (impl Read + AsRawFd)) -> Result<String, String> {
+fn read_list(pipe: &mut (impl Read + AsFd)) -> Result<String, String> {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut bytes = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let mut descriptor = libc::pollfd {
-            fd: pipe.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ready = unsafe { libc::poll(&mut descriptor, 1, remaining.as_millis() as i32) };
-        if ready == 0 {
-            return Err("Reading the copied file list timed out. Paste again.".into());
-        }
-        if ready < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error.to_string());
+        let timeout = Timespec::try_from(remaining).map_err(|e| e.to_string())?;
+        let mut descriptor = [PollFd::new(pipe, PollFlags::IN)];
+        match rustix::event::poll(&mut descriptor, Some(&timeout)) {
+            Ok(0) => return Err("Reading the copied file list timed out. Paste again.".into()),
+            Ok(_) => {}
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(error) => return Err(error.to_string()),
         }
         let mut buffer = [0; 4096];
         let count = pipe.read(&mut buffer).map_err(|e| e.to_string())?;
