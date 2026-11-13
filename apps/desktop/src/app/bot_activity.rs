@@ -20,6 +20,8 @@ pub(super) struct BotActivity {
     pub(super) answers: Vec<Uuid>,
     failed: Vec<Uuid>,
     stopped: Vec<Uuid>,
+    /// Its turn has a notice still waiting on the owner.
+    needs_owner: bool,
 }
 
 impl BotActivity {
@@ -40,6 +42,14 @@ fn outcome(item: &Item, conversation: Option<&Conversation>) -> Option<BotReplyS
         "interrupted" => Some(BotReplyStatus::Cancelled),
         _ => None,
     }
+}
+
+fn waits_on_owner(conversation: Option<&Conversation>, turn: Uuid) -> bool {
+    conversation.and_then(|c| c.turn(turn)).is_some_and(|turn| {
+        turn.owner_notices
+            .iter()
+            .any(|n| n.status == crate::model::OwnerNoticeStatus::Pending)
+    })
 }
 
 pub(super) fn group_activity(
@@ -77,6 +87,7 @@ pub(super) fn group_activity(
                 .then_some(item.id)
                 .into_iter()
                 .collect(),
+            needs_owner: waits_on_owner(conversation, item.turn_id),
         };
         if !row.unread_start
             && let Some(previous) = grouped.last_mut()
@@ -344,11 +355,7 @@ impl ActivityStatus {
 }
 
 fn activity_status(activity: &BotActivity, last: &Item, c: &Conversation) -> ActivityStatus {
-    if c.turn(activity.turn).is_some_and(|turn| {
-        turn.owner_notices
-            .iter()
-            .any(|n| n.status == crate::model::OwnerNoticeStatus::Pending)
-    }) {
+    if activity.needs_owner {
         return ActivityStatus::NeedsYou;
     }
     if !activity.failed.is_empty() {
@@ -532,7 +539,7 @@ impl ElseApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivityStatus, BotActivity, activity_status, note_lines};
+    use super::{ActivityStatus, BotActivity, activity_status, note_lines, waits_on_owner};
     use crate::model::Conversation;
     use serde_json::json;
     use uuid::Uuid;
@@ -585,6 +592,7 @@ mod tests {
                     vec![]
                 },
                 stopped: vec![],
+                needs_owner: waits_on_owner(Some(&c), item.turn_id),
             };
             assert_eq!(activity_status(&activity, item, &c), expected);
         }

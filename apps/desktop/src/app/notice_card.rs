@@ -34,6 +34,8 @@ impl ElseApp {
                         app.connection =
                             Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
                     }
+                    // The owner's message settled it first; the stream shows that.
+                    Err(err) if err.code() == Some("owner_notice_settled") => {}
                     Err(err) => app.notice = Some(err.to_string()),
                 }
                 cx.notify();

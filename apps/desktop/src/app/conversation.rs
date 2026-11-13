@@ -229,11 +229,13 @@ pub(super) fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
                         .filter(|notice| {
                             notice.status != crate::model::OwnerNoticeStatus::Superseded
                         })
-                        .map(move |notice| {
-                            (
-                                RowKey::OwnerNotice(notice.id),
-                                c.question_anchor(turn.id, None),
-                            )
+                        // A settled notice of a turn outside the loaded page
+                        // would otherwise land below newer messages.
+                        .filter_map(move |notice| {
+                            let anchor = c.question_anchor(turn.id, None);
+                            (notice.status == crate::model::OwnerNoticeStatus::Pending
+                                || anchor.is_some())
+                            .then_some((RowKey::OwnerNotice(notice.id), anchor))
                         }),
                 )
                 .chain(turn.social_setups.iter().map(move |setup| {
@@ -782,7 +784,7 @@ impl ElseApp {
                     RowKey::Item(id) => c
                         .item(id)
                         .and_then(|i| c.turn(i.turn_id))
-                        .map(|t| format!("{}:{:?}", t.status, t.owner_notices)),
+                        .map(|t| t.status.clone()),
                     RowKey::Task(id) => c.turn(id).map(|t| t.status.clone()),
                     RowKey::Pending(_) => None,
                 });
@@ -1095,6 +1097,23 @@ mod tests {
                 c.owner_notice(Uuid::from_u128(400)).unwrap().summary,
                 "Start a Dev session"
             );
+        }
+    }
+
+    #[test]
+    fn a_settled_owner_notice_outside_the_page_does_not_drop_below_newer_messages() {
+        for (status, shown) in [("pending", true), ("dismissed", false)] {
+            let mut page = card_page("sent", json!([]), Some(5));
+            page["turns"][0]["outgoing_drafts"] = json!([]);
+            page["turns"][0]["owner_notices"] = json!([{
+                "id": Uuid::from_u128(400), "bot_id": Uuid::from_u128(80),
+                "turn_id": Uuid::from_u128(10), "kind": "blocked",
+                "summary": "Start a Dev session", "tried": null, "status": status,
+                "created_at": "2026-11-01T00:00:01Z",
+                "settled_at": if status == "pending" { None } else { Some("2026-11-01T00:01:00Z") }
+            }]);
+            let rows = card_rows(page);
+            assert_eq!(rows.len(), usize::from(shown), "{status}: {rows:?}");
         }
     }
 
