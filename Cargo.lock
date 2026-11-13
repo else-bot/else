@@ -3080,7 +3080,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.9.0"
-source = "git+https://github.com/else-bot/gpui-kit?rev=f4403dce5487a5635f23f4175bbcd2acdefe787d#f4403dce5487a5635f23f4175bbcd2acdefe787d"
+source = "git+https://github.com/else-bot/gpui-kit?rev=b3e69860b08a4640510bc8a982dd68c4fb446c8e#b3e69860b08a4640510bc8a982dd68c4fb446c8e"
 dependencies = [
  "aho-corasick",
  "anyhow",
