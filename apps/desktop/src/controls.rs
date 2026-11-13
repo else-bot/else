@@ -70,7 +70,7 @@ impl Scale {
 /// the action it will become rather than a hole in the surface.
 pub const DISABLED_OPACITY: f32 = 0.45;
 /// Ghost labels sit below body text and come up to full strength on hover.
-const QUIET_TEXT: f32 = 0.72;
+const QUIET_TEXT: f32 = 0.85;
 /// Unselected segment labels: quieter than the selected one, but clearly
 /// available rather than disabled. Light themes' mid-tone ink needs more.
 const SEGMENT_TEXT_DARK: f32 = 0.68;

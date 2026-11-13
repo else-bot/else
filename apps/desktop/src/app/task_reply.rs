@@ -214,7 +214,7 @@ impl ElseApp {
                     .items_center()
                     .gap_2()
                     .when(working, |line| {
-                        line.child(working_dots(task.turn, theme.link, cx.reduce_motion()))
+                        line.child(working_dots(task.turn, theme.primary, cx.reduce_motion()))
                     })
                     .children(delegate_faces)
                     .child(tail(
