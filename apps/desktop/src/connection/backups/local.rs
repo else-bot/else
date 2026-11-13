@@ -2,7 +2,7 @@ use super::*;
 use crate::api::{LocalBackupSettings, LocalBackupStatus, PauseReason};
 use chrono::{DateTime, FixedOffset, Offset as _, Utc};
 use gpui_kit::component::{Theme, h_flex};
-use view::{message, metric};
+use view::{message, metric, metrics};
 
 fn server_timestamp(value: &str, timezone: &str, offset: i32) -> String {
     match DateTime::parse_from_rfc3339(value) {
@@ -195,11 +195,11 @@ impl Shell {
             }
         }
         v_flex()
-            .gap_5()
+            .gap_4()
             .child(
                 div()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
+                    .text_base()
+                    .font_weight(FontWeight::SEMIBOLD)
                     .child("On this server"),
             )
             .child(
@@ -219,10 +219,6 @@ impl Shell {
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .px_2()
-                            .py_1()
-                            .rounded_full()
-                            .bg(theme.secondary)
                             .child(format!(
                                 "{} · server time {}",
                                 local.timezone,
@@ -235,32 +231,32 @@ impl Shell {
                             )),
                     ),
             )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_stretch()
-                    .when(stacked, |row| row.flex_col())
-                    .child(metric(
+            .child(metrics(
+                [
+                    metric(
                         "Next backup",
                         if running { "In progress".into() } else { next },
                         next_detail,
                         theme,
-                    ))
-                    .child(metric(
+                    ),
+                    metric(
                         "Last backup",
                         latest
                             .map(|run| stamp(run.finished_at.as_deref().unwrap_or(&run.started_at)))
                             .unwrap_or_else(|| "None yet".into()),
                         last_detail,
                         theme,
-                    ))
-                    .child(metric(
+                    ),
+                    metric(
                         "Local copies",
                         format!("{} of {}", local.copies, local.keep),
                         disk,
                         theme,
-                    )),
-            )
+                    ),
+                ],
+                stacked,
+                theme,
+            ))
             .when_some(view.local_form.as_ref(), |section, form| {
                 section.child(form.render(
                     local,
