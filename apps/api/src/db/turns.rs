@@ -145,6 +145,9 @@ pub struct TurnRecord {
     /// The MCP jobs this turn waits on.
     #[sqlx(skip)]
     pub mcp_waits: Vec<crate::db::mcp_waits::Pending>,
+    /// The background computer jobs this turn waits on.
+    #[sqlx(skip)]
+    pub computer_job_waits: Vec<crate::db::computer_job_waits::Pending>,
     /// The bot's requests that the owner take over its computer.
     #[sqlx(skip)]
     pub computer_handoffs: Vec<crate::db::computer_handoffs::Handoff>,
@@ -636,6 +639,7 @@ pub async fn attach_owner_requests(
     let mut drafts = crate::db::outgoing_drafts::for_turns(conn, &ids).await?;
     let mut delegations = crate::db::delegations::for_turns(conn, &ids).await?;
     let mut mcp_waits = crate::db::mcp_waits::pending_for_turns(conn, &ids).await?;
+    let mut job_waits = crate::db::computer_job_waits::pending_for_turns(conn, &ids).await?;
     let mut skills = crate::db::skills::for_turns(conn, &ids).await?;
     let mut handoffs = crate::db::computer_handoffs::for_turns(conn, &ids).await?;
     for turn in turns {
@@ -646,6 +650,7 @@ pub async fn attach_owner_requests(
         turn.outgoing_drafts = drafts.remove(&turn.id).unwrap_or_default();
         turn.delegations = delegations.remove(&turn.id).unwrap_or_default();
         turn.mcp_waits = mcp_waits.remove(&turn.id).unwrap_or_default();
+        turn.computer_job_waits = job_waits.remove(&turn.id).unwrap_or_default();
         turn.computer_handoffs = handoffs.remove(&turn.id).unwrap_or_default();
     }
     Ok(())
@@ -1091,6 +1096,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         outgoing_drafts: crate::db::outgoing_drafts::notes(&mut conn, turn_id).await?,
         social_setups: crate::socials::store::setup_outcomes(&mut conn, turn_id).await?,
         mcp_waits: crate::db::mcp_waits::undelivered(&mut conn, turn_id).await?,
+        computer_job_waits: crate::db::computer_job_waits::undelivered(&mut conn, turn_id).await?,
         skill_installs: crate::db::skills::undelivered(&mut conn, turn_id).await?,
         computer_handoffs: crate::db::computer_handoffs::undelivered(&mut conn, turn_id).await?,
         computer_control: crate::db::computer_handoffs::latest_taken(&mut conn, turn.bot_id)

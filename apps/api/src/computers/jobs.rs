@@ -126,6 +126,13 @@ pub enum JobStatus {
 }
 
 impl JobStatus {
+    pub fn is_ended(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Lost
+        )
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Starting => "starting",

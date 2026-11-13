@@ -159,6 +159,9 @@ pub struct TurnInput {
     pub social_setups: Vec<crate::socials::store::Setup>,
     /// Settled waits on MCP jobs that no attempt has received yet.
     pub mcp_waits: Vec<McpWaitOutcome>,
+    /// Settled waits on the bot's background computer jobs that no
+    /// attempt has received yet.
+    pub computer_job_waits: Vec<crate::db::computer_job_waits::Outcome>,
     /// The shared MCPs installed for every bot, for a turn that may use
     /// them; `None` when it may not or the library could not be read.
     pub mcps: Option<Vec<InstalledMcp>>,

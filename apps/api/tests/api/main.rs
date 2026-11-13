@@ -23,6 +23,7 @@ mod cancel;
 mod categories;
 mod cli_attempts;
 mod computer_handoffs;
+mod computer_job_waits;
 mod computers;
 mod connector_store;
 mod default_skills;

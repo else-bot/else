@@ -56,6 +56,7 @@ fn input(history: Vec<(i64, &str, &str)>) -> TurnInput {
         outgoing_drafts: Vec::new(),
         social_setups: Vec::new(),
         mcp_waits: Vec::new(),
+        computer_job_waits: Vec::new(),
         skill_installs: Vec::new(),
         computer_handoffs: Vec::new(),
         computer_control: None,
