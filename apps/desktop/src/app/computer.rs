@@ -3,9 +3,9 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Selectable as _, Sizable as _,
+    h_flex, v_flex,
 };
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 use xkeysym::Keysym;
@@ -643,7 +643,7 @@ impl ComputerView {
             .h_full()
             .rounded(radius)
             .overflow_hidden()
-            .bg(rgb(0x111111));
+            .bg(cx.theme().secondary);
         if let Some(image) = &self.image {
             area = area.child(
                 img(image.clone())
@@ -673,14 +673,14 @@ impl ComputerView {
                     .items_center()
                     .justify_center()
                     .gap_2()
-                    .text_color(rgb(0xaaaaaa))
+                    .text_color(cx.theme().muted_foreground)
                     .child(div().opacity(0.55).child(
                         crate::avatar::bot_avatar("computer-avatar", self.avatar, px(56.)).still(),
                     ))
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0xf5f5f5))
+                            .text_color(cx.theme().foreground)
                             .child(text.to_owned()),
                     )
                     .child(div().text_xs().child(hint)),
@@ -844,13 +844,6 @@ impl Render for ComputerView {
                         .border_1()
                         .border_color(theme.border),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .text_center()
-                        .child(format!("{}'s screen", self.name)),
-                )
                 .children(self.upgrade_section(cx))
                 .children(match &self.screen {
                     Screen::Failed(error) => Some(
@@ -944,7 +937,10 @@ impl Render for ComputerView {
                             .label("Watching")
                             .disabled(self.mode_pending || !matches!(self.screen, Screen::Live))
                             .icon(IconName::Eye)
-                            .when(mode == DesktopMode::Watch, |button| button.primary())
+                            .ghost()
+                            .small()
+                            .focus_ring(false)
+                            .selected(mode == DesktopMode::Watch)
                             .on_click(cx.listener(|view, _, window, cx| {
                                 view.set_mode(DesktopMode::Watch, window, cx)
                             })),
@@ -958,7 +954,10 @@ impl Render for ComputerView {
                             } else {
                                 "Take over"
                             })
-                            .when(mode == DesktopMode::Control, |button| button.primary())
+                            .ghost()
+                            .small()
+                            .focus_ring(false)
+                            .selected(mode == DesktopMode::Control)
                             .on_click(cx.listener(|view, _, window, cx| {
                                 view.set_mode(DesktopMode::Control, window, cx)
                             })),

@@ -44,15 +44,13 @@ impl SocialsView {
                     .on_click(cx.listener(|view, _, window, cx| view.cancel(window, cx)))))
             .child(div().text_sm().child(provider.token_help()))
             .child(div().text_xs().text_color(theme.muted_foreground).child("The API stores the token encrypted and uses it to call the platform. The assistant never sees the token, and it stays out of chat history."))
-            .child(Button::new("social-token-help").focus_ring(false).cursor_pointer().ghost().xsmall()
-                .label(if provider == Provider::Telegram { "Open BotFather" } else { "Open Discord Developer Portal" })
+            .child(Button::new("social-token-help").focus_ring(false).cursor_pointer().ghost()                .label(if provider == Provider::Telegram { "Open BotFather" } else { "Open Discord Developer Portal" })
                 .on_click(move |_, _, cx| cx.open_url(match provider {
                     Provider::Telegram => "https://t.me/BotFather",
                     Provider::Discord => "https://discord.com/developers/applications",
                 })))
             .child(Input::new(&form.token).focus_ring(false).aria_label(format!("{} bot token", provider.label())).disabled(self.busy || !self.available))
-            .child(h_flex().justify_end().child(Button::new("social-connect").focus_ring(false).cursor_pointer().primary().small()
-                .label(if replacing { "Validate replacement token" } else { "Validate and connect" })
+            .child(h_flex().justify_end().child(Button::new("social-connect").focus_ring(false).cursor_pointer().primary()                .label(if replacing { "Validate replacement token" } else { "Validate and connect" })
                 .disabled(self.busy || !self.available)
                 .on_click(cx.listener(|view, _, window, cx| view.connect(window, cx)))));
         if self.setup.is_some() && !replacing {
@@ -75,8 +73,6 @@ impl SocialsView {
                         Button::new(SharedString::from(format!("social-existing-{id}")))
                             .focus_ring(false)
                             .cursor_pointer()
-                            .ghost()
-                            .small()
                             .label(connection.display_name.clone())
                             .disabled(self.busy || !self.available)
                             .on_click(cx.listener(move |view, _, window, cx| {
@@ -130,8 +126,6 @@ impl SocialsView {
                         Button::new(SharedString::from(format!("social-pause-{id}")))
                             .focus_ring(false)
                             .cursor_pointer()
-                            .ghost()
-                            .xsmall()
                             .label(if paused { "Resume" } else { "Pause" })
                             .disabled(self.busy || !self.available)
                             .on_click(cx.listener(move |view, _, window, cx| {
@@ -142,8 +136,6 @@ impl SocialsView {
                         Button::new(SharedString::from(format!("social-replace-{id}")))
                             .focus_ring(false)
                             .cursor_pointer()
-                            .ghost()
-                            .xsmall()
                             .label("Replace token")
                             .disabled(self.busy || !self.available)
                             .on_click(cx.listener(move |view, _, window, cx| {
@@ -154,8 +146,6 @@ impl SocialsView {
                         Button::new(SharedString::from(format!("social-disconnect-{id}")))
                             .focus_ring(false)
                             .cursor_pointer()
-                            .ghost()
-                            .xsmall()
                             .label("Disconnect")
                             .disabled(self.busy || !self.available)
                             .on_click(cx.listener(move |view, _, _, cx| {
@@ -183,8 +173,6 @@ impl SocialsView {
                             Button::new(SharedString::from(format!("social-keep-{id}")))
                                 .focus_ring(false)
                                 .cursor_pointer()
-                                .ghost()
-                                .small()
                                 .label("Keep connected")
                                 .disabled(self.busy || !self.available)
                                 .on_click(cx.listener(|view, _, _, cx| {
@@ -199,7 +187,6 @@ impl SocialsView {
                             .focus_ring(false)
                             .cursor_pointer()
                             .danger()
-                            .small()
                             .label("Disconnect account")
                             .disabled(self.busy || !self.available)
                             .on_click(cx.listener(
@@ -217,48 +204,81 @@ impl Render for SocialsView {
         let theme = cx.theme().clone();
         let mut root = v_flex().w_full().gap_3();
         if self.setup.is_none() {
-            root = root.child(div().text_lg().font_semibold().child("Socials"))
-                .child(div().text_sm().text_color(theme.muted_foreground).child("Connect Telegram and Discord bots. Any bot can use a connection when you ask. Manage message triggers in each bot's sidebar."));
+            root =
+                root.child(
+                    v_flex()
+                        .gap_2()
+                        .child(div().text_xl().font_semibold().child("Socials"))
+                        .child(div().text_sm().text_color(theme.muted_foreground).child(
+                            "Connect Telegram and Discord bots for any of your bots to use.",
+                        )),
+                );
             for connection in &self.connections {
                 root = root.child(self.render_connection(connection, cx));
             }
-            root = root.child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("social-add-telegram")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .small()
-                            .label("Add Telegram")
-                            .disabled(self.busy || !self.available)
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.add(Provider::Telegram, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("social-add-discord")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .small()
-                            .label("Add Discord")
-                            .disabled(self.busy || !self.available)
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.add(Provider::Discord, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("social-refresh")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .xsmall()
-                            .label("Refresh")
-                            .disabled(self.busy || !self.available)
-                            .on_click(cx.listener(|view, _, window, cx| view.refresh(window, cx))),
-                    ),
+            let mut providers = v_flex().gap_3().mt_3();
+            for (provider, id, description) in [
+                (
+                    Provider::Telegram,
+                    "social-add-telegram",
+                    "Send messages and watch Telegram chats.",
+                ),
+                (
+                    Provider::Discord,
+                    "social-add-discord",
+                    "Send messages and follow Discord channels.",
+                ),
+            ] {
+                providers = providers.child(
+                    h_flex()
+                        .w_full()
+                        .p_4()
+                        .gap_3()
+                        .rounded(theme.radius_lg)
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.background)
+                        .child(
+                            gpui_kit::component::Icon::new(match provider {
+                                Provider::Telegram => gpui_kit::assets::IconName::MessageSquare,
+                                Provider::Discord => gpui_kit::assets::IconName::MessageSquare,
+                            })
+                            .size_5()
+                            .text_color(theme.muted_foreground),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .gap_1()
+                                .child(div().text_sm().font_semibold().child(provider.label()))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(description),
+                                ),
+                        )
+                        .child(
+                            Button::new(id)
+                                .focus_ring(false)
+                                .cursor_pointer()
+                                .label(format!("Add {}", provider.label()))
+                                .disabled(self.busy || !self.available)
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.add(provider, window, cx)
+                                })),
+                        ),
+                );
+            }
+            root = root.child(providers).child(
+                h_flex().justify_end().child(
+                    Button::new("social-refresh")
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .label("Refresh")
+                        .disabled(self.busy || !self.available)
+                        .on_click(cx.listener(|view, _, window, cx| view.refresh(window, cx))),
+                ),
             );
         }
         if self.busy {

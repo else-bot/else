@@ -113,8 +113,8 @@ Use a fresh output directory for each comparison round.
   reports physical bounds; `tree_point.py` divides them by `TREE_SCALE` (default 2).
 - Controls missing accessible nodes use documented logical coordinates in
   `shoot.sh`: main sidebar anchor `(130,100)`, Details `(1152,98)`, Computer
-  `(1230,98)`, rules summary `(1260,428)`, purple swatch `(515,474)` and Backups
-  `(285,469)`. Settings has fallback rows at x=285. Transcript and panel scrolling
+  `(1230,98)`, rules summary `(1260,428)` and Backups `(285,469)`. The purple
+  swatch is anchored to the House shape node. Settings has fallback rows at x=285. Transcript and panel scrolling
   also use fixed anchors and wheel deltas. Recalibrate these after layout changes
   and visually inspect every PNG before scoring.
 - `up.py` checks a unique source anchor before mounting its dev-runner mirror.

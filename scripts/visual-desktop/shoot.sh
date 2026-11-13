@@ -83,6 +83,14 @@ click_named() {
   read -r x y <<< "$point"
   click "$x" "$y"
 }
+pick_purple() {
+  local point x y
+  point=$(omabox -b "$BOX" tree --window "$W" --find 'House shape' | python3 "$H/tree_point.py" 'House shape' "${TREE_SCALE:-2}")
+  read -r x y <<< "$point"
+  # Both are column four; the narrower color cells shift their center 2 px left.
+  # From the House center: 17 px to its edge, 12 gap, 30 first row, 4 gap, 15 center.
+  click "$((x - 2))" "$((y + 78))"
+}
 settings_page() {
   local label=$1 fallback_y=$2
   # Most nav items have accessible names; Backups currently lacks one.
@@ -135,8 +143,8 @@ keys ctrl+shift+n
 # The dialog opens with Bot name focused. Fill it without creating a bot.
 keys -t 'Calendar Assistant'
 click_named 'House shape'
-# GPUI omits the lower color row from AT-SPI; purple is grid col 4,row 2.
-click 515 474
+# GPUI omits color nodes; anchor the swatch to the accessible shape grid.
+pick_purple
 shot dark-12-create-bot
 keys Escape
 # Shell-level settings shortcut survives focus restoration after a modal.
@@ -180,8 +188,8 @@ keys ctrl+shift+b
 keys ctrl+shift+n
 keys -t 'Calendar Assistant'
 click_named 'House shape'
-# GPUI omits the lower color row from AT-SPI; purple is grid col 4,row 2.
-click 515 474
+# GPUI omits color nodes; anchor the swatch to the accessible shape grid.
+pick_purple
 shot light-03-create-bot
 keys Escape
 keys ctrl+comma

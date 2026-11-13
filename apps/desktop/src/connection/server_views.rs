@@ -190,7 +190,6 @@ impl Shell {
                         Button::new("servers-update-all")
                             .focus_ring(false)
                             .cursor_pointer()
-                            .small()
                             .label(if updating {
                                 "Updating…"
                             } else {
@@ -204,7 +203,6 @@ impl Shell {
                         Button::new("servers-add")
                             .focus_ring(false)
                             .cursor_pointer()
-                            .small()
                             .label("+ Add server")
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.open_server_editor(Editor::Add, window, cx)
@@ -313,8 +311,6 @@ impl Shell {
                     Button::new(SharedString::from(format!("use-server-{id}")))
                         .focus_ring(false)
                         .cursor_pointer()
-                        .ghost()
-                        .xsmall()
                         .label("Use server")
                         .on_click(cx.listener(move |shell, _, window, cx| {
                             shell.select_server(id, window, cx)
@@ -351,7 +347,6 @@ impl Shell {
                     Button::new(SharedString::from(format!("update-server-{id}")))
                         .focus_ring(false)
                         .cursor_pointer()
-                        .xsmall()
                         .label(if update_activity {
                             "View update"
                         } else {
@@ -366,8 +361,6 @@ impl Shell {
                     Button::new(SharedString::from(format!("retry-server-{id}")))
                         .focus_ring(false)
                         .cursor_pointer()
-                        .ghost()
-                        .xsmall()
                         .label("Retry")
                         .on_click(
                             cx.listener(|shell, _, window, cx| shell.refresh_servers(window, cx)),
@@ -505,8 +498,6 @@ impl Shell {
                         Button::new("servers-check-all")
                             .focus_ring(false)
                             .cursor_pointer()
-                            .ghost()
-                            .xsmall()
                             .icon(IconName::RefreshCw)
                             .label("Check all")
                             .on_click(cx.listener(|shell, _, window, cx| {
@@ -529,8 +520,6 @@ impl Shell {
                         Button::new("servers-app-updates")
                             .focus_ring(false)
                             .cursor_pointer()
-                            .ghost()
-                            .xsmall()
                             .label("Desktop app updates")
                             .icon(IconName::ArrowRight)
                             .on_click(cx.listener(|shell, _, window, cx| {

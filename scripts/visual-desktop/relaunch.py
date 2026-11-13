@@ -18,7 +18,7 @@ saved=Path('/home/sbx/desktop.env')
 candidates=[]
 try:
     previous=json.loads(marker.read_text())
-    if os.readlink(f"/proc/{previous['pid']}/exe")==previous['exe']:
+    if os.readlink(f"/proc/{previous['pid']}/exe").removesuffix(" (deleted)")==previous['exe']:
         candidates.append(str(previous['pid']))
 except (OSError,ValueError,KeyError):
     pass

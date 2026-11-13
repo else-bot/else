@@ -373,8 +373,7 @@ impl Shell {
                                 .focus_ring(false)
                                 .cursor_pointer()
                                 .label("Cancel")
-                                .ghost()
-                                .track_focus(&cancel)
+                                                                .track_focus(&cancel)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
@@ -455,6 +454,48 @@ impl Shell {
             return body.child("Loading installed skills…").into_any_element();
         };
         let busy = view.busy || !connected;
+        let Some(entries) = &view.entries else {
+            return body.child("Loading installed skills…").into_any_element();
+        };
+        if entries.is_empty() {
+            return body
+                .child(
+                    v_flex()
+                        .w_full()
+                        .items_center()
+                        .text_center()
+                        .py_12()
+                        .gap_3()
+                        .child(
+                            Icon::new(IconName::FileText)
+                                .size_6()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("No skills installed yet"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("Ask a bot to install a skill from a GitHub link."),
+                        )
+                        .child(
+                            Button::new("empty-open-chat")
+                                .focus_ring(false)
+                                .cursor_pointer()
+                                .label("Open chat")
+                                .on_click(cx.listener(|shell, _, window, cx| {
+                                    window.close_dialog(cx);
+                                    shell.cancel(window, cx);
+                                })),
+                        ),
+                )
+                .into_any_element();
+        }
         body = body.child(
             div().max_w(px(340.)).child(
                 Input::new(&view.search)
@@ -479,8 +520,6 @@ impl Shell {
                         Button::new("skills-retry")
                             .focus_ring(false)
                             .cursor_pointer()
-                            .small()
-                            .ghost()
                             .label("Retry")
                             .disabled(busy)
                             .on_click(
@@ -489,9 +528,6 @@ impl Shell {
                     ),
             );
         }
-        let Some(entries) = &view.entries else {
-            return body.child("Loading installed skills…").into_any_element();
-        };
         let query = view.search.read(cx).value().trim().to_lowercase();
         let filtered: Vec<_> = entries
             .iter()
@@ -705,7 +741,6 @@ impl Shell {
                                     Button::new("skill-key-replace")
                                         .focus_ring(false)
                                         .cursor_pointer()
-                                        .small()
                                         .label("Replace")
                                         .disabled(busy)
                                         .on_click(cx.listener(move |shell, _, window, cx| {
@@ -716,8 +751,6 @@ impl Shell {
                                     Button::new("skill-key-clear")
                                         .focus_ring(false)
                                         .cursor_pointer()
-                                        .small()
-                                        .ghost()
                                         .label("Clear")
                                         .disabled(busy)
                                         .on_click(cx.listener(move |shell, _, window, cx| {
@@ -731,7 +764,6 @@ impl Shell {
                                 Button::new("skill-key-save")
                                     .focus_ring(false)
                                     .cursor_pointer()
-                                    .small()
                                     .primary()
                                     .label("Save")
                                     .disabled(busy)
@@ -745,7 +777,6 @@ impl Shell {
                             Button::new("skill-key-edit")
                                 .focus_ring(false)
                                 .cursor_pointer()
-                                .small()
                                 .label("Add key")
                                 .disabled(busy)
                                 .on_click(cx.listener(move |shell, _, window, cx| {

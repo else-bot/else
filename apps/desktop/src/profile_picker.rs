@@ -137,39 +137,20 @@ impl ProfilePicker {
                         .min_w_0()
                         .gap_2()
                         .child(
-                            div()
-                                .flex_none()
-                                .size_6()
-                                .rounded(theme.radius)
-                                .bg(theme.secondary)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.foreground)
-                                .child(provider_initial(&provider.label)),
-                        )
-                        .child(
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
                                 .items_start()
                                 .child(
-                                    h_flex()
-                                        .w_full()
-                                        .min_w_0()
-                                        .gap_1p5()
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .text_sm()
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(theme.foreground)
-                                                .truncate()
-                                                .child(provider.label.clone()),
-                                        )
-                                        .when(self.tabs, |label| label.child(dot())),
+                                    h_flex().w_full().min_w_0().gap_1p5().child(
+                                        div()
+                                            .min_w_0()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.foreground)
+                                            .truncate()
+                                            .child(provider.label.clone()),
+                                    ),
                                 )
                                 .when(!self.tabs, |text| {
                                     text.child(
@@ -182,7 +163,7 @@ impl ProfilePicker {
                                     )
                                 }),
                         )
-                        .children(holds_choice.then(|| {
+                        .children((holds_choice && !self.tabs).then(|| {
                             Icon::new(IconName::Check)
                                 .size_3p5()
                                 .text_color(theme.primary)
@@ -363,12 +344,8 @@ impl ProfilePicker {
         let command = setup_command(&reason).map(str::to_owned);
         let copied = self.copied.as_deref() == Some(provider.id.as_str());
         v_flex()
-            .m_1()
-            .p_4()
+            .p_3()
             .gap_2()
-            .rounded(theme.radius)
-            .border_1()
-            .border_color(theme.border)
             .child(
                 div()
                     .text_sm()
@@ -461,11 +438,7 @@ impl ProfilePicker {
                                 .size(px(STOP_DOT))
                                 .rounded_full()
                                 .border_2()
-                                .border_color(if i <= index {
-                                    theme.primary
-                                } else {
-                                    theme.border
-                                })
+                                .border_color(if on { theme.primary } else { theme.border })
                                 .bg(if on { theme.primary } else { theme.background }),
                         )
                         .child(
@@ -499,16 +472,6 @@ impl ProfilePicker {
                     .h(px(TRACK))
                     .rounded_full()
                     .bg(theme.border),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top(px(STOP_PAD + (STOP_DOT - TRACK) / 2.))
-                    .left(edge)
-                    .w(relative(index as f32 / count))
-                    .h(px(TRACK))
-                    .rounded_full()
-                    .bg(theme.primary),
             )
             .child(h_flex().relative().w_full().children(stops));
         let speeds = [
@@ -560,20 +523,26 @@ impl ProfilePicker {
                 .child(control)
         };
         let reasoning = field("Reasoning", slider.into_any_element()).flex_grow(3.);
-        let speed = field(
-            "Speed",
-            h_flex()
-                .w_full()
-                .gap_1()
-                .p_0p5()
-                .bg(theme.muted.opacity(0.3))
-                .rounded(theme.radius)
-                .children(speeds)
-                .into_any_element(),
-        )
-        .flex_grow(2.);
+        let speed = h_flex()
+            .gap_3()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Speed"),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .gap_1()
+                    .p_0p5()
+                    .bg(theme.muted.opacity(0.3))
+                    .rounded(theme.radius)
+                    .children(speeds),
+            )
+            .flex_grow(2.);
         let row = if self.tabs {
-            v_flex().gap_4()
+            v_flex().gap_3()
         } else {
             h_flex().gap_6().items_start()
         };
@@ -605,14 +574,6 @@ fn setup_command(reason: &str) -> Option<&str> {
     let (_, rest) = reason.split_once('`')?;
     let (command, _) = rest.split_once('`')?;
     (!command.trim().is_empty()).then_some(command)
-}
-
-fn provider_initial(label: &str) -> String {
-    label
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().collect())
-        .unwrap_or_default()
 }
 
 fn radio(on: bool, cx: &App) -> impl IntoElement {
@@ -735,7 +696,7 @@ impl Render for ProfilePicker {
                         picker.child(self.render_settings(cx))
                     }),
             )
-            .when(!self.any_available(), |picker| {
+            .when(!self.any_available() && !self.tabs, |picker| {
                 picker.child(
                     div()
                         .text_xs()
