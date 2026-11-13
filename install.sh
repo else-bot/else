@@ -25,7 +25,8 @@ EOF
 }
 
 
-MIN_RUST="1.94.0"
+# Releases before Cargo.toml declared rust-version built with this toolchain.
+LEGACY_MIN_RUST="1.94.0"
 MSB_VERSION="0.7.13"
 GUEST_IMAGE=""
 
@@ -372,10 +373,12 @@ ensure_rust() {
 	step "Rust toolchain ($TOOLCHAIN)"
 	export PATH="$CARGO_HOME/bin:$PATH"
 	if [ -x "$CARGO_HOME/bin/rustc" ]; then
-		local current
+		local current minimum
 		current="$("$CARGO_HOME/bin/rustc" --version | awk '{print $2}')"
-		if ! version_ge "$current" "$MIN_RUST"; then
-			info "rustc $current is older than $MIN_RUST; updating"
+		minimum="$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' "$SRC/Cargo.toml" | head -1)"
+		minimum="${minimum:-$LEGACY_MIN_RUST}"
+		if ! version_ge "$current" "$minimum"; then
+			info "rustc $current is older than $minimum; updating"
 			"$CARGO_HOME/bin/rustup" update stable --no-self-update >/dev/null
 		fi
 	else

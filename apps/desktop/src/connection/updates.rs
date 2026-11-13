@@ -278,7 +278,7 @@ impl Shell {
                 Ok(())
             }
             Action::ToggleOutput => {
-                view.show_output = !view.show_output;
+                view.show_output.toggle();
                 Ok(())
             }
             Action::Copy => {

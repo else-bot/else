@@ -132,9 +132,7 @@ async fn discovery_requests_every_scope_of_a_large_provider_like_posthog() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let resource = format!("{base}/mcp");
-    let scopes: Vec<String> = (0..157)
-        .map(|index| format!("resource_{index}:read"))
-        .collect();
+    let scopes: Vec<String> = Vec::from_fn(157, |index| format!("resource_{index}:read"));
     assert!(scopes.join(" ").len() > 2048);
     let resource_document =
         json!({"resource":resource,"authorization_servers":[base],"scopes_supported":scopes});

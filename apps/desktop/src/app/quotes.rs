@@ -444,7 +444,7 @@ impl ElseApp {
                                         })
                                         .on_click(cx.listener(|app, _, _, cx| {
                                             if let Some(editor) = app.quote_editor.as_mut() {
-                                                editor.full_quote = !editor.full_quote;
+                                                editor.full_quote.toggle();
                                                 cx.notify();
                                             }
                                         })),

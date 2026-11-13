@@ -313,7 +313,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_assignments_retry_alone_without_a_second_create() {
-        let bots: Vec<Uuid> = (0..6).map(|_| Uuid::new_v4()).collect();
+        let bots: Vec<Uuid> = Vec::from_fn(6, |_| Uuid::new_v4());
         let flaky = [bots[1].to_string(), bots[4].to_string()];
         let (client, seen) = serve(move |request, earlier| {
             let bot = request.path.split('/').nth(3).unwrap_or_default();

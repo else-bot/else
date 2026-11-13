@@ -92,7 +92,7 @@ impl Tracker {
     /// without running it and the model can retry, so none is a policy
     /// breach.
     fn misnamed(&self, target: &str) -> bool {
-        let tool = target.strip_prefix("mcp__").unwrap_or(target);
+        let tool = target.trim_prefix("mcp__");
         let tool = tool
             .strip_prefix(SERVER_NAME)
             .and_then(|rest| rest.strip_prefix("__"))

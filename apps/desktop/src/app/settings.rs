@@ -311,7 +311,7 @@ pub(super) struct BotSettings {
 
 impl ElseApp {
     pub(super) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings_open = !self.settings_open;
+        self.settings_open.toggle();
         if self.settings_open {
             if let Some(bot) = self.selected.filter(|id| {
                 self.settings

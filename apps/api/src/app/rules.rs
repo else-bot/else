@@ -607,12 +607,10 @@ mod tests {
     #[test]
     fn a_full_file_refuses_new_rules_by_count_and_by_size() {
         let full = Rules {
-            sections: (0..MAX_SECTIONS)
-                .map(|i| Section {
-                    title: format!("Rule {i}"),
-                    body: "x".into(),
-                })
-                .collect(),
+            sections: Vec::from_fn(MAX_SECTIONS, |i| Section {
+                title: format!("Rule {i}"),
+                body: "x".into(),
+            }),
         };
         assert_eq!(
             full.apply(&edit("Another", "y")),
@@ -620,12 +618,10 @@ mod tests {
         );
         assert!(full.apply(&edit("Rule 0", "y")).is_ok());
         let big = Rules {
-            sections: (0..MAX_SECTIONS - 1)
-                .map(|i| Section {
-                    title: format!("Rule {i}"),
-                    body: "é".repeat(MAX_PROSE_CHARS),
-                })
-                .collect(),
+            sections: Vec::from_fn(MAX_SECTIONS - 1, |i| Section {
+                title: format!("Rule {i}"),
+                body: "é".repeat(MAX_PROSE_CHARS),
+            }),
         };
         assert_eq!(
             big.apply(&edit("Another", &"é".repeat(MAX_PROSE_CHARS))),

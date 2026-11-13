@@ -208,7 +208,7 @@ impl Passage {
                 let Some(quoted) = line.strip_prefix('>') else {
                     break;
                 };
-                original.push(quoted.strip_prefix(' ').unwrap_or(quoted));
+                original.push(quoted.trim_prefix(' '));
                 end += line.len() + 1;
             }
             if original.is_empty() {

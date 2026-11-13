@@ -2,6 +2,7 @@ use super::{
     ComputerError, ComputerManager, GUEST_CHECKPOINT, IdleAction, Ordering, Reason, RuntimeState,
 };
 use crate::db::turns::ACTIVE_STATUSES;
+use std::mem::DropGuard;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -375,7 +376,7 @@ impl ComputerManager {
                 }
             })
         };
-        let _orphans = AbortOnDrop(orphans);
+        let _orphans = DropGuard::new(orphans, |task| task.abort());
         loop {
             if let Err(err) = self.tick(&cancel).await {
                 tracing::warn!(error = %err, "computer maintenance failed");
@@ -385,13 +386,5 @@ impl ComputerManager {
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {}
             }
         }
-    }
-}
-
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
     }
 }

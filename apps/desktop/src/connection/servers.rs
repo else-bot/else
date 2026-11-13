@@ -899,7 +899,7 @@ impl Shell {
 }
 
 fn version_numbers(value: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = value.strip_prefix('v').unwrap_or(value).split('.');
+    let mut parts = value.trim_prefix('v').split('.');
     let result = (
         parts.next()?.parse().ok()?,
         parts.next()?.parse().ok()?,

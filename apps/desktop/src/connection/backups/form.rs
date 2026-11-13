@@ -187,7 +187,7 @@ impl DestinationForm {
             .child(div().text_xs().text_color(theme.muted_foreground).child(if self.saved_secret { "Leave the secret blank to keep the saved key. A new key replaces it only after saving." } else { "Credentials are encrypted on the workspace server." }))
             .child(div().text_xs().text_color(theme.muted_foreground).child("Backups share unchanged data between copies. Do not add a bucket rule that expires objects under this prefix: it would delete data newer backups still use."))
             .child(Button::new("backup-advanced").focus_ring(false).cursor_pointer().small().label(if self.advanced { "Hide advanced settings" } else { "Advanced connection settings" }).disabled(busy).on_click(cx.listener(|shell, _, _, cx| {
-                if let Some(Editor::Destination(form)) = shell.backups.as_mut().and_then(|view| view.editor.as_mut()) { form.advanced = !form.advanced; }
+                if let Some(Editor::Destination(form)) = shell.backups.as_mut().and_then(|view| view.editor.as_mut()) { form.advanced.toggle(); }
                 cx.notify();
             })))
             .when(self.advanced, |content| content.child(self.field("Region", &self.region, busy)).child(h_flex().gap_3().child(Switch::new("backup-path-style").focus_ring(false).cursor_pointer().small().checked(self.path_style).disabled(busy).accessibility_label("Use path-style addressing").on_click(cx.listener(|shell, checked: &bool, _, cx| {

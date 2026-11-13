@@ -288,10 +288,7 @@ async fn reference_images_and_percent_encoded_file_names_attach() {
 #[tokio::test(flavor = "multi_thread")]
 async fn image_types_are_sniffed_and_only_eight_images_attach_per_message() {
     let directory = tempfile::tempdir().unwrap();
-    let reply = (0..10)
-        .map(|index| format!("![image {index}](image-{index}.bin)"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let reply = Vec::from_fn(10, |index| format!("![image {index}](image-{index}.bin)")).join(" ");
     let app = app(directory.path(), vec![reply], TurnOutcome::Completed).await;
     let bot = app.main_bot().await;
     let project = directory.path().join(&bot);

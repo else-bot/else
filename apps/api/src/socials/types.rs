@@ -171,7 +171,7 @@ pub fn public_username(destination: &str) -> Result<Option<String>, Error> {
                 "A private Telegram invite link has no public username. Post in the chat so it appears in social_connections, then use its chat ID.",
             ));
         }
-        let path = path.strip_prefix("s/").unwrap_or(path);
+        let path = path.trim_prefix("s/");
         path.split(['/', '?', '#']).next().unwrap_or_default()
     };
     let valid = (4..=32).contains(&name.len())
