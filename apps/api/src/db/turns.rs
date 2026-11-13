@@ -670,6 +670,16 @@ pub struct AskingCaller {
     pub main_bot: bool,
 }
 
+/// [`asking_caller`] on a pooled connection, for a tool that reads the
+/// attempt before a slow call so the call cannot park a later attempt.
+pub async fn running_caller(
+    pool: &sqlx::SqlitePool,
+    turn_id: Uuid,
+) -> Result<Option<AskingCaller>, sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    asking_caller(&mut conn, turn_id).await
+}
+
 pub async fn asking_caller(
     conn: &mut SqliteConnection,
     turn_id: Uuid,

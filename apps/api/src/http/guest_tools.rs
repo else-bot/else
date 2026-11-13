@@ -21,6 +21,7 @@ use crate::grants::Grant;
 
 pub(crate) mod approval;
 mod input_progress;
+mod job_wait;
 
 pub use approval::call;
 use approval::{EFFECT_ADVERTISED, MAX_PURPOSE};
@@ -403,80 +404,6 @@ fn job_json(job: &crate::computers::jobs::JobState) -> Value {
         "output_tail": job.output_tail,
         "command": job.command,
     })
-}
-
-/// The attempt is read before the guest is probed, so a slow probe cannot
-/// park a later attempt.
-async fn wait_job(
-    state: &AppState,
-    grant: &Grant,
-    computers: &crate::computers::ComputerManager,
-    id: Uuid,
-) -> Outcome {
-    use crate::db::computer_job_waits::{self as waits, CreateError, Created};
-    let refused = |error: CreateError| -> Outcome {
-        let code = match error {
-            CreateError::AttemptParked => "ATTEMPT_PARKED",
-            CreateError::NotRunning => "NOT_RUNNING",
-            CreateError::NoSuchJob => "NO_SUCH_JOB",
-            CreateError::Db => "UNAVAILABLE",
-        };
-        (
-            tool_error(&format!("{code}: {error}")),
-            Some(format!("computer_job wait {id} refused")),
-        )
-    };
-    let caller = {
-        let found = match state.db.acquire().await {
-            Ok(mut conn) => crate::db::turns::asking_caller(&mut conn, grant.turn_id).await,
-            Err(err) => Err(err),
-        };
-        match found {
-            Ok(Some(caller)) => caller,
-            Ok(None) => return refused(CreateError::NotRunning),
-            Err(err) => return refused(err.into()),
-        }
-    };
-    let ended = |job: crate::computers::jobs::JobState| -> Outcome {
-        let mut value = job_json(&job);
-        value["next"] = json!("The job already ended; nothing waits. Continue with this result.");
-        let log = format!("computer_job wait {id}: already {}", job.status);
-        (tool_result(fit(value)), Some(log))
-    };
-    match computers.job(grant.bot_id, id).await {
-        Ok(Some(job)) if job.status.is_ended() => return ended(job),
-        Ok(Some(_)) => {}
-        Ok(None) => return refused(CreateError::NoSuchJob),
-        Err(err) => return failure(err),
-    }
-    match waits::create(&state.db, grant.turn_id, caller.attempt, id).await {
-        Ok(Created::Waiting(wait_id)) => {
-            state.scheduler.grants().park(grant.turn_id).await;
-            let next = if caller.owner_conversation {
-                "Tell the owner briefly what the job does and end this attempt now. Do not poll \
-                 or call more tools; else.bot continues this request when the job ends."
-            } else {
-                "End this attempt now without a reply. Do not poll or call more tools; else.bot \
-                 continues this task when the job ends."
-            };
-            (
-                tool_result(json!({
-                    "status": "waiting",
-                    "parked": true,
-                    "job_id": id,
-                    "wait_id": wait_id,
-                    "next": next,
-                })),
-                Some(format!("computer_job wait {id}: waiting {wait_id}")),
-            )
-        }
-        Ok(Created::Ended) => match computers.job(grant.bot_id, id).await {
-            Ok(Some(job)) => ended(job),
-            Ok(None) => refused(CreateError::NoSuchJob),
-            Err(err) => failure(err),
-        },
-        Err(error) => refused(error),
-    }
 }
 
 async fn screenshot(
@@ -1000,7 +927,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
             let Some(id) = text("job_id").and_then(|s| s.parse::<Uuid>().ok()) else {
                 return (tool_error("job_id must be a job ID."), None);
             };
-            wait_job(state, grant, &computers, id).await
+            job_wait::wait_job(state, grant, &computers, id).await
         }
         "computer_job" | "computer_job_cancel" => {
             let Some(id) = text("job_id").and_then(|s| s.parse::<Uuid>().ok()) else {

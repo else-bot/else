@@ -7,6 +7,7 @@ pub mod computers;
 pub mod connectors;
 pub mod context;
 pub mod conversation;
+mod delegation_tools;
 mod desktop_stream;
 pub mod error;
 pub mod guest_tools;

@@ -91,8 +91,7 @@ pub async fn caller(
     pool: &SqlitePool,
     turn_id: Uuid,
 ) -> Result<super::turns::AskingCaller, CreateError> {
-    let mut conn = pool.acquire().await?;
-    super::turns::asking_caller(&mut conn, turn_id)
+    super::turns::running_caller(pool, turn_id)
         .await?
         .ok_or(CreateError::NotRunning)
 }
