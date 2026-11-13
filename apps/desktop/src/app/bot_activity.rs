@@ -400,6 +400,7 @@ impl ElseApp {
                     .focus_ring(false)
                     .cursor_pointer()
                     .label("Details")
+                    .accessibility_label("Show created bot details")
                     .on_click(cx.listener(move |app, _, _, cx| {
                         if let Some(view) = app.view.as_mut()
                             && !view.expanded_events.remove(&item)

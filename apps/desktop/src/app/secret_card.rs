@@ -347,7 +347,7 @@ impl ElseApp {
                 .child(div().flex_1().min_w_0().text_xs().text_color(theme.muted_foreground)
                     .child("Encrypted on this server. Values stay out of chat."))
                 .child(Button::new(SharedString::from(format!("secret-about-{id}")))
-                    .small().ghost().focus_ring(false).cursor_pointer().label("About saving")
+                    .small().ghost().focus_ring(false).cursor_pointer().label("About saving").accessibility_label("About saving credentials")
                     .on_click(cx.listener(move |app, _, _, cx| {
                         if let Some(view) = app.view.as_mut() && !view.expanded_events.remove(&id) {
                             view.expanded_events.insert(id);

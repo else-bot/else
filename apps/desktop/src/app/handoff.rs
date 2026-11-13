@@ -148,6 +148,7 @@ impl ElseApp {
                     .focus_ring(false)
                     .cursor_pointer()
                     .label("Open chat")
+                    .accessibility_label(format!("Open chat with {}", bot.name))
                     .on_click(
                         cx.listener(move |app, _, window, cx| app.open_bot(target, window, cx)),
                     ),
@@ -189,6 +190,10 @@ impl ElseApp {
                                     .focus_ring(false)
                                     .cursor_pointer()
                                     .label("Open chat")
+                                    .accessibility_label(format!(
+                                        "Open chat with {}",
+                                        name(delegation)
+                                    ))
                                     .disabled(!self.bots.iter().any(|bot| bot.id == target))
                                     .on_click(cx.listener(move |app, _, window, cx| {
                                         app.open_bot(target, window, cx)
