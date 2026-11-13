@@ -16,8 +16,10 @@ use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
 use super::mcp::{Outcome, tool_error, tool_result};
 use crate::app::rules::{
-    Edit, MAX_BODY_CHARS, MAX_OWNER_WORDS_CHARS, MAX_TITLE_CHARS, Rules, parse_owner_words,
+    ChangeKind, Edit, MAX_BODY_CHARS, MAX_OWNER_WORDS_CHARS, MAX_TITLE_CHARS, Rules,
+    parse_owner_words,
 };
+use crate::db::routines;
 use crate::db::rules::{self, Caller, RulesError, Saved};
 use crate::grants::Grant;
 
@@ -110,20 +112,28 @@ pub(super) async fn update(state: &AppState, grant: &Grant, args: &Value) -> Out
             tool_result(json!({ "version": version, "changed": false })),
             Some(format!("rules unchanged at version {version}")),
         ),
-        Ok(Saved::Saved(update)) => (
-            tool_result(json!({
+        Ok(Saved::Saved(update)) => {
+            let mut result = json!({
                 "version": update.version,
                 "changed": true,
                 "section": update.section,
                 "change": update.change,
-            })),
-            Some(format!(
-                "rules version {}: {} {}",
-                update.version,
-                update.change.as_str(),
-                update.section
-            )),
-        ),
+            });
+            if update.change != ChangeKind::Removed
+                && let Some(next) = routines_next(state, grant.bot_id).await
+            {
+                result["next"] = json!(next);
+            }
+            (
+                tool_result(result),
+                Some(format!(
+                    "rules version {}: {} {}",
+                    update.version,
+                    update.change.as_str(),
+                    update.section
+                )),
+            )
+        }
         Err(RulesError::Invalid(err)) => reject("INVALID_RULE", &err.to_string()),
         Err(err @ RulesError::NotAllowed) => reject("NOT_ALLOWED", &err.to_string()),
         Err(err @ RulesError::NotRunning) => reject("NOT_RUNNING", &err.to_string()),
@@ -135,6 +145,32 @@ pub(super) async fn update(state: &AppState, grant: &Grant, args: &Value) -> Out
             )
         }
     }
+}
+
+/// A routine's saved wording keeps pulling against a newer rule on every run,
+/// and the server can't tell which routine a rule touches, so the bot checks.
+async fn routines_next(state: &AppState, bot_id: Uuid) -> Option<String> {
+    let listed = async {
+        let mut conn = state.db.acquire().await?;
+        routines::list(&mut conn, bot_id).await
+    };
+    let routines = listed
+        .await
+        .inspect_err(|err| tracing::warn!(error = %err, "listing routines for a rule failed"))
+        .ok()?;
+    let enabled: Vec<String> = routines
+        .iter()
+        .filter(|routine| routine.enabled)
+        .map(|routine| format!("\"{}\" ({})", routine.name, routine.id))
+        .collect();
+    (!enabled.is_empty()).then(|| {
+        format!(
+            "Your enabled routines: {}. Now rewrite the prompt of each one whose task \
+             contradicts this rule with routine_update. The owner's correction covers that \
+             edit, so don't ask first.",
+            enabled.join(", ")
+        )
+    })
 }
 
 async fn active_bot(state: &AppState, bot_id: Uuid) -> Result<(), ApiError> {
