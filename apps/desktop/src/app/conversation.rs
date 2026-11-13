@@ -262,18 +262,19 @@ pub(super) fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
 
 const BURST_GAP: TimeDelta = TimeDelta::minutes(5);
 
+/// One timestamp per group of messages: messages from either side less than
+/// [`BURST_GAP`] apart on one local day share the stamp of the last one.
 fn burst_tail_stamps<Tz: TimeZone>(
     rows: &[(Option<Author>, Option<DateTime<Utc>>)],
     zone: &Tz,
 ) -> Vec<Option<DateTime<Utc>>> {
     let joins = |(author, at): (Option<Author>, Option<DateTime<Utc>>),
                  (next_author, next_at): (Option<Author>, Option<DateTime<Utc>>)| {
-        let (Some(author), Some(at), Some(next_at)) = (author, at, next_at) else {
+        let (Some(_), Some(_), Some(at), Some(next_at)) = (author, next_author, at, next_at) else {
             return false;
         };
         let gap = next_at - at;
-        next_author == Some(author)
-            && gap >= TimeDelta::zero()
+        gap >= TimeDelta::zero()
             && gap < BURST_GAP
             && at.with_timezone(zone).date_naive() == next_at.with_timezone(zone).date_naive()
     };
@@ -2017,22 +2018,30 @@ mod tests {
     }
 
     #[test]
-    fn a_five_minute_gap_or_another_sender_starts_a_new_stamp() {
+    fn a_five_minute_gap_starts_a_new_stamp() {
         let rows = [
             (Some(Bot), Some("10:00:00")),
             (Some(Bot), Some("10:05:00")),
-            (Some(Owner), Some("10:05:01")),
-            (Some(Bot), Some("10:05:02")),
+            (Some(Owner), Some("10:10:00")),
         ];
         assert_eq!(
             stamps(&rows),
             [
                 Some(at("10:00:00")),
                 Some(at("10:05:00")),
-                Some(at("10:05:01")),
-                Some(at("10:05:02")),
+                Some(at("10:10:00")),
             ]
         );
+    }
+
+    #[test]
+    fn an_owner_message_and_its_quick_reply_share_one_stamp() {
+        let rows = [
+            (Some(Owner), Some("10:00:00")),
+            (Some(Bot), Some("10:00:20")),
+            (Some(Owner), Some("10:01:00")),
+        ];
+        assert_eq!(stamps(&rows), [None, None, Some(at("10:01:00"))]);
     }
 
     #[test]

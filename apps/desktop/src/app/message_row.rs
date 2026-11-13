@@ -12,15 +12,27 @@ use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Theme, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 /// Bot-side cards use the full shared reading column.
 pub(super) const BOT_GUTTER: Pixels = px(0.);
 
-/// Timestamps and other trailing metadata sit at this share of the foreground.
+/// Timestamps and other trailing metadata sit at this share of the foreground
+/// in dark themes.
 pub(super) const META_OPACITY: f32 = 0.45;
+
+/// The colour of timestamps and other trailing metadata. A faded foreground
+/// stays quiet on a dark page, but on a light one it falls below 4.5:1, so
+/// light themes use their readable secondary text instead.
+pub(super) fn meta_color(theme: &Theme) -> Hsla {
+    if theme.mode.is_dark() {
+        theme.foreground.opacity(META_OPACITY)
+    } else {
+        theme.muted_foreground
+    }
+}
 
 impl ElseApp {
     pub(super) fn render_row(
@@ -149,7 +161,7 @@ impl ElseApp {
                     .children(row.footer_stamp.map(|at| {
                         div()
                             .text_size(px(12.))
-                            .text_color(cx.theme().foreground.opacity(META_OPACITY))
+                            .text_color(meta_color(cx.theme()))
                             .child(clock(at))
                     }))
                     .into_any_element()
@@ -290,7 +302,7 @@ impl ElseApp {
                 .text_color(if error {
                     theme.danger
                 } else {
-                    theme.foreground.opacity(META_OPACITY)
+                    meta_color(&theme)
                 })
                 .child(text)
         };
@@ -794,7 +806,7 @@ fn day_separator(at: DateTime<Utc>, cx: &App) -> Div {
         .pt_4()
         .pb_2()
         .text_size(px(12.))
-        .text_color(cx.theme().foreground.opacity(META_OPACITY))
+        .text_color(meta_color(cx.theme()))
         .child(day_label_in(at, Local::now()))
 }
 

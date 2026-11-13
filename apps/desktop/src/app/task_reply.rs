@@ -76,7 +76,7 @@ impl ElseApp {
                     .owner_notices
                     .iter()
                     .any(|notice| notice.status == crate::model::OwnerNoticeStatus::Pending));
-        let meta = theme.foreground.opacity(super::message_row::META_OPACITY);
+        let meta = super::message_row::meta_color(&theme);
         let chevron = || {
             Icon::new(if expanded {
                 IconName::ChevronDown
