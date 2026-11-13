@@ -586,16 +586,23 @@ impl RowText {
                         .with_code_background(cx.theme().secondary)
                         .with_link(cx.theme().link)
                         .with_border(cx.theme().foreground.opacity(0.08))
-                        // A 20 px document title over 16 px section headings.
+                        // A reply's title (H1, H2) leads at 18–19 px with 20 px
+                        // above it (8 px plus the paragraph gap) and 8 px below;
+                        // sections (H3) at 16 px; deeper levels at body size.
                         .with_heading(|level| {
-                            StyleRefinement::default()
+                            let style = StyleRefinement::default()
                                 .text_size(px(match level {
-                                    1 => 20.,
-                                    2 => 16.,
-                                    3 => 15.,
+                                    1 => 19.,
+                                    2 => 18.,
+                                    3 => 16.,
                                     _ => 14.,
                                 }))
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .font_weight(FontWeight::SEMIBOLD);
+                            if level <= 2 {
+                                style.pt(px(8.)).pb(px(8.))
+                            } else {
+                                style
+                            }
                         })
                         .with_code_block(
                             StyleRefinement::default()
