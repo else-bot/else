@@ -880,9 +880,12 @@ pub async fn undelivered(
         result: Option<String>,
         error: Option<String>,
         earlier_request: bool,
+        conversation_id: Uuid,
+        takeover_turn_id: Option<Uuid>,
     }
     let rows: Vec<OutcomeRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT d.id, d.parent_bot_id, coalesce(d.takeover_turn_id, d.child_turn_id) AS turn,
+                d.conversation_id, d.takeover_turn_id,
                 d.target_bot_id, b.name AS target_name, d.task, d.status, d.result, d.error,
                 d.parent_attempt = 0 AS earlier_request
              FROM delegations d JOIN bots b ON b.id = d.target_bot_id
@@ -899,6 +902,12 @@ pub async fn undelivered(
             files.extend(attachment(conn, copy, row.parent_bot_id).await?);
         }
         let messages = attachment(conn, messages_file(row.id), row.parent_bot_id).await?;
+        let ran = crate::db::owner_questions::ran_in_task(
+            conn,
+            row.conversation_id,
+            row.takeover_turn_id,
+        )
+        .await?;
         outcomes.push(Outcome {
             id: row.id,
             target_bot_id: row.target_bot_id,
@@ -910,6 +919,7 @@ pub async fn undelivered(
             files,
             messages,
             earlier_request: row.earlier_request,
+            ran,
         });
     }
     Ok(outcomes)

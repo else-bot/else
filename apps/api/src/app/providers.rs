@@ -265,6 +265,8 @@ pub struct DelegationOutcome {
     pub messages: Option<crate::app::messages::Attachment>,
     /// Started for an earlier owner message and carried into this turn.
     pub earlier_request: bool,
+    /// Owner-approved calls the task made in attempts that did not complete.
+    pub ran: Vec<crate::db::owner_questions::RanAction>,
 }
 
 /// The owner's answer to a secret request: which task secret and

@@ -113,6 +113,16 @@ impl Use {
             Self::Started { at } | Self::Completed { at } | Self::Error { at } => at,
         }
     }
+
+    /// How the call ended, for a bot: "completed at 2026-11-13T09:00:00Z".
+    pub fn describe(self) -> String {
+        let at = self.at().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        match self {
+            Self::Completed { .. } => format!("completed at {at}"),
+            Self::Error { .. } => format!("returned an error at {at}"),
+            Self::Started { .. } => format!("started at {at}, outcome unknown"),
+        }
+    }
 }
 
 tokio::task_local! {
@@ -177,6 +187,25 @@ pub async fn ran_before(
     conversation_id: Uuid,
     turn_no: i64,
 ) -> Result<Vec<RanAction>, sqlx::Error> {
+    ran(conn, conversation_id, turn_no, None).await
+}
+
+/// The same for a delegated task: every turn of its task conversation, plus
+/// the owner's takeover turn in the target's chat when there is one.
+pub async fn ran_in_task(
+    conn: &mut SqliteConnection,
+    conversation_id: Uuid,
+    takeover_turn: Option<Uuid>,
+) -> Result<Vec<RanAction>, sqlx::Error> {
+    ran(conn, conversation_id, i64::MAX, takeover_turn).await
+}
+
+async fn ran(
+    conn: &mut SqliteConnection,
+    conversation_id: Uuid,
+    before_turn_no: i64,
+    also_turn: Option<Uuid>,
+) -> Result<Vec<RanAction>, sqlx::Error> {
     type RanRow = (
         i64,
         turns::TurnStatus,
@@ -189,13 +218,14 @@ pub async fn ran_before(
         "SELECT t.turn_no, t.status, json_extract(q.action, '$.tool'), q.title, q.used_at,
                 q.use_outcome
          FROM owner_questions q JOIN turns t ON t.id = q.turn_id
-         WHERE t.conversation_id = ?1 AND t.turn_no < ?2
+         WHERE ((t.conversation_id = ?1 AND t.turn_no < ?2) OR t.id = ?3)
            AND t.status IN ('failed', 'uncertain', 'interrupted')
            AND q.used_at IS NOT NULL
-         ORDER BY q.used_at DESC, q.id LIMIT ?3",
+         ORDER BY q.used_at DESC, q.id LIMIT ?4",
     )
     .bind(conversation_id)
-    .bind(turn_no)
+    .bind(before_turn_no)
+    .bind(also_turn)
     .bind(RAN_ACTIONS_SHOWN)
     .fetch_all(&mut *conn)
     .await?;

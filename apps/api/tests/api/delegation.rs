@@ -3173,6 +3173,40 @@ async fn a_failed_child_returns_its_last_checkpoint_and_the_error() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_failed_child_names_the_approved_calls_it_made() {
+    let db = TestDb::migrated().await;
+    let (_, root, child, _) = seed(&db).await;
+    sqlx::query(
+        "INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, choices, action,
+             status, answer, consumed_attempt, used_at, use_outcome)
+         SELECT ?1, bot_id, id, 1, 'external', 'Merge the news recap', '[]',
+                json_object('tool', 'mcp_request', 'args', json_object()), 'answered', '\"approve\"', 1,
+                '2026-11-13T09:00:00.000+00:00', 'completed'
+         FROM turns WHERE id = ?2",
+    )
+    .bind(Uuid::new_v4())
+    .bind(child)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    settle_with_messages(&db, child, &["Merging now."], "failed").await;
+
+    let mut conn = db.pool.acquire().await.unwrap();
+    let outcomes = else_api::db::delegations::undelivered(&mut conn, root)
+        .await
+        .unwrap();
+    let ran = &outcomes[0].ran;
+    assert_eq!(ran.len(), 1, "{ran:?}");
+    assert_eq!(ran[0].tool, "mcp_request");
+    assert_eq!(ran[0].title, "Merge the news recap");
+    assert_eq!(
+        ran[0].used.describe(),
+        "completed at 2026-11-13T09:00:00Z",
+        "the delegating bot learns the merge ran despite the failure"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_single_message_child_returns_no_extra_file() {
     let db = TestDb::migrated().await;
     let (_, root, child, _) = seed(&db).await;

@@ -1325,6 +1325,7 @@ mod tests {
                 files,
                 messages,
                 earlier_request: false,
+                ran: Vec::new(),
             }
         };
         let mut outcomes = vec![
