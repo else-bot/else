@@ -218,6 +218,15 @@ def run(runner):
                     [], "Research hit the 30-minute attempt limit during run 2. Run 1 finished with "
                         "41 profiles and 6 drafts, and run 2 may still be running as job 7f3c.",
                     "Research crashed, so the pipeline test failed."),
+                "relayed-owner-quote-loses-to-rule": (
+                    [], "Cause: db.ts reads DATABASE_URL before dotenv loads. Per my rule, Dev implements: "
+                        "follow-up for Dev (bot_id 00000000-0000-0000-0000-000000000005): load dotenv first.",
+                    "Fixed: db.ts now loads dotenv before reading DATABASE_URL."),
+                "task-check-loses-to-rule": (
+                    [self.call("draft_message", {"platform": "x", "account": "@proliquid_xyz",
+                                                 "body": "Long ETH from $3,120, target $3,400, stop $2,980. Up 4.2% so far."},
+                               {"status": "pending", "parked": True})],
+                    "Drafted as approved; my no-double-review rule skips the staleness check."),
                 "routine-task-drafts-post-for-approval": (
                     [self.call("draft_message", {"platform": "x",
                                                  "body": "A whale just opened a $40M BTC short on Hyperliquid at 10x."},
