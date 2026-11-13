@@ -120,6 +120,11 @@ def run(runner):
                 "missing-api-key": ([self.call("request_secret", {"name": "openweather", "reason": "Weather data", "env": ["OPENWEATHER_API_KEY"]})], "Private form opened."),
                 "installed-mcp-has-id": (mcp_calls, "#17 Fix digest retry"),
                 "mcp-index-then-schema": (mcp_calls, "#17 Fix digest retry"),
+                "mcp-connection-failure-is-read": (
+                    [{"name": "mcp_request", "arguments": {"id": "github", "method": "tools/call", "effect": "local", "params": {
+                        "name": "list_pull_requests", "arguments": {"owner": "acme", "repo": "widget", "state": "open"}}},
+                      "result": mock.tool_result({"error": {"code": "connection_failed", "message": "The MCP connection failed."}}, True)}],
+                    "The GitHub connection failed, so I could not list the pull requests."),
                 "mcp-wait-purpose-is-a-label": ([self.call("mcp_request", {
                     "id": "github", "method": "tools/call", "effect": "local", "params": {
                         "name": "dispatch_workflow", "arguments": {"owner": "acme", "repo": "widget",
