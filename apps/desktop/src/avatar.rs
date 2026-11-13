@@ -453,7 +453,7 @@ impl Element for BotAvatar {
                 work: if self.working { 1. } else { 0. },
                 ..Pose::default()
             };
-            paint_avatar(bounds, self.avatar, pose, 0., window);
+            paint_avatar(bounds, self.avatar, pose, 0., ring_color(cx), window);
             return;
         };
         let center = bounds.center();
@@ -499,7 +499,7 @@ impl Element for BotAvatar {
             }
             ((pose, elapsed, live.awake.clone()), live)
         });
-        paint_avatar(bounds, self.avatar, pose, elapsed, window);
+        paint_avatar(bounds, self.avatar, pose, elapsed, ring_color(cx), window);
 
         let moved = awake.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
@@ -537,6 +537,7 @@ fn paint_avatar(
     avatar: Avatar,
     pose: Pose,
     elapsed: f32,
+    ring: Hsla,
     window: &mut Window,
 ) {
     let art = avatar.shape.art();
@@ -576,7 +577,7 @@ fn paint_avatar(
     let place = place_at(scale);
 
     if work > 0.01 {
-        paint_halo(center, unit, avatar.color.fill(), work, elapsed, window);
+        paint_halo(center, unit, ring, work, elapsed, window);
     }
     let points = shape.map(place);
     let mut body = PathBuilder::fill();
@@ -639,7 +640,23 @@ fn halo_radius(unit: f32) -> f32 {
 }
 
 fn halo_width(unit: f32) -> f32 {
-    (unit * 0.04).max(1.25)
+    (unit * 0.05).max(1.5)
+}
+
+/// The working ring is the app's accent, lifted toward white in dark so it
+/// reads as light rather than a dark blue outline.
+fn ring_color(cx: &App) -> Hsla {
+    use gpui_kit::component::ActiveTheme as _;
+    let theme = cx.theme();
+    let accent = theme.primary;
+    if theme.mode.is_dark() {
+        Hsla {
+            l: accent.l + (1. - accent.l) * 0.25,
+            ..accent
+        }
+    } else {
+        accent
+    }
 }
 
 /// A concentric working ring contained inside the avatar's layout bounds: a
@@ -669,7 +686,7 @@ fn paint_halo(
     }
     track.close();
     if let Ok(path) = track.build() {
-        window.paint_path(path, color.opacity(0.28 * work));
+        window.paint_path(path, color.opacity(0.32 * work));
     }
     const LIT: usize = SAMPLES * 38 / 100;
     let at = |i: isize| points[i.rem_euclid(SAMPLES as isize) as usize];
