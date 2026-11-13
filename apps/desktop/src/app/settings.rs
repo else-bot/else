@@ -1,6 +1,7 @@
 use super::delete_dialog::DeleteTarget;
 use super::view::HEADER_HEIGHT;
 use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
+use crate::controls::{Control as _, Scale, Tier, segment, segment_track, text_field, toggle};
 use gpui_kit::component::FocusableExt as _;
 use std::collections::HashMap;
 
@@ -14,10 +15,9 @@ use gpui_kit::base::HoverCard;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, Size,
-    WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, WindowExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -874,11 +874,7 @@ impl ElseApp {
                             .child(muted("Follow the bot's model, including future changes.", cx)),
                     )
                     .child(
-                        Switch::new("routine-inherit-model")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .checked(form.inherits())
-                            .disabled(saving || !connected)
+                        toggle("routine-inherit-model", form.inherits(), saving || !connected)
                             .accessibility_label("Use bot model")
                             .on_click(move |enabled: &bool, window, cx| {
                                 inherit_holder.update(cx, |form, cx| {
@@ -935,16 +931,16 @@ impl ElseApp {
                         .justify_end()
                         .gap_2()
                         .child(
-                            Button::new("model-cancel").focus_ring(false).cursor_pointer()
+                            Button::new("model-cancel")
+                                .control(Tier::Secondary, Scale::Standard, false, cx)
                                 .label("Cancel")
                                                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
-                            Button::new("model-apply").focus_ring(false).cursor_pointer()
+                            Button::new("model-apply")
                                 .label("Apply")
-                                .primary()
+                                .control(Tier::Primary, Scale::Standard, !ready || saving || !connected, cx)
                                 .loading(saving)
-                                .disabled(!ready || saving || !connected)
                                 .on_click(move |_, window, cx| {
                                     let _ = app_apply.update(cx, |app, cx| app.apply_model(window, cx));
                                 }),
@@ -1114,37 +1110,45 @@ impl ElseApp {
                         .items_center()
                         .border_b_1()
                         .border_color(line)
-                        .gap_1()
+                        .gap_2()
                         .child(
-                            Button::new("details-tab")
-                                .cursor_pointer()
+                            segment_track(cx)
                                 .flex_1()
-                                .label("Details")
-                                .ghost()
-                                .focus_ring(false)
-                                .selected(self.details_tab == super::computer::DetailsTab::Details)
-                                .on_click(cx.listener(|app, _, _, cx| {
-                                    app.details_tab = super::computer::DetailsTab::Details;
-                                    app.computer = None;
-                                    app._computer_layout = None;
-                                    cx.notify();
-                                })),
+                                .child(
+                                    segment(
+                                        "details-tab",
+                                        "Details",
+                                        self.details_tab == super::computer::DetailsTab::Details,
+                                        false,
+                                        cx,
+                                    )
+                                    .on_click(cx.listener(
+                                        |app, _, _, cx| {
+                                            app.details_tab = super::computer::DetailsTab::Details;
+                                            app.computer = None;
+                                            app._computer_layout = None;
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    segment(
+                                        "computer-tab",
+                                        "Computer",
+                                        self.details_tab == super::computer::DetailsTab::Computer,
+                                        false,
+                                        cx,
+                                    )
+                                    .on_click(cx.listener(
+                                        |app, _, window, cx| {
+                                            app.details_tab = super::computer::DetailsTab::Computer;
+                                            app.ensure_settings(window, cx);
+                                            cx.notify();
+                                        },
+                                    )),
+                                ),
                         )
-                        .child(
-                            Button::new("computer-tab")
-                                .cursor_pointer()
-                                .flex_1()
-                                .label("Computer")
-                                .ghost()
-                                .focus_ring(false)
-                                .selected(self.details_tab == super::computer::DetailsTab::Computer)
-                                .on_click(cx.listener(|app, _, window, cx| {
-                                    app.details_tab = super::computer::DetailsTab::Computer;
-                                    app.ensure_settings(window, cx);
-                                    cx.notify();
-                                })),
-                        )
-                        .child(div().flex_none().ml_2().child(close)),
+                        .child(div().flex_none().child(close)),
                 )
                 .child(
                     div()
@@ -1210,8 +1214,7 @@ impl ElseApp {
                 .w_full()
                 .on_mouse_down_out(cx.listener(move |app, _, _, cx| app.commit_name(bot, cx)))
                 .child(
-                    Input::new(&details.name)
-                        .focus_ring(false)
+                    text_field(Input::new(&details.name), cx)
                         .text_left()
                         .font_weight(FontWeight::SEMIBOLD),
                 )
@@ -1246,8 +1249,7 @@ impl ElseApp {
                 .child(note(format!("Couldn't save. {err}"), true, cx))
                 .child(
                     Button::new("retry-details")
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Secondary, Scale::Standard, false, cx)
                         .label("Retry")
                         .on_click(cx.listener(move |app, _, _, cx| app.flush_details(bot, cx))),
                 )
@@ -1366,8 +1368,7 @@ impl ElseApp {
                     .child(
                         h_flex().child(
                             Button::new("retry-model")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Secondary, Scale::Standard, false, cx)
                                 .label("Retry")
                                 .on_click(cx.listener(move |app, _, window, cx| {
                                     app.load_profile(bot, window, cx)
@@ -1522,16 +1523,15 @@ impl ElseApp {
         };
         let disabled =
             save.is_some_and(TriggerSave::busy) || self.connection != Connection::Connected;
-        let switch = Switch::new(ElementId::Name(format!("trigger-{key}").into()))
-            .focus_ring(false)
-            .cursor_pointer()
-            .checked(checked)
-            .small()
-            .accessibility_label(format!("Run the trigger for {}", card.title))
-            .disabled(disabled)
-            .on_click(cx.listener(move |app, enabled: &bool, window, cx| {
-                app.change_trigger(bot, source, Some(*enabled), window, cx)
-            }));
+        let switch = toggle(
+            ElementId::Name(format!("trigger-{key}").into()),
+            checked,
+            disabled,
+        )
+        .accessibility_label(format!("Run the trigger for {}", card.title))
+        .on_click(cx.listener(move |app, enabled: &bool, window, cx| {
+            app.change_trigger(bot, source, Some(*enabled), window, cx)
+        }));
         let delete = Button::new(ElementId::Name(format!("trigger-delete-{key}").into()))
             .focus_ring(false)
             .cursor_pointer()
@@ -1686,16 +1686,15 @@ impl ElseApp {
             _ => routine.enabled,
         };
         let passed = !checked && routine.run_at.is_some_and(|at| at <= Utc::now());
-        let switch = Switch::new(ElementId::Name(format!("routine-{id}").into()))
-            .focus_ring(false)
-            .cursor_pointer()
-            .checked(checked)
-            .small()
-            .accessibility_label(format!("Run {}", routine.name))
-            .disabled(busy || !connected || passed)
-            .on_click(cx.listener(move |app, enabled: &bool, window, cx| {
-                app.set_routine(bot, id, *enabled, window, cx)
-            }));
+        let switch = toggle(
+            ElementId::Name(format!("routine-{id}").into()),
+            checked,
+            busy || !connected || passed,
+        )
+        .accessibility_label(format!("Run {}", routine.name))
+        .on_click(cx.listener(move |app, enabled: &bool, window, cx| {
+            app.set_routine(bot, id, *enabled, window, cx)
+        }));
         let delete = Button::new(ElementId::Name(format!("routine-delete-{id}").into()))
             .focus_ring(false)
             .cursor_pointer()
@@ -1713,14 +1712,10 @@ impl ElseApp {
             }));
         let dismiss = (routine.failed_runs > 0).then(|| {
             Button::new(ElementId::Name(format!("routine-dismiss-{id}").into()))
-                .focus_ring(false)
-                .cursor_pointer()
-                .ghost()
-                .xsmall()
+                .control(Tier::Ghost, Scale::Compact, busy || !connected, cx)
                 .label("Dismiss")
                 .loading(matches!(save, Some(RoutineSave::Dismissing { .. })))
                 .accessibility_label(format!("Dismiss the failures of {}", routine.name))
-                .disabled(busy || !connected)
                 .on_click(cx.listener(move |app, _, window, cx| {
                     app.dismiss_routine_failures(bot, id, window, cx)
                 }))

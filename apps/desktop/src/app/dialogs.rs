@@ -1,11 +1,11 @@
 use super::delete_dialog::DeleteTarget;
 use super::{Connection, ElseApp};
 use crate::api::{Bot, Capabilities};
+use crate::controls::{Control as _, Scale, Tier, text_field};
 use crate::profile_picker::ProfilePicker;
-use gpui_kit::component::FocusableExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -130,7 +130,7 @@ impl ElseApp {
                             .text_color(theme.muted_foreground)
                             .child("Name"),
                     )
-                    .child(Input::new(&welcome.name).focus_ring(false)),
+                    .child(text_field(Input::new(&welcome.name), cx)),
             )
             .child(welcome.picker.clone());
         if let Some(error) = &welcome.error {
@@ -144,12 +144,9 @@ impl ElseApp {
         card = card.child(
             h_flex().justify_end().child(
                 Button::new("welcome-start")
-                    .focus_ring(false)
-                    .cursor_pointer()
+                    .control(Tier::Primary, Scale::Standard, welcome.busy || !ready, cx)
                     .label("Get started")
-                    .primary()
                     .loading(welcome.busy)
-                    .disabled(welcome.busy || !ready)
                     .on_click(cx.listener(|app, _, window, cx| app.submit_welcome(window, cx))),
             ),
         );

@@ -1,5 +1,6 @@
 use super::*;
 use crate::api::InstalledMcp;
+use crate::controls::{Control as _, Scale, Tier, text_field};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
@@ -163,17 +164,14 @@ impl Shell {
                         .gap_2()
                         .child(
                             Button::new("mcp-remove-cancel")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Secondary, Scale::Standard, false, cx)
                                 .label("Cancel")
                                                                 .track_focus(&cancel)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("mcp-remove-confirm")
-                                .focus_ring(false)
-                                .cursor_pointer()
-                                .danger()
+                                .control(Tier::Danger, Scale::Standard, false, cx)
                                 .label("Remove for all bots")
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
@@ -250,10 +248,13 @@ impl Shell {
                     )
                     .child(
                         Button::new("mcp-retry")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(
+                                Tier::Secondary,
+                                Scale::Standard,
+                                view.removing.is_some(),
+                                cx,
+                            )
                             .label("Retry")
-                            .disabled(view.removing.is_some())
                             .on_click(
                                 cx.listener(|shell, _, window, cx| shell.open_mcp(window, cx)),
                             ),
@@ -279,8 +280,7 @@ impl Shell {
                     "No MCPs installed yet",
                     "Ask a bot to install an MCP.",
                     Button::new("empty-open-chat")
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Secondary, Scale::Standard, false, cx)
                         .label("Open chat")
                         .on_click(cx.listener(|shell, _, window, cx| {
                             window.close_dialog(cx);
@@ -298,7 +298,7 @@ impl Shell {
         );
         body = body.child(
             div().max_w(px(340.)).child(
-                Input::new(&view.search)
+                text_field(Input::new(&view.search), cx)
                     .small()
                     .prefix(Icon::new(IconName::Search).size_3()),
             ),

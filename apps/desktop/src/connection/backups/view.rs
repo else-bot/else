@@ -1,12 +1,11 @@
 use super::*;
-use crate::appearance::{Tier, Tiered as _};
 use crate::connection::settings::settings_column;
+use crate::controls::{Control as _, Scale, Tier, toggle};
 use chrono::{DateTime, Local, Utc};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Disableable as _, FocusableExt as _, Icon, Sizable as _, Theme, h_flex};
+use gpui_kit::component::{Icon, Theme, h_flex};
 
 fn interval(seconds: u64) -> String {
     match seconds {
@@ -151,8 +150,7 @@ impl Shell {
                     |content| {
                         content.child(
                             Button::new("backups-retry")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Secondary, Scale::Standard, false, cx)
                                 .label("Try again")
                                 .on_click(cx.listener(|shell, _, window, cx| {
                                     shell.open_backups(window, cx)
@@ -202,19 +200,18 @@ impl Shell {
                 content.child(self.render_local_backups(view, snapshot, local, stacked, cx))
             });
         let run_now = Button::new("backup-run-now")
-            .focus_ring(false)
-            .cursor_pointer()
+            .control(
+                Tier::Primary,
+                Scale::Standard,
+                busy || snapshot.running || !has_destination || unavailable,
+                cx,
+            )
             .label(if snapshot.running {
                 "Backing up…"
             } else {
                 "Back up now"
             })
             .loading(view.operation == Operation::Starting)
-            .tier(
-                Tier::Primary,
-                busy || snapshot.running || !has_destination || unavailable,
-                cx,
-            )
             .on_click(cx.listener(|shell, _, window, cx| shell.run_remote_backup(window, cx)));
         let mut content = v_flex()
             .gap_5()
@@ -247,23 +244,22 @@ impl Shell {
                     )
                     .when(view.editor.is_none(), |row| row.child(run_now))
                     .child(
-                        Switch::new("remote-backups-enabled")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .small()
-                            .checked(snapshot.enabled)
-                            .disabled(
-                                busy || unavailable || !has_destination || view.editor.is_some(),
-                            )
-                            .accessibility_label("Automatic remote backups")
-                            .tooltip(if snapshot.enabled {
-                                "Pause automatic remote backups"
-                            } else {
-                                "Enable automatic remote backups"
-                            })
-                            .on_click(cx.listener(|shell, enabled: &bool, window, cx| {
+                        toggle(
+                            "remote-backups-enabled",
+                            snapshot.enabled,
+                            busy || unavailable || !has_destination || view.editor.is_some(),
+                        )
+                        .accessibility_label("Automatic remote backups")
+                        .tooltip(if snapshot.enabled {
+                            "Pause automatic remote backups"
+                        } else {
+                            "Enable automatic remote backups"
+                        })
+                        .on_click(cx.listener(
+                            |shell, enabled: &bool, window, cx| {
                                 shell.toggle_remote_backups(*enabled, window, cx)
-                            })),
+                            },
+                        )),
                     ),
             )
             .when_some(snapshot.unavailable_reason.clone(), |content, reason| {
@@ -346,12 +342,14 @@ impl Shell {
                             )
                             .child(
                                 Button::new("backup-edit-destination")
-                                    .focus_ring(false)
-                                    .cursor_pointer()
+                                    .control(
+                                        Tier::Secondary,
+                                        Scale::Standard,
+                                        busy || view.editor.is_some(),
+                                        cx,
+                                    )
                                     .label("Edit destination")
                                     .icon(IconName::Pencil)
-                                    .secondary()
-                                    .disabled(busy || view.editor.is_some())
                                     .on_click(cx.listener(|shell, _, window, cx| {
                                         shell.edit_backup_destination(window, cx)
                                     })),
@@ -378,11 +376,13 @@ impl Shell {
                         ))
                         .child(
                             Button::new("backup-configure-destination")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(
+                                    Tier::Primary,
+                                    Scale::Standard,
+                                    busy || view.editor.is_some(),
+                                    cx,
+                                )
                                 .label("Configure destination")
-                                .primary()
-                                .disabled(busy || view.editor.is_some())
                                 .on_click(cx.listener(|shell, _, window, cx| {
                                     shell.edit_backup_destination(window, cx)
                                 })),
@@ -432,12 +432,14 @@ impl Shell {
                         )
                         .child(
                             Button::new("backup-edit-policy")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(
+                                    Tier::Secondary,
+                                    Scale::Standard,
+                                    busy || view.editor.is_some(),
+                                    cx,
+                                )
                                 .label("Edit policy")
                                 .icon(IconName::Pencil)
-                                .secondary()
-                                .disabled(busy || view.editor.is_some())
                                 .on_click(cx.listener(|shell, _, window, cx| {
                                     shell.edit_backup_policy(window, cx)
                                 })),
@@ -536,11 +538,9 @@ impl Shell {
                 bar = bar
                     .child(
                         Button::new("backup-test-connection")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Secondary, Scale::Standard, busy, cx)
                             .label("Test connection")
                             .loading(view.operation == Operation::Testing)
-                            .disabled(busy)
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.test_backup_destination(window, cx)
                             })),
@@ -548,12 +548,9 @@ impl Shell {
                     .child(div().flex_1())
                     .child(
                         Button::new("backup-save-destination")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Primary, Scale::Standard, busy || !form.verified, cx)
                             .label("Save changes")
-                            .primary()
                             .loading(view.operation == Operation::Saving)
-                            .disabled(busy || !form.verified)
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.save_backup_edit(window, cx)
                             })),
@@ -561,12 +558,9 @@ impl Shell {
             } else {
                 bar = bar.child(div().flex_1()).child(
                     Button::new("backup-save-policy")
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Primary, Scale::Standard, busy, cx)
                         .label("Save changes")
-                        .primary()
                         .loading(view.operation == Operation::Saving)
-                        .disabled(busy)
                         .on_click(
                             cx.listener(|shell, _, window, cx| shell.save_backup_edit(window, cx)),
                         ),
@@ -574,10 +568,8 @@ impl Shell {
             }
             bar = bar.child(
                 Button::new("backup-cancel-edit")
-                    .focus_ring(false)
-                    .cursor_pointer()
+                    .control(Tier::Secondary, Scale::Standard, busy, cx)
                     .label("Cancel")
-                    .disabled(busy)
                     .on_click(cx.listener(|shell, _, _, cx| shell.cancel_backup_edit(cx))),
             );
             footer = Some(bar);

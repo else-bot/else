@@ -2,17 +2,16 @@
 //! the Rules section in Bot details, and the dialog with the file and its
 //! history.
 
+use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
 use std::collections::HashMap;
 
 use super::ElseApp;
-use crate::appearance::{Tier, Tiered as _};
 use crate::model::{DiffLine, DiffOp, RuleChange, RulesFile, RulesUpdate, RulesVersion};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, Size, WindowExt as _,
-    h_flex, v_flex,
+    ActiveTheme as _, Icon, Selectable as _, Sizable as _, Size, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -382,10 +381,7 @@ impl ElseApp {
         let section = update.section.clone();
         let shown = update.version;
         let view = Button::new(SharedString::from(format!("rules-view-{item}")))
-            .focus_ring(false)
-            .ghost()
-            .small()
-            .cursor_pointer()
+            .control(Tier::Ghost, Scale::Compact, false, cx)
             .label("View")
             .accessibility_label(format!("View the change to {}", update.section))
             .on_click(cx.listener(move |app, _, window, cx| {
@@ -401,13 +397,9 @@ impl ElseApp {
         let previous = update.version - 1;
         let undo = current.then(|| {
             Button::new(SharedString::from(format!("rules-undo-{item}")))
-                .focus_ring(false)
-                .ghost()
-                .small()
-                .cursor_pointer()
+                .control(Tier::Ghost, Scale::Compact, restoring, cx)
                 .label("Undo")
                 .loading(restoring)
-                .disabled(restoring)
                 .accessibility_label(format!("Undo the change to {}", update.section))
                 .on_click(cx.listener(move |app, _, window, cx| {
                     app.restore_rules(bot, previous, shown, window, cx)
@@ -442,11 +434,9 @@ impl ElseApp {
         let only_history =
             file.is_some_and(|file| file.sections.is_empty() && !file.history.is_empty());
         let open = Button::new("rules-open")
-            .focus_ring(false)
-            .cursor_pointer()
+            .control(Tier::Secondary, Scale::Standard, file.is_none(), cx)
             .label("Open")
             .accessibility_label("Open rules")
-            .disabled(file.is_none())
             .on_click(cx.listener(move |app, _, window, cx| {
                 app.open_rules(bot, None, RulesTab::Rules, None, window, cx)
             }));
@@ -585,21 +575,18 @@ impl ElseApp {
                 .child("Loading…")
                 .into_any_element();
         };
-        let selected_fill = crate::appearance::segment_selected(cx);
-        let tabs = crate::appearance::segment_track(cx).children(
+        let tabs = segment_track(cx).w(px(220.)).children(
             [(RulesTab::Rules, "Rules"), (RulesTab::History, "History")]
                 .into_iter()
                 .map(|(value, label)| {
-                    Button::new(SharedString::from(format!("rules-tab-{label}")))
-                        .ghost()
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .small()
-                        .px_3()
-                        .label(label)
-                        .selected(value == tab)
-                        .when(value == tab, |button| button.bg(selected_fill))
-                        .on_click(on(owner, move |app, _, cx| app.set_rules_tab(value, cx)))
+                    segment(
+                        SharedString::from(format!("rules-tab-{label}")),
+                        label,
+                        value == tab,
+                        false,
+                        cx,
+                    )
+                    .on_click(on(owner, move |app, _, cx| app.set_rules_tab(value, cx)))
                 }),
         );
         let body = match tab {
@@ -641,8 +628,7 @@ impl ElseApp {
             )
             .child(
                 Button::new("rules-copy")
-                    .focus_ring(false)
-                    .cursor_pointer()
+                    .control(Tier::Secondary, Scale::Standard, false, cx)
                     .icon(IconName::Copy)
                     .label("Copy markdown")
                     .on_click(move |_, _, cx| {
@@ -651,9 +637,7 @@ impl ElseApp {
             )
             .child(
                 Button::new("rules-ask")
-                    .primary()
-                    .focus_ring(false)
-                    .cursor_pointer()
+                    .control(Tier::Primary, Scale::Standard, false, cx)
                     .label("Ask to edit")
                     .accessibility_label(format!("Ask {name} to edit a rule"))
                     .on_click(on(owner, move |app, window, cx| {
@@ -777,12 +761,11 @@ impl ElseApp {
             } else {
                 "rules-restore-this"
             })
-            .focus_ring(false)
-            .cursor_pointer()
+            .control(Tier::Ghost, Scale::Compact, restoring, cx)
+            .flush_start(Scale::Compact)
             .icon(Icon::new(icon).text_color(color))
             .label(label)
             .loading(restoring)
-            .tier(Tier::Ghost, restoring, cx)
             .text_color(color)
             .on_click(on(owner, move |app, window, cx| {
                 app.restore_rules(bot, target, expected, window, cx)

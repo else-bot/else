@@ -5,12 +5,13 @@
 //! a newer owner message (skipped), or the turn ending (withdrawn) disables
 //! it here too. A click on a card the server already settled is refused.
 
+use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, Theme, h_flex, v_flex,
+    ActiveTheme as _, Icon, Sizable as _, StyledExt as _, Theme, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -357,10 +358,7 @@ impl ElseApp {
                 )
                 .child(
                     Button::new("jump-to-question")
-                        .focus_ring(false)
-                        .ghost()
-                        .small()
-                        .cursor_pointer()
+                        .control(Tier::Ghost, Scale::Compact, false, cx)
                         .icon(IconName::ArrowDown)
                         .label(if secret {
                             "Jump to request"

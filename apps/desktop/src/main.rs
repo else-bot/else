@@ -5,6 +5,7 @@ mod attachments;
 mod avatar;
 mod config;
 mod connection;
+mod controls;
 mod email;
 #[cfg(test)]
 mod icon_assets_tests;

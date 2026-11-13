@@ -1,10 +1,10 @@
 use super::*;
 use crate::api::{Bot, ClientError, EmailConfig, EmailEndpoint, EmailProvider};
-use gpui_kit::component::button::ButtonCustomVariant;
+use crate::controls::{Control as _, Scale, Tier, field_style, segment, segment_track, text_field};
+use gpui_kit::component::IndexPath;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::searchable_list::SearchableListItem;
 use gpui_kit::component::select::{Select, SelectState};
-use gpui_kit::component::{IndexPath, Selectable as _};
 
 #[derive(Clone, PartialEq, Eq)]
 struct BotChoice {
@@ -246,8 +246,7 @@ impl Form {
                 .min_w_0()
                 .child(div().text_sm().font_medium().child(label.to_owned()))
                 .child(
-                    Input::new(input)
-                        .focus_ring(false)
+                    text_field(Input::new(input), cx)
                         .aria_label(label.to_owned())
                         .disabled(busy),
                 )
@@ -265,37 +264,21 @@ impl Form {
                 let url = url.clone();
                 form = form.child(
                     Button::new("email-open-signin")
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Ghost, Scale::Standard, false, cx)
                         .label("Open sign-in page")
-                        .ghost()
                         .on_click(move |_, _, cx| cx.open_url(&url)),
                 );
             }
             return form
                 .child(
                     Button::new("email-cancel-signin")
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Ghost, Scale::Standard, !waiting, cx)
                         .label("Cancel")
-                        .ghost()
-                        .disabled(!waiting)
                         .on_click(cx.listener(|view, _, _, cx| view.cancel_signin(cx))),
                 )
                 .into_any_element();
         }
-        // A segmented control: one track, the chosen provider raised on it.
-        let dark = theme.mode.is_dark();
-        let (track, raised) = if dark {
-            (theme.background, theme.secondary_active)
-        } else {
-            (theme.foreground.opacity(0.06), theme.background)
-        };
-        let mut providers = h_flex()
-            .p(px(3.))
-            .gap(px(2.))
-            .rounded(theme.radius + px(3.))
-            .bg(track);
+        let mut providers = segment_track(cx).w_full();
         for provider in [
             EmailProvider::Gmail,
             EmailProvider::Microsoft,
@@ -305,39 +288,21 @@ impl Form {
         ] {
             let chosen = self.provider == provider;
             providers = providers.child(
-                Button::new(SharedString::from(format!("email-provider-{provider:?}")))
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .small()
-                    .flex_1()
-                    .flex_basis(px(0.))
-                    .label(provider.label())
-                    .custom(
-                        ButtonCustomVariant::new(cx)
-                            .color(if chosen { raised } else { track.opacity(0.) })
-                            .foreground(if chosen {
-                                theme.foreground
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .hover(if chosen {
-                                raised
-                            } else {
-                                theme.foreground.opacity(0.05)
-                            })
-                            .active(raised)
-                            .shadow(chosen),
-                    )
-                    .selected(chosen)
-                    .disabled(busy)
-                    .on_click(cx.listener(move |view, _, window, cx| {
-                        if let Some(form) = &mut view.form {
-                            form.clear_secrets(window, cx);
-                            form.provider = provider;
-                        }
-                        view.error = None;
-                        cx.notify();
-                    })),
+                segment(
+                    SharedString::from(format!("email-provider-{provider:?}")),
+                    provider.label(),
+                    chosen,
+                    busy,
+                    cx,
+                )
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    if let Some(form) = &mut view.form {
+                        form.clear_secrets(window, cx);
+                        form.provider = provider;
+                    }
+                    view.error = None;
+                    cx.notify();
+                })),
             );
         }
         form = form.child(div().max_w(px(520.)).child(providers));
@@ -369,15 +334,17 @@ impl Form {
         }
         form = form.child(v_flex().gap_1()
             .child(div().text_sm().font_medium().child("Ask a bot to help, optional"))
-            .child(div().max_w(px(320.)).child(Select::new(&self.bot).focus_ring(false).cursor_pointer().accessibility_label("Email bot").disabled(busy))))
+            .child(div().max_w(px(320.)).child(field_style(Select::new(&self.bot), cx).focus_ring(false).cursor_pointer().accessibility_label("Email bot").disabled(busy))))
             .child(note("The bot will ask what this inbox is for and whether you want a first triage. All your other bots can still use it when asked."));
         form.child(
             h_flex().gap_2().justify_end().child(
                 Button::new("email-connect")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .primary()
-                    .disabled(busy || oauth.is_some_and(|provider| !provider.configured()))
+                    .control(
+                        Tier::Primary,
+                        Scale::Standard,
+                        busy || oauth.is_some_and(|provider| !provider.configured()),
+                        cx,
+                    )
                     .label(if busy {
                         "Connecting…".to_owned()
                     } else if let Some(provider) = oauth {

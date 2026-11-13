@@ -1,5 +1,6 @@
 mod view;
 
+use crate::controls::{Control as _, Scale, Tier, text_field};
 use std::collections::HashSet;
 
 use super::creation::Creation;
@@ -127,8 +128,7 @@ impl ElseApp {
                     .gap_2()
                     .child(div().text_xs().child("Category name"))
                     .child(
-                        Input::new(&form.name)
-                            .focus_ring(false)
+                        text_field(Input::new(&form.name), cx)
                             .aria_label("Category name")
                             .disabled(form.locked()),
                     )
@@ -188,20 +188,15 @@ impl ElseApp {
                 })
                 .child(
                     Button::new("category-cancel")
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Ghost, Scale::Standard, false, cx)
                         .label("Cancel")
-                        .ghost()
                         .on_click(|_, window, cx| window.close_dialog(cx)),
                 )
                 .child(
                     Button::new("category-submit")
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Primary, Scale::Standard, busy || !can_submit, cx)
                         .label(form.action())
-                        .primary()
                         .loading(busy)
-                        .disabled(busy || !can_submit)
                         .on_click(move |_, window, cx| {
                             let _ = submit.update(cx, |app, cx| app.submit_category(window, cx));
                         }),

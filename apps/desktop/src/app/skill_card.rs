@@ -1,10 +1,8 @@
+use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
 use std::collections::HashSet;
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Selectable as _, Sizable as _,
-    StyledExt as _, h_flex, v_flex,
-};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{ActiveTheme as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -300,10 +298,7 @@ impl ElseApp {
                     )))
                     .child(
                         Button::new(SharedString::from(format!("skill-settings-{id}")))
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .small()
-                            .ghost()
+                            .control(Tier::Ghost, Scale::Compact, false, cx)
                             .label("Open in Settings")
                             .on_click(cx.listener(|app, _, window, cx| {
                                 // A click leaves nothing focused, and an action
@@ -362,28 +357,25 @@ impl ElseApp {
                 cx,
             ))
             .child(div().text_xs().font_semibold().child("Who can use it"));
-        let mut scopes = h_flex().gap_2();
+        let mut scopes = segment_track(cx).w_full();
         for (scope, label) in [
             (SkillScope::All, "All bots".to_owned()),
             (SkillScope::Bot, format!("Only {bot}")),
         ] {
             scopes = scopes.child(
-                Button::new(SharedString::from(format!("skill-scope-{id}-{scope:?}")))
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .small()
-                    .flex_1()
-                    .label(label)
-                    .selected(card.scope == scope)
-                    .disabled(busy)
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        if let Some(card) =
-                            app.view.as_mut().and_then(|v| v.skill_cards.get_mut(&id))
-                        {
-                            card.scope = scope;
-                        }
-                        app.remeasure_row(RowKey::SkillInstall(id), cx);
-                    })),
+                segment(
+                    SharedString::from(format!("skill-scope-{id}-{scope:?}")),
+                    label,
+                    card.scope == scope,
+                    busy,
+                    cx,
+                )
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    if let Some(card) = app.view.as_mut().and_then(|v| v.skill_cards.get_mut(&id)) {
+                        card.scope = scope;
+                    }
+                    app.remeasure_row(RowKey::SkillInstall(id), cx);
+                })),
             );
         }
         body = body.child(scopes);
@@ -422,22 +414,15 @@ impl ElseApp {
                 .gap_2()
                 .child(
                     Button::new(SharedString::from(format!("skill-decline-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .small()
-                        .ghost()
+                        .control(Tier::Ghost, Scale::Compact, busy, cx)
                         .label("Decline Esc")
-                        .disabled(busy)
                         .on_click(cx.listener(move |app, _, window, cx| {
                             app.answer_skill(id, false, window, cx)
                         })),
                 )
                 .child(
                     Button::new(SharedString::from(format!("skill-approve-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .small()
-                        .primary()
+                        .control(Tier::Primary, Scale::Compact, busy, cx)
                         .label(format!(
                             "{label} {}↵",
                             if cfg!(target_os = "macos") {
@@ -446,7 +431,6 @@ impl ElseApp {
                                 "Ctrl+"
                             }
                         ))
-                        .disabled(busy)
                         .on_click(cx.listener(move |app, _, window, cx| {
                             app.answer_skill(id, true, window, cx)
                         })),

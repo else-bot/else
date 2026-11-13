@@ -3,9 +3,8 @@ mod omarchy;
 
 use std::rc::Rc;
 
-use gpui_kit::component::button::Button;
 use gpui_kit::component::dialog::Dialog;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Theme, ThemeConfig, ThemeMode};
+use gpui_kit::component::{ActiveTheme as _, Theme, ThemeConfig, ThemeMode};
 use gpui_kit::{
     App, Div, FontWeight, Global, ParentElement as _, SharedString, Styled, Task, Window, div,
 };
@@ -90,78 +89,6 @@ pub fn modal_surface(dialog: Dialog, cx: &App) -> Dialog {
     dialog.bg(theme.popover).border_color(edge)
 }
 
-/// The well behind a segmented control, sunk below the surface it sits on:
-/// the page color in dark, a faint tint of the text color in light.
-pub fn segment_track(cx: &App) -> Div {
-    let theme = cx.theme();
-    div()
-        .flex()
-        .p_0p5()
-        .gap_0p5()
-        .rounded(theme.radius)
-        .bg(if theme.mode.is_dark() {
-            theme.background
-        } else {
-            theme.foreground.opacity(0.06)
-        })
-}
-
-/// The fill of a segmented control's selected segment: raised above its
-/// track in dark, white-like in light.
-pub fn segment_selected(cx: &App) -> gpui_kit::Hsla {
-    let theme = cx.theme();
-    if theme.mode.is_dark() {
-        theme.secondary_active
-    } else {
-        theme.popover
-    }
-}
-
-/// The three button tiers. Disabled keeps the tier's own look at reduced
-/// opacity instead of the component library's separate bordered style.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tier {
-    Primary,
-    Secondary,
-    Ghost,
-}
-
-pub trait Tiered: Sized {
-    fn tier(self, tier: Tier, disabled: bool, cx: &App) -> Self;
-}
-
-impl Tiered for Button {
-    fn tier(self, tier: Tier, disabled: bool, cx: &App) -> Self {
-        use gpui_kit::component::button::ButtonVariants as _;
-        let theme = cx.theme();
-        let (button, fill, text, edge) = match tier {
-            Tier::Primary => (
-                self.primary(),
-                theme.button_primary,
-                theme.button_primary_foreground,
-                theme.button_primary,
-            ),
-            Tier::Secondary => (self, theme.button, theme.button_foreground, theme.input),
-            Tier::Ghost => (
-                self.ghost(),
-                theme.transparent,
-                theme.secondary_foreground,
-                theme.transparent,
-            ),
-        };
-        let button = button.disabled(disabled);
-        if disabled {
-            button
-                .opacity(0.4)
-                .bg(fill)
-                .text_color(text)
-                .border_color(edge)
-        } else {
-            button
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 struct Style {
     radius: u8,
@@ -172,7 +99,7 @@ struct Style {
 
 impl Style {
     const SYSTEM: Self = Self {
-        radius: 7,
+        radius: 8,
         radius_lg: 12,
         shadow: true,
         border_strength: 1.,
@@ -391,6 +318,17 @@ impl Palette {
                 .find(|color| hover.contrast(*color) >= 4.6)
                 .unwrap_or_else(|| on(hover))
         };
+        // Code keeps its hues: in light, a pale palette color deepens
+        // toward black instead of fading into the text color.
+        let syntax_color = |color: Rgb| {
+            if dark {
+                return readable(color);
+            }
+            (0..=20)
+                .map(|step| color.mix(BLACK, step as f32 / 40.))
+                .find(|shade| hover.contrast(*shade) >= 4.6)
+                .unwrap_or_else(|| readable(color))
+        };
         let danger = readable(p.red);
         let warning = (0..=20)
             .map(|step| {
@@ -407,14 +345,20 @@ impl Palette {
         } else {
             p.background.mix(WHITE, 0.75)
         };
+        // In light the conversation is the lightest surface: the sidebar
+        // and panels sit a visible step below it.
         let sidebar = if dark {
             p.surface
         } else {
-            p.background.mix(p.foreground, 0.045)
+            p.background.mix(p.foreground, 0.07)
         };
-        let selected = p
-            .background
-            .mix(p.foreground, if dark { 0.14 } else { 0.10 });
+        // A selected row reads as one firm step: lighter in dark, about 8%
+        // black over the sidebar in light.
+        let selected = if dark {
+            p.background.mix(p.foreground, 0.14)
+        } else {
+            sidebar.mix(BLACK, 0.08)
+        };
         let border = p.background.mix(p.border, style.border_strength);
         let (primary, on_primary) = (strong_fill(p.accent), WHITE);
         let roles = [
@@ -429,7 +373,6 @@ impl Palette {
             ("secondary.foreground", p.foreground),
             ("secondary.hover.background", hover),
             ("secondary.active.background", selected),
-            ("button.background", raised),
             ("button.foreground", p.foreground),
             ("button.hover.background", hover),
             ("button.active.background", active),
@@ -484,8 +427,9 @@ impl Palette {
             ("status_bar.border", border),
             ("scrollbar.thumb.background", p.border),
             ("scrollbar.thumb.hover.background", p.muted_foreground),
-            ("switch.background", p.border),
-            ("switch.thumb.background", p.background),
+            // A solid white knob on the accent, and a neutral track when off.
+            ("switch.background", p.background.mix(p.foreground, 0.28)),
+            ("switch.thumb.background", WHITE),
             ("tab_bar.background", p.surface),
             ("danger.background", danger),
             ("danger.foreground", on_danger),
@@ -516,9 +460,15 @@ impl Palette {
             .into_iter()
             .map(|(key, color)| (key.to_owned(), color.hex().into()))
             .collect();
+        // Secondary buttons: a quiet tint of the text color, so they lift off
+        // whatever surface they sit on, cards and dialogs included.
+        colors.insert(
+            "button.background".to_owned(),
+            format!("{}{}", p.foreground.hex(), if dark { "14" } else { "12" }).into(),
+        );
         colors.insert(
             "overlay".to_owned(),
-            if dark { "#0000007f" } else { "#0000004d" }.into(),
+            if dark { "#0000008c" } else { "#0000004d" }.into(),
         );
         let syntax: serde_json::Map<_, _> = [
             ("keyword", p.magenta),
@@ -542,7 +492,7 @@ impl Palette {
         .map(|(key, color)| {
             (
                 key.to_owned(),
-                serde_json::json!({ "color": readable(color).hex() }),
+                serde_json::json!({ "color": syntax_color(color).hex() }),
             )
         })
         .collect();
@@ -685,7 +635,7 @@ mod tests {
                 assert!(red > green && green > blue, "warnings keep their amber hue");
                 assert!(rgb(theme.warning).contrast(rgb(theme.accent)) >= 4.5);
             }
-            assert!(theme.overlay.a >= 0.2 && theme.overlay.a <= 0.5);
+            assert!(theme.overlay.a >= 0.2 && theme.overlay.a <= 0.55);
         }
     }
 
@@ -718,7 +668,7 @@ mod tests {
     fn a_palette_projects_its_mode_style_and_roles() {
         let config = QUIET_DARK.config("Quiet Dark", Style::SYSTEM);
         assert_eq!(config.mode, ThemeMode::Dark);
-        assert_eq!((config.radius, config.radius_lg), (Some(7), Some(12)));
+        assert_eq!((config.radius, config.radius_lg), (Some(8), Some(12)));
         assert_eq!(config.shadow, Some(true));
         let colors = &config.colors;
         assert_eq!(colors.border.as_deref(), Some("#3a3a3e"));

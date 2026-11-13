@@ -1,12 +1,13 @@
 use super::ElseApp;
 use super::conversation::RowKey;
 use super::task_reply::state::format_elapsed;
+use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{Delegation, DelegationStatus};
 use chrono::Utc;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
-use gpui_kit::component::{Disableable as _, FocusableExt as _};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -154,16 +155,17 @@ impl ElseApp {
                                     Button::new(SharedString::from(format!(
                                         "handoff-member-{id}-{target}"
                                     )))
-                                    .small()
-                                    .ghost()
-                                    .focus_ring(false)
-                                    .cursor_pointer()
+                                    .control(
+                                        Tier::Ghost,
+                                        Scale::Compact,
+                                        !self.bots.iter().any(|bot| bot.id == target),
+                                        cx,
+                                    )
                                     .label("Open chat")
                                     .accessibility_label(format!(
                                         "Open chat with {}",
                                         name(delegation)
                                     ))
-                                    .disabled(!self.bots.iter().any(|bot| bot.id == target))
                                     .on_click(cx.listener(move |app, _, window, cx| {
                                         app.open_bot(target, window, cx)
                                     })),

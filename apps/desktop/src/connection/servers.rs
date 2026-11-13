@@ -1,7 +1,8 @@
 use super::*;
+use crate::controls::{Control as _, Scale, Tier};
 use chrono::{DateTime, Utc};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{FocusableExt as _, h_flex};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::h_flex;
 use reqwest::Method;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
@@ -643,7 +644,7 @@ impl Shell {
                 .is_some_and(|view| view.read(cx).has_unsaved_work());
         if dirty {
             let shell = cx.weak_entity();
-            window.open_dialog(cx, move |dialog, _, _| {
+            window.open_dialog(cx, move |dialog, _, cx| {
                 let owner = shell.clone();
                 let cancel = shell.clone();
                 dialog
@@ -654,7 +655,8 @@ impl Shell {
                         h_flex().justify_end().gap_2()
                             .child(
                                 Button::new("switch-cancel")
-                                    .focus_ring(false).cursor_pointer().label("Keep editing").ghost()
+                                    .control(Tier::Ghost, Scale::Standard, false, cx)
+                                    .label("Keep editing")
                                     .on_click(move |_, window, cx| {
                                         let _ = cancel.update(cx, |shell, _| shell.notification_target = None);
                                         window.close_dialog(cx);
@@ -662,7 +664,8 @@ impl Shell {
                             )
                             .child(
                                 Button::new("switch-confirm")
-                                    .focus_ring(false).cursor_pointer().label("Discard and switch")
+                                    .control(Tier::Secondary, Scale::Standard, false, cx)
+                                    .label("Discard and switch")
                                     .on_click(move |_, window, cx| {
                                         window.close_dialog(cx);
                                         let _ = owner.update(cx, |shell, cx| shell.switch_server(id, window, cx));
@@ -812,7 +815,7 @@ impl Shell {
         }
         let name = saved.name.clone();
         let shell = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             dialog
                 .title(format!("Remove {name}?"))
                 .close_button(false)
@@ -825,18 +828,14 @@ impl Shell {
                         .gap_2()
                         .child(
                             Button::new("remove-server-cancel")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Ghost, Scale::Standard, false, cx)
                                 .label("Keep connection")
-                                .ghost()
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("remove-server-confirm")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Danger, Scale::Standard, false, cx)
                                 .label("Remove connection")
-                                .danger()
                                 .on_click({
                                     let shell = shell.clone();
                                     move |_, window, cx| {

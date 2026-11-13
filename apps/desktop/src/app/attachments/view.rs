@@ -1,6 +1,7 @@
 use super::{DraftFile, UploadState};
 use crate::app::ElseApp;
 use crate::attachments::{Attachment, byte_size};
+use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, InlineTokenContext};
@@ -51,7 +52,7 @@ pub(super) fn show_preview(
         }
         _ => None,
     };
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, _, cx| {
         let content = match (&preview, &code) {
             (_, Some(code)) => Editor::new(code)
                 .readonly(true)
@@ -86,8 +87,7 @@ pub(super) fn show_preview(
                 dialog.footer(
                     h_flex().child(
                         Button::new("save-file")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Secondary, Scale::Standard, false, cx)
                             .label("Save to disk")
                             .on_click(move |_, window, cx| {
                                 save(&file.name, bytes.clone(), window, cx)

@@ -1,11 +1,9 @@
+use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Selectable as _, Sizable as _,
-    h_flex, v_flex,
-};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 use xkeysym::Keysym;
@@ -431,14 +429,12 @@ impl ComputerView {
                 )
                 .child(
                     Button::new("upgrade-computer")
-                        .cursor_pointer()
-                        .focus_ring(false)
+                        .control(Tier::Secondary, Scale::Compact, false, cx)
                         .label(if failed {
                             "Try upgrading again"
                         } else {
                             "Upgrade computer"
                         })
-                        .small()
                         .w_full()
                         .on_click(cx.listener(|view, _, _, cx| view.upgrade(cx))),
                 )
@@ -927,10 +923,9 @@ impl Render for ComputerView {
                     )
                     .child(
                         Button::new("close-computer")
-                            .cursor_pointer()
+                            .control(Tier::Ghost, Scale::Standard, false, cx)
                             .label("Close")
                             .icon(IconName::Minimize)
-                            .ghost()
                             .on_click(cx.listener(|view, _, _, cx| view.collapse(cx))),
                     ),
             )
@@ -941,37 +936,44 @@ impl Render for ComputerView {
                     .gap_3()
                     .items_center()
                     .justify_center()
-                    .child(
-                        Button::new("watch-computer")
-                            .cursor_pointer()
-                            .label("Watching")
-                            .disabled(self.mode_pending || !matches!(self.screen, Screen::Live))
-                            .icon(IconName::Eye)
-                            .ghost()
-                            .small()
-                            .focus_ring(false)
-                            .selected(mode == DesktopMode::Watch)
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.set_mode(DesktopMode::Watch, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("control-computer")
-                            .cursor_pointer()
-                            .disabled(self.mode_pending || !matches!(self.screen, Screen::Live))
-                            .label(if self.mode_pending {
-                                "Switching…"
-                            } else {
-                                "Take over"
-                            })
-                            .ghost()
-                            .small()
-                            .focus_ring(false)
-                            .selected(mode == DesktopMode::Control)
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.set_mode(DesktopMode::Control, window, cx)
-                            })),
-                    )
+                    .child({
+                        let locked = self.mode_pending || !matches!(self.screen, Screen::Live);
+                        segment_track(cx)
+                            .w(px(260.))
+                            .child(
+                                segment(
+                                    "watch-computer",
+                                    "Watching",
+                                    mode == DesktopMode::Watch,
+                                    locked,
+                                    cx,
+                                )
+                                .icon(IconName::Eye)
+                                .on_click(cx.listener(
+                                    |view, _, window, cx| {
+                                        view.set_mode(DesktopMode::Watch, window, cx)
+                                    },
+                                )),
+                            )
+                            .child(
+                                segment(
+                                    "control-computer",
+                                    if self.mode_pending {
+                                        "Switching…"
+                                    } else {
+                                        "Take over"
+                                    },
+                                    mode == DesktopMode::Control,
+                                    locked,
+                                    cx,
+                                )
+                                .on_click(cx.listener(
+                                    |view, _, window, cx| {
+                                        view.set_mode(DesktopMode::Control, window, cx)
+                                    },
+                                )),
+                            )
+                    })
                     .child(div().text_xs().text_color(theme.muted_foreground).child(
                         if mode == DesktopMode::Control {
                             "You control this computer"

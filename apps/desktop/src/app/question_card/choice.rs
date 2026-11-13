@@ -1,3 +1,4 @@
+use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -335,11 +336,7 @@ impl ElseApp {
             let disabled = locked || selected.is_empty();
             footer = footer.child(
                 Button::new(SharedString::from(format!("question-{id}-done")))
-                    .focus_ring(false)
-                    .primary()
-                    .small()
-                    .disabled(disabled)
-                    .when(!disabled, |button| button.cursor_pointer())
+                    .control(Tier::Primary, Scale::Compact, disabled, cx)
                     .label(format!("Done · {} selected", selected.len()))
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.answer_question(id, answer.clone(), window, cx);
@@ -391,11 +388,7 @@ impl ElseApp {
             )
             .child(
                 Button::new(SharedString::from(format!("question-{id}-write-in")))
-                    .focus_ring(false)
-                    .primary()
-                    .small()
-                    .disabled(disabled)
-                    .when(!disabled, |button| button.cursor_pointer())
+                    .control(Tier::Primary, Scale::Compact, disabled, cx)
                     .label("Send")
                     .children(Keystroke::parse("enter").ok().map(|key| {
                         div()

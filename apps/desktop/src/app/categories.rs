@@ -1,15 +1,13 @@
 use super::delete_dialog::DeleteTarget;
 use super::{Connection, ElseApp};
 use crate::api::{Bot, Category};
+use crate::controls::{Control as _, Scale, Tier};
 use crate::sidebar::known_category;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::FocusableExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::radio::RadioGroup;
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, WindowExt as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Icon, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -225,19 +223,14 @@ impl ElseApp {
                         .gap_2()
                         .child(
                             Button::new("move-cancel")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Ghost, Scale::Standard, false, cx)
                                 .label("Cancel")
-                                .ghost()
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("move-apply")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Primary, Scale::Standard, unchanged, cx)
                                 .label("Move")
-                                .primary()
-                                .disabled(unchanged)
                                 .on_click(move |_, window, cx| {
                                     apply(window, cx);
                                     window.close_dialog(cx);

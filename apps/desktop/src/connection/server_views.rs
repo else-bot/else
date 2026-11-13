@@ -1,6 +1,6 @@
 use super::servers::{Editor, Health, ReleaseStatus};
 use super::*;
-use crate::appearance::{Tier, Tiered as _};
+use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -189,9 +189,7 @@ impl Shell {
                     )))
                     .child(
                         Button::new("servers-check-all")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
+                            .control(Tier::Ghost, Scale::Standard, false, cx)
                             .icon(IconName::RefreshCw)
                             .label("Check all")
                             .on_click(cx.listener(|shell, _, window, cx| {
@@ -201,15 +199,13 @@ impl Shell {
                     .when(can_update || updating, |row| {
                         row.child(
                             Button::new("servers-update-all")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Secondary, Scale::Standard, updating, cx)
                                 .label(if updating {
                                     "Updating…"
                                 } else {
                                     "Update all"
                                 })
                                 .loading(updating)
-                                .tier(Tier::Secondary, updating, cx)
                                 .on_click(
                                     cx.listener(|shell, _, _, cx| shell.update_all_servers(cx)),
                                 ),
@@ -217,8 +213,7 @@ impl Shell {
                     })
                     .child(
                         Button::new("servers-add")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Secondary, Scale::Standard, false, cx)
                             .icon(IconName::Plus)
                             .label("Add server")
                             .on_click(cx.listener(|shell, _, window, cx| {
@@ -332,8 +327,7 @@ impl Shell {
             if !selected {
                 actions = actions.child(
                     Button::new(SharedString::from(format!("use-server-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Secondary, Scale::Standard, false, cx)
                         .label("Use server")
                         .on_click(cx.listener(move |shell, _, window, cx| {
                             shell.select_server(id, window, cx)
@@ -370,8 +364,7 @@ impl Shell {
             {
                 actions = actions.child(
                     Button::new(SharedString::from(format!("update-server-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Secondary, Scale::Standard, false, cx)
                         .label(if update_activity {
                             "View update"
                         } else {
@@ -384,8 +377,7 @@ impl Shell {
             } else if !online {
                 actions = actions.child(
                     Button::new(SharedString::from(format!("retry-server-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Secondary, Scale::Standard, false, cx)
                         .label("Retry")
                         .on_click(
                             cx.listener(|shell, _, window, cx| shell.refresh_servers(window, cx)),
