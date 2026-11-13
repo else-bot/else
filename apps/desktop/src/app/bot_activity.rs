@@ -180,11 +180,10 @@ impl ElseApp {
             ))
             .child(super::action_card::event_verb(&theme, verb))
             .child(super::action_card::event_object(&theme, object))
-            .child(super::action_card::event_meta(
+            .child(super::action_card::event_meta_end(
                 &theme,
                 format!("{} · {messages}", status.label()),
-            ))
-            .child(super::action_card::event_chevron(false));
+            ));
         let title = names.clone();
         let mut card = v_flex().w_full().min_w_0().child(
             Button::new(SharedString::from(format!("bot-activity-{anchor}")))

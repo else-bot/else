@@ -131,8 +131,8 @@ impl RenderOnce for ActionCard {
                     .h(px(TITLE_LINE))
                     .flex()
                     .items_center()
-                    .text_size(px(13.))
-                    .text_color(theme.muted_foreground)
+                    .text_size(px(12.))
+                    .text_color(super::message_row::meta_color(theme))
                     .child(meta)
             }))
             .children(self.tag.map(|tag| {
@@ -202,7 +202,9 @@ pub(super) fn body_text(text: impl Into<SharedString>) -> Div {
 pub(super) const OPTION_HEIGHT: f32 = 44.;
 
 /// One activity row: a 36 px line with the icon column, then actor, verb
-/// and object, then right-aligned meta and quiet actions.
+/// and object. Its right end follows one grammar: meta, then at most two
+/// actions, then a chevron only when the row expands in place. Each ends on
+/// the same edge, the card content inset.
 pub(super) fn event_row(theme: &Theme) -> Div {
     h_flex()
         .w_full()
@@ -304,7 +306,8 @@ pub(super) fn event_action(
         .child(div().text_size(px(13.)).child(label.into()))
 }
 
-/// A trailing disclosure chevron, inset to end where an action's label ends.
+/// The disclosure chevron of a row that expands in place, inset to end where
+/// an action's label ends.
 pub(super) fn event_chevron(expanded: bool) -> Div {
     div().flex_none().mr(Scale::Compact.padding()).child(
         Icon::new(if expanded {
@@ -316,18 +319,19 @@ pub(super) fn event_chevron(expanded: bool) -> Div {
     )
 }
 
-/// Right-aligned meta: status, count, time. Same size as the row, quieter
-/// than its verb.
+/// Right-aligned meta: status, count, time. A step smaller and quieter than
+/// the row's words and its actions, so it never reads as a control.
 pub(super) fn event_meta(theme: &Theme, text: impl Into<SharedString>) -> Div {
     div()
         .flex_none()
-        .text_size(px(13.))
-        .text_color(if theme.mode.is_dark() {
-            theme.foreground.opacity(0.55)
-        } else {
-            super::message_row::meta_color(theme)
-        })
+        .text_size(px(12.))
+        .text_color(super::message_row::meta_color(theme))
         .child(text.into())
+}
+
+/// Meta that ends its row, inset to end where an action's label ends.
+pub(super) fn event_meta_end(theme: &Theme, text: impl Into<SharedString>) -> Div {
+    event_meta(theme, text).mr(Scale::Compact.padding())
 }
 
 pub(super) fn failure(theme: &Theme, text: String) -> Div {
