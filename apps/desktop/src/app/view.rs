@@ -162,20 +162,20 @@ impl ElseApp {
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .child(
-                        Icon::new(if collapsed {
-                            IconName::ChevronRight
-                        } else {
-                            IconName::ChevronDown
-                        })
-                        .xsmall(),
-                    )
-                    .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .font_weight(FontWeight::SEMIBOLD)
                             .truncate()
                             .child(name.clone()),
+                    )
+                    .child(
+                        Icon::new(if collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .xsmall(),
                     )
                     .on_click(
                         cx.listener(move |app, _, _, cx| app.toggle_category(destination, cx)),
@@ -265,9 +265,9 @@ impl ElseApp {
                         .focus_ring(false)
                         .cursor_pointer()
                         .icon(IconName::FolderPlus)
-                        .label("New category")
+                        .accessibility_label("New category")
+                        .child(div().text_size(px(13.)).child("New category"))
                         .text_color(theme.muted_foreground)
-                        .text_size(px(13.))
                         .small()
                         .ghost()
                         .w_full()
@@ -279,8 +279,7 @@ impl ElseApp {
                                         .flex_none()
                                         .ml_auto()
                                         .pl_2()
-                                        .text_xs()
-                                        .child(kbd.appearance(false))
+                                        .child(kbd.text_size(px(11.5)))
                                 },
                             ),
                         )
