@@ -162,6 +162,19 @@ enum Effect {
 
 use crate::mcp::METHODS;
 
+pub(crate) const PURPOSE_MAX: usize = 300;
+
+/// The error for a `purpose` over the limit, naming both lengths so the
+/// bot can shorten it in one retry.
+pub(crate) fn oversized_purpose(purpose: &str) -> Option<String> {
+    (purpose.len() > PURPOSE_MAX).then(|| {
+        format!(
+            "purpose is {} bytes; the limit is {PURPOSE_MAX}. Give a short label for the job.",
+            purpose.len()
+        )
+    })
+}
+
 pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
     let mut approval = None;
     let result = match name {
@@ -227,6 +240,9 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
             Err(outcome) => return outcome,
         },
         "mcp_request" => {
+            if let Some(error) = args["purpose"].as_str().and_then(oversized_purpose) {
+                return (tool_error(&error), None);
+            }
             let request = match serde_json::from_value::<RequestArgs>(args.clone()) {
                 Ok(request)
                     if METHODS.contains(&request.method.as_str())
@@ -234,7 +250,7 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                         && request
                             .purpose
                             .as_ref()
-                            .is_none_or(|s| s.len() <= 300 && !s.contains('\0'))
+                            .is_none_or(|s| s.len() <= PURPOSE_MAX && !s.contains('\0'))
                         && request
                             .context
                             .as_ref()

@@ -115,6 +115,17 @@ async fn one_bot_installs_another_discovers_and_uses_it_then_owner_removes_it() 
         if counter == 1 {
             let malformed = tool(&app, token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"arguments":{}},"effect":"local"})).await;
             assert_eq!(malformed.body["result"]["isError"], true);
+            let plan = "a".repeat(301);
+            let long = tool(&app, token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{}},"effect":"local","purpose":plan})).await;
+            assert_eq!(long.body["result"]["isError"], true);
+            assert!(
+                long.body["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("purpose is 301 bytes; the limit is 300."),
+                "{}",
+                long.body
+            );
         }
     }
     let forged = tool(&app, &consumer, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"forge","arguments":{}},"effect":"local"})).await;

@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use super::AppState;
 use super::guest_tools::approval::approve_card;
 use super::mcp::{Outcome, tool_error, tool_result};
+use super::shared_mcp::{PURPOSE_MAX, oversized_purpose};
 use crate::app::questions::Kind;
 use crate::db::mcp_waits::{self, Check, CreateError, Due, Spec};
 use crate::grants::Grant;
@@ -49,7 +50,7 @@ pub fn schema() -> Value {
                                 a read or routine reversible work; destructive or external asks the \
                                 owner to approve this exact call first and returns parked." },
                 "purpose": { "type": "string", "minLength": 1, "maxLength": 300,
-                             "description": "What the job does and what to do with its result." },
+                             "description": "A short label for the job, such as \"Review of PR 42\"; at most 300 bytes." },
                 "interval_seconds": { "type": "integer",
                                       "minimum": mcp_waits::MIN_INTERVAL_SECONDS,
                                       "maximum": mcp_waits::MAX_INTERVAL_SECONDS,
@@ -88,9 +89,9 @@ enum Effect {
 }
 
 /// The spec, and the approval its first call needs, if any.
-fn parse(args: &Value) -> Result<(Spec, Option<Kind>), &'static str> {
+fn parse(args: &Value) -> Result<(Spec, Option<Kind>), String> {
     let args: Args = serde_json::from_value(args.clone())
-        .map_err(|_| "Use id, tool, status_pointer, running_values, effect and purpose, with optional arguments, interval_seconds and timeout_minutes.")?;
+        .map_err(|_| "Use id, tool, status_pointer, running_values, effect and purpose, with optional arguments, interval_seconds and timeout_minutes.".to_owned())?;
     let approval = match args.effect {
         Effect::Local => None,
         Effect::Destructive => Some(Kind::Destructive),
@@ -98,32 +99,35 @@ fn parse(args: &Value) -> Result<(Spec, Option<Kind>), &'static str> {
     };
     let text = |s: &str, max: usize| !s.trim().is_empty() && s.len() <= max && !s.contains('\0');
     if !text(&args.tool, 200) {
-        return Err("tool is the status tool's name.");
+        return Err("tool is the status tool's name.".into());
     }
-    if !text(&args.purpose, 300) {
-        return Err("purpose is 1 to 300 bytes of text.");
+    if let Some(error) = oversized_purpose(&args.purpose) {
+        return Err(error);
+    }
+    if !text(&args.purpose, PURPOSE_MAX) {
+        return Err("purpose is a short label of text.".into());
     }
     if !(args.status_pointer.is_empty() || args.status_pointer.starts_with('/'))
         || args.status_pointer.len() > 200
     {
-        return Err("status_pointer is a JSON pointer such as /status.");
+        return Err("status_pointer is a JSON pointer such as /status.".into());
     }
     if !(1..=16).contains(&args.running_values.len()) {
-        return Err("running_values lists 1 to 16 status values.");
+        return Err("running_values lists 1 to 16 status values.".into());
     }
     let arguments = args.arguments.unwrap_or_else(|| json!({}));
     if !arguments.is_object() {
-        return Err("arguments is an object.");
+        return Err("arguments is an object.".into());
     }
     let interval_seconds = args.interval_seconds.unwrap_or(60);
     if !(mcp_waits::MIN_INTERVAL_SECONDS..=mcp_waits::MAX_INTERVAL_SECONDS)
         .contains(&interval_seconds)
     {
-        return Err("interval_seconds is 15 to 3600.");
+        return Err("interval_seconds is 15 to 3600.".into());
     }
     let timeout_minutes = args.timeout_minutes.unwrap_or(240);
     if !(1..=mcp_waits::MAX_TIMEOUT_MINUTES).contains(&timeout_minutes) {
-        return Err("timeout_minutes is 1 to 1440.");
+        return Err("timeout_minutes is 1 to 1440.".into());
     }
     let spec = Spec {
         mcp_id: args.id.into(),
@@ -280,7 +284,7 @@ async fn qualify(library: &Library, mcp_id: &str, tool: &str) -> Result<(), Refu
 pub async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     let (spec, approval) = match parse(args) {
         Ok(parsed) => parsed,
-        Err(message) => return (tool_error(message), None),
+        Err(message) => return (tool_error(&message), None),
     };
     let Some(library) = state.mcps.get() else {
         return (tool_error("The shared MCP library is unavailable."), None);
@@ -614,5 +618,11 @@ mod tests {
             args[field] = value;
             assert!(parse(&args).is_err(), "{field}");
         }
+        let mut args = base.clone();
+        args["purpose"] = json!("p".repeat(940));
+        assert_eq!(
+            parse(&args).err().as_deref(),
+            Some("purpose is 940 bytes; the limit is 300. Give a short label for the job.")
+        );
     }
 }
