@@ -14,6 +14,7 @@ mod launch;
 mod mcp_oauth;
 mod model;
 mod oauth_callback;
+mod panel_kit;
 mod preferences;
 mod profile_picker;
 mod sidebar;

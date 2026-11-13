@@ -515,33 +515,27 @@ impl ElseApp {
                 app.open_rules(bot, None, RulesTab::Rules, None, window, cx)
             }))
             .child(
+                // The same anatomy as the Model row above it: a name over
+                // one meta line, and a chevron.
                 h_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap_2p5()
+                    .gap_2()
                     .items_center()
-                    .child(
-                        Icon::new(IconName::FileText)
-                            .size_4()
-                            .text_color(theme.muted_foreground),
-                    )
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
+                            .gap_0p5()
                             .items_start()
                             .text_left()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(title),
-                            )
+                            .child(super::settings::item_name(title))
                             .child(
                                 h_flex()
                                     .gap_1p5()
                                     .items_center()
-                                    .text_xs()
+                                    .text_size(px(12.5))
+                                    .line_height(px(18.))
                                     .text_color(theme.muted_foreground)
                                     .when(fresh > 0, |row| row.child(dot(cx)))
                                     .child(div().truncate().child(detail)),
