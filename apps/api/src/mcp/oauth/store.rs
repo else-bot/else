@@ -17,12 +17,15 @@ use crate::credentials::SecretKey;
 
 const MAX_BODY: usize = 64 * 1024;
 
-/// A saved sign-in: the provider's metadata and the token the MCP accepts.
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Credential {
     pub(super) resource: String,
     pub(super) metadata: AuthorizationMetadata,
     pub(super) client_id: String,
+    /// The secret dynamic registration issued, if any. A registered app's
+    /// secret stays in the server configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) client_secret: Option<String>,
     pub(super) token: OAuthTokenResponse,
     pub(super) scopes: Vec<String>,
     pub(super) received_at: u64,
@@ -32,12 +35,14 @@ impl Credential {
     pub(super) fn from_stored(
         resource: String,
         metadata: AuthorizationMetadata,
+        client_secret: Option<String>,
         stored: StoredCredentials,
     ) -> Option<Self> {
         Some(Self {
             resource,
             metadata,
             client_id: stored.client_id,
+            client_secret,
             token: stored.token_response?,
             scopes: stored.granted_scopes,
             received_at: stored.token_received_at.unwrap_or_else(now),
@@ -117,6 +122,7 @@ impl From<Legacy> for Credential {
             resource: discovery.resource,
             metadata,
             client_id: legacy.client_id,
+            client_secret: None,
             token,
             scopes: discovery.scopes,
             received_at,

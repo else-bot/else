@@ -52,6 +52,7 @@ pub struct Complete {
 struct Pending {
     id: Uuid,
     discovery: Discovery,
+    client_secret: Option<String>,
     session: AuthorizationSession,
     tokens: InMemoryCredentialStore,
     states: InMemoryStateStore,
@@ -225,9 +226,9 @@ impl Session {
     }
 
     /// The access token of a GitHub sign-in made through the server's
-    /// registered GitHub app, for authenticating git over HTTPS. GitHub's
-    /// tokens do not expire, so a read first proves the token still works and
-    /// turns a revoked one into `AuthRequired`.
+    /// registered GitHub app, for authenticating git over HTTPS. A read first
+    /// refreshes the token if needed, proves it still works, and turns a
+    /// revoked one into `AuthRequired`.
     pub(super) async fn git_token(
         &mut self,
         config: &Transport,
@@ -342,18 +343,38 @@ impl Session {
                 }
             }
         };
-        let mut request = AuthorizationRequest::new(redirect_uri)
-            .with_client_name("else.bot")
-            .with_scopes(discovery.scopes.clone());
-        if let Some(client) = self.registered_client(&discovery.metadata)? {
+        let registered = self.registered_client(&discovery.metadata)?;
+        if let Some(client) = registered {
             discovery.metadata = client.metadata(&discovery.resource)?;
-            request = request
-                .with_preregistered_client(client.client_id.clone())
-                .with_client_secret(client.secret.as_str());
         }
-        let exchange = exchange(&discovery.resource, discovery.metadata.clone())
-            .await
-            .map_err(auth_error)?;
+        let mut exchange = exchange(
+            &discovery.resource,
+            discovery.metadata.clone(),
+            registered.is_some(),
+        )
+        .await
+        .map_err(auth_error)?;
+        let (client_id, client_secret) = match registered {
+            Some(client) => (client.client_id.clone(), None),
+            None => {
+                let scopes: Vec<&str> = discovery.scopes.iter().map(String::as_str).collect();
+                let client = exchange
+                    .manager
+                    .register_client("else.bot", &redirect_uri, &scopes)
+                    .await
+                    .map_err(auth_error)?;
+                (client.client_id, client.client_secret)
+            }
+        };
+        let mut request = AuthorizationRequest::new(redirect_uri)
+            .with_preregistered_client(client_id)
+            .with_scopes(discovery.scopes.clone());
+        if let Some(secret) = registered
+            .map(|client| client.secret.as_str())
+            .or(client_secret.as_deref())
+        {
+            request = request.with_client_secret(secret);
+        }
         let session = AuthorizationSession::new(exchange.manager, request)
             .await
             .map_err(|(_, error)| auth_error(error))?;
@@ -372,6 +393,7 @@ impl Session {
         self.state = State::Authorizing(Box::new(Pending {
             id: started.request_id,
             discovery,
+            client_secret,
             session,
             tokens: exchange.tokens,
             states: exchange.states,
@@ -398,6 +420,11 @@ impl Session {
             self.cancel(id);
             return Err(Error::Invalid("This MCP sign-in has expired."));
         }
+        if !issuer_matches(&pending.discovery.metadata, callback.iss.as_deref()) {
+            return Err(Error::Invalid(
+                "The MCP sign-in callback issuer is invalid.",
+            ));
+        }
         let credential = match (callback.error, callback.code) {
             (Some(_), _) => Err(Error::Invalid("MCP sign-in was denied or cancelled.")),
             (None, None) => Err(Error::Invalid(
@@ -408,16 +435,12 @@ impl Session {
                 .handle_callback_with_issuer(&code, &callback.state, callback.iss.as_deref())
                 .await
             {
-                // rmcp keeps the flow for the genuine callback.
-                Err(
-                    error @ (AuthError::AuthorizationServerMismatch { .. }
-                    | AuthError::AuthorizationServerMissingIssuer { .. }),
-                ) => return Err(auth_error(error)),
                 Err(error) => Err(auth_error(error)),
                 Ok(_) => match pending.tokens.load().await {
                     Ok(Some(stored)) => Credential::from_stored(
                         pending.discovery.resource.clone(),
                         pending.discovery.metadata.clone(),
+                        pending.client_secret.clone(),
                         stored,
                     )
                     .ok_or(Error::Connection),
@@ -466,13 +489,22 @@ impl Session {
     }
 
     async fn refreshed(&self, credential: &Credential) -> Result<Credential, AuthError> {
-        let mut exchange = exchange(&credential.resource, credential.metadata.clone()).await?;
+        let registered = self.client.as_deref().filter(|client| {
+            client.applies(&credential.metadata) && client.client_id == credential.client_id
+        });
+        let mut exchange = exchange(
+            &credential.resource,
+            credential.metadata.clone(),
+            registered.is_some(),
+        )
+        .await?;
         let mut config =
             OAuthClientConfig::new(credential.client_id.clone(), credential.resource.clone());
-        if let Some(client) = self.client.as_deref().filter(|client| {
-            client.applies(&credential.metadata) && client.client_id == credential.client_id
-        }) {
-            config = config.with_client_secret(client.secret.as_str());
+        if let Some(secret) = registered
+            .map(|client| client.secret.as_str())
+            .or(credential.client_secret.as_deref())
+        {
+            config = config.with_client_secret(secret);
         }
         exchange.manager.configure_client(config)?;
         exchange.tokens.save(credential.stored()).await?;
@@ -485,6 +517,7 @@ impl Session {
                 Credential::from_stored(
                     credential.resource.clone(),
                     credential.metadata.clone(),
+                    credential.client_secret.clone(),
                     stored,
                 )
             })
@@ -546,6 +579,21 @@ impl Session {
         if let Some(mut connection) = self.connection.take() {
             connection.shutdown().await;
         }
+    }
+}
+
+/// RFC 9207: a callback must name the provider the sign-in started with,
+/// and must name one when the provider says it always does.
+fn issuer_matches(metadata: &AuthorizationMetadata, received: Option<&str>) -> bool {
+    let required = metadata
+        .additional_fields
+        .get("authorization_response_iss_parameter_supported")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    match (metadata.issuer.as_deref(), received) {
+        (Some(expected), Some(received)) => expected == received,
+        (None, Some(_)) => false,
+        (_, None) => !required,
     }
 }
 

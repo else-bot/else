@@ -44,6 +44,7 @@ pub(super) fn credential() -> Credential {
         resource: discovery.resource,
         metadata: discovery.metadata,
         client_id: "public-client".into(),
+        client_secret: None,
         token: token("private-access-token", Some("private-refresh-token"), 3600),
         scopes: discovery.scopes,
         received_at: now(),

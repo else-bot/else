@@ -112,9 +112,9 @@ async fn registered_signin_exchanges_and_refreshes_with_a_secret_without_registr
             assert_eq!(fields["client_secret"], "private-secret");
             sent.send(fields).await.unwrap();
             if revoked {
-                return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":"invalid_grant"})));
+                return Json(json!({"error":"bad_refresh_token"}));
             }
-            (axum::http::StatusCode::OK, Json(json!({"access_token":"private-access", "refresh_token":"private-refresh", "token_type":"bearer", "expires_in":3600})))
+            Json(json!({"access_token":"private-access", "refresh_token":"private-refresh", "token_type":"bearer", "expires_in":3600}))
         }
     }));
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });

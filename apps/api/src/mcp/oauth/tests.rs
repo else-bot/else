@@ -3,7 +3,7 @@ use super::*;
 
 /// A sign-in in progress against `discovery`, with the state its callback must echo.
 async fn pending(previous: Option<Credential>, discovery: Discovery) -> (Box<Pending>, String) {
-    let exchange = exchange(&discovery.resource, discovery.metadata.clone())
+    let exchange = exchange(&discovery.resource, discovery.metadata.clone(), false)
         .await
         .unwrap();
     let session = AuthorizationSession::new(
@@ -25,6 +25,7 @@ async fn pending(previous: Option<Credential>, discovery: Discovery) -> (Box<Pen
     let pending = Pending {
         id: Uuid::new_v4(),
         discovery,
+        client_secret: None,
         session,
         tokens: exchange.tokens,
         states: exchange.states,
@@ -128,6 +129,12 @@ async fn wrong_state_and_issuer_do_not_consume_an_active_flow_and_denial_is_one_
     let error = session.complete(wrong_issuer).await.unwrap_err();
     assert!(error.to_string().contains("issuer"), "{error}");
     assert_eq!(session.status().status, "authorizing");
+    for iss in [Some("https://imposter.example.com"), None] {
+        let mut forged_denial = callback(id, &state);
+        forged_denial.iss = iss.map(Into::into);
+        assert!(session.complete(forged_denial).await.is_err());
+        assert_eq!(session.status().status, "authorizing");
+    }
     assert!(session.complete(callback(id, &state)).await.is_err());
     assert_eq!(session.status().status, "disconnected");
     assert!(session.complete(callback(id, &state)).await.is_err());
@@ -329,5 +336,73 @@ async fn a_sign_in_saved_before_the_rmcp_client_still_refreshes() {
         "legacy-refresh"
     );
     assert!(saved.expires_at().unwrap() > now() + 3000);
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_secret_from_dynamic_registration_is_kept_for_refresh() {
+    use axum::{Form, Json, Router, routing::post};
+    use serde_json::json;
+    use std::collections::HashMap;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (sent, mut received) = tokio::sync::mpsc::channel(2);
+    let router = Router::new()
+        .route(
+            "/register",
+            post(|| async { Json(json!({"client_id":"dynamic-client","client_secret":"dynamic-secret","redirect_uris":[]})) }),
+        )
+        .route(
+            "/token",
+            post(move |Form(fields): Form<HashMap<String, String>>| {
+                let sent = sent.clone();
+                async move {
+                    sent.send(fields).await.unwrap();
+                    Json(json!({"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600}))
+                }
+            }),
+        );
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path().into());
+    let mut session = Session::open(store.clone(), None).await.unwrap();
+    let mut discovery = discovery();
+    discovery.resource = format!("{base}/mcp");
+    discovery.metadata = metadata("https://auth.example.com", &base);
+    discovery.metadata.additional_fields.insert(
+        "token_endpoint_auth_methods_supported".into(),
+        json!(["client_secret_post"]),
+    );
+    session.state = State::Required(discovery.clone());
+    let started = session
+        .authorize(
+            &Transport::Http {
+                secrets: Vec::new(),
+                url: discovery.resource,
+                headers: Default::default(),
+            },
+            "http://127.0.0.1:49177/mcp/callback".into(),
+        )
+        .await
+        .unwrap();
+    let url = reqwest::Url::parse(&started.authorization_url).unwrap();
+    let state = url
+        .query_pairs()
+        .find(|(name, _)| name == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    let mut response = callback(started.request_id, &state);
+    response.error = None;
+    response.code = Some("authorization-code".into());
+    session.complete(response).await.unwrap();
+    let mut reopened = Session::open(store, None).await.unwrap();
+    reopened.refresh(true).await.unwrap();
+    for grant in ["authorization_code", "refresh_token"] {
+        let fields = received.recv().await.unwrap();
+        assert_eq!(fields["grant_type"], grant);
+        assert_eq!(fields["client_id"], "dynamic-client");
+        assert_eq!(fields["client_secret"], "dynamic-secret");
+    }
     server.abort();
 }

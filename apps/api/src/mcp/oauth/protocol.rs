@@ -1,11 +1,13 @@
+use std::sync::Arc;
+
 use rmcp::transport::auth::{
     AuthError, AuthorizationManager, AuthorizationMetadata, InMemoryCredentialStore,
-    InMemoryStateStore,
+    InMemoryStateStore, OAuthHttpClient, OAuthHttpClientFuture, OAuthHttpRequest,
+    default_oauth_http_client,
 };
 
 use super::Error;
 
-/// What a sign-in will ask the provider for.
 #[derive(Clone)]
 pub(super) struct Discovery {
     pub(super) resource: String,
@@ -39,11 +41,22 @@ pub(super) struct Exchange {
     pub(super) states: InMemoryStateStore,
 }
 
+/// `github` routes the token requests of the registered GitHub app, whose
+/// endpoints are fixed, through [`GitHubErrors`].
 pub(super) async fn exchange(
     resource: &str,
     metadata: AuthorizationMetadata,
+    github: bool,
 ) -> Result<Exchange, AuthError> {
-    let mut manager = AuthorizationManager::new(resource).await?;
+    let mut manager = if github {
+        AuthorizationManager::new_with_oauth_http_client(
+            resource,
+            Arc::new(GitHubErrors(Box::new(default_oauth_http_client()?))),
+        )
+        .await?
+    } else {
+        AuthorizationManager::new(resource).await?
+    };
     manager.set_metadata(metadata);
     let tokens = InMemoryCredentialStore::new();
     let states = InMemoryStateStore::new();
@@ -56,28 +69,54 @@ pub(super) async fn exchange(
     })
 }
 
+/// GitHub rejects a revoked refresh token with HTTP 200 and
+/// `bad_refresh_token`. rmcp asks for a new sign-in only on an RFC 6749
+/// `invalid_grant` error, so this rewrites GitHub's reply into one.
+struct GitHubErrors(Box<dyn OAuthHttpClient>);
+
+impl OAuthHttpClient for GitHubErrors {
+    fn execute(&self, request: OAuthHttpRequest) -> OAuthHttpClientFuture<'_> {
+        Box::pin(async move {
+            let mut response = self.0.execute(request).await?;
+            let revoked = serde_json::from_slice::<serde_json::Value>(response.body())
+                .is_ok_and(|body| body["error"] == "bad_refresh_token");
+            if revoked {
+                *response.status_mut() = reqwest::StatusCode::BAD_REQUEST;
+                *response.body_mut() = br#"{"error":"invalid_grant"}"#.to_vec();
+            }
+            Ok(response)
+        })
+    }
+}
+
+/// Provider error text can echo request fields, so only the kind is logged.
 pub(super) fn auth_error(error: AuthError) -> Error {
-    tracing::warn!(%error, "MCP OAuth request failed");
-    match error {
+    let (kind, mapped) = match error {
         AuthError::HttpError(_)
         | AuthError::DiscoveryRequestFailed { .. }
         | AuthError::TokenRefreshFailed(_)
-        | AuthError::CredentialStoreError(_) => Error::Connection,
-        AuthError::RegistrationFailed(_) => Error::Invalid(
-            "The OAuth provider did not register else.bot as a client. It may need a pre-registered OAuth app.",
+        | AuthError::CredentialStoreError(_) => ("unreachable", Error::Connection),
+        AuthError::RegistrationFailed(_) => (
+            "registration",
+            Error::Invalid(
+                "The OAuth provider did not register else.bot as a client. It may need a pre-registered OAuth app.",
+            ),
         ),
-        AuthError::TokenExchangeFailed(_) => {
-            Error::Invalid("The OAuth provider rejected the sign-in. Try signing in again.")
-        }
-        AuthError::AuthorizationServerMismatch { .. }
-        | AuthError::AuthorizationServerMissingIssuer { .. } => {
-            Error::Invalid("The MCP sign-in callback issuer is invalid.")
-        }
-        AuthError::PkceUnsupported => {
-            Error::Invalid("The OAuth provider does not support PKCE S256.")
-        }
-        _ => Error::Invalid("The MCP's OAuth metadata is invalid or unavailable."),
-    }
+        AuthError::TokenExchangeFailed(_) => (
+            "token_exchange",
+            Error::Invalid("The OAuth provider rejected the sign-in. Try signing in again."),
+        ),
+        AuthError::PkceUnsupported => (
+            "pkce",
+            Error::Invalid("The OAuth provider does not support PKCE S256."),
+        ),
+        _ => (
+            "metadata",
+            Error::Invalid("The MCP's OAuth metadata is invalid or unavailable."),
+        ),
+    };
+    tracing::warn!(kind, "MCP OAuth request failed");
+    mapped
 }
 
 #[cfg(test)]
