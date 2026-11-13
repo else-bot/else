@@ -507,6 +507,7 @@ impl Palette {
         }))
         .expect("every palette projects onto a theme");
         config.font_family = crate::ui_font::family();
+        config.mono_font_family = crate::ui_font::mono_family();
         config
     }
 }
