@@ -835,15 +835,25 @@ impl Render for ComputerView {
         }
         let theme = cx.theme().clone();
         if !self.expanded {
+            // Without a screen to show, the state message sits on the panel
+            // itself, centered in the tab, rather than in an empty frame.
+            let screen = self.image.is_some();
             return v_flex()
                 .gap_2()
                 .w_full()
-                .child(
+                .flex_1()
+                .child(if screen {
                     self.image_area(cx)
                         .h(px(176.))
                         .border_1()
-                        .border_color(theme.border),
-                )
+                        .border_color(theme.border)
+                } else {
+                    self.image_area(cx)
+                        .flex_1()
+                        .min_h(px(240.))
+                        .pb(px(64.))
+                        .bg(transparent_black())
+                })
                 .children(self.upgrade_section(cx))
                 .children(match &self.screen {
                     Screen::Failed(error) => Some(

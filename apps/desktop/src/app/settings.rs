@@ -1057,15 +1057,21 @@ impl ElseApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
+        let line = hairline(cx);
+        // Same height and rule as the conversation header, so the two
+        // dividers meet as one line across the window.
         let header = h_flex()
             .flex_none()
             .h(HEADER_HEIGHT)
             .px_4()
             .gap_2()
             .items_center()
+            .border_b_1()
+            .border_color(line)
             .child(
                 div()
                     .flex_1()
+                    .text_base()
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Bot details"),
             )
@@ -1084,11 +1090,9 @@ impl ElseApp {
             .id("bot-settings-body")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .p_4()
-            .gap_6();
+            .overflow_y_scroll();
         if let Some(computer) = &self.computer {
-            body = body.child(computer.clone());
+            body = body.child(v_flex().flex_1().p_4().child(computer.clone()));
         }
         if self.details_tab == super::computer::DetailsTab::Details {
             if let Some(entry) = self.settings.get(&bot.id) {
@@ -1113,18 +1117,20 @@ impl ElseApp {
             .bg(theme.sidebar)
             .text_color(theme.sidebar_foreground)
             .border_l_1()
-            .border_color(theme.sidebar_border)
+            .border_color(line)
             .child(header)
             .child(
                 h_flex()
+                    .flex_none()
                     .px_4()
-                    .pb_4()
+                    .py_2()
                     .border_b_1()
-                    .border_color(theme.sidebar_border)
-                    .gap_2()
+                    .border_color(line)
+                    .gap_1()
                     .child(
                         Button::new("details-tab")
                             .cursor_pointer()
+                            .flex_1()
                             .label("Details")
                             .ghost()
                             .focus_ring(false)
@@ -1139,6 +1145,7 @@ impl ElseApp {
                     .child(
                         Button::new("computer-tab")
                             .cursor_pointer()
+                            .flex_1()
                             .label("Computer")
                             .ghost()
                             .focus_ring(false)
@@ -1160,7 +1167,7 @@ impl ElseApp {
                     .px_4()
                     .py_3()
                     .border_t_1()
-                    .border_color(theme.sidebar_border)
+                    .border_color(line)
                     .child(
                         Button::new("delete-bot")
                             .focus_ring(false)
@@ -1207,7 +1214,8 @@ impl ElseApp {
                 .id("bot-name")
                 .max_w_full()
                 .px_2()
-                .py_0p5()
+                .py_1()
+                .text_sm()
                 .rounded(theme.radius)
                 .cursor_pointer()
                 .hover(move |style| style.bg(hover))
@@ -1236,9 +1244,16 @@ impl ElseApp {
                         .on_click(cx.listener(move |app, _, _, cx| app.flush_details(bot, cx))),
                 )
         });
+        // A compact row, not a hero: the conversation header already
+        // presents the bot. This is where its avatar and name are edited.
         h_flex()
+            .w_full()
+            .px_4()
+            .py_3()
             .items_center()
-            .gap_3()
+            .gap_2()
+            .border_b_1()
+            .border_color(hairline(cx))
             .child(self.render_avatar_editor(bot, details, cx))
             .child(
                 v_flex()
@@ -1287,10 +1302,10 @@ impl ElseApp {
             .focus_ring(false)
             .cursor_pointer()
             .ghost()
-            .w(px(48.))
-            .h(px(48.))
+            .w(px(36.))
+            .h(px(36.))
             .p_0()
-            .rounded(px(12.))
+            .rounded(theme.radius_lg)
             .accessibility_label(editing)
             .toggled(details.picking)
             .child(
@@ -1300,7 +1315,7 @@ impl ElseApp {
                     .child(bot_avatar(
                         ElementId::Name(format!("settings-avatar-{bot}").into()),
                         details.sync.desired.avatar,
-                        px(40.),
+                        px(28.),
                     ))
                     .child(badge),
             );
@@ -1354,15 +1369,8 @@ impl ElseApp {
             }
             ModelState::Ready(saved) => saved,
         };
-        body.child(
-            div()
-                .rounded(cx.theme().radius)
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().background)
-                .child(self.render_current_model(bot, saved.as_ref(), cx)),
-        )
-        .into_any_element()
+        body.child(self.render_current_model(bot, saved.as_ref(), cx))
+            .into_any_element()
     }
 
     fn render_current_model(
@@ -1380,7 +1388,6 @@ impl ElseApp {
                 } else {
                     "Standard speed"
                 };
-                let offered = self.model_available(choice);
                 v_flex()
                     .gap_1()
                     .child(
@@ -1389,33 +1396,36 @@ impl ElseApp {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(model_label(&choice.model)),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "{} · {} reasoning · {speed}",
-                                self.provider_label(&choice.provider_id),
-                                effort_label(&choice.reasoning_effort),
-                            )),
-                    )
-                    .children((!offered).then(|| {
-                        note(
-                            "Saved model is unavailable. Choose another model.",
-                            true,
-                            cx,
-                        )
-                    }))
+                    .child(meta(
+                        format!(
+                            "{} · {} reasoning · {speed}",
+                            self.provider_label(&choice.provider_id),
+                            effort_label(&choice.reasoning_effort),
+                        ),
+                        cx,
+                    ))
             }
         };
+        // The warning sits under the button: a button keeps its label on one
+        // line, which would clip the sentence.
+        let unavailable = saved
+            .is_some_and(|saved| !self.model_available(&saved.choice))
+            .then(|| {
+                alert(
+                    "Saved model is unavailable. Choose another model.",
+                    cx.theme().danger,
+                    cx,
+                )
+            });
         // Button centers and nowraps its content; the card reads as a left-aligned block.
-        Button::new("change-model")
+        let button = Button::new("change-model")
             .focus_ring(false)
             .cursor_pointer()
             .ghost()
             .with_size(Size::Size(px(16.)))
-            .w_full()
-            .p_3()
+            .mx(-ROW_BLEED)
+            .px(ROW_BLEED)
+            .py_2()
             .accessibility_label("Change model")
             .disabled(self.caps.is_none() || self.connection != Connection::Connected)
             .child(
@@ -1426,8 +1436,18 @@ impl ElseApp {
                     .text_left()
                     .whitespace_normal(),
             )
-            .child(Icon::new(IconName::ChevronRight).flex_none())
-            .on_click(cx.listener(move |app, _, window, cx| app.open_model_dialog(bot, window, cx)))
+            .child(
+                Icon::new(IconName::ChevronRight)
+                    .flex_none()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .on_click(
+                cx.listener(move |app, _, window, cx| app.open_model_dialog(bot, window, cx)),
+            );
+        v_flex()
+            .w_full()
+            .child(button)
+            .children(unavailable)
             .into_any_element()
     }
 
@@ -1472,11 +1492,14 @@ impl ElseApp {
                 ))
                 .into_any_element();
         }
-        body.children(cards.into_iter().map(|card| {
-            let save = entry.triggers.get(&card.source.key());
-            self.render_trigger(bot, card, save, cx)
-        }))
-        .into_any_element()
+        let rows = cards
+            .into_iter()
+            .map(|card| {
+                let save = entry.triggers.get(&card.source.key());
+                self.render_trigger(bot, card, save, cx)
+            })
+            .collect::<Vec<_>>();
+        body.children(list_rows(rows, cx)).into_any_element()
     }
 
     fn render_trigger(
@@ -1520,57 +1543,36 @@ impl ElseApp {
             .on_click(cx.listener(move |app, _, window, cx| {
                 app.open_trigger_delete_dialog(bot, source, window, cx)
             }));
-        let pill = |text: String| {
-            div()
-                .px_2()
-                .py_0p5()
-                .rounded_full()
-                .text_xs()
-                .bg(theme.sidebar_accent)
-                .text_color(theme.muted_foreground)
-                .child(text)
-        };
         let error = match save {
             Some(TriggerSave::Failed(error)) => Some(error.clone()),
             _ => None,
         };
-        let last_woke = card.last_woke.map(|at| {
-            format!(
+        let mut facts = card.pills;
+        if !checked {
+            facts.push("Paused".to_owned());
+        }
+        if let Some(at) = card.last_woke {
+            facts.push(format!(
                 "Last woke {}",
                 at.with_timezone(&chrono::Local).format("%a %-d %b, %H:%M")
-            )
-        });
+            ));
+        }
         v_flex()
             .w_full()
-            .p_3()
-            .gap_3()
-            .rounded(theme.radius_lg)
+            .py_3()
+            .gap_0p5()
             .group("automation-card")
-            .bg(theme.background)
-            .border_1()
-            .border_color(theme.border)
             .child(
                 h_flex()
                     .gap_2()
-                    .items_center()
-                    .child(
-                        div()
-                            .flex_none()
-                            .size_6()
-                            .rounded(theme.radius)
-                            .bg(theme.sidebar_accent)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(Icon::new(card.icon).xsmall()),
-                    )
+                    .items_start()
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
+                            .whitespace_normal()
                             .child(card.title.clone()),
                     )
                     .child(
@@ -1582,23 +1584,16 @@ impl ElseApp {
                             .child(switch),
                     ),
             )
-            .child(div().text_sm().whitespace_normal().child(card.instructions))
+            .child(meta(card.instructions, cx))
             .child(
                 h_flex()
-                    .gap_1()
-                    .flex_wrap()
-                    .children(card.pills.into_iter().map(pill))
-                    .when(!checked, |row| row.child(pill("paused".into()))),
+                    .gap_1p5()
+                    .items_center()
+                    .text_color(theme.muted_foreground)
+                    .child(Icon::new(card.icon).size_3().flex_none())
+                    .child(meta(facts.join(" · "), cx)),
             )
-            .child(
-                h_flex().justify_between().items_center().gap_2().child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .children(last_woke),
-                ),
-            )
-            .children(error.map(|error| note(error, true, cx)))
+            .children(error.map(|error| alert(error, theme.danger, cx)))
             .into_any_element()
     }
 
@@ -1633,10 +1628,11 @@ impl ElseApp {
                 .into_any_element();
         }
         let connected = self.connection == Connection::Connected;
-        body.children(routines.into_iter().map(|routine| {
-            self.render_routine(bot, routine, saves.get(&routine.id), connected, cx)
-        }))
-        .into_any_element()
+        let rows = routines
+            .into_iter()
+            .map(|routine| self.render_routine(bot, routine, saves.get(&routine.id), connected, cx))
+            .collect::<Vec<_>>();
+        body.children(list_rows(rows, cx)).into_any_element()
     }
 
     fn render_reminders(
@@ -1670,10 +1666,13 @@ impl ElseApp {
         }
         reminders.sort_by_key(|reminder| (reminder.run_at, reminder.id));
         let connected = self.connection == Connection::Connected;
-        body.children(reminders.into_iter().map(|reminder| {
-            self.render_routine(bot, reminder, saves.get(&reminder.id), connected, cx)
-        }))
-        .into_any_element()
+        let rows = reminders
+            .into_iter()
+            .map(|reminder| {
+                self.render_routine(bot, reminder, saves.get(&reminder.id), connected, cx)
+            })
+            .collect::<Vec<_>>();
+        body.children(list_rows(rows, cx)).into_any_element()
     }
 
     fn render_routine(
@@ -1720,6 +1719,8 @@ impl ElseApp {
             Button::new(ElementId::Name(format!("routine-dismiss-{id}").into()))
                 .focus_ring(false)
                 .cursor_pointer()
+                .ghost()
+                .xsmall()
                 .label("Dismiss")
                 .loading(matches!(save, Some(RoutineSave::Dismissing { .. })))
                 .accessibility_label(format!("Dismiss the failures of {}", routine.name))
@@ -1808,9 +1809,9 @@ impl ElseApp {
             .cursor_pointer()
             .ghost()
             .with_size(Size::Size(px(16.)))
-            .w_full()
-            .py_1()
-            .px_0()
+            .mx(-ROW_BLEED)
+            .px(ROW_BLEED)
+            .py_0p5()
             .accessibility_label(format!(
                 "Change model for {}. {model_title}. {model_details}",
                 routine.name
@@ -1818,14 +1819,11 @@ impl ElseApp {
             .loading(matches!(save, Some(RoutineSave::Model { .. })))
             .disabled(busy || !connected || self.caps.is_none())
             .child(
-                div()
+                meta(model_summary, cx)
                     .w_full()
                     .min_w_0()
                     .text_left()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .truncate()
-                    .child(model_summary),
+                    .truncate(),
             )
             .on_click(cx.listener(move |app, _, window, cx| {
                 app.open_routine_model_dialog(bot, id, window, cx)
@@ -1838,11 +1836,11 @@ impl ElseApp {
                 div()
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .truncate()
+                    .whitespace_normal()
                     .child(routine.name.clone()),
             )
-            .child(muted(schedule.clone(), cx).truncate())
-            .children(problem.map(|text| note(text, true, cx)));
+            .child(meta(schedule.clone(), cx))
+            .children(problem.map(|text| alert(text, theme.danger, cx)));
         let name = routine.name.clone();
         let prompt = routine.prompt.clone();
         let next = match (routine.enabled, routine.next_run_at) {
@@ -1938,20 +1936,17 @@ impl ElseApp {
                     )
             })
             .into_any_element();
+        let theme = cx.theme();
         v_flex()
             .w_full()
-            .p_3()
-            .gap_3()
-            .rounded(theme.radius_lg)
+            .py_3()
+            .gap_0p5()
             .group("automation-card")
-            .bg(theme.background)
-            .border_1()
-            .border_color(theme.border)
             .child(
                 h_flex()
                     .w_full()
                     .gap_2()
-                    .items_center()
+                    .items_start()
                     .child(div().flex_1().min_w_0().child(description))
                     .child(
                         h_flex()
@@ -1963,10 +1958,8 @@ impl ElseApp {
                             .child(switch),
                     ),
             )
-            .children(
-                warning.map(|warning| div().text_xs().text_color(theme.warning).child(warning)),
-            )
             .when(routine.run_at.is_none(), |card| card.child(model_control))
+            .children(warning.map(|warning| alert(warning, theme.warning, cx)))
             .into_any_element()
     }
 }
@@ -2206,14 +2199,83 @@ fn new_details(bot: &Bot, window: &mut Window, cx: &mut Context<ElseApp>) -> Det
     }
 }
 
+/// The 1 px rule between the panel's header, tabs, sections and rows. It
+/// matches the conversation header's rule so both sides read as one line.
+pub(super) fn hairline(cx: &App) -> Hsla {
+    cx.theme().foreground.opacity(0.06)
+}
+
+/// How far a clickable row's hover fill reaches past the text column.
+const ROW_BLEED: Pixels = px(8.);
+
+/// A titled group of rows in the Details panel: no box, just a label and
+/// a rule under the group.
+pub(super) fn section_frame(cx: &App) -> Div {
+    v_flex()
+        .w_full()
+        .px_4()
+        .pt_4()
+        .pb_2()
+        .border_b_1()
+        .border_color(hairline(cx))
+}
+
+pub(super) fn section_label(title: &'static str, cx: &App) -> Div {
+    div()
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(cx.theme().muted_foreground)
+        .child(title)
+}
+
 fn section(title: &'static str, cx: &App) -> Div {
-    v_flex().gap_3().child(
+    section_frame(cx).child(section_label(title, cx).pb_1())
+}
+
+/// Rows separated by hairlines, without a rule above the first.
+fn list_rows(rows: Vec<AnyElement>, cx: &App) -> impl Iterator<Item = Div> {
+    let line = hairline(cx);
+    rows.into_iter().enumerate().map(move |(index, row)| {
         div()
-            .text_xs()
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(cx.theme().muted_foreground)
-            .child(title.to_uppercase()),
-    )
+            .w_full()
+            .when(index > 0, |row| row.border_t_1().border_color(line))
+            .child(row)
+    })
+}
+
+/// Secondary text in a row: a schedule, a model, a trigger's details. It
+/// wraps instead of truncating.
+fn meta(text: impl Into<SharedString>, cx: &App) -> Div {
+    div()
+        .text_size(px(12.5))
+        .line_height(px(18.))
+        .text_color(cx.theme().muted_foreground)
+        .whitespace_normal()
+        .child(text.into())
+}
+
+/// A problem in a row, with a small warning icon.
+fn alert(text: impl Into<SharedString>, color: Hsla, _cx: &App) -> Div {
+    h_flex()
+        .pt_0p5()
+        .gap_1p5()
+        .items_start()
+        .text_size(px(12.5))
+        .line_height(px(18.))
+        .text_color(color)
+        .child(
+            Icon::new(IconName::TriangleAlert)
+                .size_3()
+                .mt(px(3.))
+                .flex_none(),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .whitespace_normal()
+                .child(text.into()),
+        )
 }
 
 fn muted(text: impl Into<SharedString>, cx: &App) -> Div {
@@ -2295,7 +2357,7 @@ fn trigger_cards(conversation: &Conversation) -> Vec<TriggerCard> {
             source: TriggerSource::Social { id: trigger.id },
             icon: match trigger.provider {
                 Provider::Telegram => gpui_kit::assets::IconName::Send,
-                Provider::Discord => gpui_kit::assets::IconName::MessageSquare,
+                Provider::Discord => gpui_kit::assets::IconName::Gamepad2,
             },
             title: trigger.title().to_owned(),
             delete_name: match trigger.destination {
