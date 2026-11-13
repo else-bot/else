@@ -351,6 +351,20 @@ def clickables(tab):
             out[node["backendNodeId"]] = tab.on(oid, "function(){return this.innerText}") or ""
     return out
 
+def clean(value):
+    return " ".join(str(value).split())[:100]
+
+def described(node):
+    """The role and name a snapshot lists for an accessibility node; an
+    element listed only for looking clickable has the role clickable."""
+    role = node.get("role", {}).get("value", "")
+    props = {p["name"]: p.get("value", {}).get("value") for p in node.get("properties", [])}
+    if role not in CONTROLS and "editable" in props:
+        role = "textbox"
+    if role not in CONTROLS:
+        role = "clickable"
+    return role.lower(), clean(node.get("name", {}).get("value", "")), props
+
 def document_id(tab):
     return tab.call("Page.getFrameTree")["frameTree"]["frame"]["loaderId"]
 
@@ -363,31 +377,26 @@ def snapshot(tab):
     extra = clickables(tab)
     by_id = {n["nodeId"]: n for n in nodes}
     roots = [n for n in nodes if not n.get("parentId") or n["parentId"] not in by_id]
-    clean = lambda v: " ".join(str(v).split())[:100]
     origin = urllib.parse.urlsplit(tab.eval("location.href") or "")
     entries = []
     def visit(node):
-        role = node.get("role", {}).get("value", "")
-        props = {p["name"]: p.get("value", {}).get("value") for p in node.get("properties", [])}
-        if role not in CONTROLS and "editable" in props:
-            role = "textbox"
-        name = clean(node.get("name", {}).get("value", ""))
+        role, name, props = described(node)
         backend = node.get("backendDOMNodeId")
-        listed = not node.get("ignored") and backend and (role in CONTROLS or backend in extra)
+        listed = not node.get("ignored") and backend and (role != "clickable" or backend in extra)
         if listed:
             states = [k if v in (True, "true") else f"{k}={v}"
                       for k, v in props.items() if k in STATES and v not in (False, "false", None)]
             value = clean(node.get("value", {}).get("value", ""))
             if value and role in ("textbox", "searchbox", "combobox", "spinbutton", "slider"):
                 states.append(f"value={json.dumps(value)}")
-            if role not in CONTROLS:
-                role, name = "clickable", name or clean(extra.pop(backend))
+            if role == "clickable":
+                name = name or clean(extra.pop(backend))
             url = urllib.parse.urlsplit(props.get("url") or "")
             if url.netloc == origin.netloc and url.scheme == origin.scheme:
                 url = url._replace(scheme="", netloc="")
-            entries.append({"role": role.lower(), "name": name, "states": states, "backend": backend,
+            entries.append({"role": role, "name": name, "states": states, "backend": backend,
                             "url": urllib.parse.urlunsplit(url)[:120]})
-        elif role == "heading" and name and not node.get("ignored"):
+        elif node.get("role", {}).get("value") == "heading" and name and not node.get("ignored"):
             entries.append({"role": "heading", "name": name})
         if listed and role not in CONTAINERS:
             return
@@ -423,7 +432,7 @@ def snapshot(tab):
             truncated = True
             break
         if "backend" in entry:
-            refs[ref] = entry["backend"]
+            refs[ref] = {"backend": entry["backend"], "role": entry["role"], "name": entry["name"]}
         lines.append(line)
     with open(REFS + ".tmp", "w") as f:
         json.dump({"tab": tab.id, "document": document_id(tab), "epoch": epoch, "next": first + len(refs),
@@ -442,14 +451,27 @@ def from_ref(tab, selector):
             saved = json.load(f)
     except (OSError, ValueError):
         raise SystemExit(json.dumps({"error": stale}))
-    backend = saved.get("refs", {}).get(selector[1:])
-    if not backend or saved.get("tab") != tab.id or saved.get("document") != document_id(tab):
+    entry = saved.get("refs", {}).get(selector[1:])
+    if (not isinstance(entry, dict) or saved.get("tab") != tab.id
+            or saved.get("document") != document_id(tab)):
         raise SystemExit(json.dumps({"error": stale}))
     tab.call("DOM.enable")
+    tab.call("Accessibility.enable")
     try:
-        return tab.call("DOM.resolveNode", backendNodeId=backend)["object"]["objectId"]
+        element = tab.call("DOM.resolveNode", backendNodeId=entry["backend"])["object"]["objectId"]
+        nodes = tab.call("Accessibility.getPartialAXTree", backendNodeId=entry["backend"],
+                         fetchRelatives=False)["nodes"]
     except SystemExit:
         raise SystemExit(json.dumps({"error": stale}))
+    # The owner approved the control the snapshot named, so a page that
+    # relabels it since then does not get the click.
+    role, name, _ = described(nodes[0]) if nodes else ("", "", None)
+    if role == "clickable" and not name:
+        name = clean(tab.on(element, "function(){return this.innerText}") or "")
+    if (role, name) != (entry["role"], entry["name"]):
+        raise SystemExit(json.dumps({"error": f"CHANGED_REF: {selector} was {entry['role']} {json.dumps(entry['name'])} "
+                                     f"and is now {role} {json.dumps(name)}; take a new snapshot"}))
+    return element
 
 def main(argv):
     accept_dialogs = argv[:1] == ["--accept-dialogs"]
