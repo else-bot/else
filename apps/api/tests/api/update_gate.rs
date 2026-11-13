@@ -41,6 +41,15 @@ async fn an_update_is_refused_while_bots_work_and_holds_new_work_once_idle() {
     )
     .await;
     app.wait_turn(&turn, &["interrupted"]).await;
+    // The scheduler still counts the turn while it stops its processes, so
+    // wait for the report the installer reads before it updates.
+    tokio::time::timeout(common::SETTLE, async {
+        while app.owner("GET", "/v1/maintenance/update", None).await.body["active_turns"] != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the stopped turn released its slot");
     let ready = app.owner("POST", "/v1/maintenance/update", None).await;
     assert_eq!(ready.status, StatusCode::OK, "{}", ready.body);
     assert_eq!(ready.body["ready"], true);

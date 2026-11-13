@@ -73,7 +73,6 @@ impl Install {
     }
 
     async fn serve(&self) -> Api {
-        let port = common::free_port();
         let log = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -81,7 +80,7 @@ impl Install {
             .unwrap();
         let child = self
             .command(&["serve"])
-            .env("ELSE_API_BIND", format!("127.0.0.1:{port}"))
+            .env("ELSE_API_BIND", "127.0.0.1:0")
             .stdout(log.try_clone().unwrap())
             .stderr(log)
             .spawn()
@@ -90,25 +89,19 @@ impl Install {
             .unwrap()
             .trim()
             .to_owned();
-        let api = Api {
+        let Some(base) = common::ready_url(&self.data, &child, Duration::from_secs(30)).await
+        else {
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the API did not start; see {}", self.log.display());
+        };
+        Api {
             child: Some(child),
-            base: format!("http://127.0.0.1:{port}"),
+            base,
             token,
             http: reqwest::Client::new(),
-        };
-        for _ in 0..600 {
-            if api
-                .http
-                .get(format!("{}/readyz", api.base))
-                .send()
-                .await
-                .is_ok_and(|r| r.status().is_success())
-            {
-                return api;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        panic!("the API did not start; see {}", self.log.display());
     }
 }
 

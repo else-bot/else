@@ -430,7 +430,7 @@ async fn a_second_api_cannot_take_over_runtime_storage_or_database() {
     let hanging = send(&api, &main, "[synthetic:hang]").await;
     wait_status(&api, &db.pool, &hanging, "running").await;
 
-    let output = common::api_command(&db, dir.path(), common::free_port())
+    let output = common::api_command(&db, dir.path(), 0)
         .arg("serve")
         .output()
         .unwrap();
@@ -449,7 +449,7 @@ async fn a_second_api_cannot_take_over_runtime_storage_or_database() {
         other.path().join("secret-key"),
     )
     .unwrap();
-    let output = common::api_command(&db, other.path(), common::free_port())
+    let output = common::api_command(&db, other.path(), 0)
         .arg("serve")
         .output()
         .unwrap();

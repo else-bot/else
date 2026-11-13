@@ -1,5 +1,10 @@
 #![allow(dead_code)]
 pub mod recorder;
+
+/// How long a test waits for a state it expects to reach. It only bounds a
+/// hang: a passing wait returns as soon as the state appears, and several
+/// suites sharing one machine can slow a step tenfold.
+pub const SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
 use else_api::config::{Config, DatabaseUrl};
 use sqlx::SqlitePool;
 pub struct TestDb {
@@ -241,8 +246,7 @@ impl TestApp {
     }
 
     pub async fn wait_turn(&self, turn_id: &str, statuses: &[&str]) -> String {
-        self.wait_turn_for(turn_id, statuses, std::time::Duration::from_secs(10))
-            .await
+        self.wait_turn_for(turn_id, statuses, SETTLE).await
     }
 
     pub async fn wait_turn_for(
@@ -367,12 +371,34 @@ pub fn without_dotenv(dir: &std::path::Path) -> &std::path::Path {
     dir
 }
 
-pub fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// The URL `child`, an `else-api serve` bound to port 0, published in
+/// `data_dir` once it answers `/readyz`, or `None` after `limit`.
+pub async fn ready_url(
+    data_dir: &std::path::Path,
+    child: &std::process::Child,
+    limit: std::time::Duration,
+) -> Option<String> {
+    let manifest = data_dir.join(else_api::runtime_lock::MANIFEST);
+    let client = reqwest::Client::new();
+    tokio::time::timeout(limit, async {
+        loop {
+            let published = std::fs::read(&manifest).ok().and_then(|body| {
+                serde_json::from_slice::<else_api::runtime_lock::Manifest>(&body).ok()
+            });
+            if let Some(published) = published.filter(|m| m.pid == child.id())
+                && client
+                    .get(format!("{}/readyz", published.url))
+                    .send()
+                    .await
+                    .is_ok_and(|r| r.status().is_success())
+            {
+                return published.url;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .ok()
 }
 
 pub fn api_command(db: &TestDb, data_dir: &std::path::Path, port: u16) -> std::process::Command {
@@ -400,33 +426,21 @@ impl ApiProcess {
             let status = api_command(db, data_dir, 1).arg("setup").status().unwrap();
             assert!(status.success());
         }
-        let port = free_port();
-        let child = api_command(db, data_dir, port)
-            .arg("serve")
-            .spawn()
-            .unwrap();
+        // Port 0: the server binds and publishes its own address, so no
+        // other process can take the port between choosing and binding it.
+        let child = api_command(db, data_dir, 0).arg("serve").spawn().unwrap();
         let token = std::fs::read_to_string(data_dir.join("owner-token"))
             .unwrap()
             .trim()
             .to_owned();
-        let process = Self {
-            child,
-            base: format!("http://127.0.0.1:{port}"),
-            token,
+        let started = ready_url(data_dir, &child, SETTLE).await;
+        let Some(base) = started else {
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("API did not start");
         };
-        let client = reqwest::Client::new();
-        for _ in 0..200 {
-            if client
-                .get(format!("{}/readyz", process.base))
-                .send()
-                .await
-                .is_ok()
-            {
-                return process;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        panic!("API did not start");
+        Self { child, base, token }
     }
 
     pub async fn call(

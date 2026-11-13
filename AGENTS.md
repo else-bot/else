@@ -19,6 +19,9 @@
 - Fix lint causes instead of adding blanket suppressions; justify targeted `#[allow]` and `#[expect]` attributes inline.
 - While developing, run only the focused tests that cover your change, and rerun only the tests that failed; do not run the full workspace suite by hand, because the pre-commit hook runs fmt and Clippy, the pre-push hook runs the full suite, and CI runs it again.
 - Keep `--workspace` on focused Cargo test commands and narrow them with `--test TARGET`, `--lib`, or a name filter, as in `cargo nextest run --workspace --locked --test api -E 'test(/^bots::/)'`; `-p PACKAGE` resolves different dependency features and compiles a second copy of up to about 240 dependency crates.
+- Make a test's wait-until deadline a hang guard, such as `common::SETTLE` in the API tests, because several suites share this machine and slow each step; keep short deadlines only for asserting that something does not happen.
+- Give a test server its port by binding it (port 0, then read the address back, or a bound `TcpSocket`), never by choosing a free port and binding it later.
+- Scope process scans in tests, such as `pgrep -f`, to a value unique to the run, because another worktree may run the same test at the same time.
 - Add each offline else-api integration test file as a module in `apps/api/tests/api/` and declare it in its `main.rs`, so all of them link into one `api` binary; keep `*_live`, `replication`, and tests that arm `else_api::faults` (`backup`, `recovery`) as their own files in `apps/api/tests/`, because fault points are process-global.
 - On Linux, run focused tests with `scripts/dev.py test --test api -- MODULE::`; read the printed `.else-dev/tests/` results before repeating a run after a restart.
 - Fetch `origin/main` before adding a migration in `apps/api/migrations`, choose the next contiguous `NNNN_` prefix, and run `python3 scripts/check_migrations.py` after rebasing; never renumber a shipped migration.

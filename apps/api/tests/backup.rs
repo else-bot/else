@@ -641,7 +641,7 @@ async fn the_backup_and_restore_commands_work_on_an_installation() {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     let run = |args: &[&str]| {
-        let out = common::api_command(&db, &data, common::free_port())
+        let out = common::api_command(&db, &data, 0)
             .env("ELSE_MSB_BIN", data.join("unavailable-msb"))
             .env("RUST_LOG", "info")
             .args(args)
@@ -680,7 +680,7 @@ async fn the_backup_and_restore_commands_work_on_an_installation() {
     let target = Target::new(&app);
     let db = app.db.clone();
     let restored_data = dir.path().join("restored-data");
-    let mut command = common::api_command(&db, &data, common::free_port());
+    let mut command = common::api_command(&db, &data, 0);
     let out = command
         .env("RUST_LOG", "info")
         .args([
@@ -707,7 +707,7 @@ async fn the_backup_and_restore_commands_work_on_an_installation() {
         rows(db.url.expose(), COMPARED[0]).await
     );
     let other = Target::new(&app);
-    let out = common::api_command(&db, &data, common::free_port())
+    let out = common::api_command(&db, &data, 0)
         .env("SECRET_KEY", key_text(9))
         .args(["restore", &set, &other.name])
         .stderr(std::process::Stdio::piped())
@@ -926,7 +926,7 @@ async fn a_database_only_backup_restores_without_touching_the_schedule() {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     let run = |args: &[&str]| {
-        let out = common::api_command(&db, &data, common::free_port())
+        let out = common::api_command(&db, &data, 0)
             .env("ELSE_MSB_BIN", data.join("unavailable-msb"))
             .args(args)
             .stdout(std::process::Stdio::piped())
@@ -1000,7 +1000,7 @@ async fn a_database_only_backup_restores_without_touching_the_schedule() {
     let app = TestApp::with_db(db);
     let target = Target::new(&app);
     let db = app.db.clone();
-    let out = common::api_command(&db, &data, common::free_port())
+    let out = common::api_command(&db, &data, 0)
         .args(["restore", set.to_str().unwrap(), &target.name])
         .stderr(std::process::Stdio::piped())
         .output()

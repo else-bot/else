@@ -31,9 +31,13 @@ if [ "$needs_tests" = false ]; then
 	exit 0
 fi
 
-# Nextest runs tests from every binary in parallel; cargo test runs binaries one by one.
-if command -v cargo-nextest >/dev/null 2>&1; then
-	cargo nextest run --workspace --locked
-	exec cargo test --workspace --locked --doc
+# Nextest gives each test its own process, as CI does. Plain cargo test runs a
+# binary's tests as threads of one process, where they race on forks and fds.
+if ! command -v cargo-nextest >/dev/null 2>&1; then
+	echo "pre-push: install cargo-nextest 0.9.151 (the CI version): https://nexte.st/docs/installation/pre-built-binaries/" >&2
+	exit 1
 fi
-exec cargo test --workspace --locked
+cargo nextest run --workspace --locked --no-run
+# Builds run outside the slot; the suite holds one so concurrent pushes queue.
+scripts/test_slot.py -- cargo nextest run --workspace --locked --no-fail-fast
+exec cargo test --workspace --locked --doc

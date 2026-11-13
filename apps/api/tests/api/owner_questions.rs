@@ -41,6 +41,26 @@ async fn grant(app: &TestApp, turn_id: Uuid, tools: Vec<Tool>) -> String {
         .await
 }
 
+/// Mark a finished turn running again with a fresh owner grant, as if it
+/// resumed. The scheduler revokes a turn's grants after it records the final
+/// status, so this waits until the scheduler has let the turn go.
+async fn resume_finished(app: &TestApp, turn_id: Uuid) -> String {
+    tokio::time::timeout(common::SETTLE, async {
+        while app.scheduler.running_count().await > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the scheduler released the finished turn");
+    let token = grant(app, turn_id, owner_tools()).await;
+    sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
+        .bind(turn_id)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    token
+}
+
 fn owner_tools() -> Vec<Tool> {
     vec![
         Tool::ReadMemory,
@@ -683,12 +703,7 @@ async fn an_external_action_needs_approval_for_exactly_that_call_once() {
         "{packet}"
     );
 
-    let token = grant(&app, turn, owner_tools()).await;
-    sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
-        .bind(turn)
-        .execute(&app.db.pool)
-        .await
-        .unwrap();
+    let token = resume_finished(&app, turn).await;
     let ran = tool(&app, &token, "computer_run", send_args()).await;
     let text = tool_text(&ran);
     assert!(
@@ -728,12 +743,7 @@ async fn a_denied_action_stays_denied_for_the_request() {
         "{packet}"
     );
 
-    let token = grant(&app, turn, owner_tools()).await;
-    sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
-        .bind(turn)
-        .execute(&app.db.pool)
-        .await
-        .unwrap();
+    let token = resume_finished(&app, turn).await;
     let retry = tool(&app, &token, "computer_run", send_args()).await;
     assert!(is_error(&retry));
     assert!(
@@ -1044,12 +1054,7 @@ async fn a_host_permission_waits_and_the_answer_names_the_action() {
         "{packet}"
     );
 
-    let token = grant(&app, turn, owner_tools()).await;
-    sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
-        .bind(turn)
-        .execute(&app.db.pool)
-        .await
-        .unwrap();
+    let token = resume_finished(&app, turn).await;
     let again = tool_text(&tool(&app, &token, "ask_permission", args).await);
     assert_eq!(again["status"], "pending");
     assert_ne!(again["question_id"], question.to_string());

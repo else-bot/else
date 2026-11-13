@@ -1162,7 +1162,6 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     else_api::credentials::provision_owner_token(&new_dir.join("owner-token")).unwrap();
     let before = saved(target_url.clone()).await;
     for start in 1..=2 {
-        let port = common::free_port();
         let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_else-api"))
             .current_dir(common::without_dotenv(new_dir.parent().unwrap()))
             .env_clear()
@@ -1170,7 +1169,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
             .env("HOME", &new_dir)
             .env("DATABASE_URL", &target_url)
             .env("ELSE_DATA_DIR", &new_dir)
-            .env("ELSE_API_BIND", format!("127.0.0.1:{port}"))
+            .env("ELSE_API_BIND", "127.0.0.1:0")
             .env("ELSE_SYNTHETIC_PROVIDER", "1")
             .env("ELSE_BACKUP_INTERVAL_SECS", "0")
             .env("ELSE_MSB_BIN", &msb_bin)
@@ -1180,20 +1179,9 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        let client = reqwest::Client::new();
-        let mut up = false;
-        for _ in 0..400 {
-            if client
-                .get(format!("http://127.0.0.1:{port}/readyz"))
-                .send()
-                .await
-                .is_ok_and(|r| r.status().is_success())
-            {
-                up = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+        let up = common::ready_url(&new_dir, &child, Duration::from_secs(10))
+            .await
+            .is_some();
         tokio::time::sleep(Duration::from_secs(2)).await;
         unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
         let status = child.wait().unwrap();
