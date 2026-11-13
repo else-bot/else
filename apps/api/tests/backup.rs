@@ -966,7 +966,7 @@ async fn a_database_only_backup_restores_without_touching_the_schedule() {
     assert!(out.contains("Database only"), "{out}");
 
     let (ok, out) = run(&["backup", "--whole"]);
-    assert!(!ok && out.contains("usage:"), "{out}");
+    assert!(!ok && out.contains("Usage:"), "{out}");
 
     let mut conn = sqlx::SqliteConnection::connect(db.url.expose())
         .await
