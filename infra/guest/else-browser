@@ -2,6 +2,7 @@
 """Drive the guest's Chromium through DevTools on guest loopback.
 
 Usage: else-browser [--accept-dialogs] open URL | text | title | click SELECTOR | type SELECTOR TEXT | reconcile
+SELECTOR is CSS, or text=Label for the one visible element with exactly that text.
 Prints one JSON object. Runs inside the guest; nothing leaves the VM.
 
 A native dialog (alert, confirm, prompt, "Leave site?") is answered in the same
@@ -145,14 +146,62 @@ def lock():
                                              "(see computer_job); wait for it or cancel it"}))
             time.sleep(0.2)
 
+BY_TEXT = r"""(q)=>{
+const norm=s=>(s||'').replace(/\s+/g,' ').trim();
+q=norm(q);
+const low=q.toLowerCase(),bare=low.replace(/ /g,'');
+const named=e=>e.hasAttribute('aria-label')||!!e.placeholder||e.tagName==='INPUT';
+const name=e=>norm(e.getAttribute('aria-label'))||(e.tagName==='INPUT'&&/^(submit|button|reset)$/.test(e.type)
+ ?norm(e.value):norm(e.placeholder)||norm(e.innerText));
+const visible=e=>e.getClientRects().length>0&&getComputedStyle(e).visibility!=='hidden';
+const exact=[],near=[];
+const walk=root=>{const it=document.createTreeWalker(root,NodeFilter.SHOW_ELEMENT);
+ for(let e=it.nextNode();e;e=it.nextNode()){
+  if(e.shadowRoot)walk(e.shadowRoot);
+  if(/^(HEAD|SCRIPT|STYLE|HTML|BODY)$/.test(e.tagName))continue;
+  if(!named(e)){const t=e.textContent.replace(/\s+/g,'').toLowerCase();if(!t.includes(bare))continue}
+  const n=name(e);
+  if(n.length>q.length+40||!n.toLowerCase().includes(low)||!visible(e))continue;
+  (n===q?exact:near).push(e);
+ }};
+walk(document);
+const deepest=a=>a.filter(e=>!a.some(o=>o!==e&&e.contains(o)));
+const hits=deepest(exact);
+if(hits.length===1)return {el:hits[0]};
+const tag=e=>{const h=(e.closest('a,button,label,input,select,textarea,[role]')||e).outerHTML;
+ return h.slice(0,Math.min(h.indexOf('>')+1,160))};
+if(hits.length)return {state:'several',count:hits.length,tags:hits.slice(0,5).map(tag)};
+return {state:'missing',near:[...new Set(deepest(near).map(name))].slice(0,5)};
+}"""
+
 def on_element(tab, selector, script):
-    found = tab.eval(f"(()=>{{let e;try{{e=document.querySelector({json.dumps(selector)})}}catch(_){{return 'invalid'}}"
-                     f"if(!e)return 'missing';{script}return 'ok'}})()")
-    if found == "invalid":
-        raise SystemExit(json.dumps({"error": f"{json.dumps(selector)} is not a CSS selector; use CSS such as "
-                                     "#id, .class, or button[type=submit], not text= or XPath"}))
-    if found != "ok":
-        raise SystemExit(json.dumps({"error": "no element matches the CSS selector"}))
+    if selector.startswith("text="):
+        label = selector[5:].strip()
+        if len(label) > 1 and label[0] == label[-1] and label[0] in "\"'":
+            label = label[1:-1]
+        find = f"const r=({BY_TEXT})({json.dumps(label)});if(!r.el)return r;let e=r.el;"
+    else:
+        label = None
+        find = (f"let e;try{{e=document.querySelector({json.dumps(selector)})}}catch(_){{return {{state:'invalid'}}}}"
+                "if(!e)return {state:'missing'};")
+    found = tab.eval(f"(()=>{{{find}{script}return {{state:'ok'}}}})()") or {"state": "missing"}
+    state = found["state"]
+    if state == "ok":
+        return
+    if state == "invalid":
+        error = (f"{json.dumps(selector)} is not a CSS selector; use CSS such as #id, .class, or "
+                 "button[type=submit], or text=Label, not XPath")
+    elif state == "not_field":
+        error = f"{json.dumps(selector)} is not a text field"
+    elif state == "several":
+        error = (f"{found['count']} visible elements have the text {json.dumps(label)}, in page order: "
+                 f"{', '.join(found['tags'])}; use a CSS selector")
+    elif label is None:
+        error = "no element matches the CSS selector"
+    else:
+        similar = ", ".join(json.dumps(n) for n in found.get("near", []))
+        error = f"no visible element has the text {json.dumps(label)}" + (f"; similar: {similar}" if similar else "")
+    raise SystemExit(json.dumps({"error": error}))
 
 def main(argv):
     accept_dialogs = argv[:1] == ["--accept-dialogs"]
@@ -178,7 +227,9 @@ def main(argv):
         time.sleep(0.2)
         tab.settle()
     elif action == "type":
-        on_element(tab, rest[0], f"e.focus();e.value={json.dumps(rest[1])};e.dispatchEvent(new Event('input',{{bubbles:true}}));")
+        on_element(tab, rest[0], "if(!e.matches('input,textarea,select')&&e.closest('label')?.control)e=e.closest('label').control;"
+                   "if(!e.matches('input,textarea,select'))return {state:'not_field'};"
+                   f"e.focus();e.value={json.dumps(rest[1])};e.dispatchEvent(new Event('input',{{bubbles:true}}));")
     elif action not in ("text", "title"):
         raise SystemExit(json.dumps({"error": f"unknown action {action}"}))
     text = tab.eval("document.body ? document.body.innerText : ''") or ""
