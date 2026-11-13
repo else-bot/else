@@ -408,23 +408,19 @@ impl Shell {
             .gap_5()
             .when(output_visible, |content| content.gap_3())
             .when(!output_visible, |content| {
-                content
-                    .child(super::settings::section_heading(
-                        if server {
-                            "Server updates"
-                        } else {
-                            "App updates"
-                        },
-                        if server {
-                            "Update this server and reconnect when it restarts."
-                        } else {
-                            "The desktop app on this computer. Your servers keep running."
-                        },
-                        cx,
-                    ))
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        last_check.unwrap_or_else(|| "Stable releases from git tags".into()),
-                    ))
+                content.child(super::settings::section_heading(
+                    if server {
+                        "Server updates"
+                    } else {
+                        "App updates"
+                    },
+                    if server {
+                        "Update this server and reconnect when it restarts."
+                    } else {
+                        "The desktop app on this computer. Your servers keep running."
+                    },
+                    cx,
+                ))
             })
             .child(
                 h_flex()
@@ -461,26 +457,32 @@ impl Shell {
                                     .text_sm()
                                     .text_color(theme.muted_foreground)
                                     .child(description),
+                            )
+                            .child(
+                                h_flex()
+                                    .pt_1()
+                                    .gap_2()
+                                    .flex_wrap()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(if let Some(id) = self.server_update_target {
+                                        self.registry
+                                            .find(id)
+                                            .map(|s| s.name.clone())
+                                            .unwrap_or_default()
+                                    } else {
+                                        format!("Running v{}", env!("ELSE_VERSION"))
+                                    })
+                                    .when_some(view.latest(), |row, version| {
+                                        row.child(Icon::new(IconName::ArrowRight).size_3())
+                                            .child(format!("Latest {version}"))
+                                    })
+                                    .when(snapshot.unavailable.is_none(), |row| {
+                                        row.child("·")
+                                            .child(last_check.unwrap_or_else(|| source.to_owned()))
+                                    }),
                             ),
                     ),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(if let Some(id) = self.server_update_target {
-                        self.registry
-                            .find(id)
-                            .map(|s| s.name.clone())
-                            .unwrap_or_default()
-                    } else {
-                        format!("Running v{}", env!("ELSE_VERSION"))
-                    })
-                    .when_some(view.latest(), |row, version| {
-                        row.child(Icon::new(IconName::ArrowRight).size_3())
-                            .child(format!("Latest {version}"))
-                    }),
             );
         if snapshot.unavailable.is_none()
             && server
@@ -527,7 +529,6 @@ impl Shell {
         let mut panel = v_flex()
             .w_full()
             .when(output_visible, |panel| panel.h_full())
-            .max_w(px(680.))
             .min_h_0()
             .gap_4()
             .child(
@@ -573,8 +574,12 @@ impl Shell {
                     .child(error.clone()),
             );
         }
+        // A copy whose updates are managed elsewhere has nothing to check
+        // or schedule, so the automatic-checks row would only show a
+        // disabled button.
+        let checks_apply = snapshot.unavailable.is_none() || view.remote_profile.is_some();
         panel
-            .child(
+            .when(checks_apply, |panel| panel.child(
                 h_flex()
                     .items_start()
                     .gap_2()
@@ -605,10 +610,10 @@ impl Shell {
                         "Check again",
                         Action::Check,
                         false,
-                        view.busy() || (snapshot.unavailable.is_some() && view.remote_profile.is_none()) || matches!(snapshot.check, UpdateCheck::Checking),
+                        view.busy() || matches!(snapshot.check, UpdateCheck::Checking),
                         cx,
                     )),
-            )
+            ))
             .into_any_element()
     }
 

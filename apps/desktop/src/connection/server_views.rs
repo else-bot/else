@@ -187,23 +187,39 @@ impl Shell {
                         cx,
                     )))
                     .child(
-                        Button::new("servers-update-all")
+                        Button::new("servers-check-all")
                             .focus_ring(false)
                             .cursor_pointer()
-                            .label(if updating {
-                                "Updating…"
-                            } else {
-                                "Update all"
-                            })
-                            .loading(updating)
-                            .disabled(!can_update || updating)
-                            .on_click(cx.listener(|shell, _, _, cx| shell.update_all_servers(cx))),
+                            .ghost()
+                            .icon(IconName::RefreshCw)
+                            .label("Check all")
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.refresh_servers(window, cx)
+                            })),
                     )
+                    .when(can_update || updating, |row| {
+                        row.child(
+                            Button::new("servers-update-all")
+                                .focus_ring(false)
+                                .cursor_pointer()
+                                .label(if updating {
+                                    "Updating…"
+                                } else {
+                                    "Update all"
+                                })
+                                .loading(updating)
+                                .disabled(updating)
+                                .on_click(
+                                    cx.listener(|shell, _, _, cx| shell.update_all_servers(cx)),
+                                ),
+                        )
+                    })
                     .child(
                         Button::new("servers-add")
                             .focus_ring(false)
                             .cursor_pointer()
-                            .label("+ Add server")
+                            .icon(IconName::Plus)
+                            .label("Add server")
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.open_server_editor(Editor::Add, window, cx)
                             })),
@@ -214,6 +230,7 @@ impl Shell {
                     .pt_6()
                     .pb_2()
                     .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.muted_foreground)
                     .child(format!(
                         "Saved connections · {}",
@@ -251,7 +268,7 @@ impl Shell {
                 installed.to_owned()
             };
             let mut facts = h_flex()
-                .gap_3()
+                .gap_x_2()
                 .flex_wrap()
                 .text_xs()
                 .child(
@@ -271,13 +288,14 @@ impl Shell {
                         )
                         .child(status),
                 )
+                .child(dot_separator(&theme))
                 .child(
                     div()
                         .text_color(theme.muted_foreground)
                         .child(shown_version),
                 );
             if online {
-                facts = facts.child(
+                facts = facts.child(dot_separator(&theme)).child(
                     h_flex()
                         .gap_1p5()
                         .when(release == ReleaseStatus::Checking, |row| {
@@ -299,10 +317,14 @@ impl Shell {
                 .and_then(|entry| entry.working)
                 .filter(|n| *n > 0)
             {
-                facts = facts.child(
+                facts = facts.child(dot_separator(&theme)).child(
                     div()
                         .text_color(theme.muted_foreground)
-                        .child(format!("{working} tasks running")),
+                        .child(if working == 1 {
+                            "1 task running".to_owned()
+                        } else {
+                            format!("{working} tasks running")
+                        }),
                 );
             }
             let mut actions = h_flex().gap_1().flex_wrap().justify_end();
@@ -336,7 +358,9 @@ impl Shell {
                     Operation::Idle => None,
                 };
                 if let Some((label, color)) = progress {
-                    facts = facts.child(div().text_color(color).child(label));
+                    facts = facts
+                        .child(dot_separator(&theme))
+                        .child(div().text_color(color).child(label));
                 }
             }
             if (update_available && online)
@@ -482,55 +506,7 @@ impl Shell {
             );
         }
         content
-            .child(
-                h_flex()
-                    .justify_between()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Offline versions are from the last successful check."),
-                    )
-                    .child(
-                        Button::new("servers-check-all")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .icon(IconName::RefreshCw)
-                            .label("Check all")
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.refresh_servers(window, cx)
-                            })),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .pt_5()
-                    .gap_2()
-                    .flex_wrap()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Server updates live here."),
-                    )
-                    .child(
-                        Button::new("servers-app-updates")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .label("Desktop app updates")
-                            .icon(IconName::ArrowRight)
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.select_settings(
-                                    settings::SettingsSection::Updates,
-                                    window,
-                                    cx,
-                                )
-                            })),
-                    ),
-            )
+            .child(div().border_t_1().border_color(theme.border))
             .into_any_element()
     }
 
@@ -551,8 +527,7 @@ impl Shell {
             .w_full()
             .min_w_0()
             .h(px(32.))
-            .px_8()
-            .gap_2()
+            .px(settings::SETTINGS_INSET)
             .items_center()
             .border_b_1()
             .border_color(theme.border)
@@ -564,33 +539,48 @@ impl Shell {
                 active.profile.origin.as_str()
             ))
             .child(
-                Icon::new(if self.managed_server(&active.profile) {
-                    IconName::Laptop
-                } else {
-                    IconName::Server
-                })
-                .size_3()
-                .flex_none(),
-            )
-            .child(div().flex_none().child("Editing settings on"))
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(px(220.))
-                    .truncate()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.foreground)
-                    .child(name.to_owned()),
-            )
-            .child(div().flex_none().size_1p5().rounded_full().bg(color))
-            .child(div().flex_1())
-            .child(
-                div()
+                h_flex()
+                    .w_full()
                     .min_w_0()
-                    .truncate()
-                    .font_family(theme.mono_font_family.clone())
-                    .child(active.profile.origin.as_str().to_owned()),
+                    .max_w(settings::SETTINGS_COLUMN)
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Icon::new(if self.managed_server(&active.profile) {
+                            IconName::Laptop
+                        } else {
+                            IconName::Server
+                        })
+                        .size_3()
+                        .flex_none(),
+                    )
+                    .child(div().flex_none().child("Editing settings on"))
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(px(220.))
+                            .truncate()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.foreground)
+                            .child(name.to_owned()),
+                    )
+                    .child(div().flex_none().size_1p5().rounded_full().bg(color))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(theme.mono_font_family.clone())
+                            .child(active.profile.origin.as_str().to_owned()),
+                    ),
             )
             .into_any_element()
     }
+}
+
+/// The "·" between facts in a server's status line.
+fn dot_separator(theme: &gpui_kit::component::Theme) -> Div {
+    div()
+        .text_color(theme.muted_foreground.opacity(0.6))
+        .child("·")
 }
