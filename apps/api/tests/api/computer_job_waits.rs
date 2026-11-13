@@ -1,117 +1,18 @@
 use crate::common;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use axum::http::StatusCode;
+use common::guest::Guest;
 use common::{TestApp, TestDb};
-use else_api::computers::{
-    ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, RuntimeError, RuntimeState, Spec,
-};
+use else_api::computers::{ComputerConfig, ComputerManager};
 use else_api::grants::{DEFAULT_TTL, Tool};
 use else_api::providers::synthetic::Synthetic;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 const SLOW: &str = "[synthetic:slow] Run the nightly crawl and report what it found.";
-
-/// A guest whose jobs launch at once and report `probe` until killed.
-struct Guest {
-    probe: Mutex<String>,
-    state: Mutex<std::collections::HashMap<String, RuntimeState>>,
-}
-
-impl Guest {
-    fn new() -> Self {
-        Self {
-            probe: Mutex::new("running\n".into()),
-            state: Mutex::default(),
-        }
-    }
-
-    fn report(&self, probe: &str) {
-        *self.probe.lock().unwrap() = probe.into();
-    }
-}
-
-#[async_trait]
-impl ComputerRuntime for Guest {
-    async fn list(&self) -> Result<Vec<(String, RuntimeState)>, RuntimeError> {
-        Ok(self
-            .state
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(n, s)| (n.clone(), *s))
-            .collect())
-    }
-    async fn create(&self, spec: &Spec) -> Result<(), RuntimeError> {
-        self.state
-            .lock()
-            .unwrap()
-            .insert(spec.name.clone(), RuntimeState::Running);
-        Ok(())
-    }
-    async fn start(&self, name: &str) -> Result<(), RuntimeError> {
-        self.state
-            .lock()
-            .unwrap()
-            .insert(name.into(), RuntimeState::Running);
-        Ok(())
-    }
-    async fn stop(&self, name: &str) -> Result<(), RuntimeError> {
-        self.state
-            .lock()
-            .unwrap()
-            .insert(name.into(), RuntimeState::Stopped);
-        Ok(())
-    }
-    async fn pause(&self, _: &str) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-    async fn resume(&self, _: &str) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-    async fn copy_out(&self, _: &str, _: &str, _: &std::path::Path) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-    async fn exec(
-        &self,
-        name: &str,
-        program: &str,
-        args: &[&str],
-        timeout: Duration,
-    ) -> Result<ExecOutput, RuntimeError> {
-        self.exec_input(name, program, args, &[], timeout).await
-    }
-    async fn exec_input(
-        &self,
-        _: &str,
-        _: &str,
-        args: &[&str],
-        _: &[u8],
-        _: Duration,
-    ) -> Result<ExecOutput, RuntimeError> {
-        let at = args.iter().position(|a| *a == "-c").map_or(0, |i| i + 1);
-        let script = args.get(at).copied().unwrap_or_default();
-        let stdout = if script.contains("echo launched") {
-            "launched".to_owned()
-        } else if script.contains("alive()") {
-            "stopped".to_owned()
-        } else if script.contains("echo running") {
-            self.probe.lock().unwrap().clone()
-        } else {
-            String::new()
-        };
-        Ok(ExecOutput {
-            status: Some(0),
-            stdout,
-            stderr: String::new(),
-            truncated: false,
-        })
-    }
-}
 
 struct Setup {
     app: TestApp,

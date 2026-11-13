@@ -376,9 +376,8 @@ impl ComputerManager {
         secret_names: &[String],
         webhook: Option<Uuid>,
     ) -> Result<Started, ComputerError> {
-        let id = Uuid::new_v4();
         let duration = max_duration.min(MAX_JOB_DURATION);
-        {
+        let id = {
             let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
             let bot: Option<(bool, bool)> =
                 sqlx::query_as("SELECT status = 'active', cancel_pending FROM bots WHERE id = ?1")
@@ -404,47 +403,95 @@ impl ComputerManager {
             if !current {
                 return Ok(Started::Stopped);
             }
-            let running: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM guest_jobs
-                 WHERE bot_id = ?1 AND status IN ('starting', 'running', 'cancelling')",
-            )
-            .bind(bot_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            if running >= MAX_JOBS {
+            let Some(id) = self
+                .reserve_job(
+                    &mut tx,
+                    bot_id,
+                    turn_id,
+                    command,
+                    duration,
+                    secret_names,
+                    webhook,
+                )
+                .await?
+            else {
                 return Ok(Started::TooMany);
-            }
-            sqlx::query(
-                "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib, network)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
-            )
-            .bind(bot_id)
-            .bind(Self::runtime_name(bot_id))
-            .bind(&self.config.image)
-            .bind(self.config.cpus as i32)
-            .bind(self.config.memory_mib as i32)
-            .bind(&self.config.network)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                "INSERT INTO guest_jobs (id, bot_id, turn_id, command, deadline, secrets, webhook_id)
-                 VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', ?5)), ?6,
-                         (SELECT id FROM webhooks WHERE id = ?7 AND bot_id = ?2 AND deleted_at IS NULL))",
-            )
-            .bind(id)
-            .bind(bot_id)
-            .bind(turn_id)
-            .bind(command)
-            .bind(duration.as_secs_f64())
-            .bind(sqlx::types::Json(secret_names))
-            .bind(webhook)
-            .execute(&mut *tx)
-            .await?;
+            };
             tx.commit().await?;
-        }
+            id
+        };
         if crate::faults::hit("job.after_insert") {
             return Err(ComputerError::Interrupted);
         }
+        self.launch_reserved(bot_id, id, command, env).await
+    }
+
+    /// Take a job slot inside the caller's immediate transaction: the job
+    /// is recorded `starting`, without a lease, until [`Self::launch_reserved`]
+    /// launches it. Maintenance fails a job still unlaunched after
+    /// `STALE_START`. Returns `None` when `MAX_JOBS` already run. The caller
+    /// checks the bot is active and its work current.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reserve_job(
+        &self,
+        conn: &mut sqlx::SqliteConnection,
+        bot_id: Uuid,
+        turn_id: Option<Uuid>,
+        command: &str,
+        duration: Duration,
+        secret_names: &[String],
+        webhook: Option<Uuid>,
+    ) -> Result<Option<Uuid>, sqlx::Error> {
+        let id = Uuid::new_v4();
+        let duration = duration.min(MAX_JOB_DURATION);
+        let running: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM guest_jobs
+             WHERE bot_id = ?1 AND status IN ('starting', 'running', 'cancelling')",
+        )
+        .bind(bot_id)
+        .fetch_one(&mut *conn)
+        .await?;
+        if running >= MAX_JOBS {
+            return Ok(None);
+        }
+        sqlx::query(
+            "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib, network)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
+        )
+        .bind(bot_id)
+        .bind(Self::runtime_name(bot_id))
+        .bind(&self.config.image)
+        .bind(self.config.cpus as i32)
+        .bind(self.config.memory_mib as i32)
+        .bind(&self.config.network)
+        .execute(&mut *conn)
+        .await?;
+        sqlx::query(
+            "INSERT INTO guest_jobs (id, bot_id, turn_id, command, deadline, secrets, webhook_id)
+             VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', ?5)), ?6,
+                     (SELECT id FROM webhooks WHERE id = ?7 AND bot_id = ?2 AND deleted_at IS NULL))",
+        )
+        .bind(id)
+        .bind(bot_id)
+        .bind(turn_id)
+        .bind(command)
+        .bind(duration.as_secs_f64())
+        .bind(sqlx::types::Json(secret_names))
+        .bind(webhook)
+        .execute(&mut *conn)
+        .await?;
+        Ok(Some(id))
+    }
+
+    /// Hold the computer for a reserved job and launch it. A job stopped
+    /// before it holds the computer is not launched.
+    pub async fn launch_reserved(
+        &self,
+        bot_id: Uuid,
+        id: Uuid,
+        command: &str,
+        env: &Env,
+    ) -> Result<Started, ComputerError> {
         let acquired = self.acquire(bot_id, &format!("job:{id}")).await?;
         let Acquire::Ready { lease_id, .. } = acquired else {
             self.fail_start(id, "the computer was not available")
