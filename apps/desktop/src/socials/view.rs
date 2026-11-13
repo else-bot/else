@@ -122,7 +122,7 @@ impl SocialsView {
                             Button::new(SharedString::from(format!("social-pause-{id}")))
                                 .control(
                                     Tier::Secondary,
-                                    Scale::Standard,
+                                    Scale::Compact,
                                     self.busy || !self.available,
                                     cx,
                                 )
@@ -135,7 +135,7 @@ impl SocialsView {
                             Button::new(SharedString::from(format!("social-replace-{id}")))
                                 .control(
                                     Tier::Secondary,
-                                    Scale::Standard,
+                                    Scale::Compact,
                                     self.busy || !self.available,
                                     cx,
                                 )
@@ -148,7 +148,7 @@ impl SocialsView {
                             Button::new(SharedString::from(format!("social-disconnect-{id}")))
                                 .control(
                                     Tier::Secondary,
-                                    Scale::Standard,
+                                    Scale::Compact,
                                     self.busy || !self.available,
                                     cx,
                                 )
@@ -183,7 +183,7 @@ impl SocialsView {
                             Button::new(SharedString::from(format!("social-keep-{id}")))
                                 .control(
                                     Tier::Secondary,
-                                    Scale::Standard,
+                                    Scale::Compact,
                                     self.busy || !self.available,
                                     cx,
                                 )
@@ -281,13 +281,13 @@ impl Render for SocialsView {
                             Button::new(id)
                                 .control(
                                     Tier::Secondary,
-                                    Scale::Standard,
+                                    Scale::Compact,
                                     self.busy || !self.available,
                                     cx,
                                 )
                                 .label(format!("Add {}", provider.label()))
                                 // Paired rows share one button width.
-                                .w(px(132.))
+                                .w(px(120.))
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     view.add(provider, window, cx)
                                 })),

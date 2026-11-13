@@ -3,19 +3,23 @@
 //!
 //! Call sites say what a control is, a [`Tier`] and a [`Scale`], and never
 //! set its colors, height or padding. The component library fixes button
-//! heights at 24 and 32 px and paints disabled controls in its own bordered
-//! style, so the kit overrides both here, once.
+//! heights at 24 and 32 px, paints disabled controls in its own bordered
+//! style and sizes switches at 28×16 or 36×20, so the kit overrides all
+//! three here, once.
 
+use std::rc::Rc;
+
+use gpui_kit::base::{Switch as BaseSwitch, SwitchThumb, spring};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::switch::Switch;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, FocusableExt as _, Selectable as _, Sizable as _, Size,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Div, ElementId, FontWeight, Hsla, ParentElement as _, Pixels, SharedString, Styled, div,
-    px,
+    App, Div, ElementId, FontWeight, Hsla, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    SharedString, StatefulInteractiveElement as _, Styled, Window, div, px,
 };
 
 /// What a button does in its context: the one main action, a quieter
@@ -65,10 +69,11 @@ impl Scale {
     }
 }
 
-/// How strongly a disabled control fades. A disabled control is the same
-/// control, fill and label included, at this opacity, so it still reads as
-/// the action it will become rather than a hole in the surface.
+/// How strongly a disabled segment or other non-button control fades.
 pub const DISABLED_OPACITY: f32 = 0.45;
+/// A disabled button's label: about 40% ink on a neutral fill, whatever its
+/// tier, so an unavailable primary never reads as a muted accent.
+const DISABLED_LABEL: f32 = 0.4;
 /// Ghost labels sit below body text and come up to full strength on hover.
 const QUIET_TEXT: f32 = 0.85;
 /// Unselected segment labels: quieter than the selected one, but clearly
@@ -113,24 +118,29 @@ impl Control for Button {
         if !disabled {
             return button.cursor_pointer();
         }
-        // The library paints disabled buttons in its own faint style; replay
-        // the tier's normal fill and label so only the opacity changes.
-        let (fill, label) = match tier {
-            Tier::Primary => (theme.button_primary, theme.button_primary_foreground),
-            Tier::Danger => (theme.button_danger, theme.button_danger_foreground),
-            Tier::Secondary => (theme.button, theme.button_foreground),
-            Tier::Ghost => (theme.transparent, theme.foreground.opacity(QUIET_TEXT)),
+        // The library paints disabled buttons in its own faint style. Filled
+        // tiers become one neutral grey well; ghosts stay bare.
+        let fill = match tier {
+            Tier::Primary | Tier::Danger | Tier::Secondary => neutral_well(cx),
+            Tier::Ghost => theme.transparent,
         };
         button
-            .opacity(DISABLED_OPACITY)
             .border_0()
             .bg(fill)
-            .text_color(label)
+            .text_color(theme.foreground.opacity(DISABLED_LABEL))
     }
 
     fn flush_start(self, scale: Scale) -> Self {
         self.ml(-scale.padding())
     }
+}
+
+/// The neutral grey fill of a disabled button or an unready send button.
+fn neutral_well(cx: &App) -> Hsla {
+    let theme = cx.theme();
+    theme
+        .foreground
+        .opacity(if theme.mode.is_dark() { 0.08 } else { 0.07 })
 }
 
 /// The well behind a segmented control: 32 px tall with a 2 px inset, one
@@ -139,7 +149,15 @@ impl Control for Button {
 /// width: in a row as it is, in a column with `.self_start()` so the column
 /// doesn't stretch it.
 ///
+/// A form field (provider, reasoning, speed) fills its column with equal
+/// segments, edges aligned to the inputs above and below it; a tab-like
+/// switch hugs its labels:
+///
 /// ```ignore
+/// segment_track(cx).w_full().children([
+///     segment("speed-standard", "Standard", true, false, cx),
+///     segment("speed-fast", "Fast", false, false, cx),
+/// ])
 /// segment_track(cx).self_start().children([
 ///     hugging_segment("details", "Details", true, false, cx),
 ///     hugging_segment("computer", "Computer", false, false, cx),
@@ -263,15 +281,109 @@ fn labeled_segment(id: impl Into<ElementId>, label: impl Into<SharedString>) -> 
         .child(div().text_size(px(13.)).truncate().child(label))
 }
 
-/// A 36×20 switch with a solid 16 px knob. Its name comes from the call
-/// site's `accessibility_label`.
-pub fn toggle(id: impl Into<ElementId>, checked: bool, disabled: bool, cx: &App) -> Switch {
-    Switch::new(id)
-        .focus_ring(false)
-        .color(cx.theme().primary)
-        .checked(checked)
-        .disabled(disabled)
-        .when(!disabled, |switch| switch.cursor_pointer())
+const TOGGLE_WIDTH: Pixels = px(32.);
+const TOGGLE_HEIGHT: Pixels = px(18.);
+const TOGGLE_KNOB: Pixels = px(14.);
+
+/// A 32×18 switch with a solid 14 px knob, quiet enough that the row's
+/// title leads. Its name comes from the call site's `accessibility_label`.
+pub fn toggle(id: impl Into<ElementId>, checked: bool, disabled: bool, _: &App) -> Toggle {
+    Toggle {
+        id: id.into(),
+        checked,
+        disabled,
+        label: None,
+        tooltip: None,
+        on_click: None,
+    }
+}
+
+/// The kit's switch; see [`toggle`].
+#[derive(IntoElement)]
+pub struct Toggle {
+    id: ElementId,
+    checked: bool,
+    disabled: bool,
+    label: Option<SharedString>,
+    tooltip: Option<SharedString>,
+    on_click: Option<ToggleHandler>,
+}
+
+type ToggleHandler = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
+
+impl Toggle {
+    /// The name announced for the switch.
+    pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
+        self
+    }
+
+    /// Runs with the next checked value when the switch is activated.
+    pub fn on_click(mut self, handler: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Rc::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for Toggle {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        // The on-state is the accent a little calmer: 85% in dark, 80% in
+        // light, so a column of switches never outshines the row titles.
+        let on = theme
+            .primary
+            .opacity(if theme.mode.is_dark() { 0.85 } else { 0.8 });
+        let track = if self.checked { on } else { theme.switch };
+        let track = if self.disabled {
+            track.opacity(track.a * 0.5)
+        } else {
+            track
+        };
+        let knob = theme.switch_thumb;
+        let travel = TOGGLE_WIDTH - TOGGLE_KNOB - INSET * 2.;
+        let motion = theme.motion_tokens().spring_move;
+        let offset = spring(
+            (self.id.clone(), "knob"),
+            if self.checked { travel } else { px(0.) },
+            motion,
+            window,
+            cx,
+        );
+        BaseSwitch::new(self.id)
+            .checked(self.checked)
+            .disabled(self.disabled)
+            .when_some(self.label, |switch, label| {
+                switch.accessibility_label(label)
+            })
+            .when_some(self.on_click, |switch, on_click| {
+                switch.on_change(move |next, _, window, cx| on_click(&next, window, cx))
+            })
+            .when_some(self.tooltip, |switch, text| {
+                switch.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+            })
+            .flex_none()
+            .flex()
+            .items_center()
+            .w(TOGGLE_WIDTH)
+            .h(TOGGLE_HEIGHT)
+            .p(INSET)
+            .rounded(TOGGLE_HEIGHT / 2.)
+            .bg(track)
+            .when(!self.disabled, |switch| switch.cursor_pointer())
+            .child(
+                SwitchThumb::new(self.checked)
+                    .size(TOGGLE_KNOB)
+                    .rounded(TOGGLE_KNOB / 2.)
+                    .left(offset)
+                    .bg(knob)
+                    .shadow_xs(),
+            )
+    }
 }
 
 /// An editable single-line field: one step lighter than whatever card,
@@ -352,16 +464,16 @@ pub fn send_button(id: impl Into<ElementId>, ready: bool, cx: &App) -> Button {
     } else {
         button
             .border_0()
-            .bg(theme.foreground.opacity(0.08))
+            .bg(neutral_well(cx))
             .text_color(theme.foreground.opacity(0.45))
     }
 }
 
-/// The stop button: a neutral circle the size of send with a light square,
-/// present without outshining the conversation.
+/// The stop button: a neutral circle the size of send with a solid square
+/// in full ink, present without outshining the conversation.
 pub fn stop_button(id: impl Into<ElementId>, stopping: bool, cx: &App) -> Button {
     let theme = cx.theme();
-    let glyph = theme.foreground.opacity(0.85);
+    let glyph = theme.foreground;
     let button = Button::new(id)
         .focus_ring(false)
         .size(COMPOSER_ACTION)

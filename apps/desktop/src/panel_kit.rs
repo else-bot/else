@@ -66,7 +66,8 @@ pub(crate) fn list_row() -> Div {
         .items_center()
 }
 
-/// The 32 px tile that leads a [`list_row`].
+/// The 32 px tile that leads a [`list_row`]: a 6% ink well, visible on
+/// any sheet or card.
 pub(crate) fn row_icon(icon: Icon, cx: &App) -> Div {
     let theme = cx.theme();
     div()
@@ -76,7 +77,7 @@ pub(crate) fn row_icon(icon: Icon, cx: &App) -> Div {
         .items_center()
         .justify_center()
         .rounded(theme.radius)
-        .bg(theme.secondary)
+        .bg(theme.foreground.opacity(0.06))
         .child(icon.size_4().text_color(theme.muted_foreground))
 }
 

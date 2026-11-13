@@ -6,6 +6,7 @@ use super::{
     StopWork, TakeOverComputer, ToggleSettings,
 };
 use crate::api::Bot;
+use crate::appearance::{Tone, tone};
 use crate::avatar::bot_avatar;
 use crate::connection::{OpenAppSettings, SHELL_CONTEXT};
 use crate::controls::{
@@ -473,13 +474,9 @@ impl ElseApp {
             .then(|| self.waiting_faces("sidebar-waiting", bot))
             .flatten();
         let working = subtitle.kind == Kind::Working && connected;
-        // The status line and wait sit well below the name: about 60% ink in
-        // dark; light themes keep their readable muted tone.
-        let meta = if theme.mode.is_dark() {
-            theme.foreground.opacity(0.6)
-        } else {
-            theme.muted_foreground
-        };
+        // The name leads; the status line and the wait sit two steps below.
+        let meta = tone(Tone::Secondary, cx);
+        let wait = tone(Tone::Tertiary, cx);
         let color = if !connected {
             meta
         } else {
@@ -522,7 +519,7 @@ impl ElseApp {
             .text_color(meta)
             .when(!pending, |line| {
                 line.group_hover("sidebar-bot-row", |style| {
-                    style.text_color(theme.foreground)
+                    style.text_color(tone(Tone::Primary, cx))
                 })
             })
             .when(working, |line| {
@@ -540,7 +537,7 @@ impl ElseApp {
         let mut row = h_flex()
             .id(SharedString::from(format!("bot-{id}")))
             .group("sidebar-bot-row")
-            .min_h(px(44.))
+            .min_h(px(42.))
             .gap_2p5()
             .items_center()
             .px_2()
@@ -560,9 +557,10 @@ impl ElseApp {
                                 div()
                                     .min_w_0()
                                     .text_size(px(14.))
-                                    .line_height(px(20.))
+                                    .line_height(px(19.))
                                     .truncate()
                                     .font_weight(FontWeight::MEDIUM)
+                                    .text_color(tone(Tone::Strong, cx))
                                     .child(bot.name.clone()),
                             )
                             .when(muted, |line| {
@@ -585,8 +583,8 @@ impl ElseApp {
                                     .flex_none()
                                     .ml_auto()
                                     .pl_2()
-                                    .text_size(px(11.5))
-                                    .text_color(meta)
+                                    .text_size(px(12.))
+                                    .text_color(wait)
                                     .child(waited)
                             })),
                     )
@@ -673,6 +671,7 @@ impl ElseApp {
                         div()
                             .text_size(px(16.))
                             .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(tone(Tone::Strong, cx))
                             .truncate()
                             .child(bot.name.clone()),
                     )

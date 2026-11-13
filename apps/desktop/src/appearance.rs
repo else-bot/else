@@ -6,7 +6,7 @@ use std::rc::Rc;
 use gpui_kit::component::dialog::Dialog;
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeConfig, ThemeMode};
 use gpui_kit::{
-    App, Div, FontWeight, Global, ParentElement as _, SharedString, Styled, Task, Window, div,
+    App, Div, FontWeight, Global, Hsla, ParentElement as _, SharedString, Styled, Task, Window, div,
 };
 
 enum Source {
@@ -67,6 +67,45 @@ fn install_omarchy(palette: Palette, cx: &mut App) {
     Theme::update(cx, |theme| theme.apply_config(&config));
 }
 
+/// The four text tones every view picks from, so names and titles, body
+/// text, supporting lines and timestamps stay distinct in both themes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// Titles, headings and bot names: a step stronger than body text.
+    Strong,
+    /// Body text.
+    Primary,
+    /// Supporting lines and subtitles, about 60% ink.
+    Secondary,
+    /// Timestamps and other meta, about 45% ink.
+    Tertiary,
+}
+
+/// The color of `tone` in the current theme.
+pub fn tone(tone: Tone, cx: &App) -> Hsla {
+    let theme = cx.theme();
+    let dark = theme.mode.is_dark();
+    let ink = theme.foreground;
+    match tone {
+        // Dark themes lift titles toward white; light themes deepen their
+        // mid-tone ink toward black.
+        Tone::Strong if dark => Hsla {
+            l: ink.l + (1. - ink.l) * 0.45,
+            ..ink
+        },
+        Tone::Strong => Hsla {
+            l: ink.l * 0.62,
+            ..ink
+        },
+        Tone::Primary => ink,
+        Tone::Secondary if dark => ink.opacity(0.6),
+        // Light themes keep supporting text at a readable contrast.
+        Tone::Secondary => theme.muted_foreground,
+        Tone::Tertiary if dark => ink.opacity(0.45),
+        Tone::Tertiary => ink.opacity(0.58),
+    }
+}
+
 /// A section heading inside a page, panel or dialog: sentence case, small
 /// and quiet, so it groups without competing with titles.
 pub fn section_label(text: impl Into<SharedString>, cx: &App) -> Div {
@@ -77,12 +116,12 @@ pub fn section_label(text: impl Into<SharedString>, cx: &App) -> Div {
         .child(text.into())
 }
 
-/// The surface every modal sheet shares: one step above the page with a
-/// visible edge, so it lifts off the scrim in both light and dark.
+/// The surface every modal sheet shares: a calm step above the page with a
+/// hairline edge, so it lifts off the neutral scrim in both light and dark.
 pub fn modal_surface(dialog: Dialog, cx: &App) -> Dialog {
     let theme = cx.theme();
     let edge = if theme.mode.is_dark() {
-        theme.foreground.opacity(0.12)
+        theme.foreground.opacity(0.08)
     } else {
         theme.border
     };
@@ -224,15 +263,21 @@ fn text_on(fill: Rgb, background: Rgb, foreground: Rgb) -> Rgb {
 fn strong_fill(accent: Rgb) -> Rgb {
     let [h, s, l] = accent.hsl();
     let s = if s < 0.12 { s } else { s.max(0.68) };
+    carrying_white(h, s, l.min(0.62))
+}
+
+/// The lightest color of hue `h` and saturation `s`, at or below lightness
+/// `l`, that still carries white text at 4.5:1.
+fn carrying_white(h: f32, s: f32, l: f32) -> Rgb {
     (0..=60)
-        .map(|step| Rgb::from_hsl([h, s, l.min(0.62) - step as f32 / 100.]))
+        .map(|step| Rgb::from_hsl([h, s, l - step as f32 / 100.]))
         .find(|fill| fill.contrast(WHITE) >= 4.5)
         .unwrap_or(BLACK)
 }
 
 /// `line` as the palette's foreground at the alpha that paints `line` over
 /// the background, as an `#rrggbbaa` color.
-fn ink(p: &Palette, line: Rgb) -> String {
+fn line_ink(p: &Palette, line: Rgb) -> String {
     let (bg, fg, line) = (
         p.background.channels(),
         p.foreground.channels(),
@@ -247,20 +292,21 @@ fn ink(p: &Palette, line: Rgb) -> String {
     format!("{}{alpha:02x}", p.foreground.hex())
 }
 
-/// How much a dark theme calms its accent fill, in saturation and
-/// lightness, so filled buttons and switches don't glare off a dark page.
+/// How much a dark theme calms its accent fill's saturation, so filled
+/// buttons don't glare off a dark page.
 const DARK_ACCENT_CALM: f32 = 0.9;
 
 /// The app's one accent: primary buttons, checked switches, selection rings
-/// and working indicators all paint this fill. Dark themes get it about 10%
-/// calmer; it stays deep enough to carry white text.
+/// and working indicators all paint this fill. Dark themes take it about
+/// 10% less saturated but as light as white text allows, so it stays
+/// luminous on a dark page instead of reading muddy.
 fn accent_fill(accent: Rgb, mode: ThemeMode) -> Rgb {
     let fill = strong_fill(accent);
     if !mode.is_dark() {
         return fill;
     }
-    let [h, s, l] = fill.hsl();
-    Rgb::from_hsl([h, s * DARK_ACCENT_CALM, l * DARK_ACCENT_CALM])
+    let [h, s, _] = fill.hsl();
+    carrying_white(h, s * DARK_ACCENT_CALM, 0.62)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -371,27 +417,28 @@ impl Palette {
             .find(|color| hover.contrast(*color) >= 4.6)
             .unwrap_or_else(|| on(hover));
         let on_danger = on(danger);
-        // Dialogs and menus sit one step above the page: lighter than it in
-        // dark, near white in light.
+        // Dialogs and menus sit one calm step above the page: about 6% ink
+        // over it in dark, so a sheet reads deep rather than muddy grey;
+        // near white in light.
         let popover = if dark {
-            p.raised.mix(p.foreground, 0.03)
+            p.background.mix(p.foreground, 0.06)
         } else {
             p.background.mix(WHITE, 0.75)
         };
         // In light the conversation is the lightest surface: the sidebar
-        // and panels sit one clear step, about 5% lightness, below it, so
+        // and panels sit one clear step, about 6% lightness, below it, so
         // structure doesn't rest on hairlines.
         let sidebar = if dark {
             p.surface
         } else {
-            p.background.mix(p.foreground, 0.075)
+            p.background.mix(p.foreground, 0.1)
         };
-        // A selected row reads as one firm step: lighter in dark, about 8%
-        // black over the sidebar in light.
+        // A selected row reads as one light step, quieter than a button:
+        // about 10% ink in dark, 6% black over the sidebar in light.
         let selected = if dark {
-            p.background.mix(p.foreground, 0.14)
+            p.background.mix(p.foreground, 0.1)
         } else {
-            sidebar.mix(BLACK, 0.08)
+            sidebar.mix(BLACK, 0.06)
         };
         let border = p.background.mix(p.border, style.border_strength);
         let (primary, on_primary) = (accent_fill(p.accent, p.mode), WHITE);
@@ -498,7 +545,7 @@ impl Palette {
         // border on the page, and a firmer one (about 10% white) on the
         // lighter cards and sheets, where an opaque line would vanish.
         if dark {
-            colors.insert("border".to_owned(), ink(p, border).into());
+            colors.insert("border".to_owned(), line_ink(p, border).into());
         }
         // Secondary buttons: a quiet tint of the text color, so they lift off
         // whatever surface they sit on, cards and dialogs included.
@@ -506,16 +553,11 @@ impl Palette {
             "button.background".to_owned(),
             format!("{}{}", p.foreground.hex(), if dark { "20" } else { "12" }).into(),
         );
-        // The modal scrim: 60% black in dark; in light, about 28% of the
-        // theme's own ink, so the page dims in its hue instead of going grey.
+        // The modal scrim is neutral black, never tinted: 50% in dark, 20%
+        // in light.
         colors.insert(
             "overlay".to_owned(),
-            if dark {
-                "#00000099".to_owned()
-            } else {
-                format!("{}48", p.foreground.hex())
-            }
-            .into(),
+            if dark { "#00000080" } else { "#00000033" }.into(),
         );
         let syntax: serde_json::Map<_, _> = [
             ("keyword", p.magenta),
@@ -634,25 +676,50 @@ mod tests {
     }
 
     #[test]
-    fn a_dark_theme_calms_its_accent_and_keeps_white_text_readable() {
+    fn a_dark_theme_calms_its_accent_but_keeps_it_as_light_as_white_text_allows() {
         for accent in [Rgb(0x81a1c1), Rgb(0x69a9ff), Rgb(0x1e66f5)] {
             let (light, dark) = (
                 accent_fill(accent, ThemeMode::Light),
                 accent_fill(accent, ThemeMode::Dark),
             );
             assert_eq!(light, strong_fill(accent));
-            let ([hue, s, l], [dark_hue, dark_s, dark_l]) = (light.hsl(), dark.hsl());
+            let ([hue, s, _], [dark_hue, dark_s, _]) = (light.hsl(), dark.hsl());
             assert!(
                 (hue - dark_hue).abs() < 4.,
                 "{} keeps its hue",
                 accent.hex()
             );
+            assert!(dark_s < s, "{} is less saturated in dark", accent.hex());
+            let contrast = dark.contrast(WHITE);
             assert!(
-                dark_s < s && dark_l < l,
-                "{} is calmer in dark",
+                (4.5..5.2).contains(&contrast),
+                "{} carries white text without going muddy: {contrast:.2}",
                 accent.hex()
             );
-            assert!(dark.contrast(WHITE) >= 4.5);
+        }
+    }
+
+    #[test]
+    fn the_scrim_is_neutral_and_dark_sheets_sit_just_above_the_page() {
+        for palette in [QUIET_DARK, cursor_dark(), QUIET_LIGHT, latte()] {
+            let mut theme = Theme::default();
+            theme.apply_config(&Rc::new(palette.config("test", Style::OMARCHY)));
+            assert_eq!(theme.overlay.s, 0., "the scrim is untinted");
+            assert_eq!(theme.overlay.l, 0., "the scrim is black");
+            let expected = if palette.mode.is_dark() { 0.5 } else { 0.2 };
+            assert!((theme.overlay.a - expected).abs() < 0.01);
+        }
+        let sheet = cursor_dark().config("test", Style::OMARCHY).colors.popover;
+        assert_eq!(sheet.as_deref(), Some("#202020"));
+    }
+
+    #[test]
+    fn light_sidebars_sit_a_visible_step_below_the_conversation() {
+        for palette in [QUIET_LIGHT, latte()] {
+            let config = palette.config("test", Style::OMARCHY);
+            let sidebar = Rgb::parse(config.colors.sidebar.as_deref().unwrap()).unwrap();
+            let step = palette.background.contrast(sidebar);
+            assert!(step >= 1.12, "{} step {step:.2}", palette.background.hex());
         }
     }
 
@@ -707,7 +774,6 @@ mod tests {
                 assert!(rgb(theme.warning).contrast(rgb(theme.accent)) >= 4.5);
             }
             assert_eq!(rgb(theme.ring), rgb(theme.button_primary), "one accent");
-            assert!(theme.overlay.a >= 0.25 && theme.overlay.a <= 0.6);
         }
     }
 
@@ -753,7 +819,7 @@ mod tests {
             )
         );
         assert_eq!(colors.sidebar.as_deref(), Some("#28282b"));
-        assert_eq!(colors.list_active.as_deref(), Some("#3d3d3f"));
+        assert_eq!(colors.list_active.as_deref(), Some("#353537"));
     }
 
     #[test]
