@@ -195,7 +195,8 @@ async fn setup(desktop: bool) -> Setup {
     ));
     manager.reconcile_startup().await.unwrap();
     let registry = else_api::providers::Registry::new(vec![Arc::new(
-        else_api::providers::synthetic::Synthetic::new(Duration::from_millis(5)),
+        else_api::providers::synthetic::Synthetic::new(Duration::from_millis(5))
+            .with_projects(dir.path().join("projects")),
     )]);
     let app = Arc::new(TestApp::with_parts(db, 4, registry, Some(manager.clone())));
     Setup {
@@ -385,6 +386,67 @@ async fn computers_without_a_desktop_say_so() {
     let token = grant(&app, &bot).await;
     let refused = error(&shot(&app, &token, json!({})).await);
     assert!(refused.contains("no desktop"), "{refused}");
+}
+
+fn handed_off(result: &Value) -> Value {
+    assert_ne!(result["isError"], true, "{result}");
+    let content = result["content"].as_array().unwrap();
+    assert_eq!(content.len(), 1, "the bot already saw its screen: {result}");
+    serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_handoff_shares_the_screen_it_asks_the_owner_to_look_at() {
+    let Setup { app, _dir, .. } = setup(true).await;
+    let bot = app.create_bot("Scout").await;
+    let token = grant(&app, &bot).await;
+    let looked = shot(&app, &token, json!({})).await;
+    assert_ne!(looked["isError"], true, "{looked}");
+
+    let reason = json!({ "reason": "X Chat is blank at x.com/messages." });
+    let asked = handed_off(&tool(&app, &token, "computer_handoff", reason).await);
+    assert_eq!(asked["parked"], true, "{asked}");
+    let shared = asked["shared"].as_str().expect("the screen is shared");
+    assert!(
+        shared.starts_with("screens/") && shared.ends_with(".png"),
+        "{shared}"
+    );
+    let file = _dir.path().join("projects").join(&bot).join(shared);
+    assert_eq!(std::fs::read(&file).unwrap(), png(), "{}", file.display());
+    let next = asked["next"].as_str().unwrap();
+    assert!(next.contains(&format!("]({shared})")), "{next}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_handoff_never_wakes_a_computer_to_share_its_screen() {
+    let Setup { app, guest, .. } = setup(true).await;
+    let bot = app.create_bot("Sleeper").await;
+    let token = grant(&app, &bot).await;
+
+    let reason = json!({ "reason": "Log in to X at x.com/login." });
+    let asked = handed_off(&tool(&app, &token, "computer_handoff", reason).await);
+    assert_eq!(asked["parked"], true, "{asked}");
+    assert!(asked.get("shared").is_none(), "{asked}");
+    assert!(
+        guest.state.lock().unwrap().is_empty(),
+        "no computer was created or started"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_handoff_without_a_desktop_still_asks_the_owner() {
+    let Setup { app, .. } = setup(false).await;
+    let bot = app.create_bot("Headless").await;
+    let token = grant(&app, &bot).await;
+
+    let reason = json!({ "reason": "Log in to X at x.com/login." });
+    let asked = handed_off(&tool(&app, &token, "computer_handoff", reason).await);
+    assert_eq!(asked["parked"], true, "{asked}");
+    assert!(asked.get("shared").is_none(), "{asked}");
+    assert!(
+        !asked["next"].as_str().unwrap().contains("screens/"),
+        "{asked}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

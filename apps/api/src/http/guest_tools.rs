@@ -499,36 +499,10 @@ async fn shown(
     mut log: String,
 ) -> Outcome {
     if share {
-        let Some(project) = state
-            .scheduler
-            .registry()
-            .all()
-            .iter()
-            .find_map(|provider| provider.project_dir(grant.bot_id))
-        else {
-            return (
-                tool_error("SHARE_UNAVAILABLE: your project directory is unavailable."),
-                None,
-            );
+        let rel = match shared(state, grant, id, png).await {
+            Ok(rel) => rel,
+            Err(message) => return (tool_error(message), None),
         };
-        let name = format!("{id}.png");
-        let rel = format!("screens/{name}");
-        let data = png.to_vec();
-        let written = tokio::task::spawn_blocking(move || {
-            crate::computers::screens::share(&project, &name, &data)
-        })
-        .await
-        .map_err(std::io::Error::other)
-        .and_then(|r| r);
-        if let Err(err) = written {
-            tracing::warn!(error = %err, "sharing a screenshot failed");
-            return (
-                tool_error(
-                    "SHARE_UNAVAILABLE: the screenshot could not be copied to your project.",
-                ),
-                None,
-            );
-        }
         meta["shared"] = json!(rel);
         meta["next"] = json!(format!(
             "Show it to the owner by writing ![screenshot]({rel}) in your reply."
@@ -536,6 +510,59 @@ async fn shown(
         log.push_str(&format!(", shared as {rel}"));
     }
     (tool_image(meta, png), Some(log))
+}
+
+/// Copy a screenshot to `screens/` in the bot's project and return the
+/// path a reply links to show it.
+pub(super) async fn shared(
+    state: &AppState,
+    grant: &Grant,
+    id: Uuid,
+    png: &[u8],
+) -> Result<String, &'static str> {
+    let project = state
+        .scheduler
+        .registry()
+        .all()
+        .iter()
+        .find_map(|provider| provider.project_dir(grant.bot_id))
+        .ok_or("SHARE_UNAVAILABLE: your project directory is unavailable.")?;
+    let name = format!("{id}.png");
+    let rel = format!("screens/{name}");
+    let data = png.to_vec();
+    let written = tokio::task::spawn_blocking(move || {
+        crate::computers::screens::share(&project, &name, &data)
+    })
+    .await
+    .map_err(std::io::Error::other)
+    .and_then(|r| r);
+    if let Err(err) = written {
+        tracing::warn!(error = %err, "sharing a screenshot failed");
+        return Err("SHARE_UNAVAILABLE: the screenshot could not be copied to your project.");
+    }
+    Ok(rel)
+}
+
+/// The bot's screen as an ID and PNG, for a handoff that shows the owner
+/// what it asks about. `None` unless the desktop already runs: a handoff
+/// never wakes a computer.
+pub(super) async fn current_screen(state: &AppState, grant: &Grant) -> Option<(Uuid, Vec<u8>)> {
+    let computers = state.computers.as_ref()?;
+    let lease = computers
+        .lease_running_desktop(grant.bot_id, &holder(grant))
+        .await
+        .ok()??;
+    match computers
+        .capture_screen(lease, grant.bot_id, Some(grant.turn_id), false)
+        .await
+    {
+        Ok(Ok(shot)) => Some((shot.meta.capture_id, shot.png)),
+        Ok(Err(_)) => None,
+        Err(err) => {
+            tracing::warn!(error = %err, "capturing the screen for a handoff failed");
+            None
+        }
+    }
 }
 
 fn end_turn_on_drop(
