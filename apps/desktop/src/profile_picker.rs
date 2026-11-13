@@ -123,6 +123,9 @@ impl ProfilePicker {
                 .focus_ring(false)
                 .ghost()
                 .selected(browsing)
+                .when(self.tabs && browsing, |button| {
+                    button.bg(crate::appearance::segment_selected(cx))
+                })
                 .disabled(self.disabled)
                 .when(!self.disabled, |button| button.cursor_pointer())
                 .when(self.tabs, |button| button.flex_1().min_w_0())
@@ -140,7 +143,13 @@ impl ProfilePicker {
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
-                                .items_start()
+                                .map(|text| {
+                                    if self.tabs {
+                                        text.items_center()
+                                    } else {
+                                        text.items_start()
+                                    }
+                                })
                                 .child(
                                     h_flex().w_full().min_w_0().gap_1p5().child(
                                         div()
@@ -175,13 +184,8 @@ impl ProfilePicker {
                 }))
         });
         if self.tabs {
-            h_flex()
+            crate::appearance::segment_track(cx)
                 .w_full()
-                .gap_1()
-                .p_1p5()
-                .border_b_1()
-                .border_color(theme.border)
-                .bg(theme.muted.opacity(0.3))
                 .children(items)
                 .into_any_element()
         } else {
@@ -212,7 +216,7 @@ impl ProfilePicker {
                 }
             })
             .overflow_y_scroll()
-            .p_2()
+            .map(|pane| if self.tabs { pane.py_2() } else { pane.p_2() })
             .gap_3();
         let Some(provider) = self.browsed() else {
             return pane.into_any_element();
@@ -344,7 +348,7 @@ impl ProfilePicker {
         let command = setup_command(&reason).map(str::to_owned);
         let copied = self.copied.as_deref() == Some(provider.id.as_str());
         v_flex()
-            .p_3()
+            .map(|setup| if self.tabs { setup.py_2() } else { setup.p_3() })
             .gap_2()
             .child(
                 div()
@@ -433,14 +437,11 @@ impl ProfilePicker {
                         .w_full()
                         .items_center()
                         .gap_1p5()
-                        .child(
-                            div()
-                                .size(px(STOP_DOT))
-                                .rounded_full()
-                                .border_2()
-                                .border_color(if on { theme.primary } else { theme.border })
-                                .bg(if on { theme.primary } else { theme.background }),
-                        )
+                        .child(div().size(px(STOP_DOT)).rounded_full().bg(if on {
+                            theme.primary
+                        } else {
+                            theme.foreground.opacity(0.3)
+                        }))
                         .child(
                             div()
                                 .text_xs()
@@ -491,6 +492,9 @@ impl ProfilePicker {
                 .flex_basis(px(0.))
                 .min_w_0()
                 .selected(selected)
+                .when(selected, |button| {
+                    button.bg(crate::appearance::segment_selected(cx))
+                })
                 .toggled(selected)
                 .icon(icon)
                 .label(label)
@@ -532,12 +536,8 @@ impl ProfilePicker {
                     .child("Speed"),
             )
             .child(
-                h_flex()
+                crate::appearance::segment_track(cx)
                     .flex_1()
-                    .gap_1()
-                    .p_0p5()
-                    .bg(theme.muted.opacity(0.3))
-                    .rounded(theme.radius)
                     .children(speeds),
             )
             .flex_grow(2.);
@@ -547,8 +547,13 @@ impl ProfilePicker {
             h_flex().gap_6().items_start()
         };
         row.w_full()
-            .px_4()
-            .py_3()
+            .map(|row| {
+                if self.tabs {
+                    row.pt_4()
+                } else {
+                    row.px_4().py_3()
+                }
+            })
             .border_t_1()
             .border_color(theme.border)
             .child(reasoning)
@@ -683,10 +688,14 @@ impl Render for ProfilePicker {
             .child(
                 v_flex()
                     .w_full()
-                    .rounded(radius)
-                    .border_1()
-                    .border_color(border)
-                    .overflow_hidden()
+                    .when(self.tabs, |picker| picker.gap_2())
+                    .when(!self.tabs, |picker| {
+                        picker
+                            .rounded(radius)
+                            .border_1()
+                            .border_color(border)
+                            .overflow_hidden()
+                    })
                     .child(
                         body.w_full()
                             .child(self.render_providers(cx))

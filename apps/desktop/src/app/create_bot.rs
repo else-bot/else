@@ -1,15 +1,14 @@
 use super::ElseApp;
 use crate::api::{Category, CreateBotRequest};
+use crate::appearance::{Tier, Tiered as _};
 use crate::avatar::{Avatar, AvatarColor, AvatarPicker, AvatarShape, bot_avatar};
 use crate::profile_picker::ProfilePicker;
 use gpui_kit::component::FocusableExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::searchable_list::SearchableListItem;
 use gpui_kit::component::select::{Select, SelectState};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IndexPath, WindowExt as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, IndexPath, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use uuid::Uuid;
@@ -133,6 +132,7 @@ impl ElseApp {
                 v_flex()
                     .flex_none()
                     .items_center()
+                    .justify_center()
                     .gap_5()
                     .border_color(theme.border)
                     .when(stacked, |studio| studio.w_full().pb_5().border_b_1())
@@ -218,7 +218,7 @@ impl ElseApp {
             let app_ok = app.clone();
             let app_close = app.clone();
             let mine = holder.clone();
-            dialog
+            crate::appearance::modal_surface(dialog, cx)
                 .title(
                     div()
                         .text_lg()
@@ -226,7 +226,6 @@ impl ElseApp {
                         .child("Create bot"),
                 )
                 .centered()
-                .bg(theme.popover)
                 .w(px(704.))
                 .on_close(move |_, _, cx| {
                     let _ = app_close.update(cx, |app, _| {
@@ -260,9 +259,8 @@ impl ElseApp {
                                 .focus_ring(false)
                                 .cursor_pointer()
                                 .label("Create bot")
-                                .primary()
                                 .loading(busy)
-                                .disabled(busy || !can_submit)
+                                .tier(Tier::Primary, busy || !can_submit, cx)
                                 .on_click(move |_, window, cx| {
                                     let _ = app_create
                                         .update(cx, |app, cx| app.submit_create(window, cx));

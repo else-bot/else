@@ -122,11 +122,10 @@ impl Shell {
             let shell = shell.clone();
             let shell_close = shell_close.clone();
             let viewport = window.viewport_size();
-            dialog
+            crate::appearance::modal_surface(dialog, cx)
                 .w((viewport.width - px(64.)).min(px(1040.)))
                 .h((viewport.height - px(64.)).min(px(760.)))
                 .centered()
-                .bg(cx.theme().popover)
                 .entrance(DialogEntrance::None)
                 .p_0()
                 .gap_0()
@@ -260,13 +259,10 @@ impl Shell {
             .border_color(theme.border)
             .bg(theme.secondary.opacity(0.45))
             .child(
-                div()
+                crate::appearance::section_label("This app", cx)
                     .px_2()
                     .pt_1()
-                    .pb_2()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("THIS APP"),
+                    .pb_2(),
             )
             .child(nav_item(
                 "settings-server",
@@ -283,14 +279,11 @@ impl Shell {
                 &setup.navigation_focus[6],
             ))
             .child(
-                div()
+                crate::appearance::section_label("This server", cx)
                     .px_2()
                     .pt_6()
                     .pb_2()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .truncate()
-                    .child("THIS SERVER"),
+                    .truncate(),
             )
             .child(nav_item(
                 "settings-email",

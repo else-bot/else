@@ -1,4 +1,5 @@
 use super::*;
+use crate::appearance::{Tier, Tiered as _};
 use crate::updates::{
     Channel as UpdateChannel, Check as UpdateCheck, Commands, Operation, Snapshot, Work,
 };
@@ -693,10 +694,10 @@ impl Shell {
     fn render_update_output(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let view = self.update_view();
         let status = match view.snapshot.operation {
-            Operation::Installing | Operation::Preparing => "LIVE",
-            Operation::Ready { .. } => "COMPLETE",
-            Operation::Failed(_) => "FAILED",
-            _ => "OUTPUT",
+            Operation::Installing | Operation::Preparing => "Live",
+            Operation::Ready { .. } => "Complete",
+            Operation::Failed(_) => "Failed",
+            _ => "Output",
         };
         v_flex()
             .flex_1()
@@ -824,9 +825,16 @@ impl Shell {
         Button::new(id)
             .label(label)
             .focus_ring(false)
-            .when(primary, |button| button.primary())
             .when(!disabled, |button| button.cursor_pointer())
-            .disabled(disabled)
+            .tier(
+                if primary {
+                    Tier::Primary
+                } else {
+                    Tier::Secondary
+                },
+                disabled,
+                cx,
+            )
             .on_click(cx.listener(move |shell, _, window, cx| {
                 if matches!(action, Action::Later) {
                     shell.cancel(window, cx);

@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use super::ElseApp;
+use crate::appearance::{Tier, Tiered as _};
 use crate::avatar::bot_avatar;
 use crate::model::{DiffLine, DiffOp, RuleChange, RulesFile, RulesUpdate, RulesVersion};
 use gpui_kit::assets::IconName;
@@ -133,6 +134,7 @@ fn diff_block(diff: &[DiffLine], cx: &App) -> Div {
         .overflow_hidden()
         .font_family(theme.mono_font_family.clone())
         .text_xs()
+        .line_height(px(18.))
         .children(diff.iter().map(|line| {
             let (sign, color, fill) = match line.op {
                 DiffOp::Same => (" ", theme.muted_foreground, None),
@@ -157,13 +159,14 @@ fn diff_block(diff: &[DiffLine], cx: &App) -> Div {
         }))
 }
 
+/// The tallest a tab's body grows before it scrolls; shorter content
+/// leaves the dialog shorter.
+const BODY_MAX: f32 = 380.;
+
 fn quote(words: &str, cx: &App) -> Div {
     let theme = cx.theme();
     div()
         .w_full()
-        .pl_2p5()
-        .border_l_2()
-        .border_color(theme.border)
         .text_sm()
         .text_color(theme.muted_foreground)
         .child(format!("From your message: \u{201c}{words}\u{201d}"))
@@ -245,7 +248,9 @@ impl ElseApp {
         }
         let owner = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
-            let dialog = dialog.w(px(680.)).centered().bg(cx.theme().popover);
+            let dialog = crate::appearance::modal_surface(dialog, cx)
+                .w(px(680.))
+                .centered();
             let Some(app) = owner.upgrade() else {
                 return dialog;
             };
@@ -462,14 +467,7 @@ impl ElseApp {
         let heading = h_flex()
             .w_full()
             .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.muted_foreground)
-                    .child("RULES"),
-            )
+            .child(crate::appearance::section_label("Rules", cx).flex_1())
             .when(only_history, |row| row.child(open));
         let body = v_flex().gap_3().child(heading);
         let muted = |text: String| {
@@ -609,7 +607,8 @@ impl ElseApp {
                 .child("Loading…")
                 .into_any_element();
         };
-        let tabs = h_flex().gap_1().children(
+        let selected_fill = crate::appearance::segment_selected(cx);
+        let tabs = crate::appearance::segment_track(cx).children(
             [(RulesTab::Rules, "Rules"), (RulesTab::History, "History")]
                 .into_iter()
                 .map(|(value, label)| {
@@ -617,8 +616,11 @@ impl ElseApp {
                         .ghost()
                         .focus_ring(false)
                         .cursor_pointer()
+                        .small()
+                        .px_3()
                         .label(label)
                         .selected(value == tab)
+                        .when(value == tab, |button| button.bg(selected_fill))
                         .on_click(on(owner, move |app, _, cx| app.set_rules_tab(value, cx)))
                 }),
         );
@@ -629,6 +631,9 @@ impl ElseApp {
         let problem = self.rules.get(&bot).and_then(|cache| cache.problem.clone());
         let markdown = file.markdown.clone();
         let focus = dialog.focus.clone();
+        let action = (tab == RulesTab::History)
+            .then(|| self.history_action(bot, file, owner, cx))
+            .flatten();
         let footer = h_flex()
             .w_full()
             .items_center()
@@ -639,16 +644,22 @@ impl ElseApp {
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .text_xs()
                     .text_color(if problem.is_some() {
                         theme.danger
                     } else {
                         theme.muted_foreground
                     })
-                    .child(
-                        problem
-                            .unwrap_or_else(|| format!("To change a rule, tell {name} in chat.")),
-                    ),
+                    .map(|hint| match (problem, action) {
+                        (Some(problem), action) => hint
+                            .child(problem)
+                            .children(action.map(|action| h_flex().child(action))),
+                        (None, Some(action)) => hint.child(h_flex().child(action)),
+                        (None, None) => {
+                            hint.child(format!("To change a rule, tell {name} in chat."))
+                        }
+                    }),
             )
             .child(
                 Button::new("rules-copy")
@@ -674,8 +685,8 @@ impl ElseApp {
         v_flex()
             .w_full()
             .gap_3()
-            .child(tabs)
-            .child(div().h(px(300.)).w_full().child(body))
+            .child(h_flex().child(tabs))
+            .child(div().w_full().child(body))
             .child(footer)
             .into_any_element()
     }
@@ -738,12 +749,67 @@ impl ElseApp {
         });
         v_flex()
             .id("rules-sections")
-            .size_full()
+            .w_full()
+            .max_h(px(BODY_MAX))
             .overflow_y_scroll()
             .track_scroll(&dialog.scroll)
             .gap_2()
             .children(sections)
             .into_any_element()
+    }
+
+    /// History's one action: clear or step back from the current version,
+    /// or restore the older version being viewed.
+    fn history_action(
+        &self,
+        bot: Uuid,
+        file: &RulesFile,
+        owner: &WeakEntity<ElseApp>,
+        cx: &App,
+    ) -> Option<Button> {
+        let dialog = self.rules_dialog.as_ref()?;
+        let picked = dialog
+            .version
+            .and_then(|v| file.history.iter().find(|h| h.version == v))
+            .or_else(|| file.history.first())?;
+        let restoring = self.rules.get(&bot).is_some_and(|cache| cache.restoring)
+            || self.rules_version_of(bot) != Some(file.version);
+        let expected = file.version;
+        let current = picked.version == file.version;
+        let target = if current {
+            picked.version - 1
+        } else {
+            picked.version
+        };
+        if target < 0 {
+            return None;
+        }
+        let (label, icon, color) = if target == 0 {
+            ("Clear rules".to_owned(), IconName::Trash, cx.theme().danger)
+        } else {
+            (
+                format!("Restore v{target}"),
+                IconName::RotateCw,
+                cx.theme().secondary_foreground,
+            )
+        };
+        Some(
+            Button::new(if current {
+                "rules-restore"
+            } else {
+                "rules-restore-this"
+            })
+            .focus_ring(false)
+            .cursor_pointer()
+            .icon(Icon::new(icon).text_color(color))
+            .label(label)
+            .loading(restoring)
+            .tier(Tier::Ghost, restoring, cx)
+            .text_color(color)
+            .on_click(on(owner, move |app, window, cx| {
+                app.restore_rules(bot, target, expected, window, cx)
+            })),
+        )
     }
 
     fn render_history_tab(
@@ -798,7 +864,7 @@ impl ElseApp {
             .id("rules-versions")
             .w(px(200.))
             .flex_none()
-            .h_full()
+            .max_h(px(BODY_MAX))
             .overflow_y_scroll()
             .gap_0p5()
             .pr_2()
@@ -847,60 +913,21 @@ impl ElseApp {
                             ),
                     )
             }));
-        let restoring = self.rules.get(&bot).is_some_and(|cache| cache.restoring)
-            || self.rules_version_of(bot) != Some(file.version);
-        let target = picked.version - 1;
-        let expected = file.version;
-        let restore = (picked.version == file.version && target >= 0).then(|| {
-            Button::new("rules-restore")
-                .focus_ring(false)
-                .cursor_pointer()
-                .icon(IconName::RotateCw)
-                .label(if target == 0 {
-                    "Clear rules".to_owned()
-                } else {
-                    format!("Restore v{target}")
-                })
-                .loading(restoring)
-                .disabled(restoring)
-                .on_click(on(owner, move |app, window, cx| {
-                    app.restore_rules(bot, target, expected, window, cx)
-                }))
-        });
-        let restore_this = (picked.version != file.version).then(|| {
-            let version = picked.version;
-            Button::new("rules-restore-this")
-                .focus_ring(false)
-                .cursor_pointer()
-                .icon(IconName::RotateCw)
-                .label(format!("Restore v{version}"))
-                .loading(restoring)
-                .disabled(restoring)
-                .on_click(on(owner, move |app, window, cx| {
-                    app.restore_rules(bot, version, expected, window, cx)
-                }))
-        });
         let detail = v_flex()
             .id("rules-version-detail")
             .flex_1()
             .min_w_0()
-            .h_full()
+            .max_h(px(BODY_MAX))
             .overflow_y_scroll()
             .gap_2p5()
             .when(!picked.owner_words.is_empty(), |col| {
                 col.child(quote(&picked.owner_words, cx))
             })
-            .child(diff_block(&picked.diff, cx))
-            .child(
-                h_flex()
-                    .w_full()
-                    .child(div().flex_1())
-                    .children(restore)
-                    .children(restore_this),
-            );
+            .child(diff_block(&picked.diff, cx));
         h_flex()
-            .size_full()
-            .items_start()
+            .w_full()
+            .max_h(px(BODY_MAX))
+            .items_stretch()
             .gap_3()
             .child(list)
             .child(detail)

@@ -1,4 +1,5 @@
 use super::*;
+use crate::appearance::{Tier, Tiered as _};
 use chrono::{DateTime, Local, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -554,9 +555,12 @@ impl Shell {
                         } else {
                             "Back up now"
                         })
-                        .primary()
                         .loading(view.operation == Operation::Starting)
-                        .disabled(busy || snapshot.running || !has_destination || unavailable)
+                        .tier(
+                            Tier::Primary,
+                            busy || snapshot.running || !has_destination || unavailable,
+                            cx,
+                        )
                         .on_click(
                             cx.listener(|shell, _, window, cx| shell.run_remote_backup(window, cx)),
                         ),

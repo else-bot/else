@@ -16,7 +16,7 @@ use gpui_kit::component::ThemeMode;
 use notify::Watcher as _;
 use tokio::sync::mpsc;
 
-use super::{Palette, Rgb, text_on};
+use super::{Palette, Rgb};
 
 /// `omarchy-theme-set` replaces the theme in several steps; reading once
 /// they settle avoids parsing a half-moved directory.
@@ -110,7 +110,6 @@ pub(super) fn parse(text: &str) -> Result<Palette, Error> {
         muted_foreground,
         border,
         accent,
-        on_accent: text_on(accent, background, foreground),
         selection,
         red,
         yellow,
@@ -355,7 +354,7 @@ color8 = "#555753"
             );
             assert_eq!(
                 colors.primary.as_deref(),
-                Some(palette.accent.hex().as_str())
+                Some(super::super::strong_fill(palette.accent).hex().as_str())
             );
             assert_eq!(
                 colors.selection.as_deref(),
@@ -391,11 +390,9 @@ color8 = "#555753"
     fn text_roles_stay_legible() {
         let tokyo = parse(&TOKYO.replace("#565f89", "#2a2b36")).unwrap();
         assert!(tokyo.background.contrast(tokyo.muted_foreground) >= 4.5);
-        let ansi = parse(ANSI).unwrap();
-        assert!(ansi.accent.contrast(ansi.on_accent) >= 4.5);
-        assert!(ansi.on_accent.luminance() < 0.2);
-        let flexoki = parse(FLEXOKI).unwrap();
-        assert!(flexoki.accent.contrast(flexoki.on_accent) >= 4.5);
+        for palette in [parse(ANSI).unwrap(), parse(FLEXOKI).unwrap()] {
+            assert!(super::super::strong_fill(palette.accent).contrast(super::super::WHITE) >= 4.5);
+        }
     }
 
     #[test]

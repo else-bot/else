@@ -2207,13 +2207,9 @@ fn new_details(bot: &Bot, window: &mut Window, cx: &mut Context<ElseApp>) -> Det
 }
 
 fn section(title: &'static str, cx: &App) -> Div {
-    v_flex().gap_3().child(
-        div()
-            .text_xs()
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(cx.theme().muted_foreground)
-            .child(title.to_uppercase()),
-    )
+    v_flex()
+        .gap_3()
+        .child(crate::appearance::section_label(title, cx))
 }
 
 fn muted(text: impl Into<SharedString>, cx: &App) -> Div {

@@ -3,8 +3,12 @@ mod omarchy;
 
 use std::rc::Rc;
 
-use gpui_kit::component::{Theme, ThemeConfig, ThemeMode};
-use gpui_kit::{App, Global, Task, Window};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::dialog::Dialog;
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Theme, ThemeConfig, ThemeMode};
+use gpui_kit::{
+    App, Div, FontWeight, Global, ParentElement as _, SharedString, Styled, Task, Window, div,
+};
 
 enum Source {
     System,
@@ -62,6 +66,100 @@ fn install_omarchy(palette: Palette, cx: &mut App) {
     let config = Rc::new(palette.config("Omarchy", Style::OMARCHY));
     state.source = Source::Omarchy(palette);
     Theme::update(cx, |theme| theme.apply_config(&config));
+}
+
+/// A section heading inside a page, panel or dialog: sentence case, small
+/// and quiet, so it groups without competing with titles.
+pub fn section_label(text: impl Into<SharedString>, cx: &App) -> Div {
+    div()
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(cx.theme().muted_foreground.opacity(0.9))
+        .child(text.into())
+}
+
+/// The surface every modal sheet shares: one step above the page with a
+/// visible edge, so it lifts off the scrim in both light and dark.
+pub fn modal_surface(dialog: Dialog, cx: &App) -> Dialog {
+    let theme = cx.theme();
+    let edge = if theme.mode.is_dark() {
+        theme.foreground.opacity(0.12)
+    } else {
+        theme.border
+    };
+    dialog.bg(theme.popover).border_color(edge)
+}
+
+/// The well behind a segmented control, sunk below the surface it sits on:
+/// the page color in dark, a faint tint of the text color in light.
+pub fn segment_track(cx: &App) -> Div {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .p_0p5()
+        .gap_0p5()
+        .rounded(theme.radius)
+        .bg(if theme.mode.is_dark() {
+            theme.background
+        } else {
+            theme.foreground.opacity(0.06)
+        })
+}
+
+/// The fill of a segmented control's selected segment: raised above its
+/// track in dark, white-like in light.
+pub fn segment_selected(cx: &App) -> gpui_kit::Hsla {
+    let theme = cx.theme();
+    if theme.mode.is_dark() {
+        theme.secondary_active
+    } else {
+        theme.popover
+    }
+}
+
+/// The three button tiers. Disabled keeps the tier's own look at reduced
+/// opacity instead of the component library's separate bordered style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    Primary,
+    Secondary,
+    Ghost,
+}
+
+pub trait Tiered: Sized {
+    fn tier(self, tier: Tier, disabled: bool, cx: &App) -> Self;
+}
+
+impl Tiered for Button {
+    fn tier(self, tier: Tier, disabled: bool, cx: &App) -> Self {
+        use gpui_kit::component::button::ButtonVariants as _;
+        let theme = cx.theme();
+        let (button, fill, text, edge) = match tier {
+            Tier::Primary => (
+                self.primary(),
+                theme.button_primary,
+                theme.button_primary_foreground,
+                theme.button_primary,
+            ),
+            Tier::Secondary => (self, theme.button, theme.button_foreground, theme.input),
+            Tier::Ghost => (
+                self.ghost(),
+                theme.transparent,
+                theme.secondary_foreground,
+                theme.transparent,
+            ),
+        };
+        let button = button.disabled(disabled);
+        if disabled {
+            button
+                .opacity(0.4)
+                .bg(fill)
+                .text_color(text)
+                .border_color(edge)
+        } else {
+            button
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -136,6 +234,41 @@ impl Rgb {
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 
+    fn hsl(self) -> [f32; 3] {
+        let [r, g, b] = self.channels().map(|c| c as f32 / 255.);
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        let l = (max + min) / 2.;
+        let d = max - min;
+        if d == 0. {
+            return [0., 0., l];
+        }
+        let s = d / (1. - (2. * l - 1.).abs());
+        let h = if max == r {
+            ((g - b) / d).rem_euclid(6.)
+        } else if max == g {
+            (b - r) / d + 2.
+        } else {
+            (r - g) / d + 4.
+        };
+        [h * 60., s, l]
+    }
+
+    fn from_hsl([h, s, l]: [f32; 3]) -> Self {
+        let c = (1. - (2. * l - 1.).abs()) * s;
+        let x = c * (1. - ((h / 60.).rem_euclid(2.) - 1.).abs());
+        let (r, g, b) = match (h / 60.) as u32 % 6 {
+            0 => (c, x, 0.),
+            1 => (x, c, 0.),
+            2 => (0., c, x),
+            3 => (0., x, c),
+            4 => (x, 0., c),
+            _ => (c, 0., x),
+        };
+        let m = l - c / 2.;
+        let channel = |v: f32| ((v + m).clamp(0., 1.) * 255.).round() as u32;
+        Self(channel(r) << 16 | channel(g) << 8 | channel(b))
+    }
+
     fn most_legible(self, candidates: &[Self]) -> Self {
         candidates
             .iter()
@@ -157,6 +290,19 @@ fn text_on(fill: Rgb, background: Rgb, foreground: Rgb) -> Rgb {
     }
 }
 
+/// The fill for primary actions and selected controls: the accent's hue
+/// at full strength, deep enough to carry white text. A theme whose accent
+/// is pale or greyed (a soft blue on a dark theme) still gets a solid,
+/// unmistakable primary instead of a fill that reads as disabled.
+fn strong_fill(accent: Rgb) -> Rgb {
+    let [h, s, l] = accent.hsl();
+    let s = if s < 0.12 { s } else { s.max(0.68) };
+    (0..=60)
+        .map(|step| Rgb::from_hsl([h, s, l.min(0.62) - step as f32 / 100.]))
+        .find(|fill| fill.contrast(WHITE) >= 4.5)
+        .unwrap_or(BLACK)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Palette {
     mode: ThemeMode,
@@ -167,7 +313,6 @@ struct Palette {
     muted_foreground: Rgb,
     border: Rgb,
     accent: Rgb,
-    on_accent: Rgb,
     selection: Rgb,
     red: Rgb,
     yellow: Rgb,
@@ -186,7 +331,6 @@ const QUIET_LIGHT: Palette = Palette {
     muted_foreground: Rgb(0x66666d),
     border: Rgb(0xdfdfe4),
     accent: Rgb(0x0a6fdb),
-    on_accent: Rgb(0xffffff),
     selection: Rgb(0xe1e9f6),
     red: Rgb(0xc93c3c),
     yellow: Rgb(0x9b6500),
@@ -205,7 +349,6 @@ const QUIET_DARK: Palette = Palette {
     muted_foreground: Rgb(0xa0a0a8),
     border: Rgb(0x3a3a3e),
     accent: Rgb(0x69a9ff),
-    on_accent: Rgb(0x101f36),
     selection: Rgb(0x35445a),
     red: Rgb(0xff9b9b),
     yellow: Rgb(0xe7be75),
@@ -226,7 +369,7 @@ impl Palette {
         let raised = if dark {
             p.raised
         } else {
-            p.background.mix(p.foreground, 0.025)
+            p.background.mix(p.foreground, 0.05)
         };
         let hover = highlight(raised);
         let active = highlight(hover);
@@ -257,7 +400,13 @@ impl Palette {
             .find(|color| hover.contrast(*color) >= 4.6)
             .unwrap_or_else(|| on(hover));
         let on_danger = on(danger);
-        let popover = if dark { p.raised } else { p.background };
+        // Dialogs and menus sit one step above the page: lighter than it in
+        // dark, near white in light.
+        let popover = if dark {
+            p.raised.mix(p.foreground, 0.03)
+        } else {
+            p.background.mix(WHITE, 0.75)
+        };
         let sidebar = if dark {
             p.surface
         } else {
@@ -267,6 +416,7 @@ impl Palette {
             .background
             .mix(p.foreground, if dark { 0.14 } else { 0.10 });
         let border = p.background.mix(p.border, style.border_strength);
+        let (primary, on_primary) = (strong_fill(p.accent), WHITE);
         let roles = [
             ("background", p.background),
             ("foreground", p.foreground),
@@ -285,27 +435,27 @@ impl Palette {
             ("button.active.background", active),
             ("accent.background", hover),
             ("accent.foreground", p.foreground),
-            ("primary.background", p.accent),
-            ("primary.foreground", p.on_accent),
-            ("button.primary.background", p.accent),
-            ("button.primary.foreground", p.on_accent),
+            ("primary.background", primary),
+            ("primary.foreground", on_primary),
+            ("button.primary.background", primary),
+            ("button.primary.foreground", on_primary),
             (
                 "button.primary.hover.background",
-                button_state(p.accent, p.on_accent, 0.12),
+                button_state(primary, on_primary, 0.12),
             ),
             (
                 "button.primary.active.background",
-                button_state(p.accent, p.on_accent, 0.20),
+                button_state(primary, on_primary, 0.20),
             ),
             ("tab.active.background", selected),
             ("tab.active.foreground", p.foreground),
             (
                 "primary.hover.background",
-                button_state(p.accent, p.on_accent, 0.12),
+                button_state(primary, on_primary, 0.12),
             ),
             (
                 "primary.active.background",
-                button_state(p.accent, p.on_accent, 0.20),
+                button_state(primary, on_primary, 0.20),
             ),
             ("ring", p.accent),
             ("caret", p.accent),
@@ -323,9 +473,12 @@ impl Palette {
             ("sidebar.border", border),
             ("sidebar.accent.background", hover),
             ("sidebar.accent.foreground", p.foreground),
-            ("sidebar.primary.background", p.accent),
-            ("sidebar.primary.foreground", p.on_accent),
-            ("title_bar.background", p.surface),
+            ("sidebar.primary.background", primary),
+            ("sidebar.primary.foreground", on_primary),
+            (
+                "title_bar.background",
+                if dark { p.surface } else { sidebar },
+            ),
             ("title_bar.border", border),
             ("status_bar.background", p.surface),
             ("status_bar.border", border),
@@ -365,7 +518,7 @@ impl Palette {
             .collect();
         colors.insert(
             "overlay".to_owned(),
-            if dark { "#00000073" } else { "#00000038" }.into(),
+            if dark { "#0000007f" } else { "#0000004d" }.into(),
         );
         let syntax: serde_json::Map<_, _> = [
             ("keyword", p.magenta),
@@ -444,8 +597,40 @@ mod tests {
             assert!(palette.background.contrast(palette.foreground) >= 7.);
             assert!(palette.background.contrast(palette.muted_foreground) >= 4.5);
             assert!(palette.raised.contrast(palette.foreground) >= 7.);
-            assert!(palette.accent.contrast(palette.on_accent) >= 4.5);
+            assert!(strong_fill(palette.accent).contrast(WHITE) >= 4.5);
         }
+    }
+
+    #[test]
+    fn a_pale_accent_becomes_a_saturated_fill_of_the_same_hue() {
+        for accent in [Rgb(0x81a1c1), Rgb(0x69a9ff), Rgb(0x1e66f5), Rgb(0xf1e05a)] {
+            let fill = strong_fill(accent);
+            let ([hue, _, _], [fill_hue, saturation, _]) = (accent.hsl(), fill.hsl());
+            assert!(
+                (hue - fill_hue).abs() < 4.,
+                "{} keeps its hue",
+                accent.hex()
+            );
+            assert!(saturation >= 0.6, "{} becomes saturated", accent.hex());
+            assert!(
+                fill.contrast(WHITE) >= 4.5,
+                "{} carries white text",
+                accent.hex()
+            );
+        }
+        let strong = Rgb(0x1e66f5);
+        for (fill, accent) in strong_fill(strong)
+            .channels()
+            .into_iter()
+            .zip(strong.channels())
+        {
+            assert!(
+                fill.abs_diff(accent) <= 1,
+                "an already strong accent is kept"
+            );
+        }
+        let grey = strong_fill(Rgb(0x9a9a9a)).hsl();
+        assert!(grey[1] < 0.05, "a neutral accent stays neutral");
     }
 
     fn cursor_dark() -> Palette {
@@ -468,7 +653,6 @@ mod tests {
             foreground: Rgb(0x4c4f69),
             muted_foreground: Rgb(0x7b7e8f),
             accent: Rgb(0x1e66f5),
-            on_accent: WHITE,
             yellow: Rgb(0xdf8e1d),
             ..QUIET_LIGHT
         }
@@ -483,7 +667,7 @@ mod tests {
             for (actual, expected) in rgb(theme.button_primary)
                 .channels()
                 .into_iter()
-                .zip(palette.accent.channels())
+                .zip(strong_fill(palette.accent).channels())
             {
                 assert!(actual.abs_diff(expected) <= 1);
             }
@@ -491,6 +675,7 @@ mod tests {
             assert!(
                 rgb(theme.button_primary).contrast(rgb(theme.button_primary_foreground)) >= 4.5
             );
+            assert_eq!(rgb(theme.button_primary_foreground), WHITE);
             assert_ne!(rgb(theme.secondary_active), palette.accent);
             assert!(rgb(theme.secondary_active).contrast(rgb(theme.secondary_foreground)) >= 4.5);
             if !palette.mode.is_dark() {
@@ -535,7 +720,10 @@ mod tests {
         assert_eq!(config.shadow, Some(true));
         let colors = &config.colors;
         assert_eq!(colors.border.as_deref(), Some("#3a3a3e"));
-        assert_eq!(colors.primary.as_deref(), Some("#69a9ff"));
+        assert_eq!(
+            colors.primary.as_deref(),
+            Some(strong_fill(QUIET_DARK.accent).hex().as_str())
+        );
         assert_eq!(colors.sidebar.as_deref(), Some("#28282b"));
         assert_eq!(colors.list_active.as_deref(), Some("#3d3d3f"));
     }
