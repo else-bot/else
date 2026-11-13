@@ -282,6 +282,11 @@ async fn qualify(library: &Library, mcp_id: &str, tool: &str) -> Result<(), Refu
 }
 
 pub async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    let (value, log) = park(state, grant, args).await;
+    (super::shared_mcp::json_error(value), log)
+}
+
+async fn park(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     let (spec, approval) = match parse(args) {
         Ok(parsed) => parsed,
         Err(message) => return (tool_error(&message), None),

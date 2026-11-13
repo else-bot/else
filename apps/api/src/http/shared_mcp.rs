@@ -175,7 +175,14 @@ pub(crate) fn oversized_purpose(purpose: &str) -> Option<String> {
     })
 }
 
+/// Runs a shared MCP tool. Every failure reaches the bot in the same JSON
+/// envelope as a result, whichever layer refused it.
 pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
+    let (value, log) = run(state, grant, name, args).await;
+    (json_error(value), log)
+}
+
+async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
     let mut approval = None;
     let mut upstream_error = false;
     let result = match name {
@@ -368,6 +375,30 @@ fn failure(error: &Error) -> Value {
 
 fn invalid(message: &str) -> Value {
     envelope("invalid_request", message)
+}
+
+/// Turns a plain-text failure, such as an approval refusal written as
+/// `DENIED: ...`, into the JSON error envelope. Results and failures that
+/// are already JSON objects pass through unchanged.
+pub(crate) fn json_error(value: Value) -> Value {
+    if value["isError"] != true {
+        return value;
+    }
+    let Some(text) = value["content"][0]["text"].as_str() else {
+        return value;
+    };
+    if serde_json::from_str::<Value>(text).is_ok_and(|parsed| parsed.is_object()) {
+        return value;
+    }
+    let (code, message) = match text.split_once(": ") {
+        Some((code, message))
+            if !code.is_empty() && code.bytes().all(|b| b.is_ascii_uppercase() || b == b'_') =>
+        {
+            (code.to_ascii_lowercase(), message)
+        }
+        _ => ("error".to_owned(), text),
+    };
+    envelope(&code, message)
 }
 
 fn envelope(code: &str, message: &str) -> Value {
@@ -689,4 +720,44 @@ async fn cancel_pending_authorization(
         .await
         .map_err(api_error)?;
     Ok(Json(json!(status)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::mcp::tool_error;
+
+    fn error_of(value: &Value) -> Value {
+        serde_json::from_str(value["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_plain_text_refusal_becomes_the_json_error_envelope() {
+        let denied = json_error(tool_error(
+            "DENIED: the owner declined this external action.",
+        ));
+        assert_eq!(denied["isError"], true);
+        assert_eq!(
+            error_of(&denied)["error"],
+            json!({"code": "denied", "message": "the owner declined this external action."})
+        );
+        let bare = json_error(tool_error("The shared MCP library is unavailable."));
+        assert_eq!(error_of(&bare)["error"]["code"], "error");
+
+        let already = invalid("Use an MCP id only.");
+        assert_eq!(
+            json_error(already.clone()),
+            already,
+            "an envelope passes through"
+        );
+        let upstream = json!({"content": [{"type": "text", "text": "{\"mcp_id\":\"x\"}"}],
+                              "isError": true});
+        assert_eq!(
+            json_error(upstream.clone()),
+            upstream,
+            "upstream JSON is kept"
+        );
+        let ok = tool_result(json!({"status": "ok"}));
+        assert_eq!(json_error(ok.clone()), ok);
+    }
 }
