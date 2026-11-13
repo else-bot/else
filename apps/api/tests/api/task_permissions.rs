@@ -862,3 +862,62 @@ async fn upgrading_keeps_existing_task_grants_on_the_calls_they_were_saved_for()
         assert!(matches(task, false).await, "{task}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upgraded_task_confirmation_cannot_be_saved_again_from_its_owner_message() {
+    use else_api::app::questions::{Covers, Kind, PermissionTarget};
+    let h = recorder::harness(4).await;
+    let app = &h.app;
+    let main = app.main_bot().await;
+    let authorization = "Always allow managing Tailscale over SSH on omarchy-m1.";
+    let (turn, token) = h.running(&main, &format!("{GATE} {authorization}")).await;
+    let confirm = |target: Value| {
+        let token = token.clone();
+        async move {
+            tool(
+                app,
+                &token,
+                "confirm_permission",
+                json!({ "target": target, "authorization": authorization }),
+            )
+            .await
+        }
+    };
+    let confirmed = confirm(task_target(TASK)).await;
+    assert_eq!(confirmed.result["status"], "approved", "{}", confirmed.body);
+    let legacy = PermissionTarget::Task {
+        task: TASK.into(),
+        target: HOST.into(),
+        kind: Kind::Destructive,
+        covers: Covers::Both,
+    };
+    sqlx::query(
+        "UPDATE owner_questions SET action_hash = ?2,
+             action = json_set(action, '$.permission.covers', 'both') WHERE id = ?1",
+    )
+    .bind(
+        confirmed.result["question_id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap(),
+    )
+    .bind(legacy.legacy_permission_hash().unwrap().as_slice())
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    let scope = permissions(app, &main).await[0]["scope"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    revoke(app, &main, &scope).await;
+
+    for covers in ["host", "computer"] {
+        let mut target = task_target(TASK);
+        target["covers"] = json!(covers);
+        let retry = confirm(target).await;
+        assert_eq!(retry.code(), "AUTHORIZATION_USED", "{}", retry.body);
+    }
+    assert!(permissions(app, &main).await.is_empty());
+    h.release(turn).await;
+}

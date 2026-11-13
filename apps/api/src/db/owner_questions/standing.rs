@@ -88,6 +88,13 @@ pub async fn confirm(
             return Err(ConfirmError::RoutineChanged);
         }
     }
+    // A task grant confirmed before grants named what they cover keeps its
+    // old hash; its owner message has authorized a grant already.
+    if let Some(hash) = target.legacy_permission_hash()
+        && super::find_hash(&mut tx, turn_id, &hash).await?.is_some()
+    {
+        return Err(ConfirmError::AuthorizationUsed);
+    }
     let spec = Spec::standing_permission(target.clone(), authorization);
     if let Some(question) = find_same(&mut tx, turn_id, &spec).await? {
         if question.action.as_ref() != spec.approval.as_ref().map(|approval| &approval.action) {

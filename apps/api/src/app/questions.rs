@@ -429,6 +429,22 @@ impl PermissionTarget {
         }
     }
 
+    /// The approval hash of a `confirm_permission` question for this task
+    /// target saved before task grants named what they cover.
+    pub fn legacy_permission_hash(&self) -> Option<[u8; 32]> {
+        let Self::Task { kind, .. } = self else {
+            return None;
+        };
+        let scope = self.task_scope()?;
+        let key = format!(
+            "task:{}:{}:{}",
+            kind.as_str(),
+            hex::encode(scope.task.to_lowercase()),
+            hex::encode(&scope.target),
+        );
+        Some(hash(&[b"standing_permission", key.as_bytes()]))
+    }
+
     /// The saved scopes that would cover this target: its own, and for a
     /// task, also a grant saved before grants named what they cover.
     pub fn covering_scopes(&self) -> Vec<String> {
