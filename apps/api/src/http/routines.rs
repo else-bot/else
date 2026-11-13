@@ -201,9 +201,9 @@ fn fields() -> Value {
                     "description": "The complete task to run each time, self-contained: you \
                         will read it later without this conversation." },
         "check": { "type": "string", "minLength": 1, "maxLength": MAX_CHECK_BYTES,
-                   "description": "Shell command your computer runs before each run, without \
-                       secrets or approval. Exit 0 with no output skips the run; other output \
-                       is added to the task." },
+                   "description": "Read-only shell command your computer runs before each run: no \
+                       secrets, approval, or external effects. Exit 0 with no output skips the \
+                       run; other output is added to the task." },
         "cron": { "type": "string",
                   "description": "Standard five-field cron: minute hour day-of-month month \
                       day-of-week, digits with * , - / only (for example 0 9 * * 1-5 for \
@@ -473,8 +473,9 @@ pub fn update_schema() -> Value {
     );
     properties["check"]["type"] = json!(["string", "null"]);
     properties["check"]["description"] = json!(
-        "Shell command your computer runs before each run, without secrets or approval. Exit 0 \
-         with no output skips the run; other output is added to the task. null removes it."
+        "Read-only shell command run before each run: no secrets, approval, or external \
+         effects. Exit 0 with no output skips the run; other output is added to the task. null \
+         removes it."
     );
     properties["enabled"] = json!({ "type": "boolean",
         "description": "False pauses future runs; true resumes counting from now." });
