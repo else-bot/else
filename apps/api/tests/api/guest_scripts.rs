@@ -184,6 +184,18 @@ async fn guest_file_arguments_survive_shell_quoting_and_exact_byte_reads() {
         .unwrap()
         .unwrap();
     assert_eq!((size, preview.as_str()), (5, "éABC"));
+    for bot_path in [path.to_owned(), format!("~/work/{path}")] {
+        let fetched = setup
+            .manager
+            .fetch_artifact(lease_id, setup.bot, None, &bot_path, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            fetched.as_ref().map(|(_, size, _, _)| *size),
+            Ok(5),
+            "{bot_path}: {fetched:?}"
+        );
+    }
     assert_eq!(
         std::fs::read(
             setup
