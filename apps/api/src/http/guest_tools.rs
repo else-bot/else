@@ -548,10 +548,10 @@ pub(super) async fn shared(
 /// never wakes a computer.
 pub(super) async fn current_screen(state: &AppState, grant: &Grant) -> Option<(Uuid, Vec<u8>)> {
     let computers = state.computers.as_ref()?;
-    if !computers.desktop_running(grant.bot_id).await.ok()? {
-        return None;
-    }
-    let lease = lease(state, grant, true).await.ok()?;
+    let lease = computers
+        .lease_running_desktop(grant.bot_id, &holder(grant))
+        .await
+        .ok()??;
     match computers
         .capture_screen(lease, grant.bot_id, Some(grant.turn_id), false)
         .await

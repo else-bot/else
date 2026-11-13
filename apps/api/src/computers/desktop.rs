@@ -122,21 +122,35 @@ impl ComputerManager {
         }
     }
 
-    /// Whether the bot's desktop already runs on its current boot, so a
-    /// use of it wakes or starts nothing.
-    pub async fn desktop_running(&self, bot_id: Uuid) -> Result<bool, ComputerError> {
-        if !self.config.desktop {
-            return Ok(false);
+    /// Hold the bot's computer for `holder` only if its desktop already
+    /// runs on the current boot: unlike [`Self::acquire_desktop`], this never
+    /// creates, wakes, grows, or starts anything. The check and the lease
+    /// share the operation lock, so the computer cannot stop in between.
+    pub async fn lease_running_desktop(
+        &self,
+        bot_id: Uuid,
+        holder: &str,
+    ) -> Result<Option<Uuid>, ComputerError> {
+        if !self.config.desktop || self.upgrading(bot_id).await {
+            return Ok(None);
         }
-        let running: Option<bool> = sqlx::query_scalar(
-            "SELECT observed_state = 'running' AND desired_state = 'auto'
-                    AND desktop_generation IS NOT DISTINCT FROM generation
-             FROM bot_computers WHERE bot_id = ?1",
+        let _op = self.op(bot_id).await;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let generation: Option<i64> = sqlx::query_scalar(
+            "SELECT c.generation FROM bot_computers c JOIN bots b ON b.id = c.bot_id
+             WHERE c.bot_id = ?1 AND b.status = 'active'
+               AND c.observed_state = 'running' AND c.desired_state = 'auto'
+               AND c.desktop_generation IS NOT DISTINCT FROM c.generation",
         )
         .bind(bot_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
-        Ok(running == Some(true))
+        let Some(generation) = generation else {
+            return Ok(None);
+        };
+        let lease = self.lease(&mut tx, bot_id, holder, generation).await?;
+        tx.commit().await?;
+        Ok(Some(lease))
     }
 
     /// End the owner's desktop session.
