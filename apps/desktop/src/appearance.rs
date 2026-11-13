@@ -249,7 +249,13 @@ impl Palette {
                 .unwrap_or_else(|| on(hover))
         };
         let danger = readable(p.red);
-        let warning = readable(p.yellow);
+        let warning = (0..=20)
+            .map(|step| {
+                p.yellow
+                    .mix(if dark { p.foreground } else { BLACK }, step as f32 / 20.)
+            })
+            .find(|color| hover.contrast(*color) >= 4.6)
+            .unwrap_or_else(|| on(hover));
         let on_danger = on(danger);
         let popover = if dark { p.raised } else { p.background };
         let sidebar = if dark {
@@ -463,6 +469,7 @@ mod tests {
             muted_foreground: Rgb(0x7b7e8f),
             accent: Rgb(0x1e66f5),
             on_accent: WHITE,
+            yellow: Rgb(0xdf8e1d),
             ..QUIET_LIGHT
         }
     }
@@ -486,6 +493,11 @@ mod tests {
             );
             assert_ne!(rgb(theme.secondary_active), palette.accent);
             assert!(rgb(theme.secondary_active).contrast(rgb(theme.secondary_foreground)) >= 4.5);
+            if !palette.mode.is_dark() {
+                let [red, green, blue] = rgb(theme.warning).channels();
+                assert!(red > green && green > blue, "warnings keep their amber hue");
+                assert!(rgb(theme.warning).contrast(rgb(theme.accent)) >= 4.5);
+            }
             assert!(theme.overlay.a >= 0.2 && theme.overlay.a <= 0.5);
         }
     }

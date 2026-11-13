@@ -462,7 +462,7 @@ impl LocalForm {
                         .disabled(disabled),
                 )
         };
-        v_flex().gap_4().p_4().rounded(theme.radius).bg(theme.secondary.opacity(0.45))
+        v_flex().gap_4().py_4().border_t_1().border_color(theme.border)
             .child(h_flex().gap_3().justify_between().when(stacked, |row| row.flex_col().items_start())
                 .child(v_flex().gap_1().flex_1().min_w_0()
                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Daily backup time"))
@@ -482,8 +482,8 @@ impl LocalForm {
                 .child(field("Exact time", &self.time)).child(field("Keep", &self.keep)))
             .child(div().text_xs().text_color(theme.muted_foreground)
                 .child(format!("Times use the server's timezone ({}). A missed backup runs at the next scheduled time.", local.timezone)))
-            .when(managed, |panel| panel.child(super::view::message(
-                "ELSE_BACKUP_INTERVAL_SECS controls this schedule. Change the environment variable on the server to edit it.".into(), theme.muted_foreground, theme)))
+            .when(managed, |panel| panel.child(div().text_xs().text_color(theme.muted_foreground)
+                .child("ELSE_BACKUP_INTERVAL_SECS controls this schedule. Change the environment variable on the server to edit it.")))
             .when(!managed, |panel| panel.child(h_flex().justify_end().gap_2()
                 .child(Button::new("local-backup-cancel").focus_ring(false).cursor_pointer().label("Cancel")
                     .disabled(disabled || !self.dirty(cx))
