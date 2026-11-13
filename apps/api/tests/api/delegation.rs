@@ -3028,7 +3028,6 @@ async fn an_update_to_an_ended_task_is_rejected_with_its_outcome() {
     );
 }
 
-/// Writes `messages` as the child's replies, then settles it as `status`.
 async fn settle_with_messages(db: &TestDb, child: Uuid, messages: &[&str], status: &str) {
     let (target, conversation): (Uuid, Uuid) = sqlx::query_as(
         "SELECT t.bot_id, c.id FROM turns t
@@ -3083,7 +3082,6 @@ async fn settle_with_messages(db: &TestDb, child: Uuid, messages: &[&str], statu
     tx.commit().await.unwrap();
 }
 
-/// The delegating bot's copy of a returned file.
 async fn returned_text(db: &TestDb, owner: Uuid, file: Uuid) -> String {
     let data: Vec<u8> =
         sqlx::query_scalar("SELECT data FROM attachments WHERE id = ?1 AND bot_id = ?2")
@@ -3113,9 +3111,11 @@ async fn a_multi_message_child_returns_its_final_message_and_every_message_as_a_
     assert_eq!(outcomes.len(), 1);
     assert_eq!(outcomes[0].result.as_deref(), Some(messages[2]));
     assert_eq!(outcomes[0].error, None);
-    let [file] = outcomes[0].files.as_slice() else {
-        panic!("one file with every message: {:?}", outcomes[0].files);
-    };
+    assert!(outcomes[0].files.is_empty(), "{:?}", outcomes[0].files);
+    let file = outcomes[0]
+        .messages
+        .as_ref()
+        .expect("every message as a file");
     assert_eq!(file.name, format!("task-{delegation}-messages.md"));
     assert_eq!(
         returned_text(&db, main, file.id).await,
@@ -3150,9 +3150,10 @@ async fn a_failed_child_returns_its_last_checkpoint_and_the_error() {
         outcomes[0].error.as_deref(),
         Some("provider_error: The provider exited.")
     );
-    let [file] = outcomes[0].files.as_slice() else {
-        panic!("one file with every message: {:?}", outcomes[0].files);
-    };
+    let file = outcomes[0]
+        .messages
+        .as_ref()
+        .expect("every message as a file");
     assert_eq!(
         returned_text(&db, main, file.id).await,
         messages.join("\n\n")
@@ -3173,5 +3174,5 @@ async fn a_single_message_child_returns_no_extra_file() {
         outcomes[0].result.as_deref(),
         Some("Done: 3 failing tests.")
     );
-    assert!(outcomes[0].files.is_empty(), "{:?}", outcomes[0].files);
+    assert_eq!(outcomes[0].messages, None);
 }

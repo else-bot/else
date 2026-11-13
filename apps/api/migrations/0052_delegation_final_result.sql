@@ -1,7 +1,5 @@
--- A delegation's result is the child's final message, not every progress
--- message joined. A failed or stopped child's final message is its last
--- checkpoint. When a child sent several messages, the delegating bot gets
--- all of them as a returned file (see delegations::publish_reply).
+-- A delegation's result is the child's final message instead of every
+-- progress message joined; delegations::publish_reply keeps the rest.
 DROP TRIGGER turns_delegation_child;
 CREATE TRIGGER turns_delegation_child AFTER UPDATE OF status ON turns
 WHEN OLD.status <> NEW.status AND NEW.status IN ('completed', 'interrupted', 'failed', 'uncertain') BEGIN

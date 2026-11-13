@@ -758,8 +758,6 @@ pub async fn publish_reply(conn: &mut SqliteConnection, turn: Uuid) -> Result<()
     Ok(())
 }
 
-/// The result is the task's final message, so when it sent several, the
-/// delegating bot gets every one as a file. Saving twice is a no-op.
 async fn save_messages(
     conn: &mut SqliteConnection,
     delegation: Uuid,
@@ -871,23 +869,10 @@ pub async fn undelivered(
     let mut outcomes = Vec::with_capacity(rows.len());
     for row in rows {
         let mut files = Vec::new();
-        let copies = returned_files(conn, row.id, row.turn).await?;
-        let messages = std::iter::once(messages_file(row.id));
-        for copy in copies.into_iter().map(|(_, copy)| copy).chain(messages) {
-            let file: Option<(Uuid, String, String, i64)> = sqlx::query_as(
-                "SELECT id, name, media_type, size FROM attachments WHERE id = ?1 AND bot_id = ?2",
-            )
-            .bind(copy)
-            .bind(row.parent_bot_id)
-            .fetch_optional(&mut *conn)
-            .await?;
-            files.extend(file.map(|(id, name, media_type, size)| Attachment {
-                id,
-                name,
-                media_type,
-                size: size as u64,
-            }));
+        for (_, copy) in returned_files(conn, row.id, row.turn).await? {
+            files.extend(attachment(conn, copy, row.parent_bot_id).await?);
         }
+        let messages = attachment(conn, messages_file(row.id), row.parent_bot_id).await?;
         outcomes.push(Outcome {
             id: row.id,
             target_bot_id: row.target_bot_id,
@@ -897,10 +882,31 @@ pub async fn undelivered(
             result: row.result,
             error: row.error,
             files,
+            messages,
             earlier_request: row.earlier_request,
         });
     }
     Ok(outcomes)
+}
+
+async fn attachment(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    bot: Uuid,
+) -> Result<Option<Attachment>, sqlx::Error> {
+    let file: Option<(Uuid, String, String, i64)> = sqlx::query_as(
+        "SELECT id, name, media_type, size FROM attachments WHERE id = ?1 AND bot_id = ?2",
+    )
+    .bind(id)
+    .bind(bot)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(file.map(|(id, name, media_type, size)| Attachment {
+        id,
+        name,
+        media_type,
+        size: size as u64,
+    }))
 }
 
 /// Record that `attempt` received these outcomes, and log each to the

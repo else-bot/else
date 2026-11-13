@@ -1052,14 +1052,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
     let considered = session.as_ref().map_or(0, |s| s.considered_through_turn);
     let mut files = input_files(&mut conn, turn.bot_id, &parts, &history, considered).await?;
     let mut delegation = crate::db::delegations::context(&mut conn, turn_id).await?;
-    let mut budget = HISTORY_FILE_BUDGET;
-    for outcome in &mut delegation.outcomes {
-        outcome.files.retain(|file| {
-            let fits = file.size as usize <= budget;
-            budget -= if fits { file.size as usize } else { 0 };
-            fits
-        });
-    }
+    fit_delegation_files(&mut delegation.outcomes, HISTORY_FILE_BUDGET);
     // A chat turn that took tasks over answers them, so it needs their files.
     let taken_over: Vec<Json<Vec<MessagePart>>> = sqlx::query_scalar(
         "SELECT i.parts FROM delegations d JOIN turns c ON c.conversation_id = d.conversation_id
@@ -1080,7 +1073,8 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
             delegation
                 .outcomes
                 .iter()
-                .flat_map(|outcome| outcome.files.iter().map(|file| file.id)),
+                .flat_map(|outcome| outcome.files.iter().chain(&outcome.messages))
+                .map(|file| file.id),
         )
         .filter(|id| !files.iter().any(|staged| staged.attachment.id == *id))
         .collect();
@@ -1151,6 +1145,23 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
 }
 
 const HISTORY_FILE_BUDGET: usize = 32 * 1024 * 1024;
+
+/// Keeps the outcomes' files that fit `budget`. A task's messages may hold
+/// requests its final message leaves out, so they fit before returned files.
+fn fit_delegation_files(outcomes: &mut [crate::app::providers::DelegationOutcome], budget: usize) {
+    let mut budget = budget;
+    let mut fits = |file: &crate::app::messages::Attachment| {
+        let fits = file.size as usize <= budget;
+        budget -= if fits { file.size as usize } else { 0 };
+        fits
+    };
+    for outcome in outcomes.iter_mut() {
+        outcome.messages = outcome.messages.take().filter(&mut fits);
+    }
+    for outcome in outcomes.iter_mut() {
+        outcome.files.retain(&mut fits);
+    }
+}
 
 async fn input_files(
     conn: &mut SqliteConnection,
@@ -1287,6 +1298,41 @@ pub async fn cancelling(pool: &SqlitePool) -> Result<Vec<Uuid>, sqlx::Error> {
 mod tests {
     use super::*;
     use crate::app::messages::ReactionKind;
+
+    #[test]
+    fn a_tasks_messages_fit_before_files_other_tasks_returned() {
+        let file = |name: &str, size: u64| crate::app::messages::Attachment {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            media_type: "text/plain".into(),
+            size,
+        };
+        let outcome = |files: Vec<crate::app::messages::Attachment>, messages| {
+            crate::app::providers::DelegationOutcome {
+                id: Uuid::new_v4(),
+                target_bot_id: Uuid::new_v4(),
+                target_name: "Scout".into(),
+                task: "Scout the leads.".into(),
+                status: "completed".into(),
+                result: Some("Done.".into()),
+                error: None,
+                files,
+                messages,
+                earlier_request: false,
+            }
+        };
+        let mut outcomes = vec![
+            outcome(vec![file("a.csv", 6), file("b.csv", 4)], None),
+            outcome(Vec::new(), Some(file("messages.md", 3))),
+        ];
+        fit_delegation_files(&mut outcomes, 10);
+        assert_eq!(
+            outcomes[1].messages.as_ref().map(|f| f.name.as_str()),
+            Some("messages.md")
+        );
+        let kept: Vec<_> = outcomes[0].files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(kept, ["a.csv"], "b.csv no longer fits");
+    }
 
     fn request(reaction: Option<Reaction>) -> SendRequest<'static> {
         SendRequest {
