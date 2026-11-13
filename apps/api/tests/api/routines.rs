@@ -40,9 +40,11 @@ fn at(value: &Value) -> DateTime<Utc> {
 }
 
 async fn fire(app: &TestApp, now: DateTime<Utc>) -> usize {
-    let queued = else_api::db::routines::admit_due(&app.db.pool, app.scheduler.registry(), now, 8)
-        .await
-        .unwrap();
+    let queued =
+        else_api::db::routines::admit_due(&app.db.pool, app.scheduler.registry(), None, now, 8)
+            .await
+            .unwrap()
+            .queued;
     app.scheduler.wake();
     queued
 }
@@ -1829,9 +1831,10 @@ async fn a_restart_never_repeats_an_admitted_run() {
         .await;
     assert_ne!(status, "queued");
     assert_eq!(
-        else_api::db::routines::admit_due(&app.db.pool, app.scheduler.registry(), due, 8)
+        else_api::db::routines::admit_due(&app.db.pool, app.scheduler.registry(), None, due, 8)
             .await
-            .unwrap(),
+            .unwrap()
+            .queued,
         0
     );
     assert_eq!(runs(&app, &id).await.len(), 1);

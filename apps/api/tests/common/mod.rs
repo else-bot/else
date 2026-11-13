@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod guest;
 pub mod recorder;
 
 /// How long a test waits for a state it expects to reach. It only bounds a

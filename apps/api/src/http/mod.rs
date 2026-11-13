@@ -147,6 +147,7 @@ impl AppState {
     }
 
     pub fn with_computers(mut self, computers: Arc<crate::computers::ComputerManager>) -> Self {
+        self.scheduler.use_computers(computers.clone());
         self.computers = Some(computers);
         self
     }

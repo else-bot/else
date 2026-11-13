@@ -13,6 +13,12 @@
 //! and either queues a turn whose source is a hidden `routine` item or
 //! records why it was skipped. Run status is the turn's own status.
 //!
+//! A routine with a check admits a run as checking instead: the same
+//! transaction reserves the check's job in the bot's computer, and the
+//! caller launches it. Once the job ends, [`settle_checks`] skips the run
+//! when the check found nothing new, or queues its turn with what the
+//! check reported (see [`CheckEnd`]).
+//!
 //! A reminder is a routine due once, at `run_at`. Admitting it leaves it
 //! with no due time; a run that completes deletes it, and one that fails or
 //! is skipped stays listed so the owner sees what happened.
@@ -34,13 +40,17 @@ use super::{bot_profiles, events};
 use crate::app::messages::MAX_QUEUED_TURNS;
 use crate::app::providers::{Availability, Origin, Profile, RoutineRun};
 use crate::app::routines::{
-    ActiveHours, InvalidRoutine, MAX_PER_BOT, ModelSetting, RoutineModel, RoutineName,
-    RoutinePrompt, Schedule,
+    ActiveHours, AfterCheck, CHECK_DURATION, CheckEnd, CheckSkip, InvalidRoutine, MAX_PER_BOT,
+    ModelSetting, RoutineCheck, RoutineModel, RoutineName, RoutinePrompt, Schedule, run_prompt,
 };
+use crate::computers::ComputerManager;
+use crate::computers::jobs::JobStatus;
 use crate::providers::Registry;
 
 /// Due routines admitted per scheduler scan.
 pub const ADMIT_BATCH: i64 = 8;
+
+const UNSETTLED: &str = "rr.turn_id IS NULL AND rr.skip_reason IS NULL";
 
 #[derive(Debug, thiserror::Error)]
 pub enum RoutineError {
@@ -108,7 +118,8 @@ impl By {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LastRun {
     pub due_at: DateTime<Utc>,
-    /// `queued`, `running`, `skipped`, or the turn's terminal status.
+    /// `checking`, `queued`, `running`, `skipped`, or the turn's terminal
+    /// status.
     pub status: String,
     pub skip_reason: Option<String>,
     pub turn_id: Option<Uuid>,
@@ -124,6 +135,8 @@ pub struct Routine {
     pub name: String,
     pub prompt: String,
     pub prompt_revision: i64,
+    /// The command run before each run, if any.
+    pub check: Option<String>,
     pub cron: String,
     /// When a reminder runs; `None` for a routine on a cron schedule.
     pub run_at: Option<DateTime<Utc>>,
@@ -151,6 +164,7 @@ struct Row {
     name: String,
     prompt: String,
     prompt_revision: i64,
+    check_command: Option<String>,
     cron: String,
     run_at: Option<DateTime<Utc>>,
     timezone: String,
@@ -179,6 +193,7 @@ impl From<Row> for Routine {
         let last_run = row.run_due_at.map(|due_at| LastRun {
             due_at,
             status: match row.turn_status.map(|status| (status, status.phase())) {
+                None if row.skip_reason.is_none() => "checking",
                 None => "skipped",
                 Some((_, Phase::Active | Phase::Waiting)) => "running",
                 Some((status, Phase::Queued | Phase::Ended)) => status.as_str(),
@@ -196,6 +211,7 @@ impl From<Row> for Routine {
             name: row.name,
             prompt: row.prompt,
             prompt_revision: row.prompt_revision,
+            check: row.check_command,
             cron: row.cron,
             run_at: row.run_at,
             timezone: row.timezone,
@@ -253,7 +269,7 @@ fn columns(model: &ModelSetting) -> (Option<Json<&RoutineModel>>, Option<&str>) 
 }
 
 const SELECT: &str =
-    "SELECT r.id, r.bot_id, r.name, r.prompt, r.prompt_revision, r.cron, r.run_at, r.timezone,
+    "SELECT r.id, r.bot_id, r.name, r.prompt, r.prompt_revision, r.check_command, r.cron, r.run_at, r.timezone,
         r.active_days, r.active_start, r.active_end, r.enabled,
         r.model, r.requested_model, r.next_due_at, r.created_at, r.updated_at, r.deleted_at,
         r.failed_runs, r.paused_reason, lr.due_at AS run_due_at, lr.skip_reason, lr.turn_id, t.status AS turn_status,
@@ -337,6 +353,7 @@ pub(crate) async fn authorize_by(conn: &mut SqliteConnection, by: By) -> Result<
 pub struct NewRoutine<'a> {
     pub name: &'a RoutineName,
     pub prompt: &'a RoutinePrompt,
+    pub check: Option<&'a RoutineCheck>,
     pub schedule: &'a Schedule,
     /// The time zone as the bot sent it; `None` when it took the owner's.
     /// A retry matches on this, not on the zone it resolved to.
@@ -356,6 +373,9 @@ fn create_hash(routine: &NewRoutine<'_>) -> Vec<u8> {
         .schedule
         .hours()
         .map(|hours| format!("hours {hours}"));
+    let check_key = routine
+        .check
+        .map(|check| format!("check {}", check.as_str()));
     let mut hasher = Sha256::new();
     for part in [
         "routine",
@@ -365,6 +385,7 @@ fn create_hash(routine: &NewRoutine<'_>) -> Vec<u8> {
     ]
     .into_iter()
     .chain(hours_key.as_deref())
+    .chain(check_key.as_deref())
     .chain(routine.model_request)
     .chain(routine.when_request)
     {
@@ -423,8 +444,8 @@ pub async fn create(
     sqlx::query(
         "INSERT INTO routines (id, bot_id, conversation_id, name, prompt, cron, timezone,
              next_due_at, created_turn_id, created_name, request_hash, model, requested_model,
-             active_days, active_start, active_end, run_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?4, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             active_days, active_start, active_end, run_at, check_command)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?4, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
     )
     .bind(id)
     .bind(caller.bot_id)
@@ -442,6 +463,7 @@ pub async fn create(
     .bind(active.active_start)
     .bind(active.active_end)
     .bind(routine.schedule.run_at().map(ts))
+    .bind(routine.check.map(RoutineCheck::as_str))
     .execute(&mut *tx)
     .await?;
     events::bot_updated(&mut tx, caller.bot_id).await?;
@@ -455,6 +477,8 @@ pub async fn create(
 pub struct Patch {
     pub name: Option<RoutineName>,
     pub prompt: Option<RoutinePrompt>,
+    /// `Some(None)` removes the check.
+    pub check: Option<Option<RoutineCheck>>,
     pub cron: Option<String>,
     pub timezone: Option<String>,
     /// `Some(None)` lets runs start at any time.
@@ -469,6 +493,7 @@ pub struct Patch {
 struct RoutineSettings {
     name: String,
     prompt: String,
+    check_command: Option<String>,
     cron: String,
     run_at: Option<DateTime<Utc>>,
     timezone: String,
@@ -481,8 +506,8 @@ struct RoutineSettings {
 }
 
 /// Apply `patch`. Setting values a routine already has changes nothing, so
-/// a retry never postpones its schedule. A new prompt is a new prompt
-/// revision, which ends the routine's destructive grant. Disabling stops
+/// a retry never postpones its schedule. A new prompt or check is a new
+/// prompt revision, which ends the routine's destructive grant. Disabling stops
 /// future runs (one already admitted finishes); enabling or a new schedule
 /// counts from `now`, and forgets earlier failed runs.
 pub async fn update(
@@ -495,7 +520,7 @@ pub async fn update(
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     authorize_by(&mut tx, by).await?;
     let current: Option<RoutineSettings> = sqlx::query_as(
-        "SELECT name, prompt, cron, run_at, timezone, active_days, active_start, active_end,
+        "SELECT name, prompt, check_command, cron, run_at, timezone, active_days, active_start, active_end,
              enabled, next_due_at, model, requested_model
          FROM routines WHERE id = ?1 AND bot_id = ?2 AND deleted_at IS NULL",
     )
@@ -506,6 +531,7 @@ pub async fn update(
     let Some(RoutineSettings {
         name,
         prompt,
+        check_command,
         cron,
         run_at,
         timezone,
@@ -535,6 +561,9 @@ pub async fn update(
     let new_prompt = patch
         .prompt
         .map_or(prompt.clone(), |p| p.as_str().to_owned());
+    let new_check = patch
+        .check
+        .map_or(check_command, |c| c.map(|c| c.as_str().to_owned()));
     let new_enabled = patch.enabled.unwrap_or(enabled);
     let new_model = patch.model.unwrap_or_else(|| setting(model, requested));
     let (model, requested_model) = columns(&new_model);
@@ -568,7 +597,9 @@ pub async fn update(
     }
     let changed = sqlx::query(
         "UPDATE routines SET name = ?2, prompt = ?3, cron = ?4, timezone = ?5, enabled = ?6,
-             next_due_at = ?7, prompt_revision = prompt_revision + (prompt IS NOT ?3),
+             next_due_at = ?7,
+             prompt_revision = prompt_revision + (prompt IS NOT ?3 OR check_command IS NOT ?14),
+             check_command = ?14,
              model = ?8, requested_model = ?9,
              active_days = ?11, active_start = ?12, active_end = ?13,
              failed_runs = CASE WHEN ?10 OR (?6 AND NOT enabled) THEN 0 ELSE failed_runs END,
@@ -578,6 +609,7 @@ pub async fn update(
              OR timezone IS NOT ?5 OR enabled IS NOT ?6 OR next_due_at IS NOT ?7
              OR model IS NOT ?8 OR requested_model IS NOT ?9
              OR active_days IS NOT ?11 OR active_start IS NOT ?12 OR active_end IS NOT ?13
+             OR check_command IS NOT ?14
              OR (?10 AND (failed_runs <> 0 OR paused_reason IS NOT NULL)))",
     )
     .bind(id)
@@ -593,6 +625,7 @@ pub async fn update(
     .bind(active.active_days)
     .bind(active.active_start)
     .bind(active.active_end)
+    .bind(&new_check)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -706,10 +739,12 @@ pub async fn run_now(
     let row: Option<OnDemand> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT r.conversation_id, r.name, r.prompt, r.prompt_revision, r.model,
                 EXISTS (SELECT 1 FROM routine_runs WHERE id = ?3) AS queued,
-                EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
-                        WHERE rr.routine_id = r.id
-                          AND (t.status NOT IN {ENDED_STATUSES}
-                               OR NOT rr.reviewed)) AS busy,
+                (EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
+                         WHERE rr.routine_id = r.id
+                           AND (t.status NOT IN {ENDED_STATUSES}
+                                OR NOT rr.reviewed))
+                 OR EXISTS (SELECT 1 FROM routine_runs rr WHERE rr.routine_id = r.id
+                              AND {UNSETTLED})) AS busy,
                 (SELECT max(due_at) FROM routine_runs WHERE routine_id = r.id) AS last_due_at
          FROM routines r WHERE r.id = ?1 AND r.bot_id = ?2 AND r.deleted_at IS NULL"
     )))
@@ -756,7 +791,7 @@ pub async fn run_now(
         Ok(turn_id) => turn_id,
         Err(Skip::QueueFull) => return Err(RoutineError::QueueFull),
         Err(Skip::ProviderUnavailable) => return Err(RoutineError::ProviderUnavailable),
-        Err(Skip::Overlap) => return Err(RoutineError::AlreadyRunning),
+        Err(Skip::Overlap | Skip::Check(_)) => return Err(RoutineError::AlreadyRunning),
     };
     // Later than every earlier run, so it is the routine's last run.
     let due = last_due_at.map_or(now, |last| {
@@ -856,6 +891,31 @@ struct EndedRun {
     reminder: bool,
     live: bool,
     may_retry: bool,
+    check_job_id: Option<Uuid>,
+    #[sqlx(flatten)]
+    check: CheckedJob,
+}
+
+#[derive(sqlx::FromRow)]
+struct CheckedJob {
+    check_status: Option<JobStatus>,
+    check_exit: Option<i32>,
+    check_output: Option<String>,
+    check_leased: Option<bool>,
+}
+
+impl CheckedJob {
+    const COLUMNS: &str = "j.status AS check_status, j.exit_code AS check_exit,
+        j.output_tail AS check_output, j.lease_id IS NOT NULL AS check_leased";
+
+    fn end(self) -> Option<CheckEnd> {
+        CheckEnd::of(
+            self.check_status?,
+            self.check_exit,
+            self.check_output,
+            self.check_leased.unwrap_or(false),
+        )
+    }
 }
 
 async fn review(
@@ -873,6 +933,7 @@ async fn review(
                 r.active_days, r.active_start, r.active_end,
                 r.enabled, r.next_due_at, r.model, r.failed_runs, r.run_at IS NOT NULL AS reminder,
                 r.deleted_at IS NULL AND b.status = 'active' AS live,
+                rr.check_job_id, {checked},
                 NOT b.cancel_pending AND NOT EXISTS (
                     SELECT 1 FROM request_receipts s WHERE s.operation = 'cancel'
                       AND s.bot_id = r.bot_id AND s.boundary_turn_no >= t.turn_no)
@@ -880,10 +941,15 @@ async fn review(
                     SELECT 1 FROM routine_runs x JOIN turns u ON u.id = x.turn_id
                     WHERE x.routine_id = r.id AND x.id <> rr.id
                       AND u.status NOT IN {ENDED_STATUSES})
+                AND NOT EXISTS (
+                    SELECT 1 FROM routine_runs c WHERE c.routine_id = r.id
+                      AND c.turn_id IS NULL AND c.skip_reason IS NULL)
                     AS may_retry
          FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
          JOIN routines r ON r.id = rr.routine_id JOIN bots b ON b.id = r.bot_id
-         WHERE rr.id = ?1 AND NOT rr.reviewed"
+         LEFT JOIN guest_jobs j ON j.id = rr.check_job_id
+         WHERE rr.id = ?1 AND NOT rr.reviewed",
+        checked = CheckedJob::COLUMNS
     )))
     .bind(run_id)
     .fetch_optional(&mut *tx)
@@ -908,6 +974,10 @@ async fn review(
         failed_runs: run.failed_runs,
     };
     let mut reaction = routine_failures::react(ended, state);
+    let note = run.check.end().and_then(|end| match end.after() {
+        AfterCheck::Wake(note) => Some(note),
+        AfterCheck::Skip(_) => None,
+    });
     if reaction == Reaction::Retry {
         let retry_id = Uuid::new_v4();
         let run_on = RunOn::routine(run.routine_id, &run.model);
@@ -924,7 +994,7 @@ async fn review(
                 run.conversation_id,
                 retry_id,
                 b"routine-retry\0",
-                &run.prompt,
+                &run_prompt(&run.prompt, note.as_deref()),
                 run_on,
             )
             .await?
@@ -937,8 +1007,8 @@ async fn review(
             let due = now.max(run.due_at + chrono::Duration::milliseconds(1));
             sqlx::query(
                 "INSERT INTO routine_runs
-                     (id, routine_id, due_at, name, turn_id, prompt_revision, retry_of)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                     (id, routine_id, due_at, name, turn_id, prompt_revision, retry_of, check_job_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )
             .bind(retry_id)
             .bind(run.routine_id)
@@ -947,6 +1017,7 @@ async fn review(
             .bind(turn_id)
             .bind(run.prompt_revision)
             .bind(run_id)
+            .bind(run.check_job_id)
             .execute(&mut *tx)
             .await?;
             events::turn_accepted(&mut tx, run.bot_id, turn_id).await?;
@@ -1060,15 +1131,42 @@ async fn review(
     Ok(false)
 }
 
+/// What one scan of due routines did.
+#[derive(Debug, Default)]
+pub struct Admitted {
+    /// Turns queued.
+    pub queued: usize,
+    /// Check jobs reserved, for the caller to launch.
+    pub checks: Vec<Check>,
+}
+
+/// A reserved check job to launch with
+/// [`ComputerManager::launch_reserved`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Check {
+    pub bot_id: Uuid,
+    pub job_id: Uuid,
+    pub command: String,
+}
+
+enum Admit {
+    Nothing,
+    Queued,
+    Checking(Check),
+}
+
 /// Admit up to `limit` routines due at `now`. A routine whose ended run
 /// awaits [`review_ended`] waits for it, so a retry precedes the next
-/// occurrence. Returns how many turns were queued. The caller holds a maintenance admission.
+/// occurrence. A routine with a check reserves its job in `computers`;
+/// without computers its run is skipped as `check_unavailable`. The caller
+/// holds a maintenance admission.
 pub async fn admit_due(
     pool: &SqlitePool,
     registry: &Registry,
+    computers: Option<&ComputerManager>,
     now: DateTime<Utc>,
     limit: i64,
-) -> Result<usize, sqlx::Error> {
+) -> Result<Admitted, sqlx::Error> {
     let due: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT r.id FROM routines r JOIN bots b ON b.id = r.bot_id
          WHERE r.next_due_at IS NOT NULL AND r.next_due_at <= ?1
@@ -1082,13 +1180,15 @@ pub async fn admit_due(
     .bind(limit)
     .fetch_all(pool)
     .await?;
-    let mut queued = 0;
+    let mut admitted = Admitted::default();
     for id in due {
-        if admit(pool, registry, id, now).await? {
-            queued += 1;
+        match admit(pool, registry, computers, id, now).await? {
+            Admit::Nothing => {}
+            Admit::Queued => admitted.queued += 1,
+            Admit::Checking(check) => admitted.checks.push(check),
         }
     }
-    Ok(queued)
+    Ok(admitted)
 }
 
 /// Why a due run queued no turn.
@@ -1097,6 +1197,7 @@ pub(crate) enum Skip {
     Overlap,
     QueueFull,
     ProviderUnavailable,
+    Check(CheckSkip),
 }
 
 impl Skip {
@@ -1105,6 +1206,9 @@ impl Skip {
             Skip::Overlap => "overlap",
             Skip::QueueFull => "queue_full",
             Skip::ProviderUnavailable => "provider_unavailable",
+            Skip::Check(CheckSkip::NothingNew) => "nothing_new",
+            Skip::Check(CheckSkip::Cancelled) => "check_cancelled",
+            Skip::Check(CheckSkip::Unavailable) => "check_unavailable",
         }
     }
 }
@@ -1122,6 +1226,7 @@ struct Due {
     #[sqlx(flatten)]
     active: ActiveColumns,
     model: Option<Json<RoutineModel>>,
+    check_command: Option<String>,
     due_at: String,
 }
 
@@ -1265,13 +1370,15 @@ pub(crate) async fn queue_saved_task(
 async fn admit(
     pool: &SqlitePool,
     registry: &Registry,
+    computers: Option<&ComputerManager>,
     id: Uuid,
     now: DateTime<Utc>,
-) -> Result<bool, sqlx::Error> {
+) -> Result<Admit, sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let row: Option<Due> = sqlx::query_as(
-        sqlx::AssertSqlSafe(format!("SELECT r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.cron, r.run_at,
-                r.timezone, r.active_days, r.active_start, r.active_end, r.model, r.next_due_at AS due_at
+    let row: Option<Due> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.cron, r.run_at,
+                r.timezone, r.active_days, r.active_start, r.active_end, r.model, r.check_command,
+                r.next_due_at AS due_at
          FROM routines r JOIN bots b ON b.id = r.bot_id
          WHERE r.id = ?1 AND r.next_due_at IS NOT NULL AND r.next_due_at <= ?2
            AND b.status = 'active' AND NOT b.cancel_pending
@@ -1294,10 +1401,11 @@ async fn admit(
         timezone,
         active,
         model,
+        check_command,
         due_at,
     }) = row
     else {
-        return Ok(false);
+        return Ok(Admit::Nothing);
     };
     let schedule = Schedule::stored(&cron, run_at, &timezone, active.hours()).ok();
     let next = schedule.as_ref().and_then(|s| s.next_after(now));
@@ -1310,7 +1418,7 @@ async fn admit(
     // closed: the next occurrence inside them stands in for it.
     if schedule.is_some_and(|s| !s.allows(now)) {
         tx.commit().await?;
-        return Ok(false);
+        return Ok(Admit::Nothing);
     }
     let recorded: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM routine_runs WHERE routine_id = ?1 AND due_at = ?2)",
@@ -1321,12 +1429,12 @@ async fn admit(
     .await?;
     if recorded {
         tx.commit().await?;
-        return Ok(false);
+        return Ok(Admit::Nothing);
     }
     let unfinished: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
+        "SELECT EXISTS (SELECT 1 FROM routine_runs rr LEFT JOIN turns t ON t.id = rr.turn_id
                         WHERE rr.routine_id = ?1
-                          AND t.status NOT IN {ENDED_STATUSES})"
+                          AND (t.status NOT IN {ENDED_STATUSES} OR {UNSETTLED}))"
     )))
     .bind(id)
     .fetch_one(&mut *tx)
@@ -1334,6 +1442,45 @@ async fn admit(
     let run_id = Uuid::new_v4();
     let queued = if unfinished {
         Err(Skip::Overlap)
+    } else if let Some(command) = check_command {
+        let reserved = match computers {
+            Some(computers) => {
+                computers
+                    .reserve_job(&mut tx, bot_id, None, &command, CHECK_DURATION, &[], None)
+                    .await?
+            }
+            None => None,
+        };
+        let Some(job_id) = reserved else {
+            return skip(
+                tx,
+                bot_id,
+                id,
+                run_id,
+                &due_at,
+                &name,
+                Skip::Check(CheckSkip::Unavailable),
+            )
+            .await;
+        };
+        sqlx::query(
+            "INSERT INTO routine_runs (id, routine_id, due_at, name, check_job_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(run_id)
+        .bind(id)
+        .bind(&due_at)
+        .bind(&name)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+        events::bot_updated(&mut tx, bot_id).await?;
+        tx.commit().await?;
+        return Ok(Admit::Checking(Check {
+            bot_id,
+            job_id,
+            command,
+        }));
     } else {
         let run_on = RunOn::routine(id, &model);
         queue_saved_task(
@@ -1350,22 +1497,7 @@ async fn admit(
     };
     let turn_id = match queued {
         Ok(turn_id) => turn_id,
-        Err(skip) => {
-            sqlx::query(
-                "INSERT INTO routine_runs (id, routine_id, due_at, name, skip_reason)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            )
-            .bind(run_id)
-            .bind(id)
-            .bind(&due_at)
-            .bind(&name)
-            .bind(skip.as_str())
-            .execute(&mut *tx)
-            .await?;
-            events::bot_updated(&mut tx, bot_id).await?;
-            tx.commit().await?;
-            return Ok(false);
-        }
+        Err(reason) => return skip(tx, bot_id, id, run_id, &due_at, &name, reason).await,
     };
     sqlx::query(
         "INSERT INTO routine_runs (id, routine_id, due_at, name, turn_id, prompt_revision)
@@ -1381,5 +1513,166 @@ async fn admit(
     .await?;
     events::turn_accepted(&mut tx, bot_id, turn_id).await?;
     tx.commit().await?;
-    Ok(true)
+    Ok(Admit::Queued)
+}
+
+async fn skip(
+    mut tx: sqlx::Transaction<'_, sqlx::Sqlite>,
+    bot_id: Uuid,
+    routine_id: Uuid,
+    run_id: Uuid,
+    due_at: &str,
+    name: &str,
+    reason: Skip,
+) -> Result<Admit, sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO routine_runs (id, routine_id, due_at, name, skip_reason)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(run_id)
+    .bind(routine_id)
+    .bind(due_at)
+    .bind(name)
+    .bind(reason.as_str())
+    .execute(&mut *tx)
+    .await?;
+    events::bot_updated(&mut tx, bot_id).await?;
+    tx.commit().await?;
+    Ok(Admit::Nothing)
+}
+
+/// Checking runs settled per scheduler scan.
+pub const SETTLE_BATCH: i64 = 8;
+
+/// Settle up to `limit` checking runs whose check job has ended, per
+/// [`CheckEnd::after`]: skip the run, or queue its turn with the routine's
+/// current prompt and what the check reported. A run whose bot stopped or
+/// left is skipped as `check_cancelled`; Stop settles its runs itself, see
+/// [`stop_checks`]. Returns how many turns were
+/// queued. The caller holds a maintenance admission.
+pub async fn settle_checks(
+    pool: &SqlitePool,
+    registry: &Registry,
+    limit: i64,
+) -> Result<usize, sqlx::Error> {
+    let ended: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT rr.id FROM routine_runs rr JOIN guest_jobs j ON j.id = rr.check_job_id
+         WHERE {UNSETTLED} AND j.status IN ('completed', 'failed', 'cancelled', 'lost')
+         ORDER BY rr.due_at, rr.id LIMIT ?1"
+    )))
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    let mut queued = 0;
+    for id in ended {
+        if settle_check(pool, registry, id).await? {
+            queued += 1;
+        }
+    }
+    Ok(queued)
+}
+
+#[derive(sqlx::FromRow)]
+struct Checked {
+    routine_id: Uuid,
+    bot_id: Uuid,
+    conversation_id: Uuid,
+    prompt: String,
+    prompt_revision: i64,
+    model: Option<Json<RoutineModel>>,
+    live: bool,
+    #[sqlx(flatten)]
+    check: CheckedJob,
+}
+
+async fn settle_check(
+    pool: &SqlitePool,
+    registry: &Registry,
+    run_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let row: Option<Checked> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT rr.routine_id, r.bot_id, r.conversation_id, r.prompt, r.prompt_revision, r.model,
+                b.status = 'active' AND NOT b.cancel_pending AS live, {checked}
+         FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id
+         JOIN bots b ON b.id = r.bot_id JOIN guest_jobs j ON j.id = rr.check_job_id
+         WHERE rr.id = ?1 AND {UNSETTLED}",
+        checked = CheckedJob::COLUMNS
+    )))
+    .bind(run_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(run) = row else {
+        return Ok(false);
+    };
+    let Some(end) = run.check.end() else {
+        return Ok(false);
+    };
+    let after = if run.live {
+        end.after()
+    } else {
+        AfterCheck::Skip(CheckSkip::Cancelled)
+    };
+    let queued = match after {
+        AfterCheck::Skip(reason) => Err(Skip::Check(reason)),
+        AfterCheck::Wake(note) => {
+            queue_saved_task(
+                &mut tx,
+                registry,
+                run.bot_id,
+                run.conversation_id,
+                run_id,
+                b"routine-run\0",
+                &run_prompt(&run.prompt, Some(&note)),
+                RunOn::routine(run.routine_id, &run.model),
+            )
+            .await?
+        }
+    };
+    let (turn_id, reason) = match queued {
+        Ok(turn_id) => (Some(turn_id), None),
+        Err(reason) => (None, Some(reason.as_str())),
+    };
+    let settled = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE routine_runs AS rr SET turn_id = ?2, skip_reason = ?3, prompt_revision = ?4
+         WHERE rr.id = ?1 AND {UNSETTLED}"
+    )))
+    .bind(run_id)
+    .bind(turn_id)
+    .bind(reason)
+    .bind(turn_id.map(|_| run.prompt_revision))
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if settled != 1 {
+        return Ok(false);
+    }
+    match turn_id {
+        Some(turn_id) => events::turn_accepted(&mut tx, run.bot_id, turn_id).await?,
+        None => events::bot_updated(&mut tx, run.bot_id).await?,
+    }
+    tx.commit().await?;
+    Ok(turn_id.is_some())
+}
+
+/// Skip every unsettled check run of the bot as `check_cancelled`, inside a
+/// Stop's or deletion's immediate transaction, so a check that already
+/// ended cannot queue its turn after the stop.
+pub(crate) async fn stop_checks(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let stopped = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE routine_runs AS rr SET skip_reason = 'check_cancelled'
+         WHERE {UNSETTLED} AND rr.check_job_id IS NOT NULL
+           AND rr.routine_id IN (SELECT id FROM routines WHERE bot_id = ?1)"
+    )))
+    .bind(bot_id)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if stopped > 0 {
+        events::bot_updated(conn, bot_id).await?;
+    }
+    Ok(())
 }
