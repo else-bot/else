@@ -495,6 +495,36 @@ async fn scripts_drive_the_visible_browser_safely() {
         lost["error"].as_str().unwrap().starts_with("STALE_REF"),
         "a ref from before the state was lost: {lost}"
     );
+    let snapshot = browse(&["snapshot"]).await;
+    let remove = ref_of(&snapshot, "button \"Remove\"");
+    let review = ref_of(&snapshot, "button \"Review\"");
+    browse(&["click", "text=Rename"]).await;
+    let changed = browse(&["click", &remove]).await;
+    assert!(
+        changed["error"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with(&format!(
+                "CHANGED_REF: {remove} was button \"Remove\" and is now button \"Keep\""
+            )),
+        "a relabelled control is refused: {changed}"
+    );
+    let hovered = browse(&["click", &review]).await;
+    assert!(
+        hovered["error"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with(&format!(
+                "CHANGED_REF: {review} was button \"Review\" and is now button \"Erase\""
+            )),
+        "a control relabelled by hovering it is refused: {hovered}"
+    );
+    let page = browse(&["text"]).await;
+    let text = page["text"].as_str().unwrap();
+    assert!(
+        !text.contains("removed") && !text.contains("erased"),
+        "and neither is clicked: {page}"
+    );
     let covered = browse(&["click", "#covered"]).await;
     assert!(
         covered["error"].as_str().unwrap().starts_with("COVERED"),

@@ -2,6 +2,7 @@ use serde_json::Value;
 
 use super::{AppState, Grant, Outcome, slice, summarize_input, tool_error};
 use crate::app::questions::{Kind, TaskScope};
+use crate::computers::browser_refs::RefLabel;
 
 pub(super) const MAX_PURPOSE: usize = 300;
 const MAX_PREVIEW: usize = 2000;
@@ -103,7 +104,49 @@ fn declared_effect(name: &str, args: &Value) -> Result<Option<Effect>, String> {
     Ok(Some(effect))
 }
 
-fn approval_card(name: &str, args: &Value) -> (String, String) {
+/// Page text for a card: control and invisible formatting characters
+/// removed, cut to `max` characters.
+fn page_text(text: &str, max: usize) -> String {
+    let invisible = |c: &char| {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{200b}'..='\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+                    | '\u{feff}'
+            )
+    };
+    let mut kept: String = text.chars().filter(|c| !invisible(c)).collect();
+    if let Some((cut, _)) = kept.char_indices().nth(max) {
+        kept.truncate(cut);
+        kept.push('…');
+    }
+    kept
+}
+
+/// The control a snapshot ref names, as the page labels it: `button
+/// "Delete project" (@kqvzb5)`. A selector the API has no label for
+/// is shown as given.
+fn browser_target(selector: &str, label: Option<&RefLabel>) -> String {
+    let selector = slice(selector, 0, 300).1;
+    let Some(label) = label else {
+        return selector.to_owned();
+    };
+    let role: String = label
+        .role
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(30)
+        .collect();
+    let name = serde_json::to_string(&page_text(&label.name, 80)).unwrap_or_default();
+    match &label.url {
+        Some(url) => format!("{role} {name} to {} ({selector})", page_text(url, 120)),
+        None => format!("{role} {name} ({selector})"),
+    }
+}
+
+fn approval_card(name: &str, args: &Value, label: Option<&RefLabel>) -> (String, String) {
     let text = |key: &str| args[key].as_str().unwrap_or_default();
     let purpose = text("purpose").trim();
     let default = match name {
@@ -134,7 +177,7 @@ fn approval_card(name: &str, args: &Value) -> (String, String) {
         let available = crate::app::questions::MAX_CONTEXT.saturating_sub(header.len());
         return (title, format!("{header}{}", slice(&body, 0, available).1));
     }
-    if !text("context").trim().is_empty() {
+    if !text("context").trim().is_empty() && name != "computer_browser" {
         return (title, text("context").to_owned());
     }
     let context = match name {
@@ -165,7 +208,7 @@ fn approval_card(name: &str, args: &Value) -> (String, String) {
         ),
         _ => {
             let action = text("action");
-            let selector = slice(text("selector"), 0, 300).1;
+            let selector = browser_target(text("selector"), label);
             let step = match action {
                 "type" => format!(
                     "Browser: type {} characters into {selector}",
@@ -174,10 +217,19 @@ fn approval_card(name: &str, args: &Value) -> (String, String) {
                 "open" => format!("Browser: open {}", slice(text("url"), 0, 300).1),
                 _ => format!("Browser: {action} {selector}"),
             };
-            if args["dialog"] == "accept" {
+            let step = if args["dialog"] == "accept" {
                 format!("{step}, accepting any dialog it opens")
             } else {
                 step
+            };
+            // First, so a long description from the bot cannot push it
+            // out of the card's collapsed preview.
+            let given = text("context").trim();
+            if given.is_empty() {
+                step
+            } else {
+                let room = crate::app::questions::MAX_CONTEXT.saturating_sub(step.len() + 2);
+                format!("{step}\n\n{}", slice(given, 0, room).1)
             }
         }
     };
@@ -191,7 +243,13 @@ pub(crate) async fn approve(
     args: &Value,
     kind: Kind,
 ) -> Result<Option<&'static str>, Outcome> {
-    let (title, context) = approval_card(name, args);
+    let label = match (name, args["selector"].as_str(), &state.computers) {
+        ("computer_browser", Some(selector), Some(computers)) => {
+            computers.browser_ref(grant.bot_id, selector).await
+        }
+        _ => None,
+    };
+    let (title, context) = approval_card(name, args, label.as_ref());
     approve_card(state, grant, name, args, kind, title, context).await
 }
 
@@ -389,15 +447,76 @@ mod tests {
         );
     }
 
+    fn card(name: &str, args: &Value) -> (String, String) {
+        approval_card(name, args, None)
+    }
+
+    fn label(role: &str, name: &str, url: Option<&str>) -> RefLabel {
+        RefLabel {
+            role: role.into(),
+            name: name.into(),
+            url: url.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_browser_card_names_the_control_a_known_ref_points_at() {
+        let click = json!({ "action": "click", "selector": "@kqvzb5", "effect": "destructive" });
+        let delete = label("button", "Delete project", None);
+        let (_, context) = approval_card("computer_browser", &click, Some(&delete));
+        assert_eq!(
+            context,
+            "Browser: click button \"Delete project\" (@kqvzb5)"
+        );
+
+        let typing = json!({ "action": "type", "selector": "@kqvzb7", "text": "hunter2 here",
+                             "effect": "external" });
+        let email = label("textbox", "Email", None);
+        let (_, context) = approval_card("computer_browser", &typing, Some(&email));
+        assert_eq!(
+            context,
+            "Browser: type 12 characters into textbox \"Email\" (@kqvzb7)"
+        );
+
+        let docs = label("link", "Docs", Some("/docs"));
+        let (_, context) = approval_card("computer_browser", &click, Some(&docs));
+        assert_eq!(context, "Browser: click link \"Docs\" to /docs (@kqvzb5)");
+
+        let (_, context) = card("computer_browser", &click);
+        assert_eq!(
+            context, "Browser: click @kqvzb5",
+            "an unknown ref is shown as given"
+        );
+        let css = json!({ "action": "click", "selector": "text=Pay", "effect": "external" });
+        assert_eq!(card("computer_browser", &css).1, "Browser: click text=Pay");
+    }
+
+    #[test]
+    fn a_hostile_control_name_is_quoted_cut_and_stripped() {
+        let click = json!({ "action": "click", "selector": "@kq1", "effect": "destructive",
+                            "context": "Remove the old project." });
+        let hostile = label(
+            "button\n\"x",
+            &format!("Cancel\" (@kq2)\n\u{202e}{}", "a".repeat(200)),
+            None,
+        );
+        let (_, context) = approval_card("computer_browser", &click, Some(&hostile));
+        let expected = format!(
+            "Browser: click buttonx \"Cancel\\\" (@kq2){}…\" (@kq1)\n\nRemove the old project.",
+            "a".repeat(66)
+        );
+        assert_eq!(context, expected);
+    }
+
     #[test]
     fn approval_cards_name_the_action_but_never_typed_text() {
-        let (title, context) = approval_card(
+        let (title, context) = card(
             "computer_run",
             &json!({ "command": "./send.sh", "effect": "external", "secrets": ["smtp"], "purpose": "Send the newsletter" }),
         );
         assert_eq!(title, "Send the newsletter");
         assert_eq!(context, "./send.sh\n(uses the secrets: smtp)");
-        let (title, context) = approval_card(
+        let (title, context) = card(
             "computer_input",
             &json!({ "frame": [1, 1], "effect": "external",
                      "actions": [{ "click": [1, 2] }, { "type": "hunter2" }] }),
@@ -407,12 +526,12 @@ mod tests {
             context.contains("type(7 chars)") && !context.contains("hunter2"),
             "{context}"
         );
-        let (_, context) = approval_card(
+        let (_, context) = card(
             "computer_browser",
             &json!({ "action": "type", "selector": "#msg", "text": "secret words", "effect": "external" }),
         );
         assert_eq!(context, "Browser: type 12 characters into #msg");
-        let (_, context) = approval_card(
+        let (_, context) = card(
             "computer_browser",
             &json!({ "action": "open", "url": "https://x.com/home", "dialog": "accept", "effect": "destructive" }),
         );

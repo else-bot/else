@@ -1105,6 +1105,10 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                             Some(log),
                         )
                     } else {
+                        if let Some(snapshot) = parsed["snapshot"].as_str() {
+                            let refs = crate::computers::browser_refs::parse(snapshot);
+                            computers.remember_browser_refs(grant.bot_id, refs).await;
+                        }
                         (tool_result(fit(parsed)), Some(log))
                     }
                 }

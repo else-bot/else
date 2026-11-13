@@ -16,6 +16,7 @@
 //! that inspection has succeeded. Provider CLIs and credentials stay on the
 //! host.
 
+pub mod browser_refs;
 pub mod cursors;
 mod desktop;
 pub mod jobs;
@@ -307,6 +308,7 @@ pub struct ComputerManager {
     upgrades: Actor<HashMap<Uuid, upgrade::UpgradeStatus>>,
     upgrade_tasks: tokio_util::task::TaskTracker,
     upgrade_stop: tokio_util::sync::CancellationToken,
+    browser_refs: Actor<HashMap<Uuid, HashMap<String, browser_refs::RefLabel>>>,
 }
 
 impl ComputerManager {
@@ -329,6 +331,7 @@ impl ComputerManager {
             upgrades: Actor::default(),
             upgrade_tasks: tokio_util::task::TaskTracker::new(),
             upgrade_stop: tokio_util::sync::CancellationToken::new(),
+            browser_refs: Actor::default(),
         }
     }
 
