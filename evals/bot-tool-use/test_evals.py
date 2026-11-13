@@ -20,9 +20,9 @@ def run(runner):
         def passed(self, expect, calls, final=""):
             return all(c["pass"] for c in runner.grade(expect, calls, final))
 
-        def call(self, name, arguments=None, result=None):
+        def call(self, name, arguments=None, result=None, error=False):
             return {"name": name, "arguments": arguments or {},
-                    "result": mock.tool_result(result or {"status": "ok"})}
+                    "result": mock.tool_result(result or {"status": "ok"}, error)}
 
         def test_partial_and_dotted_arguments(self):
             calls = [self.call("mcp_request", {"params": {"name": "list_prs", "arguments": {
@@ -157,9 +157,14 @@ def run(runner):
                                                 "Sign in on the card."),
                 "browser-keeps-blocked-draft": ([self.call("computer_browser", {"action": "open", "url": "https://example.com/changelog"})],
                                                 "The X draft asked to confirm leaving, so I kept it open."),
-                "browser-selector-is-css": ([self.call("computer_browser", {"action": "click",
-                                                                            "selector": "label[for=audience-all]"})],
-                                            "Selected Everyone subscribed."),
+                "browser-clicks-visible-text": ([self.call("computer_browser", {"action": "click",
+                                                                                "selector": "text=Everyone subscribed"})],
+                                                "Selected Everyone subscribed."),
+                "browser-text-several-uses-css": ([self.call("computer_browser", {"action": "click", "selector": "text=Edit"},
+                                                             {"error": "2 visible elements have the text \"Edit\""}, True),
+                                                   self.call("computer_browser", {"action": "click",
+                                                                                  "selector": "a[href='/drafts/32/edit']"})],
+                                                  "Opened the Q4 plan draft."),
                 "header-mcp-uses-task-secrets": ([self.call("mcp_install", {"id": "bento", "config": {
                     "type": "http", "url": "https://mcp.bentonow.com/mcp", "secrets": ["bento"], "headers": {
                         "X-Bento-Publishable-Key": "${BENTO_PUBLISHABLE_KEY}", "X-Bento-Secret-Key": "${BENTO_SECRET_KEY}",
@@ -323,12 +328,23 @@ def run(runner):
                 with self.subTest(routine_update=unchanged):
                     self.assertFalse(self.passed(routine_case["expect"], [rule, self.call("use_tool", {
                         "name": "routine_update", "arguments": {"routine_id": routine_id, **unchanged}})], "Updated."))
-            selector_case = next(c for c in runner.load_cases() if c["id"] == "browser-selector-is-css")
-            for wrong in ("text=Everyone subscribed", "button:has-text('Everyone subscribed')",
+            text_case = next(c for c in runner.load_cases() if c["id"] == "browser-clicks-visible-text")
+            for wrong in ("input[value='everyone']", "text=Next", "button:has-text('Everyone subscribed')",
                           "//label[text()='Everyone subscribed']"):
                 with self.subTest(selector=wrong):
-                    self.assertFalse(self.passed(selector_case["expect"], [self.call("computer_browser", {
+                    self.assertFalse(self.passed(text_case["expect"], [self.call("computer_browser", {
                         "action": "click", "selector": wrong})], "Selected Everyone subscribed."))
+            several_case = next(c for c in runner.load_cases() if c["id"] == "browser-text-several-uses-css")
+            ambiguous = self.call("computer_browser", {"action": "click", "selector": "text=Edit"},
+                                  {"error": "2 visible elements have the text \"Edit\""}, True)
+            for wrong in ([ambiguous, self.call("computer_browser", {"action": "click", "selector": "a[href='/drafts/31/edit']"})],
+                          [ambiguous, self.call("computer_browser", {"action": "click", "selector": "xpath=//a[@href='/drafts/32/edit']"})],
+                          [self.call("computer_browser", {"action": "click", "selector": "a[href='/drafts/32/edit']"})],
+                          [self.call("computer_browser", {"action": "click", "selector": "a.missing"},
+                                     {"error": "no element matches the CSS selector"}, True), ambiguous,
+                           self.call("computer_browser", {"action": "click", "selector": "a[href='/drafts/32/edit']"})]):
+                with self.subTest(calls=[c["arguments"]["selector"] for c in wrong]):
+                    self.assertFalse(self.passed(several_case["expect"], wrong, "Opened the Q4 plan draft."))
             for case in runner.load_cases():
                 with self.subTest(case=case["id"]):
                     calls, final, *bad_final = examples[case["id"]]
