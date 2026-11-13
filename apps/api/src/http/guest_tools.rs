@@ -182,8 +182,9 @@ pub fn tool_list() -> Vec<Value> {
                 "action": { "type": "string", "enum": ["open", "text", "title", "click", "type"] },
                 "url": { "type": "string", "maxLength": 4000 },
                 "selector": { "type": "string", "maxLength": 1000,
-                    "description": "CSS selector for document.querySelector, such as #send or \
-                        button[type=submit]. text= and XPath selectors are not supported." },
+                    "description": "CSS selector such as #send or button[type=submit], or \
+                        text=Label for the one visible element with exactly that text. XPath is \
+                        not supported." },
                 "text": { "type": "string", "maxLength": 4000 },
                 "dialog": { "type": "string", "enum": ["dismiss", "accept"],
                     "description": "How to answer alert, confirm, prompt, or leave-page dialogs this \
