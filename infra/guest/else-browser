@@ -145,6 +145,15 @@ def lock():
                                              "(see computer_job); wait for it or cancel it"}))
             time.sleep(0.2)
 
+def on_element(tab, selector, script):
+    found = tab.eval(f"(()=>{{let e;try{{e=document.querySelector({json.dumps(selector)})}}catch(_){{return 'invalid'}}"
+                     f"if(!e)return 'missing';{script}return 'ok'}})()")
+    if found == "invalid":
+        raise SystemExit(json.dumps({"error": f"{json.dumps(selector)} is not a CSS selector; use CSS such as "
+                                     "#id, .class, or button[type=submit], not text= or XPath"}))
+    if found != "ok":
+        raise SystemExit(json.dumps({"error": "no element matches the CSS selector"}))
+
 def main(argv):
     accept_dialogs = argv[:1] == ["--accept-dialogs"]
     if accept_dialogs:
@@ -165,15 +174,11 @@ def main(argv):
         time.sleep(0.3)
         tab.settle()
     elif action == "click":
-        found = tab.eval(f"(()=>{{const e=document.querySelector({json.dumps(rest[0])});if(!e)return false;e.click();return true}})()")
-        if not found:
-            raise SystemExit(json.dumps({"error": "no element matches the selector"}))
+        on_element(tab, rest[0], "e.click();")
         time.sleep(0.2)
         tab.settle()
     elif action == "type":
-        found = tab.eval(f"(()=>{{const e=document.querySelector({json.dumps(rest[0])});if(!e)return false;e.focus();e.value={json.dumps(rest[1])};e.dispatchEvent(new Event('input',{{bubbles:true}}));return true}})()")
-        if not found:
-            raise SystemExit(json.dumps({"error": "no element matches the selector"}))
+        on_element(tab, rest[0], f"e.focus();e.value={json.dumps(rest[1])};e.dispatchEvent(new Event('input',{{bubbles:true}}));")
     elif action not in ("text", "title"):
         raise SystemExit(json.dumps({"error": f"unknown action {action}"}))
     text = tab.eval("document.body ? document.body.innerText : ''") or ""

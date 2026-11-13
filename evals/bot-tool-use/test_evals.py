@@ -145,6 +145,9 @@ def run(runner):
                                                 "Sign in on the card."),
                 "browser-keeps-blocked-draft": ([self.call("computer_browser", {"action": "open", "url": "https://example.com/changelog"})],
                                                 "The X draft asked to confirm leaving, so I kept it open."),
+                "browser-selector-is-css": ([self.call("computer_browser", {"action": "click",
+                                                                            "selector": "label[for=audience-all]"})],
+                                            "Selected Everyone subscribed."),
                 "header-mcp-uses-task-secrets": ([self.call("mcp_install", {"id": "bento", "config": {
                     "type": "http", "url": "https://mcp.bentonow.com/mcp", "secrets": ["bento"], "headers": {
                         "X-Bento-Publishable-Key": "${BENTO_PUBLISHABLE_KEY}", "X-Bento-Secret-Key": "${BENTO_SECRET_KEY}",
@@ -293,6 +296,12 @@ def run(runner):
                 with self.subTest(routine_update=unchanged):
                     self.assertFalse(self.passed(routine_case["expect"], [rule, self.call("use_tool", {
                         "name": "routine_update", "arguments": {"routine_id": routine_id, **unchanged}})], "Updated."))
+            selector_case = next(c for c in runner.load_cases() if c["id"] == "browser-selector-is-css")
+            for wrong in ("text=Everyone subscribed", "button:has-text('Everyone subscribed')",
+                          "//label[text()='Everyone subscribed']"):
+                with self.subTest(selector=wrong):
+                    self.assertFalse(self.passed(selector_case["expect"], [self.call("computer_browser", {
+                        "action": "click", "selector": wrong})], "Selected Everyone subscribed."))
             for case in runner.load_cases():
                 with self.subTest(case=case["id"]):
                     calls, final, *bad_final = examples[case["id"]]
