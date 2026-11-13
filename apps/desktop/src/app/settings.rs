@@ -1201,8 +1201,9 @@ impl ElseApp {
         panel.into_any_element()
     }
 
-    /// The panel's identity header: a 40 px avatar that opens the picker
-    /// and the bot's 17 px name, which turns into a field when clicked.
+    /// The panel's compact identity header: a 32 px avatar that opens the
+    /// picker and the bot's 15 px name, which turns into a field when
+    /// clicked. A full-width rule closes it like every section below.
     fn render_identity(&self, bot: Uuid, details: &Details, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let name = if details.editing {
@@ -1235,8 +1236,8 @@ impl ElseApp {
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(17.))
-                        .line_height(px(24.))
+                        .text_size(px(15.))
+                        .line_height(px(20.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(details.sync.desired.name.clone()),
                 )
@@ -1274,17 +1275,17 @@ impl ElseApp {
             .flex_none()
             .w_full()
             .px_4()
-            .pt_4()
-            .pb_3()
+            .py_3()
             .gap_1()
             .items_center()
+            .border_b_1()
+            .border_color(hairline(cx))
             .child(self.render_avatar_editor(bot, details, cx))
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
                     .gap_1()
-                    .px_1()
                     .child(name)
                     .children(problem)
                     .children(error),
@@ -1306,9 +1307,9 @@ impl ElseApp {
         };
         let badge = div()
             .absolute()
-            .right(px(-2.))
-            .bottom(px(-2.))
-            .size(px(18.))
+            .right(px(-3.))
+            .bottom(px(-3.))
+            .size(px(16.))
             .rounded_full()
             .flex()
             .items_center()
@@ -1320,17 +1321,15 @@ impl ElseApp {
             .shadow_sm()
             .opacity(if details.picking { 1. } else { 0. })
             .group_hover("avatar-editor", |style| style.opacity(1.))
-            .child(
-                Icon::new(gpui_kit::assets::IconName::PencilLine).with_size(Size::Size(px(10.))),
-            );
+            .child(Icon::new(gpui_kit::assets::IconName::PencilLine).with_size(Size::Size(px(9.))));
         let hero = Button::new("edit-avatar")
             .focus_ring(false)
             .cursor_pointer()
             .ghost()
-            .w(px(44.))
-            .h(px(44.))
+            .w(px(32.))
+            .h(px(32.))
             .p_0()
-            .rounded(theme.radius_lg)
+            .rounded(theme.radius)
             .accessibility_label(editing)
             .toggled(details.picking)
             .child(
@@ -1340,7 +1339,7 @@ impl ElseApp {
                     .child(bot_avatar(
                         ElementId::Name(format!("settings-avatar-{bot}").into()),
                         details.sync.desired.avatar,
-                        px(40.),
+                        px(32.),
                     ))
                     .child(badge),
             );
@@ -1444,8 +1443,9 @@ impl ElseApp {
             .ghost()
             .with_size(Size::Size(px(16.)))
             .mx(-ROW_BLEED)
+            .my(-ROW_BLEED)
             .px(ROW_BLEED)
-            .py_2()
+            .py(ROW_BLEED)
             .accessibility_label("Change model")
             .disabled(self.caps.is_none() || self.connection != Connection::Connected)
             .child(
@@ -1519,7 +1519,7 @@ impl ElseApp {
                 self.render_trigger(bot, card, save, cx)
             })
             .collect::<Vec<_>>();
-        body.children(list_rows(rows, cx)).into_any_element()
+        body.child(list_rows(rows)).into_any_element()
     }
 
     fn render_trigger(
@@ -1597,7 +1597,7 @@ impl ElseApp {
         }));
         v_flex()
             .w_full()
-            .py(px(10.))
+            .py_0()
             .gap_1()
             .group("automation-card")
             .child(
@@ -1662,7 +1662,7 @@ impl ElseApp {
             .into_iter()
             .map(|routine| self.render_routine(bot, routine, saves.get(&routine.id), connected, cx))
             .collect::<Vec<_>>();
-        body.children(list_rows(rows, cx)).into_any_element()
+        body.child(list_rows(rows)).into_any_element()
     }
 
     fn render_reminders(
@@ -1702,7 +1702,7 @@ impl ElseApp {
                 self.render_routine(bot, reminder, saves.get(&reminder.id), connected, cx)
             })
             .collect::<Vec<_>>();
-        body.children(list_rows(rows, cx)).into_any_element()
+        body.child(list_rows(rows)).into_any_element()
     }
 
     fn render_routine(
@@ -1966,7 +1966,7 @@ impl ElseApp {
         let theme = cx.theme();
         v_flex()
             .w_full()
-            .py(px(10.))
+            .py_0()
             .gap_1()
             .group("automation-card")
             .child(
@@ -2237,31 +2237,28 @@ pub(super) fn hairline(cx: &App) -> Hsla {
 /// How far a clickable row's hover fill reaches past the text column.
 const ROW_BLEED: Pixels = px(8.);
 
-/// A titled group of rows in the Details panel: no box, just a label and
-/// a rule under the group.
+/// A titled group of rows in the Details panel: no box, just a label, 16 px
+/// of padding and one full-width rule under the group. Rows inside never
+/// draw their own rules.
 pub(super) fn section_frame(cx: &App) -> Div {
     v_flex()
         .w_full()
         .px_4()
-        .pt_4()
-        .pb_2()
+        .py_4()
         .border_b_1()
         .border_color(hairline(cx))
 }
 
+/// The gap from a section's label to its first row, and between rows.
+pub(super) const ROW_GAP: Pixels = px(12.);
+
 fn section(title: &'static str, cx: &App) -> Div {
-    section_frame(cx).child(crate::appearance::section_label(title, cx).pb_0p5())
+    section_frame(cx).child(crate::appearance::section_label(title, cx).pb(ROW_GAP))
 }
 
-/// Rows separated by hairlines, without a rule above the first.
-fn list_rows(rows: Vec<AnyElement>, cx: &App) -> impl Iterator<Item = Div> {
-    let line = hairline(cx);
-    rows.into_iter().enumerate().map(move |(index, row)| {
-        div()
-            .w_full()
-            .when(index > 0, |row| row.border_t_1().border_color(line))
-            .child(row)
-    })
+/// A section's rows, 12 px apart.
+fn list_rows(rows: Vec<AnyElement>) -> Div {
+    v_flex().w_full().gap(ROW_GAP).children(rows)
 }
 
 /// Secondary text in a row: a schedule, a model, a trigger's details. It
