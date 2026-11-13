@@ -287,8 +287,8 @@ impl SinkState {
         let item_id = Uuid::new_v4();
         let seq = transcript.last_seq + 1;
         sqlx::query(
-            "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text, provider_id)
-             VALUES (?1, ?2, ?3, ?4, 'assistant', ?5, ?6)",
+            "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text, provider_id, attempt)
+             VALUES (?1, ?2, ?3, ?4, 'assistant', ?5, ?6, ?7)",
         )
         .bind(item_id)
         .bind(transcript.conversation_id)
@@ -296,6 +296,7 @@ impl SinkState {
         .bind(self.turn_id)
         .bind(chunk)
         .bind(&self.provider_id)
+        .bind(self.attempt)
         .execute(&mut *tx)
         .await?;
         sqlx::query("UPDATE conversations SET last_item_seq = ?2 WHERE id = ?1")

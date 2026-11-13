@@ -54,6 +54,9 @@ pub struct Item {
     pub bot_created: Option<BotCreated>,
     #[serde(default)]
     pub rules_update: Option<RulesUpdate>,
+    /// The provider attempt that wrote an assistant item. Absent from older servers.
+    #[serde(default)]
+    pub attempt: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -445,6 +448,9 @@ pub struct Turn {
     pub id: Uuid,
     pub request_id: Uuid,
     pub turn_no: i64,
+    /// The turn's latest provider attempt. Absent from older servers.
+    #[serde(default)]
+    pub attempt: Option<i64>,
     pub provider_id: String,
     pub status: String,
     pub error: Option<TurnError>,

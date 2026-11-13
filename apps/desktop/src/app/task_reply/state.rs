@@ -160,7 +160,12 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                 reply.reactions.push((item.id, kind));
             }
             if let Some(previous) = reply.latest.replace(item.id) {
-                if reply.latest_kept {
+                // The owner read an earlier attempt's last reply as the answer.
+                let ended_attempt = conversation
+                    .item(previous)
+                    .and_then(|previous| previous.attempt)
+                    .is_some_and(|previous| item.attempt > Some(previous));
+                if reply.latest_kept || ended_attempt {
                     reply.kept.push(previous)
                 } else {
                     reply.history.push(previous)
@@ -173,6 +178,15 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
         } else if reply.latest.is_none() && item.routine_update.is_none() {
             reply.anchor = Some(item.id);
         }
+    }
+    // A queued turn runs no attempt, so its latest reply ended one.
+    for (turn, reply) in &mut replies {
+        let attempt = reply.latest.and_then(|id| conversation.item(id)?.attempt);
+        reply.latest_kept |= attempt.is_some()
+            && (reply.state == ReplyState::Queued
+                || conversation
+                    .turn(*turn)
+                    .is_some_and(|turn| turn.attempt > attempt));
     }
     // A finished turn kept only for its pending computer handoff has no
     // history on this page; the composer bar shows it instead of a row.
@@ -757,5 +771,52 @@ mod tests {
         }}]);
         let c = conversation(vec![item(1, 10, "user"), file], vec![turn(10, "running")]);
         assert!(task_replies(&c)[&id(10)].latest_kept);
+    }
+
+    /// #387: a reply that ended an attempt was read as the answer while the
+    /// turn waited on a delegated task; the continuation must not fold it away.
+    #[test]
+    fn a_reply_that_ended_an_attempt_stays_visible_after_the_turn_resumes() {
+        let reply = |number, attempt| {
+            let mut reply = item(number, 10, "assistant");
+            reply["attempt"] = json!(attempt);
+            reply
+        };
+        let mut result = item(4, 10, "status");
+        result["bot_reply"] = json!({"sender_bot_id": id(50), "sender_name": "Bento",
+            "prompt": "Clean up the routine", "status": "completed"});
+        let attempt = |status, attempt| {
+            let mut turn = turn(10, status);
+            turn["attempt"] = json!(attempt);
+            turn
+        };
+        let items = vec![item(1, 10, "user"), reply(2, 1), reply(3, 1), result];
+
+        let requeued = conversation(items.clone(), vec![attempt("queued", 1)]);
+        assert!(
+            task_replies(&requeued)[&id(10)].latest_kept,
+            "the read reply stays on screen while the result waits for a slot"
+        );
+
+        let resumed = conversation(items.clone(), vec![attempt("running", 2)]);
+        let working = &task_replies(&resumed)[&id(10)];
+        assert_eq!(working.latest, Some(id(3)));
+        assert!(
+            working.latest_kept,
+            "the read reply stays on screen while the bot continues"
+        );
+        assert_eq!(
+            working.history,
+            [id(2)],
+            "progress inside one attempt still folds"
+        );
+
+        let mut done = items;
+        done.push(reply(5, 2));
+        let c = conversation(done, vec![attempt("completed", 2)]);
+        let finished = &task_replies(&c)[&id(10)];
+        assert_eq!(finished.latest, Some(id(5)));
+        assert_eq!(finished.kept, [id(3)]);
+        assert_eq!(finished.history, [id(2)]);
     }
 }
