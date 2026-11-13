@@ -695,6 +695,11 @@ pub async fn delete(pool: &SqlitePool, by: By, id: Uuid) -> Result<bool, Routine
             .bind(id)
             .execute(&mut *tx)
             .await?;
+            // A check still running for this routine must not queue a turn
+            // for it; its job is asked to stop.
+            for job in skip_checks(&mut tx, by.bot_id(), Some(id)).await? {
+                crate::computers::jobs::request_cancel(&mut *tx, by.bot_id(), Some(job)).await?;
+            }
             events::bot_updated(&mut tx, by.bot_id()).await?;
             tx.commit().await?;
             Ok(true)
@@ -1549,8 +1554,8 @@ pub const SETTLE_BATCH: i64 = 8;
 /// Settle up to `limit` checking runs whose check job has ended, per
 /// [`CheckEnd::after`]: skip the run, or queue its turn with the routine's
 /// current prompt and what the check reported. A run whose bot stopped or
-/// left is skipped as `check_cancelled`; Stop settles its runs itself, see
-/// [`stop_checks`]. Returns how many turns were
+/// left, or whose routine was deleted, is skipped as `check_cancelled`;
+/// Stop and deletion settle their runs themselves, see [`stop_checks`]. Returns how many turns were
 /// queued. The caller holds a maintenance admission.
 pub async fn settle_checks(
     pool: &SqlitePool,
@@ -1595,7 +1600,8 @@ async fn settle_check(
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row: Option<Checked> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT rr.routine_id, r.bot_id, r.conversation_id, r.prompt, r.prompt_revision, r.model,
-                b.status = 'active' AND NOT b.cancel_pending AS live, {checked}
+                b.status = 'active' AND NOT b.cancel_pending AND r.deleted_at IS NULL AS live,
+                {checked}
          FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id
          JOIN bots b ON b.id = r.bot_id JOIN guest_jobs j ON j.id = rr.check_job_id
          WHERE rr.id = ?1 AND {UNSETTLED}",
@@ -1658,23 +1664,35 @@ async fn settle_check(
 }
 
 /// Skip every unsettled check run of the bot as `check_cancelled`, inside a
-/// Stop's or deletion's immediate transaction, so a check that already
-/// ended cannot queue its turn after the stop.
+/// Stop's immediate transaction, so a check that already ended cannot queue
+/// its turn after the stop. Stop cancels the bot's jobs itself.
 pub(crate) async fn stop_checks(
     conn: &mut SqliteConnection,
     bot_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let stopped = sqlx::query(sqlx::AssertSqlSafe(format!(
+    skip_checks(conn, bot_id, None).await.map(drop)
+}
+
+/// Skip the unsettled check runs of the bot, or of one of its routines, as
+/// `check_cancelled`. Returns the check jobs of the runs it skipped.
+async fn skip_checks(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+    routine_id: Option<Uuid>,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let jobs: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "UPDATE routine_runs AS rr SET skip_reason = 'check_cancelled'
          WHERE {UNSETTLED} AND rr.check_job_id IS NOT NULL
-           AND rr.routine_id IN (SELECT id FROM routines WHERE bot_id = ?1)"
+           AND rr.routine_id IN (SELECT id FROM routines WHERE bot_id = ?1)
+           AND (?2 IS NULL OR rr.routine_id = ?2)
+         RETURNING check_job_id"
     )))
     .bind(bot_id)
-    .execute(&mut *conn)
-    .await?
-    .rows_affected();
-    if stopped > 0 {
+    .bind(routine_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    if !jobs.is_empty() {
         events::bot_updated(conn, bot_id).await?;
     }
-    Ok(())
+    Ok(jobs)
 }
