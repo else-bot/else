@@ -38,6 +38,7 @@ struct SinkState {
     delivered_drafts: Vec<Uuid>,
     delivered_socials: Vec<Uuid>,
     delivered_waits: Vec<Uuid>,
+    delivered_job_waits: Vec<Uuid>,
     /// A delegated task: its text updates the delegating turn's progress.
     delegated: bool,
     progress_at: Option<std::time::Instant>,
@@ -78,6 +79,7 @@ impl SqliteSink {
                 delivered_secrets: input.secrets.iter().map(|o| o.id).collect(),
                 delivered_socials: input.social_setups.iter().map(|s| s.id).collect(),
                 delivered_waits: input.mcp_waits.iter().map(|w| w.id).collect(),
+                delivered_job_waits: input.computer_job_waits.iter().map(|w| w.id).collect(),
                 delegated: input.delegation.delegated_task,
                 progress_at: None,
                 delivered_skills: input.skill_installs.iter().map(|o| o.id).collect(),
@@ -539,6 +541,7 @@ impl SinkState {
                     || !self.delivered_drafts.is_empty()
                     || !self.delivered_socials.is_empty()
                     || !self.delivered_waits.is_empty()
+                    || !self.delivered_job_waits.is_empty()
                     || !self.delivered_skills.is_empty()
                     || !self.delivered_handoffs.is_empty()
                 {
@@ -578,6 +581,13 @@ impl SinkState {
                             self.turn_id,
                             self.attempt,
                             &self.delivered_waits,
+                        )
+                        .await?;
+                        crate::db::computer_job_waits::mark_delivered(
+                            &mut tx,
+                            self.turn_id,
+                            self.attempt,
+                            &self.delivered_job_waits,
                         )
                         .await?;
                         if !self.delivered.is_empty() {

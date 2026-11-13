@@ -425,6 +425,9 @@ pub struct Turn {
     /// MCP jobs this turn waits on. Absent from older servers.
     #[serde(default)]
     pub mcp_waits: Vec<McpWait>,
+    /// Background computer jobs this turn waits on. Absent from older servers.
+    #[serde(default)]
+    pub computer_job_waits: Vec<ComputerJobWait>,
     /// Requests that the owner take over the computer. Absent from older servers.
     #[serde(default)]
     pub computer_handoffs: Vec<ComputerHandoff>,
@@ -436,6 +439,21 @@ pub struct Turn {
 pub struct McpWait {
     pub id: Uuid,
     pub mcp_id: String,
+}
+
+/// A background job in the bot's computer that a waiting turn continues
+/// after. A pending wait is the only hold of its attempt.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ComputerJobWait {
+    pub id: Uuid,
+    pub job_id: Uuid,
+}
+
+impl Turn {
+    /// Whether the turn waits on work of its own rather than on the owner.
+    pub fn waits_on_job(&self) -> bool {
+        !self.mcp_waits.is_empty() || !self.computer_job_waits.is_empty()
+    }
 }
 
 /// A task a turn handed to another bot. Its settled reply is the item
