@@ -734,6 +734,7 @@ pub async fn publish_reply(conn: &mut SqliteConnection, turn: Uuid) -> Result<()
             .execute(&mut *conn)
             .await?;
         }
+        save_messages(conn, id, parent, turn).await?;
         let seq: i64 = sqlx::query_scalar(
             "UPDATE conversations SET last_item_seq = last_item_seq + 1 WHERE id = ?1
              RETURNING last_item_seq",
@@ -755,6 +756,50 @@ pub async fn publish_reply(conn: &mut SqliteConnection, turn: Uuid) -> Result<()
         events::item_upsert(conn, parent, id).await?;
     }
     Ok(())
+}
+
+async fn save_messages(
+    conn: &mut SqliteConnection,
+    delegation: Uuid,
+    parent: Uuid,
+    turn: Uuid,
+) -> Result<(), sqlx::Error> {
+    let messages: Vec<String> = sqlx::query_scalar(
+        "SELECT text FROM items WHERE turn_id = ?1 AND kind = 'assistant' ORDER BY seq",
+    )
+    .bind(turn)
+    .fetch_all(&mut *conn)
+    .await?;
+    if messages.len() < 2 {
+        return Ok(());
+    }
+    let data = messages.join("\n\n").into_bytes();
+    sqlx::query(
+        "INSERT OR IGNORE INTO attachments (id, bot_id, name, media_type, size, sha256, data)
+         VALUES (?1, ?2, ?3, 'text/markdown', ?4, ?5, ?6)",
+    )
+    .bind(messages_file(delegation))
+    .bind(parent)
+    .bind(format!("task-{delegation}-messages.md"))
+    .bind(data.len() as i64)
+    .bind(Sha256::digest(&data).to_vec())
+    .bind(data)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+fn messages_file(delegation: Uuid) -> Uuid {
+    derived_id(&[b"delegation-messages", delegation.as_bytes()])
+}
+
+fn derived_id(parts: &[&[u8]]) -> Uuid {
+    let digest = parts
+        .iter()
+        .fold(Sha256::new(), |hasher, part| hasher.chain_update(part))
+        .finalize();
+    let bytes: [u8; 16] = digest[..16].try_into().expect("digest has 16 bytes");
+    uuid::Builder::from_random_bytes(bytes).into_uuid()
 }
 
 /// The files a task's replies attached, at most a message's worth, each
@@ -784,13 +829,8 @@ async fn returned_files(
     Ok(sources
         .into_iter()
         .map(|source| {
-            let digest = Sha256::new()
-                .chain_update(b"delegation-file")
-                .chain_update(delegation.as_bytes())
-                .chain_update(source.as_bytes())
-                .finalize();
-            let bytes: [u8; 16] = digest[..16].try_into().expect("digest has 16 bytes");
-            (source, uuid::Builder::from_random_bytes(bytes).into_uuid())
+            let copy = derived_id(&[b"delegation-file", delegation.as_bytes(), source.as_bytes()]);
+            (source, copy)
         })
         .collect())
 }
@@ -830,20 +870,9 @@ pub async fn undelivered(
     for row in rows {
         let mut files = Vec::new();
         for (_, copy) in returned_files(conn, row.id, row.turn).await? {
-            let file: Option<(Uuid, String, String, i64)> = sqlx::query_as(
-                "SELECT id, name, media_type, size FROM attachments WHERE id = ?1 AND bot_id = ?2",
-            )
-            .bind(copy)
-            .bind(row.parent_bot_id)
-            .fetch_optional(&mut *conn)
-            .await?;
-            files.extend(file.map(|(id, name, media_type, size)| Attachment {
-                id,
-                name,
-                media_type,
-                size: size as u64,
-            }));
+            files.extend(attachment(conn, copy, row.parent_bot_id).await?);
         }
+        let messages = attachment(conn, messages_file(row.id), row.parent_bot_id).await?;
         outcomes.push(Outcome {
             id: row.id,
             target_bot_id: row.target_bot_id,
@@ -853,10 +882,31 @@ pub async fn undelivered(
             result: row.result,
             error: row.error,
             files,
+            messages,
             earlier_request: row.earlier_request,
         });
     }
     Ok(outcomes)
+}
+
+async fn attachment(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    bot: Uuid,
+) -> Result<Option<Attachment>, sqlx::Error> {
+    let file: Option<(Uuid, String, String, i64)> = sqlx::query_as(
+        "SELECT id, name, media_type, size FROM attachments WHERE id = ?1 AND bot_id = ?2",
+    )
+    .bind(id)
+    .bind(bot)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(file.map(|(id, name, media_type, size)| Attachment {
+        id,
+        name,
+        media_type,
+        size: size as u64,
+    }))
 }
 
 /// Record that `attempt` received these outcomes, and log each to the
