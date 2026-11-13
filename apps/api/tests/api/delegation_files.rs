@@ -258,10 +258,20 @@ async fn a_delegated_file_reaches_the_other_bot_and_its_reply_files_come_back() 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owner_taking_over_a_task_gets_its_files() {
+    owner_takeover_gets_the_task_files(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_taking_over_an_updated_task_still_gets_its_files() {
+    owner_takeover_gets_the_task_files(true).await;
+}
+
+async fn owner_takeover_gets_the_task_files(updated: bool) {
     let Setup {
         _root,
         provider,
         app,
+        main,
         twitter,
         card,
         token,
@@ -275,12 +285,55 @@ async fn an_owner_taking_over_a_task_gets_its_files() {
     )
     .await;
     assert!(!error, "{pending}");
-    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations")
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
+    let task: Uuid = pending["task_id"].as_str().unwrap().parse().unwrap();
+    let child_of = || async {
+        sqlx::query_scalar::<_, Uuid>("SELECT child_turn_id FROM delegations")
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap()
+    };
+    let child = child_of().await;
     app.wait_turn_for(&child.to_string(), &["running"], Duration::from_secs(20))
         .await;
+    if updated {
+        let follow = app
+            .send(&main, Uuid::new_v4(), "[synthetic:hang] Any news?", None)
+            .await;
+        let follow: Uuid = follow.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+        app.wait_turn(&follow.to_string(), &["running"]).await;
+        let conversation: Uuid =
+            sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
+                .bind(follow)
+                .fetch_one(&app.db.pool)
+                .await
+                .unwrap();
+        let token = app
+            .scheduler
+            .grants()
+            .issue(
+                main.parse().unwrap(),
+                conversation,
+                follow,
+                vec![Tool::Delegate],
+                DEFAULT_TTL,
+            )
+            .await;
+        let reply = app
+            .call(
+                "POST",
+                "/tools/v1/mcp",
+                Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                             "params": { "name": "delegation_update", "arguments": {
+                                 "task_id": task,
+                                 "message": "[synthetic:hang] Use the blue caption." } } })),
+                Some(&token),
+            )
+            .await;
+        assert_ne!(reply.body["result"]["isError"], true, "{}", reply.body);
+        app.wait_turn(&child.to_string(), &["interrupted"]).await;
+        let replacement = child_of().await;
+        app.wait_turn(&replacement.to_string(), &["running"]).await;
+    }
 
     let sent = app
         .send(

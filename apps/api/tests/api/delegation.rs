@@ -2811,6 +2811,142 @@ async fn a_delegating_bot_updates_a_running_task_and_gets_the_updated_reply() {
         second,
         "a retry changes nothing"
     );
+    let delivered: Option<i64> =
+        sqlx::query_scalar("SELECT delivered_attempt FROM delegations WHERE id = ?1")
+            .bind(task)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert!(
+        delivered.is_some(),
+        "the retry's outcome is not delivered again"
+    );
+}
+
+async fn app_with_synthetic() -> (TestApp, Arc<else_api::providers::synthetic::Synthetic>) {
+    let db = Arc::new(TestDb::migrated().await);
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let synthetic = Arc::new(else_api::providers::synthetic::Synthetic::new(
+        Duration::from_millis(5),
+    ));
+    let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
+    (TestApp::with_registry(db, 3, registry), synthetic)
+}
+
+async fn update(app: &TestApp, token: &str, task: Uuid, message: &str) -> Value {
+    let (failed, updated) = control(
+        app,
+        token,
+        "delegation_update",
+        json!({ "task_id": task, "message": message }),
+    )
+    .await;
+    assert!(!failed, "{updated}");
+    updated
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_without_the_tasks_session_still_sees_its_earlier_reply() {
+    let (app, synthetic) = app_with_synthetic().await;
+    let work = leaf(&app, "Work").await;
+    let original = format!(
+        "[synthetic:slow] List the school forms. {}",
+        "Name each form and its due date. ".repeat(8)
+    );
+    let (task, first, token) = task_carried_to_a_follow_up(&app, &work, &original).await;
+    let deadline = tokio::time::Instant::now() + common::SETTLE;
+    let partial = loop {
+        let text: Option<String> = sqlx::query_scalar(
+            "SELECT group_concat(text, '') FROM items WHERE turn_id = ?1 AND kind = 'assistant'",
+        )
+        .bind(first)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+        if let Some(text) = text.filter(|t| t.len() >= 14) {
+            break text;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no partial reply");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let native: Vec<String> = sqlx::query_scalar(
+        "SELECT s.native_session_id FROM provider_sessions s JOIN turns t
+         ON t.conversation_id = s.conversation_id WHERE t.id = ?1",
+    )
+    .bind(first)
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap();
+    synthetic.forget_sessions(&native).await;
+
+    let change = "Only the permission slip matters now.";
+    update(&app, &token, task, change).await;
+    wait_task(&app, task, "completed").await;
+    let packet = synthetic
+        .packets()
+        .await
+        .into_iter()
+        .find(|p| p.ends_with(change))
+        .expect("the update reached Work");
+    assert!(
+        packet.contains(&partial[..14]),
+        "the update carries the task's earlier reply: {packet}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_update_can_repeat_an_earlier_one() {
+    let app = app_with(3).await;
+    let work = leaf(&app, "Work").await;
+    let (task, _, token) =
+        task_carried_to_a_follow_up(&app, &work, "[synthetic:hang] Plan the week.").await;
+    let include = "[synthetic:hang] Include the school forms.";
+    let exclude = "[synthetic:hang] Leave out the school forms.";
+    update(&app, &token, task, include).await;
+    let included = child_of(&app, task).await;
+    update(&app, &token, task, exclude).await;
+    let again = update(&app, &token, task, include).await;
+    let latest = child_of(&app, task).await;
+    assert_ne!(latest, included, "changing back is a new update: {again}");
+    let source: String = sqlx::query_scalar(
+        "SELECT i.text FROM turns t JOIN items i ON i.id = t.owner_item_id WHERE t.id = ?1",
+    )
+    .bind(latest)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(source, include);
+    let retry = update(&app, &token, task, include).await;
+    assert_eq!(retry["next"], "This update was already applied.");
+    assert_eq!(child_of(&app, task).await, latest);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_message_takes_over_an_update_still_queued() {
+    let (app, synthetic) = app_with_synthetic().await;
+    let work = leaf(&app, "Work").await;
+    let (task, first, token) =
+        task_carried_to_a_follow_up(&app, &work, "[synthetic:hang] long research").await;
+    synthetic.hold_hangs(true).await;
+    update(&app, &token, task, "Narrow it to the permission slip.").await;
+    wait_status(&app, first, "cancelling").await;
+    let replacement = child_of(&app, task).await;
+    wait_status(&app, replacement, "queued").await;
+
+    let steer = "Stop this, Dev is on it.";
+    let sent = app
+        .send(&work, Uuid::new_v4(), steer, Some("synthetic"))
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    let steer_turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    wait_status(&app, replacement, "interrupted").await;
+    synthetic.hold_hangs(false).await;
+    wait_status(&app, steer_turn, "completed").await;
+    let (_, result, _) = wait_task(&app, task, "completed").await;
+    assert!(
+        result.as_deref().is_some_and(|r| r.contains(steer)),
+        "the owner's message answers the task: {result:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
