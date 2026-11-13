@@ -195,6 +195,12 @@ def run(runner):
                         "scope": "mcp_tool", "mcp_id": "github", "tool": "merge_pull_request", "kind": "external"},
                         "authorization": "Always allow merging pull requests with the GitHub MCP"}})],
                     "Saved: merges with the GitHub MCP no longer need a card."),
+                "always-allow-host-task-saves-host-covers": ([self.call("use_tool", {
+                    "name": "confirm_permission", "arguments": {"target": {
+                        "scope": "task", "task": "Manage Tailscale via SSH", "target": "SSH host omarchy-m1",
+                        "kind": "destructive", "covers": "host"},
+                        "authorization": "Always allow managing Tailscale over SSH on omarchy-m1"}})],
+                    "Saved: managing Tailscale over SSH on omarchy-m1 no longer needs a card."),
                 "link-project-files": ([], "[CSV](hypertracker-evidence/cloudflare-only/daily_counts_utc.csv) · "
                                            "[Report](~/work/hypertracker-evidence/cloudflare-only/report.md)",
                                        "Both are in your artifact store: `daily_counts_utc.csv` and `report.md`."),
@@ -343,6 +349,16 @@ def run(runner):
                     self.assertFalse(self.passed(one_repo["expect"], [self.call("use_tool", {
                         "name": "confirm_permission", "arguments": {"target": scope,
                         "authorization": "Always allow merging news-recap PRs"}})], "Saved."))
+            host_case = next(c for c in runner.load_cases() if c["id"] == "always-allow-host-task-saves-host-covers")
+            for covers in ("computer", None):
+                target = {"scope": "task", "task": "Manage Tailscale via SSH", "target": "SSH host omarchy-m1",
+                          "kind": "destructive"}
+                if covers:
+                    target["covers"] = covers
+                with self.subTest(host_covers=covers):
+                    self.assertFalse(self.passed(host_case["expect"], [self.call("use_tool", {
+                        "name": "confirm_permission", "arguments": {"target": target,
+                        "authorization": "Always allow managing Tailscale"}})], "Saved."))
             scoped_case = next(c for c in runner.load_cases() if c["id"] == "recurring-external-batch-declares-task-scope")
             self.assertFalse(self.passed(scoped_case["expect"], unscoped, "Approve the card."))
             routine_case = next(c for c in runner.load_cases() if c["id"] == "format-correction-updates-routine")

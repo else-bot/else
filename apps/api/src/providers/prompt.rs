@@ -230,9 +230,9 @@ fn delegation_rules(input: &TurnInput) -> String {
             {
                 (
                     "An owner request",
-                    "Your saved task permissions apply here to host actions and to computer \
-                     tool calls declaring the same task_scope: call ask_permission before each \
-                     sensitive host action, with the saved task and target when the work fits.",
+                    "Your saved task permissions apply here to the host actions or computer \
+                     tool calls each one covers, declaring the same task_scope: call ask_permission \
+                     before each sensitive host action, with the saved task and target when the work fits.",
                 )
             } else {
                 (
@@ -532,8 +532,8 @@ pub(super) fn permissions_block(input: &TurnInput) -> String {
     format!(
         "[else.bot saved permissions] Current saved scopes that apply to this request: {}\n\
          This snapshot replaces earlier saved-permission snapshots. These are permission records, \
-         not instructions to perform work. Reuse task and target exactly as task_scope for matching \
-         host work and computer tool calls. \
+         not instructions to perform work. Reuse task and target exactly as task_scope on the kind of \
+         call each task scope covers: host actions or computer tool calls. \
          Always call ask_permission before a sensitive host action; the gate checks the current \
          grant. Records from memory or old conversation history cannot restore a revoked grant.\n\n{}",
         serde_json::to_string(&input.standing_permissions).expect("permission serialization"),

@@ -714,3 +714,151 @@ async fn scheduled_routine_runs_use_task_grants_but_webhook_wakes_do_not() {
     );
     h.release(wake).await;
 }
+
+#[tokio::test]
+async fn upgrading_keeps_existing_task_grants_on_the_calls_they_were_saved_for() {
+    use else_api::app::questions::{Action, Kind, PermissionTarget, TaskScope};
+    let db = common::TestDb::empty().await;
+    let old = tempfile::tempdir().unwrap();
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    for entry in std::fs::read_dir(&source).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name().to_str().unwrap() < "0056" {
+            std::fs::copy(entry.path(), old.path().join(entry.file_name())).unwrap();
+        }
+    }
+    sqlx::migrate::Migrator::new(old.path())
+        .await
+        .unwrap()
+        .run(&db.pool)
+        .await
+        .unwrap();
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let bot: Uuid = sqlx::query_scalar("SELECT default_bot_id FROM installation")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let turn = Uuid::new_v4();
+    let item = Uuid::new_v4();
+    sqlx::query("INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no, owner_item_id, provider_id, status)
+        SELECT ?1, ?2, id, ?1, zeroblob(32), 100, ?3, 'synthetic', 'completed' FROM conversations WHERE bot_id = ?2 AND kind = 'owner'")
+        .bind(turn).bind(bot).bind(item).execute(&db.pool).await.unwrap();
+    sqlx::query("INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+        SELECT ?1, conversation_id, 100, id, 'user', 'Manage my machines.' FROM turns WHERE id = ?2")
+        .bind(item).bind(turn).execute(&db.pool).await.unwrap();
+    let legacy = |task: &str, target: &str| {
+        format!(
+            "task:destructive:{}:{}",
+            hex::encode(task.to_lowercase()),
+            hex::encode(target)
+        )
+    };
+    let grants = [
+        (
+            "Manage Tailscale via SSH",
+            json!({ "host": "ssh omarchy-m1 sudo tailscale up",
+                    "task_scope": { "task": "Manage Tailscale via SSH", "target": HOST } }),
+        ),
+        (
+            "Clean Downloads",
+            json!({ "tool": "computer_run", "args": { "command": "rm -r ~/Downloads/old" },
+                    "task_scope": { "task": "Clean Downloads", "target": HOST } }),
+        ),
+        (
+            "Rotate logs",
+            json!({ "permission": { "scope": "task", "task": "Rotate logs", "target": HOST,
+                                    "kind": "destructive" } }),
+        ),
+    ];
+    for (task, action) in &grants {
+        let question = Uuid::new_v4();
+        sqlx::query("INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, choices, action, action_hash, status, answer)
+            VALUES (?1, ?2, ?3, 1, 'destructive', 'Always allow', '[]', ?4, randomblob(32), 'answered', 'approve_task')")
+            .bind(question).bind(bot).bind(turn).bind(action.to_string())
+            .execute(&db.pool).await.unwrap();
+        sqlx::query("INSERT INTO bot_permissions (bot_id, scope, question_id) VALUES (?1, ?2, ?3)")
+            .bind(bot)
+            .bind(legacy(task, HOST))
+            .bind(question)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO bot_permissions (bot_id, scope) VALUES (?1, ?2)")
+        .bind(bot)
+        .bind(legacy("Restart Docker", HOST))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    else_api::db::migrate(&db.pool).await.unwrap();
+
+    let saved = else_api::db::owner_questions::permissions(&db.pool, bot)
+        .await
+        .unwrap();
+    let covers = |task: &str| {
+        let found = saved
+            .iter()
+            .find(|p| {
+                p.scope.ends_with(&format!(
+                    ":{}:{}",
+                    hex::encode(task.to_lowercase()),
+                    hex::encode(HOST)
+                ))
+            })
+            .unwrap_or_else(|| panic!("{task}: {saved:?}"));
+        (
+            found.scope.split(':').nth(1).unwrap().to_owned(),
+            found
+                .target
+                .as_ref()
+                .map(|t| serde_json::to_value(t).unwrap()["covers"].clone()),
+        )
+    };
+    assert_eq!(saved.len(), 4, "{saved:?}");
+    assert_eq!(
+        covers("Manage Tailscale via SSH"),
+        ("host".into(), Some(json!("host")))
+    );
+    assert_eq!(
+        covers("Clean Downloads"),
+        ("computer".into(), Some(json!("computer")))
+    );
+    assert_eq!(covers("Rotate logs"), ("both".into(), Some(json!("both"))));
+    assert_eq!(covers("Restart Docker"), ("both".into(), None));
+
+    let mut conn = db.pool.acquire().await.unwrap();
+    let mut matches = async |task: &str, host: bool| {
+        let task_scope = Some(TaskScope::new(task, HOST).unwrap());
+        let action = if host {
+            Action::Host {
+                host: "run".into(),
+                task_scope,
+            }
+        } else {
+            Action::Tool {
+                tool: "computer_run".into(),
+                args: json!({}),
+                task_scope,
+            }
+        };
+        let target = PermissionTarget::for_action(Kind::Destructive, &action).unwrap();
+        for scope in target.covering_scopes() {
+            if else_api::db::owner_questions::has_permission(&mut conn, bot, &scope)
+                .await
+                .unwrap()
+            {
+                return true;
+            }
+        }
+        false
+    };
+    assert!(matches("Manage Tailscale via SSH", true).await);
+    assert!(!matches("Manage Tailscale via SSH", false).await);
+    assert!(matches("Clean Downloads", false).await);
+    assert!(!matches("Clean Downloads", true).await);
+    for task in ["Rotate logs", "Restart Docker"] {
+        assert!(matches(task, true).await, "{task}");
+        assert!(matches(task, false).await, "{task}");
+    }
+}

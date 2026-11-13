@@ -436,14 +436,15 @@ pub async fn gate_host(
         .as_ref()
         .and_then(|a| PermissionTarget::for_action(spec.kind, &a.action))
         .filter(|t| reach.covers(t));
-    let granted = match &target {
-        Some(target)
-            if has_permission(&mut tx, caller.bot_id, &target.bot_scope().unwrap()).await? =>
-        {
-            Some(target.standing())
+    let mut granted = None;
+    if let Some(target) = &target {
+        for scope in target.covering_scopes() {
+            if has_permission(&mut tx, caller.bot_id, &scope).await? {
+                granted = Some(target.standing());
+                break;
+            }
         }
-        _ => None,
-    };
+    }
     if spec.kind == Kind::Destructive {
         let standing = match scope {
             Scope::Bot if has_permission(&mut tx, caller.bot_id, DESTRUCTIVE_SCOPE).await? => {

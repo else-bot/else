@@ -79,6 +79,7 @@ fn saved_task_permissions_are_refreshed_even_in_resumed_sessions() {
             task: "Manage Tailscale".into(),
             target: "SSH host omarchy-m1".into(),
             kind: crate::app::questions::Kind::Destructive,
+            covers: crate::app::questions::Covers::Host,
         });
     let skills = super::super::default_skills::Update {
         text: None,
