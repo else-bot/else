@@ -69,7 +69,7 @@ impl ComputerManager {
             .strip_suffix('\n')
             .and_then(|out| out.split_once('\n'))
             .and_then(|(size, path)| Some((size.parse::<u64>().ok()?, path)));
-        let Some((bytes, guest_path)) = resolved else {
+        let Some((bytes, absolute)) = resolved else {
             return Ok(Err("not a regular file (or not readable)".into()));
         };
         if bytes > max {
@@ -100,7 +100,7 @@ impl ComputerManager {
             let _ = std::fs::remove_dir_all(path);
             let _ = std::fs::remove_file(path);
         };
-        if let Err(err) = self.runtime.copy_out(&name, guest_path, &temp).await {
+        if let Err(err) = self.runtime.copy_out(&name, absolute, &temp).await {
             remove(&temp);
             return Err(err.into());
         }
