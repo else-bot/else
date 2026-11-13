@@ -294,7 +294,7 @@ pub(super) fn notice_schema() -> Value {
             "type": "object",
             "properties": {
                 "kind": { "type": "string", "enum": ["blocked", "decision"],
-                          "description": "blocked: something only the owner can clear stops the work. decision: the work waits on the owner's choice." },
+                          "description": "blocked: something only the owner can clear stops the work. decision: the work waits on the owner's choice, including whether to start work you propose beyond the task." },
                 "summary": { "type": "string", "minLength": 1, "maxLength": MAX_SUMMARY,
                              "description": "What the owner must do, in one or two sentences, e.g. Dev has no eligible session, so the fix can't start. Start one, or tell me who should take it." },
                 "tried": { "type": "string", "minLength": 1, "maxLength": MAX_TRIED,

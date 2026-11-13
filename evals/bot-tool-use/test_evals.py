@@ -313,6 +313,14 @@ def run(runner):
                                                 "summary": "Dev is signed out of its provider, so it can't make the fix. Sign Dev back in from Settings."},
                                {"status": "pending"})],
                     "The fix waits on Dev, which is signed out. I flagged the owner to sign it back in."),
+                "review-task-fix-flags-owner": (
+                    [self.call("notify_owner", {"kind": "decision",
+                                                "summary": "Scout's DM drafts keep overclaiming. I specced a fix, a per-candidate qualification gate, but Scout won't build it from my review. Tell me to go ahead and I'll send Scout the build."},
+                               {"status": "pending"})],
+                    "Drop @jwhh365: a promo and an NFT mint are not trading evidence. Build one per-candidate gate."),
+                "review-task-requester-applies-stays-quiet": (
+                    [], "Use A: it cites the Hyperliquid perp post from yesterday. B claims more than the evidence shows.",
+                    "Use the first option."),
                 "routine-task-report-stays-quiet": (
                     [], "0 new checkout errors in the last hour; this morning's 3 are resolved.",
                     "No new checkout errors in the last hour."),
@@ -431,6 +439,12 @@ def run(runner):
                           [self.call("computer_browser", {"action": "click", "selector": "@e5"})]):
                 with self.subTest(calls=[c["arguments"].get("selector") for c in wrong]):
                     self.assertFalse(self.passed(icon_case["expect"], wrong, "Liked Maria's post."))
+            fix_case = next(c for c in runner.load_cases() if c["id"] == "review-task-fix-flags-owner")
+            for summary in (None, "Everything is fine."):
+                args = {"kind": "decision"} | ({"summary": summary} if summary else {})
+                with self.subTest(summary=summary):
+                    self.assertFalse(self.passed(fix_case["expect"], [self.call("notify_owner", args, {"status": "pending"})],
+                                                 "Drop @jwhh365."))
             for case in runner.load_cases():
                 with self.subTest(case=case["id"]):
                     calls, final, *bad_final = examples[case["id"]]
