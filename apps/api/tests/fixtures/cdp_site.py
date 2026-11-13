@@ -8,7 +8,8 @@
 /order     a page whose button POSTs to /count
 /controls  a React-style email field (state follows only real input), an
            icon-only Like button, a Rename button that relabels the Remove
-           button, and a button under an overlay
+           button, a Review button that relabels itself on hover, and a
+           button under an overlay
 /count     POST: counts one order at once, then withholds the reply for
            30 s (so a test can cut the connection after the side effect
            and before its acknowledgment); GET: the count
@@ -61,7 +62,9 @@ class Handler(BaseHTTPRequestHandler):
                       "<button aria-label='Like' onclick=\"document.getElementById('likes').textContent='liked'\">&#9829;</button>"
                       "<div id='likes'></div><button onclick=\"document.getElementById('remove').textContent='Keep'\">Rename</button>"
                       "<button id='remove' onclick=\"document.getElementById('removed').textContent='removed'\">Remove</button>"
-                      "<div id='removed'></div><div style='position:relative;width:120px'><button id='covered'>Hidden pay</button>"
+                      "<div id='removed'></div><button onmouseenter=\"this.textContent='Erase'\" "
+                      "onclick=\"document.getElementById('removed').textContent='erased'\">Review</button>"
+                      "<div style='position:relative;width:120px'><button id='covered'>Hidden pay</button>"
                       "<div style='position:absolute;inset:0;z-index:1;background:#0006'></div></div><script>"
                       "const e = document.getElementById('email'); let tracked = '';"
                       "const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');"

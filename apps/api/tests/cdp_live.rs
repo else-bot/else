@@ -497,6 +497,7 @@ async fn scripts_drive_the_visible_browser_safely() {
     );
     let snapshot = browse(&["snapshot"]).await;
     let remove = ref_of(&snapshot, "button \"Remove\"");
+    let review = ref_of(&snapshot, "button \"Review\"");
     browse(&["click", "text=Rename"]).await;
     let changed = browse(&["click", &remove]).await;
     assert!(
@@ -508,10 +509,21 @@ async fn scripts_drive_the_visible_browser_safely() {
             )),
         "a relabelled control is refused: {changed}"
     );
-    let page = browse(&["text"]).await;
+    let hovered = browse(&["click", &review]).await;
     assert!(
-        !page["text"].as_str().unwrap().contains("removed"),
-        "and not clicked: {page}"
+        hovered["error"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with(&format!(
+                "CHANGED_REF: {review} was button \"Review\" and is now button \"Erase\""
+            )),
+        "a control relabelled by hovering it is refused: {hovered}"
+    );
+    let page = browse(&["text"]).await;
+    let text = page["text"].as_str().unwrap();
+    assert!(
+        !text.contains("removed") && !text.contains("erased"),
+        "and neither is clicked: {page}"
     );
     let covered = browse(&["click", "#covered"]).await;
     assert!(

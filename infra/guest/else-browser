@@ -41,6 +41,7 @@ class Tab:
         self.n = 0
         self.accept_dialogs = accept_dialogs
         self.dialogs = []
+        self.ref = None
         try:
             self.call("Page.enable")
         except websocket.WebSocketTimeoutException:
@@ -232,6 +233,7 @@ def click(tab, element, selector):
         point = page_step(tab, element, "clickPoint", point["x"], point["y"])
     if "error" in point:
         raise SystemExit(json.dumps({"error": f"{point['error']} ({json.dumps(selector)})"}))
+    check_ref(tab)
     for kind in ("mousePressed", "mouseReleased"):
         tab.call("Input.dispatchMouseEvent", type=kind, x=point["x"], y=point["y"], button="left", clickCount=1)
 
@@ -247,6 +249,7 @@ def type_into(tab, element, selector, text, secret):
         # Text goes wherever focus is, so check it right before typing.
         if not page_step(tab, element, "focusedField"):
             fail("the page moved focus or the text cursor away from the field, so nothing was typed")
+        check_ref(tab)
         if text:
             tab.call("Input.insertText", text=text)
         else:
@@ -351,8 +354,11 @@ def clickables(tab):
             out[node["backendNodeId"]] = tab.on(oid, "function(){return this.innerText}") or ""
     return out
 
+def normalized(value):
+    return " ".join(str(value).split())
+
 def clean(value):
-    return " ".join(str(value).split())[:100]
+    return normalized(value)[:100]
 
 def described(node):
     """The role and name a snapshot lists for an accessibility node; an
@@ -363,7 +369,7 @@ def described(node):
         role = "textbox"
     if role not in CONTROLS:
         role = "clickable"
-    return role.lower(), clean(node.get("name", {}).get("value", "")), props
+    return role.lower(), normalized(node.get("name", {}).get("value", "")), props
 
 def document_id(tab):
     return tab.call("Page.getFrameTree")["frameTree"]["frame"]["loaderId"]
@@ -390,12 +396,12 @@ def snapshot(tab):
             if value and role in ("textbox", "searchbox", "combobox", "spinbutton", "slider"):
                 states.append(f"value={json.dumps(value)}")
             if role == "clickable":
-                name = name or clean(extra.pop(backend))
+                name = name or normalized(extra.pop(backend))
             url = urllib.parse.urlsplit(props.get("url") or "")
             if url.netloc == origin.netloc and url.scheme == origin.scheme:
                 url = url._replace(scheme="", netloc="")
             entries.append({"role": role, "name": name, "states": states, "backend": backend,
-                            "url": urllib.parse.urlunsplit(url)[:120]})
+                            "href": props.get("url") or "", "url": urllib.parse.urlunsplit(url)[:120]})
         elif node.get("role", {}).get("value") == "heading" and name and not node.get("ignored"):
             entries.append({"role": "heading", "name": name})
         if listed and role not in CONTAINERS:
@@ -420,7 +426,7 @@ def snapshot(tab):
         epoch, first = "".join(random.choice(string.ascii_lowercase) for _ in range(5)), 1
     lines, refs, size, truncated = [], {}, 0, False
     for entry in entries:
-        line = f"{entry['role']} {json.dumps(entry['name'])}"
+        line = f"{entry['role']} {json.dumps(entry['name'][:100])}"
         if "backend" in entry:
             ref = f"{epoch}{first + len(refs)}"
             states = entry["states"]
@@ -432,7 +438,8 @@ def snapshot(tab):
             truncated = True
             break
         if "backend" in entry:
-            refs[ref] = {"backend": entry["backend"], "role": entry["role"], "name": entry["name"]}
+            refs[ref] = {"backend": entry["backend"], "role": entry["role"], "name": entry["name"],
+                         "url": entry["href"]}
         lines.append(line)
     with open(REFS + ".tmp", "w") as f:
         json.dump({"tab": tab.id, "document": document_id(tab), "epoch": epoch, "next": first + len(refs),
@@ -443,34 +450,53 @@ def snapshot(tab):
         result["snapshot_truncated"] = True
     return result
 
+def stale(selector):
+    return SystemExit(json.dumps({"error": f"STALE_REF: {selector} is not from the latest snapshot of this page; "
+                                  "take a new snapshot and use its refs"}))
+
+def identity(tab, backend):
+    """The role, full name, and link URL the page gives a node now."""
+    nodes = tab.call("Accessibility.getPartialAXTree", backendNodeId=backend, fetchRelatives=False)["nodes"]
+    role, name, props = described(nodes[0]) if nodes else ("", "", {})
+    if role == "clickable" and not name:
+        element = tab.call("DOM.resolveNode", backendNodeId=backend)["object"]["objectId"]
+        name = normalized(tab.on(element, "function(){return this.innerText}") or "")
+    return role, name, props.get("url") or ""
+
+def check_ref(tab):
+    """Refuse a ref whose control the page changed since the snapshot the
+    owner approved from. Run again right before input, after hover and
+    focus handlers have run."""
+    if not tab.ref:
+        return
+    selector, entry = tab.ref
+    try:
+        role, name, url = identity(tab, entry["backend"])
+    except SystemExit:
+        raise stale(selector)
+    if (role, name, url) != (entry["role"], entry["name"], entry.get("url", "")):
+        now = f"{role} {json.dumps(clean(name))}" + (f" to {url[:120]}" if url != entry.get("url", "") else "")
+        raise SystemExit(json.dumps({"error": f"CHANGED_REF: {selector} was {entry['role']} "
+                                     f"{json.dumps(clean(entry['name']))} and is now {now}; take a new snapshot"}))
+
 def from_ref(tab, selector):
-    stale = (f"STALE_REF: {selector} is not from the latest snapshot of this page; take a new snapshot "
-             "and use its refs")
     try:
         with open(REFS) as f:
             saved = json.load(f)
     except (OSError, ValueError):
-        raise SystemExit(json.dumps({"error": stale}))
+        raise stale(selector)
     entry = saved.get("refs", {}).get(selector[1:])
     if (not isinstance(entry, dict) or saved.get("tab") != tab.id
             or saved.get("document") != document_id(tab)):
-        raise SystemExit(json.dumps({"error": stale}))
+        raise stale(selector)
     tab.call("DOM.enable")
     tab.call("Accessibility.enable")
     try:
         element = tab.call("DOM.resolveNode", backendNodeId=entry["backend"])["object"]["objectId"]
-        nodes = tab.call("Accessibility.getPartialAXTree", backendNodeId=entry["backend"],
-                         fetchRelatives=False)["nodes"]
     except SystemExit:
-        raise SystemExit(json.dumps({"error": stale}))
-    # The owner approved the control the snapshot named, so a page that
-    # relabels it since then does not get the click.
-    role, name, _ = described(nodes[0]) if nodes else ("", "", None)
-    if role == "clickable" and not name:
-        name = clean(tab.on(element, "function(){return this.innerText}") or "")
-    if (role, name) != (entry["role"], entry["name"]):
-        raise SystemExit(json.dumps({"error": f"CHANGED_REF: {selector} was {entry['role']} {json.dumps(entry['name'])} "
-                                     f"and is now {role} {json.dumps(name)}; take a new snapshot"}))
+        raise stale(selector)
+    tab.ref = (selector, entry)
+    check_ref(tab)
     return element
 
 def main(argv):

@@ -222,14 +222,14 @@ fn approval_card(name: &str, args: &Value, label: Option<&RefLabel>) -> (String,
             } else {
                 step
             };
-            // The bot's own description goes first, but the card always
-            // shows which control the browser acts on.
+            // First, so a long description from the bot cannot push it
+            // out of the card's collapsed preview.
             let given = text("context").trim();
             if given.is_empty() {
                 step
             } else {
                 let room = crate::app::questions::MAX_CONTEXT.saturating_sub(step.len() + 2);
-                format!("{}\n\n{step}", slice(given, 0, room).1)
+                format!("{step}\n\n{}", slice(given, 0, room).1)
             }
         }
     };
@@ -502,7 +502,7 @@ mod tests {
         );
         let (_, context) = approval_card("computer_browser", &click, Some(&hostile));
         let expected = format!(
-            "Remove the old project.\n\nBrowser: click buttonx \"Cancel\\\" (@kq2){}…\" (@kq1)",
+            "Browser: click buttonx \"Cancel\\\" (@kq2){}…\" (@kq1)\n\nRemove the old project.",
             "a".repeat(66)
         );
         assert_eq!(context, expected);
