@@ -16,6 +16,8 @@ pub struct ProfilePicker {
     choice: Option<ProfileChoice>,
     browsing: Option<String>,
     copied: Option<String>,
+    /// The provider whose full setup problem is expanded.
+    explained: Option<String>,
     tabs: bool,
     disabled: bool,
 }
@@ -46,6 +48,7 @@ impl ProfilePicker {
             choice,
             browsing,
             copied: None,
+            explained: None,
             tabs: false,
             disabled: false,
         }
@@ -182,9 +185,17 @@ impl ProfilePicker {
                 .on_click(select)
         });
         if self.tabs {
-            segment_track(cx)
+            v_flex()
                 .w_full()
-                .children(items)
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.muted_foreground)
+                        .child("Provider"),
+                )
+                .child(segment_track(cx).w_full().children(items))
                 .into_any_element()
         } else {
             v_flex()
@@ -345,6 +356,8 @@ impl ProfilePicker {
             .unwrap_or_else(|| format!("{} is not available on this computer.", provider.label));
         let command = setup_command(&reason).map(str::to_owned);
         let copied = self.copied.as_deref() == Some(provider.id.as_str());
+        let explained = self.explained.as_deref() == Some(provider.id.as_str());
+        let explain_id = provider.id.clone();
         v_flex()
             .map(|setup| if self.tabs { setup.py_2() } else { setup.p_3() })
             .gap_2()
@@ -354,22 +367,50 @@ impl ProfilePicker {
                     .font_weight(FontWeight::MEDIUM)
                     .child(format!("Connect {}", provider.label)),
             )
-            // Why the provider can't run, as a warning rather than body text.
+            // Why the provider can't run: one short warning line, with the
+            // server's full reason behind a disclosure.
             .child(
                 h_flex()
                     .gap_1p5()
-                    .items_start()
+                    .items_center()
                     .text_size(px(13.))
                     .line_height(px(18.))
-                    .text_color(theme.warning)
                     .child(
                         Icon::new(IconName::TriangleAlert)
                             .size_3p5()
-                            .mt(px(2.))
-                            .flex_none(),
+                            .flex_none()
+                            .text_color(theme.warning),
                     )
-                    .child(div().flex_1().min_w_0().whitespace_normal().child(reason)),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.warning)
+                            .child(format!("{} isn't available yet.", provider.label)),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("setup-details-{}", provider.id)))
+                            .control(Tier::Ghost, Scale::Compact, false, cx)
+                            .label(if explained { "Hide details" } else { "Details" })
+                            .on_click(cx.listener(move |picker, _, _, cx| {
+                                picker.explained = if explained {
+                                    None
+                                } else {
+                                    Some(explain_id.clone())
+                                };
+                                cx.notify();
+                            })),
+                    ),
             )
+            .when(explained, |setup| {
+                setup.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .whitespace_normal()
+                        .child(reason),
+                )
+            })
             .children(command.map(|command| {
                 let provider_id = provider.id.clone();
                 let text = command.clone();

@@ -128,11 +128,12 @@ impl ElseApp {
             });
             let stacked = window.viewport_size().width < px(760.);
             let choose = holder.downgrade();
+            // The avatar studio starts on the "Bot name" line, preview first.
             let studio =
                 v_flex()
                     .flex_none()
                     .items_center()
-                    .justify_center()
+                    .justify_start()
                     .gap_5()
                     .when(stacked, |studio| studio.w_full().pb_2())
                     .when(!stacked, |studio| studio.w(px(248.)))
@@ -140,7 +141,7 @@ impl ElseApp {
                         v_flex()
                             .items_center()
                             .gap_2()
-                            .child(bot_avatar("create-avatar-preview", form.avatar, px(64.)))
+                            .child(bot_avatar("create-avatar-preview", form.avatar, px(96.)))
                             .child(div().text_xs().text_color(theme.muted_foreground).child(
                                 format!(
                                     "{} · {}",
@@ -168,8 +169,8 @@ impl ElseApp {
                                 .child("Update the server to choose an avatar."),
                         )
                     });
-            let mut details = v_flex().flex_1().min_w_0().gap_4().child(
-                v_flex().gap_1().child(field_label("Bot name", cx)).child(
+            let mut details = v_flex().flex_1().min_w_0().gap_5().child(
+                v_flex().gap_2().child(field_label("Bot name", cx)).child(
                     text_field(Input::new(&form.name), cx)
                         .aria_label("Bot name")
                         .disabled(locked),
@@ -177,7 +178,7 @@ impl ElseApp {
             );
             if !categories.is_empty() {
                 details = details.child(
-                    v_flex().gap_1().child(field_label("Category", cx)).child(
+                    v_flex().gap_2().child(field_label("Category", cx)).child(
                         field_style(Select::new(&form.category), cx)
                             .focus_ring(false)
                             .cursor_pointer()
@@ -187,7 +188,7 @@ impl ElseApp {
                 );
             }
             if let Some(profile) = &form.profile {
-                details = details.child(div().pt_2().child(profile.clone()));
+                details = details.child(profile.clone());
             }
             if let Some(error) = &form.error {
                 details = details.child(
@@ -340,9 +341,12 @@ impl ElseApp {
     }
 }
 
+/// A field's label, in the same voice as the model picker's "Provider",
+/// "Reasoning" and "Speed".
 fn field_label(text: &'static str, cx: &App) -> Div {
     div()
         .text_xs()
+        .font_weight(FontWeight::MEDIUM)
         .text_color(cx.theme().muted_foreground)
         .child(text)
 }

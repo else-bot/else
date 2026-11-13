@@ -88,8 +88,9 @@ pick_purple() {
   point=$(omabox -b "$BOX" tree --window "$W" --all --find 'House shape' | python3 "$H/tree_point.py" 'House shape' "${TREE_SCALE:-2}")
   read -r x y <<< "$point"
   # Both are column four; the narrower color cells shift their center 2 px left.
-  # From the House center: 17 px to its edge, 12 gap, 30 first row, 4 gap, 15 center.
-  click "$((x - 2))" "$((y + 78))"
+  # From the House center: 17 px to its edge, 8 gap, the 32 px Color label,
+  # 8 gap, 30 first row, 4 gap, 15 center (117 measured at 1440x900).
+  click "$((x - 2))" "$((y + 117))"
 }
 settings_page() {
   local label=$1 fallback_y=$2
