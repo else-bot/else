@@ -140,10 +140,10 @@ impl ElseApp {
         let locked =
             submit.is_some_and(QuestionForm::locks) || self.connection != Connection::Connected;
         let destructive = question.kind == "destructive";
-        let (icon, badge) = if destructive {
-            (IconName::TriangleAlert, "Hard to undo")
+        let icon = if destructive {
+            IconName::TriangleAlert
         } else {
-            (IconName::Send, "Approval needed")
+            IconName::Send
         };
         let mut source = vec![bot_name.to_owned()];
         if let Some(scope) = question.task_scope() {
@@ -153,20 +153,16 @@ impl ElseApp {
         } else if let Some(tool) = question.action.as_ref().and_then(|a| a.tool.clone()) {
             source.push(tool);
         }
-        let mut card = super::super::action_card::card(
-            &theme,
-            icon,
-            question.title.clone(),
-            source.join(" · "),
-            badge,
-        );
+        let mut card =
+            super::super::action_card::card(icon, question.title.clone(), source.join(" · "))
+                .when(destructive, |card| card.tag("Hard to undo"));
         if let Some(context) = &question.context {
             let short = preview(context);
             let shown = match (&short, expanded) {
                 (Some(short), false) => short.clone(),
                 _ => context.clone(),
             };
-            card = card.child(inset(shown, &theme));
+            card = card.child(super::super::action_card::quote(&theme, shown));
             if short.is_some() {
                 card = card.child(
                     Button::new(SharedString::from(format!("question-details-{id}")))
@@ -211,12 +207,7 @@ impl ElseApp {
             .or(grants.first())
             .copied();
         if grants.len() > 1 {
-            let mut list = v_flex()
-                .w_full()
-                .gap_0p5()
-                .p_1()
-                .rounded(theme.radius)
-                .bg(theme.background);
+            let mut list = v_flex().w_full().gap_2();
             for choice in &grants {
                 let on = selected.is_some_and(|s| s.id == choice.id);
                 let (title, detail) = scope(choice, question, bot_name);
@@ -231,12 +222,19 @@ impl ElseApp {
                     .checked(on)
                     .disabled(locked)
                     .w_full()
-                    .px_2p5()
+                    .min_h(px(super::super::action_card::OPTION_HEIGHT))
+                    .px_3()
                     .py_2()
                     .gap_2p5()
                     .rounded(theme.radius)
+                    .border_1()
+                    .border_color(if on {
+                        theme.primary.opacity(0.5)
+                    } else {
+                        theme.border
+                    })
                     .when(!locked, |row| row.cursor_pointer())
-                    .when(on, |row| row.bg(theme.muted))
+                    .when(on, |row| row.bg(theme.primary.opacity(0.08)))
                     .when(!locked && !on, |row| {
                         row.hover(|style| style.bg(theme.muted.opacity(0.5)))
                     })
@@ -269,13 +267,15 @@ impl ElseApp {
                     _ => None,
                 })
         };
-        let mut footer = super::super::action_card::footer().child(div().flex_1().min_w_0().child(
-            note(if grants.len() > 1 {
-                "Sending a new message skips this.".into()
-            } else {
-                "Covers exactly this action, once. Sending a new message skips this.".into()
-            }),
-        ));
+        let mut footer =
+            super::super::action_card::footer().child(super::super::action_card::footer_note(
+                &theme,
+                if grants.len() > 1 {
+                    "Sending a new message skips this."
+                } else {
+                    "Covers exactly this action, once. Sending a new message skips this."
+                },
+            ));
         if question.choices.iter().any(|c| c.id == DENY) {
             footer = footer.child(
                 Button::new(SharedString::from(format!("question-{id}-{DENY}")))
@@ -318,11 +318,10 @@ impl ElseApp {
                     })),
             );
         }
-        card = card.child(footer);
         if let Some(SubmitState::Failed(error)) = submit.map(|s| &s.state) {
             card = card.child(callout(error.clone(), &theme));
         }
-        card.into_any_element()
+        card.footer(footer).into_any_element()
     }
 }
 

@@ -109,15 +109,13 @@ impl ElseApp {
                 .label(label)
         };
         let actions = super::action_card::footer()
-            .child(
+            .children(anchor.map(|anchor| {
                 button("open", "Open task".into())
-                    .disabled(anchor.is_none())
+                    .ghost()
                     .on_click(cx.listener(move |app, _, window, cx| {
-                        if let Some(anchor) = anchor {
-                            app.open_bot_exchange(anchor, exchange_title.clone(), window, cx);
-                        }
-                    })),
-            )
+                        app.open_bot_exchange(anchor, exchange_title.clone(), window, cx);
+                    }))
+            }))
             .child(
                 button("dismiss", "Mark handled".into())
                     .disabled(!connected)
@@ -133,7 +131,7 @@ impl ElseApp {
                     })),
             );
         Some(
-            super::action_card::card(theme, IconName::TriangleAlert, title, subtitle, "Needs you")
+            super::action_card::card(IconName::TriangleAlert, title, subtitle)
                 .child(
                     div()
                         .text_sm()
@@ -146,7 +144,7 @@ impl ElseApp {
                         .text_color(theme.muted_foreground)
                         .child(format!("Tried · {tried}"))
                 }))
-                .child(actions)
+                .footer(actions)
                 .into_any_element(),
         )
     }

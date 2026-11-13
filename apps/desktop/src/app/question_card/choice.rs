@@ -4,13 +4,14 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Sizable as _, StyledExt as _, h_flex,
-    v_flex,
+    ActiveTheme as _, Disableable as _, FocusableExt as _, Sizable as _, StyledExt as _, Theme,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
+use super::super::action_card::{OPTION_HEIGHT, footer_note};
 use super::{Connection, ElseApp, QuestionForm, RowKey, SubmitState, callout, letter, receipt};
 use crate::model::{Question, QuestionAnswer};
 
@@ -213,11 +214,9 @@ impl ElseApp {
             "Choose one"
         };
         let mut body = super::super::action_card::card(
-            &theme,
             IconName::CircleQuestionMark,
             question.title.clone(),
             format!("{bot_name} · {kind}"),
-            "Your answer",
         );
         if let Some(context) = &question.context {
             body = body.child(
@@ -228,7 +227,7 @@ impl ElseApp {
                     .child(context.clone()),
             );
         }
-        let mut rows = v_flex().w_full().gap_0p5();
+        let mut rows = v_flex().w_full().gap_2();
         for choice in &question.choices {
             let choice_id = choice.id.clone();
             if question.multiple {
@@ -240,13 +239,21 @@ impl ElseApp {
                         .checked(checked)
                         .disabled(locked)
                         .w_full()
-                        .p_2()
+                        .min_h(px(OPTION_HEIGHT))
+                        .px_3()
+                        .py_2()
                         .gap_2p5()
                         .rounded(theme.radius)
+                        .border_1()
+                        .border_color(if checked {
+                            theme.primary.opacity(0.5)
+                        } else {
+                            theme.border
+                        })
                         .when(!locked, |row| row.cursor_pointer())
-                        .when(checked, |row| row.bg(theme.primary.opacity(0.1)))
+                        .when(checked, |row| row.bg(theme.primary.opacity(0.08)))
                         .when(!locked && !checked, |row| {
-                            row.hover(|style| style.bg(theme.accent))
+                            row.hover(|style| style.bg(theme.muted.opacity(0.5)))
                         })
                         .accessibility_label(choice.label.clone())
                         .child(
@@ -270,25 +277,19 @@ impl ElseApp {
                         .disabled(locked)
                         .w_full()
                         .h_auto()
+                        .min_h(px(OPTION_HEIGHT))
                         .px_2()
-                        .py_2p5()
+                        .py_1p5()
+                        .rounded(theme.radius)
+                        .border_1()
+                        .border_color(theme.border)
                         .when(!locked, |row| row.cursor_pointer())
                         .accessibility_label(format!("{}. {}", letter(&choice.id), choice.label))
                         .child(
                             h_flex()
                                 .w_full()
                                 .gap_2p5()
-                                .child(
-                                    h_flex()
-                                        .size_6()
-                                        .flex_shrink_0()
-                                        .justify_center()
-                                        .rounded(theme.radius)
-                                        .bg(theme.background)
-                                        .text_color(theme.muted_foreground)
-                                        .text_xs()
-                                        .child(letter(&choice.id)),
-                                )
+                                .child(key_chip(&theme, letter(&choice.id)))
                                 .child(
                                     div()
                                         .flex_1()
@@ -320,15 +321,7 @@ impl ElseApp {
         } else {
             "Choose an answer or type your own. Sending a new message skips this.".to_owned()
         };
-        let mut footer = super::super::action_card::footer().child(
-            div()
-                .flex_1()
-                .min_w(px(180.))
-                .text_xs()
-                .whitespace_normal()
-                .text_color(theme.muted_foreground)
-                .child(hint),
-        );
+        let mut footer = super::super::action_card::footer().child(footer_note(&theme, hint));
         if question.multiple {
             let answer = QuestionAnswer::Multiple(selected.iter().map(|c| c.id.clone()).collect());
             let disabled = locked || selected.is_empty();
@@ -345,11 +338,10 @@ impl ElseApp {
                     })),
             );
         }
-        body = body.child(footer);
         if let Some(SubmitState::Failed(error)) = form.map(|f| &f.state) {
             body = body.child(callout(error.clone(), &theme));
         }
-        body.into_any_element()
+        body.footer(footer).into_any_element()
     }
 
     fn render_write_in(
@@ -371,24 +363,22 @@ impl ElseApp {
         let disabled = locked || empty;
         h_flex()
             .w_full()
+            .min_h(px(OPTION_HEIGHT))
             .gap_2p5()
-            .when(next.is_some(), |row| row.px_2().py_1())
-            .children(next.map(|next| {
-                h_flex()
-                    .size_6()
-                    .flex_shrink_0()
-                    .justify_center()
-                    .rounded(theme.radius)
-                    .bg(theme.background)
-                    .text_color(theme.muted_foreground)
-                    .text_xs()
-                    .child(next)
-            }))
+            .pl_2()
+            .pr_1()
+            .py_1()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .children(next.map(|next| key_chip(theme, next)))
             .child(
                 div().flex_1().min_w_0().child(
                     Input::new(&write_in.input)
                         .focus_ring(false)
+                        .appearance(false)
                         .small()
+                        .px_0()
                         .aria_label("Your own answer")
                         .disabled(locked),
                 ),
@@ -412,6 +402,19 @@ impl ElseApp {
                     })),
             )
     }
+}
+
+/// The letter that leads an option row.
+fn key_chip(theme: &Theme, key: String) -> Div {
+    h_flex()
+        .size_6()
+        .flex_shrink_0()
+        .justify_center()
+        .rounded(theme.radius)
+        .bg(theme.muted)
+        .text_color(theme.muted_foreground)
+        .text_xs()
+        .child(key)
 }
 
 /// How a settled card reads: the divider above it, whether the bot carried

@@ -305,6 +305,9 @@ pub(super) struct ConversationView {
     pub(super) answered: HashSet<Uuid>,
     pub(super) connections: HashMap<Uuid, super::question_card::connection::Form>,
     pub(super) question_submits: HashMap<Uuid, super::question_card::QuestionForm>,
+    /// Where cards that can pause the bot were last painted, so the paused
+    /// strip can step aside while one is on screen.
+    pub(super) sightings: super::question_card::Sightings,
     /// The typed answer field on each pending single-choice card.
     pub(super) write_ins: HashMap<Uuid, super::question_card::WriteIn>,
     /// The approval scope picked on each pending approval card.
@@ -414,6 +417,7 @@ impl ConversationView {
             skill_cards: HashMap::new(),
             answered: HashSet::new(),
             question_submits: HashMap::new(),
+            sightings: Default::default(),
             write_ins: HashMap::new(),
             connections: HashMap::new(),
             approval_scopes: HashMap::new(),
