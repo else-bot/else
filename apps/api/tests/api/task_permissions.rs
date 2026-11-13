@@ -24,7 +24,7 @@ fn tailscale(command: &str) -> Value {
 }
 
 fn task_target(task: &str) -> Value {
-    json!({ "scope": "task", "task": task, "target": HOST, "kind": "destructive" })
+    json!({ "scope": "task", "task": task, "target": HOST, "kind": "destructive", "covers": "host" })
 }
 
 const UP_TO_DATE_REQUEST: &str =
@@ -255,7 +255,7 @@ async fn always_allow_covers_one_task_on_one_target_until_revoked() {
     assert_eq!(granted[0]["target"], task_target(TASK));
     assert_eq!(granted[0]["question_id"], question.to_string());
     let scope = granted[0]["scope"].as_str().unwrap().to_owned();
-    assert!(scope.starts_with("task:destructive:"), "{scope}");
+    assert!(scope.starts_with("task:host:destructive:"), "{scope}");
     let card: String = sqlx::query_scalar("SELECT action FROM owner_questions WHERE id = ?1")
         .bind(question)
         .fetch_one(&app.db.pool)
@@ -288,6 +288,18 @@ async fn always_allow_covers_one_task_on_one_target_until_revoked() {
     assert_eq!(choices, ONCE, "an undeclared scope is never covered");
     h.release(next).await;
     wait(app, next, "waiting").await;
+
+    let (computer_turn, token) = h.running(&main, GATE).await;
+    let mut computer = like(TASK, HOST);
+    computer["effect"] = json!("destructive");
+    let asked = asks_for(app, &token, computer).await;
+    assert_eq!(
+        choices_of(app, asked).await,
+        ALWAYS,
+        "a host grant never covers a computer call with the same task scope"
+    );
+    h.release(computer_turn).await;
+    wait(app, computer_turn, "waiting").await;
 
     asks_in_new_request(
         &h,
@@ -422,7 +434,7 @@ async fn chat_can_record_a_task_grant_from_the_owner_words_only() {
     for malformed in [
         task_target("   "),
         task_target(&"x".repeat(201)),
-        json!({ "scope": "task", "task": TASK, "target": HOST, "kind": "choice" }),
+        json!({ "scope": "task", "task": TASK, "target": HOST, "kind": "choice", "covers": "host" }),
     ] {
         let refused = confirm(malformed.clone(), authorization).await;
         assert_eq!(refused.code(), "NOT_AUTHORIZED", "{malformed}");
@@ -599,7 +611,8 @@ async fn scheduled_routine_runs_use_task_grants_but_webhook_wakes_do_not() {
         app,
         &token,
         "confirm_permission",
-        json!({ "target": { "scope": "task", "task": LIKES, "target": X_LIKES, "kind": "external" },
+        json!({ "target": { "scope": "task", "task": LIKES, "target": X_LIKES, "kind": "external",
+                            "covers": "computer" },
                 "authorization": authorization }),
     )
     .await;
@@ -620,7 +633,8 @@ async fn scheduled_routine_runs_use_task_grants_but_webhook_wakes_do_not() {
     let input = h.inputs(run).await.last().unwrap().clone();
     assert_eq!(
         serde_json::to_value(&input.standing_permissions).unwrap(),
-        json!([{ "scope": "task", "task": LIKES, "target": X_LIKES, "kind": "external" }]),
+        json!([{ "scope": "task", "task": LIKES, "target": X_LIKES, "kind": "external",
+                 "covers": "computer" }]),
         "the run sees the saved task grant it may reuse"
     );
     runs_without_a_card(app, &token, like(LIKES, X_LIKES)).await;
@@ -628,7 +642,8 @@ async fn scheduled_routine_runs_use_task_grants_but_webhook_wakes_do_not() {
         app,
         &token,
         "confirm_permission",
-        json!({ "target": { "scope": "task", "task": LIKES, "target": "X @other", "kind": "external" },
+        json!({ "target": { "scope": "task", "task": LIKES, "target": "X @other", "kind": "external",
+                            "covers": "computer" },
                 "authorization": "Scout X leads." }),
     )
     .await;

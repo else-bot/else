@@ -268,21 +268,50 @@ async fn a_task_grant_for_mcp_work_redirects_to_the_tool_grant() {
     let (h, bot, turn, _) = setup().await;
     let authorization = "Always allow creating tickets with the Tickets MCP.";
     let (first, token) = h.running(&bot, &format!("{GATE} {authorization}")).await;
-    let task = tool(
-        &h.app,
-        &token,
-        "confirm_permission",
-        json!({"target":{"scope":"task", "task":"Create tickets",
-            "target":"Tickets MCP create_ticket", "kind":"external"},
-            "authorization":authorization}),
-    )
-    .await;
-    assert_eq!(task.result["status"], "approved", "{}", task.body);
-    let next = task.result["next"].as_str().unwrap();
-    assert!(
-        next.contains("never covers MCP tools/call") && next.contains("mcp_tool"),
-        "{next}"
-    );
+    let task = |covers: Value| {
+        let token = token.clone();
+        let h = &h;
+        async move {
+            let mut target = json!({"scope":"task", "task":"Create tickets",
+                "target":"Tickets MCP create_ticket", "kind":"external"});
+            if !covers.is_null() {
+                target["covers"] = covers;
+            }
+            tool(
+                &h.app,
+                &token,
+                "confirm_permission",
+                json!({"target":target, "authorization":authorization}),
+            )
+            .await
+        }
+    };
+    for covers in [Value::Null, json!("mcp"), json!("both"), json!(["host"])] {
+        let refused = task(covers.clone()).await;
+        assert!(refused.error, "{covers}: {}", refused.body);
+        assert!(
+            refused.result["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("INVALID_COVERS"),
+            "{covers}: {}",
+            refused.body
+        );
+        let next = refused.result["next"].as_str().unwrap();
+        assert!(
+            next.contains("never covers MCP tools/call") && next.contains("mcp_tool"),
+            "{next}"
+        );
+    }
+    let listed = h
+        .app
+        .owner("GET", &format!("/v1/bots/{bot}/permissions"), None)
+        .await;
+    assert_eq!(listed.body["permissions"], json!([]), "nothing was saved");
+    let host = task(json!("host")).await;
+    assert_eq!(host.result["status"], "approved", "{}", host.body);
+    let next = host.result["next"].as_str().unwrap();
+    assert!(next.contains("MCP tools/call are not covered"), "{next}");
     let uncovered = tool(&h.app, &token, "mcp_request", create("external", "First")).await;
     assert_eq!(
         uncovered.result["status"], "pending",
