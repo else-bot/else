@@ -971,6 +971,26 @@ refresh_provider_paths() {
 	if [ -n "$grok" ]; then config_set ELSE_GROK_BIN "$grok"; fi
 }
 
+# msb records a released maintenance lease with no holder and an expiry equal
+# to its completion time, and blocks every command until that expiry passes.
+# When the clock steps backwards after a release (a fast clock at boot that NTP
+# corrects), that expiry lies hours ahead and msb fails with "install operation
+# in progress" although nothing holds it. Move such released leases to now; the
+# guard leaves a lease that a process took meanwhile untouched.
+release_stale_msb_leases() {
+	local db="$1/db/msb.db" released
+	[ -f "$db" ] && have sqlite3 || return 0
+	released="$(sqlite3 -cmd '.timeout 5000' "$db" "
+		UPDATE maintenance_lease
+		SET lease_expires_at = strftime('%Y-%m-%d %H:%M:%f', 'now'),
+			last_completed_at = strftime('%Y-%m-%d %H:%M:%f', 'now')
+		WHERE holder_pid IS NULL
+			AND last_completed_at = lease_expires_at
+			AND lease_expires_at > strftime('%Y-%m-%d %H:%M:%f', 'now')
+		RETURNING name;" 2>/dev/null)" || return 0
+	[ -z "$released" ] || info "Released Microsandbox locks dated in the future by a clock change: ${released//$'\n'/ }"
+}
+
 GUEST_IMAGE_STATE=missing
 GUEST_BUILD=0
 decide_guest_image() {
@@ -1019,6 +1039,7 @@ decide_guest_image() {
 	local home="$DATA/microsandbox" images
 	[ -d "$home" ] || return 0
 	[ -x "$MSB" ] || ensure_msb
+	release_stale_msb_leases "$home"
 	if ! images="$(MSB_HOME="$home" "$MSB" image list --format json)"; then
 		ensure_msb
 		images="$(MSB_HOME="$home" "$MSB" image list --format json)" ||
