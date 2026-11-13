@@ -63,7 +63,7 @@ impl StreamAttempt {
             scope,
             stdin,
             events: JsonLines::new(BufReader::new(stdout), label),
-            stderr: Stderr::collect(stderr),
+            stderr: Stderr::collect(stderr, spec),
             interrupt,
             label,
         })

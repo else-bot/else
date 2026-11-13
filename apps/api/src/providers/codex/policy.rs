@@ -58,28 +58,47 @@ impl Reported {
     }
 }
 
+/// Why Codex's reported MCP servers were refused.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Refusal {
+    /// else.bot's server reported no tools: it did not start or connect.
+    Unavailable(String),
+    /// The servers or their tools are outside the allowlist.
+    Policy(String),
+}
+
+impl From<Refusal> for String {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::Unavailable(reason) | Refusal::Policy(reason) => reason,
+        }
+    }
+}
+
 impl Codex {
     /// The MCP servers Codex reports: none, or only else.bot's with exactly
     /// its tools.
-    pub(super) fn check_servers(&self, servers: &Value, with_tools: bool) -> Result<(), String> {
+    pub(super) fn check_servers(&self, servers: &Value, with_tools: bool) -> Result<(), Refusal> {
+        let policy = |reason: String| Err(Refusal::Policy(reason));
         let servers = servers.as_array().map(Vec::as_slice).unwrap_or_default();
         if !with_tools || self.tool_url.is_none() {
             return if servers.is_empty() {
                 Ok(())
             } else {
-                Err("Codex has MCP servers configured.".into())
+                policy("Codex has MCP servers configured.".into())
             };
         }
         let [server] = servers else {
-            return Err(format!(
+            return policy(format!(
                 "Codex reported {} MCP servers; expected only else.bot's.",
                 servers.len()
             ));
         };
         if server["name"].as_str() != Some(SERVER_NAME) {
-            return Err("Codex reported an MCP server other than else.bot's.".into());
+            return policy("Codex reported an MCP server other than else.bot's.".into());
         }
-        let malformed = || "Codex reported a malformed else.bot tool inventory.".to_owned();
+        let malformed =
+            || Refusal::Policy("Codex reported a malformed else.bot tool inventory.".into());
         let mut tools: Vec<String> = match &server["tools"] {
             Value::Object(map) => map.keys().cloned().collect(),
             Value::Array(list) => list
@@ -88,11 +107,17 @@ impl Codex {
                 .collect::<Result<_, _>>()?,
             _ => return Err(malformed()),
         };
+        if tools.is_empty() {
+            let cause = server["toolsError"].as_str().unwrap_or("it did not start");
+            return Err(Refusal::Unavailable(format!(
+                "else.bot's MCP server reported no tools: {cause}"
+            )));
+        }
         tools.sort();
         let mut expected: Vec<String> = TOOL_NAMES.iter().map(|t| (*t).to_owned()).collect();
         expected.sort();
         if tools != expected {
-            return Err(format!(
+            return policy(format!(
                 "else.bot's MCP server offered unexpected tools: {tools:?}"
             ));
         }

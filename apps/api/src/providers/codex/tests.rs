@@ -402,6 +402,7 @@ fn fake_codex_with(
     let one_model = dir.join("one-model");
     let long_history = dir.join("long-history");
     let account_failures = dir.join("account-failures");
+    let mcp_failures = dir.join("mcp-failures");
     let catalog = json!({
         "models": MODELS.iter().chain(&["hidden-model"]).map(|slug| json!({
             "slug": slug,
@@ -449,6 +450,12 @@ for line in sys.stdin:
         open({account_failures:?}, "w").write(str(left - 1))
         if left > 0:
             out({{"id": m["id"], "error": {{"code": -32603, "message": "workspace routing discovery timed out"}}}})
+            continue
+    if method == "mcpServerStatus/list" and os.path.exists({mcp_failures:?}):
+        left = int(open({mcp_failures:?}).read())
+        open({mcp_failures:?}, "w").write(str(left - 1))
+        if left > 0:
+            out({{"id": m["id"], "result": {{"data": [{{"name": "elsebot", "tools": {{}}, "toolsError": "MCP startup failed: connection refused"}}]}}}})
             continue
     if method == "mcpServerStatus/list": r = {{"data": json.loads({servers})}}
     elif method == "skills/list": r = {{"data": [{{"skills": []}}]}}
@@ -704,6 +711,100 @@ async fn a_failed_account_read_is_asked_once_more_before_the_turn_fails() {
                 }
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn an_empty_tool_inventory_is_listed_once_more_before_the_turn_fails() {
+    for (failures, delivered) in [(1, true), (2, false)] {
+        let dir = tempfile::tempdir().unwrap();
+        let (codex, received) = fake_codex_with(dir.path(), &elsebot_server(), None);
+        let codex = codex.with_tools(TOOL_URL.into());
+        std::fs::write(dir.path().join("mcp-failures"), failures.to_string()).unwrap();
+        let sink = super::super::recording::Recorded::default();
+        let outcome = codex
+            .run(
+                turn_from(crate::app::providers::Origin::OwnerRequest),
+                &sink,
+                Stop::default(),
+            )
+            .await;
+        let asked = std::fs::read_to_string(dir.path().join("mcp-failures")).unwrap();
+        assert_eq!(
+            asked,
+            (failures - 2).to_string(),
+            "listed twice: {failures}"
+        );
+        assert_eq!(received.exists(), delivered, "{failures}: {outcome:?}");
+        if delivered {
+            assert_eq!(outcome, TurnOutcome::Completed);
+        } else {
+            assert_eq!(
+                outcome,
+                failed(
+                    "provider_unavailable",
+                    "else.bot's MCP server reported no tools: MCP startup failed: connection refused",
+                )
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_unexpected_tool_inventory_is_a_policy_violation() {
+    let dir = tempfile::tempdir().unwrap();
+    let servers = json!([{ "name": crate::app::tools::SERVER_NAME, "tools": { "shell": {} } }]);
+    let (codex, received) = fake_codex_with(dir.path(), &servers, None);
+    let codex = codex.with_tools(TOOL_URL.into());
+    let sink = super::super::recording::Recorded::default();
+    let outcome = codex
+        .run(
+            turn_from(crate::app::providers::Origin::OwnerRequest),
+            &sink,
+            Stop::default(),
+        )
+        .await;
+    assert_eq!(
+        outcome,
+        failed(
+            "policy_violation",
+            "else.bot's MCP server offered unexpected tools: [\"shell\"]",
+        )
+    );
+    assert!(!received.exists());
+}
+
+#[tokio::test]
+async fn a_codex_that_exits_reports_the_end_of_its_stderr_without_the_grant() {
+    for leftover in ["", "sleep 30 >/dev/null &"] {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = detect_with(
+            dir.path(),
+            &format!(
+                "[ \"$1\" = --version ] && echo 'codex-cli 9.0.0' && exit\n\
+                 {leftover}\n\
+                 printf 'starting\\nthread main panicked: bad grant %s\\nnote: run with RUST_BACKTRACE=1\\n' \"$ELSE_TASK_GRANT\" >&2\n\
+                 exit 101"
+            ),
+            true,
+        )
+        .with_tools(TOOL_URL.into());
+        let sink = super::super::recording::Recorded::default();
+        let outcome = codex
+            .run(
+                turn_from(crate::app::providers::Origin::OwnerRequest),
+                &sink,
+                Stop::default(),
+            )
+            .await;
+        assert_eq!(
+            outcome,
+            failed(
+                "provider_unavailable",
+                "the provider process exited: starting / thread main panicked: bad grant [tool grant] / note: run with RUST_BACKTRACE=1",
+            ),
+            "{leftover}"
+        );
     }
 }
 

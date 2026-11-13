@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::time::Instant;
 
-use super::process::{Finish, Scope, Stderr};
+use super::process::{Finish, Scope, Stderr, last_lines};
 use super::session::PreparedTurn;
 use crate::app::providers::{Stop, TurnOutcome, TurnSink};
 
@@ -369,7 +369,7 @@ pub async fn conclude(
     }
     match (outcome, stderr) {
         (TurnOutcome::Uncertain { message }, Some(stderr)) => {
-            let reason = stderr.last_line().await;
+            let reason = last_lines(&stderr.tail().await, 1).concat();
             TurnOutcome::Uncertain {
                 message: format!("{message} {reason}").trim_end().to_owned(),
             }
