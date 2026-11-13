@@ -135,6 +135,84 @@ async fn a_bot_saves_a_rule_from_the_owner_and_reads_it_verbatim_next_turn() {
 }
 
 #[tokio::test]
+async fn a_saved_rule_points_the_bot_at_its_enabled_routines() {
+    let h = harness(2).await;
+    let main = h.app.main_bot().await;
+    let (turn, token) = h.running(&main, GATE).await;
+    let without = tool(
+        &h.app,
+        &token,
+        "rules_update",
+        update("Tone", "Do: write plainly.", "Write plainly."),
+    )
+    .await;
+    assert!(
+        without.result.get("next").is_none(),
+        "no routines, no next: {}",
+        without.body
+    );
+
+    let mut ids = Vec::new();
+    for name in ["Growth digest", "Old digest"] {
+        let created = tool(
+            &h.app,
+            &token,
+            "routine_create",
+            json!({ "name": name, "prompt": "Post detailed sections.", "cron": "0 9 * * *" }),
+        )
+        .await;
+        assert!(!created.error, "{}", created.body);
+        ids.push(created.result["routine"]["id"].as_str().unwrap().to_owned());
+    }
+    let paused = tool(
+        &h.app,
+        &token,
+        "routine_update",
+        json!({ "routine_id": ids[1], "enabled": false }),
+    )
+    .await;
+    assert!(!paused.error, "{}", paused.body);
+
+    let saved = tool(
+        &h.app,
+        &token,
+        "rules_update",
+        update(
+            "Digests",
+            "Do: keep chat text brief; put details in a report.",
+            "I'm not able to read it.",
+        ),
+    )
+    .await;
+    assert!(!saved.error, "{}", saved.body);
+    let next = saved.result["next"].as_str().unwrap();
+    assert!(
+        next.contains(&format!("\"Growth digest\" ({})", ids[0])),
+        "{next}"
+    );
+    assert!(next.contains("routine_update"), "{next}");
+    assert!(
+        !next.contains("Old digest"),
+        "paused routines are left out: {next}"
+    );
+
+    let removed = tool(
+        &h.app,
+        &token,
+        "rules_update",
+        update("Digests", "", "Forget the digest rule."),
+    )
+    .await;
+    assert_eq!(removed.result["change"], "removed", "{}", removed.body);
+    assert!(
+        removed.result.get("next").is_none(),
+        "a removed rule contradicts nothing: {}",
+        removed.body
+    );
+    h.release(turn).await;
+}
+
+#[tokio::test]
 async fn the_owner_restores_an_earlier_version_or_the_empty_file() {
     let h = harness(2).await;
     let main = h.app.main_bot().await;

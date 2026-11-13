@@ -1002,6 +1002,10 @@ async fn a_run_is_hidden_and_its_report_is_visible() {
         "{packet}"
     );
     assert!(packet.contains(TASK));
+    assert!(
+        packet.contains("Where your rules conflict with this task's wording, follow your rules."),
+        "{packet}"
+    );
     assert!(!packet.contains("Owner's latest message"));
 
     let snapshot = h
