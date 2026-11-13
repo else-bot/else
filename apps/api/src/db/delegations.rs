@@ -36,6 +36,9 @@ use crate::app::messages::{Attachment, MessagePart};
 use crate::app::providers::Profile;
 use crate::providers::output_files::OutputFile;
 
+mod control;
+pub use control::{ControlError, Status, Task, TaskState, Updated, cancel, update};
+
 /// Child limit when accepting an individual delegation.
 pub const MAX_CHILDREN: i64 = 2;
 /// Individual delegations per provider attempt; a council parks after its group.
@@ -506,7 +509,8 @@ pub async fn lock_targets_of_root(
 }
 
 /// The owner's new message `turn_id` in `bot_id`'s chat steers the work
-/// delegated to that bot: a task it is starting or running, a parked
+/// delegated to that bot: a task it is starting or running (an update's
+/// turn queued behind the turn it replaced counts as running), a parked
 /// task whose owner card (question, secret, draft, or connection) is pending
 /// there, and a task an earlier chat message in `conversation_id` took over.
 /// A task parked on anything else holds no slot and keeps waiting. The
@@ -527,6 +531,8 @@ pub async fn take_over(
                       AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running'))
                 OR (takeover_turn_id IS NULL AND child_turn_id IN (
                     SELECT id FROM turns WHERE status IN ('preparing', 'sending', 'running')
+                    -- An update's turn waiting for the one it replaced to stop.
+                    UNION ALL SELECT id FROM turns WHERE status = 'queued' AND request_id <> delegations.id
                     UNION ALL SELECT id FROM turns WHERE status = 'waiting' AND id IN (
                         SELECT turn_id FROM owner_questions WHERE status = 'pending'
                         UNION ALL SELECT turn_id FROM secret_requests WHERE status = 'pending'

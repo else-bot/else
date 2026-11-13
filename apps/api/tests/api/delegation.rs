@@ -2659,3 +2659,371 @@ async fn a_question_while_the_owner_holds_a_delegated_bots_computer_keeps_the_ta
     wait_status(&app, child, "completed").await;
     wait_status(&app, root, "completed").await;
 }
+
+async fn control(app: &TestApp, token: &str, tool: &str, arguments: Value) -> (bool, Value) {
+    let reply = app
+        .call(
+            "POST",
+            "/tools/v1/mcp",
+            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                         "params": { "name": tool, "arguments": arguments } })),
+            Some(token),
+        )
+        .await;
+    (reply.body["result"]["isError"] == true, tool_text(&reply))
+}
+
+/// A task to `target` from the main bot's running turn, carried to a
+/// second owner message that hangs, as when the owner follows up while the
+/// task runs. Returns the task, its running child turn, and a delegate
+/// grant for the follow-up.
+async fn task_carried_to_a_follow_up(
+    app: &TestApp,
+    target: &str,
+    task: &str,
+) -> (Uuid, Uuid, String) {
+    let (main, root, token) = running_main(app).await;
+    let reply = delegate(app, &token, target, task).await;
+    let task_id: Uuid = tool_text(&reply)["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait_status(app, root, "waiting").await;
+    let child = child_of(app, task_id).await;
+    wait_status(app, child, "running").await;
+    let follow = app
+        .send(
+            &main,
+            Uuid::new_v4(),
+            "[synthetic:hang] Any news?",
+            Some("synthetic"),
+        )
+        .await;
+    let follow: Uuid = follow.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    wait_status(app, follow, "running").await;
+    (task_id, child, grant_delegate(app, follow).await)
+}
+
+async fn child_of(app: &TestApp, task: Uuid) -> Uuid {
+    sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
+        .bind(task)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
+}
+
+async fn wait_task(
+    app: &TestApp,
+    task: Uuid,
+    status: &str,
+) -> (String, Option<String>, Option<String>) {
+    let deadline = tokio::time::Instant::now() + common::SETTLE;
+    loop {
+        let row: (String, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT status, result, error FROM delegations WHERE id = ?1")
+                .bind(task)
+                .fetch_one(&app.db.pool)
+                .await
+                .unwrap();
+        if row.0 == status {
+            return row;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "task {task} never reached {status}: {row:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delegating_bot_updates_a_running_task_and_gets_the_updated_reply() {
+    let app = app_with(3).await;
+    let work = leaf(&app, "Work").await;
+    let original = "[synthetic:hang] Research every school form due this month.";
+    let (task, first, token) = task_carried_to_a_follow_up(&app, &work, original).await;
+
+    let change = "Only the permission slip matters now.";
+    let (failed, updated) = control(
+        &app,
+        &token,
+        "delegation_update",
+        json!({ "task_id": task, "message": change }),
+    )
+    .await;
+    assert!(!failed, "{updated}");
+    assert_eq!(updated["task_id"], task.to_string());
+    assert!(
+        matches!(updated["status"].as_str(), Some("queued" | "running")),
+        "{updated}"
+    );
+    wait_status(&app, first, "interrupted").await;
+    let second = child_of(&app, task).await;
+    assert_ne!(second, first, "the update runs in a new turn");
+    let conversations: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT conversation_id FROM turns WHERE id IN (?1, ?2) GROUP BY conversation_id",
+    )
+    .bind(first)
+    .bind(second)
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        conversations.len(),
+        1,
+        "the update continues the task conversation"
+    );
+
+    let (_, result, _) = wait_task(&app, task, "completed").await;
+    assert!(
+        result.as_deref().is_some_and(|r| r.contains(change)),
+        "the delegating bot gets the updated reply: {result:?}"
+    );
+    let snapshot =
+        else_api::db::conversation::snapshot(&app.db.pool, work.parse().unwrap(), 50, None)
+            .await
+            .unwrap()
+            .unwrap();
+    let prompts: Vec<&str> = snapshot
+        .items
+        .iter()
+        .filter_map(|item| item.bot_task.as_ref().map(|t| t.prompt.as_str()))
+        .collect();
+    assert_eq!(
+        prompts,
+        [original, change],
+        "the owner sees the task and its update"
+    );
+
+    let (failed, repeated) = control(
+        &app,
+        &token,
+        "delegation_update",
+        json!({ "task_id": task, "message": change }),
+    )
+    .await;
+    assert!(!failed, "{repeated}");
+    assert_eq!(repeated["status"], "completed");
+    assert_eq!(repeated["next"], "This update was already applied.");
+    assert_eq!(
+        child_of(&app, task).await,
+        second,
+        "a retry changes nothing"
+    );
+    let delivered: Option<i64> =
+        sqlx::query_scalar("SELECT delivered_attempt FROM delegations WHERE id = ?1")
+            .bind(task)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert!(
+        delivered.is_some(),
+        "the retry's outcome is not delivered again"
+    );
+}
+
+async fn app_with_synthetic() -> (TestApp, Arc<else_api::providers::synthetic::Synthetic>) {
+    let db = Arc::new(TestDb::migrated().await);
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let synthetic = Arc::new(else_api::providers::synthetic::Synthetic::new(
+        Duration::from_millis(5),
+    ));
+    let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
+    (TestApp::with_registry(db, 3, registry), synthetic)
+}
+
+async fn update(app: &TestApp, token: &str, task: Uuid, message: &str) -> Value {
+    let (failed, updated) = control(
+        app,
+        token,
+        "delegation_update",
+        json!({ "task_id": task, "message": message }),
+    )
+    .await;
+    assert!(!failed, "{updated}");
+    updated
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_without_the_tasks_session_still_sees_its_earlier_reply() {
+    let (app, synthetic) = app_with_synthetic().await;
+    let work = leaf(&app, "Work").await;
+    let original = format!(
+        "[synthetic:slow] List the school forms. {}",
+        "Name each form and its due date. ".repeat(8)
+    );
+    let (task, first, token) = task_carried_to_a_follow_up(&app, &work, &original).await;
+    let deadline = tokio::time::Instant::now() + common::SETTLE;
+    let partial = loop {
+        let text: Option<String> = sqlx::query_scalar(
+            "SELECT group_concat(text, '') FROM items WHERE turn_id = ?1 AND kind = 'assistant'",
+        )
+        .bind(first)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+        if let Some(text) = text.filter(|t| t.len() >= 14) {
+            break text;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no partial reply");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let native: Vec<String> = sqlx::query_scalar(
+        "SELECT s.native_session_id FROM provider_sessions s JOIN turns t
+         ON t.conversation_id = s.conversation_id WHERE t.id = ?1",
+    )
+    .bind(first)
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap();
+    synthetic.forget_sessions(&native).await;
+
+    let change = "Only the permission slip matters now.";
+    update(&app, &token, task, change).await;
+    wait_task(&app, task, "completed").await;
+    let packet = synthetic
+        .packets()
+        .await
+        .into_iter()
+        .find(|p| p.ends_with(change))
+        .expect("the update reached Work");
+    assert!(
+        packet.contains(&partial[..14]),
+        "the update carries the task's earlier reply: {packet}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_update_can_repeat_an_earlier_one() {
+    let app = app_with(3).await;
+    let work = leaf(&app, "Work").await;
+    let (task, _, token) =
+        task_carried_to_a_follow_up(&app, &work, "[synthetic:hang] Plan the week.").await;
+    let include = "[synthetic:hang] Include the school forms.";
+    let exclude = "[synthetic:hang] Leave out the school forms.";
+    update(&app, &token, task, include).await;
+    let included = child_of(&app, task).await;
+    update(&app, &token, task, exclude).await;
+    let again = update(&app, &token, task, include).await;
+    let latest = child_of(&app, task).await;
+    assert_ne!(latest, included, "changing back is a new update: {again}");
+    let source: String = sqlx::query_scalar(
+        "SELECT i.text FROM turns t JOIN items i ON i.id = t.owner_item_id WHERE t.id = ?1",
+    )
+    .bind(latest)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(source, include);
+    let retry = update(&app, &token, task, include).await;
+    assert_eq!(retry["next"], "This update was already applied.");
+    assert_eq!(child_of(&app, task).await, latest);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_message_takes_over_an_update_still_queued() {
+    let (app, synthetic) = app_with_synthetic().await;
+    let work = leaf(&app, "Work").await;
+    let (task, first, token) =
+        task_carried_to_a_follow_up(&app, &work, "[synthetic:hang] long research").await;
+    synthetic.hold_hangs(true).await;
+    update(&app, &token, task, "Narrow it to the permission slip.").await;
+    wait_status(&app, first, "cancelling").await;
+    let replacement = child_of(&app, task).await;
+    wait_status(&app, replacement, "queued").await;
+
+    let steer = "Stop this, Dev is on it.";
+    let sent = app
+        .send(&work, Uuid::new_v4(), steer, Some("synthetic"))
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    let steer_turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    wait_status(&app, replacement, "interrupted").await;
+    synthetic.hold_hangs(false).await;
+    wait_status(&app, steer_turn, "completed").await;
+    let (_, result, _) = wait_task(&app, task, "completed").await;
+    assert!(
+        result.as_deref().is_some_and(|r| r.contains(steer)),
+        "the owner's message answers the task: {result:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delegating_bot_cancels_a_running_task() {
+    let app = app_with(3).await;
+    let work = leaf(&app, "Work").await;
+    let (task, child, token) =
+        task_carried_to_a_follow_up(&app, &work, "[synthetic:hang] long research").await;
+
+    let (failed, stopping) = control(
+        &app,
+        &token,
+        "delegation_cancel",
+        json!({ "task_id": task }),
+    )
+    .await;
+    assert!(!failed, "{stopping}");
+    assert_eq!(stopping["status"], "stopping", "{stopping}");
+    wait_status(&app, child, "interrupted").await;
+    wait_task(&app, task, "cancelled").await;
+
+    let (failed, again) = control(
+        &app,
+        &token,
+        "delegation_cancel",
+        json!({ "task_id": task }),
+    )
+    .await;
+    assert!(!failed, "{again}");
+    assert_eq!(again["status"], "cancelled");
+    assert!(again["outcome"].as_str().is_some(), "{again}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_to_an_ended_task_is_rejected_with_its_outcome() {
+    let app = app_with(3).await;
+    let work = leaf(&app, "Work").await;
+    let (_, root, token) = running_main(&app).await;
+    let reply = delegate(&app, &token, &work, "Say which forms are due.").await;
+    let task: Uuid = tool_text(&reply)["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let (_, result, _) = wait_task(&app, task, "completed").await;
+    let child = child_of(&app, task).await;
+    // The continuation that receives the reply is the caller.
+    app.wait_turn_for(&root.to_string(), &["running"], common::SETTLE)
+        .await;
+    let token = grant_delegate(&app, root).await;
+
+    let (failed, rejected) = control(
+        &app,
+        &token,
+        "delegation_update",
+        json!({ "task_id": task, "message": "Also the dentist." }),
+    )
+    .await;
+    assert!(failed, "{rejected}");
+    assert!(
+        rejected["error"].as_str().unwrap().starts_with("ENDED"),
+        "{rejected}"
+    );
+    assert_eq!(rejected["task"]["status"], "completed");
+    assert_eq!(rejected["task"]["outcome"].as_str(), result.as_deref());
+    assert_eq!(child_of(&app, task).await, child, "nothing was changed");
+
+    let (failed, unknown) = control(
+        &app,
+        &token,
+        "delegation_cancel",
+        json!({ "task_id": Uuid::new_v4() }),
+    )
+    .await;
+    assert!(failed, "{unknown}");
+    assert!(
+        unknown["error"].as_str().unwrap().starts_with("NOT_FOUND"),
+        "{unknown}"
+    );
+}

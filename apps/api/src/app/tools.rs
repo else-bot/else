@@ -61,6 +61,8 @@ pub const DEFERRED_TOOLS: &[&str] = &[
     "else_status",
     "list_bots",
     "create_bot",
+    "delegation_update",
+    "delegation_cancel",
     "rename_bot",
     "set_bot_model",
     "confirm_permission",
