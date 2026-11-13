@@ -15,6 +15,8 @@ pub enum Turn {
     DelegatedTask,
     /// A task the main bot delegated to Research during a routine run.
     RoutineTask,
+    /// Research woken by new mail in an inbox it watches.
+    MailEvent,
 }
 
 /// A representative turn. Keep schemas on the same path as MCP tools/list.
@@ -41,18 +43,22 @@ pub fn export(turn: Turn) -> Value {
             delegated_by: Some((Uuid::from_u128(1), "Main".into())),
             ..DelegationContext::default()
         },
+        Turn::MailEvent => DelegationContext {
+            origin: Origin::ConnectorEvent,
+            ..DelegationContext::default()
+        },
     };
     let input = TurnInput {
         bot_id: match turn {
             Turn::Owner => Uuid::from_u128(1),
-            Turn::DelegatedTask | Turn::RoutineTask => Uuid::from_u128(4),
+            Turn::DelegatedTask | Turn::RoutineTask | Turn::MailEvent => Uuid::from_u128(4),
         },
         conversation_id: Uuid::from_u128(2),
         turn_id: Uuid::from_u128(3),
         turn_no: 1,
         bot_name: match turn {
             Turn::Owner => "Main".into(),
-            Turn::DelegatedTask | Turn::RoutineTask => "Research".into(),
+            Turn::DelegatedTask | Turn::RoutineTask | Turn::MailEvent => "Research".into(),
         },
         text: "Help me with my tasks.".into(),
         parts: vec![],

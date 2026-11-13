@@ -147,6 +147,13 @@ def run(runner):
                 "watch-connected-inbox": ([self.call("mail_accounts", {}), self.call("mail_trigger_set", {
                     "account_id": inbox, "instructions": "Draft a reply asking for their W-9."},
                     {"status": "pending", "parked": True})], "Approve the card and new invoices wake me."),
+                "mail-trigger-drafts-reply-in-card": ([
+                    self.call("mail_action", {"account_id": inbox, "command": {"operation": "read", "message": {
+                        "folder": "INBOX", "uid_validity": 1, "uid": 42}}}),
+                    self.call("draft_email", {"account_id": inbox, "to": ["kim@example.org"], "subject": "Re: Liquidation prices",
+                                              "body": "Which pair?", "reply_to": {"folder": "INBOX", "uid_validity": 1, "uid": 42}},
+                              {"status": "pending", "parked": True})],
+                    "Kim's reply is ready to review."),
                 "connect-inbox-then-watch": ([self.call("mail_connect", {"provider": "gmail", "address": "max@example.com"}),
                                               self.call("mail_trigger_set", {"account_id": inbox,
                                                                              "instructions": "Triage new mail into folders."},
