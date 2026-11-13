@@ -607,7 +607,7 @@ async fn scheduled_routine_runs_use_task_grants_but_webhook_wakes_do_not() {
     h.release(setup).await;
     wait(app, setup, "completed").await;
 
-    else_api::db::routines::admit_due(&app.db.pool, app.scheduler.registry(), due, 8)
+    else_api::db::routines::admit_due(&app.db.pool, app.scheduler.registry(), None, due, 8)
         .await
         .unwrap();
     app.scheduler.wake();

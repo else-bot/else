@@ -47,6 +47,7 @@ mod outgoing_drafts;
 mod owner_questions;
 mod reads;
 mod reset;
+mod routine_checks;
 mod routine_grants;
 mod routine_models;
 mod routines;

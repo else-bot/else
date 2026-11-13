@@ -102,7 +102,7 @@ async fn fire(app: &TestApp, routine: &Value) -> Option<Uuid> {
     let due = DateTime::parse_from_rfc3339(routine["next_run_at"].as_str().unwrap())
         .unwrap()
         .to_utc();
-    else_api::db::routines::admit_due(&app.db.pool, app.scheduler.registry(), due, 8)
+    else_api::db::routines::admit_due(&app.db.pool, app.scheduler.registry(), None, due, 8)
         .await
         .unwrap();
     app.scheduler.wake();
@@ -812,7 +812,7 @@ async fn run_once(app: &TestApp, routine: Uuid) -> Uuid {
         .await
         .unwrap();
     let due = DateTime::parse_from_rfc3339(&due).unwrap().to_utc();
-    else_api::db::routines::admit_due(&app.db.pool, app.scheduler.registry(), due, 8)
+    else_api::db::routines::admit_due(&app.db.pool, app.scheduler.registry(), None, due, 8)
         .await
         .unwrap();
     app.scheduler.wake();

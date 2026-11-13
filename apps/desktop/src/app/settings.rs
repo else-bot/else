@@ -2106,9 +2106,14 @@ fn last_run_status(run: &LastRun, when: &str, error: Option<String>) -> (String,
         "overlap" => "the previous run was still going",
         "queue_full" => "too many messages were waiting",
         "provider_unavailable" => "no provider was available",
+        "check_cancelled" => "its check was stopped",
+        "check_unavailable" => "its check could not start",
         _ => "it could not start",
     };
     match run.status.as_str() {
+        "skipped" if run.skip_reason.as_deref() == Some("nothing_new") => {
+            (format!("Last run {when}: nothing new"), false)
+        }
         "failed" | "uncertain" | "interrupted" => {
             let detail = error.unwrap_or_else(|| run.status.clone());
             (format!("Last run {when} {}: {detail}", run.status), true)
@@ -2120,6 +2125,7 @@ fn last_run_status(run: &LastRun, when: &str, error: Option<String>) -> (String,
             ),
             true,
         ),
+        "checking" => (format!("Checking for new work (due {when})"), false),
         "queued" | "running" => (format!("Running now (due {when})"), false),
         status => (format!("Last run {when}: {status}"), false),
     }
@@ -2565,6 +2571,19 @@ mod tests {
             text,
             "Paused after 3 failed runs (the provider process exited)"
         );
+        let skipped = |reason: &str| {
+            last_run(&routine(serde_json::json!({
+                "last_run": { "due_at": "2026-11-08T02:00:00Z", "status": "skipped",
+                              "skip_reason": reason, "error": null },
+            })))
+            .unwrap()
+        };
+        let (text, attention) = skipped("nothing_new");
+        assert!(!attention, "a check that found nothing is a normal run");
+        assert!(text.ends_with(": nothing new"), "{text}");
+        let (text, attention) = skipped("check_unavailable");
+        assert!(attention);
+        assert!(text.ends_with(": its check could not start"), "{text}");
     }
 
     fn trigger(enabled: bool) -> Trigger {

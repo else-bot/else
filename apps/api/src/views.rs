@@ -152,6 +152,7 @@ pub fn routine_json(routine: &Routine) -> Value {
         "name": routine.name,
         "prompt": routine.prompt,
         "prompt_revision": routine.prompt_revision,
+        "check": routine.check,
         "cron": routine.cron,
         "run_at": routine.run_at,
         "timezone": routine.timezone,

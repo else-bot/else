@@ -39,6 +39,7 @@ pub struct Scheduler {
     gate: Arc<crate::maintenance::Gate>,
     /// The shared MCP library's directory, set by the router.
     mcp_root: std::sync::OnceLock<std::path::PathBuf>,
+    computers: std::sync::OnceLock<Arc<crate::computers::ComputerManager>>,
 }
 
 /// A provider slot held by one memory summary. Released on drop.
@@ -84,12 +85,18 @@ impl Scheduler {
             summaries: AtomicUsize::new(0),
             gate: Arc::default(),
             mcp_root: std::sync::OnceLock::new(),
+            computers: std::sync::OnceLock::new(),
         })
     }
 
     /// Where the shared MCP library lives, so turns can list its packages.
     pub fn use_mcp_library(&self, root: std::path::PathBuf) {
         let _ = self.mcp_root.set(root);
+    }
+
+    /// Where routine checks run.
+    pub fn use_computers(&self, computers: Arc<crate::computers::ComputerManager>) {
+        let _ = self.computers.set(computers);
     }
 
     /// Turns this process is running now.
@@ -242,10 +249,21 @@ impl Scheduler {
             {
                 tracing::warn!(error = %err, "reviewing ended routine runs failed");
             }
+            if let Err(err) = crate::db::routines::settle_checks(
+                &self.pool,
+                &self.registry,
+                crate::db::routines::SETTLE_BATCH,
+            )
+            .await
+            {
+                tracing::warn!(error = %err, "settling routine checks failed");
+            }
+            let computers = self.computers.get();
             let (admitted, woken, mail, social) = tokio::join!(
                 crate::db::routines::admit_due(
                     &self.pool,
                     &self.registry,
+                    computers.map(Arc::as_ref),
                     now,
                     crate::db::routines::ADMIT_BATCH,
                 ),
@@ -258,8 +276,13 @@ impl Scheduler {
                 crate::connectors::delivery::admit_pending(&self.pool, &self.registry, 32),
                 crate::socials::delivery::admit_pending(&self.pool, &self.registry, 32)
             );
-            if let Err(err) = admitted {
-                tracing::warn!(error = %err, "admitting due routines failed");
+            match admitted {
+                Ok(admitted) => {
+                    for check in admitted.checks {
+                        self.launch_check(check);
+                    }
+                }
+                Err(err) => tracing::warn!(error = %err, "admitting due routines failed"),
             }
             if let Err(err) = woken {
                 tracing::warn!(error = %err, "admitting webhook wakes failed");
@@ -311,6 +334,21 @@ impl Scheduler {
                 .await;
         }
         Ok(())
+    }
+
+    fn launch_check(&self, check: crate::db::routines::Check) {
+        let Some(computers) = self.computers.get().cloned() else {
+            return;
+        };
+        tokio::spawn(async move {
+            let env = crate::db::task_secrets::Env::default();
+            if let Err(err) = computers
+                .launch_reserved(check.bot_id, check.job_id, &check.command, &env)
+                .await
+            {
+                tracing::warn!(job = %check.job_id, error = %err, "launching a routine check failed");
+            }
+        });
     }
 
     async fn execute(&self, turn_id: Uuid, cancel: CancellationToken) {

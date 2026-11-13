@@ -73,6 +73,7 @@ pub async fn halt_accepted(
         events::turn_changed(conn, bot_id, *turn_id).await?;
     }
     crate::db::delegations::cancel_for_bot(conn, bot_id, boundary).await?;
+    crate::db::routines::stop_checks(conn, bot_id).await?;
     crate::computers::jobs::request_cancel(&mut *conn, bot_id, None).await?;
     let active: Option<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'cancelling', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')

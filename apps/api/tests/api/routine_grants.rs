@@ -63,7 +63,7 @@ async fn fire(app: &TestApp, now: DateTime<Utc>) -> Vec<(Uuid, Uuid)> {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    routines::admit_due(&app.db.pool, app.scheduler.registry(), now, 8)
+    routines::admit_due(&app.db.pool, app.scheduler.registry(), None, now, 8)
         .await
         .unwrap();
     app.scheduler.wake();

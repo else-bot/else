@@ -20,9 +20,9 @@ use super::error::{ApiError, ApiJson, ApiPath};
 use super::mcp::{Outcome, tool_error, tool_result};
 use crate::app::providers::{Availability, Profile, default_profiles};
 use crate::app::routines::{
-    ActiveHours, DEFAULT_TIMEZONE, InvalidRoutine, MAX_NAME_CHARS, MAX_PER_BOT, MAX_PROMPT_BYTES,
-    MAX_REMINDER_DAYS, ModelSetting, RoutineModel, RoutineName, RoutinePrompt, Schedule, When,
-    match_model,
+    ActiveHours, DEFAULT_TIMEZONE, InvalidRoutine, MAX_CHECK_BYTES, MAX_NAME_CHARS, MAX_PER_BOT,
+    MAX_PROMPT_BYTES, MAX_REMINDER_DAYS, ModelSetting, RoutineCheck, RoutineModel, RoutineName,
+    RoutinePrompt, Schedule, When, match_model,
 };
 use crate::db::routines::{self, By, Caller, NewRoutine, Patch, Routine, RoutineError};
 use crate::grants::Grant;
@@ -200,6 +200,10 @@ fn fields() -> Value {
         "prompt": { "type": "string", "minLength": 1, "maxLength": MAX_PROMPT_BYTES,
                     "description": "The complete task to run each time, self-contained: you \
                         will read it later without this conversation." },
+        "check": { "type": "string", "minLength": 1, "maxLength": MAX_CHECK_BYTES,
+                   "description": "Shell command your computer runs before each run, without \
+                       secrets or approval. Exit 0 with no output skips the run; other output \
+                       is added to the task." },
         "cron": { "type": "string",
                   "description": "Standard five-field cron: minute hour day-of-month month \
                       day-of-week, digits with * , - / only (for example 0 9 * * 1-5 for \
@@ -467,6 +471,11 @@ pub fn update_schema() -> Value {
          the owner asks for nights or weekends; otherwise the days and hours asked. End is \
          excluded, after start."
     );
+    properties["check"]["type"] = json!(["string", "null"]);
+    properties["check"]["description"] = json!(
+        "Shell command your computer runs before each run, without secrets or approval. Exit 0 \
+         with no output skips the run; other output is added to the task. null removes it."
+    );
     properties["enabled"] = json!({ "type": "boolean",
         "description": "False pauses future runs; true resumes counting from now." });
     json!({
@@ -583,6 +592,7 @@ impl HoursArg {
 struct CreateArgs {
     name: String,
     prompt: String,
+    check: Option<String>,
     cron: String,
     timezone: Option<String>,
     active_hours: Option<HoursArg>,
@@ -596,7 +606,7 @@ fn parse_new(
     args: &CreateArgs,
     timezone: Option<&str>,
     now: chrono::DateTime<Utc>,
-) -> Result<(RoutineName, RoutinePrompt, Schedule), RoutineError> {
+) -> Result<(RoutineName, RoutinePrompt, Option<RoutineCheck>, Schedule), RoutineError> {
     let hours = match &args.active_hours {
         None => Some(ActiveHours::WORKING),
         Some(arg) => arg.parse()?,
@@ -604,6 +614,7 @@ fn parse_new(
     Ok((
         RoutineName::parse(&args.name)?,
         RoutinePrompt::parse(&args.prompt)?,
+        args.check.as_deref().map(RoutineCheck::parse).transpose()?,
         Schedule::parse_due(&args.cron, timezone, hours, now)?,
     ))
 }
@@ -611,8 +622,8 @@ fn parse_new(
 pub async fn create(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     let Ok(args) = serde_json::from_value::<CreateArgs>(args.clone()) else {
         return invalid(
-            "pass name, prompt, and cron as strings, and optionally timezone, active_hours, and \
-             model with provider_id, reasoning_effort, and service_tier.",
+            "pass name, prompt, and cron as strings, and optionally check, timezone, \
+             active_hours, and model with provider_id, reasoning_effort, and service_tier.",
         );
     };
     let now = Utc::now();
@@ -624,7 +635,7 @@ pub async fn create(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         },
     };
     let timezone = args.timezone.as_deref().or(owner_timezone.as_deref());
-    let (name, prompt, schedule) = match parse_new(&args, timezone, now) {
+    let (name, prompt, check, schedule) = match parse_new(&args, timezone, now) {
         Ok(parsed) => parsed,
         Err(err) => return reject(err),
     };
@@ -653,6 +664,7 @@ pub async fn create(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     let new = NewRoutine {
         name: &name,
         prompt: &prompt,
+        check: check.as_ref(),
         schedule: &schedule,
         requested_timezone: args.timezone.as_deref(),
         model: &model,
@@ -725,6 +737,8 @@ struct UpdateArgs {
     routine_id: Uuid,
     name: Option<String>,
     prompt: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    check: Option<Option<String>>,
     cron: Option<String>,
     timezone: Option<String>,
     active_hours: Option<HoursArg>,
@@ -743,6 +757,11 @@ fn parse_patch(args: &UpdateArgs) -> Result<Patch, RoutineError> {
             .prompt
             .as_deref()
             .map(RoutinePrompt::parse)
+            .transpose()?,
+        check: args
+            .check
+            .as_ref()
+            .map(|check| check.as_deref().map(RoutineCheck::parse).transpose())
             .transpose()?,
         cron: args.cron.clone(),
         timezone: args.timezone.clone(),
@@ -930,6 +949,7 @@ pub async fn create_reminder(state: &AppState, grant: &Grant, args: &Value) -> O
     let new = NewRoutine {
         name: &name,
         prompt: &prompt,
+        check: None,
         schedule: &schedule,
         requested_timezone: args.timezone.as_deref(),
         model: &model,
