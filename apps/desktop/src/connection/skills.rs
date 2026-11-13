@@ -457,7 +457,6 @@ impl Shell {
         };
         if entries.is_empty() {
             return body
-                .flex_1()
                 .child(settings::empty_state(
                     IconName::FileText,
                     "No skills installed yet",

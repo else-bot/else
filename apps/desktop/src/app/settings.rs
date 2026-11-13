@@ -1156,10 +1156,11 @@ impl ElseApp {
             .child(
                 // Rows dissolve under the tabs and the footer instead of
                 // being sliced at the rule.
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(crate::panel_kit::faded(body, theme.sidebar)),
+                div().flex_1().min_h_0().child(crate::panel_kit::faded(
+                    body,
+                    theme.sidebar,
+                    px(0.),
+                )),
             )
             .child(self.sidebar_handle(super::layout::SidebarEdge::Right, cx));
         if self.default_bot_id != Some(bot.id) {

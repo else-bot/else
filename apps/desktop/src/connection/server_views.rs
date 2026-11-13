@@ -6,7 +6,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex};
+use gpui_kit::component::{Icon, Sizable as _, h_flex};
 
 impl Shell {
     fn server_status(&self, id: Uuid, cx: &App) -> (&'static str, Hsla) {
@@ -177,51 +177,46 @@ impl Shell {
             self.server_update_view(saved.id)
                 .is_some_and(updates::View::busy)
         });
+        let mut actions = vec![
+            Button::new("servers-check-all")
+                .control(Tier::Secondary, Scale::Compact, false, cx)
+                .icon(IconName::RefreshCw)
+                .label("Check all")
+                .on_click(cx.listener(|shell, _, window, cx| shell.refresh_servers(window, cx)))
+                .into_any_element(),
+        ];
+        if can_update || updating {
+            actions.push(
+                Button::new("servers-update-all")
+                    .control(Tier::Secondary, Scale::Compact, updating, cx)
+                    .label(if updating {
+                        "Updating…"
+                    } else {
+                        "Update all"
+                    })
+                    .loading(updating)
+                    .on_click(cx.listener(|shell, _, _, cx| shell.update_all_servers(cx)))
+                    .into_any_element(),
+            );
+        }
+        actions.push(
+            Button::new("servers-add")
+                .control(Tier::Secondary, Scale::Compact, false, cx)
+                .icon(IconName::Plus)
+                .label("Add server")
+                .on_click(cx.listener(|shell, _, window, cx| {
+                    shell.open_server_editor(Editor::Add, window, cx)
+                }))
+                .into_any_element(),
+        );
         let mut content = v_flex()
             .gap_0()
-            .child(
-                h_flex()
-                    .items_start()
-                    .gap_3()
-                    .child(div().flex_1().min_w_0().child(settings::section_heading(
-                        "Servers",
-                        "Manage where your bots run.",
-                        cx,
-                    )))
-                    .child(
-                        Button::new("servers-check-all")
-                            .control(Tier::Ghost, Scale::Standard, false, cx)
-                            .icon(IconName::RefreshCw)
-                            .label("Check all")
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.refresh_servers(window, cx)
-                            })),
-                    )
-                    .when(can_update || updating, |row| {
-                        row.child(
-                            Button::new("servers-update-all")
-                                .control(Tier::Secondary, Scale::Standard, updating, cx)
-                                .label(if updating {
-                                    "Updating…"
-                                } else {
-                                    "Update all"
-                                })
-                                .loading(updating)
-                                .on_click(
-                                    cx.listener(|shell, _, _, cx| shell.update_all_servers(cx)),
-                                ),
-                        )
-                    })
-                    .child(
-                        Button::new("servers-add")
-                            .control(Tier::Secondary, Scale::Standard, false, cx)
-                            .icon(IconName::Plus)
-                            .label("Add server")
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.open_server_editor(Editor::Add, window, cx)
-                            })),
-                    ),
-            )
+            .child(crate::panel_kit::page_heading(
+                "Servers",
+                "Manage where your bots run.",
+                actions,
+                cx,
+            ))
             .child(
                 div()
                     .pt_6()
@@ -265,33 +260,31 @@ impl Shell {
             } else {
                 installed.to_owned()
             };
-            let mut facts = h_flex()
-                .gap_x_2()
-                .flex_wrap()
+            // Health reads beside the name; the meta line below carries only
+            // the version, release and work facts.
+            let health = h_flex()
+                .flex_none()
+                .gap_1p5()
+                .items_center()
                 .text_xs()
+                .text_color(color)
                 .child(
-                    h_flex()
-                        .gap_1p5()
-                        .text_color(color)
-                        .child(
-                            if observation.is_none_or(|entry| entry.health == Health::Checking) {
-                                updates::checking_icon(
-                                    SharedString::from(format!("server-health-{id}")),
-                                    px(12.),
-                                    color,
-                                )
-                            } else {
-                                div().size_1p5().rounded_full().bg(color).into_any_element()
-                            },
+                    if observation.is_none_or(|entry| entry.health == Health::Checking) {
+                        updates::checking_icon(
+                            SharedString::from(format!("server-health-{id}")),
+                            px(12.),
+                            color,
                         )
-                        .child(status),
+                    } else {
+                        div().size_1p5().rounded_full().bg(color).into_any_element()
+                    },
                 )
-                .child(dot_separator(&theme))
-                .child(
-                    div()
-                        .text_color(theme.muted_foreground)
-                        .child(shown_version),
-                );
+                .child(status);
+            let mut facts = h_flex().gap_x_2().flex_wrap().text_xs().child(
+                div()
+                    .text_color(theme.muted_foreground)
+                    .child(shown_version),
+            );
             if online {
                 facts = facts.child(dot_separator(&theme)).child(
                     h_flex()
@@ -386,33 +379,41 @@ impl Shell {
                         ),
                 );
             }
+            // Both row icons: 16 px at 60% in 28 px targets. The server in
+            // use can't be removed, so it shows no trash at all.
+            let row_icon_button = |id: SharedString, icon: IconName, label: String| {
+                Button::new(id)
+                    .control(Tier::Ghost, Scale::Compact, false, cx)
+                    .w(Scale::Compact.height())
+                    .px_0()
+                    .text_color(theme.foreground.opacity(0.6))
+                    .icon(Icon::new(icon).size_4())
+                    .accessibility_label(label)
+            };
             let connection_actions = h_flex()
                 .gap_1()
                 .child(
-                    Button::new(SharedString::from(format!("edit-server-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Pencil)
-                        .accessibility_label(format!("Edit {}", saved.name))
-                        .on_click(cx.listener(move |shell, _, window, cx| {
-                            shell.open_server_editor(Editor::Edit(id), window, cx)
-                        })),
+                    row_icon_button(
+                        SharedString::from(format!("edit-server-{id}")),
+                        IconName::Pencil,
+                        format!("Edit {}", saved.name),
+                    )
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        shell.open_server_editor(Editor::Edit(id), window, cx)
+                    })),
                 )
-                .child(
-                    Button::new(SharedString::from(format!("remove-server-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Trash)
-                        .accessibility_label(format!("Remove connection to {}", saved.name))
-                        .disabled(selected)
-                        .on_click(cx.listener(move |shell, _, window, cx| {
-                            shell.remove_server(id, window, cx)
-                        })),
-                );
+                .when(!selected, |actions| {
+                    actions.child(
+                        row_icon_button(
+                            SharedString::from(format!("remove-server-{id}")),
+                            IconName::Trash,
+                            format!("Remove connection to {}", saved.name),
+                        )
+                        .on_click(cx.listener(
+                            move |shell, _, window, cx| shell.remove_server(id, window, cx),
+                        )),
+                    )
+                });
             // One grouped-list row: the server, its address and status
             // tokens, with every action at the trailing edge.
             rows.push(
@@ -447,7 +448,8 @@ impl Shell {
                                             )
                                             .when(selected, |row| {
                                                 row.child(crate::panel_kit::tag("In use", cx))
-                                            }),
+                                            })
+                                            .child(health),
                                     )
                                     .child(
                                         div()
@@ -525,11 +527,12 @@ impl Shell {
                     .child(name.to_owned()),
             )
             .child(div().flex_none().size_1p5().rounded_full().bg(color))
-            .child(dot_separator(theme))
             .child(
                 div()
                     .min_w_0()
+                    .pl_1()
                     .truncate()
+                    .text_color(theme.foreground.opacity(0.6))
                     .child(active.profile.origin.as_str().to_owned()),
             )
             .into_any_element()

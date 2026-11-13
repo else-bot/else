@@ -405,9 +405,9 @@ impl Shell {
             let at: chrono::DateTime<chrono::Local> = at.into();
             format!("{source} · Checked {}", at.format("%H:%M"))
         });
-        // The status block reads as the heading's answer, 16 px under it.
+        // The status card reads as the heading's answer, 24 px under it.
         let mut content = v_flex()
-            .gap_4()
+            .gap_6()
             .when(output_visible, |content| content.gap_3())
             .when(!output_visible, |content| {
                 content.child(super::settings::section_heading(
@@ -424,8 +424,14 @@ impl Shell {
                     cx,
                 ))
             })
+            // The status is one group card, like every other Settings group.
             .child(
                 h_flex()
+                    .w_full()
+                    .p_4()
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(theme.border)
                     .items_start()
                     .gap_3()
                     .child(
@@ -457,6 +463,7 @@ impl Shell {
                             )
                             .child(
                                 div()
+                                    .max_w(crate::panel_kit::PARAGRAPH)
                                     .text_sm()
                                     .text_color(theme.muted_foreground)
                                     .child(description),
