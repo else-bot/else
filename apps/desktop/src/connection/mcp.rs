@@ -274,6 +274,7 @@ impl Shell {
         };
         if entries.is_empty() {
             return body
+                .flex_1()
                 .child(settings::empty_state(
                     IconName::Plug,
                     "No MCPs installed yet",

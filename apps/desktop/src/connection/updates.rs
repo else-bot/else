@@ -312,6 +312,9 @@ impl Shell {
         let view = self.update_view();
         let snapshot = &view.snapshot;
         let output_visible = view.show_output || !snapshot.output.is_empty();
+        // A copy whose updates are managed elsewhere shows only its status.
+        let lone =
+            !output_visible && snapshot.unavailable.is_some() && view.remote_profile.is_none();
         let (target, source) = match snapshot.channel {
             UpdateChannel::Stable => ("latest stable release", "Stable releases"),
             UpdateChannel::Dev => ("newest commit of main", "Dev builds of main"),
@@ -425,72 +428,82 @@ impl Shell {
                 ))
             })
             // The status is one group card, like every other Settings group.
+            // Alone on the page, it centres in the space under the heading,
+            // like an inventory page's empty state.
             .child(
-                h_flex()
+                div()
                     .w_full()
-                    .p_4()
-                    .rounded(theme.radius_lg)
-                    .border_1()
-                    .border_color(theme.border)
-                    .items_start()
-                    .gap_3()
+                    .when(lone, |slot| {
+                        slot.flex_1().flex().flex_col().justify_center().pb_10()
+                    })
                     .child(
-                        div()
-                            .size_10()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(theme.radius)
-                            .bg(theme.secondary.opacity(0.45))
-                            .child(if loading {
-                                checking_icon("update-status-loading", px(20.), tone)
-                            } else {
-                                Icon::new(icon).size_5().text_color(tone).into_any_element()
-                            }),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
+                        h_flex()
+                            .w_full()
+                            .p_4()
+                            .rounded(theme.radius_lg)
+                            .border_1()
+                            .border_color(theme.border)
+                            .items_start()
+                            .gap_3()
                             .child(
                                 div()
-                                    .text_size(px(15.))
-                                    .line_height(px(20.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .max_w(crate::panel_kit::PARAGRAPH)
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child(description),
-                            )
-                            .child(
-                                h_flex()
-                                    .pt_1()
-                                    .gap_2()
-                                    .flex_wrap()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(if let Some(id) = self.server_update_target {
-                                        self.registry
-                                            .find(id)
-                                            .map(|s| s.name.clone())
-                                            .unwrap_or_default()
+                                    .size_10()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(theme.radius)
+                                    .bg(theme.secondary.opacity(0.45))
+                                    .child(if loading {
+                                        checking_icon("update-status-loading", px(20.), tone)
                                     } else {
-                                        format!("Running v{}", env!("ELSE_VERSION"))
-                                    })
-                                    .when_some(view.latest(), |row, version| {
-                                        row.child(Icon::new(IconName::ArrowRight).size_3())
-                                            .child(format!("Latest {version}"))
-                                    })
-                                    .when(snapshot.unavailable.is_none(), |row| {
-                                        row.child("·")
-                                            .child(last_check.unwrap_or_else(|| source.to_owned()))
+                                        Icon::new(icon).size_5().text_color(tone).into_any_element()
                                     }),
+                            )
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_size(px(15.))
+                                            .line_height(px(20.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(title),
+                                    )
+                                    .child(
+                                        div()
+                                            .max_w(crate::panel_kit::PARAGRAPH)
+                                            .text_sm()
+                                            .text_color(theme.muted_foreground)
+                                            .child(description),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .pt_1()
+                                            .gap_2()
+                                            .flex_wrap()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(if let Some(id) = self.server_update_target {
+                                                self.registry
+                                                    .find(id)
+                                                    .map(|s| s.name.clone())
+                                                    .unwrap_or_default()
+                                            } else {
+                                                format!("Running v{}", env!("ELSE_VERSION"))
+                                            })
+                                            .when_some(view.latest(), |row, version| {
+                                                row.child(Icon::new(IconName::ArrowRight).size_3())
+                                                    .child(format!("Latest {version}"))
+                                            })
+                                            .when(snapshot.unavailable.is_none(), |row| {
+                                                row.child("·").child(
+                                                    last_check.unwrap_or_else(|| source.to_owned()),
+                                                )
+                                            }),
+                                    ),
                             ),
                     ),
             );
@@ -539,12 +552,13 @@ impl Shell {
         let mut panel = v_flex()
             .w_full()
             .when(output_visible, |panel| panel.h_full())
+            .when(lone, |panel| panel.flex_1())
             .min_h_0()
             .gap_4()
             .child(
                 div()
                     .id("updates-status-scroll")
-                    .when(output_visible, |area| area.flex_1())
+                    .when(output_visible || lone, |area| area.flex_1())
                     .min_h_0()
                     .flex()
                     .flex_col()
@@ -554,8 +568,8 @@ impl Shell {
                     .child(
                         content
                             .w_full()
-                            .when(output_visible, |content| content.flex_1())
-                            .when(!output_visible, |content| content.flex_none()),
+                            .when(output_visible || lone, |content| content.flex_1())
+                            .when(!output_visible && !lone, |content| content.flex_none()),
                     ),
             );
         if view.confirm_restart {

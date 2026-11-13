@@ -122,8 +122,8 @@ impl Shell {
             let shell_close = shell_close.clone();
             let viewport = window.viewport_size();
             crate::appearance::modal_surface(dialog, cx)
-                .w((viewport.width - px(64.)).min(SETTINGS_SHEET_WIDTH))
-                .margin_top(sheet_band(viewport.height).0)
+                .w(sheet_size(viewport).width)
+                .centered()
                 .entrance(DialogEntrance::None)
                 .p_0()
                 .gap_0()
@@ -345,23 +345,19 @@ impl Shell {
                 div()
                     .id("settings-page-scroll")
                     .size_full()
-                    .child(v_flex().py_8().child(settings_column(body)))
+                    .child(v_flex().min_h_full().py_8().child(settings_column(body)))
                     .overflow_y_scrollbar(),
                 cx,
             )
             .into_any_element()
         };
-        // The sheet hugs its page between a floor that fits the navigation
-        // and a ceiling that keeps it clear of the window's bottom edge; a
-        // longer page scrolls inside it. Its top edge never moves, so the
-        // navigation stays put while pages change.
-        let (_, ceiling) = sheet_band(window.viewport_size().height);
+        // One sheet size for every page: the header and navigation stay
+        // put while pages change, and a longer page scrolls inside it.
         v_flex()
             .id("app-settings")
             .track_focus(&setup.focus)
             .w_full()
-            .min_h(SHEET_MIN_HEIGHT.min(ceiling))
-            .max_h(ceiling)
+            .h(sheet_size(window.viewport_size()).height)
             .overflow_hidden()
             .child(
                 // One header: the sheet's title over the server it edits.
@@ -797,29 +793,26 @@ fn settings_row(
 
 /// Width of the content column on every Settings page. The server strip,
 /// page bodies and footers share it so their left and right edges line up.
-pub(super) const SETTINGS_COLUMN: Pixels = px(640.);
-/// Inset of that column from the left edge of the Settings pane.
+pub(super) const SETTINGS_COLUMN: Pixels = px(560.);
+/// Least inset of that column from the edges of the Settings pane; a wider
+/// pane centres the column.
 pub(super) const SETTINGS_INSET: Pixels = px(32.);
-/// The sheet fits the navigation and the column with the same inset on
-/// both sides.
-const SETTINGS_SHEET_WIDTH: Pixels = px(840.);
-/// The sheet's top edge sits 40 px under the conversation header, so it
-/// never slices the header's text; its tallest bottom edge stays 48 px
-/// above the composer, so nothing peeks out beside it.
-const SHEET_CLEAR_TOP: Pixels = px(96.);
-const SHEET_CLEAR_BOTTOM: Pixels = px(136.);
-/// The shortest sheet: the header and the whole navigation.
-const SHEET_MIN_HEIGHT: Pixels = px(520.);
+/// The sheet's one size on every page.
+const SHEET_SIZE: Size<Pixels> = Size {
+    width: px(840.),
+    height: px(620.),
+};
+/// The least gap between the sheet and each window edge.
+const SHEET_CLEARANCE: Pixels = px(32.);
 
-/// The sheet's fixed top offset and its tallest height for a window this
-/// tall. A window too short for the clearances spends them first.
-fn sheet_band(viewport: Pixels) -> (Pixels, Pixels) {
-    let band = viewport - SHEET_CLEAR_TOP - SHEET_CLEAR_BOTTOM;
-    if band < SHEET_MIN_HEIGHT {
-        let height = SHEET_MIN_HEIGHT.min(viewport - px(32.)).max(px(0.));
-        return (((viewport - height) / 2.).max(px(0.)), height);
+/// The sheet's fixed size, shrunk only when the window cannot fit it with
+/// [`SHEET_CLEARANCE`] on every side. The dialog centres it.
+fn sheet_size(viewport: Size<Pixels>) -> Size<Pixels> {
+    let room = |extent: Pixels| (extent - SHEET_CLEARANCE * 2.).max(px(0.));
+    Size {
+        width: SHEET_SIZE.width.min(room(viewport.width)),
+        height: SHEET_SIZE.height.min(room(viewport.height)),
     }
-    (SHEET_CLEAR_TOP, band)
 }
 
 /// The radius just inside the sheet's 1 px border. Clipping is rectangular,
@@ -844,14 +837,15 @@ pub(super) fn settings_column(content: impl IntoElement) -> Div {
             .min_h_0()
             .w_full()
             .max_w(SETTINGS_COLUMN)
+            .mx_auto()
             .child(content),
     )
 }
 
 /// The empty state of an inventory page (MCP, Skills): a 28 px icon, 12 px
 /// to the title, one supporting line, and 16 px to the button that fixes
-/// it. It sits 60 px under the page description (the page's 20 px gap plus
-/// 40 px), so the sheet can hug it instead of centring it in a void.
+/// it. It fills the page under the description and centres itself there,
+/// a little above the middle so it reads as centred.
 pub(super) fn empty_state(
     icon: IconName,
     title: &'static str,
@@ -862,7 +856,9 @@ pub(super) fn empty_state(
     let theme = cx.theme();
     v_flex()
         .w_full()
-        .pt_10()
+        .flex_1()
+        .justify_center()
+        .pb_10()
         .items_center()
         .text_center()
         .child(
