@@ -393,7 +393,7 @@ impl Palette {
             )
         })
         .collect();
-        serde_json::from_value(serde_json::json!({
+        let mut config: ThemeConfig = serde_json::from_value(serde_json::json!({
             "name": name,
             "mode": if dark { "dark" } else { "light" },
             "radius": style.radius,
@@ -402,7 +402,9 @@ impl Palette {
             "colors": colors,
             "highlight": { "syntax": syntax },
         }))
-        .expect("every palette projects onto a theme")
+        .expect("every palette projects onto a theme");
+        config.font_family = crate::ui_font::family();
+        config
     }
 }
 

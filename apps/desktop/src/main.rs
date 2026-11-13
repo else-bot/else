@@ -18,6 +18,7 @@ mod profile_picker;
 mod sidebar;
 mod skill_ui;
 mod socials;
+mod ui_font;
 mod updates;
 mod window_frame;
 
@@ -184,6 +185,7 @@ fn main() {
         .run(move |cx| {
             cx.set_app_identity("else-bot", "else.bot");
             gpui_kit::init(cx);
+            ui_font::init(cx);
             appearance::init(cx);
             app::bind_keys(cx);
             app::install_menus(cx);
