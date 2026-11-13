@@ -271,6 +271,15 @@ def run(runner):
                 self.assertFalse(self.passed(carried["expect"], [], wrong), wrong)
             scoped_case = next(c for c in runner.load_cases() if c["id"] == "recurring-external-batch-declares-task-scope")
             self.assertFalse(self.passed(scoped_case["expect"], unscoped, "Approve the card."))
+            routine_case = next(c for c in runner.load_cases() if c["id"] == "format-correction-updates-routine")
+            rule = self.call("rules_update", {"section": "Growth digest", "content": "Do: brief chat; details in a report.",
+                                              "owner_words": "I'm not able to read it."})
+            routine_id = "10000000-0000-0000-0000-000000000003"
+            for unchanged in ({}, {"name": "Growth digest"},
+                              {"prompt": "Review Product, Landing, App, Ads, Search and Funnel, and post a detailed section for each here."}):
+                with self.subTest(routine_update=unchanged):
+                    self.assertFalse(self.passed(routine_case["expect"], [rule, self.call("use_tool", {
+                        "name": "routine_update", "arguments": {"routine_id": routine_id, **unchanged}})], "Updated."))
             for case in runner.load_cases():
                 with self.subTest(case=case["id"]):
                     calls, final, *bad_final = examples[case["id"]]
