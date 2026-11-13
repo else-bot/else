@@ -6,6 +6,8 @@
 /slow      never finishes loading within a minute
 /draft     a textarea whose page asks to confirm leaving once it holds text
 /order     a page whose button POSTs to /count
+/controls  a React-style email field (state follows only real input), an
+           icon-only Like button, and a button under an overlay
 /count     POST: counts one order at once, then withholds the reply for
            30 s (so a test can cut the connection after the side effect
            and before its acknowledgment); GET: the count
@@ -53,6 +55,17 @@ class Handler(BaseHTTPRequestHandler):
                       "{ e.preventDefault(); e.returnValue = ''; } })</script>")
         elif url.path == "/order":
             self.page("<title>Order</title><button id='buy'>Buy</button>")
+        elif url.path == "/controls":
+            self.page("<title>Controls</title><input id='email' aria-label='Email'><div id='state'>state:</div>"
+                      "<button aria-label='Like' onclick=\"document.getElementById('likes').textContent='liked'\">&#9829;</button>"
+                      "<div id='likes'></div><div style='position:relative;width:120px'><button id='covered'>Hidden pay</button>"
+                      "<div style='position:absolute;inset:0;z-index:1;background:#0006'></div></div><script>"
+                      "const e = document.getElementById('email'); let tracked = '';"
+                      "const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');"
+                      "Object.defineProperty(e, 'value', { get() { return d.get.call(this) },"
+                      " set(v) { tracked = String(v); d.set.call(this, v) } });"
+                      "e.addEventListener('input', () => { if (e.value !== tracked) { tracked = e.value;"
+                      " document.getElementById('state').textContent = 'state:' + e.value } });</script>")
         elif url.path == "/count":
             self.page(str(COUNT))
         else:

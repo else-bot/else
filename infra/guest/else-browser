@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Drive the guest's Chromium through DevTools on guest loopback.
 
-Usage: else-browser [--accept-dialogs] open URL | text | title | click SELECTOR | type SELECTOR TEXT | reconcile
-SELECTOR is CSS, or text=Label for the one visible element with exactly that text.
+Usage: else-browser [--accept-dialogs] open URL | text | title | snapshot | click SELECTOR | type SELECTOR TEXT | reconcile
+SELECTOR is CSS, text=Label for the one visible element with exactly that text,
+or a ref such as @kqvzb3 from the latest snapshot of the same page.
 Prints one JSON object. Runs inside the guest; nothing leaves the VM.
 
 A native dialog (alert, confirm, prompt, "Leave site?") is answered in the same
@@ -10,7 +11,7 @@ call, since a later connection can neither see nor answer it: dismissed by
 default, so a page that asks to confirm leaving keeps its input, or accepted
 with --accept-dialogs. The result lists the dialogs answered.
 """
-import fcntl, json, os, subprocess, sys, time, urllib.request
+import difflib, fcntl, json, os, random, string, subprocess, sys, time, urllib.parse, urllib.request
 import websocket
 
 DEVTOOLS = "http://127.0.0.1:9222"
@@ -35,6 +36,7 @@ def page():
 class Tab:
     def __init__(self, accept_dialogs):
         target = page()
+        self.id = target["id"]
         self.ws = websocket.create_connection(target["webSocketDebuggerUrl"], timeout=5)
         self.n = 0
         self.accept_dialogs = accept_dialogs
@@ -64,6 +66,10 @@ class Tab:
                                  "params": {"accept": self.accept_dialogs}}))
         self.dialogs.append({"type": dialog.get("type"), "message": dialog.get("message", "")[:500],
                              "answer": "accepted" if self.accept_dialogs else "dismissed"})
+    def on(self, element, function):
+        r = self.call("Runtime.callFunctionOn", objectId=element, functionDeclaration=function,
+                      returnByValue=True, awaitPromise=True)
+        return r.get("result", {}).get("value")
     def eval(self, expression):
         r = self.call("Runtime.evaluate", expression=expression, returnByValue=True, awaitPromise=True)
         return r.get("result", {}).get("value")
@@ -75,6 +81,7 @@ class Tab:
 
 LOCK = "/var/lib/elsebot/browser.lock"
 CONTROLLED = "/var/lib/elsebot/browser-controlled.jsonl"
+REFS = "/var/lib/elsebot/browser-refs.json"
 
 def reconcile():
     """After a script was stopped (run by every guest kill): the tabs a
@@ -174,25 +181,27 @@ if(hits.length)return {state:'several',count:hits.length,tags:hits.slice(0,5).ma
 return {state:'missing',near:[...new Set(deepest(near).map(name))].slice(0,5)};
 }"""
 
-def on_element(tab, selector, script):
+def find(tab, selector):
+    """The one element a selector names, as a remote object ID."""
+    if selector.startswith("@"):
+        return from_ref(tab, selector)
     if selector.startswith("text="):
         label = selector[5:].strip()
         if len(label) > 1 and label[0] == label[-1] and label[0] in "\"'":
             label = label[1:-1]
-        find = f"const r=({BY_TEXT})({json.dumps(label)});if(!r.el)return r;let e=r.el;"
+        body = f"const r=({BY_TEXT})({json.dumps(label)});return r.el||r;"
     else:
         label = None
-        find = (f"let e;try{{e=document.querySelector({json.dumps(selector)})}}catch(_){{return {{state:'invalid'}}}}"
-                "if(!e)return {state:'missing'};")
-    found = tab.eval(f"(()=>{{{find}{script}return {{state:'ok'}}}})()") or {"state": "missing"}
-    state = found["state"]
-    if state == "ok":
-        return
+        body = (f"let e;try{{e=document.querySelector({json.dumps(selector)})}}catch(_){{return {{state:'invalid'}}}}"
+                "return e||{state:'missing'};")
+    result = tab.call("Runtime.evaluate", expression=f"(()=>{{{body}}})()")["result"]
+    if result.get("subtype") == "node":
+        return result["objectId"]
+    found = tab.on(result["objectId"], "function(){return this}") if "objectId" in result else {}
+    state = found.get("state")
     if state == "invalid":
         error = (f"{json.dumps(selector)} is not a CSS selector; use CSS such as #id, .class, or "
                  "button[type=submit], or text=Label, not XPath")
-    elif state == "not_field":
-        error = f"{json.dumps(selector)} is not a text field"
     elif state == "several":
         error = (f"{found['count']} visible elements have the text {json.dumps(label)}, in page order: "
                  f"{', '.join(found['tags'])}; use a CSS selector")
@@ -202,6 +211,245 @@ def on_element(tab, selector, script):
         similar = ", ".join(json.dumps(n) for n in found.get("near", []))
         error = f"no visible element has the text {json.dumps(label)}" + (f"; similar: {similar}" if similar else "")
     raise SystemExit(json.dumps({"error": error}))
+
+ACTIONS = open("/usr/local/lib/elsebot/cdp/actions.js").read()
+
+def page_step(tab, element, step, *args):
+    """Run one of the steps in actions.js on the element."""
+    return tab.on(element, f"function(){{return ({ACTIONS}).{step}.call(this,...{json.dumps(args)})}}")
+
+def field_of(tab, element):
+    """The field to type into, resolved once (see field in actions.js)."""
+    r = tab.call("Runtime.callFunctionOn", objectId=element, returnByValue=False,
+                 functionDeclaration=f"function(){{return ({ACTIONS}).field.call(this)}}")
+    return r["result"]["objectId"]
+
+def click(tab, element, selector):
+    point = page_step(tab, element, "clickPoint")
+    if "error" not in point:
+        tab.call("Input.dispatchMouseEvent", type="mouseMoved", x=point["x"], y=point["y"])
+        # Hovering can open a menu or move the page; check the point again.
+        point = page_step(tab, element, "clickPoint", point["x"], point["y"])
+    if "error" in point:
+        raise SystemExit(json.dumps({"error": f"{point['error']} ({json.dumps(selector)})"}))
+    for kind in ("mousePressed", "mouseReleased"):
+        tab.call("Input.dispatchMouseEvent", type=kind, x=point["x"], y=point["y"], button="left", clickCount=1)
+
+DELETE_KEY = {"key": "Delete", "code": "Delete", "windowsVirtualKeyCode": 46}
+
+def type_into(tab, element, selector, text, secret):
+    def fail(error):
+        raise SystemExit(json.dumps({"error": f"{json.dumps(selector)}: {error}"}))
+    typed = page_step(tab, element, "typeInto", text)
+    if "error" in typed:
+        fail(typed["error"])
+    if typed.get("insert"):
+        # Text goes wherever focus is, so check it right before typing.
+        if not page_step(tab, element, "focusedField"):
+            fail("the page moved focus or the text cursor away from the field, so nothing was typed")
+        if text:
+            tab.call("Input.insertText", text=text)
+        else:
+            for kind in ("rawKeyDown", "keyUp"):
+                tab.call("Input.dispatchKeyEvent", type=kind, **DELETE_KEY)
+    # In its own call, so the page's handlers have finished.
+    held = page_step(tab, element, "holds", text if typed.get("insert") else typed["check"], secret,
+                     typed.get("index"))
+    if "error" in held:
+        fail(held["error"])
+
+PAGE_TEXT = "document.body ? document.body.innerText : ''"
+TEXT_LIMIT = 20000
+CHANGES_LIMIT = 4000
+
+def page_text(tab):
+    text = tab.eval(PAGE_TEXT) or ""
+    return {"text": text[:TEXT_LIMIT], "text_truncated": len(text) > TEXT_LIMIT}
+
+def changes(before, after):
+    """The lines an action added to or removed from the page text."""
+    added, removed = [], []
+    a, b = before.splitlines(), after.splitlines()
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        removed += [l for l in a[i1:i2] if l.strip()] if op in ("replace", "delete") else []
+        added += [l for l in b[j1:j2] if l.strip()] if op in ("replace", "insert") else []
+    out, size = {}, 0
+    for key, lines in (("added", added), ("removed", removed)):
+        kept = []
+        for line in lines:
+            size += len(line) + 1
+            if size > CHANGES_LIMIT:
+                out["changes_truncated"] = True
+                break
+            kept.append(line)
+        if kept:
+            out[key] = kept
+    return out
+
+def act(tab, action, expect_change):
+    """Run an action on the current page and report what it changed: the new
+    page's text when it loaded another document, else the lines that changed."""
+    marker = os.urandom(8).hex()
+    tab.eval(f"window.__elseDoc = {json.dumps(marker)}")
+    before = tab.eval(PAGE_TEXT) or ""
+    action()
+    time.sleep(0.2)
+    tab.settle()
+    navigated = lambda: tab.eval("window.__elseDoc") != marker
+    if navigated():
+        return {"navigated": True, **page_text(tab)}
+    after = tab.eval(PAGE_TEXT) or ""
+    deadline = time.monotonic() + (1 if expect_change else 0)
+    while after == before and time.monotonic() < deadline:
+        time.sleep(0.1)
+        after = tab.eval(PAGE_TEXT) or ""
+    if navigated():
+        tab.settle()
+        return {"navigated": True, **page_text(tab)}
+    diff = changes(before, after)
+    if diff or not expect_change:
+        return diff
+    return {"unchanged": True, "next": "The page text did not change. If the click starts something slow, "
+            "read the page again with text; take a screenshot for changes text does not show."}
+
+# Roles a person acts on; each gets a ref. Headings are listed for context.
+CONTROLS = {"button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox", "listbox", "option",
+            "menuitem", "menuitemcheckbox", "menuitemradio", "slider", "spinbutton", "switch", "tab", "treeitem",
+            "Date", "DateTime", "InputTime"}
+# Controls whose children are themselves listed (a select's options); the
+# parts inside any other control, such as a date input's fields, are not.
+CONTAINERS = {"combobox", "listbox"}
+STATES = ("disabled", "checked", "pressed", "expanded", "selected", "required")
+SNAPSHOT_LIMIT = 16000
+
+# Elements styled as clickable that are not controls, such as a div with an
+# onclick handler: the outermost one with text, not inherited from a parent.
+CLICKABLE = r"""(()=>{const out=[];if(!document.body)return out;
+const skip='a,button,input,select,textarea,summary,details,label,[role],[contenteditable]';
+for(const e of document.body.querySelectorAll('*')){
+ if(out.length>=100)break;
+ if(e.matches(skip)||e.closest('a,button,[role=button],[role=link]'))continue;
+ const st=getComputedStyle(e);
+ if(st.cursor!=='pointer'&&!e.hasAttribute('onclick'))continue;
+ if(e.parentElement&&getComputedStyle(e.parentElement).cursor==='pointer'&&!e.hasAttribute('onclick'))continue;
+ const t=(e.innerText||'').replace(/\s+/g,' ').trim();
+ if(!t||!e.getClientRects().length||st.visibility==='hidden')continue;
+ out.push(e);
+}return out})()"""
+
+def clickables(tab):
+    """backendNodeId -> visible text of each element CLICKABLE finds."""
+    found = tab.call("Runtime.evaluate", expression=CLICKABLE)["result"]
+    if "objectId" not in found:
+        return {}
+    props = tab.call("Runtime.getProperties", objectId=found["objectId"], ownProperties=True)["result"]
+    out = {}
+    for prop in props:
+        oid = prop.get("value", {}).get("objectId")
+        if prop["name"].isdigit() and oid:
+            node = tab.call("DOM.describeNode", objectId=oid)["node"]
+            out[node["backendNodeId"]] = tab.on(oid, "function(){return this.innerText}") or ""
+    return out
+
+def document_id(tab):
+    return tab.call("Page.getFrameTree")["frameTree"]["frame"]["loaderId"]
+
+def snapshot(tab):
+    """The page's controls in page order, one line each, with refs. A link
+    shows its URL when another link has the same name, or it has none."""
+    tab.call("DOM.enable")
+    tab.call("Accessibility.enable")
+    nodes = tab.call("Accessibility.getFullAXTree")["nodes"]
+    extra = clickables(tab)
+    by_id = {n["nodeId"]: n for n in nodes}
+    roots = [n for n in nodes if not n.get("parentId") or n["parentId"] not in by_id]
+    clean = lambda v: " ".join(str(v).split())[:100]
+    origin = urllib.parse.urlsplit(tab.eval("location.href") or "")
+    entries = []
+    def visit(node):
+        role = node.get("role", {}).get("value", "")
+        props = {p["name"]: p.get("value", {}).get("value") for p in node.get("properties", [])}
+        if role not in CONTROLS and "editable" in props:
+            role = "textbox"
+        name = clean(node.get("name", {}).get("value", ""))
+        backend = node.get("backendDOMNodeId")
+        listed = not node.get("ignored") and backend and (role in CONTROLS or backend in extra)
+        if listed:
+            states = [k if v in (True, "true") else f"{k}={v}"
+                      for k, v in props.items() if k in STATES and v not in (False, "false", None)]
+            value = clean(node.get("value", {}).get("value", ""))
+            if value and role in ("textbox", "searchbox", "combobox", "spinbutton", "slider"):
+                states.append(f"value={json.dumps(value)}")
+            if role not in CONTROLS:
+                role, name = "clickable", name or clean(extra.pop(backend))
+            url = urllib.parse.urlsplit(props.get("url") or "")
+            if url.netloc == origin.netloc and url.scheme == origin.scheme:
+                url = url._replace(scheme="", netloc="")
+            entries.append({"role": role.lower(), "name": name, "states": states, "backend": backend,
+                            "url": urllib.parse.urlunsplit(url)[:120]})
+        elif role == "heading" and name and not node.get("ignored"):
+            entries.append({"role": "heading", "name": name})
+        if listed and role not in CONTAINERS:
+            return
+        for child in node.get("childIds", []):
+            if child in by_id:
+                visit(by_id[child])
+    for root in roots:
+        visit(root)
+    links = {}
+    for entry in entries:
+        if entry["role"] == "link":
+            links[entry["name"]] = links.get(entry["name"], 0) + 1
+    # A ref is never reused for another element, so an old one fails as
+    # stale: numbering continues from the last snapshot, and when that state
+    # is lost a new random epoch prefixes the numbers.
+    try:
+        with open(REFS) as f:
+            saved = json.load(f)
+        epoch, first = saved["epoch"], int(saved["next"])
+    except (OSError, ValueError, TypeError, KeyError):
+        epoch, first = "".join(random.choice(string.ascii_lowercase) for _ in range(5)), 1
+    lines, refs, size, truncated = [], {}, 0, False
+    for entry in entries:
+        line = f"{entry['role']} {json.dumps(entry['name'])}"
+        if "backend" in entry:
+            ref = f"{epoch}{first + len(refs)}"
+            states = entry["states"]
+            if entry["role"] == "link" and entry["url"] and (not entry["name"] or links[entry["name"]] > 1):
+                states = [f"url={entry['url']}", *states]
+            line += f" @{ref}" + (f" [{', '.join(states)}]" if states else "")
+        size += len(line) + 1
+        if size > SNAPSHOT_LIMIT:
+            truncated = True
+            break
+        if "backend" in entry:
+            refs[ref] = entry["backend"]
+        lines.append(line)
+    with open(REFS + ".tmp", "w") as f:
+        json.dump({"tab": tab.id, "document": document_id(tab), "epoch": epoch, "next": first + len(refs),
+                   "refs": refs}, f)
+    os.replace(REFS + ".tmp", REFS)
+    result = {"snapshot": "\n".join(lines)}
+    if truncated:
+        result["snapshot_truncated"] = True
+    return result
+
+def from_ref(tab, selector):
+    stale = (f"STALE_REF: {selector} is not from the latest snapshot of this page; take a new snapshot "
+             "and use its refs")
+    try:
+        with open(REFS) as f:
+            saved = json.load(f)
+    except (OSError, ValueError):
+        raise SystemExit(json.dumps({"error": stale}))
+    backend = saved.get("refs", {}).get(selector[1:])
+    if not backend or saved.get("tab") != tab.id or saved.get("document") != document_id(tab):
+        raise SystemExit(json.dumps({"error": stale}))
+    tab.call("DOM.enable")
+    try:
+        return tab.call("DOM.resolveNode", backendNodeId=backend)["object"]["objectId"]
+    except SystemExit:
+        raise SystemExit(json.dumps({"error": stale}))
 
 def main(argv):
     accept_dialogs = argv[:1] == ["--accept-dialogs"]
@@ -222,22 +470,26 @@ def main(argv):
                                          "to discard it"}))
         time.sleep(0.3)
         tab.settle()
+        result = page_text(tab)
     elif action == "click":
-        on_element(tab, rest[0], "e.click();")
-        time.sleep(0.2)
-        tab.settle()
+        element = find(tab, rest[0])
+        result = act(tab, lambda: click(tab, element, rest[0]), True)
     elif action == "type":
-        on_element(tab, rest[0], "if(!e.matches('input,textarea,select')&&e.closest('label')?.control)e=e.closest('label').control;"
-                   "if(!e.matches('input,textarea,select'))return {state:'not_field'};"
-                   f"e.focus();e.value={json.dumps(rest[1])};e.dispatchEvent(new Event('input',{{bubbles:true}}));")
-    elif action not in ("text", "title"):
+        element = field_of(tab, find(tab, rest[0]))
+        secret = page_step(tab, element, "secret")
+        result = act(tab, lambda: type_into(tab, element, rest[0], rest[1], secret), False)
+        if not result.get("navigated"):
+            result = {"value": page_step(tab, element, "fieldValue", secret), **result}
+    elif action == "snapshot":
+        result = snapshot(tab)
+    elif action in ("text", "title"):
+        result = page_text(tab) if action == "text" else {}
+    else:
         raise SystemExit(json.dumps({"error": f"unknown action {action}"}))
-    text = tab.eval("document.body ? document.body.innerText : ''") or ""
     print(json.dumps({
         "url": tab.eval("location.href"),
         "title": tab.eval("document.title"),
-        "text": text[:20000],
-        "text_truncated": len(text) > 20000,
+        **result,
         **({"dialogs": tab.dialogs} if tab.dialogs else {}),
     }))
 

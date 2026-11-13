@@ -38,6 +38,8 @@ def partial(actual, expected):
 def matches(call, selector):
     if isinstance(selector, str):
         selector = {"name": selector}
+    if "anyOf" in selector:
+        return any(matches(call, s) for s in selector["anyOf"])
     return (
         partial(call, {k: v for k, v in selector.items() if k != "absent"})
         and all(at(call.get("arguments", {}), key) is MISSING

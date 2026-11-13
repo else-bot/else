@@ -437,6 +437,75 @@ async fn scripts_drive_the_visible_browser_safely() {
     let left: Value = serde_json::from_str(left.stdout.trim()).unwrap();
     assert_eq!(left["title"], "Fixture search");
     assert_eq!(left["dialogs"][0]["type"], "beforeunload");
+
+    let browse = |args: &[&str]| {
+        let manager = manager.clone();
+        let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        async move {
+            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+            let out = manager.browser(lease_id, &argv).await.unwrap();
+            let json = if out.stdout.trim().is_empty() {
+                &out.stderr
+            } else {
+                &out.stdout
+            };
+            serde_json::from_str::<Value>(json.trim()).unwrap()
+        }
+    };
+    let ref_of = |snapshot: &Value, control: &str| -> String {
+        let lines = snapshot["snapshot"].as_str().unwrap();
+        let line = lines
+            .lines()
+            .find(|l| l.starts_with(control))
+            .unwrap_or_else(|| panic!("{control} in {lines}"));
+        line.split(' ')
+            .find(|w| w.starts_with('@'))
+            .unwrap()
+            .to_owned()
+    };
+    browse(&["open", "http://127.0.0.1:8411/controls"]).await;
+    let snapshot = browse(&["snapshot"]).await;
+    eprintln!("snapshot: {snapshot}");
+    let email = ref_of(&snapshot, "textbox \"Email\"");
+    let like = ref_of(&snapshot, "button \"Like\"");
+    let liked = browse(&["click", &like]).await;
+    assert_eq!(liked["added"][0], "liked", "{liked}");
+    assert!(
+        liked.get("text").is_none(),
+        "a click returns only what changed"
+    );
+    let typed = browse(&["type", &email, "ref@example.com"]).await;
+    assert_eq!(typed["value"], "ref@example.com", "{typed}");
+    assert_eq!(
+        typed["added"][0], "state:ref@example.com",
+        "the page's own state saw the text"
+    );
+    let again = ref_of(&browse(&["snapshot"]).await, "button \"Like\"");
+    assert_ne!(again, like, "refs are not reused across snapshots");
+    let replaced = browse(&["click", &like]).await;
+    assert!(
+        replaced["error"].as_str().unwrap().starts_with("STALE_REF"),
+        "a ref from an earlier snapshot of the same page: {replaced}"
+    );
+    ok(&manager, bot, "rm /var/lib/elsebot/browser-refs.json", 30).await;
+    let fresh = ref_of(&browse(&["snapshot"]).await, "button \"Like\"");
+    assert_ne!(fresh, like, "lost ref state starts a new epoch: {fresh}");
+    let lost = browse(&["click", &again]).await;
+    assert!(
+        lost["error"].as_str().unwrap().starts_with("STALE_REF"),
+        "a ref from before the state was lost: {lost}"
+    );
+    let covered = browse(&["click", "#covered"]).await;
+    assert!(
+        covered["error"].as_str().unwrap().starts_with("COVERED"),
+        "{covered}"
+    );
+    browse(&["open", "http://127.0.0.1:8411/controls"]).await;
+    let stale = browse(&["click", &fresh]).await;
+    assert!(
+        stale["error"].as_str().unwrap().starts_with("STALE_REF"),
+        "a ref from the previous load: {stale}"
+    );
     manager.release(lease_id).await.unwrap();
 
     let example = ok(

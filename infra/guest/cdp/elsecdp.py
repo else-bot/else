@@ -44,6 +44,9 @@ SCREEN = "/tmp/.X11-unix/X99"
 LOCK = "/var/lib/elsebot/browser.lock"
 MAX_EVALUATE = 300
 CONTROLLED = "/var/lib/elsebot/browser-controlled.jsonl"
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "actions.js")) as _f:
+    ACTIONS = _f.read()
+DELETE_KEY = {"key": "Delete", "code": "Delete", "windowsVirtualKeyCode": 46}
 
 
 def _record(target, created):
@@ -450,18 +453,82 @@ class Page:
                 raise error(f"timed out after {timeout} s waiting for {what or expression}")
             time.sleep(0.15)
 
-    def fill(self, selector, value):
-        ok = self.evaluate(
-            f"(() => {{ const e = document.querySelector({json.dumps(selector)}); if (!e) return false; e.focus(); "
-            f"e.value = {json.dumps(value)}; e.dispatchEvent(new Event('input', {{ bubbles: true }})); "
-            f"e.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()")
-        if not ok:
+    def _element(self, selector, field=False):
+        """The remote object of the element the selector finds (or, with
+        field, the field it types into), resolved once so every step of an
+        action runs on that element even if the page swaps in another."""
+        r = self.call("Runtime.evaluate", {"expression": f"document.querySelector({json.dumps(selector)})",
+                                           "objectGroup": "elsecdp-action"}, mutating=False)
+        if r.get("result", {}).get("subtype") == "null" or "objectId" not in r.get("result", {}):
             raise CdpError(f"no element matches {selector}")
+        element = r["result"]["objectId"]
+        if field:
+            element = self.call("Runtime.callFunctionOn", {
+                "objectId": element, "objectGroup": "elsecdp-action",
+                "functionDeclaration": f"function(){{return ({ACTIONS}).field.call(this)}}"}, mutating=False)["result"]["objectId"]
+        return element
+
+    def _step(self, element, step, *args, mutating=True):
+        """Run one of the steps in actions.js on the element."""
+        r = self.call("Runtime.callFunctionOn", {
+            "objectId": element, "returnByValue": True, "awaitPromise": True,
+            "functionDeclaration": f"function(){{return ({ACTIONS}).{step}.call(this, ...{json.dumps(args)})}}"},
+            mutating=mutating)
+        if "exceptionDetails" in r:
+            d = r["exceptionDetails"]
+            raise CdpError(f"page script failed: {d.get('exception', {}).get('description', d.get('text'))}")
+        return r.get("result", {}).get("value")
+
+    def _release(self):
+        try:
+            self.call("Runtime.releaseObjectGroup", {"objectGroup": "elsecdp-action"}, mutating=False)
+        except CdpError:
+            pass
+
+    def fill(self, selector, value):
+        """Replace a field's content like typing, so frameworks such as React
+        see it and the page may refuse it (CdpError); a select takes an
+        option's value or label."""
+        try:
+            field = self._element(selector, field=True)
+            secret = self._step(field, "secret", mutating=False)
+            typed = self._step(field, "typeInto", value)
+            if "error" in typed:
+                raise CdpError(f"{selector}: {typed['error']}")
+            if typed.get("insert"):
+                # Text goes wherever focus is, so check it right before typing.
+                if not self._step(field, "focusedField", mutating=False):
+                    raise CdpError(f"{selector}: the page moved focus or the text cursor away from the field, so nothing was typed")
+                if value:
+                    self.call("Input.insertText", {"text": value})
+                else:
+                    for kind in ("rawKeyDown", "keyUp"):
+                        self.call("Input.dispatchKeyEvent", {"type": kind, **DELETE_KEY})
+            # In its own call, so the page's handlers have finished.
+            want = value if typed.get("insert") else typed["check"]
+            held = self._step(field, "holds", want, secret, typed.get("index"), mutating=False)
+            if "error" in held:
+                raise CdpError(f"{selector}: {held['error']}")
+        finally:
+            self._release()
 
     def click(self, selector):
-        ok = self.evaluate(f"(() => {{ const e = document.querySelector({json.dumps(selector)}); if (!e) return false; e.click(); return true; }})()")
-        if not ok:
-            raise CdpError(f"no element matches {selector}")
+        """Click like a person: real mouse events on the element, after
+        checking that it is visible, enabled, and not covered (CdpError if not)."""
+        try:
+            element = self._element(selector)
+            point = self._step(element, "clickPoint", mutating=False)
+            if "error" not in point:
+                self.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": point["x"], "y": point["y"]})
+                # Hovering can open a menu or move the page; check the point again.
+                point = self._step(element, "clickPoint", point["x"], point["y"], mutating=False)
+            if "error" in point:
+                raise CdpError(f"{point['error']} ({selector})")
+            for kind in ("mousePressed", "mouseReleased"):
+                self.call("Input.dispatchMouseEvent", {"type": kind, "x": point["x"], "y": point["y"],
+                                                       "button": "left", "clickCount": 1})
+        finally:
+            self._release()
 
     def show(self):
         """Make this the tab shown in the visible browser window."""
