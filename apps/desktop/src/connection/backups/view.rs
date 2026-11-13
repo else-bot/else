@@ -6,18 +6,6 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Disableable as _, FocusableExt as _, Icon, Sizable as _, Theme, h_flex};
 
-pub(super) fn bytes(value: u64) -> String {
-    if value >= 1_000_000_000 {
-        format!("{:.2} GB", value as f64 / 1_000_000_000.)
-    } else if value >= 1_000_000 {
-        format!("{:.1} MB", value as f64 / 1_000_000.)
-    } else if value >= 1000 {
-        format!("{:.1} KB", value as f64 / 1000.)
-    } else {
-        format!("{value} B")
-    }
-}
-
 fn interval(seconds: u64) -> String {
     match seconds {
         0 => "Manual only".into(),
@@ -248,7 +236,7 @@ impl Shell {
                             "Uploaded last run",
                             latest
                                 .and_then(|run| run.uploaded_bytes.or(run.bytes))
-                                .map(bytes)
+                                .map(byte_size)
                                 .unwrap_or_else(|| "None yet".into()),
                             latest
                                 .and_then(|run| run.finished_at.as_deref())
@@ -262,7 +250,7 @@ impl Shell {
                             format!(
                                 "Keep target {} · {} in the bucket",
                                 snapshot.keep,
-                                bytes(snapshot.remote_bytes)
+                                byte_size(snapshot.remote_bytes)
                             ),
                             &theme,
                         )),
@@ -415,7 +403,7 @@ impl Shell {
         }
         content = content.when(view.editor.is_none(), |content| content.child(v_flex().gap_2().p_4().rounded(theme.radius).bg(theme.secondary.opacity(0.45))
             .child(div().text_xs().text_color(theme.muted_foreground).child("Estimated first upload"))
-            .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(snapshot.estimate.as_ref().map(|e| bytes(e.bytes)).unwrap_or_else(|| "Not available yet".into())))
+            .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(snapshot.estimate.as_ref().map(|e| byte_size(e.bytes)).unwrap_or_else(|| "Not available yet".into())))
             .when_some(snapshot.estimate.as_ref(), |content, estimate| content
                 .child(div().text_xs().text_color(theme.muted_foreground).child(estimate.basis.clone()))
                 .child(div().text_xs().text_color(theme.muted_foreground).child("Later backups upload only what changed since the previous one. Copies share unchanged data in the bucket.")))));
@@ -460,8 +448,10 @@ impl Shell {
                             )
                             .child(div().text_xs().text_color(theme.muted_foreground).child(
                                 match (run.uploaded_bytes, run.bytes) {
-                                    (Some(uploaded), _) => format!("{} uploaded", bytes(uploaded)),
-                                    (None, Some(size)) => bytes(size),
+                                    (Some(uploaded), _) => {
+                                        format!("{} uploaded", byte_size(uploaded))
+                                    }
+                                    (None, Some(size)) => byte_size(size),
                                     (None, None) => "Size pending".into(),
                                 },
                             ))

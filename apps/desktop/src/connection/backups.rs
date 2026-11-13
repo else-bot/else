@@ -4,6 +4,7 @@ mod view;
 
 use super::*;
 use crate::api::{BackupSettingsInput, BackupSnapshot};
+use crate::attachments::byte_size;
 use std::time::Duration;
 use uuid::Uuid;
 

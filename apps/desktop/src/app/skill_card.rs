@@ -332,7 +332,9 @@ impl ElseApp {
                 } else {
                     "files"
                 },
-                crate::skill_ui::size(install.files.iter().map(|file| file.size).sum::<u64>())
+                crate::attachments::byte_size(
+                    install.files.iter().map(|file| file.size).sum::<u64>()
+                )
             ),
             theme.muted_foreground,
         ));

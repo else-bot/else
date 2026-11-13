@@ -15,6 +15,7 @@ anyhow = "1.0.104"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 base64 = "0.22.1"
 chrono = { version = "0.4.45", default-features = false, features = ["serde", "clock", "std"] }
+bytesize = "2.7.0"
 chrono-tz = "0.10.4"
 croner = "4.0.2"
 dotenvy = "0.15.7"

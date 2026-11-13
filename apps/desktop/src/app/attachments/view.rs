@@ -1,6 +1,6 @@
 use super::{DraftFile, UploadState};
 use crate::app::ElseApp;
-use crate::attachments::{Attachment, file_size};
+use crate::attachments::{Attachment, byte_size};
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, InlineTokenContext};
@@ -78,7 +78,7 @@ pub(super) fn show_preview(
             .child(
                 div()
                     .text_xs()
-                    .child(format!("{} · {}", file.media_type, file_size(file.size))),
+                    .child(format!("{} · {}", file.media_type, byte_size(file.size))),
             )
             .child(content)
             .when_some(bytes.clone(), |dialog, bytes| {
@@ -232,7 +232,7 @@ pub(in crate::app) fn draft_chip(
             .into_any_element();
     };
     let detail = match &file.state {
-        UploadState::Ready { file } => file_size(file.size),
+        UploadState::Ready { file } => byte_size(file.size),
         UploadState::Preparing { .. } | UploadState::Uploading { .. } => "Uploading…".into(),
         UploadState::Failed { .. } => "Failed".into(),
         UploadState::Unconfirmed { .. } => "Unconfirmed".into(),
