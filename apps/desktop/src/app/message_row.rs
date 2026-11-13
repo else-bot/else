@@ -110,13 +110,11 @@ impl ElseApp {
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(Icon::new(IconName::Clock).xsmall().flex_none())
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .child(format!("Scheduled routine · {}", run.name)),
-                                    )
+                                    .child(div().flex_1().min_w_0().truncate().child(format!(
+                                        "{} · {}",
+                                        run.label(),
+                                        run.name
+                                    )))
                                     .child(stamp(run.due_at))
                             }),
                     )
@@ -554,7 +552,7 @@ fn routine_banner(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> 
                 .text_xs()
                 .text_color(theme.primary)
                 .child(Icon::new(IconName::Clock).size_3p5())
-                .child("Scheduled routine")
+                .child(run.label())
                 .child(
                     div()
                         .flex_1()

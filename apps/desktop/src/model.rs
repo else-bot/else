@@ -528,6 +528,20 @@ pub struct RoutineRun {
     pub routine_id: Uuid,
     pub name: String,
     pub due_at: DateTime<Utc>,
+    /// The routine is a reminder, due once. Absent from older servers.
+    #[serde(default)]
+    pub reminder: bool,
+}
+
+impl RoutineRun {
+    /// What started the run, as the conversation labels it.
+    pub fn label(&self) -> &'static str {
+        if self.reminder {
+            "Reminder"
+        } else {
+            "Scheduled routine"
+        }
+    }
 }
 
 /// The last due occurrence of a routine: the turn it started, or why it
@@ -1452,6 +1466,21 @@ mod tests {
         assert_eq!(expected.name, "Merged branch cleanup");
         assert_eq!(live.turn(id).unwrap().routine.as_ref(), Some(expected));
         assert_eq!(paged.turn(id).unwrap().routine.as_ref(), Some(expected));
+    }
+
+    #[test]
+    fn a_run_is_labelled_by_whether_a_reminder_started_it() {
+        let run = |extra: serde_json::Value| {
+            let mut run = json!({ "routine_id": Uuid::from_u128(71), "name": "DevOps check",
+                                  "due_at": "2026-11-13T13:37:00Z" });
+            run.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<RoutineRun>(run).unwrap().label()
+        };
+        assert_eq!(run(json!({ "reminder": true })), "Reminder");
+        assert_eq!(run(json!({ "reminder": false })), "Scheduled routine");
+        assert_eq!(run(json!({})), "Scheduled routine", "an older server");
     }
 
     #[test]

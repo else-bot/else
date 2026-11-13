@@ -1179,6 +1179,7 @@ async fn a_run_is_hidden_and_its_report_is_visible() {
     assert_eq!(visible_turn["routine"]["routine_id"], routine["id"]);
     assert_eq!(visible_turn["routine"]["name"], "Morning digest");
     assert_eq!(at(&visible_turn["routine"]["due_at"]), due);
+    assert_eq!(visible_turn["routine"]["reminder"], false);
     assert_eq!(snapshot["routines"][0]["last_run"]["status"], "completed");
     assert_eq!(
         snapshot["routines"][0]["last_run"]["turn_id"],
@@ -2358,13 +2359,28 @@ async fn a_reminder_runs_once_then_leaves_the_list() {
     assert_eq!(fire(&h.app, run_at + six_hours).await, 0, "it runs once");
     let run = runs(&h.app, &id).await;
     assert_eq!(run.len(), 1);
-    h.app
-        .wait_turn(&run[0].0.unwrap().to_string(), &["completed"])
-        .await;
+    let turn = run[0].0.unwrap().to_string();
+    h.app.wait_turn(&turn, &["completed"]).await;
     for _ in 0..400 {
         let listed = owner_routines(&h.app, &main).await;
         if listed.iter().all(|r| r["id"] != id.as_str()) {
             assert_eq!(listed.len(), 1, "the other reminder stays: {listed:?}");
+            let snapshot = h
+                .app
+                .owner("GET", &format!("/v1/bots/{main}/conversation"), None)
+                .await
+                .body;
+            let ran = snapshot["turns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["id"] == turn.as_str())
+                .unwrap();
+            assert_eq!(ran["routine"]["name"], "Scout check");
+            assert_eq!(
+                ran["routine"]["reminder"], true,
+                "its run still shows as a reminder's"
+            );
             return;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;

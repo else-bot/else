@@ -231,6 +231,8 @@ pub struct RoutineRun {
     pub routine_id: Uuid,
     pub name: String,
     pub due_at: chrono::DateTime<chrono::Utc>,
+    /// The routine is a reminder, due once.
+    pub reminder: bool,
 }
 
 /// A provider's native session for one conversation.

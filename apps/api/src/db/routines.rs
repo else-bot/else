@@ -857,15 +857,18 @@ pub async fn run_of(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
 ) -> Result<Option<RoutineRun>, sqlx::Error> {
-    let row: Option<(Uuid, String, DateTime<Utc>)> =
-        sqlx::query_as("SELECT routine_id, name, due_at FROM routine_runs WHERE turn_id = ?1")
-            .bind(turn_id)
-            .fetch_optional(conn)
-            .await?;
-    Ok(row.map(|(routine_id, name, due_at)| RoutineRun {
+    let row: Option<(Uuid, String, DateTime<Utc>, bool)> = sqlx::query_as(
+        "SELECT rr.routine_id, rr.name, rr.due_at, r.run_at IS NOT NULL
+         FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id WHERE rr.turn_id = ?1",
+    )
+    .bind(turn_id)
+    .fetch_optional(conn)
+    .await?;
+    Ok(row.map(|(routine_id, name, due_at, reminder)| RoutineRun {
         routine_id,
         name,
         due_at,
+        reminder,
     }))
 }
 
