@@ -44,6 +44,7 @@ pub struct Synthetic {
     id: &'static str,
     label: &'static str,
     chunk_delay: Duration,
+    projects: Option<std::path::PathBuf>,
     state: Actor<State>,
 }
 
@@ -66,8 +67,15 @@ impl Synthetic {
             id,
             label,
             chunk_delay,
+            projects: None,
             state: Actor::default(),
         }
+    }
+
+    /// Give each bot a project folder under `root`, as real providers do.
+    pub fn with_projects(mut self, root: std::path::PathBuf) -> Self {
+        self.projects = Some(root);
+        self
     }
 
     /// The last 256 packets this provider was sent, oldest first.
@@ -124,6 +132,11 @@ impl Provider for Synthetic {
 
     fn label(&self) -> &'static str {
         self.label
+    }
+
+    fn project_dir(&self, bot_id: uuid::Uuid) -> Option<std::path::PathBuf> {
+        let root = self.projects.as_deref()?;
+        super::host::project_dir(root, bot_id).ok()
     }
 
     fn availability(&self) -> Availability {
