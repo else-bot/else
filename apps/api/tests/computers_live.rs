@@ -359,6 +359,18 @@ async fn guest_tools_desktop_and_isolation() {
         .collect();
     assert_eq!(hex, sha);
 
+    for path in ["~/work/job.txt", "job.txt", "$HOME/work/job.txt"] {
+        let fetched = manager
+            .fetch_artifact(lease, bot, None, path, 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            fetched.as_ref().map(|(_, size, _, _)| *size),
+            Ok(9),
+            "{path}: {fetched:?}"
+        );
+    }
+
     let refused = manager
         .fetch_artifact(lease, bot, None, "/home/elsebot/work", 1 << 20)
         .await
@@ -367,7 +379,7 @@ async fn guest_tools_desktop_and_isolation() {
     let stored: Vec<_> = std::fs::read_dir(dir.path().join("artifacts").join(bot.to_string()))
         .unwrap()
         .collect();
-    assert_eq!(stored.len(), 1, "only the earlier artifact");
+    assert_eq!(stored.len(), 4, "only the earlier artifacts");
     manager.write_file(lease, "utf.txt", "éABC").await.unwrap();
     let (size, bytes) = manager
         .read_file(lease, "utf.txt", 1, 3)
