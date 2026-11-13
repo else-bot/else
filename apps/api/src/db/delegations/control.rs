@@ -14,7 +14,10 @@ use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use super::{MAX_TASK_BYTES, events, lock_targets_of_root, stop_children};
+use super::{
+    MAX_TASK_BYTES, announce_task_turn, end_child_turn, lock_targets_of_root, next_item_seq,
+    stop_children,
+};
 use crate::db::turns::TurnStatus;
 
 /// A delegation's lifecycle, as stored in `delegations.status`.
@@ -248,22 +251,8 @@ pub async fn update(
         .await?;
 
     let turn_no = last_turn_no + 1;
-    let receipt_seq: i64 = sqlx::query_scalar(
-        "UPDATE conversations SET last_turn_no = ?2, last_item_seq = last_item_seq + 1
-         WHERE id = ?1 RETURNING last_item_seq",
-    )
-    .bind(owner_conversation)
-    .bind(turn_no)
-    .fetch_one(&mut *tx)
-    .await?;
-    let item_seq: i64 = sqlx::query_scalar(
-        "UPDATE conversations SET last_turn_no = ?2, last_item_seq = last_item_seq + 1
-         WHERE id = ?1 RETURNING last_item_seq",
-    )
-    .bind(row.conversation_id)
-    .bind(turn_no)
-    .fetch_one(&mut *tx)
-    .await?;
+    let receipt_seq = next_item_seq(&mut tx, owner_conversation, turn_no).await?;
+    let item_seq = next_item_seq(&mut tx, row.conversation_id, turn_no).await?;
     let new_turn = Uuid::new_v4();
     let item_id = Uuid::new_v4();
     let request_hash = Sha256::digest(message.as_bytes()).to_vec();
@@ -308,39 +297,24 @@ pub async fn update(
     if moved != 1 {
         return Err(ControlError::Db);
     }
-    let superseded = sqlx::query(
-        "UPDATE turns SET
-             status = CASE WHEN status IN ('queued', 'waiting') THEN 'interrupted' ELSE 'cancelling' END,
-             error_code = 'superseded', error_message = ?2,
-             finished_at = CASE WHEN status IN ('queued', 'waiting') THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') ELSE finished_at END,
-             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE id = ?1 AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running')",
+    end_child_turn(
+        &mut tx,
+        row.child_turn_id,
+        row.target_bot_id,
+        "superseded",
+        &format!("{sender} updated the task before this attempt finished."),
     )
-    .bind(row.child_turn_id)
-    .bind(format!("{sender} updated the task before this attempt finished."))
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if superseded > 0 {
-        events::turn_changed(&mut tx, row.target_bot_id, row.child_turn_id).await?;
-    }
-    let receipt_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-         VALUES (?1, ?2, ?3, ?4, 'status', ?5)",
-    )
-    .bind(receipt_id)
-    .bind(owner_conversation)
-    .bind(receipt_seq)
-    .bind(new_turn)
-    .bind(format!(
-        "Received an update from {sender} on its task.\n\n{message}"
-    ))
-    .execute(&mut *tx)
     .await?;
-    crate::db::memory::log_item(&mut tx, item_id).await?;
-    events::item_upsert(&mut tx, row.target_bot_id, receipt_id).await?;
-    events::turn_changed(&mut tx, row.target_bot_id, new_turn).await?;
+    announce_task_turn(
+        &mut tx,
+        row.target_bot_id,
+        owner_conversation,
+        receipt_seq,
+        new_turn,
+        item_id,
+        &format!("Received an update from {sender} on its task.\n\n{message}"),
+    )
+    .await?;
     let task = state(&mut tx, task).await?;
     tx.commit().await?;
     Ok(Updated {

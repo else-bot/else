@@ -404,16 +404,8 @@ async fn create_in(
     let conversation_id = Uuid::new_v4();
     let child_turn = Uuid::new_v4();
     let item_id = Uuid::new_v4();
-    let receipt_id = Uuid::new_v4();
     let turn_no = last_turn_no + 1;
-    let receipt_seq: i64 = sqlx::query_scalar(
-        "UPDATE conversations SET last_turn_no = ?2, last_item_seq = last_item_seq + 1
-         WHERE id = ?1 RETURNING last_item_seq",
-    )
-    .bind(owner_conversation)
-    .bind(turn_no)
-    .fetch_one(&mut *conn)
-    .await?;
+    let receipt_seq = next_item_seq(conn, owner_conversation, turn_no).await?;
     sqlx::query(
         "INSERT INTO conversations (id, bot_id, kind, last_item_seq, last_turn_no)
          VALUES (?1, ?2, 'task', 1, ?3)",
@@ -472,22 +464,16 @@ async fn create_in(
         .bind(parent)
         .fetch_one(&mut *conn)
         .await?;
-    sqlx::query(
-        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-         VALUES (?1, ?2, ?3, ?4, 'status', ?5)",
+    announce_task_turn(
+        conn,
+        target,
+        owner_conversation,
+        receipt_seq,
+        child_turn,
+        item_id,
+        &format!("Received a task from {sender}. I'll take care of it for you.\n\n{receipt}"),
     )
-    .bind(receipt_id)
-    .bind(owner_conversation)
-    .bind(receipt_seq)
-    .bind(child_turn)
-    .bind(format!(
-        "Received a task from {sender}. I'll take care of it for you.\n\n{receipt}"
-    ))
-    .execute(&mut *conn)
     .await?;
-    crate::db::memory::log_item(conn, item_id).await?;
-    events::item_upsert(conn, target, receipt_id).await?;
-    events::turn_changed(conn, target, child_turn).await?;
     Ok(Accepted {
         delegation_id,
         target_bot_id: target,
@@ -671,25 +657,86 @@ async fn stop_children(
             }
             continue;
         }
-        let changed = sqlx::query(
-            "UPDATE turns SET
-                 status = CASE WHEN status IN ('queued', 'waiting') THEN 'interrupted' ELSE 'cancelling' END,
-                 error_code = 'cancelled',
-                 error_message = ?2,
-                 finished_at = CASE WHEN status IN ('queued', 'waiting') THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') ELSE finished_at END,
-                 updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-             WHERE id = ?1 AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running')",
-        )
-        .bind(child)
-        .bind(message)
-        .execute(&mut *conn)
-        .await?
-        .rows_affected();
-        if changed > 0 {
-            events::turn_changed(conn, target, child).await?;
-        }
+        end_child_turn(conn, child, target, "cancelled", message).await?;
     }
     Ok(())
+}
+
+/// End a task's turn with `code`: one that has not started is interrupted
+/// at once, one in progress moves to `cancelling` for the scheduler to
+/// interrupt. Returns whether the turn was still in progress.
+async fn end_child_turn(
+    conn: &mut SqliteConnection,
+    turn: Uuid,
+    target: Uuid,
+    code: &str,
+    message: &str,
+) -> Result<bool, sqlx::Error> {
+    let changed = sqlx::query(
+        "UPDATE turns SET
+             status = CASE WHEN status IN ('queued', 'waiting') THEN 'interrupted' ELSE 'cancelling' END,
+             error_code = ?2,
+             error_message = ?3,
+             finished_at = CASE WHEN status IN ('queued', 'waiting') THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') ELSE finished_at END,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE id = ?1 AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running')",
+    )
+    .bind(turn)
+    .bind(code)
+    .bind(message)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected()
+        > 0;
+    if changed {
+        events::turn_changed(conn, target, turn).await?;
+    }
+    Ok(changed)
+}
+
+/// Give a conversation turn `turn_no` and reserve its next item sequence.
+async fn next_item_seq(
+    conn: &mut SqliteConnection,
+    conversation: Uuid,
+    turn_no: i64,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "UPDATE conversations SET last_turn_no = ?2, last_item_seq = last_item_seq + 1
+         WHERE id = ?1 RETURNING last_item_seq",
+    )
+    .bind(conversation)
+    .bind(turn_no)
+    .fetch_one(&mut *conn)
+    .await
+}
+
+/// Show a queued task turn in the target's own chat: a status receipt at
+/// `receipt_seq` of its owner conversation, then log the task's request
+/// item to memory and publish both.
+async fn announce_task_turn(
+    conn: &mut SqliteConnection,
+    target: Uuid,
+    owner_conversation: Uuid,
+    receipt_seq: i64,
+    turn: Uuid,
+    request_item: Uuid,
+    receipt: &str,
+) -> Result<(), sqlx::Error> {
+    let receipt_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+         VALUES (?1, ?2, ?3, ?4, 'status', ?5)",
+    )
+    .bind(receipt_id)
+    .bind(owner_conversation)
+    .bind(receipt_seq)
+    .bind(turn)
+    .bind(receipt)
+    .execute(&mut *conn)
+    .await?;
+    crate::db::memory::log_item(conn, request_item).await?;
+    events::item_upsert(conn, target, receipt_id).await?;
+    events::turn_changed(conn, target, turn).await
 }
 
 /// Stop work delegated by roots of `bot_id` up to `boundary`.
