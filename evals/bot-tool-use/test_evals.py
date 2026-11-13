@@ -114,6 +114,13 @@ def run(runner):
                                                                           "files": ["cards/whale.png"]}, {"status": "pending", "parked": True})], "Sent it to Research."),
                 "follow-up-keeps-task-in-progress": ([self.call("delegate", {"target_bot_id": "00000000-0000-0000-0000-000000000005",
                                                                             "task": "Check whether issue #12 is fixed"}, {"status": "pending", "parked": True})], "Asked GitHub; Research is still working."),
+                "amend-running-task": ([self.call("find_tool", {"query": "delegation_update"}), self.call("use_tool", {
+                    "name": "delegation_update", "arguments": {"task_id": "20000000-0000-0000-0000-000000000009",
+                                                               "message": "Focus only on the 18th century."}})],
+                                       "Research will focus on the 18th century."),
+                "stop-running-task": ([self.call("find_tool", {"query": "delegation_cancel"}), self.call("use_tool", {
+                    "name": "delegation_cancel", "arguments": {"task_id": "20000000-0000-0000-0000-000000000009"}})],
+                                      "Stopping Research's task."),
                 "email-uses-draft": ([self.call("draft_email", {"to": ["alex@example.com"],
                                                               "body": "The review is ready for Friday."})], "Draft ready."),
                 "mental-arithmetic": ([], "84"),
