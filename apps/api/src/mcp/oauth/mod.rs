@@ -6,21 +6,17 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use oauth2::TokenResponse;
+use rmcp::transport::auth::{AuthError, AuthorizationMetadata};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
 use uuid::Uuid;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use super::{Error, Transport, transport};
 pub use client::RegisteredClient;
-use protocol::{
-    Discovery, authorization_endpoint, discover, loopback, register, safe_url, token,
-    validate_scopes,
-};
-use store::Credential;
+use protocol::{Discovery, Flow, auth_error, discover};
 pub(super) use store::Store;
+use store::{Credential, now};
 
 const AUTH_LIFETIME: Duration = Duration::from_secs(600);
 
@@ -52,20 +48,16 @@ pub struct Complete {
 
 struct Pending {
     id: Uuid,
-    discovery: Discovery,
-    client_id: String,
-    redirect_uri: String,
-    state_hash: [u8; 32],
-    verifier: Zeroizing<String>,
+    flow: Flow,
     expires: Instant,
-    previous: Option<Credential>,
+    previous: Option<Box<Credential>>,
 }
 
 enum State {
     Disconnected,
     Required(Discovery),
     Authorizing(Box<Pending>),
-    Authorized(Credential),
+    Authorized(Box<Credential>),
     ReauthRequired(Discovery),
 }
 
@@ -84,7 +76,9 @@ impl Session {
         let state = store
             .load()
             .await?
-            .map_or(State::Disconnected, State::Authorized);
+            .map_or(State::Disconnected, |credential| {
+                State::Authorized(Box::new(credential))
+            });
         Ok(Self {
             store,
             client,
@@ -100,34 +94,47 @@ impl Session {
             let id = pending.id;
             self.cancel(id);
         }
-        let (status, discovery) = match &self.state {
-            State::Disconnected => (
-                if self.connection.is_some() {
-                    "connected"
-                } else {
-                    "disconnected"
-                },
-                None,
-            ),
-            State::Required(discovery) => ("disconnected", Some(discovery)),
-            State::Authorizing(pending) => ("authorizing", Some(&pending.discovery)),
-            State::Authorized(credential) => {
-                let expired = credential.expires_at.is_some_and(|at| at <= now());
-                (
-                    if expired && credential.refresh_token.is_none() {
-                        "reauth_required"
-                    } else {
+        let (status, metadata, scopes): (_, Option<&AuthorizationMetadata>, &[String]) =
+            match &self.state {
+                State::Disconnected => (
+                    if self.connection.is_some() {
                         "connected"
+                    } else {
+                        "disconnected"
                     },
-                    Some(&credential.discovery),
-                )
-            }
-            State::ReauthRequired(discovery) => ("reauth_required", Some(discovery)),
-        };
+                    None,
+                    &[],
+                ),
+                State::Required(discovery) => {
+                    ("disconnected", Some(&discovery.metadata), &discovery.scopes)
+                }
+                State::Authorizing(pending) => (
+                    "authorizing",
+                    Some(&pending.flow.discovery.metadata),
+                    &pending.flow.discovery.scopes,
+                ),
+                State::Authorized(credential) => {
+                    let expired = credential.expires_at().is_some_and(|at| at <= now());
+                    (
+                        if expired && credential.token.refresh_token().is_none() {
+                            "reauth_required"
+                        } else {
+                            "connected"
+                        },
+                        Some(&credential.metadata),
+                        &credential.scopes,
+                    )
+                }
+                State::ReauthRequired(discovery) => (
+                    "reauth_required",
+                    Some(&discovery.metadata),
+                    &discovery.scopes,
+                ),
+            };
         ConnectionStatus {
             status,
-            provider: discovery.map(|d| d.issuer.clone()),
-            scopes: discovery.map_or_else(Vec::new, |d| d.scopes.clone()),
+            provider: metadata.and_then(|metadata| metadata.issuer.clone()),
+            scopes: scopes.to_vec(),
         }
     }
 
@@ -185,7 +192,7 @@ impl Session {
                     let was_authorized =
                         matches!(self.state, State::Authorized(_) | State::ReauthRequired(_));
                     let previous_scopes: &[String] = match &self.state {
-                        State::Authorized(credential) => &credential.discovery.scopes,
+                        State::Authorized(credential) => &credential.scopes,
                         State::ReauthRequired(discovery) => &discovery.scopes,
                         _ => &[],
                     };
@@ -194,7 +201,6 @@ impl Session {
                             discovery.scopes.push(scope.clone());
                         }
                     }
-                    validate_scopes(&discovery.scopes)?;
                     self.store.remove().await?;
                     self.state = if was_authorized {
                         State::ReauthRequired(discovery)
@@ -213,9 +219,9 @@ impl Session {
     }
 
     /// The access token of a GitHub sign-in made through the server's
-    /// registered GitHub app, for authenticating git over HTTPS. GitHub's
-    /// tokens do not expire, so a read first proves the token still works and
-    /// turns a revoked one into `AuthRequired`.
+    /// registered GitHub app, for authenticating git over HTTPS. A read first
+    /// refreshes the token if needed, proves it still works, and turns a
+    /// revoked one into `AuthRequired`.
     pub(super) async fn git_token(
         &mut self,
         config: &Transport,
@@ -227,30 +233,27 @@ impl Session {
 
     /// Any other provider's token is refused, so it can never reach github.com.
     fn github_token(&self) -> Result<Zeroizing<String>, Error> {
+        let not_github = Error::Invalid("This MCP has no GitHub sign-in. Use the GitHub MCP's id.");
         let State::Authorized(credential) = &self.state else {
-            return Err(Error::Invalid(
-                "This MCP has no GitHub sign-in. Use the GitHub MCP's id.",
-            ));
+            return Err(not_github);
         };
-        match self.registered_client(&credential.discovery) {
-            Ok(Some(client)) if client.client_id == credential.client_id => {}
-            _ => {
-                return Err(Error::Invalid(
-                    "This MCP has no GitHub sign-in. Use the GitHub MCP's id.",
-                ));
-            }
+        if self.issuer_of(credential).is_none() {
+            return Err(not_github);
         }
+        // GitHub reports the granted scopes as one comma-separated value.
         if !credential
-            .discovery
             .scopes
             .iter()
+            .flat_map(|scope| scope.split(','))
             .any(|scope| scope == "repo")
         {
             return Err(Error::Invalid(
                 "This GitHub sign-in lacks the repo scope git needs. The owner must disconnect it and sign in again.",
             ));
         }
-        Ok(Zeroizing::new(credential.access_token.clone()))
+        Ok(Zeroizing::new(
+            credential.token.access_token().secret().clone(),
+        ))
     }
 
     async fn ensure_connection(&mut self, config: &Transport) -> Result<(), Error> {
@@ -262,7 +265,7 @@ impl Session {
                 headers.retain(|name, _| !name.eq_ignore_ascii_case("authorization"));
                 headers.insert(
                     "Authorization".into(),
-                    format!("Bearer {}", credential.access_token),
+                    format!("Bearer {}", credential.token.access_token().secret()),
                 );
             }
             self.connection = Some(
@@ -287,20 +290,26 @@ impl Session {
         redirect_uri: String,
     ) -> Result<Started, Error> {
         self.store.require_key()?;
-        let redirect = safe_url(&redirect_uri)?;
-        if redirect.scheme() != "http" || !loopback(&redirect) || redirect.query().is_some() {
+        let redirect = reqwest::Url::parse(&redirect_uri).ok().filter(|url| {
+            url.scheme() == "http"
+                && matches!(url.host_str(), Some("127.0.0.1" | "[::1]"))
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+        });
+        if redirect.is_none() {
             return Err(Error::Invalid(
                 "MCP sign-in needs a local loopback callback URL.",
             ));
         }
         self.status();
-        if matches!(self.state, State::Authorizing(_)) {
-            return Err(Error::Invalid("This MCP sign-in is already in progress."));
-        }
         let discovery = match &self.state {
-            State::Required(d) | State::ReauthRequired(d) => d.clone(),
-            State::Authorized(c) => c.discovery.clone(),
-            State::Authorizing(p) => p.discovery.clone(),
+            State::Authorizing(_) => {
+                return Err(Error::Invalid("This MCP sign-in is already in progress."));
+            }
+            State::Required(discovery) | State::ReauthRequired(discovery) => discovery.clone(),
+            State::Authorized(credential) => Discovery::from(&**credential),
             State::Disconnected => {
                 let Transport::Http { url, .. } = config else {
                     return Err(Error::Invalid("This MCP does not use HTTP OAuth."));
@@ -322,53 +331,27 @@ impl Session {
                 }
             }
         };
-        let client_id = if let Some(client) = self.registered_client(&discovery)? {
-            client.client_id.clone()
-        } else {
-            register(&discovery, &redirect_uri).await?
+        let registered = self.registered_client(&discovery.metadata)?;
+        let flow = protocol::begin(discovery, registered, redirect_uri).await?;
+        let started = Started {
+            request_id: Uuid::new_v4(),
+            authorization_url: flow.authorization_url().to_owned(),
+            expires_in: AUTH_LIFETIME.as_secs(),
+            provider: flow.discovery.metadata.issuer.clone(),
+            scopes: flow.discovery.scopes.clone(),
         };
-        let id = Uuid::new_v4();
-        let state = nonce();
-        let verifier = Zeroizing::new(nonce());
-        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        let mut url = authorization_endpoint(&discovery.authorization_endpoint)?;
-        url.query_pairs_mut().extend_pairs([
-            ("response_type", "code"),
-            ("client_id", client_id.as_str()),
-            ("redirect_uri", redirect_uri.as_str()),
-            ("state", state.as_str()),
-            ("code_challenge", challenge.as_str()),
-            ("code_challenge_method", "S256"),
-            ("resource", discovery.resource.as_str()),
-        ]);
-        if !discovery.scopes.is_empty() {
-            url.query_pairs_mut()
-                .append_pair("scope", &discovery.scopes.join(" "));
-        }
         self.close().await;
         let previous = match std::mem::replace(&mut self.state, State::Disconnected) {
             State::Authorized(credential) => Some(credential),
             _ => None,
         };
-        let provider = Some(discovery.issuer.clone());
-        let scopes = discovery.scopes.clone();
         self.state = State::Authorizing(Box::new(Pending {
-            id,
-            discovery,
-            client_id,
-            redirect_uri,
-            state_hash: Sha256::digest(state.as_bytes()).into(),
-            verifier,
+            id: started.request_id,
+            flow,
             expires: Instant::now() + AUTH_LIFETIME,
             previous,
         }));
-        Ok(Started {
-            request_id: id,
-            authorization_url: url.into(),
-            expires_in: AUTH_LIFETIME.as_secs(),
-            provider,
-            scopes,
-        })
+        Ok(started)
     }
 
     pub(super) async fn complete(&mut self, callback: Complete) -> Result<(), Error> {
@@ -378,11 +361,7 @@ impl Session {
                 "This MCP sign-in has expired or was already completed.",
             ));
         };
-        let state_hash: [u8; 32] = Sha256::digest(callback.state.as_bytes()).into();
-        if callback.request_id != pending.id
-            || callback.state.len() > 128
-            || !bool::from(state_hash.ct_eq(&pending.state_hash))
-        {
+        if callback.request_id != pending.id || !pending.flow.expects(&callback.state).await {
             return Err(Error::Invalid("The MCP sign-in callback state is invalid."));
         }
         if pending.expires <= Instant::now() {
@@ -390,58 +369,27 @@ impl Session {
             self.cancel(id);
             return Err(Error::Invalid("This MCP sign-in has expired."));
         }
-        if callback
-            .iss
-            .as_ref()
-            .is_some_and(|issuer| issuer != &pending.discovery.issuer)
-            || (pending.discovery.require_iss && callback.iss.is_none())
-        {
+        if !issuer_matches(&pending.flow.discovery.metadata, callback.iss.as_deref()) {
             return Err(Error::Invalid(
                 "The MCP sign-in callback issuer is invalid.",
             ));
         }
-        let discovery = pending.discovery.clone();
-        let previous = std::mem::replace(&mut self.state, State::Required(discovery));
-        let State::Authorizing(pending) = previous else {
-            unreachable!()
-        };
-        let mut pending = *pending;
-        if let Some(previous) = pending.previous.take() {
-            self.state = State::Authorized(previous);
-        }
-        if callback.error.is_some() {
-            return Err(Error::Invalid("MCP sign-in was denied or cancelled."));
-        }
-        let code = callback
-            .code
-            .filter(|code| !code.is_empty() && code.len() <= 8192)
-            .ok_or(Error::Invalid(
+        let credential = match (callback.error, callback.code) {
+            (Some(_), _) => Err(Error::Invalid("MCP sign-in was denied or cancelled.")),
+            (None, None) => Err(Error::Invalid(
                 "The MCP sign-in callback did not include a valid code.",
-            ))?;
-        let mut fields = vec![
-            ("grant_type", "authorization_code".to_owned()),
-            ("code", code),
-            ("client_id", pending.client_id.clone()),
-            ("redirect_uri", pending.redirect_uri.clone()),
-            ("code_verifier", pending.verifier.to_string()),
-            ("resource", pending.discovery.resource.clone()),
-        ];
-        let result = self
-            .exchange(&pending.discovery, &pending.client_id, &fields)
-            .await;
-        for (_, value) in &mut fields {
-            value.zeroize();
-        }
-        let response = result?;
-        let credential = Credential {
-            discovery: pending.discovery,
-            client_id: pending.client_id,
-            access_token: response.access_token,
-            refresh_token: response.refresh_token,
-            expires_at: response.expires_in.map(expiration),
+            )),
+            (None, Some(code)) => {
+                pending
+                    .flow
+                    .finish(&code, &callback.state, callback.iss.as_deref())
+                    .await
+            }
         };
+        self.end_authorizing();
+        let credential = credential?;
         self.store.save(&credential).await?;
-        self.state = State::Authorized(credential);
+        self.state = State::Authorized(Box::new(credential));
         Ok(())
     }
 
@@ -451,89 +399,53 @@ impl Session {
         };
         if !force
             && credential
-                .expires_at
+                .expires_at()
                 .is_none_or(|expires| expires > now() + 30)
         {
             return Ok(());
         }
-        let Some(refresh_token) = &credential.refresh_token else {
-            let discovery = credential.discovery.clone();
-            self.close().await;
-            self.store.remove().await?;
-            self.state = State::ReauthRequired(discovery);
-            return Err(Error::AuthRequired(Box::new(self.status())));
-        };
-        let mut fields = vec![
-            ("grant_type", "refresh_token".to_owned()),
-            ("refresh_token", refresh_token.clone()),
-            ("client_id", credential.client_id.clone()),
-            ("resource", credential.discovery.resource.clone()),
-        ];
-        let result = self
-            .exchange(&credential.discovery, &credential.client_id, &fields)
-            .await;
-        for (_, value) in &mut fields {
-            value.zeroize();
-        }
-        let response = match result {
-            Ok(response) => response,
-            Err(Error::OAuthRevoked) => {
-                let discovery = credential.discovery.clone();
+        match protocol::refresh(credential, self.issuer_of(credential)).await {
+            Ok(refreshed) => {
+                self.store.save(&refreshed).await?;
+                self.state = State::Authorized(Box::new(refreshed));
+                self.close().await;
+                Ok(())
+            }
+            Err(AuthError::AuthorizationRequired | AuthError::TokenRefreshRejected(_)) => {
+                let discovery = Discovery::from(&**credential);
                 self.close().await;
                 self.store.remove().await?;
                 self.state = State::ReauthRequired(discovery);
-                return Err(Error::AuthRequired(Box::new(self.status())));
+                Err(Error::AuthRequired(Box::new(self.status())))
             }
-            Err(error) => return Err(error),
-        };
-        let refreshed = Credential {
-            discovery: credential.discovery.clone(),
-            client_id: credential.client_id.clone(),
-            access_token: response.access_token,
-            refresh_token: response
-                .refresh_token
-                .or_else(|| credential.refresh_token.clone()),
-            expires_at: response.expires_in.map(expiration),
-        };
-        self.store.save(&refreshed).await?;
-        self.state = State::Authorized(refreshed);
-        self.close().await;
-        Ok(())
+            Err(error) => Err(auth_error(error)),
+        }
     }
 
-    fn registered_client(&self, discovery: &Discovery) -> Result<Option<&RegisteredClient>, Error> {
+    /// The registered app that issued `credential`, if any.
+    fn issuer_of(&self, credential: &Credential) -> Option<&RegisteredClient> {
+        self.client
+            .as_deref()
+            .filter(|client| client.issued(credential))
+    }
+
+    fn registered_client(
+        &self,
+        metadata: &AuthorizationMetadata,
+    ) -> Result<Option<&RegisteredClient>, Error> {
         if let Some(client) = self
             .client
             .as_deref()
-            .filter(|client| client.applies(discovery))
+            .filter(|client| client.applies(metadata))
         {
-            client.validate(discovery)?;
             return Ok(Some(client));
         }
-        if discovery.issuer == "https://github.com/login/oauth" {
+        if metadata.issuer.as_deref() == Some("https://github.com/login/oauth") {
             return Err(Error::Invalid(
                 "GitHub sign-in needs an OAuth app. Set ELSE_GITHUB_CLIENT_ID and ELSE_GITHUB_CLIENT_SECRET on the API server, then restart it and try again.",
             ));
         }
         Ok(None)
-    }
-
-    async fn exchange(
-        &self,
-        discovery: &Discovery,
-        client_id: &str,
-        fields: &[(&str, String)],
-    ) -> Result<protocol::TokenResponse, Error> {
-        let client = self.registered_client(discovery)?;
-        if client.is_some_and(|client| client.client_id != client_id) {
-            return Err(Error::OAuthRevoked);
-        }
-        token(
-            &discovery.token_endpoint,
-            fields,
-            client.map(|client| client.secret.as_str()),
-        )
-        .await
     }
 
     pub(super) async fn disconnect(&mut self) -> Result<(), Error> {
@@ -544,18 +456,19 @@ impl Session {
     }
 
     pub(super) fn cancel(&mut self, request_id: Uuid) {
-        if let State::Authorizing(pending) = &self.state
-            && pending.id == request_id
+        if matches!(&self.state, State::Authorizing(pending) if pending.id == request_id) {
+            self.end_authorizing();
+        }
+    }
+
+    /// Leave a sign-in, restoring the account it would have replaced.
+    fn end_authorizing(&mut self) {
+        if let State::Authorizing(pending) = std::mem::replace(&mut self.state, State::Disconnected)
         {
-            let discovery = pending.discovery.clone();
-            let State::Authorizing(pending) =
-                std::mem::replace(&mut self.state, State::Required(discovery))
-            else {
-                unreachable!()
+            self.state = match pending.previous {
+                Some(credential) => State::Authorized(credential),
+                None => State::Required(pending.flow.discovery),
             };
-            if let Some(credential) = pending.previous {
-                self.state = State::Authorized(credential);
-            }
         }
     }
 
@@ -573,17 +486,20 @@ impl Session {
         }
     }
 }
-fn now() -> i64 {
-    chrono::Utc::now().timestamp()
-}
-fn expiration(seconds: u64) -> i64 {
-    now().saturating_add(seconds.min(365 * 86_400) as i64)
-}
 
-fn nonce() -> String {
-    let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).expect("OS entropy");
-    URL_SAFE_NO_PAD.encode(bytes)
+/// RFC 9207: a callback must name the provider the sign-in started with,
+/// and must name one when the provider says it always does.
+fn issuer_matches(metadata: &AuthorizationMetadata, received: Option<&str>) -> bool {
+    let required = metadata
+        .additional_fields
+        .get("authorization_response_iss_parameter_supported")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    match (metadata.issuer.as_deref(), received) {
+        (Some(expected), Some(received)) => expected == received,
+        (None, Some(_)) => false,
+        (_, None) => !required,
+    }
 }
 
 #[cfg(test)]

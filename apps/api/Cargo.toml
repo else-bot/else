@@ -45,10 +45,11 @@ image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 markdown = { workspace = true }
 mime_guess = { workspace = true }
 quick-xml = { version = "0.41.0", features = ["serialize"] }
+oauth2 = { version = "5.0.0", default-features = false, features = ["timing-resistant-secret-traits"] }
 percent-encoding = "2.3.2"
 png = "0.18.1"
 reqwest = { workspace = true, features = ["stream", "json", "rustls", "form"] }
-rmcp = { version = "=3.9.0", default-features = false, features = ["client", "transport-async-rw", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { version = "=3.9.0", default-features = false, features = ["auth", "client", "transport-async-rw", "transport-streamable-http-client-reqwest", "reqwest"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

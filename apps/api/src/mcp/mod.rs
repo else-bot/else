@@ -48,8 +48,6 @@ pub enum Error {
     AuthRequired(Box<oauth::ConnectionStatus>),
     #[error("The MCP requires OAuth authorization.")]
     AuthChallenge(String),
-    #[error("The MCP authorization expired or was revoked. Sign in again.")]
-    OAuthRevoked,
     #[error("The MCP request timed out and may have completed. Check its outcome before retrying.")]
     Timeout,
     #[error("The MCP library is paused for a backup or update. Try again afterward.")]
@@ -70,7 +68,6 @@ impl Error {
             Self::Connection => "connection_failed",
             Self::Http(_) => "http_status",
             Self::AuthRequired(_) | Self::AuthChallenge(_) => "auth_required",
-            Self::OAuthRevoked => "reauth_required",
             Self::Timeout => "timeout",
             Self::Paused => "paused",
             Self::Secret(_) => "secret_unavailable",
