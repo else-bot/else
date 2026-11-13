@@ -21,8 +21,9 @@ use super::{
 use crate::db::turns::TurnStatus;
 
 /// A delegation's lifecycle, as stored in `delegations.status`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, strum::IntoStaticStr)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum Status {
     Queued,
     Running,
@@ -33,13 +34,7 @@ pub enum Status {
 
 impl Status {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Running => "running",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
+        self.into()
     }
 
     fn is_ended(self) -> bool {

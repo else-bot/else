@@ -23,8 +23,9 @@ use super::events;
 pub const MAX_SUMMARY: usize = 300;
 pub const MAX_TRIED: usize = 200;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, strum::EnumString)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Kind {
     /// Something only the owner can clear stops the work.
     Blocked,
@@ -33,24 +34,14 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn parse(text: &str) -> Option<Self> {
-        match text {
-            "blocked" => Some(Self::Blocked),
-            "decision" => Some(Self::Decision),
-            _ => None,
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Blocked => "blocked",
-            Self::Decision => "decision",
-        }
+        self.into()
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, strum::EnumString)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Status {
     Pending,
     /// The owner messaged the bot after the notice.
@@ -62,22 +53,8 @@ pub enum Status {
 }
 
 impl Status {
-    fn parse(text: &str) -> Self {
-        match text {
-            "replied" => Self::Replied,
-            "dismissed" => Self::Dismissed,
-            "superseded" => Self::Superseded,
-            _ => Self::Pending,
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Replied => "replied",
-            Self::Dismissed => "dismissed",
-            Self::Superseded => "superseded",
-        }
+        self.into()
     }
 }
 
@@ -115,10 +92,10 @@ fn notice(
         id,
         bot_id,
         turn_id,
-        kind: Kind::parse(&kind).unwrap_or(Kind::Blocked),
+        kind: kind.parse().unwrap_or(Kind::Blocked),
         summary,
         tried,
-        status: Status::parse(&status),
+        status: status.parse().unwrap_or(Status::Pending),
         created_at,
         settled_at,
     }
@@ -136,7 +113,7 @@ impl Spec {
     pub fn parse(args: &Value) -> Result<Self, &'static str> {
         let kind = args["kind"]
             .as_str()
-            .and_then(Kind::parse)
+            .and_then(|k| k.parse().ok())
             .ok_or("kind is blocked or decision")?;
         let text = |raw: Option<&str>, max: usize| {
             raw.map(str::trim)

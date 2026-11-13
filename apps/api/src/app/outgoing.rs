@@ -16,9 +16,12 @@ pub const MAX_HANDLE: usize = 200;
 /// edit. `approved` allows exactly one send by its send request; the claim
 /// moves it to `sending`, and only the bot's report for that claim settles
 /// it as `sent`, `failed`, or `uncertain`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "lowercase")]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum Status {
     Pending,
     Approved,
@@ -32,16 +35,7 @@ pub enum Status {
 
 impl Status {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Approved => "approved",
-            Self::Sending => "sending",
-            Self::Sent => "sent",
-            Self::Failed => "failed",
-            Self::Uncertain => "uncertain",
-            Self::Discarded => "discarded",
-            Self::Superseded => "superseded",
-        }
+        self.into()
     }
 
     /// The owner may still decide to send it: as drafted, or again after a
@@ -136,8 +130,19 @@ pub enum Delivery {
 /// A platform a bot can draft a message or post for. The bot sends through
 /// its own tools; the API only names the medium on the card and receipt.
 /// Adding a platform is a new variant, not a new lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
+)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum Platform {
     /// A post on X (Twitter).
     X,
@@ -149,15 +154,7 @@ impl Platform {
     pub const ALL: [Self; 3] = [Self::X, Self::Telegram, Self::Discord];
 
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::X => "x",
-            Self::Telegram => "telegram",
-            Self::Discord => "discord",
-        }
-    }
-
-    pub fn parse(text: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|p| p.as_str() == text)
+        self.into()
     }
 
     /// What one draft on this platform is, for receipts and logs.
@@ -510,7 +507,7 @@ impl Message {
         )?;
         let platform = args["platform"]
             .as_str()
-            .and_then(Platform::parse)
+            .and_then(|p| p.parse::<Platform>().ok())
             .ok_or("platform is x, telegram or discord")?;
         let destination = handle(args, "destination")?;
         if platform.needs_destination() && destination.is_none() {

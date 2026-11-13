@@ -15,9 +15,20 @@ use crate::app::messages::{MessagePart, Reaction};
 use crate::app::providers::{HistoryEntry, Profile, SessionState, TurnInput};
 
 /// Where a turn is in its life, as stored in `turns.status`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::Type)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    sqlx::Type,
+    strum::IntoStaticStr,
+)]
 #[serde(rename_all = "lowercase")]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum TurnStatus {
     Queued,
     Preparing,
@@ -57,18 +68,7 @@ impl TurnStatus {
     ];
 
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Preparing => "preparing",
-            Self::Sending => "sending",
-            Self::Running => "running",
-            Self::Cancelling => "cancelling",
-            Self::Waiting => "waiting",
-            Self::Completed => "completed",
-            Self::Interrupted => "interrupted",
-            Self::Failed => "failed",
-            Self::Uncertain => "uncertain",
-        }
+        self.into()
     }
 
     pub fn phase(self) -> Phase {

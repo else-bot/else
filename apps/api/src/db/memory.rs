@@ -18,8 +18,9 @@ pub const SEARCH_PAGE: i64 = 20;
 /// Serialized result budget for one retrieval response.
 pub const RESPONSE_BUDGET: usize = 16_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Kind {
     OwnerMessage,
     AssistantMessage,
@@ -31,13 +32,7 @@ pub enum Kind {
 
 impl Kind {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Kind::OwnerMessage => "owner_message",
-            Kind::AssistantMessage => "assistant_message",
-            Kind::OwnerCorrection => "owner_correction",
-            Kind::ToolActivity => "tool_activity",
-            Kind::DelegatedTask => "delegated_task",
-        }
+        self.into()
     }
 
     /// Authority follows from the kind: only the owner's own words are

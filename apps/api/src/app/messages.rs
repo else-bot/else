@@ -146,8 +146,9 @@ pub struct Reaction {
     pub kind: ReactionKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ReactionKind {
     ThumbsUp,
     ThumbsDown,
@@ -155,10 +156,7 @@ pub enum ReactionKind {
 
 impl ReactionKind {
     pub fn as_str(self) -> &'static str {
-        match self {
-            ReactionKind::ThumbsUp => "thumbs_up",
-            ReactionKind::ThumbsDown => "thumbs_down",
-        }
+        self.into()
     }
 }
 

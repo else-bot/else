@@ -2283,6 +2283,7 @@ dependencies = [
  "sha2 0.11.1",
  "similar",
  "sqlx",
+ "strum 0.28.0",
  "subtle",
  "tar",
  "teloxide-core",

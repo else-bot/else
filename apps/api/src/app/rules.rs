@@ -61,8 +61,9 @@ pub struct Rules {
     pub sections: Vec<Section>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ChangeKind {
     Added,
     Changed,
@@ -72,12 +73,7 @@ pub enum ChangeKind {
 
 impl ChangeKind {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Added => "added",
-            Self::Changed => "changed",
-            Self::Removed => "removed",
-            Self::Restored => "restored",
-        }
+        self.into()
     }
 }
 

@@ -104,9 +104,20 @@ if alive; then echo alive; else [ -f "$1/exit" ] || echo 130 > "$1/exit"; settle
 /// `starting` until the guest acknowledges the launch, and `cancelling`
 /// from a cancel request until the guest confirms its process group is
 /// gone. The last four are terminal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, sqlx::Type)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    sqlx::Type,
+    strum::IntoStaticStr,
+    strum::Display,
+)]
 #[serde(rename_all = "lowercase")]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum JobStatus {
     Starting,
     Running,
@@ -126,21 +137,7 @@ impl JobStatus {
     }
 
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Starting => "starting",
-            Self::Running => "running",
-            Self::Cancelling => "cancelling",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-            Self::Lost => "lost",
-        }
-    }
-}
-
-impl std::fmt::Display for JobStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+        self.into()
     }
 }
 
