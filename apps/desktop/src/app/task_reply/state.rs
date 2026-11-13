@@ -758,4 +758,45 @@ mod tests {
         let c = conversation(vec![item(1, 10, "user"), file], vec![turn(10, "running")]);
         assert!(task_replies(&c)[&id(10)].latest_kept);
     }
+
+    /// #387: a reply that ended an attempt was read as the answer while the
+    /// turn waited on a delegated task; the continuation must not fold it away.
+    #[test]
+    fn a_reply_that_ended_an_attempt_stays_visible_after_the_turn_resumes() {
+        let reply = |number, attempt| {
+            let mut reply = item(number, 10, "assistant");
+            reply["attempt"] = json!(attempt);
+            reply
+        };
+        let mut result = item(4, 10, "status");
+        result["bot_reply"] = json!({"sender_bot_id": id(50), "sender_name": "Bento",
+            "prompt": "Clean up the routine", "status": "completed"});
+        let attempt = |status, attempt| {
+            let mut turn = turn(10, status);
+            turn["attempt"] = json!(attempt);
+            turn
+        };
+        let items = vec![item(1, 10, "user"), reply(2, 1), reply(3, 1), result];
+
+        let resumed = conversation(items.clone(), vec![attempt("running", 2)]);
+        let working = &task_replies(&resumed)[&id(10)];
+        assert_eq!(working.latest, Some(id(3)));
+        assert!(
+            working.latest_kept,
+            "the read reply stays on screen while the bot continues"
+        );
+        assert_eq!(
+            working.history,
+            [id(2)],
+            "progress inside one attempt still folds"
+        );
+
+        let mut done = items;
+        done.push(reply(5, 2));
+        let c = conversation(done, vec![attempt("completed", 2)]);
+        let finished = &task_replies(&c)[&id(10)];
+        assert_eq!(finished.latest, Some(id(5)));
+        assert_eq!(finished.kept, [id(3)]);
+        assert_eq!(finished.history, [id(2)]);
+    }
 }
