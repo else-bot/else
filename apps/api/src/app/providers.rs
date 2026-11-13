@@ -380,10 +380,11 @@ impl DelegationContext {
         self.origin == Origin::OwnerRequest || self.owner_answer.is_some()
     }
 
-    /// A bot edits its rules only while answering the owner directly in its
-    /// own conversation: never for a routine, event, or delegated task.
+    /// A bot edits its rules while answering the owner directly in its own
+    /// conversation, or in a task delegated with the owner's answer on a
+    /// card; never for a routine, event, or other delegated task.
     pub fn can_edit_rules(&self) -> bool {
-        self.origin == Origin::OwnerRequest && !self.delegated_task
+        (self.origin == Origin::OwnerRequest && !self.delegated_task) || self.owner_answer.is_some()
     }
 
     /// The provider's own host shell, file, and web tools. Never for work an
