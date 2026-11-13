@@ -161,13 +161,13 @@ enum ServerEvent {
 /// guest cannot receive as text.
 #[cfg(any(target_os = "macos", test))]
 fn text_keysym(ch: char) -> Option<u32> {
-    Some(match ch {
-        '\n' | '\r' => 0xff0d,
-        '\t' => 0xff09,
-        ch if ch.is_control() => return None,
-        ch if (ch as u32) <= 0xff => ch as u32,
-        ch => 0x0100_0000 | ch as u32,
-    })
+    use xkeysym::Keysym;
+    let keysym = match ch {
+        '\n' | '\r' => Keysym::Return,
+        ch if ch.is_control() && ch != '\t' => return None,
+        ch => Keysym::from_char(ch),
+    };
+    Some(keysym.raw())
 }
 
 /// The native cursor for a CSS cursor name the server sends; an arrow for
@@ -565,6 +565,12 @@ impl Client {
 mod tests {
     use super::*;
     use crate::config::{Origin, OwnerToken};
+
+    #[test]
+    fn typed_text_maps_to_keysyms_and_skips_control_characters() {
+        let keys: Vec<_> = "a\né\t\u{7}€".chars().filter_map(text_keysym).collect();
+        assert_eq!(keys, [0x61, 0xff0d, 0xe9, 0xff09, 0x20ac]);
+    }
 
     fn png(width: u32, height: u32, pixels: Vec<u8>) -> Vec<u8> {
         let mut bytes = Cursor::new(Vec::new());

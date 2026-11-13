@@ -2345,6 +2345,7 @@ dependencies = [
  "uuid",
  "vte",
  "wl-clipboard-rs",
+ "xkeysym",
 ]
 
 [[package]]
