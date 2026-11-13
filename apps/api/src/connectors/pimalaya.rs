@@ -1,9 +1,7 @@
 mod mime;
 mod session;
 
-use mime::{
-    ThreadHeaders, addresses, compose, compose_draft, compose_forward, reply, smtp_address, thread,
-};
+use mime::{ThreadHeaders, addresses, compose, compose_forward, reply, smtp_address, thread};
 use session::{Imap, Smtp};
 
 use std::borrow::Cow;
@@ -222,39 +220,6 @@ impl Imap {
             })
         });
         Ok(json!({"moved":true,"destination":folder,"message":moved}))
-    }
-
-    async fn draft(
-        &mut self,
-        config: &MailConfig,
-        draft: &Draft,
-        reply: Option<ThreadHeaders>,
-    ) -> Result<Value, MailError> {
-        let message = compose_draft(&config.address, draft, reply)?;
-        self.append_draft(config, &message).await
-    }
-    async fn append_draft(
-        &mut self,
-        config: &MailConfig,
-        message: &[u8],
-    ) -> Result<Value, MailError> {
-        let result = self
-            .append(
-                mailbox(&config.drafts_folder)?,
-                message,
-                ImapMessageAppendOptions {
-                    flags: vec![Flag::Draft],
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(failure)?;
-        let message = result.1.map(|(uid_validity, uid)| MessageRef {
-            folder: config.drafts_folder.clone(),
-            uid_validity,
-            uid,
-        });
-        Ok(json!({"saved":true,"folder":config.drafts_folder,"message":message}))
     }
 }
 #[async_trait::async_trait]
@@ -589,7 +554,7 @@ async fn execute(
                 .map_err(failure)?;
             Ok(json!({"message":message,"deleted":true}))
         }
-        MailCommand::Draft { draft } | MailCommand::Send { draft } => {
+        MailCommand::Send { draft } => {
             let thread = match &draft.reply_to {
                 Some(message) => {
                     let raw = client.body(message).await?;
@@ -600,34 +565,26 @@ async fn execute(
                 }
                 None => None,
             };
-            if matches!(command, MailCommand::Send { .. }) {
-                send(config, auth, draft, thread).await
-            } else {
-                client.draft(config, draft, thread).await
-            }
+            send(config, auth, draft, thread).await
         }
         MailCommand::Reply {
             message,
             body,
             all,
-            send: should_send,
+            send: SendNow,
         } => {
             let raw = client.body(message).await?;
             let parsed = MessageParser::default()
                 .parse(&raw)
                 .ok_or_else(|| MailError::new("invalid_email_message"))?;
             let (draft, headers) = reply(&parsed, &config.address, body, *all)?;
-            if *should_send {
-                send(config, auth, &draft, Some(headers)).await
-            } else {
-                client.draft(config, &draft, Some(headers)).await
-            }
+            send(config, auth, &draft, Some(headers)).await
         }
         MailCommand::Forward {
             message,
             to,
             body,
-            send: should_send,
+            send: SendNow,
         } => {
             let raw = client.body(message).await?;
             let parsed = MessageParser::default()
@@ -647,13 +604,8 @@ async fn execute(
                     parsed.body_text(0).unwrap_or_default()
                 ),
             };
-            if *should_send {
-                let bytes = compose_forward(&config.address, &draft, &raw, false)?;
-                send_prepared(config, auth, &draft, bytes).await
-            } else {
-                let bytes = compose_forward(&config.address, &draft, &raw, true)?;
-                client.append_draft(config, &bytes).await
-            }
+            let bytes = compose_forward(&config.address, &draft, &raw)?;
+            send_prepared(config, auth, &draft, bytes).await
         }
         MailCommand::CreateFolder { folder } => {
             client.create(mailbox(folder)?).await.map_err(failure)?;

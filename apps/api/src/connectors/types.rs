@@ -178,9 +178,6 @@ pub enum MailCommand {
     Delete {
         message: MessageRef,
     },
-    Draft {
-        draft: Draft,
-    },
     Send {
         draft: Draft,
     },
@@ -189,15 +186,13 @@ pub enum MailCommand {
         body: String,
         #[serde(default)]
         all: bool,
-        #[serde(default)]
-        send: bool,
+        send: SendNow,
     },
     Forward {
         message: MessageRef,
         to: Vec<String>,
         body: String,
-        #[serde(default)]
-        send: bool,
+        send: SendNow,
     },
     CreateFolder {
         folder: String,
@@ -210,6 +205,25 @@ pub enum MailCommand {
         folder: String,
     },
 }
+/// `send: true`, the only value reply and forward accept: they send at once,
+/// and a draft for the owner goes to a `draft_email` card, not the mailbox.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(try_from = "bool", into = "bool")]
+pub struct SendNow;
+
+impl TryFrom<bool> for SendNow {
+    type Error = &'static str;
+    fn try_from(send: bool) -> Result<Self, Self::Error> {
+        send.then_some(Self).ok_or("send must be true")
+    }
+}
+
+impl From<SendNow> for bool {
+    fn from(_: SendNow) -> bool {
+        true
+    }
+}
+
 fn default_limit() -> usize {
     50
 }
@@ -223,7 +237,7 @@ impl MailCommand {
     pub fn sends(&self) -> bool {
         matches!(
             self,
-            Self::Send { .. } | Self::Reply { send: true, .. } | Self::Forward { send: true, .. }
+            Self::Send { .. } | Self::Reply { .. } | Self::Forward { .. }
         )
     }
     pub fn allowed(&self, p: &Permissions) -> bool {
