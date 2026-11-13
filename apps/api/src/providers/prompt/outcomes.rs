@@ -110,7 +110,8 @@ fn computer_handoffs_block(input: &TurnInput) -> String {
         };
         text.push_str(&format!(
             "<take_over id=\"{}\" result=\"{what}\">{}</take_over>\n",
-            outcome.id, outcome.reason
+            outcome.id,
+            escape(&outcome.reason)
         ));
     }
     text.push('\n');
@@ -171,7 +172,7 @@ fn skill_installs_block(input: &TurnInput) -> String {
         };
         text.push_str(&format!(
             "<skill id=\"{}\" status=\"{}\"{scope}{key}/>\n",
-            outcome.skill_id,
+            escape(&outcome.skill_id),
             if outcome.installed {
                 "installed"
             } else {
@@ -196,8 +197,8 @@ fn secrets_block(input: &TurnInput) -> String {
     for secret in &input.secrets {
         text.push_str(&format!(
             "<secret name=\"{}\" env=\"{}\" status=\"{}\"/>\n",
-            secret.name,
-            secret.env.join(","),
+            escape(&secret.name),
+            escape(&secret.env.join(",")),
             if secret.stored { "stored" } else { "declined" },
         ));
     }
