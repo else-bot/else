@@ -731,23 +731,16 @@ pub async fn attempt_parked(
 
 /// Queue a waiting turn again as a continuation once nothing but its
 /// delegated tasks holds it, and either none of those is pending or a batch
-/// of them has settled. True when it was.
+/// of them has settled: the `turns_continuable` view, which the triggers
+/// that requeue a turn share. True when it was.
 pub async fn continue_waiting(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let requeued = sqlx::query(sqlx::AssertSqlSafe(format!(
+    let requeued = sqlx::query(
         "UPDATE turns SET status = 'queued', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE id = ?1 AND status = 'waiting'
-           AND (SELECT coalesce(sum(pending), 0) FROM turn_holds WHERE turn_id = ?1)
-               = (SELECT count(*) FROM delegations
-                  WHERE root_turn_id = ?1 AND status IN ('queued', 'running'))
-           AND (NOT EXISTS (SELECT 1 FROM delegations
-                            WHERE root_turn_id = ?1 AND status IN ('queued', 'running'))
-                OR EXISTS (SELECT 1 FROM delegations d
-                           WHERE d.root_turn_id = ?1 AND {}))",
-        crate::db::delegations::READY
-    )))
+         WHERE id = ?1 AND id IN (SELECT id FROM turns_continuable WHERE id = ?1)",
+    )
     .bind(turn_id)
     .execute(&mut *conn)
     .await?

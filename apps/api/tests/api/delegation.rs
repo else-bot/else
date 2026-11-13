@@ -1199,6 +1199,59 @@ async fn a_child_settling_while_the_parent_parks_still_requeues_it() {
     );
 }
 
+/// A child turn ending requeues its waiting root by the shared
+/// `turns_continuable` rule: once nothing else holds the root it continues,
+/// even when its task's result was already delivered; a pending secret
+/// request still holds it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_ending_continues_its_root_only_when_nothing_else_holds_it() {
+    for held in [false, true] {
+        let db = TestDb::migrated().await;
+        let (_, root, child, delegation) = seed(&db).await;
+        if held {
+            sqlx::query(
+                "INSERT INTO secret_requests (id, bot_id, turn_id, attempt, name, reason, env_names)
+                 SELECT ?1, bot_id, id, attempt, 'login', 'Authenticate', '[\"LOGIN_TOKEN\"]'
+                 FROM turns WHERE id = ?2",
+            )
+            .bind(Uuid::new_v4())
+            .bind(root)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query("UPDATE turns SET status = 'waiting' WHERE id = ?1")
+            .bind(root)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE delegations SET status = 'completed', delivered_attempt = 1,
+                 finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE id = ?1",
+        )
+        .bind(delegation)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE turns SET status = 'completed',
+                 finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
+        )
+        .bind(child)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+            .bind(root)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        let expected = if held { "waiting" } else { "queued" };
+        assert_eq!(status, expected, "held by a secret request: {held}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_reconciliation_ends_the_children_of_an_ended_root() {
     let db = TestDb::migrated().await;
