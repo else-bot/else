@@ -4,6 +4,7 @@
 //! to the owner API; they are cleared on success, decline, navigation, and
 //! disconnect, and never enter a draft, a pending message, or the chat.
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use std::collections::BTreeMap;
 
@@ -24,6 +25,13 @@ pub(super) struct SecretForm {
     fields: Vec<SecretField>,
     submitting: bool,
     error: Option<String>,
+}
+
+impl SecretForm {
+    /// Whether the owner already sent this form and waits on the server.
+    pub(super) fn locks(&self) -> bool {
+        self.submitting
+    }
 }
 
 struct SecretField {
@@ -270,6 +278,7 @@ impl ElseApp {
         let note = |text: String| {
             div()
                 .text_xs()
+                .whitespace_normal()
                 .text_color(theme.muted_foreground)
                 .child(text)
         };
@@ -291,7 +300,7 @@ impl ElseApp {
         };
         let app = cx.entity().downgrade();
         let busy = form.submitting || self.connection != Connection::Connected;
-        let mut fields = v_flex().gap_2();
+        let mut fields = v_flex().w_full().gap_2();
         for (ix, field) in form.fields.iter().enumerate() {
             let label = div().text_xs().font_semibold().child(field.var.clone());
             let control: AnyElement = match &field.captured {
@@ -332,69 +341,101 @@ impl ElseApp {
                         .into_any_element()
                 }
             };
-            fields = fields.child(v_flex().gap_1().child(label).child(control));
+            fields = fields.child(v_flex().gap_1p5().child(label).child(control));
         }
+        let fields = fields.child(note(
+            "Encrypted on this server. Values stay out of chat.".into(),
+        ));
+        let expanded = view.expanded_events.contains(&id);
         let mut card = super::action_card::card(
-            &theme,
-            gpui_kit::assets::IconName::Lock,
+            IconName::Lock,
             format!("Save {}", request.name),
             format!("{bot_name} · Credentials"),
-            "Needs credentials",
         )
-        .child(div().text_sm().child(request.reason.clone()))
         .child(
-            h_flex().w_full().min_w_0().gap_2().items_center()
-                .child(div().flex_1().min_w_0().text_xs().text_color(theme.muted_foreground)
-                    .child("Encrypted on this server. Values stay out of chat."))
-                .child(Button::new(SharedString::from(format!("secret-about-{id}")))
-                    .small().ghost().focus_ring(false).cursor_pointer().label("About saving").accessibility_label("About saving credentials")
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        if let Some(view) = app.view.as_mut() && !view.expanded_events.remove(&id) {
-                            view.expanded_events.insert(id);
-                        }
-                        app.remeasure_row(super::RowKey::SecretRequest(id), cx);
-                    }))),
+            div()
+                .text_sm()
+                .whitespace_normal()
+                .child(request.reason.clone()),
         )
-        .when(view.expanded_events.contains(&id), |card| card.child(note(format!(
-            "Saved as the task secret {} for every bot on this server, replacing one with the same name. \
-             {bot_name} never sees the values. Paste multi-line values such as private keys whole.", request.name
-        ))))
-        .child(fields);
-
+        .child(fields)
+        .when(expanded, |card| {
+            card.child(note(format!(
+                "Saved as the task secret {} for every bot on this server, replacing one with the \
+                 same name. {bot_name} never sees the values. Paste multi-line values such as \
+                 private keys whole.",
+                request.name
+            )))
+        });
         if let Some(error) = &form.error {
             card = card.child(super::action_card::failure(&theme, error.clone()));
         }
-        card = card.child(
-            super::action_card::footer()
-                .child(
-                    Button::new(SharedString::from(format!("secret-decline-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .label("Decline")
+        let footer = super::action_card::footer()
+            .child(
+                h_flex().flex_1().child(
+                    Button::new(SharedString::from(format!("secret-about-{id}")))
                         .small()
-                        .disabled(busy)
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            app.answer_secret(id, false, window, cx)
-                        })),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("secret-save-{id}")))
+                        .ghost()
                         .focus_ring(false)
                         .cursor_pointer()
-                        .label(if form.submitting {
-                            "Saving…"
+                        .icon(if expanded {
+                            IconName::ChevronDown
                         } else {
-                            "Save and continue"
+                            IconName::CircleQuestionMark
                         })
-                        .small()
-                        .primary()
-                        .disabled(busy)
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            app.answer_secret(id, true, window, cx)
+                        .label(if expanded {
+                            "Hide details"
+                        } else {
+                            "About saving"
+                        })
+                        .accessibility_label(if expanded {
+                            "Hide details about saving credentials"
+                        } else {
+                            "About saving credentials"
+                        })
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            if let Some(view) = app.view.as_mut()
+                                && !view.expanded_events.remove(&id)
+                            {
+                                view.expanded_events.insert(id);
+                            }
+                            app.remeasure_row(super::RowKey::SecretRequest(id), cx);
                         })),
                 ),
-        );
-        row.child(card).into_any_element()
+            )
+            .child(
+                Button::new(SharedString::from(format!("secret-decline-{id}")))
+                    .focus_ring(false)
+                    .cursor_pointer()
+                    .label("Decline")
+                    .small()
+                    .disabled(busy)
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.answer_secret(id, false, window, cx)
+                    })),
+            )
+            .child(
+                Button::new(SharedString::from(format!("secret-save-{id}")))
+                    .focus_ring(false)
+                    .cursor_pointer()
+                    .label(if form.submitting {
+                        "Saving…"
+                    } else {
+                        "Save and continue"
+                    })
+                    .small()
+                    .primary()
+                    .disabled(busy)
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.answer_secret(id, true, window, cx)
+                    })),
+            );
+        let card = row.child(card.footer(footer)).into_any_element();
+        if form.locks() {
+            card
+        } else {
+            self.sighted(RowKey::SecretRequest(id), card, cx)
+        }
     }
 }
 
