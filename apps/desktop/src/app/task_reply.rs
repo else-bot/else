@@ -43,14 +43,15 @@ impl ElseApp {
         };
         let elapsed = task.elapsed(Utc::now());
         // Parked on other bots' tasks: their faces show who has the work.
-        let delegates: Vec<Uuid> = if task.state == ReplyState::Waiting && !error {
-            turn.open_delegations()
-                .iter()
-                .map(|d| d.target_bot_id)
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let delegates: Vec<Uuid> =
+            if task.state == ReplyState::Waiting && !error && turn.waits_on_bots() {
+                turn.open_delegations()
+                    .iter()
+                    .map(|d| d.target_bot_id)
+                    .collect()
+            } else {
+                Vec::new()
+            };
         let delegate_faces = self.face_stack(
             &format!("task-delegates-{}", task.turn),
             delegates.iter().copied(),

@@ -639,12 +639,13 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
         }
         "waiting" => {
             let open = turn.open_delegations();
-            let mut names: Vec<&str> = Vec::new();
+            let mut bots: Vec<(uuid::Uuid, &str)> = Vec::new();
             for task in &open {
-                if !names.contains(&task.target_name.as_str()) {
-                    names.push(&task.target_name);
+                if !bots.iter().any(|(id, _)| *id == task.target_bot_id) {
+                    bots.push((task.target_bot_id, &task.target_name));
                 }
             }
+            let names: Vec<&str> = bots.into_iter().map(|(_, name)| name).collect();
             let label = crate::sidebar::status::waiting_for(&names, open.len());
             (format!("{label}…"), false)
         }

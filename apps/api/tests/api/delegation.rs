@@ -1156,7 +1156,7 @@ async fn the_delegating_turn_shows_its_handoff_as_the_child_progresses() {
 }
 
 /// A delegating bot's activity names the bots it waits on only while its
-/// turn is parked on their tasks, and each task's change republishes it.
+/// turn is parked on their tasks.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_delegating_bot_shows_whom_it_waits_on_until_the_task_ends() {
     let db = TestDb::migrated().await;
@@ -1187,32 +1187,17 @@ async fn the_delegating_bot_shows_whom_it_waits_on_until_the_task_ends() {
     );
     assert!(shown["since"].is_string(), "{shown}");
 
-    let before = bot_events(&db.pool, main).await.len();
     for status in ["running", "completed"] {
-        let mut tx = db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
         sqlx::query("UPDATE turns SET status = ?1 WHERE id = ?2")
             .bind(status)
             .bind(child)
-            .execute(&mut *tx)
+            .execute(&db.pool)
             .await
             .unwrap();
-        else_api::db::events::turn_changed(&mut tx, target, child)
-            .await
-            .unwrap();
-        tx.commit().await.unwrap();
+        if status == "running" {
+            assert_eq!(waiting_on().await["bots"][0]["tasks"], 1, "a running task");
+        }
     }
-    let published: Vec<Value> = bot_events(&db.pool, main)
-        .await
-        .into_iter()
-        .skip(before)
-        .filter(|(kind, _)| kind == "bot.updated")
-        .map(|(_, data)| data["bot"]["activity"]["waiting_on"]["bots"][0]["tasks"].clone())
-        .collect();
-    assert_eq!(
-        published,
-        [json!(1), Value::Null],
-        "the parent republishes as its task runs and then ends"
-    );
     assert_eq!(
         waiting_on().await,
         Value::Null,

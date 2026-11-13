@@ -355,6 +355,9 @@ impl ElseApp {
 
     /// The faces of the bots `bot` waits on, before its status text.
     fn waiting_faces(&self, key: &str, bot: &Bot) -> Option<Div> {
+        if bot.waiting().is_some() {
+            return None;
+        }
         let waiting = bot.activity.as_ref()?.waiting_on.as_ref()?;
         self.face_stack(
             &format!("{key}-{}", bot.id),
@@ -982,7 +985,12 @@ fn subtitle(bot: &Bot, main: bool) -> String {
     let Some(activity) = &bot.activity else {
         return idle();
     };
-    let working = match &activity.waiting_on {
+    // An owner request outranks the bots it waits on, as in the sidebar.
+    let working = match activity
+        .waiting_on
+        .as_ref()
+        .filter(|_| bot.waiting().is_none())
+    {
         Some(waiting) => crate::sidebar::status::waiting_label(waiting),
         None => "Working".into(),
     };
