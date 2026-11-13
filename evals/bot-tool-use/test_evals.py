@@ -157,6 +157,14 @@ def run(runner):
                     "task_scope": {"task": "Unfollow X accounts that never replied", "target": "X account @proliquid_xyz"}},
                     {"status": "pending", "parked": True})], "Approve the card to unfollow them."),
                 "thumbs-up-saves-no-rule": ([], ""),
+                "always-allow-one-repo-mcp-merges-saves-no-grant": (
+                    [], "A saved permission can only cover the whole merge_pull_request tool, for every repository. Approve the card each time, or tell me to allow every merge.",
+                    "Saved: news-recap merges no longer need a card."),
+                "always-allow-mcp-merges-saves-tool-grant": ([self.call("use_tool", {
+                    "name": "confirm_permission", "arguments": {"target": {
+                        "scope": "mcp_tool", "mcp_id": "github", "tool": "merge_pull_request", "kind": "external"},
+                        "authorization": "Always allow merging pull requests with the GitHub MCP"}})],
+                    "Saved: merges with the GitHub MCP no longer need a card."),
                 "link-project-files": ([], "[CSV](hypertracker-evidence/cloudflare-only/daily_counts_utc.csv) · "
                                            "[Report](~/work/hypertracker-evidence/cloudflare-only/report.md)",
                                        "Both are in your artifact store: `daily_counts_utc.csv` and `report.md`."),
@@ -285,6 +293,13 @@ def run(runner):
             for wrong in ("Issue https://github.com/else-bot/else/issues/260 is filed. Twitter successfully posted the callout.",
                           "Issue https://github.com/else-bot/else/issues/260 still needs filing. Twitter saved draft 7."):
                 self.assertFalse(self.passed(carried["expect"], [], wrong), wrong)
+            one_repo = next(c for c in runner.load_cases() if c["id"] == "always-allow-one-repo-mcp-merges-saves-no-grant")
+            for scope in ({"scope": "mcp_tool", "mcp_id": "github", "tool": "merge_pull_request", "kind": "external"},
+                          {"scope": "task", "task": "Merge news-recap PRs", "target": "GitHub MCP", "kind": "external"}):
+                with self.subTest(one_repo=scope["scope"]):
+                    self.assertFalse(self.passed(one_repo["expect"], [self.call("use_tool", {
+                        "name": "confirm_permission", "arguments": {"target": scope,
+                        "authorization": "Always allow merging news-recap PRs"}})], "Saved."))
             scoped_case = next(c for c in runner.load_cases() if c["id"] == "recurring-external-batch-declares-task-scope")
             self.assertFalse(self.passed(scoped_case["expect"], unscoped, "Approve the card."))
             routine_case = next(c for c in runner.load_cases() if c["id"] == "format-correction-updates-routine")

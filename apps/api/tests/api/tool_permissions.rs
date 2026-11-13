@@ -264,6 +264,54 @@ async fn tool_grants_require_current_owner_words_and_do_not_cover_other_bots_or_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_task_grant_for_mcp_work_redirects_to_the_tool_grant() {
+    let (h, bot, turn, _) = setup().await;
+    let authorization = "Always allow creating tickets with the Tickets MCP.";
+    let (first, token) = h.running(&bot, &format!("{GATE} {authorization}")).await;
+    let task = tool(
+        &h.app,
+        &token,
+        "confirm_permission",
+        json!({"target":{"scope":"task", "task":"Create tickets",
+            "target":"Tickets MCP create_ticket", "kind":"external"},
+            "authorization":authorization}),
+    )
+    .await;
+    assert_eq!(task.result["status"], "approved", "{}", task.body);
+    let next = task.result["next"].as_str().unwrap();
+    assert!(
+        next.contains("never covers MCP tools/call") && next.contains("mcp_tool"),
+        "{next}"
+    );
+    let uncovered = tool(&h.app, &token, "mcp_request", create("external", "First")).await;
+    assert_eq!(
+        uncovered.result["status"], "pending",
+        "a task grant never matches an MCP call: {}",
+        uncovered.body
+    );
+    let (second, token) = h.running(&bot, &format!("{GATE} {authorization}")).await;
+    let confirmed = tool(
+        &h.app,
+        &token,
+        "confirm_permission",
+        json!({"target":target(), "authorization":authorization}),
+    )
+    .await;
+    assert_eq!(confirmed.result["status"], "approved", "{}", confirmed.body);
+    executed(
+        &tool(&h.app, &token, "mcp_request", create("external", "Later")).await,
+        "Later",
+    );
+    let mut deletion = create("external", "Other tool");
+    deletion["params"]["name"] = json!("delete_ticket");
+    let other = tool(&h.app, &token, "mcp_request", deletion).await;
+    assert_eq!(other.result["status"], "pending", "{}", other.body);
+    for turn in [turn, first, second] {
+        h.release(turn).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn delegated_work_cannot_inherit_a_saved_tool_permission() {
     let (h, _, turn, token) = setup().await;
     let worker = h.app.create_bot("Worker").await;
