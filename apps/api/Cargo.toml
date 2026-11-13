@@ -62,7 +62,7 @@ tar = { version = "0.4.46", default-features = false }
 thiserror = "2.0.21"
 toml = "1.1.8"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync", "process", "io-util", "fs"] }
-tokio-util = { version = "0.7.20", features = ["rt"] }
+tokio-util = { version = "0.7.20", features = ["codec", "rt"] }
 tokio-tungstenite = "0.30.0"
 tempfile = "3.27.0"
 teloxide-core = { version = "0.13.0", default-features = false, features = ["rustls", "throttle"] }

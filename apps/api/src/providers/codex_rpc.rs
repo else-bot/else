@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 use super::cli::attempt::{self, Ended};
@@ -332,7 +332,7 @@ async fn io_loop(
 }
 
 async fn read_loop(stdout: impl AsyncRead + Unpin, tx: mpsc::Sender<Value>) {
-    let mut lines = JsonLines::new(BufReader::new(stdout), "Codex");
+    let mut lines = JsonLines::new(stdout, "Codex");
     loop {
         match lines.next().await {
             Ok(Some(message)) => {
@@ -353,7 +353,7 @@ async fn read_loop(stdout: impl AsyncRead + Unpin, tx: mpsc::Sender<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncBufReadExt;
+    use tokio::io::{AsyncBufReadExt, BufReader};
 
     #[tokio::test]
     async fn actor_refuses_server_requests_while_waiting_for_a_response() {
