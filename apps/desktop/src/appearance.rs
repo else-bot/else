@@ -230,6 +230,39 @@ fn strong_fill(accent: Rgb) -> Rgb {
         .unwrap_or(BLACK)
 }
 
+/// `line` as the palette's foreground at the alpha that paints `line` over
+/// the background, as an `#rrggbbaa` color.
+fn ink(p: &Palette, line: Rgb) -> String {
+    let (bg, fg, line) = (
+        p.background.channels(),
+        p.foreground.channels(),
+        line.channels(),
+    );
+    let shares: Vec<f32> = (0..3)
+        .filter(|&i| fg[i] != bg[i])
+        .map(|i| (line[i] as f32 - bg[i] as f32) / (fg[i] as f32 - bg[i] as f32))
+        .collect();
+    let alpha = shares.iter().sum::<f32>() / shares.len().max(1) as f32;
+    let alpha = (alpha.clamp(0.08, 0.2) * 255.).round() as u8;
+    format!("{}{alpha:02x}", p.foreground.hex())
+}
+
+/// How much a dark theme calms its accent fill, in saturation and
+/// lightness, so filled buttons and switches don't glare off a dark page.
+const DARK_ACCENT_CALM: f32 = 0.9;
+
+/// The app's one accent: primary buttons, checked switches, selection rings
+/// and working indicators all paint this fill. Dark themes get it about 10%
+/// calmer; it stays deep enough to carry white text.
+fn accent_fill(accent: Rgb, mode: ThemeMode) -> Rgb {
+    let fill = strong_fill(accent);
+    if !mode.is_dark() {
+        return fill;
+    }
+    let [h, s, l] = fill.hsl();
+    Rgb::from_hsl([h, s * DARK_ACCENT_CALM, l * DARK_ACCENT_CALM])
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Palette {
     mode: ThemeMode,
@@ -346,11 +379,12 @@ impl Palette {
             p.background.mix(WHITE, 0.75)
         };
         // In light the conversation is the lightest surface: the sidebar
-        // and panels sit one soft step, about 3% lightness, below it.
+        // and panels sit one clear step, about 5% lightness, below it, so
+        // structure doesn't rest on hairlines.
         let sidebar = if dark {
             p.surface
         } else {
-            p.background.mix(p.foreground, 0.045)
+            p.background.mix(p.foreground, 0.075)
         };
         // A selected row reads as one firm step: lighter in dark, about 8%
         // black over the sidebar in light.
@@ -360,7 +394,7 @@ impl Palette {
             sidebar.mix(BLACK, 0.08)
         };
         let border = p.background.mix(p.border, style.border_strength);
-        let (primary, on_primary) = (strong_fill(p.accent), WHITE);
+        let (primary, on_primary) = (accent_fill(p.accent, p.mode), WHITE);
         let roles = [
             ("background", p.background),
             ("foreground", p.foreground),
@@ -400,7 +434,7 @@ impl Palette {
                 "primary.active.background",
                 button_state(primary, on_primary, 0.20),
             ),
-            ("ring", p.accent),
+            ("ring", primary),
             ("caret", p.accent),
             ("link", p.accent),
             ("link.hover", p.accent.mix(p.foreground, 0.2)),
@@ -460,15 +494,28 @@ impl Palette {
             .into_iter()
             .map(|(key, color)| (key.to_owned(), color.hex().into()))
             .collect();
+        // In dark, lines are translucent ink: the same line as the opaque
+        // border on the page, and a firmer one (about 10% white) on the
+        // lighter cards and sheets, where an opaque line would vanish.
+        if dark {
+            colors.insert("border".to_owned(), ink(p, border).into());
+        }
         // Secondary buttons: a quiet tint of the text color, so they lift off
         // whatever surface they sit on, cards and dialogs included.
         colors.insert(
             "button.background".to_owned(),
-            format!("{}{}", p.foreground.hex(), if dark { "14" } else { "12" }).into(),
+            format!("{}{}", p.foreground.hex(), if dark { "20" } else { "12" }).into(),
         );
+        // The modal scrim: 60% black in dark; in light, about 28% of the
+        // theme's own ink, so the page dims in its hue instead of going grey.
         colors.insert(
             "overlay".to_owned(),
-            if dark { "#0000008c" } else { "#0000004d" }.into(),
+            if dark {
+                "#00000099".to_owned()
+            } else {
+                format!("{}48", p.foreground.hex())
+            }
+            .into(),
         );
         let syntax: serde_json::Map<_, _> = [
             ("keyword", p.magenta),
@@ -586,6 +633,29 @@ mod tests {
         assert!(grey[1] < 0.05, "a neutral accent stays neutral");
     }
 
+    #[test]
+    fn a_dark_theme_calms_its_accent_and_keeps_white_text_readable() {
+        for accent in [Rgb(0x81a1c1), Rgb(0x69a9ff), Rgb(0x1e66f5)] {
+            let (light, dark) = (
+                accent_fill(accent, ThemeMode::Light),
+                accent_fill(accent, ThemeMode::Dark),
+            );
+            assert_eq!(light, strong_fill(accent));
+            let ([hue, s, l], [dark_hue, dark_s, dark_l]) = (light.hsl(), dark.hsl());
+            assert!(
+                (hue - dark_hue).abs() < 4.,
+                "{} keeps its hue",
+                accent.hex()
+            );
+            assert!(
+                dark_s < s && dark_l < l,
+                "{} is calmer in dark",
+                accent.hex()
+            );
+            assert!(dark.contrast(WHITE) >= 4.5);
+        }
+    }
+
     fn cursor_dark() -> Palette {
         Palette {
             background: Rgb(0x141414),
@@ -620,7 +690,7 @@ mod tests {
             for (actual, expected) in rgb(theme.button_primary)
                 .channels()
                 .into_iter()
-                .zip(strong_fill(palette.accent).channels())
+                .zip(accent_fill(palette.accent, palette.mode).channels())
             {
                 assert!(actual.abs_diff(expected) <= 1);
             }
@@ -636,7 +706,8 @@ mod tests {
                 assert!(red > green && green > blue, "warnings keep their amber hue");
                 assert!(rgb(theme.warning).contrast(rgb(theme.accent)) >= 4.5);
             }
-            assert!(theme.overlay.a >= 0.2 && theme.overlay.a <= 0.55);
+            assert_eq!(rgb(theme.ring), rgb(theme.button_primary), "one accent");
+            assert!(theme.overlay.a >= 0.25 && theme.overlay.a <= 0.6);
         }
     }
 
@@ -672,10 +743,14 @@ mod tests {
         assert_eq!((config.radius, config.radius_lg), (Some(8), Some(12)));
         assert_eq!(config.shadow, Some(true));
         let colors = &config.colors;
-        assert_eq!(colors.border.as_deref(), Some("#3a3a3e"));
+        assert_eq!(colors.border.as_deref(), Some("#ededf021"));
         assert_eq!(
             colors.primary.as_deref(),
-            Some(strong_fill(QUIET_DARK.accent).hex().as_str())
+            Some(
+                accent_fill(QUIET_DARK.accent, ThemeMode::Dark)
+                    .hex()
+                    .as_str()
+            )
         );
         assert_eq!(colors.sidebar.as_deref(), Some("#28282b"));
         assert_eq!(colors.list_active.as_deref(), Some("#3d3d3f"));
