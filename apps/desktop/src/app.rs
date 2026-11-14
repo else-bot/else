@@ -41,6 +41,7 @@ use categories::CategoryFormHolder;
 use conversation::{ConversationView, RowKey};
 use create_bot::CreateFormHolder;
 use dialogs::Welcome;
+pub(crate) use images::decode_image;
 use pending_send::{Failure, Lookup, PendingSend};
 use reply::Draft;
 use settings::{BotSettings, ModelDialog};
@@ -251,8 +252,7 @@ pub enum Connection {
     InvalidCredentials(String),
 }
 
-/// How the app's link to its server stands, as the server switcher shows
-/// it.
+/// How the app's link to its server stands, as the server label shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Link {
     Connecting,
@@ -260,10 +260,10 @@ pub(crate) enum Link {
     Failed,
 }
 
-/// Draws the window shell's server switcher in the sidebar header. The
-/// shell owns the switcher and its menu; the sidebar passes its own link,
-/// which the shell cannot read while the sidebar draws.
-pub(crate) type ServerSwitcher = std::rc::Rc<dyn Fn(Link, &mut App) -> AnyElement>;
+/// Draws the current server's name in the sidebar header. The shell owns
+/// the server list; the sidebar passes its own link, which the shell cannot
+/// read while the sidebar draws.
+pub(crate) type ServerLabel = std::rc::Rc<dyn Fn(Link, &mut App) -> AnyElement>;
 
 pub struct ElseApp {
     client: Arc<Client>,
@@ -312,7 +312,7 @@ pub struct ElseApp {
     rules: rules::RulesState,
     rules_dialog: Option<rules::RulesDialog>,
     sidebar_focus: FocusHandle,
-    server_switcher: Option<ServerSwitcher>,
+    server_label: Option<ServerLabel>,
     pause: pause::PauseStrip,
     live: Option<crate::api::LiveCommands>,
     _live: Option<Task<()>>,
@@ -412,7 +412,7 @@ impl ElseApp {
             rules: HashMap::new(),
             rules_dialog: None,
             sidebar_focus,
-            server_switcher: None,
+            server_label: None,
             pause: Default::default(),
             live: None,
             _live: None,

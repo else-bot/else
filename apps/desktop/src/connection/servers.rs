@@ -446,18 +446,26 @@ impl Shell {
         }
     }
 
-    fn rename_saved(&mut self, id: Uuid, name: &str) {
+    /// Apply `change` to a copy of the registry, save it, and adopt it only
+    /// once saved, so memory never shows a change the disk refused.
+    pub(super) fn commit_registry(
+        &mut self,
+        change: impl FnOnce(&mut ServerRegistry) -> Result<(), String>,
+    ) -> Result<(), String> {
         let mut registry = self.registry.clone();
-        let saved = registry.rename(id, name).and_then(|()| {
-            self.launch
-                .store
-                .as_ref()
-                .map_err(Clone::clone)
-                .and_then(|store| store.save(&registry))
-        });
-        match saved {
-            Ok(()) => self.registry = registry,
-            Err(err) => self.connection_error = Some(err),
+        change(&mut registry)?;
+        self.launch
+            .store
+            .as_ref()
+            .map_err(Clone::clone)?
+            .save(&registry)?;
+        self.registry = registry;
+        Ok(())
+    }
+
+    fn rename_saved(&mut self, id: Uuid, name: &str) {
+        if let Err(err) = self.commit_registry(|registry| registry.rename(id, name)) {
+            self.connection_error = Some(err);
         }
     }
 
@@ -566,7 +574,6 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.server_menu = false;
         self.switch_attempt = None;
         self._switch = None;
         self.server_update_target = None;
@@ -613,7 +620,6 @@ impl Shell {
     }
 
     pub(super) fn select_server(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        self.server_menu = false;
         if self.active.as_ref().is_some_and(|active| active.id == id) {
             self.switch_attempt = None;
             self._switch = None;
@@ -751,21 +757,15 @@ impl Shell {
                         return;
                     }
                 };
-                let mut registry = shell.registry.clone();
-                registry.selected = Some(id);
-                if let Err(err) = shell
-                    .launch
-                    .store
-                    .as_ref()
-                    .map_err(Clone::clone)
-                    .and_then(|store| store.save(&registry))
-                {
+                if let Err(err) = shell.commit_registry(|registry| {
+                    registry.selected = Some(id);
+                    Ok(())
+                }) {
                     shell.connection_error = Some(err);
                     cx.notify();
                     return;
                 }
                 let section = shell.settings_section();
-                shell.registry = registry;
                 shell.server_editor = None;
                 shell.server_update_target = None;
                 shell.activate(verified.profile, verified.client, window, cx);
@@ -841,18 +841,14 @@ impl Shell {
                                     move |_, window, cx| {
                                         window.close_dialog(cx);
                                         let _ = shell.update(cx, |shell, cx| {
-                                            let mut registry = shell.registry.clone();
-                                            let result = registry.remove(id).and_then(|()| {
-                                                shell
-                                                    .launch
-                                                    .store
-                                                    .as_ref()
-                                                    .map_err(Clone::clone)
-                                                    .and_then(|store| store.save(&registry))
-                                            });
-                                            match result {
+                                            match shell.commit_registry(|r| r.remove(id)) {
                                                 Ok(()) => {
-                                                    shell.registry = registry;
+                                                    if let Ok(store) = &shell.launch.store
+                                                        && let Err(err) =
+                                                            shell.rail.icons.forget(store, id)
+                                                    {
+                                                        shell.connection_error = Some(err);
+                                                    }
                                                     shell.inactive.remove(&id);
                                                     shell.remote_updates.remove(&id);
                                                     shell.refresh_servers(window, cx);

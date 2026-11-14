@@ -35,4 +35,4 @@ The app requires HTTPS for every address except loopback and verified Tailscale 
 
 ## Several servers
 
-The app saves each server after it accepts the connection. Use the server switcher at the top of the sidebar to add servers and move between them. Email, Socials, MCP and Backups settings apply to the selected server.
+The app saves each server after it accepts the connection. The server rail on the window's left edge shows one icon per server. Click an icon to switch, drag it to reorder, and right-click it to change its icon, edit the connection, or remove it. The plus button at the bottom adds a server. Email, Socials, MCP and Backups settings apply to the selected server.

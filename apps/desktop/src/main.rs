@@ -17,6 +17,7 @@ mod oauth_callback;
 mod panel_kit;
 mod preferences;
 mod profile_picker;
+mod server_icon;
 mod sidebar;
 mod skill_ui;
 mod socials;
@@ -97,7 +98,9 @@ gpui_kit::assets::icon_assets!(
         Plus,
         ExternalLink,
         Webhook,
-        Undo2
+        Undo2,
+        Palette,
+        ImagePlus
     ]
 );
 

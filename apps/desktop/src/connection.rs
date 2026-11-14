@@ -3,7 +3,9 @@
 //! Switching selects a session without rebinding requests or discarding drafts.
 
 mod backups;
+mod icon_editor;
 mod mcp;
+mod server_rail;
 mod server_views;
 mod servers;
 mod settings;
@@ -164,7 +166,7 @@ pub struct Shell {
     inactive: HashMap<Uuid, Active>,
     servers: servers::Connections,
     server_editor: Option<servers::Editor>,
-    server_menu: bool,
+    rail: server_rail::Rail,
     switch_attempt: Option<Uuid>,
     notification_target: Option<(Uuid, Uuid, Uuid)>,
     _switch: Option<Task<()>>,
@@ -226,6 +228,7 @@ impl Shell {
         let updates = updates::View::new(&launch, &runtime, window, cx);
         let server_updates = updates::View::new_server(&launch, &runtime, window, cx);
         let servers = servers::Connections::new(&registry, &runtime, window, cx);
+        let (rail, rail_error) = server_rail::Rail::load(&launch.store);
         let mut shell = Self {
             launch,
             key,
@@ -235,11 +238,11 @@ impl Shell {
             inactive: HashMap::new(),
             servers,
             server_editor: None,
-            server_menu: false,
+            rail,
             switch_attempt: None,
             notification_target: None,
             _switch: None,
-            connection_error: loaded.err(),
+            connection_error: loaded.err().or(rail_error),
             server_updates,
             remote_updates: HashMap::new(),
             names: Default::default(),
@@ -362,11 +365,9 @@ impl Shell {
         let app = cx.new(|cx| ElseApp::new(client.clone(), preferences, window, cx));
         let shell = cx.weak_entity();
         app.update(cx, |app, _| {
-            app.set_server_switcher(std::rc::Rc::new(move |link, cx| {
+            app.set_server_label(std::rc::Rc::new(move |link, cx| {
                 shell
-                    .update(cx, |shell, cx| {
-                        shell.render_server_switcher("sidebar-server-switcher", link, cx)
-                    })
+                    .update(cx, |shell, cx| shell.render_server_label(link, cx))
                     .unwrap_or_else(|_| div().into_any_element())
             }))
         });
@@ -767,7 +768,6 @@ impl Shell {
             self.updates.dismiss();
             self.server_updates.dismiss();
             self.server_editor = None;
-            self.server_menu = false;
             self.backups = None;
             self.mcp = None;
             self.email = None;
@@ -881,7 +881,7 @@ impl Render for Shell {
                     )
                 },
             )
-            .child(div().flex_1().min_h_0().w_full().child(active.app.clone()))
+            .child(self.render_with_rail(active.app.clone().into(), cx))
     }
 }
 
