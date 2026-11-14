@@ -63,45 +63,6 @@ pub(crate) enum ServerIcon {
     Picture(Arc<Image>),
 }
 
-impl ServerIcon {
-    pub(crate) fn hue(&self) -> Option<u16> {
-        match self {
-            Self::Letters { hue, .. } | Self::Pattern { hue } | Self::Emoji { hue, .. } => *hue,
-            Self::Default | Self::Picture(_) => None,
-        }
-    }
-
-    pub(crate) fn with_hue(self, hue: Option<u16>) -> Self {
-        match self {
-            Self::Letters { style, letters, .. } => Self::Letters {
-                style,
-                letters,
-                hue,
-            },
-            Self::Pattern { .. } => Self::Pattern { hue },
-            Self::Emoji { emoji, .. } => Self::Emoji { emoji, hue },
-            Self::Default | Self::Picture(_) => Self::Letters {
-                style: LetterStyle::Gradient,
-                letters: None,
-                hue,
-            },
-        }
-    }
-
-    /// The choice as saved: gradient letters that follow the name are the
-    /// default for a server that isn't this computer.
-    fn normalized(self, device: bool) -> Self {
-        match self {
-            Self::Letters {
-                style: LetterStyle::Gradient,
-                letters: None,
-                hue: None,
-            } if !device => Self::Default,
-            icon => icon,
-        }
-    }
-}
-
 /// Up to two letters without control characters, or `None` for blank.
 pub(crate) fn letters(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
@@ -244,9 +205,7 @@ impl Icons {
         store: &ProfileStore,
         id: ServerId,
         icon: ServerIcon,
-        device: bool,
     ) -> Result<(), String> {
-        let icon = icon.normalized(device);
         let picture = store.server_picture_path(id);
         let fail = |err: std::io::Error| format!("Cannot save the server icon: {err}");
         if let ServerIcon::Picture(image) = &icon {
@@ -271,7 +230,7 @@ impl Icons {
     /// Drop a removed server's icon and picture.
     pub(crate) fn forget(&mut self, store: &ProfileStore, id: ServerId) -> Result<(), String> {
         if self.chosen.contains_key(&id) {
-            self.set(store, id, ServerIcon::Default, false)?;
+            self.set(store, id, ServerIcon::Default)?;
         }
         Ok(())
     }
@@ -489,19 +448,6 @@ mod tests {
         assert_eq!(letters("a\u{7}"), None);
     }
 
-    #[::core::prelude::v1::test]
-    fn plain_gradient_letters_are_saved_as_the_default_except_for_this_computer() {
-        let plain = ServerIcon::Letters {
-            style: LetterStyle::Gradient,
-            letters: None,
-            hue: None,
-        };
-        assert_eq!(plain.clone().normalized(false), ServerIcon::Default);
-        assert_eq!(plain.clone().normalized(true), plain);
-        let tinted = plain.with_hue(Some(40));
-        assert_eq!(tinted.clone().normalized(false), tinted);
-    }
-
     fn store() -> (tempfile::TempDir, ProfileStore) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -529,9 +475,9 @@ mod tests {
             emoji: "🐙".into(),
             hue: Some(195),
         };
-        icons.set(&store, a, emoji.clone(), false).unwrap();
+        icons.set(&store, a, emoji.clone()).unwrap();
         icons
-            .set(&store, b, ServerIcon::Picture(picture.clone()), false)
+            .set(&store, b, ServerIcon::Picture(picture.clone()))
             .unwrap();
         icons
             .set(
@@ -542,7 +488,6 @@ mod tests {
                     letters: Some("Q".into()),
                     hue: None,
                 },
-                false,
             )
             .unwrap();
         let reloaded = Icons::load(&store).unwrap();
@@ -553,7 +498,7 @@ mod tests {
             ServerIcon::Letters { letters: Some(l), .. } if l == "Q"
         ));
         icons
-            .set(&store, b, ServerIcon::Pattern { hue: None }, false)
+            .set(&store, b, ServerIcon::Pattern { hue: None })
             .unwrap();
         assert!(
             !store.server_picture_path(b).exists(),
