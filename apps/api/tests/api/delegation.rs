@@ -820,7 +820,8 @@ async fn delegation_limits_fail_in_code() {
     assert_eq!(children, 1);
 
     let (_, root, _) = running_main(&app).await;
-    for (n, target) in [&work, &family].iter().enumerate() {
+    let budget = else_api::db::delegations::MAX_CHILDREN as usize;
+    for (n, target) in [&work, &family].iter().cycle().take(budget).enumerate() {
         sqlx::query("UPDATE turns SET attempt = ?2 WHERE id = ?1")
             .bind(root)
             .bind(n as i32 + 1)
@@ -838,8 +839,9 @@ async fn delegation_limits_fail_in_code() {
         .await
         .unwrap();
     }
-    sqlx::query("UPDATE turns SET attempt = 3 WHERE id = ?1")
+    sqlx::query("UPDATE turns SET attempt = ?2 WHERE id = ?1")
         .bind(root)
+        .bind(budget as i32 + 1)
         .execute(&app.db.pool)
         .await
         .unwrap();
@@ -848,7 +850,7 @@ async fn delegation_limits_fail_in_code() {
             &app.db.pool,
             root,
             work.parse().unwrap(),
-            "a third",
+            "one past the budget",
             &[],
             None
         )
@@ -2620,16 +2622,41 @@ async fn a_task_routes_follow_up_work_through_the_bot_that_delegated_it() {
         repeated.body
     );
     assert_eq!(to_dev().await, 1);
-    let blocked = tool(
+    let merge = tool(
         &h.app,
         &token,
         "delegate",
-        json!({ "target_bot_id": manager, "task": "Triage the next incident." }),
+        json!({ "target_bot_id": manager, "task": "Dev's PR is ready: squash merge it." }),
     )
     .await;
-    assert_eq!(blocked.code(), "BUDGET_EXHAUSTED", "{}", blocked.body);
+    assert_eq!(
+        merge.result["status"], "pending",
+        "issue #407: the merge goes back to Manager as a third hop: {}",
+        merge.body
+    );
+    h.release(root).await;
+    h.continued(root, &token).await;
     h.release(root).await;
     wait_status(&h.app, root, "completed").await;
+
+    let hops: Vec<(Uuid, String, Option<i32>)> = sqlx::query_as(
+        "SELECT target_bot_id, status, delivered_attempt FROM delegations
+         WHERE root_turn_id = ?1 ORDER BY parent_attempt",
+    )
+    .bind(root)
+    .fetch_all(&h.app.db.pool)
+    .await
+    .unwrap();
+    let [manager, dev] = [&manager, &dev].map(|id| id.parse::<Uuid>().unwrap());
+    assert_eq!(
+        hops,
+        [
+            (manager, "completed".to_owned(), Some(2)),
+            (dev, "completed".to_owned(), Some(3)),
+            (manager, "completed".to_owned(), Some(4)),
+        ],
+        "each hop started once and was read once"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
