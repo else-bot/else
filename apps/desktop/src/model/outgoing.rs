@@ -97,6 +97,25 @@ impl DraftContent {
         }
     }
 
+    /// What a receipt inside a task leads with: the email's subject, else
+    /// what the draft is.
+    pub fn title(&self) -> String {
+        match self {
+            Self::Email { subject, .. } if !subject.is_empty() => subject.clone(),
+            Self::Email { .. } => "Email".into(),
+            Self::Message { .. } if self.is_post() => "X post".into(),
+            Self::Message { .. } => format!("{} message", self.label()),
+        }
+    }
+
+    /// Who it goes to, when it names someone.
+    fn recipient(&self) -> Option<String> {
+        match self {
+            Self::Email { to, .. } => Some(to.join(", ")),
+            Self::Message { destination, .. } => destination.clone(),
+        }
+    }
+
     pub fn audience(&self) -> String {
         match self {
             Self::Email { to, .. } => to.join(", "),
@@ -285,6 +304,16 @@ impl OutgoingDraft {
         format!("{approver} · {outcome}")
     }
 
+    /// The receipt's title and outcome lines inside a task, whose meta row
+    /// already carries the time.
+    pub fn task_receipt(&self) -> (String, String) {
+        let outcome = match self.content.recipient() {
+            Some(to) => format!("{} · to {to}", self.label()),
+            None => self.label(),
+        };
+        (self.content.title(), outcome)
+    }
+
     pub fn edit(&self) -> DraftEdit {
         DraftEdit {
             version: self.version,
@@ -421,6 +450,59 @@ mod tests {
         );
         assert_eq!(card("superseded", Some("button"), None), "Draft replaced");
         assert_eq!(card("pending", None, None), "Needs approval");
+    }
+
+    #[test]
+    fn a_receipt_inside_a_task_leads_with_the_draft_then_the_decision() {
+        let card = |content: serde_json::Value, status: &str, source: Option<&str>| {
+            serde_json::from_value::<OutgoingDraft>(json!({
+                "id": Uuid::nil(), "lineage_id": Uuid::nil(), "revision": 1,
+                "content": content, "version":1, "status":status, "can_approve":false,
+                "approval_source":source, "result_detail":null,
+                "updated_at":"2026-11-14T11:00:00Z", "settled_at":"2026-11-14T11:00:00Z"
+            }))
+            .unwrap()
+            .task_receipt()
+        };
+        let email = json!({"channel":"email", "from":"me@example.com",
+            "to":["iam4x@me.com"], "cc":[], "bcc":[], "subject":"Proposal", "body":"Hi"});
+        let lines = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+        assert_eq!(
+            card(email.clone(), "discarded", None),
+            lines("Proposal", "You discarded this draft · to iam4x@me.com")
+        );
+        assert_eq!(
+            card(email.clone(), "sent", Some("button")),
+            lines("Proposal", "You approved · Email sent · to iam4x@me.com")
+        );
+        assert_eq!(
+            card(email, "sent", Some("standing")),
+            lines(
+                "Proposal",
+                "Approved by your standing rule · Email sent · to iam4x@me.com"
+            )
+        );
+        assert_eq!(
+            card(
+                json!({"channel":"message", "platform":"telegram",
+                "destination":"Family", "body":"Hi"}),
+                "sent",
+                Some("button")
+            ),
+            lines(
+                "Telegram message",
+                "You approved · Message sent · to Family"
+            )
+        );
+        assert_eq!(
+            card(
+                json!({"channel":"message", "platform":"x", "account":"@acme",
+                "body":"Hi"}),
+                "discarded",
+                None
+            ),
+            lines("X post", "You discarded this draft")
+        );
     }
 
     #[test]

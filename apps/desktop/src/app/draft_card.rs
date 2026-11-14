@@ -259,7 +259,12 @@ impl ElseApp {
         self.remeasure_row(RowKey::Draft(id), cx);
     }
 
-    pub(super) fn render_draft_card(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_draft_card(
+        &self,
+        id: Uuid,
+        in_task: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(view) = self.view.as_ref() else {
             return div().into_any_element();
         };
@@ -333,25 +338,51 @@ impl ElseApp {
                     .size_4()
                     .text_color(color),
                 )
-                .child(
-                    div()
-                        .text_sm()
-                        .font_medium()
-                        .child(draft.content.label().to_owned()),
-                )
-                .child(muted(match draft.settled_at {
-                    Some(at) => format!("{} · {}", draft.label(), short_stamp(at)),
-                    None => draft.label(),
-                }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .truncate()
-                        .child(draft.content.audience()),
-                )
+                .when(in_task, |header| {
+                    let (title, outcome) = draft.task_receipt();
+                    header.child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_medium()
+                                    .whitespace_normal()
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .whitespace_normal()
+                                    .text_color(theme.muted_foreground)
+                                    .child(outcome),
+                            ),
+                    )
+                })
+                .when(!in_task, |header| {
+                    header
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_medium()
+                                .child(draft.content.label().to_owned()),
+                        )
+                        .child(muted(match draft.settled_at {
+                            Some(at) => format!("{} · {}", draft.label(), short_stamp(at)),
+                            None => draft.label(),
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .truncate()
+                                .child(draft.content.audience()),
+                        )
+                })
                 .child(
                     Icon::new(if expanded {
                         IconName::ChevronDown

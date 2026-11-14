@@ -57,10 +57,16 @@ pub(in crate::app) struct TaskReply {
     pub reactions: Vec<(Uuid, crate::model::ReactionKind)>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
+    pub attempt: Option<i64>,
 }
 
 impl TaskReply {
     pub(in crate::app) fn elapsed(&self, now: DateTime<Utc>) -> Option<String> {
+        // `started_at` restarts with each attempt, so a resumed task's
+        // finished span would cover only its last attempt.
+        if self.state.terminal() && self.attempt > Some(1) {
+            return None;
+        }
         let start = self.started_at?;
         let end = if self.state.terminal() {
             self.finished_at?
@@ -69,6 +75,16 @@ impl TaskReply {
         };
         Some(format_elapsed((end - start).num_seconds().max(0)))
     }
+}
+
+/// The fold's label: it counts only the `hidden` replies, so beside entries
+/// the rail already shows it says "more".
+pub(in crate::app) fn fold_label(hidden: usize, rail_shown: bool) -> String {
+    format!(
+        "{hidden} {}{}",
+        if rail_shown { "more " } else { "" },
+        if hidden == 1 { "update" } else { "updates" }
+    )
 }
 
 pub(in crate::app) fn format_elapsed(seconds: i64) -> String {
@@ -131,6 +147,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                     reactions: Vec::new(),
                     started_at: turn.started_at,
                     finished_at: turn.finished_at,
+                    attempt: turn.attempt,
                 },
             ))
         })
@@ -821,6 +838,34 @@ mod tests {
         legacy.started_at = reply.started_at;
         legacy.finished_at = None;
         assert_eq!(legacy.elapsed(Utc::now()), None);
+    }
+
+    #[test]
+    fn a_resumed_task_shows_no_duration_once_finished() {
+        let now = "2027-01-01T00:00:00Z".parse().unwrap();
+        let mut first = turn(10, "completed");
+        first["attempt"] = json!(1);
+        let c = conversation(vec![], vec![first]);
+        let reply = task_replies(&c).remove(&id(10)).unwrap();
+        assert_eq!(reply.elapsed(now).as_deref(), Some("7m 50s"));
+        let mut resumed = turn(10, "completed");
+        resumed["attempt"] = json!(2);
+        let c = conversation(vec![], vec![resumed.clone()]);
+        assert_eq!(task_replies(&c)[&id(10)].elapsed(now), None);
+        resumed["status"] = json!("running");
+        let c = conversation(vec![], vec![resumed]);
+        assert!(
+            task_replies(&c)[&id(10)].elapsed(now).is_some(),
+            "a live attempt keeps its running clock"
+        );
+    }
+
+    #[test]
+    fn the_fold_counts_only_what_it_hides_and_says_more_beside_the_rail() {
+        assert_eq!(fold_label(1, true), "1 more update");
+        assert_eq!(fold_label(3, true), "3 more updates");
+        assert_eq!(fold_label(1, false), "1 update");
+        assert_eq!(fold_label(2, false), "2 updates");
     }
 
     #[test]

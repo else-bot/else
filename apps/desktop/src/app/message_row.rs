@@ -551,7 +551,7 @@ impl ElseApp {
             RowKey::SkillInstall(id) => side(self.render_skill_card(id, cx)),
             RowKey::SecretRequest(id) => side(self.render_secret_card(id, cx)),
             RowKey::Question(id) => side(self.render_question_card(id, in_task, window, cx)),
-            RowKey::Draft(id) => side(self.render_draft_card(id, cx)),
+            RowKey::Draft(id) => side(self.render_draft_card(id, in_task, cx)),
             RowKey::SocialSetup(id) => side(self.render_social_card(id, cx)),
             RowKey::Handoff(id) => self.render_handoff(id, cx),
             RowKey::ComputerHandoff(id) => self.render_handoff_row(id, cx),

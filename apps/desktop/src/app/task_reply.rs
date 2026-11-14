@@ -84,8 +84,10 @@ impl ElseApp {
             .flex_none()
         };
         let updates = expandable.then(|| {
-            let count = history.len();
-            format!("{count} {}", if count == 1 { "update" } else { "updates" })
+            state::fold_label(
+                history.len(),
+                !task.kept.is_empty() || !task.cards.is_empty(),
+            )
         });
         // Every assistant turn opens with the same name row as a plain reply.
         let name_row = h_flex()
@@ -150,7 +152,9 @@ impl ElseApp {
         };
         let mut explanation = None;
         let status = if owner_waiting {
-            expandable.then(|| meta_row().child("Earlier updates").child(chevron()))
+            updates
+                .clone()
+                .map(|updates| meta_row().child(updates).child(chevron()))
         } else if complete {
             Some(tail(
                 meta_row()
@@ -404,7 +408,6 @@ impl ElseApp {
     }
 }
 
-/// Three dots that pulse in turn beside a working turn's label, one lap per 1.2 s.
 fn waits_on_owner(task: &TaskReply, turn: &crate::model::Turn) -> bool {
     task.state == ReplyState::Waiting
         && (turn.waits_on_owner()
@@ -423,6 +426,7 @@ pub(super) fn shows_only_name(task: &TaskReply, turn: &crate::model::Turn) -> bo
         && task.kept.is_empty()
 }
 
+/// Three dots that pulse in turn beside a working turn's label, one lap per 1.2 s.
 fn working_dots(turn: Uuid, color: Hsla, still: bool) -> impl IntoElement {
     h_flex()
         .flex_none()
