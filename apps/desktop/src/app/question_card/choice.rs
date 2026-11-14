@@ -422,7 +422,8 @@ fn key_chip(theme: &Theme, key: String) -> Div {
         .justify_center()
         .rounded(theme.radius)
         .bg(theme.muted)
-        .text_color(theme.muted_foreground)
+        // 70% ink: clearly a live key, not a disabled one.
+        .text_color(theme.foreground.opacity(0.7))
         .text_xs()
         .child(key)
 }
