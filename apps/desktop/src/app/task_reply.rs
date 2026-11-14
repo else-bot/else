@@ -306,8 +306,8 @@ impl ElseApp {
             .min_w_0()
             .gap_1p5()
             .child(name_row);
-        // Earlier replies always read before the current one. A turn that
-        // ended closes on its meta row; a live one leads with it.
+        // Earlier replies always read before the current one. A completed,
+        // failed or uncertain turn closes on its meta row; others lead with it.
         card = if complete || error {
             card.children(earlier)
                 .children(reply)
