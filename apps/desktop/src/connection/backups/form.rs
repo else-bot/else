@@ -495,9 +495,12 @@ impl LocalForm {
                     .child(value)
                     .into_any_element()
             };
+            // Locked values read as fixed, not as fields: secondary tone.
+            let locked = theme.muted_foreground;
             let value = |text: SharedString| {
                 div()
                     .text_sm()
+                    .text_color(locked)
                     .font_weight(FontWeight::MEDIUM)
                     .child(text)
                     .into_any_element()
