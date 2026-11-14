@@ -975,12 +975,14 @@ pub(super) fn turn_content<'a>(
                  only your final message, so put the whole result in it, including what you \
                  reported before."
             } else {
-                "Continue the owner's request with these results. The owner sees your earlier \
-                 replies to this message directly above this one, so write only what is new: \
-                 what these results change, what is still open, and any action the owner needs \
-                 to take. Do not repeat or summarise what those replies already say, or mention \
-                 work these results did not change. If a result makes something you said wrong \
-                 or outdated, say so."
+                "Continue the owner's request with these results. Once this reply lands, your \
+                 earlier replies to this message fold away, so it is the answer the owner reads. \
+                 Answer in a few short sentences, not a status report: lead with what these \
+                 results mean, then add only the earlier points that still matter now, with \
+                 their links, what is still open, and any action the owner needs to take. Do \
+                 not narrate the history, say you reported something earlier, or doubt work you \
+                 reported as done unless a result contradicts it. If a result makes something \
+                 you said wrong or outdated, give the corrected state."
             };
             segments = vec![Segment::Text(format!("{outcomes}{reader}"))];
         } else {
@@ -1017,9 +1019,9 @@ mod tests {
     }
 
     /// A carried result must not read as the whole answer to a newer message,
-    /// and the owner, who sees the earlier replies above, gets only what changed.
+    /// and the owner, whose earlier replies fold away, gets the whole state.
     #[test]
-    fn a_resumed_continuation_marks_carried_results_and_reports_only_what_changed() {
+    fn a_resumed_continuation_marks_carried_results_and_gives_the_whole_state() {
         let mut input = crate::providers::cli::session::tests::input();
         input.delegation.origin = crate::app::providers::Origin::OwnerRequest;
         let outcome = |task: &str, earlier_request| crate::app::providers::DelegationOutcome {
@@ -1054,7 +1056,7 @@ mod tests {
             )
         );
         assert!(packet.contains("status=\"completed\">\nTask: Check the reply."));
-        assert!(packet.contains("Do not repeat or summarise what those replies already say"));
+        assert!(packet.contains("earlier replies to this message fold away"));
         assert!(
             !packet.contains(&input.text),
             "a resumed session already has the message"
@@ -1065,7 +1067,7 @@ mod tests {
             packet.contains("including what you reported before"),
             "a delegating bot reads only the final message"
         );
-        assert!(!packet.contains("Do not repeat"));
+        assert!(!packet.contains("fold away"));
     }
 
     #[test]
