@@ -3,17 +3,42 @@
 
 use super::servers::{Editor, ReleaseStatus};
 use super::*;
-use crate::server_icon::{self, ServerIcon};
+use crate::config::ProfileStore;
+use crate::server_icon::{self, Icons, ServerIcon};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{Icon, h_flex};
 
 const RAIL_WIDTH: f32 = 76.;
 
+/// What the rail keeps: the icons users chose and the hover card.
+#[derive(Default)]
+pub(super) struct Rail {
+    pub(super) icons: Icons,
+    card: RailCard,
+}
+
+impl Rail {
+    /// The saved icons. An unreadable icons file starts the rail with
+    /// generated icons and returns its error to show.
+    pub(super) fn load(store: &Result<ProfileStore, String>) -> (Self, Option<String>) {
+        let (icons, error) = match store.as_ref().map(Icons::load) {
+            Ok(Ok(icons)) => (icons, None),
+            Ok(Err(err)) => (Icons::default(), Some(err)),
+            Err(_) => (Icons::default(), None),
+        };
+        let rail = Self {
+            icons,
+            card: RailCard::Hidden,
+        };
+        (rail, error)
+    }
+}
+
 /// The hover card beside a rail icon. A right click dismisses it until the
 /// pointer leaves, so it never covers the server's menu.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum RailCard {
+enum RailCard {
     #[default]
     Hidden,
     Shown(Uuid),
@@ -81,7 +106,17 @@ pub(super) fn rail_background(theme: &gpui_kit::component::Theme) -> Hsla {
 }
 
 impl Shell {
-    pub(super) fn render_server_rail(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The window body: the rail, then `app`.
+    pub(super) fn render_with_rail(&self, app: AnyView, cx: &mut Context<Self>) -> Div {
+        h_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .child(self.render_server_rail(cx))
+            .child(div().flex_1().min_w_0().h_full().child(app))
+    }
+
+    fn render_server_rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let fill = rail_background(&theme);
         let order: Vec<Uuid> = self.registry.servers.iter().map(|s| s.id).collect();
@@ -155,7 +190,7 @@ impl Shell {
         let selected = self.active.as_ref().is_some_and(|active| active.id == id);
         let face = Face {
             name: name.clone(),
-            icon: self.icons.get(id).clone(),
+            icon: self.rail.icons.get(id).clone(),
             device: self.managed_server(&saved.profile),
         };
         let (status, color) = self.server_status(id, cx);
@@ -172,7 +207,7 @@ impl Shell {
         } else {
             status.to_owned()
         };
-        let card = (self.rail_card == RailCard::Shown(id))
+        let card = (self.rail.card == RailCard::Shown(id))
             .then(|| rail_card(name.clone(), color, detail.clone(), host, &theme));
         let drag = ServerDrag { id, face };
         let order = order.to_vec();
@@ -331,9 +366,9 @@ impl Shell {
         change: impl FnOnce(RailCard) -> RailCard,
         cx: &mut Context<Self>,
     ) {
-        let next = change(self.rail_card);
-        if next != self.rail_card {
-            self.rail_card = next;
+        let next = change(self.rail.card);
+        if next != self.rail.card {
+            self.rail.card = next;
             cx.notify();
         }
     }

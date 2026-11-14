@@ -845,7 +845,7 @@ impl Shell {
                                                 Ok(()) => {
                                                     if let Ok(store) = &shell.launch.store
                                                         && let Err(err) =
-                                                            shell.icons.forget(store, id)
+                                                            shell.rail.icons.forget(store, id)
                                                     {
                                                         shell.connection_error = Some(err);
                                                     }

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme as _, TitleBar, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, TitleBar, WindowExt as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -166,8 +166,7 @@ pub struct Shell {
     inactive: HashMap<Uuid, Active>,
     servers: servers::Connections,
     server_editor: Option<servers::Editor>,
-    icons: crate::server_icon::Icons,
-    rail_card: server_rail::RailCard,
+    rail: server_rail::Rail,
     switch_attempt: Option<Uuid>,
     notification_target: Option<(Uuid, Uuid, Uuid)>,
     _switch: Option<Task<()>>,
@@ -229,12 +228,7 @@ impl Shell {
         let updates = updates::View::new(&launch, &runtime, window, cx);
         let server_updates = updates::View::new_server(&launch, &runtime, window, cx);
         let servers = servers::Connections::new(&registry, &runtime, window, cx);
-        let (icons, icons_error) = match launch.store.as_ref().map(crate::server_icon::Icons::load)
-        {
-            Ok(Ok(icons)) => (icons, None),
-            Ok(Err(err)) => (Default::default(), Some(err)),
-            Err(_) => (Default::default(), None),
-        };
+        let (rail, rail_error) = server_rail::Rail::load(&launch.store);
         let mut shell = Self {
             launch,
             key,
@@ -244,12 +238,11 @@ impl Shell {
             inactive: HashMap::new(),
             servers,
             server_editor: None,
-            icons,
-            rail_card: Default::default(),
+            rail,
             switch_attempt: None,
             notification_target: None,
             _switch: None,
-            connection_error: loaded.err().or(icons_error),
+            connection_error: loaded.err().or(rail_error),
             server_updates,
             remote_updates: HashMap::new(),
             names: Default::default(),
@@ -888,14 +881,7 @@ impl Render for Shell {
                     )
                 },
             )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(self.render_server_rail(cx))
-                    .child(div().flex_1().min_w_0().h_full().child(active.app.clone())),
-            )
+            .child(self.render_with_rail(active.app.clone().into(), cx))
     }
 }
 

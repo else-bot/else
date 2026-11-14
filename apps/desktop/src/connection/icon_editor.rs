@@ -13,7 +13,7 @@ use gpui_kit::component::{Icon, Selectable as _, h_flex};
 impl Shell {
     fn save_server_icon(&mut self, id: Uuid, icon: ServerIcon) -> Result<(), String> {
         let store = self.launch.store.as_ref().map_err(Clone::clone)?;
-        self.icons.set(store, id, icon)
+        self.rail.icons.set(store, id, icon)
     }
 
     pub(super) fn open_icon_editor(
@@ -27,7 +27,7 @@ impl Shell {
         };
         let device = self.managed_server(&saved.profile);
         let name = saved.name.clone();
-        let icon = self.icons.get(id).clone();
+        let icon = self.rail.icons.get(id).clone();
         let shell = cx.weak_entity();
         let editor = cx.new(|cx| IconEditor::new(shell, id, name, device, &icon, window, cx));
         window.open_dialog(cx, move |dialog, _, _| {
