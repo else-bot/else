@@ -664,7 +664,8 @@ fn a_turn_that_parks_repeatedly_keeps_one_copy_of_a_restated_reply() {
         let mut reply = item(number, 10, "assistant");
         reply["attempt"] = json!(attempt);
         if let Some(name) = file {
-            reply["parts"] = json!([{"type": "file", "file": {
+            reply["parts"] = json!([{"type": "text", "text": format!("Message {number}")},
+                {"type": "file", "file": {
                 "id": id(1000 + number), "name": name,
                 "media_type": "image/png", "size": 572_211
             }}]);
@@ -689,13 +690,112 @@ fn a_turn_that_parks_repeatedly_keeps_one_copy_of_a_restated_reply() {
         finished["attempt"] = json!(4);
         let task = &task_replies(&conversation(items, vec![finished]))[&id(10)];
         assert_eq!(task.latest, Some(id(9)), "attempts={attempts}");
-        assert_eq!(
-            task.kept,
-            [id(8)],
-            "attempts={attempts}: one copy of the card and the last park's reply"
-        );
-        assert_eq!(task.history, [id(2), id(3), id(4), id(5), id(6), id(7)]);
+        if attempts {
+            assert_eq!(
+                task.kept,
+                [id(4), id(6), id(8)],
+                "each attempt's ending text"
+            );
+            assert_eq!(task.history, [id(2), id(3), id(5), id(7)]);
+            assert_eq!(
+                task.repeated_files,
+                [id(1004), id(1006)].into(),
+                "one copy of the card: the last one"
+            );
+        } else {
+            assert_eq!(task.kept, [id(8)], "one copy of the card");
+            assert_eq!(task.history, [id(2), id(3), id(4), id(5), id(6), id(7)]);
+            assert!(task.repeated_files.is_empty());
+        }
     }
+}
+
+/// A re-attached file is not a repeated text: attempt 1's "filed" news stays
+/// in view after attempt 2 re-sends its chart with other text, and the chart
+/// shows once, on the later reply.
+#[test]
+fn an_ending_reply_keeps_its_text_when_a_later_reply_resends_its_file() {
+    let file = |number: u128| {
+        json!({"type": "file", "file": {
+            "id": id(1000 + number), "name": "chart.png", "media_type": "image/png", "size": 4_096
+        }})
+    };
+    let reply = |number: u128, attempt: i64, parts: Value| {
+        let mut reply = item(number, 10, "assistant");
+        reply["attempt"] = json!(attempt);
+        reply["parts"] = parts;
+        reply
+    };
+    let prose = |number: u128| json!({"type": "text", "text": format!("Message {number}")});
+    let mut finished = turn(10, "completed");
+    finished["attempt"] = json!(4);
+    let mut only_file = reply(4, 3, json!([file(4)]));
+    only_file["text"] = json!("[File: chart.png]");
+    let items = vec![
+        item(1, 10, "user"),
+        reply(2, 1, json!([prose(2), file(2)])),
+        reply(3, 2, json!([prose(3), file(3)])),
+        only_file,
+        reply(5, 4, json!([])),
+    ];
+    let task = &task_replies(&conversation(items, vec![finished]))[&id(10)];
+    assert_eq!(
+        task.kept,
+        [id(2), id(3), id(4)],
+        "the last copy of the chart stays, alone"
+    );
+    assert_eq!(task.repeated_files, [id(1002), id(1003)].into());
+    assert!(task.history.is_empty());
+}
+
+/// A reply that only re-sends a file has nothing left to show without it.
+#[test]
+fn an_ending_reply_with_only_a_resent_file_folds() {
+    let file = |number: u128| {
+        json!([{"type": "file", "file": {
+            "id": id(1000 + number), "name": "chart.png", "media_type": "image/png", "size": 4_096
+        }}])
+    };
+    let mut first = item(2, 10, "assistant");
+    first["attempt"] = json!(1);
+    first["text"] = json!("[File: chart.png]");
+    first["parts"] = file(2);
+    let mut second = item(3, 10, "assistant");
+    second["attempt"] = json!(2);
+    second["parts"] = json!([{"type": "text", "text": "Message 3"},
+        file(3)[0].clone()]);
+    let mut finished = turn(10, "completed");
+    finished["attempt"] = json!(2);
+    let items = vec![item(1, 10, "user"), first, second];
+    let task = &task_replies(&conversation(items, vec![finished]))[&id(10)];
+    assert_eq!(task.latest, Some(id(3)));
+    assert!(task.kept.is_empty(), "a marker alone is not news");
+    assert_eq!(task.history, [id(2)]);
+}
+
+/// A resumed attempt reports only what changed, so with three attempts the
+/// reply that ended attempt 1 is still news the owner has not read twice.
+#[test]
+fn every_earlier_attempts_ending_reply_stays_in_view() {
+    let reply = |number: u128, attempt: i64| {
+        let mut reply = item(number, 10, "assistant");
+        reply["attempt"] = json!(attempt);
+        reply
+    };
+    let mut finished = turn(10, "completed");
+    finished["attempt"] = json!(3);
+    let items = vec![
+        item(1, 10, "user"),
+        reply(2, 1),
+        reply(3, 1),
+        reply(4, 2),
+        reply(5, 2),
+        reply(6, 3),
+    ];
+    let task = &task_replies(&conversation(items, vec![finished]))[&id(10)];
+    assert_eq!(task.latest, Some(id(6)));
+    assert_eq!(task.kept, [id(3), id(5)], "each attempt's last word");
+    assert_eq!(task.history, [id(2), id(4)], "progress still folds");
 }
 
 #[test]
@@ -817,8 +917,7 @@ fn a_card_settled_in_a_resumed_turn_reads_between_the_earlier_and_current_reply(
 }
 
 /// Two parks: a question answered after attempt 1, a draft discarded
-/// after attempt 2. Only attempt 2's reply is kept by the attempt rule, so
-/// the reply the question followed must stay visible beside it.
+/// after attempt 2. The reply each card followed stays visible beside it.
 #[test]
 fn every_card_in_a_task_keeps_the_reply_it_followed_in_view() {
     let reply = |number: u128, attempt, at: &str| {

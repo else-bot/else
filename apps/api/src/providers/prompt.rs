@@ -970,11 +970,19 @@ pub(super) fn turn_content<'a>(
     let outcomes = outcomes_block(input);
     if !outcomes.is_empty() {
         if considered >= input.turn_no {
-            segments = vec![Segment::Text(format!(
-                "{outcomes}Continue the owner's request with these results. The owner reads \
-                 this reply as the current status: also restate in one line, with links, the \
-                 work you already reported for this message, saying you reported it earlier."
-            ))];
+            let reader = if input.delegation.delegated_task {
+                "Continue the task with these results. The bot that delegated this task reads \
+                 only your final message, so put the whole result in it, including what you \
+                 reported before."
+            } else {
+                "Continue the owner's request with these results. The owner sees your earlier \
+                 replies to this message directly above this one, so write only what is new: \
+                 what these results change, what is still open, and any action the owner needs \
+                 to take. Do not repeat or summarise what those replies already say, or mention \
+                 work these results did not change. If a result makes something you said wrong \
+                 or outdated, say so."
+            };
+            segments = vec![Segment::Text(format!("{outcomes}{reader}"))];
         } else {
             segments.insert(0, Segment::Text(outcomes));
         }
@@ -1008,9 +1016,10 @@ mod tests {
         assert!(size <= 13_100, "{size} bytes");
     }
 
-    /// A carried result must not read as the whole answer to a newer message.
+    /// A carried result must not read as the whole answer to a newer message,
+    /// and the owner, who sees the earlier replies above, gets only what changed.
     #[test]
-    fn a_resumed_continuation_marks_carried_results_and_keeps_the_reported_status() {
+    fn a_resumed_continuation_marks_carried_results_and_reports_only_what_changed() {
         let mut input = crate::providers::cli::session::tests::input();
         input.delegation.origin = crate::app::providers::Origin::OwnerRequest;
         let outcome = |task: &str, earlier_request| crate::app::providers::DelegationOutcome {
@@ -1045,11 +1054,18 @@ mod tests {
             )
         );
         assert!(packet.contains("status=\"completed\">\nTask: Check the reply."));
-        assert!(packet.contains("the work you already reported for this message"));
+        assert!(packet.contains("Do not repeat or summarise what those replies already say"));
         assert!(
             !packet.contains(&input.text),
             "a resumed session already has the message"
         );
+        input.delegation.delegated_task = true;
+        let (packet, _) = super::turn_packet(&input, input.turn_no, None, &skills, &context);
+        assert!(
+            packet.contains("including what you reported before"),
+            "a delegating bot reads only the final message"
+        );
+        assert!(!packet.contains("Do not repeat"));
     }
 
     #[test]

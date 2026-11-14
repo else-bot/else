@@ -52,6 +52,9 @@ pub(in crate::app) struct TaskReply {
     pub summary: Option<String>,
     pub history: Vec<Uuid>,
     pub kept: Vec<Uuid>,
+    /// Files of `kept` replies that a later reply delivers again; the kept
+    /// reply shows its text without them, so a file appears once.
+    pub repeated_files: HashSet<Uuid>,
     /// Cards that follow an earlier item of the turn, such as a settled draft
     /// or question; [`TaskReply::earlier`] places each after the item it followed.
     pub cards: Vec<TaskCard>,
@@ -172,6 +175,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                     summary: None,
                     history: Vec::new(),
                     kept: Vec::new(),
+                    repeated_files: HashSet::new(),
                     cards: Vec::new(),
                     reactions: Vec::new(),
                     started_at: turn.started_at,
@@ -328,10 +332,12 @@ pub(in crate::app) fn place_cards(
 }
 
 /// Moves the earlier replies the owner still needs from `history` to `kept`:
-/// a reacted reply, the reply that ended the most recent earlier attempt, and
-/// a reply with a file no later reply delivers again. A bot that restates its
-/// work after each park re-uploads the same file, sometimes renaming an image,
-/// so an image of the same type and byte size counts as the same file.
+/// a reacted reply, the reply that ended each earlier attempt, and a reply
+/// with a file no later reply delivers again. A resumed attempt reports only
+/// what changed, so every attempt's ending reply stays in view. A bot that
+/// re-uploads a file after a park, sometimes renaming an image, delivers the
+/// same file again: an image of the same type and byte size counts as the same
+/// file, and the kept reply shows its text without it.
 fn keep_earlier_replies(
     conversation: &Conversation,
     reactions: &HashMap<Uuid, crate::model::ReactionKind>,
@@ -353,31 +359,41 @@ fn keep_earlier_replies(
             .collect::<Vec<_>>()
     };
     let replies: Vec<_> = reply.history.iter().copied().chain([latest]).collect();
-    let ended_attempt = replies
+    let ended: Vec<Uuid> = replies
         .windows(2)
-        .rev()
-        .find(|pair| attempt(pair[0]).is_some_and(|ended| attempt(pair[1]) > Some(ended)))
-        .map(|pair| pair[0]);
+        .filter(|pair| attempt(pair[0]).is_some_and(|ended| attempt(pair[1]) > Some(ended)))
+        .map(|pair| pair[0])
+        .collect();
     let same = |a: &crate::attachments::Attachment, b: &crate::attachments::Attachment| {
         a.media_type == b.media_type
             && a.size == b.size
             && (a.name == b.name || a.media_type.starts_with("image/"))
     };
+    let has_text = |id| {
+        conversation
+            .item(id)
+            .is_some_and(|item| crate::attachments::has_prose(&item.text, &item.parts))
+    };
     let mut delivered_later = files(latest);
     let mut kept = Vec::new();
+    let mut repeated = HashSet::new();
     for &id in reply.history.iter().rev() {
         let files = files(id);
-        let new_file = files
+        let (again, new): (Vec<&&crate::attachments::Attachment>, Vec<_>) = files
             .iter()
-            .any(|file| !delivered_later.iter().any(|later| same(file, later)));
-        delivered_later.extend(files);
-        if new_file || reactions.contains_key(&id) || ended_attempt == Some(id) {
+            .partition(|file| delivered_later.iter().any(|later| same(file, later)));
+        let keep = !new.is_empty()
+            || ((reactions.contains_key(&id) || ended.contains(&id)) && has_text(id));
+        if keep {
             kept.push(id);
+            repeated.extend(again.iter().map(|file| file.id));
         }
+        delivered_later.extend(files);
     }
     reply.history.retain(|id| !kept.contains(id));
     kept.reverse();
     reply.kept = kept;
+    reply.repeated_files = repeated;
 }
 
 #[cfg(test)]
