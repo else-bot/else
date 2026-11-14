@@ -12,23 +12,55 @@ const RAIL_WIDTH: f32 = 76.;
 
 /// The hover card beside a rail icon. A right click dismisses it until the
 /// pointer leaves, so it never covers the server's menu.
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum RailCard {
     #[default]
     Hidden,
     Shown(Uuid),
     Dismissed(Uuid),
 }
+
+impl RailCard {
+    /// The card after the pointer enters or leaves `id`'s icon. Leaving
+    /// another icon changes nothing, and no card shows during a drag.
+    fn hover(self, id: Uuid, hovered: bool, dragging: bool) -> Self {
+        match self {
+            _ if hovered && dragging => Self::Hidden,
+            Self::Dismissed(current) if hovered && current == id => self,
+            _ if hovered => Self::Shown(id),
+            Self::Shown(current) | Self::Dismissed(current) if current == id => Self::Hidden,
+            _ => self,
+        }
+    }
+
+    /// A right click on `id` hides its card until the pointer leaves.
+    fn dismiss(self, id: Uuid) -> Self {
+        Self::Dismissed(id)
+    }
+}
+
 const ICON_SIZE: f32 = 40.;
 pub(super) const LABEL_WIDTH: f32 = 60.;
+
+/// What a server's icon is drawn from.
+#[derive(Clone)]
+struct Face {
+    name: String,
+    icon: ServerIcon,
+    device: bool,
+}
+
+impl Face {
+    fn render(&self, cx: &App) -> AnyElement {
+        server_icon::render(&self.icon, &self.name, self.device, px(ICON_SIZE), cx)
+    }
+}
 
 /// A server being dragged to a new place in the rail.
 #[derive(Clone)]
 pub(super) struct ServerDrag {
     id: Uuid,
-    name: String,
-    icon: ServerIcon,
-    device: bool,
+    face: Face,
 }
 
 impl Render for ServerDrag {
@@ -36,13 +68,7 @@ impl Render for ServerDrag {
         div()
             .rounded(px(11.))
             .shadow_lg()
-            .child(server_icon::render(
-                &self.icon,
-                &self.name,
-                self.device,
-                px(ICON_SIZE),
-                cx,
-            ))
+            .child(self.face.render(cx))
     }
 }
 
@@ -127,110 +153,28 @@ impl Shell {
         let id = saved.id;
         let name = saved.name.clone();
         let selected = self.active.as_ref().is_some_and(|active| active.id == id);
-        let device = self.managed_server(&saved.profile);
-        let icon = self.icons.get(id).clone();
+        let face = Face {
+            name: name.clone(),
+            icon: self.icons.get(id).clone(),
+            device: self.managed_server(&saved.profile),
+        };
         let (status, color) = self.server_status(id, cx);
         let update = self.server_release(id) == ReleaseStatus::Available;
         let host = saved.profile.origin.as_str().to_owned();
-        let hollow = color == theme.muted_foreground;
-        let badge = div()
-            .absolute()
-            .right(px(-3.))
-            .bottom(px(-3.))
-            .size(px(14.))
-            .rounded_full()
-            .bg(if selected {
-                theme.foreground.opacity(0.08).blend(fill)
-            } else {
-                fill
-            })
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(div().size(px(8.)).rounded_full().map(|dot| {
-                if hollow {
-                    dot.border_2().border_color(color)
-                } else {
-                    dot.bg(color)
-                }
-            }));
-        let face = div()
-            .relative()
-            .child(server_icon::render(&icon, &name, device, px(ICON_SIZE), cx))
-            .child(badge)
-            .when(update, |face| {
-                face.child(
-                    div()
-                        .absolute()
-                        .right(px(-4.))
-                        .top(px(-4.))
-                        .size(px(16.))
-                        .rounded_full()
-                        .bg(theme.primary)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            Icon::new(IconName::ArrowUp)
-                                .size(px(10.))
-                                .text_color(theme.primary_foreground),
-                        ),
-                )
-            });
+        let ring = if selected {
+            theme.foreground.opacity(0.08).blend(fill)
+        } else {
+            fill
+        };
+        let badged = rail_face(&face, color, update, ring, cx);
         let detail = if update {
             format!("{status} · Update available")
         } else {
             status.to_owned()
         };
-        let card = (self.rail_card == RailCard::Shown(id)).then(|| {
-            div().absolute().left_full().top(px(10.)).child(deferred(
-                anchored()
-                    .anchor(Anchor::TopLeft)
-                    .offset(point(px(10.), px(0.)))
-                    .snap_to_window_with_margin(px(8.))
-                    .child(
-                        v_flex()
-                            .occlude()
-                            .max_w(px(260.))
-                            .gap_0p5()
-                            .px_3()
-                            .py_2()
-                            .rounded(px(8.))
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.popover)
-                            .text_color(theme.popover_foreground)
-                            .shadow_lg()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(name.clone()),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap(px(6.))
-                                    .items_center()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(div().size(px(6.)).rounded_full().bg(color))
-                                    .child(detail.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(host),
-                            ),
-                    ),
-            ))
-        });
-        let drag = ServerDrag {
-            id,
-            name: name.clone(),
-            icon,
-            device,
-        };
+        let card = (self.rail_card == RailCard::Shown(id))
+            .then(|| rail_card(name.clone(), color, detail.clone(), host, &theme));
+        let drag = ServerDrag { id, face };
         let order = order.to_vec();
         let owner = cx.weak_entity();
         v_flex()
@@ -253,7 +197,7 @@ impl Shell {
                     item.hover(|style| style.bg(theme.foreground.opacity(0.04)))
                 }
             })
-            .child(face)
+            .child(badged)
             .child(
                 div()
                     .max_w(px(LABEL_WIDTH))
@@ -269,14 +213,14 @@ impl Shell {
                     .child(name),
             )
             .children(card)
-            .on_hover(
-                cx.listener(move |shell, hovered: &bool, _, cx| shell.hover_rail(id, *hovered, cx)),
-            )
+            .on_hover(cx.listener(move |shell, hovered: &bool, _, cx| {
+                let dragging = cx.has_active_drag();
+                shell.move_rail_card(|card| card.hover(id, *hovered, dragging), cx)
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |shell, _, _, cx| {
-                    shell.rail_card = RailCard::Dismissed(id);
-                    cx.notify();
+                    shell.move_rail_card(|card| card.dismiss(id), cx)
                 }),
             )
             .on_click(cx.listener(move |shell, _, window, cx| shell.select_server(id, window, cx)))
@@ -382,16 +326,12 @@ impl Shell {
         )
     }
 
-    fn hover_rail(&mut self, id: Uuid, hovered: bool, cx: &mut Context<Self>) {
-        let next = match self.rail_card {
-            _ if hovered && cx.has_active_drag() => RailCard::Hidden,
-            RailCard::Dismissed(current) if hovered && current == id => return,
-            _ if hovered => RailCard::Shown(id),
-            RailCard::Shown(current) | RailCard::Dismissed(current) if current == id => {
-                RailCard::Hidden
-            }
-            _ => return,
-        };
+    fn move_rail_card(
+        &mut self,
+        change: impl FnOnce(RailCard) -> RailCard,
+        cx: &mut Context<Self>,
+    ) {
+        let next = change(self.rail_card);
         if next != self.rail_card {
             self.rail_card = next;
             cx.notify();
@@ -406,5 +346,135 @@ impl Shell {
             self.connection_error = Some(err);
         }
         cx.notify();
+    }
+}
+
+/// A server's icon with its status badge, and an update badge when one is
+/// available. The badge's `ring` matches the fill behind it.
+fn rail_face(face: &Face, color: Hsla, update: bool, ring: Hsla, cx: &App) -> Div {
+    let theme = cx.theme();
+    let hollow = color == theme.muted_foreground;
+    let badge = div()
+        .absolute()
+        .right(px(-3.))
+        .bottom(px(-3.))
+        .size(px(14.))
+        .rounded_full()
+        .bg(ring)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(div().size(px(8.)).rounded_full().map(|dot| {
+            if hollow {
+                dot.border_2().border_color(color)
+            } else {
+                dot.bg(color)
+            }
+        }));
+    div()
+        .relative()
+        .child(face.render(cx))
+        .child(badge)
+        .when(update, |face| {
+            face.child(
+                div()
+                    .absolute()
+                    .right(px(-4.))
+                    .top(px(-4.))
+                    .size(px(16.))
+                    .rounded_full()
+                    .bg(theme.primary)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Icon::new(IconName::ArrowUp)
+                            .size(px(10.))
+                            .text_color(theme.primary_foreground),
+                    ),
+            )
+        })
+}
+
+/// The hover card beside a rail icon: the full name, status and address.
+fn rail_card(
+    name: String,
+    color: Hsla,
+    detail: String,
+    host: String,
+    theme: &gpui_kit::component::Theme,
+) -> Div {
+    let muted = theme.muted_foreground;
+    div().absolute().left_full().top(px(10.)).child(deferred(
+        anchored()
+            .anchor(Anchor::TopLeft)
+            .offset(point(px(10.), px(0.)))
+            .snap_to_window_with_margin(px(8.))
+            .child(
+                v_flex()
+                    .occlude()
+                    .max_w(px(260.))
+                    .gap_0p5()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.popover)
+                    .text_color(theme.popover_foreground)
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(name),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(6.))
+                            .items_center()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(div().size(px(6.)).rounded_full().bg(color))
+                            .child(detail),
+                    )
+                    .child(div().text_xs().text_color(muted).child(host)),
+            ),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RailCard;
+    use uuid::Uuid;
+
+    #[::core::prelude::v1::test]
+    fn the_hover_card_follows_the_pointer_and_stays_away_from_menus_and_drags() {
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let card = RailCard::Hidden.hover(a, true, false);
+        assert_eq!(card, RailCard::Shown(a));
+        assert_eq!(
+            card.hover(b, true, false),
+            RailCard::Shown(b),
+            "moving to another icon"
+        );
+        assert_eq!(
+            card.hover(b, false, false),
+            card,
+            "leaving another icon is ignored"
+        );
+        let dismissed = card.dismiss(a);
+        assert_eq!(dismissed, RailCard::Dismissed(a));
+        assert_eq!(
+            dismissed.hover(a, true, false),
+            dismissed,
+            "stays hidden over its icon"
+        );
+        assert_eq!(dismissed.hover(a, false, false), RailCard::Hidden);
+        assert_eq!(
+            card.hover(b, true, true),
+            RailCard::Hidden,
+            "no card during a drag"
+        );
     }
 }
