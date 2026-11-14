@@ -972,6 +972,34 @@ pub async fn fail_unstarted(
 }
 
 /// Build the adapter input for a claimed turn.
+/// Bytes of earlier replies a fresh continuation receives, newest kept.
+const EARLIER_REPLIES_BUDGET: usize = 8_000;
+
+/// This turn's replies from its earlier attempts, oldest first, keeping the
+/// newest within [`EARLIER_REPLIES_BUDGET`].
+async fn earlier_replies(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<Vec<String>, sqlx::Error> {
+    let texts: Vec<String> = sqlx::query_scalar(
+        "SELECT text FROM items WHERE turn_id = ?1 AND kind = 'assistant' AND text != ''
+         ORDER BY seq DESC",
+    )
+    .bind(turn_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut used = 0;
+    let mut kept: Vec<String> = texts
+        .into_iter()
+        .take_while(|text| {
+            used += text.len();
+            used <= EARLIER_REPLIES_BUDGET
+        })
+        .collect();
+    kept.reverse();
+    Ok(kept)
+}
+
 pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     let turn = load_turn(&mut conn, turn_id).await?;
@@ -1143,6 +1171,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
             turn.turn_no,
         )
         .await?,
+        earlier_replies: earlier_replies(&mut conn, turn_id).await?,
     };
     let draft_tasks = crate::db::outgoing_drafts::always_approved(&mut conn, turn.bot_id).await?;
     drop(conn);

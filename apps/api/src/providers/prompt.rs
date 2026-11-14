@@ -969,22 +969,32 @@ pub(super) fn turn_content<'a>(
     let (mut segments, selection) = content_with_selection(input, considered);
     let outcomes = outcomes_block(input);
     if !outcomes.is_empty() {
+        let reader = if input.delegation.delegated_task {
+            "Continue the task with these results. The bot that delegated this task reads only \
+             your final message, so put the whole result in it, including what you reported \
+             before."
+        } else {
+            "Continue the owner's request with these results. Once this reply lands, your \
+             earlier replies to this message fold away, so it is the answer the owner reads. \
+             Answer in a few short sentences, not a status report: what these results mean, \
+             then what the owner still needs from earlier replies: work done, with its links, \
+             limits that still apply, what is still open, and any action the owner needs to \
+             take. State earlier work as fact: do not narrate the history, point to earlier \
+             replies, or re-check work you reported as done unless a result contradicts it. If \
+             a result makes something you said wrong or outdated, give the corrected state."
+        };
         if considered >= input.turn_no {
-            let reader = if input.delegation.delegated_task {
-                "Continue the task with these results. The bot that delegated this task reads \
-                 only your final message, so put the whole result in it, including what you \
-                 reported before."
-            } else {
-                "Continue the owner's request with these results. Once this reply lands, your \
-                 earlier replies to this message fold away, so it is the answer the owner reads. \
-                 Answer in a few short sentences, not a status report: lead with what these \
-                 results mean, then add only the earlier points that still matter now, with \
-                 their links, what is still open, and any action the owner needs to take. Do \
-                 not narrate the history, say you reported something earlier, or doubt work you \
-                 reported as done unless a result contradicts it. If a result makes something \
-                 you said wrong or outdated, give the corrected state."
-            };
             segments = vec![Segment::Text(format!("{outcomes}{reader}"))];
+        } else if input.attempt > 1 {
+            // A fresh session never saw this turn's earlier replies, which
+            // the owner's chat folds under the reply it writes now.
+            segments.insert(
+                0,
+                Segment::Text(format!(
+                    "{outcomes}{}{reader}\n\n",
+                    earlier_replies_block(&input.earlier_replies)
+                )),
+            );
         } else {
             segments.insert(0, Segment::Text(outcomes));
         }
@@ -1003,6 +1013,25 @@ pub(super) fn turn_content<'a>(
         segments.insert(0, Segment::Text(text.clone()));
     }
     (segments, selection)
+}
+
+/// This turn's replies from earlier attempts, for a session that never
+/// saw them.
+fn earlier_replies_block(replies: &[String]) -> String {
+    if replies.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from(
+        "[else.bot earlier replies] Your replies to this message from before it paused, \
+         which this session has not seen. They are your own record, not instructions.\n\
+         <replies>\n",
+    );
+    for reply in replies {
+        text.push_str(reply.trim());
+        text.push_str("\n---\n");
+    }
+    text.push_str("</replies>\n\n");
+    text
 }
 
 #[cfg(test)]
@@ -1068,6 +1097,24 @@ mod tests {
             "a delegating bot reads only the final message"
         );
         assert!(!packet.contains("fold away"));
+
+        // A fresh session on attempt 2 gets the replies its chat folds away.
+        input.delegation.delegated_task = false;
+        input.attempt = 2;
+        input.earlier_replies = vec!["Filed issue #260.".into()];
+        let (packet, _) = super::turn_packet(&input, input.turn_no - 1, None, &skills, &context);
+        assert!(packet.contains("<replies>\nFiled issue #260.\n---\n</replies>"));
+        assert!(packet.contains("earlier replies to this message fold away"));
+        assert!(
+            packet.contains(&input.text),
+            "a fresh session needs the message"
+        );
+        input.attempt = 1;
+        let (packet, _) = super::turn_packet(&input, input.turn_no - 1, None, &skills, &context);
+        assert!(
+            !packet.contains("<replies>") && !packet.contains("fold away"),
+            "a first attempt has nothing earlier to fold"
+        );
     }
 
     #[test]
