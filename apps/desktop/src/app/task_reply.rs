@@ -234,6 +234,9 @@ impl ElseApp {
                     .cursor_pointer()
                     .toggled(expanded)
                     .h_auto()
+                    // A column stretches its children, which centers the label.
+                    .self_start()
+                    .max_w_full()
                     .py_0p5()
                     .px_1p5()
                     .ml(px(-6.))
@@ -282,7 +285,7 @@ impl ElseApp {
                                 div()
                                     .text_size(px(12.))
                                     .text_color(meta)
-                                    .child(super::message_row::stamp(at))
+                                    .child(super::message_row::short_stamp(at))
                             },
                         ))
                         .children(self.task_message(id, conversation.reaction_for(id), cx)),

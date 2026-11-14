@@ -20,17 +20,18 @@ impl DraftStatus {
         matches!(self, Self::Pending | Self::Failed | Self::Uncertain)
     }
 
+    /// What became of the draft, without who approved it.
     pub fn label(self, content: &DraftContent) -> &'static str {
         match self {
             Self::Pending => "Needs approval",
-            Self::Approved if content.is_post() => "Approved, waiting to post",
-            Self::Approved => "Approved, waiting to send",
+            Self::Approved if content.is_post() => "Waiting to post",
+            Self::Approved => "Waiting to send",
             Self::Sending if content.is_post() => "Posting…",
             Self::Sending if content.is_email() => "Sending email…",
             Self::Sending => "Sending message…",
             Self::Sent if content.is_post() => "Posted",
-            Self::Sent if content.is_email() => "Sent email",
-            Self::Sent => "Sent message",
+            Self::Sent if content.is_email() => "Email sent",
+            Self::Sent => "Message sent",
             Self::Failed if content.is_post() => "Post not published",
             Self::Failed if content.is_email() => "Email not sent",
             Self::Failed => "Message not sent",
@@ -206,6 +207,10 @@ impl DraftContent {
     }
 }
 
+/// The detail the API writes when it closes a draft because the owner's reply
+/// moved on (migration `0037_reply_closes_drafts`), not by the Discard button.
+const REPLY_MOVED_ON: &str = "Your reply moved on without sending it.";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ApprovalSource {
@@ -258,12 +263,26 @@ impl OutgoingDraft {
         self.status == DraftStatus::Pending && !self.in_reply
     }
 
-    pub fn label(&self) -> &'static str {
-        if self.status == DraftStatus::Pending && self.in_reply {
-            "Continued in your reply"
-        } else {
-            self.status.label(&self.content)
-        }
+    /// The receipt line: who acted, then what became of the draft.
+    pub fn label(&self) -> String {
+        let outcome = self.status.label(&self.content);
+        let approver = match (self.status, self.approval_source) {
+            (DraftStatus::Pending, _) if self.in_reply => return "Continued in your reply".into(),
+            (DraftStatus::Discarded, _)
+                if self.result_detail.as_deref() == Some(REPLY_MOVED_ON) =>
+            {
+                return "Closed by your reply".into();
+            }
+            // Otherwise only the owner's Discard button discards a draft.
+            (DraftStatus::Discarded, _) => return "You discarded this draft".into(),
+            (DraftStatus::Pending | DraftStatus::Superseded, _) => return outcome.into(),
+            (_, Some(ApprovalSource::Button)) => "You approved",
+            (_, Some(ApprovalSource::Message)) => "You approved in chat",
+            (_, Some(ApprovalSource::Standing)) => "Approved by your standing rule",
+            (DraftStatus::Approved, None) => "Approved",
+            (_, None) => return outcome.into(),
+        };
+        format!("{approver} · {outcome}")
     }
 
     pub fn edit(&self) -> DraftEdit {
@@ -303,7 +322,7 @@ mod tests {
             card.result_detail.as_deref(),
             Some("The mail server accepted it from the connected account.")
         );
-        assert_eq!(card.status.label(&card.content), "Sent email");
+        assert_eq!(card.status.label(&card.content), "Email sent");
         assert!(
             card.content
                 .metadata()
@@ -351,7 +370,57 @@ mod tests {
         assert!(card("pending", false).is_open());
         assert!(!card("pending", true).is_open());
         assert_eq!(card("pending", true).label(), "Continued in your reply");
-        assert_eq!(card("discarded", false).label(), "Draft discarded");
+        assert_eq!(card("discarded", false).label(), "You discarded this draft");
+    }
+
+    #[test]
+    fn a_receipt_names_who_approved_or_discarded_it() {
+        let card = |status: &str, source: Option<&str>, detail: Option<&str>| -> String {
+            serde_json::from_value::<OutgoingDraft>(json!({
+                "id": Uuid::nil(), "lineage_id": Uuid::nil(), "revision": 1,
+                "content": {"channel":"email", "from":"me@example.com", "to":["ada@example.com"],
+                    "cc":[], "bcc":[], "subject":"Hi", "body":"Hi"},
+                "version":1, "status":status, "can_approve":false,
+                "approval_source":source, "result_detail":detail,
+                "updated_at":"2026-11-14T11:00:00Z", "settled_at":"2026-11-14T11:00:00Z"
+            }))
+            .unwrap()
+            .label()
+        };
+        assert_eq!(
+            card("sent", Some("button"), None),
+            "You approved · Email sent"
+        );
+        assert_eq!(
+            card("sent", Some("message"), None),
+            "You approved in chat · Email sent"
+        );
+        assert_eq!(
+            card("sent", Some("standing"), None),
+            "Approved by your standing rule · Email sent"
+        );
+        assert_eq!(
+            card("failed", Some("button"), Some("Refused")),
+            "You approved · Email not sent"
+        );
+        assert_eq!(
+            card("approved", Some("standing"), None),
+            "Approved by your standing rule · Waiting to send"
+        );
+        assert_eq!(card("approved", None, None), "Approved · Waiting to send");
+        assert_eq!(card("sent", None, None), "Email sent");
+        assert_eq!(card("discarded", None, None), "You discarded this draft");
+        assert_eq!(
+            card("discarded", Some("button"), Some("Email not sent: refused")),
+            "You discarded this draft",
+            "a failed draft the owner discarded keeps its failure detail"
+        );
+        assert_eq!(
+            card("discarded", None, Some(REPLY_MOVED_ON)),
+            "Closed by your reply"
+        );
+        assert_eq!(card("superseded", Some("button"), None), "Draft replaced");
+        assert_eq!(card("pending", None, None), "Needs approval");
     }
 
     #[test]

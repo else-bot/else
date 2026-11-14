@@ -878,6 +878,24 @@ pub(super) fn stamp(at: DateTime<Utc>) -> String {
     stamp_in(at, Local::now())
 }
 
+/// The time alone today, the date as well on another day.
+pub(super) fn short_stamp(at: DateTime<Utc>) -> String {
+    short_stamp_in(at, Local::now())
+}
+
+fn short_stamp_in<Tz: TimeZone>(at: DateTime<Utc>, now: DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    if at.with_timezone(&now.timezone()).date_naive() == now.date_naive() {
+        at.with_timezone(&now.timezone())
+            .format("%H:%M")
+            .to_string()
+    } else {
+        stamp_in(at, now)
+    }
+}
+
 fn stamp_in<Tz: TimeZone>(at: DateTime<Utc>, now: DateTime<Tz>) -> String
 where
     Tz::Offset: std::fmt::Display,
@@ -967,7 +985,7 @@ impl Element for CenterReveal {
 
 #[cfg(test)]
 mod tests {
-    use super::{day_label_in, stamp_in, turn_label};
+    use super::{day_label_in, short_stamp_in, stamp_in, turn_label};
     use chrono::{DateTime, FixedOffset, Utc};
 
     #[test]
@@ -1048,6 +1066,16 @@ mod tests {
         assert_eq!(
             stamp_in(at("2025-12-31T21:59:00Z"), now),
             "31 Dec 2025, 23:59"
+        );
+        assert_eq!(short_stamp_in(at("2026-11-04T07:05:00Z"), now), "09:05");
+        assert_eq!(
+            short_stamp_in(at("2026-11-03T22:30:00Z"), now),
+            "00:30",
+            "the viewer's day, not UTC's"
+        );
+        assert_eq!(
+            short_stamp_in(at("2026-11-03T21:30:00Z"), now),
+            "3 Nov, 23:30"
         );
     }
 

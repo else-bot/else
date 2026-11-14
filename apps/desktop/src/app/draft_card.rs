@@ -7,6 +7,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
+use super::message_row::short_stamp;
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::model::{DraftAttachment, DraftEdit, DraftStatus, OutgoingDraft};
@@ -338,7 +339,10 @@ impl ElseApp {
                         .font_medium()
                         .child(draft.content.label().to_owned()),
                 )
-                .child(muted(draft.label().into()))
+                .child(muted(match draft.settled_at {
+                    Some(at) => format!("{} · {}", draft.label(), short_stamp(at)),
+                    None => draft.label(),
+                }))
                 .child(
                     div()
                         .flex_1()

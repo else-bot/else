@@ -497,7 +497,6 @@ fn chose(question: &Question, answer: Option<&QuestionAnswer>) -> String {
         .collect();
     match chosen.as_slice() {
         [] => "Answer sent.".into(),
-        [one] if !question.multiple => format!("You chose {} · {}.", letter(&one.id), one.label),
         many => format!(
             "You chose {}.",
             many.iter()
@@ -561,7 +560,7 @@ mod tests {
             Settled {
                 marker: "Resumed",
                 resumed: true,
-                outcome: "You chose B · HTML digest.".into()
+                outcome: "You chose HTML digest.".into()
             }
         );
         let many = question(
@@ -597,7 +596,7 @@ mod tests {
         form.state = SubmitState::Recorded;
         assert_eq!(
             settled(&pending, Some(&form), None).outcome,
-            "You chose A · Plain text."
+            "You chose Plain text."
         );
     }
 }
