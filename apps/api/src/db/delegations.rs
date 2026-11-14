@@ -1,8 +1,9 @@
 //! One-hop asynchronous delegation.
 //!
 //! A bot's provider attempt in its own owner conversation may hand one task
-//! to another registered bot (the main bot included), at most two individual
-//! delegations per request. A council accepts a group of up to 32 reports
+//! to another registered bot (the main bot included), at most six individual
+//! delegations per request: a triage, implementation and merge chain plus
+//! one review round back to the implementer, with a hop to spare. A council accepts a group of up to 32 reports
 //! atomically. Each child runs as an ordinary queued turn of the target bot,
 //! in a separate task conversation, through the same scheduler. The target's owner conversation shows a receipt and the
 //! child's reply, and the delegating bot's conversation shows the settled
@@ -40,7 +41,7 @@ mod control;
 pub use control::{ControlError, Status, Task, TaskState, Updated, cancel, update};
 
 /// Child limit when accepting an individual delegation.
-pub const MAX_CHILDREN: i64 = 2;
+pub const MAX_CHILDREN: i64 = 6;
 /// Individual delegations per provider attempt; a council parks after its group.
 pub const PER_ATTEMPT: i64 = 1;
 pub const MAX_COUNCIL_BOTS: usize = 32;

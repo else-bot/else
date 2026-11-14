@@ -261,6 +261,11 @@ def run(runner):
                                             "task": "Implement ENG-412: skip removed products in CartService.total."},
                                {"status": "pending", "parked": True})],
                     "Research filed ENG-412; I handed the fix to GitHub."),
+                "ready-result-goes-back-to-merging-bot": (
+                    [self.call("delegate", {"target_bot_id": "00000000-0000-0000-0000-000000000004",
+                                            "task": "Squash merge https://github.com/acme/shop/pull/812 for ENG-412."},
+                               {"status": "pending", "parked": True})],
+                    "PR 812 is ready; Research is squash merging it."),
                 "task-names-follow-up-for-delegating-bot": (
                     [{"name": "delegate", "arguments": {"target_bot_id": "00000000-0000-0000-0000-000000000005"},
                       "result": mock.tool_result({"error": "NOT_ALLOWED"}, True)}], "Fix: skip removed products in CartService.total. Follow-up for GitHub "
