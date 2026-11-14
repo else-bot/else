@@ -630,10 +630,14 @@ impl RowText {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(cx.theme().muted_foreground),
                             )
+                            // Each cell's whole 24 px gutter sits on its right,
+                            // so the first column starts on the paragraph edge.
                             .with_table_cell(
                                 StyleRefinement::default()
                                     .border_color(cx.theme().foreground.opacity(0.))
-                                    .py_2(),
+                                    .py_2()
+                                    .pl_0()
+                                    .pr(px(24.)),
                             ),
                     )
                     .code_block_actions(|block, _, cx| {
