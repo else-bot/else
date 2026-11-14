@@ -371,7 +371,7 @@ impl Shell {
         let app = cx.new(|cx| ElseApp::new(client.clone(), preferences, window, cx));
         let shell = cx.weak_entity();
         app.update(cx, |app, _| {
-            app.set_server_switcher(std::rc::Rc::new(move |link, cx| {
+            app.set_server_label(std::rc::Rc::new(move |link, cx| {
                 shell
                     .update(cx, |shell, cx| shell.render_server_label(link, cx))
                     .unwrap_or_else(|_| div().into_any_element())
