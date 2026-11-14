@@ -4,8 +4,7 @@ use super::task_reply::state::format_elapsed;
 use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{Delegation, DelegationStatus};
 use chrono::Utc;
-use gpui_kit::component::FocusableExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
@@ -102,41 +101,36 @@ impl ElseApp {
         }
         meta.push(elapsed);
         let meta = meta.join(" · ");
-        let row = Button::new(SharedString::from(format!("handoff-details-{id}")))
-            .ghost()
-            .focus_ring(false)
-            .cursor_pointer()
-            .w_full()
-            .h_auto()
-            .p_0()
-            .accessibility_label(format!(
-                "{label}: {meta}. {} tasks. {} details",
-                group.len(),
-                if expanded { "Hide" } else { "Show" }
-            ))
-            .child(
-                super::action_card::event_row(theme)
-                    .child(faces)
-                    .child(super::action_card::event_verb(theme, verb))
-                    .child(super::action_card::event_object(theme, object))
-                    .child(super::action_card::event_end(
-                        theme,
-                        super::action_card::EventEnd::Meta(meta.into()),
-                        if expanded {
-                            super::action_card::Disclosure::Expanded
-                        } else {
-                            super::action_card::Disclosure::Collapsed
-                        },
-                    )),
-            )
-            .on_click(cx.listener(move |app, _, _, cx| {
-                if let Some(view) = app.view.as_mut()
-                    && !view.expanded_councils.remove(&id)
-                {
-                    view.expanded_councils.insert(id);
-                }
-                app.remeasure_row(RowKey::Handoff(id), cx);
-            }));
+        let row =
+            super::action_card::event_button(SharedString::from(format!("handoff-details-{id}")))
+                .accessibility_label(format!(
+                    "{label}: {meta}. {} tasks. {} details",
+                    group.len(),
+                    if expanded { "Hide" } else { "Show" }
+                ))
+                .child(
+                    super::action_card::event_row(theme)
+                        .child(faces)
+                        .child(super::action_card::event_verb(theme, verb))
+                        .child(super::action_card::event_object(theme, object))
+                        .child(super::action_card::event_end(
+                            theme,
+                            super::action_card::EventEnd::Meta(meta.into()),
+                            if expanded {
+                                super::action_card::Disclosure::Expanded
+                            } else {
+                                super::action_card::Disclosure::Collapsed
+                            },
+                        )),
+                )
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    if let Some(view) = app.view.as_mut()
+                        && !view.expanded_councils.remove(&id)
+                    {
+                        view.expanded_councils.insert(id);
+                    }
+                    app.remeasure_row(RowKey::Handoff(id), cx);
+                }));
         let mut content = v_flex().w_full().min_w_0().child(row);
         if expanded {
             let mut details = v_flex().w_full().min_w_0().gap_3().p_4();

@@ -608,6 +608,7 @@ impl Shell {
                     .child(
                         v_flex()
                             .flex_1()
+                            .min_w_0()
                             .gap_1()
                             .child(div().text_xs().child("Automatic update checks"))
                             .child(div().text_xs().text_color(theme.muted_foreground).child(
@@ -625,7 +626,7 @@ impl Shell {
                         false,
                         view.busy() || matches!(snapshot.check, UpdateCheck::Checking),
                         cx,
-                    )),
+                    ).flex_none()),
             ))
             .into_any_element()
     }
