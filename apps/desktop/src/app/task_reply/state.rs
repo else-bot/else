@@ -372,7 +372,7 @@ fn keep_earlier_replies(
     let has_text = |id| {
         conversation
             .item(id)
-            .is_some_and(|item| !item.text.trim().is_empty())
+            .is_some_and(|item| crate::attachments::has_prose(&item.text, &item.parts))
     };
     let mut delivered_later = files(latest);
     let mut kept = Vec::new();

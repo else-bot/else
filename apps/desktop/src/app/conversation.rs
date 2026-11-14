@@ -853,25 +853,15 @@ impl ElseApp {
             let format = RowFormat::for_item(item);
             // A kept task reply leaves out a file a later reply delivers again.
             let repeated = tasks.get(&item.turn_id).map(|reply| &reply.repeated_files);
-            let parts = item
-                .parts
-                .iter()
-                .filter(|part| match part {
-                    crate::attachments::MessagePart::File { file } => {
-                        !repeated.is_some_and(|ids| ids.contains(&file.id))
-                    }
-                    crate::attachments::MessagePart::Text { .. } => true,
-                })
-                .cloned()
-                .collect();
-            texts.push((
-                RowKey::Item(item.id),
-                item.bot_task
-                    .as_ref()
-                    .map_or_else(|| item.text.clone(), |task| task.prompt.clone()),
-                format,
-                parts,
-            ));
+            let shown = repeated.and_then(|ids| {
+                crate::attachments::without_files(&item.parts, |file| ids.contains(&file.id))
+            });
+            let (text, parts) = match (&item.bot_task, shown) {
+                (Some(task), _) => (task.prompt.clone(), item.parts.clone()),
+                (None, Some(shown)) => shown,
+                (None, None) => (item.text.clone(), item.parts.clone()),
+            };
+            texts.push((RowKey::Item(item.id), text, format, parts));
             if tasks
                 .get(&item.turn_id)
                 .is_some_and(|reply| reply.anchor == Some(item.id))

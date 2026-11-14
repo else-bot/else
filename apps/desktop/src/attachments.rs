@@ -58,6 +58,45 @@ pub fn input_content(text: &str, parts: &[MessagePart]) -> InputContent {
     content
 }
 
+/// The message's text and parts without the files `hide` names, or `None`
+/// when it names none. The text is rebuilt from the parts, because each
+/// file's `[File: …]` fallback sits in the text at the offset its part
+/// implies.
+pub fn without_files(
+    parts: &[MessagePart],
+    hide: impl Fn(&Attachment) -> bool,
+) -> Option<(String, Vec<MessagePart>)> {
+    if !parts
+        .iter()
+        .any(|part| matches!(part, MessagePart::File { file } if hide(file)))
+    {
+        return None;
+    }
+    let parts: Vec<_> = parts
+        .iter()
+        .filter(|part| !matches!(part, MessagePart::File { file } if hide(file)))
+        .cloned()
+        .collect();
+    let text = parts
+        .iter()
+        .map(|part| match part {
+            MessagePart::Text { text } => text.clone(),
+            MessagePart::File { file } => file.fallback(),
+        })
+        .collect();
+    Some((text, parts))
+}
+
+/// Whether the message says anything besides its files.
+pub fn has_prose(text: &str, parts: &[MessagePart]) -> bool {
+    if parts.is_empty() {
+        return !text.trim().is_empty();
+    }
+    parts
+        .iter()
+        .any(|part| matches!(part, MessagePart::Text { text } if !text.trim().is_empty()))
+}
+
 /// A byte count in decimal units, as people read file sizes: 840 B, 6.2 kB.
 pub fn byte_size(bytes: u64) -> String {
     bytesize::ByteSize::b(bytes).display().si().to_string()
@@ -98,6 +137,42 @@ mod tests {
         assert_eq!(content.tokens().len(), 1);
         assert_eq!(&text[content.tokens()[0].range()], file.fallback());
         assert_eq!(content.tokens()[0].token().label().as_ref(), "écran.png");
+    }
+
+    #[test]
+    fn hiding_a_file_keeps_the_other_files_tokens_in_place() {
+        let file = |name: &str| Attachment {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            media_type: "application/pdf".into(),
+            size: 42,
+        };
+        let (repeated, unique) = (file("old.pdf"), file("new.pdf"));
+        let parts = vec![
+            MessagePart::Text {
+                text: "See ".into(),
+            },
+            MessagePart::File {
+                file: repeated.clone(),
+            },
+            MessagePart::Text {
+                text: " and ".into(),
+            },
+            MessagePart::File {
+                file: unique.clone(),
+            },
+        ];
+        assert!(without_files(&parts, |_| false).is_none());
+        let (text, kept) = without_files(&parts, |file| file.id == repeated.id).unwrap();
+        assert_eq!(text, format!("See  and {}", unique.fallback()));
+        let content = input_content(&text, &kept);
+        assert_eq!(content.tokens().len(), 1, "the unique file stays a token");
+        assert_eq!(&text[content.tokens()[0].range()], unique.fallback());
+        assert!(has_prose(&text, &kept));
+        assert!(!has_prose(
+            &repeated.fallback(),
+            &[MessagePart::File { file: repeated }]
+        ));
     }
 
     #[test]
