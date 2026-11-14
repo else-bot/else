@@ -228,6 +228,23 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
     replies
 }
 
+/// The earlier replies a task card shows above its current reply, oldest
+/// first: kept replies always, folded progress only once the owner expands
+/// it. The current reply must read last, because an earlier one can describe
+/// a state the turn has since left, like a draft the owner then discarded.
+pub(in crate::app) fn earlier_replies(
+    conversation: &Conversation,
+    kept: &[Uuid],
+    history: &[Uuid],
+    expanded: bool,
+) -> Vec<Uuid> {
+    let folded = if expanded { history } else { &[] };
+    let mut ids: Vec<Uuid> = kept.iter().chain(folded).copied().collect();
+    ids.sort_by_key(|&id| conversation.item(id).map_or(i64::MAX, |item| item.seq));
+    ids.dedup();
+    ids
+}
+
 /// Moves the earlier replies the owner still needs from `history` to `kept`:
 /// a reacted reply, the reply that ended the most recent earlier attempt, and
 /// a reply with a file no later reply delivers again. A bot that restates its
@@ -865,6 +882,42 @@ mod tests {
         assert_eq!(finished.latest, Some(id(5)));
         assert_eq!(finished.kept, [id(3)]);
         assert_eq!(finished.history, [id(2)]);
+    }
+
+    /// Shaped like the production turn whose draft the owner discarded: the
+    /// "ready for your review" reply ended attempt 1, and the discard resumed
+    /// the turn. The card must end on the discard, not on the stale claim.
+    #[test]
+    fn a_reply_from_before_a_park_reads_before_the_reply_that_ended_the_turn() {
+        let reply = |number, attempt| {
+            let mut reply = item(number, 10, "assistant");
+            reply["attempt"] = json!(attempt);
+            reply
+        };
+        let mut finished = turn(10, "completed");
+        finished["attempt"] = json!(2);
+        let c = conversation(
+            vec![
+                item(98, 10, "user"),
+                reply(99, 1),
+                reply(100, 1),
+                reply(101, 2),
+            ],
+            vec![finished],
+        );
+        let task = &task_replies(&c)[&id(10)];
+        assert_eq!(task.latest, Some(id(101)), "the discard reply is current");
+
+        assert_eq!(
+            earlier_replies(&c, &task.kept, &task.history, false),
+            [id(100)],
+            "the reply from before the park shows above the current one"
+        );
+        assert_eq!(
+            earlier_replies(&c, &task.kept, &task.history, true),
+            [id(99), id(100)],
+            "expanded progress joins it in the order it was written"
+        );
     }
 
     /// #393, shaped like production turn 42: every resumed attempt restated

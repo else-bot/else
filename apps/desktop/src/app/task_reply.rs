@@ -254,7 +254,8 @@ impl ElseApp {
                 status.into_any_element()
             }
         });
-        let earlier = (expanded && expandable).then(|| {
+        let earlier_ids = state::earlier_replies(conversation, &task.kept, &history, expanded);
+        let earlier = (!earlier_ids.is_empty()).then(|| {
             let mut updates = v_flex()
                 .w_full()
                 .min_w_0()
@@ -262,7 +263,7 @@ impl ElseApp {
                 .pl_3()
                 .border_l_1()
                 .border_color(theme.border);
-            for id in history {
+            for id in earlier_ids {
                 updates = updates.child(
                     v_flex()
                         .w_full()
@@ -305,30 +306,16 @@ impl ElseApp {
             .min_w_0()
             .gap_1p5()
             .child(name_row);
-        // A turn that ended closes on its meta row; a live one leads with it.
+        // Earlier replies always read before the current one. A turn that
+        // ended closes on its meta row; a live one leads with it.
         card = if complete || error {
-            card.children(reply)
-                .children(earlier)
+            card.children(earlier)
+                .children(reply)
                 .children(explanation)
                 .children(status)
         } else {
             card.children(status).children(earlier).children(reply)
         };
-        for &id in &task.kept {
-            card = card.child(
-                v_flex()
-                    .w_full()
-                    .gap_1()
-                    .pt_1()
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(meta)
-                            .child("Kept from this task"),
-                    )
-                    .children(self.task_message(id, conversation.reaction_for(id), cx)),
-            );
-        }
         let animate = !cx.reduce_motion()
             && view
                 .reply_transitions
