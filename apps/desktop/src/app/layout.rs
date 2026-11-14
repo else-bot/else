@@ -139,31 +139,71 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let width = f32::from(window.viewport_size().width);
-        let x = f32::from(event.event.position.x);
-        match event.drag(cx).edge {
-            SidebarEdge::Left => {
-                let right = if self.settings_shown() {
-                    self.preferences.details_width
-                } else {
-                    0.
-                };
-                self.preferences.sidebar_width =
-                    x.clamp(180., (width - right - 360.).clamp(180., 420.));
-            }
-            SidebarEdge::Right => {
-                let left = if width
-                    < self.preferences.sidebar_width + self.preferences.details_width + 360.
-                {
-                    0.
-                } else {
-                    self.preferences.sidebar_width
-                };
-                self.preferences.details_width =
-                    (width - x).clamp(280., (width - left - 360.).clamp(280., 560.));
-            }
+        if !matches!(event.drag(cx).edge, SidebarEdge::Left) {
+            return;
         }
+        let room = self.width(window);
+        let right = if self.settings_shown() {
+            self.preferences.details_width
+        } else {
+            0.
+        };
+        self.preferences.sidebar_width =
+            dragged_width(SidebarEdge::Left, event.bounds, event.event.position.x)
+                .clamp(180., (room - right - 360.).clamp(180., 420.));
         self.save_preferences(cx);
+    }
+
+    pub(super) fn resize_details(
+        &mut self,
+        event: &DragMoveEvent<SidebarResize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(event.drag(cx).edge, SidebarEdge::Right) {
+            return;
+        }
+        let width = self.width(window);
+        let left = if self.crowded(width) {
+            0.
+        } else {
+            self.preferences.sidebar_width
+        };
+        self.preferences.details_width =
+            dragged_width(SidebarEdge::Right, event.bounds, event.event.position.x)
+                .clamp(280., (width - left - 360.).clamp(280., 560.));
+        self.save_preferences(cx);
+    }
+
+    /// The width this view gets, or the whole window's before its first layout.
+    pub(super) fn width(&self, window: &Window) -> f32 {
+        self.width
+            .unwrap_or_else(|| f32::from(window.viewport_size().width))
+    }
+
+    /// An invisible layer that records the view's laid-out width.
+    pub(super) fn measure_width(cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity().downgrade();
+        canvas(
+            move |bounds, _, cx| {
+                let width = f32::from(bounds.size.width);
+                let _ = entity.update(cx, |app, cx| {
+                    if app.width != Some(width) {
+                        app.width = Some(width);
+                        cx.notify();
+                    }
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+    }
+
+    /// Whether the sidebar must hide so the bot settings panel and the
+    /// conversation keep their room.
+    pub(super) fn crowded(&self, width: f32) -> bool {
+        width < self.preferences.sidebar_width + self.preferences.details_width + 360.
     }
 
     pub(crate) fn panel_widths(&self) -> (f32, f32) {
@@ -196,10 +236,39 @@ impl ElseApp {
     }
 }
 
+/// The width a panel takes when its handle is dragged to the pointer. The
+/// panel may not start at the window's edge (the server rail sits left of the
+/// sidebar), so the width is measured from the panel's own fixed edge.
+fn dragged_width(edge: SidebarEdge, panel: Bounds<Pixels>, x: Pixels) -> f32 {
+    f32::from(match edge {
+        SidebarEdge::Left => x - panel.left(),
+        SidebarEdge::Right => panel.right() - x,
+    })
+}
+
 impl Drop for ElseApp {
     fn drop(&mut self) {
         if let Err(err) = self.preferences.save() {
             eprintln!("{err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn sidebar_edge_follows_the_pointer_beside_the_server_rail() {
+        let sidebar = Bounds::new(point(px(76.), px(0.)), size(px(240.), px(800.)));
+        assert_eq!(dragged_width(SidebarEdge::Left, sidebar, px(316.)), 240.);
+        assert_eq!(dragged_width(SidebarEdge::Left, sidebar, px(376.)), 300.);
+    }
+
+    #[::core::prelude::v1::test]
+    fn details_edge_follows_the_pointer_from_the_window_edge() {
+        let details = Bounds::new(point(px(864.), px(0.)), size(px(336.), px(800.)));
+        assert_eq!(dragged_width(SidebarEdge::Right, details, px(864.)), 336.);
+        assert_eq!(dragged_width(SidebarEdge::Right, details, px(800.)), 400.);
     }
 }

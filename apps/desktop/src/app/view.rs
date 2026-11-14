@@ -1169,10 +1169,8 @@ impl Render for ElseApp {
             .settings_shown()
             .then(|| self.selected_bot().cloned())
             .flatten();
-        let width = window.viewport_size().width;
-        let crowded = settings.is_some()
-            && f32::from(width)
-                < self.preferences.sidebar_width + self.preferences.details_width + 360.;
+        let width = self.width(window);
+        let crowded = settings.is_some() && self.crowded(width);
         let theme = cx.theme();
         h_flex()
             .relative()
@@ -1233,9 +1231,10 @@ impl Render for ElseApp {
             )
             .size_full()
             .text_color(theme.foreground)
+            .child(Self::measure_width(cx))
             .children((!crowded).then(|| self.render_sidebar(window, cx)))
             .child(self.render_main(window, cx))
-            .children(settings.map(|bot| self.render_settings(&bot, width, cx)))
+            .children(settings.map(|bot| self.render_settings(&bot, px(width), cx)))
             .children(self.image_viewer.clone())
             .children(self.render_quote_prompt(window, cx))
             .children(self.render_quote_editor(cx))

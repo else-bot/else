@@ -303,6 +303,9 @@ pub struct ElseApp {
     carrying_order: bool,
     preferences: crate::preferences::Preferences,
     _save_preferences: Option<Task<()>>,
+    /// The width this view was last laid out at, measured because the server
+    /// rail and a client-drawn window frame take part of the window.
+    width: Option<f32>,
     settings_open: bool,
     details_tab: computer::DetailsTab,
     computer: Option<Entity<computer::ComputerView>>,
@@ -403,6 +406,7 @@ impl ElseApp {
             carrying_order: false,
             preferences,
             _save_preferences: None,
+            width: None,
             settings_open: false,
             details_tab: Default::default(),
             computer: None,

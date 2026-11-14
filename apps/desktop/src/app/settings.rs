@@ -1097,7 +1097,7 @@ impl ElseApp {
             .id("bot-settings")
             .relative()
             .w(px(self.preferences.details_width).min((viewport - px(360.)).max(px(280.))))
-            .on_drag_move(cx.listener(Self::resize_sidebar))
+            .on_drag_move(cx.listener(Self::resize_details))
             .flex_none()
             .h_full()
             .bg(theme.sidebar)
