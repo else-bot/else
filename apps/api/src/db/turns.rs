@@ -988,16 +988,32 @@ async fn earlier_replies(
     .bind(turn_id)
     .fetch_all(&mut *conn)
     .await?;
-    let mut used = 0;
-    let mut kept: Vec<String> = texts
-        .into_iter()
-        .take_while(|text| {
-            used += text.len();
-            used <= EARLIER_REPLIES_BUDGET
-        })
-        .collect();
+    Ok(within_budget(texts, EARLIER_REPLIES_BUDGET))
+}
+
+/// Replies given newest first, returned oldest first within `budget`
+/// bytes. The reply that crosses the budget keeps its opening, cut at a
+/// character boundary, so even one long reply still arrives.
+fn within_budget(newest_first: Vec<String>, budget: usize) -> Vec<String> {
+    let mut left = budget;
+    let mut kept = Vec::new();
+    for text in newest_first {
+        if text.len() <= left {
+            left -= text.len();
+            kept.push(text);
+            continue;
+        }
+        let mut end = left;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end > 0 {
+            kept.push(format!("{}…", &text[..end]));
+        }
+        break;
+    }
     kept.reverse();
-    Ok(kept)
+    kept
 }
 
 pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::Error> {
@@ -1348,6 +1364,18 @@ pub async fn cancelling(pool: &SqlitePool) -> Result<Vec<Uuid>, sqlx::Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_long_newest_reply_is_cut_not_dropped() {
+        let kept = super::within_budget(vec!["é".repeat(10), "old".into()], 5);
+        assert_eq!(
+            kept,
+            ["éé…"],
+            "the newest reply arrives, cut at a character"
+        );
+        let kept = super::within_budget(vec!["new".into(), "older".into(), "oldest".into()], 9);
+        assert_eq!(kept, ["o…", "older", "new"], "oldest first");
+    }
+
     use super::*;
     use crate::app::messages::ReactionKind;
 
