@@ -443,7 +443,7 @@ impl ElseApp {
             | RowKey::SocialSetup(_)
             | RowKey::Handoff(_)
             | RowKey::ComputerHandoff(_)
-            | RowKey::OwnerNotice(_) => self.render_card(key, false, window, cx)?,
+            | RowKey::OwnerNotice(_) => self.render_card(key, CardPlacement::Row, window, cx)?,
             RowKey::Pending(request_id) => {
                 let pending = self
                     .selected
@@ -537,12 +537,19 @@ impl ElseApp {
     }
 }
 
+/// Where an owner action card renders: as its own transcript row, or inside
+/// its task's card after the reply it followed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CardPlacement {
+    Row,
+    InTask,
+}
+
 impl ElseApp {
-    /// An owner action card, as its own row or `in_task` inside its task's card.
     pub(super) fn render_card(
         &self,
         key: RowKey,
-        in_task: bool,
+        placement: CardPlacement,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -550,8 +557,8 @@ impl ElseApp {
         Some(match key {
             RowKey::SkillInstall(id) => side(self.render_skill_card(id, cx)),
             RowKey::SecretRequest(id) => side(self.render_secret_card(id, cx)),
-            RowKey::Question(id) => side(self.render_question_card(id, in_task, window, cx)),
-            RowKey::Draft(id) => side(self.render_draft_card(id, in_task, cx)),
+            RowKey::Question(id) => side(self.render_question_card(id, placement, window, cx)),
+            RowKey::Draft(id) => side(self.render_draft_card(id, placement, cx)),
             RowKey::SocialSetup(id) => side(self.render_social_card(id, cx)),
             RowKey::Handoff(id) => self.render_handoff(id, cx),
             RowKey::ComputerHandoff(id) => self.render_handoff_row(id, cx),

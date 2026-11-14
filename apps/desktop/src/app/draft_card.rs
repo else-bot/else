@@ -7,7 +7,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
-use super::message_row::short_stamp;
+use super::message_row::{CardPlacement, short_stamp};
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::model::{DraftAttachment, DraftEdit, DraftStatus, OutgoingDraft};
@@ -262,7 +262,7 @@ impl ElseApp {
     pub(super) fn render_draft_card(
         &self,
         id: Uuid,
-        in_task: bool,
+        placement: CardPlacement,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(view) = self.view.as_ref() else {
@@ -338,31 +338,31 @@ impl ElseApp {
                     .size_4()
                     .text_color(color),
                 )
-                .when(in_task, |header| {
-                    let (title, outcome) = draft.task_receipt();
-                    header.child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_medium()
-                                    .whitespace_normal()
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .whitespace_normal()
-                                    .text_color(theme.muted_foreground)
-                                    .child(outcome),
-                            ),
-                    )
-                })
-                .when(!in_task, |header| {
-                    header
+                .map(|header| match placement {
+                    CardPlacement::InTask => {
+                        let (title, outcome) = draft.task_receipt();
+                        header.child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_medium()
+                                        .whitespace_normal()
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .whitespace_normal()
+                                        .text_color(theme.muted_foreground)
+                                        .child(outcome),
+                                ),
+                        )
+                    }
+                    CardPlacement::Row => header
                         .child(
                             div()
                                 .text_sm()
@@ -381,7 +381,7 @@ impl ElseApp {
                                 .text_color(theme.muted_foreground)
                                 .truncate()
                                 .child(draft.content.audience()),
-                        )
+                        ),
                 })
                 .child(
                     Icon::new(if expanded {

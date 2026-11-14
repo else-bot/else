@@ -13,6 +13,7 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use super::super::action_card::OPTION_HEIGHT;
+use super::super::message_row::CardPlacement;
 use super::{Connection, ElseApp, QuestionForm, RowKey, SubmitState, callout, letter, receipt};
 use crate::model::{Question, QuestionAnswer};
 
@@ -133,7 +134,7 @@ impl ElseApp {
         question: &Question,
         form: Option<&QuestionForm>,
         bot_name: &str,
-        in_task: bool,
+        placement: CardPlacement,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -189,7 +190,7 @@ impl ElseApp {
             }
             // Inside its task the card already sits where the bot paused, so
             // the divider would head the replies from before the pause.
-            if in_task {
+            if placement == CardPlacement::InTask {
                 return card.into_any_element();
             }
             let at = question

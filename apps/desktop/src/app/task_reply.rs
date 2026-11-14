@@ -2,6 +2,7 @@ pub(super) mod state;
 
 use self::state::{Earlier, ReplyState, TaskReply};
 use super::conversation::ReplyLayout;
+use super::message_row::CardPlacement;
 use super::reply::Author;
 use super::{ElseApp, RowKey};
 use crate::avatar::bot_avatar;
@@ -270,7 +271,12 @@ impl ElseApp {
                 let id = match entry {
                     Earlier::Reply(id) => id,
                     Earlier::Card(key) => {
-                        updates = updates.children(self.render_card(key, true, window, cx));
+                        updates = updates.children(self.render_card(
+                            key,
+                            CardPlacement::InTask,
+                            window,
+                            cx,
+                        ));
                         continue;
                     }
                 };

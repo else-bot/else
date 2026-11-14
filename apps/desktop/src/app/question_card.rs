@@ -17,6 +17,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
+use super::message_row::CardPlacement;
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::model::{
@@ -210,7 +211,7 @@ impl ElseApp {
     pub(super) fn render_question_card(
         &self,
         id: Uuid,
-        in_task: bool,
+        placement: CardPlacement,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -229,7 +230,7 @@ impl ElseApp {
             .unwrap_or_default();
         let waiting = question.is_pending() && !submit.is_some_and(QuestionForm::locks);
         let card = if !question.is_approval() {
-            self.render_choice_card(question, submit, &bot_name, in_task, window, cx)
+            self.render_choice_card(question, submit, &bot_name, placement, window, cx)
         } else if question.mcp_connection().is_some() || question.email_connection().is_some() {
             self.render_connection_card(question, &bot_name, cx)
         } else {
