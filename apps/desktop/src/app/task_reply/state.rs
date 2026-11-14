@@ -65,7 +65,7 @@ impl TaskReply {
     pub(in crate::app) fn elapsed(&self, now: DateTime<Utc>) -> Option<String> {
         // `started_at` restarts with each attempt, so a resumed task's
         // finished span would cover only its last attempt.
-        if self.state.terminal() && self.attempt > Some(1) {
+        if self.state.terminal() && self.attempt.is_some_and(|attempt| attempt > 1) {
             return None;
         }
         let start = self.started_at?;
@@ -76,16 +76,44 @@ impl TaskReply {
         };
         Some(format_elapsed((end - start).num_seconds().max(0)))
     }
-}
 
-/// The fold's label: it counts only the `hidden` replies, so beside entries
-/// the rail already shows it says "more".
-pub(in crate::app) fn fold_label(hidden: usize, rail_shown: bool) -> String {
-    format!(
-        "{hidden} {}{}",
-        if rail_shown { "more " } else { "" },
-        if hidden == 1 { "update" } else { "updates" }
-    )
+    /// What the card shows above its current reply, oldest first: kept
+    /// replies and cards always, the folded `history` once expanded. The
+    /// current reply must read last, because an earlier one can describe a
+    /// state the turn has since left, like a draft the owner then discarded.
+    pub(in crate::app) fn earlier(
+        &self,
+        conversation: &Conversation,
+        history: &[Uuid],
+        expanded: bool,
+    ) -> Vec<Earlier> {
+        let seq = |id| conversation.item(id).map_or(i64::MAX, |item| item.seq);
+        let folded = if expanded { history } else { &[] };
+        let mut entries: Vec<_> = self
+            .kept
+            .iter()
+            .chain(folded)
+            .map(|&id| ((seq(id), 0), Earlier::Reply(id)))
+            .chain(
+                self.cards
+                    .iter()
+                    .map(|card| ((seq(card.after), 1), Earlier::Card(card.key))),
+            )
+            .collect();
+        entries.sort_by_key(|(at, _)| *at);
+        entries.into_iter().map(|(_, entry)| entry).collect()
+    }
+
+    /// The fold's label: it counts only the `hidden` replies, so beside
+    /// entries the card already shows it says "more".
+    pub(in crate::app) fn fold_label(&self, hidden: usize) -> String {
+        let more = !self.kept.is_empty() || !self.cards.is_empty();
+        format!(
+            "{hidden} {}{}",
+            if more { "more " } else { "" },
+            if hidden == 1 { "update" } else { "updates" }
+        )
+    }
 }
 
 pub(in crate::app) fn format_elapsed(seconds: i64) -> String {
@@ -266,79 +294,37 @@ pub(in crate::app) enum Earlier {
 
 /// Moves each card of a task's turn that follows an item before the task's
 /// row into that task, so it reads where the owner acted instead of above
-/// the bot's name. A pending card follows the turn's last item, so it keeps
-/// its own row below the task. Returns the rows left in the transcript.
+/// the bot's name, with the reply it followed kept in view. A pending card
+/// follows the turn's last item, so it keeps its own row below the task.
+/// Returns the rows left in the transcript.
 pub(in crate::app) fn place_cards(
     conversation: &Conversation,
     tasks: &mut HashMap<Uuid, TaskReply>,
     cards: Vec<(Uuid, RowKey, Option<Uuid>)>,
 ) -> Vec<(RowKey, Option<Uuid>)> {
     let seq = |id| conversation.item(id).map(|item| item.seq);
+    let turn_of = |id| conversation.item(id).map(|item| item.turn_id);
     cards
         .into_iter()
         .filter_map(|(turn, key, anchor)| {
-            let task = tasks.get_mut(&turn);
-            let inside = anchor.filter(|&after| {
-                conversation
-                    .item(after)
-                    .is_some_and(|item| item.turn_id == turn)
-                    && task
-                        .as_ref()
-                        .and_then(|task| seq(task.anchor?))
-                        .is_some_and(|row| seq(after).is_some_and(|after| after < row))
-            });
-            match (inside, task) {
-                (Some(after), Some(task)) => {
-                    task.cards.push(TaskCard { after, key });
-                    // The reply a card followed stays in view beside it.
-                    if let Some(at) = task.history.iter().position(|&id| id == after) {
-                        task.kept.push(task.history.remove(at));
-                        task.kept.sort_by_key(|&id| seq(id));
-                    }
-                    None
-                }
-                _ => Some((key, anchor)),
+            let Some((task, after)) = tasks.get_mut(&turn).zip(anchor) else {
+                return Some((key, anchor));
+            };
+            let before_row = task
+                .anchor
+                .and_then(seq)
+                .is_some_and(|row| seq(after) < Some(row));
+            if turn_of(after) != Some(turn) || !before_row {
+                return Some((key, anchor));
             }
+            task.cards.push(TaskCard { after, key });
+            if let Some(at) = task.history.iter().position(|&id| id == after) {
+                task.kept.push(task.history.remove(at));
+                task.kept.sort_by_key(|&id| seq(id));
+            }
+            None
         })
         .collect()
-}
-
-/// [`earlier_replies`] with the task's cards, each after the item it followed.
-pub(in crate::app) fn earlier_entries(
-    conversation: &Conversation,
-    task: &TaskReply,
-    history: &[Uuid],
-    expanded: bool,
-) -> Vec<Earlier> {
-    let seq = |id| conversation.item(id).map_or(i64::MAX, |item| item.seq);
-    let mut entries: Vec<_> = earlier_replies(conversation, &task.kept, history, expanded)
-        .into_iter()
-        .map(|id| ((seq(id), 0), Earlier::Reply(id)))
-        .chain(
-            task.cards
-                .iter()
-                .map(|card| ((seq(card.after), 1), Earlier::Card(card.key))),
-        )
-        .collect();
-    entries.sort_by_key(|(at, _)| *at);
-    entries.into_iter().map(|(_, entry)| entry).collect()
-}
-
-/// The earlier replies a task card shows above its current reply, oldest
-/// first: kept replies always, folded progress only once the owner expands
-/// it. The current reply must read last, because an earlier one can describe
-/// a state the turn has since left, like a draft the owner then discarded.
-pub(in crate::app) fn earlier_replies(
-    conversation: &Conversation,
-    kept: &[Uuid],
-    history: &[Uuid],
-    expanded: bool,
-) -> Vec<Uuid> {
-    let folded = if expanded { history } else { &[] };
-    let mut ids: Vec<Uuid> = kept.iter().chain(folded).copied().collect();
-    ids.sort_by_key(|&id| conversation.item(id).map_or(i64::MAX, |item| item.seq));
-    ids.dedup();
-    ids
 }
 
 /// Moves the earlier replies the owner still needs from `history` to `kept`:

@@ -83,12 +83,7 @@ impl ElseApp {
             .xsmall()
             .flex_none()
         };
-        let updates = expandable.then(|| {
-            state::fold_label(
-                history.len(),
-                !task.kept.is_empty() || !task.cards.is_empty(),
-            )
-        });
+        let updates = expandable.then(|| task.fold_label(history.len()));
         // Every assistant turn opens with the same name row as a plain reply.
         let name_row = h_flex()
             .w_full()
@@ -262,7 +257,7 @@ impl ElseApp {
                 status.into_any_element()
             }
         });
-        let entries = state::earlier_entries(conversation, task, &history, expanded);
+        let entries = task.earlier(conversation, &history, expanded);
         let earlier = (!entries.is_empty()).then(|| {
             let mut updates = v_flex()
                 .w_full()

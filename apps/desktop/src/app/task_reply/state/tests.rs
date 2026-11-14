@@ -469,10 +469,22 @@ fn a_resumed_task_shows_no_duration_once_finished() {
 
 #[test]
 fn the_fold_counts_only_what_it_hides_and_says_more_beside_the_rail() {
-    assert_eq!(fold_label(1, true), "1 more update");
-    assert_eq!(fold_label(3, true), "3 more updates");
-    assert_eq!(fold_label(1, false), "1 update");
-    assert_eq!(fold_label(2, false), "2 updates");
+    let parked = parked_turn("completed", true);
+    let (tasks, _) = placed(&parked);
+    let beside = &tasks[&id(10)];
+    assert_eq!(beside.fold_label(1), "1 more update");
+    assert_eq!(beside.fold_label(3), "3 more updates");
+    let c = conversation(
+        vec![
+            item(1, 10, "user"),
+            item(2, 10, "assistant"),
+            item(3, 10, "assistant"),
+        ],
+        vec![turn(10, "completed")],
+    );
+    let alone = &task_replies(&c)[&id(10)];
+    assert_eq!(alone.fold_label(1), "1 update");
+    assert_eq!(alone.fold_label(2), "2 updates");
 }
 
 #[test]
@@ -633,13 +645,13 @@ fn a_reply_from_before_a_park_reads_before_the_reply_that_ended_the_turn() {
     assert_eq!(task.latest, Some(id(101)), "the discard reply is current");
 
     assert_eq!(
-        earlier_replies(&c, &task.kept, &task.history, false),
-        [id(100)],
+        task.earlier(&c, &task.history, false),
+        [Earlier::Reply(id(100))],
         "the reply from before the park shows above the current one"
     );
     assert_eq!(
-        earlier_replies(&c, &task.kept, &task.history, true),
-        [id(99), id(100)],
+        task.earlier(&c, &task.history, true),
+        [Earlier::Reply(id(99)), Earlier::Reply(id(100))],
         "expanded progress joins it in the order it was written"
     );
 }
@@ -783,7 +795,7 @@ fn a_card_settled_in_a_resumed_turn_reads_between_the_earlier_and_current_reply(
         );
         assert_eq!(task.latest, Some(id(4)), "{status}");
         assert_eq!(
-            earlier_entries(&c, task, &task.history, false),
+            task.earlier(&c, &task.history, false),
             [
                 Earlier::Reply(id(3)),
                 Earlier::Card(RowKey::Question(id(210))),
@@ -792,7 +804,7 @@ fn a_card_settled_in_a_resumed_turn_reads_between_the_earlier_and_current_reply(
             "{status}: each card follows the reply that asked for it, once"
         );
         assert_eq!(
-            earlier_entries(&c, task, &task.history, true),
+            task.earlier(&c, &task.history, true),
             [
                 Earlier::Reply(id(2)),
                 Earlier::Reply(id(3)),
@@ -843,7 +855,7 @@ fn every_card_in_a_task_keeps_the_reply_it_followed_in_view() {
         "both cards render inside the task: {rows:?}"
     );
     assert_eq!(
-        earlier_entries(&c, task, &task.history, false),
+        task.earlier(&c, &task.history, false),
         [
             Earlier::Reply(id(2)),
             Earlier::Card(RowKey::Question(id(210))),
@@ -891,6 +903,6 @@ fn a_card_settled_after_a_single_attempts_last_reply_keeps_its_row() {
     let (tasks, rows) = placed(&c);
     let task = &tasks[&id(10)];
     assert!(task.cards.is_empty());
-    assert!(earlier_entries(&c, task, &task.history, true).is_empty());
+    assert!(task.earlier(&c, &task.history, true).is_empty());
     assert_eq!(rows, [(RowKey::Draft(id(310)), Some(id(3)))]);
 }
