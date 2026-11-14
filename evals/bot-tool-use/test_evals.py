@@ -258,7 +258,8 @@ def run(runner):
                     "Issue https://github.com/else-bot/else/issues/260 is filed, as I said. Twitter saved draft 7 without the chart; it is not posted."),
                 "resumed-reply-gives-the-state-without-narrating-history": (
                     [], "Sentry confirmed the revert at prompt revision 4: it reports issues to me again. My hourly "
-                        "routine hands [SENTRY] tickets to Dev and squash merges the PRs Dev marks ready.",
+                        "routine hands [SENTRY] tickets to Dev and squash merges the PRs Dev marks ready; Dev can start "
+                        "up to an hour late until else-bot/else#407 is fixed.",
                     "Sentry confirmed it, now at prompt revision 4. As I reported earlier, my routine hands tickets to "
                     "Dev."),
                 "resumed-reply-corrects-an-outdated-claim": (
