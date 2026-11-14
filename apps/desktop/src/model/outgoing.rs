@@ -284,24 +284,33 @@ impl OutgoingDraft {
 
     /// The receipt line: who acted, then what became of the draft.
     pub fn label(&self) -> String {
-        let outcome = self.status.label(&self.content);
-        let approver = match (self.status, self.approval_source) {
-            (DraftStatus::Pending, _) if self.in_reply => return "Continued in your reply".into(),
-            (DraftStatus::Discarded, _)
-                if self.result_detail.as_deref() == Some(REPLY_MOVED_ON) =>
-            {
-                return "Closed by your reply".into();
+        match self.status {
+            DraftStatus::Pending if self.in_reply => "Continued in your reply".into(),
+            DraftStatus::Discarded if self.result_detail.as_deref() == Some(REPLY_MOVED_ON) => {
+                "Closed by your reply".into()
             }
             // Otherwise only the owner's Discard button discards a draft.
-            (DraftStatus::Discarded, _) => return "You discarded this draft".into(),
-            (DraftStatus::Pending | DraftStatus::Superseded, _) => return outcome.into(),
-            (_, Some(ApprovalSource::Button)) => "You approved",
-            (_, Some(ApprovalSource::Message)) => "You approved in chat",
-            (_, Some(ApprovalSource::Standing)) => "Approved by your standing rule",
-            (DraftStatus::Approved, None) => "Approved",
-            (_, None) => return outcome.into(),
-        };
-        format!("{approver} · {outcome}")
+            DraftStatus::Discarded => "You discarded this draft".into(),
+            _ => {
+                let outcome = self.status.label(&self.content);
+                match self.approver() {
+                    Some(who) => format!("{who} · {outcome}"),
+                    None => outcome.into(),
+                }
+            }
+        }
+    }
+
+    /// Who approved the draft, once it has left review.
+    fn approver(&self) -> Option<&'static str> {
+        match (self.status, self.approval_source) {
+            (DraftStatus::Pending | DraftStatus::Superseded, _) => None,
+            (_, Some(ApprovalSource::Button)) => Some("You approved"),
+            (_, Some(ApprovalSource::Message)) => Some("You approved in chat"),
+            (_, Some(ApprovalSource::Standing)) => Some("Approved by your standing rule"),
+            (DraftStatus::Approved, None) => Some("Approved"),
+            (_, None) => None,
+        }
     }
 
     /// The receipt's title and outcome lines inside a task, whose meta row
@@ -400,6 +409,15 @@ mod tests {
         assert!(!card("pending", true).is_open());
         assert_eq!(card("pending", true).label(), "Continued in your reply");
         assert_eq!(card("discarded", false).label(), "You discarded this draft");
+    }
+
+    #[test]
+    fn the_reply_closed_detail_matches_the_migration_that_writes_it() {
+        assert!(
+            include_str!("../../../api/migrations/0037_reply_closes_drafts.sql")
+                .contains(REPLY_MOVED_ON),
+            "rewording the trigger's detail would credit the owner with its discards"
+        );
     }
 
     #[test]
