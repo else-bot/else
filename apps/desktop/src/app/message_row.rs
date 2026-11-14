@@ -82,7 +82,7 @@ impl ElseApp {
         let body = if row.activity.is_some() {
             self.render_bot_activity(&row, cx)
         } else if let Some(task) = row.task.as_ref() {
-            self.render_task_reply(task, row.footer_stamp, cx)
+            self.render_task_reply(task, row.footer_stamp, window, cx)
         } else {
             self.render_row_content(&row, window, cx)
         };
@@ -436,16 +436,14 @@ impl ElseApp {
                     .children(footer.map(|at| note(at, false)))
                     .into_any_element()
             }
-            RowKey::SkillInstall(id) => side(self.render_skill_card(id, cx)).into_any_element(),
-            RowKey::SecretRequest(id) => side(self.render_secret_card(id, cx)).into_any_element(),
-            RowKey::Question(id) => {
-                side(self.render_question_card(id, window, cx)).into_any_element()
-            }
-            RowKey::Draft(id) => side(self.render_draft_card(id, cx)).into_any_element(),
-            RowKey::SocialSetup(id) => side(self.render_social_card(id, cx)).into_any_element(),
-            RowKey::Handoff(id) => self.render_handoff(id, cx),
-            RowKey::ComputerHandoff(id) => self.render_handoff_row(id, cx),
-            RowKey::OwnerNotice(id) => side(self.render_notice_card(id, cx)?).into_any_element(),
+            RowKey::SkillInstall(_)
+            | RowKey::SecretRequest(_)
+            | RowKey::Question(_)
+            | RowKey::Draft(_)
+            | RowKey::SocialSetup(_)
+            | RowKey::Handoff(_)
+            | RowKey::ComputerHandoff(_)
+            | RowKey::OwnerNotice(_) => self.render_card(key, false, window, cx)?,
             RowKey::Pending(request_id) => {
                 let pending = self
                     .selected
@@ -535,6 +533,30 @@ impl ElseApp {
                 column = column.child(beside(true, line));
                 column.into_any_element()
             }
+        })
+    }
+}
+
+impl ElseApp {
+    /// An owner action card, as its own row or `in_task` inside its task's card.
+    pub(super) fn render_card(
+        &self,
+        key: RowKey,
+        in_task: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let side = |card: AnyElement| div().w_full().min_w_0().child(card).into_any_element();
+        Some(match key {
+            RowKey::SkillInstall(id) => side(self.render_skill_card(id, cx)),
+            RowKey::SecretRequest(id) => side(self.render_secret_card(id, cx)),
+            RowKey::Question(id) => side(self.render_question_card(id, in_task, window, cx)),
+            RowKey::Draft(id) => side(self.render_draft_card(id, cx)),
+            RowKey::SocialSetup(id) => side(self.render_social_card(id, cx)),
+            RowKey::Handoff(id) => self.render_handoff(id, cx),
+            RowKey::ComputerHandoff(id) => self.render_handoff_row(id, cx),
+            RowKey::OwnerNotice(id) => side(self.render_notice_card(id, cx)?),
+            RowKey::Item(_) | RowKey::Task(_) | RowKey::Pending(_) => return None,
         })
     }
 }

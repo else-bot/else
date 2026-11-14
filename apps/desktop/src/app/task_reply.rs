@@ -1,6 +1,6 @@
 pub(super) mod state;
 
-use self::state::{ReplyState, TaskReply};
+use self::state::{Earlier, ReplyState, TaskReply};
 use super::conversation::ReplyLayout;
 use super::reply::Author;
 use super::{ElseApp, RowKey};
@@ -22,6 +22,7 @@ impl ElseApp {
         &self,
         task: &TaskReply,
         stamp: Option<DateTime<Utc>>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let view = self.view.as_ref()?;
@@ -254,8 +255,8 @@ impl ElseApp {
                 status.into_any_element()
             }
         });
-        let earlier_ids = state::earlier_replies(conversation, &task.kept, &history, expanded);
-        let earlier = (!earlier_ids.is_empty()).then(|| {
+        let entries = state::earlier_entries(conversation, task, &history, expanded);
+        let earlier = (!entries.is_empty()).then(|| {
             let mut updates = v_flex()
                 .w_full()
                 .min_w_0()
@@ -263,7 +264,14 @@ impl ElseApp {
                 .pl_3()
                 .border_l_1()
                 .border_color(theme.border);
-            for id in earlier_ids {
+            for entry in entries {
+                let id = match entry {
+                    Earlier::Reply(id) => id,
+                    Earlier::Card(key) => {
+                        updates = updates.children(self.render_card(key, true, window, cx));
+                        continue;
+                    }
+                };
                 updates = updates.child(
                     v_flex()
                         .w_full()

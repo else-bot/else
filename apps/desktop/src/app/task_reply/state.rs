@@ -1,3 +1,4 @@
+use crate::app::RowKey;
 use crate::model::Conversation;
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
@@ -51,6 +52,8 @@ pub(in crate::app) struct TaskReply {
     pub summary: Option<String>,
     pub history: Vec<Uuid>,
     pub kept: Vec<Uuid>,
+    /// Owner action cards that settled before the current reply, in timeline order.
+    pub cards: Vec<TaskCard>,
     pub reactions: Vec<(Uuid, crate::model::ReactionKind)>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -124,6 +127,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                     summary: None,
                     history: Vec::new(),
                     kept: Vec::new(),
+                    cards: Vec::new(),
                     reactions: Vec::new(),
                     started_at: turn.started_at,
                     finished_at: turn.finished_at,
@@ -226,6 +230,75 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             });
     }
     replies
+}
+
+/// An owner action card that reads inside its task, after the item it followed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::app) struct TaskCard {
+    pub after: Uuid,
+    pub key: RowKey,
+}
+
+/// What a task card shows above its current reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::app) enum Earlier {
+    Reply(Uuid),
+    Card(RowKey),
+}
+
+/// Moves each card of a task's turn that follows an item before the task's
+/// row into that task, so it reads where the owner acted instead of above
+/// the bot's name. A pending card follows the turn's last item, so it keeps
+/// its own row below the task. Returns the rows left in the transcript.
+pub(in crate::app) fn place_cards(
+    conversation: &Conversation,
+    tasks: &mut HashMap<Uuid, TaskReply>,
+    cards: Vec<(Uuid, RowKey, Option<Uuid>)>,
+) -> Vec<(RowKey, Option<Uuid>)> {
+    let seq = |id| conversation.item(id).map(|item| item.seq);
+    cards
+        .into_iter()
+        .filter_map(|(turn, key, anchor)| {
+            let task = tasks.get_mut(&turn);
+            let inside = anchor.filter(|&after| {
+                conversation
+                    .item(after)
+                    .is_some_and(|item| item.turn_id == turn)
+                    && task
+                        .as_ref()
+                        .and_then(|task| seq(task.anchor?))
+                        .is_some_and(|row| seq(after).is_some_and(|after| after < row))
+            });
+            match (inside, task) {
+                (Some(after), Some(task)) => {
+                    task.cards.push(TaskCard { after, key });
+                    None
+                }
+                _ => Some((key, anchor)),
+            }
+        })
+        .collect()
+}
+
+/// [`earlier_replies`] with the task's cards, each after the item it followed.
+pub(in crate::app) fn earlier_entries(
+    conversation: &Conversation,
+    task: &TaskReply,
+    history: &[Uuid],
+    expanded: bool,
+) -> Vec<Earlier> {
+    let seq = |id| conversation.item(id).map_or(i64::MAX, |item| item.seq);
+    let mut entries: Vec<_> = earlier_replies(conversation, &task.kept, history, expanded)
+        .into_iter()
+        .map(|id| ((seq(id), 0), Earlier::Reply(id)))
+        .chain(
+            task.cards
+                .iter()
+                .map(|card| ((seq(card.after), 1), Earlier::Card(card.key))),
+        )
+        .collect();
+    entries.sort_by_key(|(at, _)| *at);
+    entries.into_iter().map(|(_, entry)| entry).collect()
 }
 
 /// The earlier replies a task card shows above its current reply, oldest
@@ -1002,5 +1075,118 @@ mod tests {
             vec![turn(10, "completed")],
         );
         assert_eq!(task_replies(&c)[&id(10)].kept, [id(2), id(3)]);
+    }
+
+    /// The turn from the owner's screenshots: "ready for your review" ended
+    /// attempt 1 on a draft and a question, the owner settled both at 10:05,
+    /// and attempt 2 replied at 10:06.
+    fn parked_turn(status: &str, settled: bool) -> Conversation {
+        let reply = |number: u128, attempt, at: &str| {
+            let mut reply = item(number, 10, "assistant");
+            reply["attempt"] = json!(attempt);
+            reply["created_at"] = json!(at);
+            reply
+        };
+        let mut items = vec![
+            item(1, 10, "user"),
+            reply(2, 1, "2026-11-05T10:02:00Z"),
+            reply(3, 1, "2026-11-05T10:03:00Z"),
+        ];
+        if settled {
+            items.push(reply(4, 2, "2026-11-05T10:06:00Z"));
+        }
+        let at = settled.then_some("2026-11-05T10:05:00Z");
+        let mut parked = turn(10, status);
+        parked["attempt"] = json!(if settled { 2 } else { 1 });
+        parked["outgoing_drafts"] = json!([{"id": id(310), "lineage_id": id(311),
+            "revision": 1, "content": {"channel": "email", "from": "main@example.invalid",
+            "to": ["edward@example.invalid"], "cc": [], "bcc": [], "subject": "Re: help",
+            "body": "Hello"}, "version": 1, "status": if settled { "discarded" } else { "pending" },
+            "can_approve": !settled, "result_detail": null,
+            "updated_at": "2026-11-05T10:03:00Z", "settled_at": at}]);
+        parked["questions"] = json!([{"id": id(210), "kind": "choice",
+            "title": "Which proposal should I schedule?",
+            "choices": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+            "status": if settled { "answered" } else { "pending" },
+            "answer": settled.then_some("b"), "settled_at": at}]);
+        conversation(items, vec![parked])
+    }
+
+    type Rows = Vec<(RowKey, Option<Uuid>)>;
+
+    fn placed(c: &Conversation) -> (HashMap<Uuid, TaskReply>, Rows) {
+        let mut tasks = task_replies(c);
+        let rows = place_cards(c, &mut tasks, crate::app::conversation::turn_card_rows(c));
+        (tasks, rows)
+    }
+
+    #[test]
+    fn a_card_settled_in_a_resumed_turn_reads_between_the_earlier_and_current_reply() {
+        for status in ["completed", "running"] {
+            let c = parked_turn(status, true);
+            let (tasks, rows) = placed(&c);
+            let task = &tasks[&id(10)];
+            assert!(
+                rows.is_empty(),
+                "{status}: the cards render inside the task, not as rows: {rows:?}"
+            );
+            assert_eq!(task.latest, Some(id(4)), "{status}");
+            assert_eq!(
+                earlier_entries(&c, task, &task.history, false),
+                [
+                    Earlier::Reply(id(3)),
+                    Earlier::Card(RowKey::Question(id(210))),
+                    Earlier::Card(RowKey::Draft(id(310))),
+                ],
+                "{status}: each card follows the reply that asked for it, once"
+            );
+            assert_eq!(
+                earlier_entries(&c, task, &task.history, true),
+                [
+                    Earlier::Reply(id(2)),
+                    Earlier::Reply(id(3)),
+                    Earlier::Card(RowKey::Question(id(210))),
+                    Earlier::Card(RowKey::Draft(id(310))),
+                ],
+                "{status}: expanded progress keeps the cards after the reply they followed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pending_card_keeps_its_row_below_the_reply_asking_for_it() {
+        let c = parked_turn("waiting", false);
+        let (tasks, rows) = placed(&c);
+        let task = &tasks[&id(10)];
+        assert_eq!(task.anchor, Some(id(3)));
+        assert!(task.cards.is_empty());
+        assert_eq!(
+            rows,
+            [
+                (RowKey::Question(id(210)), Some(id(3))),
+                (RowKey::Draft(id(310)), Some(id(3))),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_card_settled_after_a_single_attempts_last_reply_keeps_its_row() {
+        let c = {
+            let mut reply = item(3, 10, "assistant");
+            reply["created_at"] = json!("2026-11-05T10:03:00Z");
+            let mut single = turn(10, "completed");
+            single["outgoing_drafts"] = json!([{"id": id(310), "lineage_id": id(311),
+                "revision": 1, "content": {"channel": "email", "from": "main@example.invalid",
+                "to": ["edward@example.invalid"], "cc": [], "bcc": [], "subject": "Re: help",
+                "body": "Hello"}, "version": 1, "status": "sent", "can_approve": false,
+                "result_detail": null, "updated_at": "2026-11-05T10:05:00Z",
+                "settled_at": "2026-11-05T10:05:00Z"}]);
+            conversation(vec![item(1, 10, "user"), reply], vec![single])
+        };
+        let (tasks, rows) = placed(&c);
+        let task = &tasks[&id(10)];
+        assert!(task.cards.is_empty());
+        assert!(earlier_entries(&c, task, &task.history, true).is_empty());
+        assert_eq!(rows, [(RowKey::Draft(id(310)), Some(id(3)))]);
     }
 }

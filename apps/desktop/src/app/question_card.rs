@@ -210,6 +210,7 @@ impl ElseApp {
     pub(super) fn render_question_card(
         &self,
         id: Uuid,
+        in_task: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -228,7 +229,7 @@ impl ElseApp {
             .unwrap_or_default();
         let waiting = question.is_pending() && !submit.is_some_and(QuestionForm::locks);
         let card = if !question.is_approval() {
-            self.render_choice_card(question, submit, &bot_name, window, cx)
+            self.render_choice_card(question, submit, &bot_name, in_task, window, cx)
         } else if question.mcp_connection().is_some() || question.email_connection().is_some() {
             self.render_connection_card(question, &bot_name, cx)
         } else {

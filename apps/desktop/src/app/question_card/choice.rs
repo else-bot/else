@@ -133,6 +133,7 @@ impl ElseApp {
         question: &Question,
         form: Option<&QuestionForm>,
         bot_name: &str,
+        in_task: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -185,6 +186,11 @@ impl ElseApp {
                         .text_color(theme.muted_foreground)
                         .child(context.clone()),
                 );
+            }
+            // Inside its task the card already sits where the bot paused, so
+            // the divider would head the replies from before the pause.
+            if in_task {
+                return card.into_any_element();
             }
             let at = question
                 .settled_at
