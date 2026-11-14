@@ -2,6 +2,7 @@ use super::conversation::{ConversationView, Reveal, Spot};
 use super::reply::{Author, MessageReference, Quote};
 use super::row_text::RowText;
 use super::{APP_CONTEXT, CiteSelection, ElseApp, RowKey};
+use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::TextSelection;
 use gpui_kit::base::input::InputEvent;
@@ -296,10 +297,7 @@ impl ElseApp {
         }
         let theme = cx.theme();
         let cite = Button::new("cite-selection")
-            .focus_ring(false)
-            .cursor_pointer()
-            .ghost()
-            .small()
+            .control(Tier::Ghost, Scale::Compact, false, cx)
             .icon(IconName::Pencil)
             .label("Cite")
             .children(
@@ -403,10 +401,7 @@ impl ElseApp {
                             .when(long, |column| {
                                 column.child(
                                     Button::new("quote-editor-more")
-                                        .focus_ring(false)
-                                        .cursor_pointer()
-                                        .ghost()
-                                        .xsmall()
+                                        .control(Tier::Ghost, Scale::Compact, false, cx)
                                         .self_start()
                                         .label(if editor.full_quote {
                                             "Collapse quote"
@@ -441,10 +436,7 @@ impl ElseApp {
                                     .justify_end()
                                     .child(
                                         Button::new("quote-editor-cancel")
-                                            .focus_ring(false)
-                                            .cursor_pointer()
-                                            .ghost()
-                                            .small()
+                                            .control(Tier::Ghost, Scale::Compact, false, cx)
                                             .label("Cancel")
                                             .child(shortcut("Esc"))
                                             .on_click(cx.listener(|app, _, window, cx| {
@@ -453,10 +445,7 @@ impl ElseApp {
                                     )
                                     .child(
                                         Button::new("quote-editor-save")
-                                            .focus_ring(false)
-                                            .cursor_pointer()
-                                            .primary()
-                                            .small()
+                                            .control(Tier::Primary, Scale::Compact, false, cx)
                                             .label("Save")
                                             .child(shortcut("Enter"))
                                             .on_click(cx.listener(|app, _, window, cx| {
@@ -569,10 +558,7 @@ impl ElseApp {
                         .when(long, |column| {
                             column.child(
                                 Button::new(SharedString::from(format!("quote-more-{id}")))
-                                    .focus_ring(false)
-                                    .cursor_pointer()
-                                    .ghost()
-                                    .xsmall()
+                                    .control(Tier::Ghost, Scale::Compact, false, cx)
                                     .self_start()
                                     .label(if expanded { "Show less" } else { "Show more" })
                                     .on_click(cx.listener(move |app, _, _, cx| {
@@ -645,10 +631,7 @@ impl ElseApp {
                             )
                             .child(
                                 Button::new("clear-quotes")
-                                    .focus_ring(false)
-                                    .cursor_pointer()
-                                    .ghost()
-                                    .xsmall()
+                                    .control(Tier::Ghost, Scale::Compact, false, cx)
                                     .label("Clear all")
                                     .on_click(cx.listener(move |app, _, window, cx| {
                                         app.clear_quotes(bot, window, cx)

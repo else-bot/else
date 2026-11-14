@@ -1,5 +1,6 @@
 use super::*;
 use crate::api::InstalledMcp;
+use crate::controls::{Control as _, Scale, Tier, text_field};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
@@ -163,18 +164,14 @@ impl Shell {
                         .gap_2()
                         .child(
                             Button::new("mcp-remove-cancel")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Secondary, Scale::Standard, false, cx)
                                 .label("Cancel")
-                                .ghost()
-                                .track_focus(&cancel)
+                                                                .track_focus(&cancel)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("mcp-remove-confirm")
-                                .focus_ring(false)
-                                .cursor_pointer()
-                                .danger()
+                                .control(Tier::Danger, Scale::Standard, false, cx)
                                 .label("Remove for all bots")
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
@@ -237,19 +234,6 @@ impl Shell {
         let Some(view) = &self.mcp else {
             return body.child("Loading installed MCPs…").into_any_element();
         };
-        body = body.child(
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child("Skills, documentation and config are shared by all bots. A signed-in OAuth account serves every bot."),
-        );
-        body = body.child(
-            div().max_w(px(340.)).child(
-                Input::new(&view.search)
-                    .small()
-                    .prefix(Icon::new(IconName::Search).size_3()),
-            ),
-        );
         let error = view.error.as_ref().or(view.poll_error.as_ref());
         if let Some(error) = error {
             body = body.child(
@@ -264,12 +248,13 @@ impl Shell {
                     )
                     .child(
                         Button::new("mcp-retry")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .small()
-                            .ghost()
+                            .control(
+                                Tier::Secondary,
+                                Scale::Standard,
+                                view.removing.is_some(),
+                                cx,
+                            )
                             .label("Retry")
-                            .disabled(view.removing.is_some())
                             .on_click(
                                 cx.listener(|shell, _, window, cx| shell.open_mcp(window, cx)),
                             ),
@@ -287,6 +272,38 @@ impl Shell {
             }
             return body.into_any_element();
         };
+        if entries.is_empty() {
+            return body
+                .flex_1()
+                .child(settings::empty_state(
+                    IconName::Plug,
+                    "No MCPs installed yet",
+                    "Ask a bot to install an MCP.",
+                    Button::new("empty-open-chat")
+                        .control(Tier::Secondary, Scale::Standard, false, cx)
+                        .icon(IconName::MessageSquare)
+                        .label("Ask a bot in chat")
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            window.close_dialog(cx);
+                            shell.cancel(window, cx);
+                        })),
+                    cx,
+                ))
+                .into_any_element();
+        }
+        body = body.child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child("Skills, documentation and config are shared by all bots. A signed-in OAuth account serves every bot."),
+        );
+        body = body.child(
+            div().max_w(px(340.)).child(
+                text_field(Input::new(&view.search), cx)
+                    .small()
+                    .prefix(Icon::new(IconName::Search).size_3()),
+            ),
+        );
         let query = view.search.read(cx).value().trim().to_lowercase();
         let filtered = entries
             .iter()

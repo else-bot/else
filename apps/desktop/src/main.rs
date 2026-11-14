@@ -5,6 +5,7 @@ mod attachments;
 mod avatar;
 mod config;
 mod connection;
+mod controls;
 mod email;
 #[cfg(test)]
 mod icon_assets_tests;
@@ -13,11 +14,13 @@ mod launch;
 mod mcp_oauth;
 mod model;
 mod oauth_callback;
+mod panel_kit;
 mod preferences;
 mod profile_picker;
 mod sidebar;
 mod skill_ui;
 mod socials;
+mod ui_font;
 mod updates;
 mod window_frame;
 
@@ -91,15 +94,26 @@ gpui_kit::assets::icon_assets!(
         Star,
         RotateCw,
         Send,
+        Plus,
         ExternalLink,
-        Webhook
+        Webhook,
+        Undo2
     ]
 );
+
+/// Brand glyphs Lucide does not ship, drawn with [`Icon::path`].
+///
+/// [`Icon::path`]: gpui_kit::component::Icon::path
+pub(crate) const DISCORD_ICON: &str = "icons/brand/discord.svg";
+const BRAND_ICONS: [(&str, &[u8]); 1] = [(DISCORD_ICON, include_bytes!("../icons/discord.svg"))];
 
 struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if let Some((_, bytes)) = BRAND_ICONS.iter().find(|(name, _)| *name == path) {
+            return Ok(Some(std::borrow::Cow::Borrowed(bytes)));
+        }
         if let Some(bytes) = AppIcons.load(path)? {
             return Ok(Some(bytes));
         }
@@ -109,6 +123,13 @@ impl AssetSource for AppAssets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
         paths.extend(AppIcons.list(path)?);
+        paths.extend(
+            BRAND_ICONS
+                .iter()
+                .map(|(name, _)| *name)
+                .filter(|name| name.starts_with(path))
+                .map(SharedString::from),
+        );
         paths.sort();
         paths.dedup();
         Ok(paths)
@@ -184,6 +205,7 @@ fn main() {
         .run(move |cx| {
             cx.set_app_identity("else-bot", "else.bot");
             gpui_kit::init(cx);
+            ui_font::init(cx);
             appearance::init(cx);
             app::bind_keys(cx);
             app::install_menus(cx);

@@ -1,11 +1,10 @@
 use super::{Connection, ElseApp};
 use crate::api::ClientError;
+use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{OwnerNoticeKind, OwnerNoticeStatus};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Sizable as _, h_flex, v_flex,
-};
+use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::button::Button;
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -86,10 +85,7 @@ impl ElseApp {
             .and_then(|item| item.bot_task.as_ref())
             .map(|task| &task.sender_name);
         let since = crate::sidebar::status::waited(notice.created_at, chrono::Utc::now());
-        let subtitle = sender.map_or_else(
-            || since.clone(),
-            |sender| format!("From {sender}'s task · {since}"),
-        );
+        let subtitle = sender.map_or_else(String::new, |sender| format!("From {sender}'s task"));
         let anchor = receipt.and_then(|receipt| {
             view.rows.iter().find_map(|row| {
                 let activity = row.activity.as_ref()?;
@@ -102,104 +98,54 @@ impl ElseApp {
         let exchange_title =
             sender.map_or_else(|| name.to_owned(), |sender| format!("{sender} & {name}"));
         let connected = self.connection == Connection::Connected;
-        let button = |action: &str, label: String| {
+        let button = |action: &str, label: String, tier: Tier, disabled: bool| {
             Button::new(SharedString::from(format!("notice-{id}-{action}")))
-                .focus_ring(false)
-                .cursor_pointer()
-                .small()
+                .control(tier, Scale::Compact, disabled, cx)
                 .accessibility_label(label.clone())
                 .label(label)
         };
-        let actions = h_flex()
-            .flex_wrap()
-            .gap_2()
+        let actions = super::action_card::footer()
+            .children(anchor.map(|anchor| {
+                button("open", "Open task".into(), Tier::Ghost, false).on_click(cx.listener(
+                    move |app, _, window, cx| {
+                        app.open_bot_exchange(anchor, exchange_title.clone(), window, cx);
+                    },
+                ))
+            }))
             .child(
-                button("reply", format!("Reply to {name}"))
-                    .primary()
-                    .on_click(cx.listener(|app, _, window, cx| {
+                button(
+                    "dismiss",
+                    "Mark handled".into(),
+                    Tier::Secondary,
+                    !connected,
+                )
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    app.dismiss_owner_notice(bot, id, window, cx);
+                })),
+            )
+            .child(
+                button("reply", format!("Reply to {name}"), Tier::Primary, false).on_click(
+                    cx.listener(|app, _, window, cx| {
                         app.composer.read(cx).focus_handle(cx).focus(window, cx);
-                    })),
-            )
-            .child(
-                button("open", "Open task".into())
-                    .disabled(anchor.is_none())
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        if let Some(anchor) = anchor {
-                            app.open_bot_exchange(anchor, exchange_title.clone(), window, cx);
-                        }
-                    })),
-            )
-            .child(
-                button("dismiss", "Mark handled".into())
-                    .ghost()
-                    .disabled(!connected)
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        app.dismiss_owner_notice(bot, id, window, cx);
-                    })),
+                    }),
+                ),
             );
         Some(
-            v_flex()
-                .w_full()
-                .min_w_0()
-                .rounded(theme.radius_lg)
-                .border_1()
-                .border_color(theme.warning.opacity(0.45))
-                .bg(theme.secondary)
-                .overflow_hidden()
+            super::action_card::card(IconName::TriangleAlert, title, subtitle)
+                .meta(since)
                 .child(
-                    h_flex()
-                        .gap_3()
-                        .p_4()
-                        .bg(theme.warning.opacity(0.11))
-                        .child(
-                            h_flex()
-                                .size_9()
-                                .flex_none()
-                                .justify_center()
-                                .rounded(theme.radius)
-                                .bg(theme.warning.opacity(0.16))
-                                .text_color(theme.warning)
-                                .child(Icon::new(IconName::TriangleAlert).size(px(16.))),
-                        )
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(subtitle),
-                                ),
-                        ),
+                    div()
+                        .text_sm()
+                        .whitespace_normal()
+                        .child(notice.summary.clone()),
                 )
-                .child(
-                    v_flex()
-                        .gap_3()
-                        .p_4()
-                        .child(
-                            div()
-                                .border_l_2()
-                                .border_color(theme.warning.opacity(0.45))
-                                .pl_3()
-                                .text_sm()
-                                .child(notice.summary.clone()),
-                        )
-                        .children(notice.tried.as_ref().map(|tried| {
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(format!("Tried · {tried}"))
-                        }))
-                        .child(actions),
-                )
+                .children(notice.tried.as_ref().map(|tried| {
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("Tried · {tried}"))
+                }))
+                .footer(actions)
                 .into_any_element(),
         )
     }

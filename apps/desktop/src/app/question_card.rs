@@ -5,11 +5,13 @@
 //! a newer owner message (skipped), or the turn ending (withdrawn) disables
 //! it here too. A click on a card the server already settled is refused.
 
+use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, Theme, h_flex, v_flex,
+    ActiveTheme as _, Icon, Sizable as _, StyledExt as _, Theme, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -205,7 +207,12 @@ impl ElseApp {
         self.remeasure_row(RowKey::Question(question), cx);
     }
 
-    pub(super) fn render_question_card(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_question_card(
+        &self,
+        id: Uuid,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(view) = self.view.as_ref() else {
             return div().into_any_element();
         };
@@ -219,38 +226,51 @@ impl ElseApp {
             .find(|b| b.id == view.bot_id)
             .map(|b| b.name.clone())
             .unwrap_or_default();
-        if !question.is_approval() {
-            return self.render_choice_card(question, submit, &bot_name, cx);
+        let waiting = question.is_pending() && !submit.is_some_and(QuestionForm::locks);
+        let card = if !question.is_approval() {
+            self.render_choice_card(question, submit, &bot_name, window, cx)
+        } else if question.mcp_connection().is_some() || question.email_connection().is_some() {
+            self.render_connection_card(question, &bot_name, cx)
+        } else {
+            self.render_approval_card(question, submit, &bot_name, cx)
+        };
+        if waiting {
+            self.sighted(RowKey::Question(id), card, cx)
+        } else {
+            card
         }
-        if question.mcp_connection().is_some() || question.email_connection().is_some() {
-            return self.render_connection_card(question, &bot_name, cx);
-        }
-        self.render_approval_card(question, submit, &bot_name, cx)
     }
 }
 
 impl ElseApp {
-    /// The conversation rows of questions still waiting on the owner, in
-    /// timeline order.
+    /// The conversation rows still waiting on the owner's answer, in
+    /// timeline order: questions, approvals, and credential requests.
     fn waiting_question_rows(&self) -> Vec<usize> {
         let Some(view) = self.view.as_ref() else {
+            return Vec::new();
+        };
+        let Some(conversation) = view.conversation.as_ref() else {
             return Vec::new();
         };
         view.rows
             .iter()
             .enumerate()
-            .filter(|(_, row)| {
-                let RowKey::Question(id) = row.key else {
-                    return false;
-                };
-                view.conversation
-                    .as_ref()
-                    .and_then(|c| c.question(id))
-                    .is_some_and(Question::is_pending)
-                    && !view
-                        .question_submits
-                        .get(&id)
-                        .is_some_and(QuestionForm::locks)
+            .filter(|(_, row)| match row.key {
+                RowKey::Question(id) => {
+                    conversation.question(id).is_some_and(Question::is_pending)
+                        && !view
+                            .question_submits
+                            .get(&id)
+                            .is_some_and(QuestionForm::locks)
+                }
+                RowKey::SecretRequest(id) => {
+                    conversation
+                        .secret_request(id)
+                        .is_some_and(|request| request.is_pending())
+                        && !view.answered.contains(&id)
+                        && !view.secret_forms.get(&id).is_some_and(|form| form.locks())
+                }
+                _ => false,
             })
             .map(|(ix, _)| ix)
             .collect()
@@ -272,17 +292,34 @@ impl ElseApp {
         self.start_reveal(reveal, cx);
     }
 
-    /// The strip above the composer while the bot waits on the owner, so the
-    /// pause stays visible after its card scrolls away.
+    /// The strip above the composer while the bot waits on the owner. It
+    /// shows only while no waiting card is on screen, so the card itself is
+    /// the one signal when the owner can see it.
     pub(super) fn render_question_bar(
         &self,
         bot_name: &str,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let waiting = self.waiting_question_rows().len();
-        if waiting == 0 {
+        let rows = self.waiting_question_rows();
+        let view = self.view.as_ref()?;
+        let mut sightings = view.sightings.0.borrow_mut();
+        let painted = std::mem::take(&mut sightings.painted);
+        let viewport = view.list.viewport_bounds();
+        sightings.hidden = rows.iter().any(|ix| {
+            painted
+                .get(&view.rows[*ix].key)
+                .is_some_and(|bounds| shows(*bounds, viewport))
+        });
+        drop(sightings);
+        if sightings_hide(view) {
             return None;
         }
+        let waiting = rows.len();
+        let first = *rows.first()?;
+        let secret = self
+            .view
+            .as_ref()
+            .is_some_and(|view| matches!(view.rows[first].key, RowKey::SecretRequest(_)));
         let theme = cx.theme();
         Some(
             h_flex()
@@ -326,15 +363,81 @@ impl ElseApp {
                 )
                 .child(
                     Button::new("jump-to-question")
-                        .focus_ring(false)
-                        .ghost()
-                        .small()
-                        .cursor_pointer()
-                        .label("Jump to question")
+                        .control(Tier::Ghost, Scale::Compact, false, cx)
+                        .icon(IconName::ArrowDown)
+                        .label(if secret {
+                            "Jump to request"
+                        } else {
+                            "Jump to question"
+                        })
                         .on_click(cx.listener(|app, _, _, cx| app.jump_to_question(cx))),
                 )
                 .into_any_element(),
         )
+    }
+}
+
+/// How much of a waiting card must show before the paused strip steps aside.
+const VISIBLE_ENOUGH: f32 = 48.;
+
+/// Where each card that can pause the bot was painted in the latest frame,
+/// and whether the paused strip stepped aside for one of them. The list
+/// paints only rows near the viewport, so a card missing here is off screen.
+#[derive(Clone, Default)]
+pub(super) struct Sightings(std::rc::Rc<std::cell::RefCell<Painted>>);
+
+#[derive(Default)]
+struct Painted {
+    painted: std::collections::HashMap<RowKey, Bounds<Pixels>>,
+    hidden: bool,
+}
+
+fn sightings_hide(view: &super::conversation::ConversationView) -> bool {
+    view.sightings.0.borrow().hidden
+}
+
+/// Whether enough of a card shows inside the conversation viewport to act on.
+fn shows(card: Bounds<Pixels>, viewport: Bounds<Pixels>) -> bool {
+    let shown = card.bottom().min(viewport.bottom()) - card.top().max(viewport.top());
+    shown >= px(VISIBLE_ENOUGH).min(card.size.height)
+}
+
+impl ElseApp {
+    /// Records where a pausing card was painted. When that flips whether
+    /// the paused strip should show, the app renders again to follow it.
+    pub(super) fn sighted(
+        &self,
+        key: RowKey,
+        card: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(view) = self.view.as_ref() else {
+            return card;
+        };
+        let sightings = view.sightings.clone();
+        let list = view.list.clone();
+        let owner = cx.entity().downgrade();
+        div()
+            .w_full()
+            .child(card)
+            .on_prepaint(move |bounds, window, cx| {
+                sightings.0.borrow_mut().painted.insert(key, bounds);
+                window.defer(cx, move |_, cx| {
+                    let viewport = list.viewport_bounds();
+                    let state = sightings.0.borrow();
+                    let any = state
+                        .painted
+                        .values()
+                        .any(|bounds| shows(*bounds, viewport));
+                    // Showing a card hides the strip; losing the last one
+                    // brings it back. Settled cards never set `hidden`.
+                    if any != state.hidden {
+                        drop(state);
+                        let _ = owner.update(cx, |_, cx| cx.notify());
+                    }
+                });
+            })
+            .into_any_element()
     }
 }
 
@@ -442,40 +545,37 @@ fn receipt(
         )
 }
 
-/// An inset block for a card's exact command, request, or explanation.
-fn inset(text: String, theme: &Theme) -> Div {
-    div()
-        .w_full()
-        .px_3()
-        .py_2p5()
-        .rounded(theme.radius)
-        .bg(theme.background)
-        .font_family(theme.mono_font_family.clone())
-        .text_xs()
-        .line_height(relative(1.6))
-        .whitespace_normal()
-        .child(text)
-}
-
 /// A red callout for an error the owner can act on.
 fn callout(text: String, theme: &Theme) -> Div {
-    h_flex()
-        .w_full()
-        .items_start()
-        .gap_2p5()
-        .px_3()
-        .py_2p5()
-        .rounded(theme.radius)
-        .bg(theme.danger.opacity(0.1))
-        .text_color(theme.danger)
-        .text_xs()
-        .child(Icon::new(IconName::TriangleAlert).size_4().flex_none())
-        .child(div().flex_1().min_w_0().whitespace_normal().child(text))
+    super::action_card::failure(theme, text)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{letter, outcome};
+    use super::{letter, outcome, shows};
+    use gpui_kit::{Bounds, point, px, size};
+
+    #[test]
+    fn the_paused_strip_steps_aside_only_while_enough_of_a_card_shows() {
+        let viewport = Bounds::new(point(px(0.), px(100.)), size(px(700.), px(400.)));
+        let card =
+            |top: f32, height: f32| Bounds::new(point(px(0.), px(top)), size(px(700.), px(height)));
+        assert!(shows(card(200., 200.), viewport));
+        assert!(
+            shows(card(450., 200.), viewport),
+            "50 px peek above the composer"
+        );
+        assert!(
+            !shows(card(470., 200.), viewport),
+            "30 px peek is not enough"
+        );
+        assert!(!shows(card(-150., 200.), viewport), "scrolled away above");
+        assert!(!shows(card(520., 200.), viewport), "below the viewport");
+        assert!(
+            shows(card(300., 30.), viewport),
+            "a short card counts when whole"
+        );
+    }
     use crate::model::{APPROVE, DENY, Question, QuestionAnswer, QuestionChoice, QuestionUse};
     use uuid::Uuid;
 

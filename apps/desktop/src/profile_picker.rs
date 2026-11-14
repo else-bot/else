@@ -1,24 +1,23 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Selectable as _, Sizable as _,
-    h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Selectable as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::api::{Capabilities, ProfileChoice, ProviderInfo};
+use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
 
 const FAST: &str = "priority";
-const STOP_PAD: f32 = 4.;
-const STOP_DOT: f32 = 16.;
-const TRACK: f32 = 3.;
 
 pub struct ProfilePicker {
     providers: Vec<ProviderInfo>,
     choice: Option<ProfileChoice>,
     browsing: Option<String>,
     copied: Option<String>,
+    /// The provider whose full setup problem is expanded.
+    explained: Option<String>,
     tabs: bool,
     disabled: bool,
 }
@@ -49,6 +48,7 @@ impl ProfilePicker {
             choice,
             browsing,
             copied: None,
+            explained: None,
             tabs: false,
             disabled: false,
         }
@@ -119,14 +119,29 @@ impl ProfilePicker {
             };
             let dot = || div().flex_none().size_1p5().rounded_full().bg(health);
             let id = provider.id.clone();
-            Button::new(SharedString::from(format!("provider-{}", provider.id)))
+            let select = cx.listener(move |picker, _, _, cx| {
+                picker.browsing = Some(id.clone());
+                cx.notify();
+            });
+            let button_id = SharedString::from(format!("provider-{}", provider.id));
+            if self.tabs {
+                return segment(
+                    button_id,
+                    provider.label.clone(),
+                    browsing,
+                    self.disabled,
+                    cx,
+                )
+                .accessibility_label(format!("{} · {status}", provider.label))
+                .on_click(select);
+            }
+            Button::new(button_id)
                 .focus_ring(false)
                 .ghost()
                 .selected(browsing)
                 .disabled(self.disabled)
                 .when(!self.disabled, |button| button.cursor_pointer())
-                .when(self.tabs, |button| button.flex_1().min_w_0())
-                .when(!self.tabs, |button| button.w_full())
+                .w_full()
                 .h_auto()
                 .px_2()
                 .py_1p5()
@@ -137,50 +152,29 @@ impl ProfilePicker {
                         .min_w_0()
                         .gap_2()
                         .child(
-                            div()
-                                .flex_none()
-                                .size_6()
-                                .rounded(theme.radius)
-                                .bg(theme.secondary)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.foreground)
-                                .child(provider_initial(&provider.label)),
-                        )
-                        .child(
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
                                 .items_start()
                                 .child(
-                                    h_flex()
-                                        .w_full()
-                                        .min_w_0()
-                                        .gap_1p5()
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .text_sm()
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(theme.foreground)
-                                                .truncate()
-                                                .child(provider.label.clone()),
-                                        )
-                                        .when(self.tabs, |label| label.child(dot())),
+                                    h_flex().w_full().min_w_0().gap_1p5().child(
+                                        div()
+                                            .min_w_0()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.foreground)
+                                            .truncate()
+                                            .child(provider.label.clone()),
+                                    ),
                                 )
-                                .when(!self.tabs, |text| {
-                                    text.child(
-                                        h_flex()
-                                            .gap_1p5()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(dot())
-                                            .child(status),
-                                    )
-                                }),
+                                .child(
+                                    h_flex()
+                                        .gap_1p5()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(dot())
+                                        .child(status),
+                                ),
                         )
                         .children(holds_choice.then(|| {
                             Icon::new(IconName::Check)
@@ -188,20 +182,22 @@ impl ProfilePicker {
                                 .text_color(theme.primary)
                         })),
                 )
-                .on_click(cx.listener(move |picker, _, _, cx| {
-                    picker.browsing = Some(id.clone());
-                    cx.notify();
-                }))
+                .on_click(select)
         });
         if self.tabs {
-            h_flex()
+            // A form field: equal segments fill the field column, edge to
+            // edge with the inputs above.
+            v_flex()
                 .w_full()
-                .gap_1()
-                .p_1p5()
-                .border_b_1()
-                .border_color(theme.border)
-                .bg(theme.muted.opacity(0.3))
-                .children(items)
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.muted_foreground)
+                        .child("Provider"),
+                )
+                .child(segment_track(cx).w_full().children(items))
                 .into_any_element()
         } else {
             v_flex()
@@ -231,7 +227,7 @@ impl ProfilePicker {
                 }
             })
             .overflow_y_scroll()
-            .p_2()
+            .map(|pane| if self.tabs { pane.py_2() } else { pane.p_2() })
             .gap_3();
         let Some(provider) = self.browsed() else {
             return pane.into_any_element();
@@ -362,25 +358,76 @@ impl ProfilePicker {
             .unwrap_or_else(|| format!("{} is not available on this computer.", provider.label));
         let command = setup_command(&reason).map(str::to_owned);
         let copied = self.copied.as_deref() == Some(provider.id.as_str());
+        let explained = self.explained.as_deref() == Some(provider.id.as_str());
+        let explain_id = provider.id.clone();
+        // Under the Provider tabs the warning row is the whole notice; the
+        // side-by-side catalog keeps a heading over it.
         v_flex()
-            .m_1()
-            .p_4()
+            .map(|setup| if self.tabs { setup } else { setup.p_3() })
             .gap_2()
-            .rounded(theme.radius)
-            .border_1()
-            .border_color(theme.border)
+            .when(!self.tabs, |setup| {
+                setup.child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(format!("Connect {}", provider.label)),
+                )
+            })
+            // Why the provider can't run: one short warning line, with the
+            // server's full reason behind a disclosure.
             .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(format!("Connect {}", provider.label)),
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .text_size(px(13.))
+                    .line_height(px(18.))
+                    .child(
+                        Icon::new(IconName::TriangleAlert)
+                            .size_3p5()
+                            .flex_none()
+                            .text_color(theme.warning),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.warning)
+                            .child(format!("{} isn't available yet.", provider.label)),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("setup-details-{}", provider.id)))
+                            .control(Tier::Ghost, Scale::Compact, false, cx)
+                            // 13 px, like the warning it explains.
+                            .child(div().text_size(px(13.)).child(if explained {
+                                "Hide details"
+                            } else {
+                                "Details"
+                            }))
+                            .accessibility_label(if explained { "Hide details" } else { "Details" })
+                            .icon(if explained {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .on_click(cx.listener(move |picker, _, _, cx| {
+                                picker.explained = if explained {
+                                    None
+                                } else {
+                                    Some(explain_id.clone())
+                                };
+                                cx.notify();
+                            })),
+                    ),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(reason),
-            )
+            .when(explained, |setup| {
+                setup.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .whitespace_normal()
+                        .child(reason),
+                )
+            })
             .children(command.map(|command| {
                 let provider_id = provider.id.clone();
                 let text = command.clone();
@@ -402,11 +449,7 @@ impl ProfilePicker {
                     )
                     .child(
                         Button::new(SharedString::from(format!("copy-setup-{}", provider.id)))
-                            .focus_ring(false)
-                            .when(!self.disabled, |button| button.cursor_pointer())
-                            .disabled(self.disabled)
-                            .ghost()
-                            .xsmall()
+                            .control(Tier::Ghost, Scale::Compact, self.disabled, cx)
                             .icon(if copied {
                                 IconName::Check
                             } else {
@@ -431,86 +474,33 @@ impl ProfilePicker {
         };
         let fast_offered = provider.catalog.tiers.iter().any(|tier| tier == FAST);
         let efforts = &provider.catalog.efforts;
-        let count = efforts.len() as f32;
         let index = efforts
             .iter()
             .position(|effort| *effort == choice.reasoning_effort)
             .unwrap_or(0);
-        let stops = efforts.iter().enumerate().map(|(i, effort)| {
-            let value = effort.clone();
-            let on = i == index;
-            Button::new(SharedString::from(format!("effort-{effort}")))
-                .focus_ring(false)
-                .ghost()
-                .disabled(self.disabled)
-                .when(!self.disabled, |button| button.cursor_pointer())
-                .flex_1()
-                .flex_basis(px(0.))
-                .min_w_0()
-                .h_auto()
-                .py(px(STOP_PAD))
+        // Equal segments fill each field: stacked under the provider tabs
+        // or side by side beside the catalog.
+        let slider = segment_track(cx)
+            .w_full()
+            .children(efforts.iter().enumerate().map(|(i, effort)| {
+                let value = effort.clone();
+                let on = i == index;
+                segment(
+                    SharedString::from(format!("effort-{effort}")),
+                    short_effort_label(effort).to_owned(),
+                    on,
+                    self.disabled,
+                    cx,
+                )
                 .toggled(on)
                 .accessibility_label(format!("{} reasoning", effort_label(effort)))
-                .child(
-                    v_flex()
-                        .w_full()
-                        .items_center()
-                        .gap_1p5()
-                        .child(
-                            div()
-                                .size(px(STOP_DOT))
-                                .rounded_full()
-                                .border_2()
-                                .border_color(if i <= index {
-                                    theme.primary
-                                } else {
-                                    theme.border
-                                })
-                                .bg(if on { theme.primary } else { theme.background }),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(if on {
-                                    theme.foreground
-                                } else {
-                                    theme.muted_foreground
-                                })
-                                .child(short_effort_label(effort).to_owned()),
-                        ),
-                )
                 .on_click(cx.listener(move |picker, _, _, cx| {
                     if let Some(choice) = picker.choice.as_mut() {
                         choice.reasoning_effort = value.clone();
                     }
                     cx.notify();
                 }))
-        });
-        let edge = relative(0.5 / count);
-        let slider = div()
-            .relative()
-            .w_full()
-            .child(
-                div()
-                    .absolute()
-                    .top(px(STOP_PAD + (STOP_DOT - TRACK) / 2.))
-                    .left(edge)
-                    .right(edge)
-                    .h(px(TRACK))
-                    .rounded_full()
-                    .bg(theme.border),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top(px(STOP_PAD + (STOP_DOT - TRACK) / 2.))
-                    .left(edge)
-                    .w(relative(index as f32 / count))
-                    .h(px(TRACK))
-                    .rounded_full()
-                    .bg(theme.primary),
-            )
-            .child(h_flex().relative().w_full().children(stops));
+            }));
         let speeds = [
             ("default", "Standard", IconName::Clock),
             (FAST, "Fast", IconName::Zap),
@@ -519,30 +509,26 @@ impl ProfilePicker {
         .map(|(tier, label, icon)| {
             let selected = choice.service_tier == tier;
             let enabled = !self.disabled && (tier != FAST || fast_offered);
-            Button::new(SharedString::from(format!("speed-{tier}")))
-                .focus_ring(false)
-                .when(enabled, |button| button.cursor_pointer())
-                .ghost()
-                .small()
-                .flex_1()
-                .flex_basis(px(0.))
-                .min_w_0()
-                .selected(selected)
-                .toggled(selected)
-                .icon(icon)
-                .label(label)
-                .accessibility_label(if enabled || tier != FAST {
-                    format!("{label} speed")
-                } else {
-                    format!("{label} speed, not offered by {}", provider.label)
-                })
-                .disabled(!enabled)
-                .on_click(cx.listener(move |picker, _, _, cx| {
-                    if let Some(choice) = picker.choice.as_mut() {
-                        choice.service_tier = tier.to_owned();
-                    }
-                    cx.notify();
-                }))
+            segment(
+                SharedString::from(format!("speed-{tier}")),
+                label,
+                selected,
+                !enabled,
+                cx,
+            )
+            .toggled(selected)
+            .icon(icon)
+            .accessibility_label(if enabled || tier != FAST {
+                format!("{label} speed")
+            } else {
+                format!("{label} speed, not offered by {}", provider.label)
+            })
+            .on_click(cx.listener(move |picker, _, _, cx| {
+                if let Some(choice) = picker.choice.as_mut() {
+                    choice.service_tier = tier.to_owned();
+                }
+                cx.notify();
+            }))
         });
         let field = |label: &'static str, control: AnyElement| {
             v_flex()
@@ -562,26 +548,25 @@ impl ProfilePicker {
         let reasoning = field("Reasoning", slider.into_any_element()).flex_grow(3.);
         let speed = field(
             "Speed",
-            h_flex()
+            segment_track(cx)
                 .w_full()
-                .gap_1()
-                .p_0p5()
-                .bg(theme.muted.opacity(0.3))
-                .rounded(theme.radius)
                 .children(speeds)
                 .into_any_element(),
         )
         .flex_grow(2.);
         let row = if self.tabs {
-            v_flex().gap_4()
+            v_flex().gap_3()
         } else {
             h_flex().gap_6().items_start()
         };
         row.w_full()
-            .px_4()
-            .py_3()
-            .border_t_1()
-            .border_color(theme.border)
+            .map(|row| {
+                if self.tabs {
+                    row.pt_2()
+                } else {
+                    row.px_4().py_3().border_t_1().border_color(theme.border)
+                }
+            })
             .child(reasoning)
             .child(speed)
             .into_any_element()
@@ -605,14 +590,6 @@ fn setup_command(reason: &str) -> Option<&str> {
     let (_, rest) = reason.split_once('`')?;
     let (command, _) = rest.split_once('`')?;
     (!command.trim().is_empty()).then_some(command)
-}
-
-fn provider_initial(label: &str) -> String {
-    label
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().collect())
-        .unwrap_or_default()
 }
 
 fn radio(on: bool, cx: &App) -> impl IntoElement {
@@ -722,10 +699,14 @@ impl Render for ProfilePicker {
             .child(
                 v_flex()
                     .w_full()
-                    .rounded(radius)
-                    .border_1()
-                    .border_color(border)
-                    .overflow_hidden()
+                    .when(self.tabs, |picker| picker.gap_2())
+                    .when(!self.tabs, |picker| {
+                        picker
+                            .rounded(radius)
+                            .border_1()
+                            .border_color(border)
+                            .overflow_hidden()
+                    })
                     .child(
                         body.w_full()
                             .child(self.render_providers(cx))
@@ -735,7 +716,7 @@ impl Render for ProfilePicker {
                         picker.child(self.render_settings(cx))
                     }),
             )
-            .when(!self.any_available(), |picker| {
+            .when(!self.any_available() && !self.tabs, |picker| {
                 picker.child(
                     div()
                         .text_xs()

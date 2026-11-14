@@ -1,14 +1,13 @@
 use super::view::{missing_local, notice};
 use super::*;
+use crate::controls::{Control as _, Scale, Tier, segment, segment_track, text_field};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogEntrance, DialogTitle};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{
-    Disableable as _, FocusableExt as _, Icon, Selectable as _, Sizable as _, Theme, h_flex,
-};
+use gpui_kit::component::{FocusableExt as _, Icon, Selectable as _, Theme, h_flex};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SettingsSection {
@@ -122,9 +121,8 @@ impl Shell {
             let shell = shell.clone();
             let shell_close = shell_close.clone();
             let viewport = window.viewport_size();
-            dialog
-                .w((viewport.width - px(64.)).min(px(1040.)))
-                .h((viewport.height - px(64.)).min(px(760.)))
+            crate::appearance::modal_surface(dialog, cx)
+                .w(sheet_size(viewport).width)
                 .centered()
                 .entrance(DialogEntrance::None)
                 .p_0()
@@ -136,7 +134,7 @@ impl Shell {
                     let _ = shell_close.update(cx, |shell, cx| shell.cancel(window, cx));
                 })
                 .content(move |content, window, cx| {
-                    content.size_full().min_h_0().overflow_hidden().children(
+                    content.w_full().min_h_0().children(
                         shell
                             .update(cx, |shell, cx| shell.render_app_settings(window, cx))
                             .ok(),
@@ -252,20 +250,17 @@ impl Shell {
         let navigation = v_flex()
             .flex_none()
             .w(px(170.))
-            .h_full()
             .p_3()
             .gap_1()
             .border_r_1()
             .border_color(theme.border)
             .bg(theme.secondary.opacity(0.45))
+            .rounded_bl(sheet_corner(cx))
             .child(
-                div()
+                crate::appearance::section_label("This app", cx)
                     .px_2()
                     .pt_1()
-                    .pb_2()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("THIS APP"),
+                    .pb_2(),
             )
             .child(nav_item(
                 "settings-server",
@@ -282,20 +277,11 @@ impl Shell {
                 &setup.navigation_focus[6],
             ))
             .child(
-                div()
+                crate::appearance::section_label("This server", cx)
                     .px_2()
                     .pt_6()
                     .pb_2()
-                    .text_xs()
-                    .text_color(theme.primary)
-                    .truncate()
-                    .child(
-                        self.active
-                            .as_ref()
-                            .and_then(|active| self.registry.find(active.id))
-                            .map(|saved| saved.name.clone())
-                            .unwrap_or_else(|| "Server settings".to_owned()),
-                    ),
+                    .truncate(),
             )
             .child(nav_item(
                 "settings-email",
@@ -343,41 +329,38 @@ impl Shell {
             SettingsSection::Backups => self.render_backups(window, cx),
             SettingsSection::Updates => self.render_updates(cx),
         };
+        // Every page scrolls in the same frame, whose 32 px padding keeps
+        // its first and last lines clear of the edge fades at rest.
         let body = if section == SettingsSection::Backups {
             body
         } else if section == SettingsSection::Updates {
-            div().size_full().p_6().child(body).into_any_element()
-        } else {
-            div()
-                .h_full()
-                .child(div().p_8().w_full().child(body))
-                .overflow_y_scrollbar()
-                .into_any_element()
-        };
-        let body = if matches!(
-            section,
-            SettingsSection::Email
-                | SettingsSection::Socials
-                | SettingsSection::Skills
-                | SettingsSection::Mcp
-                | SettingsSection::Backups
-        ) {
             v_flex()
-                .size_full()
+                .flex_1()
                 .min_h_0()
-                .child(self.render_server_identity(cx))
-                .child(div().flex_1().min_h_0().child(body))
+                .py_8()
+                .child(settings_column(body).min_h_0())
                 .into_any_element()
         } else {
-            body
+            sheet_scroller(
+                div()
+                    .id("settings-page-scroll")
+                    .size_full()
+                    .child(v_flex().min_h_full().py_8().child(settings_column(body)))
+                    .overflow_y_scrollbar(),
+                cx,
+            )
+            .into_any_element()
         };
+        // One sheet size for every page: the header and navigation stay
+        // put while pages change, and a longer page scrolls inside it.
         v_flex()
             .id("app-settings")
             .track_focus(&setup.focus)
-            .size_full()
-            .min_h_0()
+            .w_full()
+            .h(sheet_size(window.viewport_size()).height)
             .overflow_hidden()
             .child(
+                // One header: the sheet's title over the server it edits.
                 h_flex()
                     .flex_none()
                     .h(px(64.))
@@ -386,25 +369,23 @@ impl Shell {
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
-                        Icon::new(IconName::Settings)
-                            .size_4()
-                            .text_color(theme.muted_foreground),
-                    )
-                    .child(
-                        DialogTitle::new()
+                        v_flex()
                             .flex_1()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Settings"),
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                DialogTitle::new()
+                                    .text_size(px(15.))
+                                    .line_height(px(20.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Settings"),
+                            )
+                            .child(self.render_server_identity(cx)),
                     )
-                    .child(self.render_server_switcher("settings-server-switcher", cx))
                     .child(
                         Button::new("app-settings-close")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Ghost, Scale::Compact, false, cx)
                             .icon(IconName::Close)
-                            .ghost()
-                            .small()
                             .label("Esc")
                             .accessibility_label("Close settings, Escape")
                             .on_click(cx.listener(|shell, _, window, cx| {
@@ -447,7 +428,8 @@ impl Shell {
                             })
                             .flex_1()
                             .min_w_0()
-                            .h_full()
+                            .flex()
+                            .flex_col()
                             .child(body),
                     ),
             )
@@ -465,10 +447,7 @@ impl Shell {
                 .gap_4()
                 .child(
                     Button::new("server-update-back")
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .ghost()
-                        .small()
+                        .control(Tier::Ghost, Scale::Compact, false, cx)
                         .label("Back to servers")
                         .on_click(cx.listener(|shell, _, window, cx| {
                             shell.close_server_update(window, cx)
@@ -527,64 +506,53 @@ impl Shell {
             .text_color(status_color)
             .child(div().size_1p5().rounded_full().bg(status_color))
             .child(status);
-        let location = h_flex()
-            .p_1()
-            .gap_1()
-            .rounded(theme.radius)
-            .bg(theme.secondary.opacity(0.45))
+        let location = segment_track(cx)
+            .w_full()
             .when(self.launch.local.is_ok(), |row| {
                 row.child(
-                    Button::new("settings-local-server")
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .label("This machine")
-                        .ghost()
-                        .small()
-                        .flex_1()
-                        .min_w_0()
-                        .selected(matches!(setup.page, Page::Welcome))
-                        .toggled(matches!(setup.page, Page::Welcome))
-                        .on_click(cx.listener(|shell, _, window, cx| {
-                            if shell
-                                .setup
-                                .as_ref()
-                                .is_some_and(|setup| !matches!(setup.page, Page::Welcome))
-                            {
-                                shell.back_to_welcome(window, cx);
-                            }
-                        })),
-                )
-            })
-            .child(
-                Button::new("settings-remote-server")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .label("Remote server")
-                    .ghost()
-                    .small()
-                    .flex_1()
-                    .min_w_0()
-                    .selected(matches!(setup.page, Page::Remote(_)))
-                    .toggled(matches!(setup.page, Page::Remote(_)))
+                    segment(
+                        "settings-local-server",
+                        "This machine",
+                        matches!(setup.page, Page::Welcome),
+                        false,
+                        cx,
+                    )
+                    .toggled(matches!(setup.page, Page::Welcome))
                     .on_click(cx.listener(|shell, _, window, cx| {
                         if shell
                             .setup
                             .as_ref()
-                            .is_some_and(|setup| !matches!(setup.page, Page::Remote(_)))
+                            .is_some_and(|setup| !matches!(setup.page, Page::Welcome))
                         {
-                            let profile =
-                                shell.active.as_ref().map(|active| active.profile.clone());
-                            shell.open_remote(profile.as_ref(), window, cx);
+                            shell.back_to_welcome(window, cx);
                         }
                     })),
+                )
+            })
+            .child(
+                segment(
+                    "settings-remote-server",
+                    "Remote server",
+                    matches!(setup.page, Page::Remote(_)),
+                    false,
+                    cx,
+                )
+                .toggled(matches!(setup.page, Page::Remote(_)))
+                .on_click(cx.listener(|shell, _, window, cx| {
+                    if shell
+                        .setup
+                        .as_ref()
+                        .is_some_and(|setup| !matches!(setup.page, Page::Remote(_)))
+                    {
+                        let profile = shell.active.as_ref().map(|active| active.profile.clone());
+                        shell.open_remote(profile.as_ref(), window, cx);
+                    }
+                })),
             );
         let mut content = v_flex()
             .child(
                 Button::new("connection-editor-back")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .ghost()
-                    .small()
+                    .control(Tier::Ghost, Scale::Compact, false, cx)
                     .label("Back to servers")
                     .on_click(
                         cx.listener(|shell, _, window, cx| shell.close_server_editor(window, cx)),
@@ -603,9 +571,7 @@ impl Shell {
             .child(settings_row(
                 "Name",
                 "A name for this connection",
-                Input::new(&setup.name)
-                    .focus_ring(false)
-                    .aria_label("Server name"),
+                text_field(Input::new(&setup.name), cx).aria_label("Server name"),
                 stacked,
                 theme,
             ))
@@ -697,12 +663,9 @@ impl Shell {
                     };
                     (!connected || busy.is_some()).then(|| {
                         Button::new("connection-start")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Primary, Scale::Standard, busy.is_some(), cx)
                             .label(label)
-                            .primary()
                             .loading(busy.is_some())
-                            .disabled(busy.is_some())
                             .on_click(
                                 cx.listener(|shell, _, window, cx| shell.start_local(window, cx)),
                             )
@@ -717,8 +680,7 @@ impl Shell {
                         v_flex()
                             .gap_2()
                             .child(
-                                Input::new(&form.origin)
-                                    .focus_ring(false)
+                                text_field(Input::new(&form.origin), cx)
                                     .aria_label("Server address"),
                             )
                             .when(active.is_some(), |column| column.child(status)),
@@ -731,8 +693,7 @@ impl Shell {
                         v_flex()
                             .gap_2()
                             .child(
-                                Input::new(&form.token)
-                                    .focus_ring(false)
+                                text_field(Input::new(&form.token), cx)
                                     .aria_label("Owner key")
                                     .mask_toggle(),
                             )
@@ -747,16 +708,13 @@ impl Shell {
                     ));
                 Some(
                     Button::new("connection-connect")
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Primary, Scale::Standard, busy.is_some(), cx)
                         .label(if busy.is_some() {
                             "Connecting…"
                         } else {
                             "Test and save ↵"
                         })
-                        .primary()
                         .loading(busy.is_some())
-                        .disabled(busy.is_some())
                         .on_click(
                             cx.listener(|shell, _, window, cx| shell.connect_remote(window, cx)),
                         ),
@@ -785,8 +743,7 @@ impl Shell {
                 |row| {
                     row.child(
                         Button::new("app-settings-done")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Secondary, Scale::Standard, false, cx)
                             .label("Done")
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.cancel(window, cx);
@@ -834,19 +791,98 @@ fn settings_row(
         )
 }
 
-pub(super) fn section_heading(title: &'static str, description: &'static str, cx: &App) -> Div {
+/// Width of the content column on every Settings page. The server strip,
+/// page bodies and footers share it so their left and right edges line up.
+pub(super) const SETTINGS_COLUMN: Pixels = px(560.);
+/// Least inset of that column from the edges of the Settings pane; a wider
+/// pane centres the column.
+pub(super) const SETTINGS_INSET: Pixels = px(32.);
+/// The sheet's one size on every page.
+const SHEET_SIZE: Size<Pixels> = Size {
+    width: px(840.),
+    height: px(620.),
+};
+/// The least gap between the sheet and each window edge.
+const SHEET_CLEARANCE: Pixels = px(32.);
+
+/// The sheet's fixed size, shrunk only when the window cannot fit it with
+/// [`SHEET_CLEARANCE`] on every side. The dialog centres it.
+fn sheet_size(viewport: Size<Pixels>) -> Size<Pixels> {
+    let room = |extent: Pixels| (extent - SHEET_CLEARANCE * 2.).max(px(0.));
+    Size {
+        width: SHEET_SIZE.width.min(room(viewport.width)),
+        height: SHEET_SIZE.height.min(room(viewport.height)),
+    }
+}
+
+/// The radius just inside the sheet's 1 px border. Clipping is rectangular,
+/// so any fill that reaches a bottom corner rounds itself to this.
+pub(super) fn sheet_corner(cx: &App) -> Pixels {
+    (cx.theme().radius_lg - px(1.)).max(px(0.))
+}
+
+/// A page's scroll container, faded at both edges into the sheet and
+/// rounded where it meets the sheet's bottom-right corner.
+pub(super) fn sheet_scroller(scroller: impl IntoElement, cx: &App) -> Div {
+    crate::panel_kit::faded(scroller, cx.theme().popover, sheet_corner(cx))
+        .flex_1()
+        .min_h_0()
+}
+
+/// Place `content` in the shared Settings column.
+pub(super) fn settings_column(content: impl IntoElement) -> Div {
+    v_flex().flex_1().w_full().px(SETTINGS_INSET).child(
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .max_w(SETTINGS_COLUMN)
+            .mx_auto()
+            .child(content),
+    )
+}
+
+/// The empty state of an inventory page (MCP, Skills): a 28 px icon, 12 px
+/// to the title, one supporting line, and 16 px to the button that fixes
+/// it. It fills the page under the description and centres itself there,
+/// a little above the middle so it reads as centred.
+pub(super) fn empty_state(
+    icon: IconName,
+    title: &'static str,
+    detail: &'static str,
+    action: Button,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
     v_flex()
-        .gap_2()
+        .w_full()
+        .flex_1()
+        .justify_center()
+        .pb_10()
+        .items_center()
+        .text_center()
+        .child(
+            Icon::new(icon)
+                .size(px(28.))
+                .text_color(theme.muted_foreground.opacity(0.8)),
+        )
         .child(
             div()
-                .text_xl()
+                .pt_3()
+                .text_size(px(15.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(title),
         )
         .child(
             div()
+                .pt_1()
                 .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(description),
+                .text_color(theme.muted_foreground)
+                .child(detail),
         )
+        .child(div().pt_4().child(action))
+}
+
+pub(super) fn section_heading(title: &'static str, description: &'static str, cx: &App) -> Div {
+    crate::panel_kit::page_heading(title, description, Vec::new(), cx)
 }

@@ -1,11 +1,12 @@
 use super::{ImageState, MessageImages};
 use crate::app::ElseApp;
+use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -305,10 +306,7 @@ impl Render for ImageViewer {
                     )
                     .child(
                         Button::new("save-viewer-image")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .disabled(!ready)
+                            .control(Tier::Ghost, Scale::Standard, !ready, cx)
                             .icon(IconName::Download)
                             .label("Save image")
                             .on_click(cx.listener(move |viewer, _, window, cx| {
@@ -319,10 +317,7 @@ impl Render for ImageViewer {
                     )
                     .child(
                         Button::new("copy-viewer-image")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .disabled(!ready)
+                            .control(Tier::Ghost, Scale::Standard, !ready, cx)
                             .icon(IconName::Copy)
                             .label("Copy image")
                             .on_click(cx.listener(move |viewer, _, window, cx| {

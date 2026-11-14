@@ -308,6 +308,52 @@ impl RowText {
         }
     }
 
+    /// The width an owner message needs with one line per paragraph, so its
+    /// bubble can hug the text. Rich text and text carrying attachment chips
+    /// report only their narrowest layout, so this measures their widest line;
+    /// plain text without chips sizes itself and returns `None`.
+    pub(super) fn natural_width(&self, cx: &App) -> Option<Pixels> {
+        let text = match &self.widget {
+            Widget::Markdown { state, .. } => state.read(cx).rendered_text().as_str().to_owned(),
+            Widget::Plain(_) if !self.files.is_empty() => self.source.clone(),
+            Widget::Plain(_) => return None,
+        };
+        let system = cx.text_system();
+        let font_id = system.resolve_font(&font(cx.theme().font_family.clone()));
+        let measure = |line: &str| {
+            line.chars()
+                .map(|ch| {
+                    system
+                        .advance(font_id, px(14.), ch)
+                        .map_or(px(8.), |size| size.width)
+                })
+                .fold(px(0.), |sum, width| sum + width)
+        };
+        // An attachment chip adds its icon, padding and size label to the file name.
+        let chips = self
+            .files
+            .values()
+            .map(|file| measure(&file.name) + px(64.));
+        let widest = text
+            .lines()
+            .map(measure)
+            .chain(chips)
+            .fold(px(0.), Pixels::max);
+        // Plain text also needs its own inset and the textarea's 10 px caret margin.
+        let (inset_x, _) = self.inset();
+        let caret = if inset_x > px(0.) { px(10.) } else { px(0.) };
+        Some(widest + inset_x * 2. + caret + px(4.))
+    }
+
+    /// The horizontal and vertical padding the widget draws inside itself: a
+    /// read-only textarea keeps the medium input's editor padding.
+    pub(super) fn inset(&self) -> (Pixels, Pixels) {
+        match &self.widget {
+            Widget::Plain(_) => (px(10.), px(8.)),
+            Widget::Markdown { .. } => (px(0.), px(0.)),
+        }
+    }
+
     pub(super) fn rendered_bytes(&self, cx: &App) -> Option<usize> {
         match &self.widget {
             Widget::Plain(_) => Some(self.source.len()),
@@ -505,6 +551,8 @@ impl RowText {
                 .readonly(true)
                 .appearance(false)
                 .bordered(false)
+                .min_w_0()
+                .text_size(px(14.))
                 .token(move |token, _, cx| {
                     if let Some(file) = file_id(token.token().id()).and_then(|id| files.get(&id)) {
                         return super::attachments::chip(
@@ -532,101 +580,155 @@ impl RowText {
                     }
                 })
                 .into_any_element(),
-            Widget::Markdown { state, .. } => TextView::new(state)
-                .style(
-                    TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
-                        .with_code_background(cx.theme().muted)
-                        .with_link(cx.theme().link)
-                        .with_code_block(
-                            StyleRefinement::default()
-                                .rounded(cx.theme().radius)
-                                .pt(px(36.)),
-                        )
-                        .with_table(StyleRefinement::default().rounded(cx.theme().radius))
-                        .with_table_head(
-                            StyleRefinement::default()
-                                .bg(cx.theme().table_head)
-                                .text_color(cx.theme().table_head_foreground),
-                        ),
-                )
-                .code_block_actions(|block, _, cx| {
-                    let code = block.code();
-                    h_flex()
-                        .gap_2()
-                        .font_family(cx.theme().font_family.clone())
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .children(block.lang())
-                        .child(
-                            Button::new("copy-code")
-                                .ghost()
-                                .xsmall()
-                                .focus_ring(false)
-                                .cursor_pointer()
-                                .icon(IconName::Copy)
-                                .accessibility_label("Copy code")
-                                .on_click(move |_, window, cx| {
-                                    cx.stop_propagation();
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        code.to_string(),
-                                    ));
-                                    window.push_notification("Code copied to clipboard.", cx);
-                                }),
-                        )
-                })
-                .markdown_extensions(
-                    MarkdownExtensions::default()
-                        .plugin(MentionPlugin(mentions))
-                        .plugin(UnavailableImage),
-                )
-                .w_full()
-                .text_sm()
-                .line_height(rems(1.375))
-                .scrollable(false)
-                .selectable(true)
-                .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
-                .on_link_click(move |url, event, window, cx| {
-                    if !activates_link(event) {
-                        return;
-                    }
-                    if let Some(passage) = quoted_passage(url).and_then(|n| passages.get(n)) {
-                        let passage = passage.clone();
-                        let _ = link_owner.update(cx, |app, cx| {
-                            app.reveal_quoted(
-                                bot,
-                                key,
-                                passage.author,
-                                &passage.original,
-                                window,
-                                cx,
+            Widget::Markdown { state, .. } => {
+                let heading_ink = crate::appearance::tone(crate::appearance::Tone::Strong, cx);
+                TextView::new(state)
+                    .style(
+                        TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
+                            .with_code_background(cx.theme().secondary)
+                            .with_link(cx.theme().link)
+                            .with_border(cx.theme().foreground.opacity(0.08))
+                            // A reply's title (H1, H2) leads at 18–19 px with 20 px
+                            // above it (8 px plus the paragraph gap) and 8 px below;
+                            // sections (H3) at 16 px; deeper levels at body size.
+                            .with_heading(move |level| {
+                                let style = StyleRefinement::default()
+                                    .text_size(px(match level {
+                                        1 => 19.,
+                                        2 => 18.,
+                                        3 => 16.,
+                                        _ => 14.,
+                                    }))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(heading_ink);
+                                if level <= 2 {
+                                    style.pt(px(8.)).pb(px(8.))
+                                } else {
+                                    style
+                                }
+                            })
+                            .with_code_block(
+                                StyleRefinement::default()
+                                    .rounded(cx.theme().radius)
+                                    .border_0()
+                                    .pt(px(28.))
+                                    .text_size(px(13.))
+                                    .line_height(px(21.)),
                             )
-                        });
-                    } else if let Some(file) = linked_file(url).and_then(|id| link_files.get(&id)) {
-                        let file = file.clone();
-                        let _ = link_owner
-                            .update(cx, |app, cx| app.preview_attachment(bot, file, window, cx));
-                    } else if let Some(target) = LinkTarget::parse(url) {
-                        target.open(cx);
-                    }
-                })
-                .link_tooltip(move |url, window, cx| {
-                    let destination = if quoted_passage(url).is_some() {
-                        "Go to the original message".to_owned()
-                    } else {
-                        match linked_file(url).and_then(|id| tooltip_files.get(&id)) {
-                            Some(file) => format!("{} · {}", file.name, byte_size(file.size)),
-                            None => LinkTarget::parse(url)
-                                .map_or_else(|| url.to_string(), |target| target.destination()),
+                            .with_table({
+                                let mut table = StyleRefinement::default()
+                                    .min_w_0()
+                                    .border_0()
+                                    .bg(cx.theme().background.opacity(0.));
+                                table.overflow.x = Some(Overflow::Scroll);
+                                table
+                            })
+                            .with_table_head(
+                                StyleRefinement::default()
+                                    .bg(cx.theme().background.opacity(0.))
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            // Each cell's whole 24 px gutter sits on its right,
+                            // so the first column starts on the paragraph edge.
+                            .with_table_cell(
+                                StyleRefinement::default()
+                                    .border_color(cx.theme().foreground.opacity(0.))
+                                    .py_2()
+                                    .pl_0()
+                                    .pr(px(24.)),
+                            ),
+                    )
+                    .code_block_actions(|block, _, cx| {
+                        let code = block.code();
+                        h_flex()
+                            .h(px(16.))
+                            .gap_2()
+                            .items_center()
+                            .font_family(cx.theme().font_family.clone())
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .children(block.lang())
+                            .child(
+                                Button::new("copy-code")
+                                    .ghost()
+                                    .xsmall()
+                                    .size(px(16.))
+                                    .focus_ring(false)
+                                    .cursor_pointer()
+                                    .icon(IconName::Copy)
+                                    .accessibility_label("Copy code")
+                                    .on_click(move |_, window, cx| {
+                                        cx.stop_propagation();
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            code.to_string(),
+                                        ));
+                                        window.push_notification("Code copied to clipboard.", cx);
+                                    }),
+                            )
+                    })
+                    .markdown_extensions(
+                        MarkdownExtensions::default()
+                            .plugin(MentionPlugin(mentions))
+                            .plugin(UnavailableImage),
+                    )
+                    .w_full()
+                    .min_w_0()
+                    .text_size(px(14.))
+                    .line_height(px(22.))
+                    .scrollable(false)
+                    .selectable(true)
+                    .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
+                    .on_link_click(move |url, event, window, cx| {
+                        if !activates_link(event) {
+                            return;
                         }
-                    };
-                    Tooltip::element(move |_, _| div().max_w(rems(32.)).child(destination.clone()))
+                        if let Some(passage) = quoted_passage(url).and_then(|n| passages.get(n)) {
+                            let passage = passage.clone();
+                            let _ = link_owner.update(cx, |app, cx| {
+                                app.reveal_quoted(
+                                    bot,
+                                    key,
+                                    passage.author,
+                                    &passage.original,
+                                    window,
+                                    cx,
+                                )
+                            });
+                        } else if let Some(file) =
+                            linked_file(url).and_then(|id| link_files.get(&id))
+                        {
+                            let file = file.clone();
+                            let _ = link_owner.update(cx, |app, cx| {
+                                app.preview_attachment(bot, file, window, cx)
+                            });
+                        } else if let Some(target) = LinkTarget::parse(url) {
+                            target.open(cx);
+                        }
+                    })
+                    .link_tooltip(move |url, window, cx| {
+                        let destination = if quoted_passage(url).is_some() {
+                            "Go to the original message".to_owned()
+                        } else {
+                            match linked_file(url).and_then(|id| tooltip_files.get(&id)) {
+                                Some(file) => format!("{} · {}", file.name, byte_size(file.size)),
+                                None => LinkTarget::parse(url)
+                                    .map_or_else(|| url.to_string(), |target| target.destination()),
+                            }
+                        };
+                        Tooltip::element(move |_, _| {
+                            div().max_w(rems(32.)).child(destination.clone())
+                        })
                         .build(window, cx)
-                })
-                .into_any_element(),
+                    })
+                    .into_any_element()
+            }
         };
         use gpui_kit::prelude::FluentBuilder as _;
         gpui_kit::component::v_flex()
             .w_full()
+            .min_w_0()
             .gap_2()
             .children(self.render_quote_preview(cx))
             .when(!self.display.text.trim().is_empty(), |column| column.child(body))

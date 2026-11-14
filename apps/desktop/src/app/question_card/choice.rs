@@ -1,19 +1,19 @@
+use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Sizable as _, StyledExt as _, h_flex,
-    v_flex,
+    ActiveTheme as _, Disableable as _, FocusableExt as _, Sizable as _, StyledExt as _, Theme,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
-use super::{
-    Connection, ElseApp, QuestionForm, RowKey, SubmitState, callout, letter, receipt, tile,
-};
+use super::super::action_card::OPTION_HEIGHT;
+use super::{Connection, ElseApp, QuestionForm, RowKey, SubmitState, callout, letter, receipt};
 use crate::model::{Question, QuestionAnswer};
 
 /// The field on a pending single-choice card for an answer its options don't
@@ -133,6 +133,7 @@ impl ElseApp {
         question: &Question,
         form: Option<&QuestionForm>,
         bot_name: &str,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(view) = self.view.as_ref() else {
@@ -207,37 +208,11 @@ impl ElseApp {
             .iter()
             .filter(|choice| answer.is_some_and(|a| a.contains(&choice.id)))
             .collect();
-        let kind = if question.multiple {
-            "Choose any"
-        } else if question.choices.is_empty() {
-            "Reply here"
-        } else {
-            "Choose one"
-        };
-        let mut body = v_flex().w_full().gap_3().p_4().child(
-            h_flex()
-                .w_full()
-                .items_start()
-                .gap_3()
-                .child(tile(IconName::CircleQuestionMark, theme.warning))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_0p5()
-                        .child(
-                            div()
-                                .font_semibold()
-                                .whitespace_normal()
-                                .child(question.title.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(format!("{bot_name} · {kind}")),
-                        ),
-                ),
+        // The footer says how to answer, so the title stands alone.
+        let mut body = super::super::action_card::card(
+            IconName::CircleQuestionMark,
+            question.title.clone(),
+            "",
         );
         if let Some(context) = &question.context {
             body = body.child(
@@ -248,25 +223,38 @@ impl ElseApp {
                     .child(context.clone()),
             );
         }
-        let mut rows = v_flex().w_full().gap_0p5();
-        for choice in &question.choices {
+        // Options are borderless rows split by hairlines: the card is the
+        // only box.
+        let line = theme.border;
+        let separated = |index: usize, row: AnyElement| {
+            div()
+                .w_full()
+                .py_0p5()
+                .when(index > 0, |cell| cell.border_t_1().border_color(line))
+                .child(row)
+        };
+        let mut rows = v_flex().w_full();
+        for (index, choice) in question.choices.iter().enumerate() {
             let choice_id = choice.id.clone();
             if question.multiple {
                 let checked = answer.is_some_and(|a| a.contains(&choice.id));
-                rows = rows.child(
+                rows = rows.child(separated(
+                    index,
                     Checkbox::new(SharedString::from(format!("question-{id}-{}", choice.id)))
                         .focus_ring(false)
                         .small()
                         .checked(checked)
                         .disabled(locked)
                         .w_full()
-                        .p_2()
+                        .min_h(px(OPTION_HEIGHT))
+                        .px_3()
+                        .py_2()
                         .gap_2p5()
                         .rounded(theme.radius)
                         .when(!locked, |row| row.cursor_pointer())
-                        .when(checked, |row| row.bg(theme.primary.opacity(0.1)))
+                        .when(checked, |row| row.bg(theme.primary.opacity(0.08)))
                         .when(!locked && !checked, |row| {
-                            row.hover(|style| style.bg(theme.accent))
+                            row.hover(|style| style.bg(theme.muted.opacity(0.5)))
                         })
                         .accessibility_label(choice.label.clone())
                         .child(
@@ -279,10 +267,12 @@ impl ElseApp {
                         )
                         .on_change(cx.listener(move |app, _, _, cx| {
                             app.toggle_question_choice(id, &choice_id, cx);
-                        })),
-                );
+                        }))
+                        .into_any_element(),
+                ));
             } else {
-                rows = rows.child(
+                rows = rows.child(separated(
+                    index,
                     Button::new(SharedString::from(format!("question-{id}-{}", choice.id)))
                         .focus_ring(false)
                         .ghost()
@@ -290,25 +280,17 @@ impl ElseApp {
                         .disabled(locked)
                         .w_full()
                         .h_auto()
+                        .min_h(px(OPTION_HEIGHT))
                         .px_2()
-                        .py_2p5()
+                        .py_1p5()
+                        .rounded(theme.radius)
                         .when(!locked, |row| row.cursor_pointer())
                         .accessibility_label(format!("{}. {}", letter(&choice.id), choice.label))
                         .child(
                             h_flex()
                                 .w_full()
                                 .gap_2p5()
-                                .child(
-                                    h_flex()
-                                        .size_6()
-                                        .flex_shrink_0()
-                                        .justify_center()
-                                        .rounded(theme.radius)
-                                        .bg(theme.background)
-                                        .text_color(theme.muted_foreground)
-                                        .text_xs()
-                                        .child(letter(&choice.id)),
-                                )
+                                .child(key_chip(&theme, letter(&choice.id)))
                                 .child(
                                     div()
                                         .flex_1()
@@ -325,12 +307,15 @@ impl ElseApp {
                                 window,
                                 cx,
                             );
-                        })),
-                );
+                        }))
+                        .into_any_element(),
+                ));
             }
         }
         if let Some(write_in) = view.write_ins.get(&id).filter(|_| takes_write_in(question)) {
-            rows = rows.child(self.render_write_in(id, question, write_in, locked, cx));
+            let index = question.choices.len();
+            let row = self.render_write_in(id, question, write_in, locked, window, cx);
+            rows = rows.child(separated(index, row.into_any_element()));
         }
         body = body.child(rows);
         let hint = if question.multiple {
@@ -340,68 +325,23 @@ impl ElseApp {
         } else {
             "Choose an answer or type your own. Sending a new message skips this.".to_owned()
         };
-        let mut footer = h_flex().w_full().gap_3().flex_wrap().child(
-            div()
-                .flex_1()
-                .min_w(px(180.))
-                .text_xs()
-                .whitespace_normal()
-                .text_color(theme.muted_foreground)
-                .child(hint),
-        );
+        let mut footer = super::super::action_card::footer().note(hint);
         if question.multiple {
             let answer = QuestionAnswer::Multiple(selected.iter().map(|c| c.id.clone()).collect());
             let disabled = locked || selected.is_empty();
             footer = footer.child(
                 Button::new(SharedString::from(format!("question-{id}-done")))
-                    .focus_ring(false)
-                    .primary()
-                    .small()
-                    .disabled(disabled)
-                    .when(!disabled, |button| button.cursor_pointer())
+                    .control(Tier::Primary, Scale::Compact, disabled, cx)
                     .label(format!("Done · {} selected", selected.len()))
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.answer_question(id, answer.clone(), window, cx);
                     })),
             );
         }
-        body = body.child(footer);
         if let Some(SubmitState::Failed(error)) = form.map(|f| &f.state) {
             body = body.child(callout(error.clone(), &theme));
         }
-        let card = v_flex()
-            .w_full()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.warning.opacity(0.45))
-            .bg(theme.secondary)
-            .overflow_hidden()
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .px_4()
-                    .py_2()
-                    .bg(theme.warning.opacity(0.11))
-                    .text_xs()
-                    .font_semibold()
-                    .text_color(theme.warning)
-                    .child(
-                        div()
-                            .size(px(7.))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(theme.warning),
-                    )
-                    .child(format!("{bot_name} is paused until you answer")),
-            )
-            .child(body);
-        v_flex()
-            .w_full()
-            .gap_2()
-            .child(divider("Paused · waiting on you".into(), theme.warning))
-            .child(card)
-            .into_any_element()
+        body.footer(footer).into_any_element()
     }
 
     fn render_write_in(
@@ -410,6 +350,7 @@ impl ElseApp {
         question: &Question,
         write_in: &WriteIn,
         locked: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
@@ -419,51 +360,72 @@ impl ElseApp {
             .and_then(|c| c.id.chars().next())
             .and_then(|c| char::from_u32(c as u32 + 1))
             .map(|c| letter(&c.to_string()));
-        let empty = write_in.input.read(cx).value().trim().is_empty();
-        let disabled = locked || empty;
+        let input = write_in.input.read(cx);
+        let empty = input.value().trim().is_empty();
+        let focused = input.focus_handle(cx).is_focused(window);
+        let fill = theme.muted.opacity(0.5);
         h_flex()
             .w_full()
+            .min_h(px(OPTION_HEIGHT))
             .gap_2p5()
-            .when(next.is_some(), |row| row.px_2().py_1())
-            .children(next.map(|next| {
-                h_flex()
-                    .size_6()
-                    .flex_shrink_0()
-                    .justify_center()
+            .px_2()
+            .py_1()
+            .children(next.map(|next| key_chip(theme, next)))
+            // A borderless field whose text starts on the answers' text
+            // column; it fills on hover and while focused.
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .ml(-WRITE_IN_INSET)
                     .rounded(theme.radius)
-                    .bg(theme.background)
-                    .text_color(theme.muted_foreground)
-                    .text_xs()
-                    .child(next)
-            }))
-            .child(
-                div().flex_1().min_w_0().child(
-                    Input::new(&write_in.input)
-                        .focus_ring(false)
-                        .small()
-                        .aria_label("Your own answer")
-                        .disabled(locked),
-                ),
+                    .when(focused, |field| field.bg(fill))
+                    .when(!focused && !locked, |field| {
+                        field.hover(|style| style.bg(fill))
+                    })
+                    .child(
+                        Input::new(&write_in.input)
+                            .appearance(false)
+                            .focus_ring(false)
+                            .aria_label("Your own answer")
+                            .disabled(locked),
+                    ),
             )
-            .child(
-                Button::new(SharedString::from(format!("question-{id}-write-in")))
-                    .focus_ring(false)
-                    .primary()
-                    .small()
-                    .disabled(disabled)
-                    .when(!disabled, |button| button.cursor_pointer())
-                    .label("Send")
-                    .children(Keystroke::parse("enter").ok().map(|key| {
-                        div()
-                            .flex_none()
-                            .text_xs()
-                            .child(Kbd::new(key).appearance(false))
-                    }))
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        app.send_write_in(id, window, cx);
-                    })),
-            )
+            .when(!empty, |row| {
+                row.child(
+                    Button::new(SharedString::from(format!("question-{id}-write-in")))
+                        .control(Tier::Primary, Scale::Compact, locked, cx)
+                        .label("Send")
+                        .children(Keystroke::parse("enter").ok().map(|key| {
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .child(Kbd::new(key).appearance(false))
+                        }))
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.send_write_in(id, window, cx);
+                        })),
+                )
+            })
     }
+}
+
+/// The free-text field's own text inset, pulled back so its text lines up
+/// with the answers' labels.
+const WRITE_IN_INSET: Pixels = px(10.);
+
+/// The letter that leads an option row.
+fn key_chip(theme: &Theme, key: String) -> Div {
+    h_flex()
+        .size_5()
+        .flex_shrink_0()
+        .justify_center()
+        .rounded(theme.radius)
+        .bg(theme.muted)
+        // 70% ink: clearly a live key, not a disabled one.
+        .text_color(theme.foreground.opacity(0.7))
+        .text_xs()
+        .child(key)
 }
 
 /// How a settled card reads: the divider above it, whether the bot carried

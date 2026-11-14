@@ -57,6 +57,8 @@ pub(super) struct TranscriptRow {
     pub(super) key: RowKey,
     pub(super) unread_start: bool,
     pub(super) footer_stamp: Option<DateTime<Utc>>,
+    /// Set on the first row of each local day; a centered separator names that day.
+    pub(super) day: Option<DateTime<Utc>>,
     pub(super) routine: Option<RoutineRow>,
     pub(super) task: Option<TaskReply>,
     pub(super) activity: Option<BotActivity>,
@@ -260,18 +262,19 @@ pub(super) fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
 
 const BURST_GAP: TimeDelta = TimeDelta::minutes(5);
 
+/// One timestamp per group of messages: messages from either side less than
+/// [`BURST_GAP`] apart on one local day share the stamp of the last one.
 fn burst_tail_stamps<Tz: TimeZone>(
     rows: &[(Option<Author>, Option<DateTime<Utc>>)],
     zone: &Tz,
 ) -> Vec<Option<DateTime<Utc>>> {
     let joins = |(author, at): (Option<Author>, Option<DateTime<Utc>>),
                  (next_author, next_at): (Option<Author>, Option<DateTime<Utc>>)| {
-        let (Some(author), Some(at), Some(next_at)) = (author, at, next_at) else {
+        let (Some(_), Some(_), Some(at), Some(next_at)) = (author, next_author, at, next_at) else {
             return false;
         };
         let gap = next_at - at;
-        next_author == Some(author)
-            && gap >= TimeDelta::zero()
+        gap >= TimeDelta::zero()
             && gap < BURST_GAP
             && at.with_timezone(zone).date_naive() == next_at.with_timezone(zone).date_naive()
     };
@@ -282,6 +285,26 @@ fn burst_tail_stamps<Tz: TimeZone>(
             if joined { None } else { row.1 }
         })
         .collect()
+}
+
+/// Marks the first timed row of each local day, so the transcript names the
+/// day once and its stamps can show only the time.
+fn mark_days<Tz: TimeZone>(
+    rows: &mut [TranscriptRow],
+    times: &HashMap<RowKey, DateTime<Utc>>,
+    zone: &Tz,
+) {
+    let mut last = None;
+    for row in rows {
+        let Some(&at) = times.get(&row.key) else {
+            continue;
+        };
+        let date = at.with_timezone(zone).date_naive();
+        if last != Some(date) {
+            row.day = Some(at);
+            last = Some(date);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -305,6 +328,9 @@ pub(super) struct ConversationView {
     pub(super) answered: HashSet<Uuid>,
     pub(super) connections: HashMap<Uuid, super::question_card::connection::Form>,
     pub(super) question_submits: HashMap<Uuid, super::question_card::QuestionForm>,
+    /// Where cards that can pause the bot were last painted, so the paused
+    /// strip can step aside while one is on screen.
+    pub(super) sightings: super::question_card::Sightings,
     /// The typed answer field on each pending single-choice card.
     pub(super) write_ins: HashMap<Uuid, super::question_card::WriteIn>,
     /// The approval scope picked on each pending approval card.
@@ -314,8 +340,9 @@ pub(super) struct ConversationView {
     pub(super) expanded_drafts: HashSet<Uuid>,
     pub(super) expanded_questions: HashSet<Uuid>,
     pub(super) expanded_tasks: HashSet<Uuid>,
-    /// Live councils whose queued lane shows every member.
+    /// Delegation groups whose task details are expanded.
     pub(super) expanded_councils: HashSet<Uuid>,
+    pub(super) expanded_events: HashSet<Uuid>,
     /// The waiting tray lists its tasks instead of only its header.
     pub(super) tray_expanded: bool,
     pub(super) reply_transitions: HashMap<Uuid, std::time::Instant>,
@@ -413,6 +440,7 @@ impl ConversationView {
             skill_cards: HashMap::new(),
             answered: HashSet::new(),
             question_submits: HashMap::new(),
+            sightings: Default::default(),
             write_ins: HashMap::new(),
             connections: HashMap::new(),
             approval_scopes: HashMap::new(),
@@ -422,6 +450,7 @@ impl ConversationView {
             expanded_questions: HashSet::new(),
             expanded_tasks: HashSet::new(),
             expanded_councils: HashSet::new(),
+            expanded_events: HashSet::new(),
             tray_expanded: false,
             reply_transitions: HashMap::new(),
             _reply_clock: None,
@@ -875,6 +904,11 @@ impl ElseApp {
                 group.last = true;
             }
         }
+        let times: HashMap<RowKey, DateTime<Utc>> = rows
+            .iter()
+            .zip(&senders)
+            .filter_map(|(key, (_, at))| Some((*key, (*at)?)))
+            .collect();
         let rows: Vec<TranscriptRow> = rows
             .into_iter()
             .zip(burst_tail_stamps(&senders, &Local))
@@ -913,6 +947,7 @@ impl ElseApp {
                     key,
                     unread_start: Some(key) == unread_start,
                     footer_stamp: footer_stamp.filter(|_| routine.is_none()),
+                    day: None,
                     routine,
                     routine_status,
                     reaction: match key {
@@ -928,7 +963,8 @@ impl ElseApp {
                 }
             })
             .collect();
-        let rows = group_activity(rows, conversation);
+        let mut rows = group_activity(rows, conversation);
+        mark_days(&mut rows, &times, &Local);
         let old = std::mem::take(&mut view.rows);
         view.reply_transitions
             .retain(|_, at| at.elapsed() < Duration::from_millis(320));
@@ -1611,6 +1647,7 @@ mod tests {
             key,
             unread_start: false,
             footer_stamp: None,
+            day: None,
             routine: None,
             task: None,
             activity: None,
@@ -1835,6 +1872,7 @@ mod tests {
             key,
             unread_start: false,
             footer_stamp: None,
+            day: None,
             routine: None,
             task: None,
             activity: None,
@@ -1980,22 +2018,30 @@ mod tests {
     }
 
     #[test]
-    fn a_five_minute_gap_or_another_sender_starts_a_new_stamp() {
+    fn a_five_minute_gap_starts_a_new_stamp() {
         let rows = [
             (Some(Bot), Some("10:00:00")),
             (Some(Bot), Some("10:05:00")),
-            (Some(Owner), Some("10:05:01")),
-            (Some(Bot), Some("10:05:02")),
+            (Some(Owner), Some("10:10:00")),
         ];
         assert_eq!(
             stamps(&rows),
             [
                 Some(at("10:00:00")),
                 Some(at("10:05:00")),
-                Some(at("10:05:01")),
-                Some(at("10:05:02")),
+                Some(at("10:10:00")),
             ]
         );
+    }
+
+    #[test]
+    fn an_owner_message_and_its_quick_reply_share_one_stamp() {
+        let rows = [
+            (Some(Owner), Some("10:00:00")),
+            (Some(Bot), Some("10:00:20")),
+            (Some(Owner), Some("10:01:00")),
+        ];
+        assert_eq!(stamps(&rows), [None, None, Some(at("10:01:00"))]);
     }
 
     #[test]
@@ -2044,5 +2090,26 @@ mod tests {
             [Some(at("21:58:00")), Some(at("22:01:00"))]
         );
         assert_eq!(burst_tail_stamps(&rows, &Utc), [None, Some(at("22:01:00"))]);
+    }
+
+    #[test]
+    fn the_first_row_of_each_viewer_day_names_that_day() {
+        let keys = [1, 2, 3, 4].map(|n| RowKey::Item(Uuid::from_u128(n)));
+        let mut rows: Vec<_> = keys.iter().map(|&key| transcript_row(key)).collect();
+        rows.insert(2, transcript_row(RowKey::Question(Uuid::from_u128(9))));
+        let times: std::collections::HashMap<_, _> = [
+            (keys[0], at("21:00:00")),
+            (keys[1], at("21:30:00")),
+            (keys[2], at("22:30:00")),
+            (keys[3], at("23:00:00")),
+        ]
+        .into();
+        let plus_two = FixedOffset::east_opt(2 * 3600).unwrap();
+        super::mark_days(&mut rows, &times, &plus_two);
+        let days: Vec<_> = rows.iter().map(|row| row.day).collect();
+        assert_eq!(
+            days,
+            [Some(at("21:00:00")), None, None, Some(at("22:30:00")), None]
+        );
     }
 }

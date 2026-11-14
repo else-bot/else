@@ -1,7 +1,7 @@
 use super::*;
 use crate::api::Bot;
 use crate::avatar::bot_avatar;
-use gpui_kit::component::Selectable as _;
+use crate::controls::{Control as _, Scale, Tier, segment, segment_track, text_field};
 use gpui_kit::component::checkbox::Checkbox;
 
 fn category_name<'a>(bot: &Bot, categories: &'a [Category]) -> Option<&'a str> {
@@ -112,8 +112,7 @@ impl CategoryFormHolder {
                     .child("Category name"),
             )
             .child(
-                Input::new(&self.name)
-                    .focus_ring(false)
+                text_field(Input::new(&self.name), cx)
                     .aria_label("Category name")
                     .disabled(self.locked()),
             )
@@ -158,10 +157,12 @@ impl CategoryFormHolder {
             )
             .child(
                 Button::new("category-select-shown")
-                    .small()
-                    .ghost()
-                    .focus_ring(false)
-                    .cursor_pointer()
+                    .control(
+                        Tier::Ghost,
+                        Scale::Compact,
+                        locked || available.is_empty(),
+                        cx,
+                    )
                     .label(if all_selected {
                         "Deselect shown"
                     } else {
@@ -169,7 +170,6 @@ impl CategoryFormHolder {
                     })
                     .text_xs()
                     .text_color(theme.primary)
-                    .disabled(locked || available.is_empty())
                     .on_click(move |_, window, cx| {
                         choose_all.update(cx, |form, _| {
                             for id in &available {
@@ -183,7 +183,7 @@ impl CategoryFormHolder {
                         window.refresh();
                     }),
             );
-        let mut filters = h_flex().gap_1();
+        let mut filters = segment_track(cx).w(px(280.));
         for (filter, id, label, count) in [
             (
                 BotFilter::All,
@@ -203,18 +203,17 @@ impl CategoryFormHolder {
         ] {
             let choose = holder.clone();
             filters = filters.child(
-                Button::new(id)
-                    .small()
-                    .ghost()
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .label(format!("{label} {count}"))
-                    .selected(self.filter == filter)
-                    .disabled(self.busy)
-                    .on_click(move |_, window, cx| {
-                        choose.update(cx, |form, _| form.filter = filter);
-                        window.refresh();
-                    }),
+                segment(
+                    id,
+                    format!("{label} {count}"),
+                    self.filter == filter,
+                    self.busy,
+                    cx,
+                )
+                .on_click(move |_, window, cx| {
+                    choose.update(cx, |form, _| form.filter = filter);
+                    window.refresh();
+                }),
             );
         }
         let mut list = v_flex()
@@ -322,8 +321,7 @@ impl CategoryFormHolder {
             .gap_2p5()
             .child(header)
             .child(
-                Input::new(&self.search)
-                    .focus_ring(false)
+                text_field(Input::new(&self.search), cx)
                     .aria_label("Search bots")
                     .prefix(
                         Icon::new(IconName::Search)

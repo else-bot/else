@@ -2,7 +2,7 @@ use super::*;
 use crate::api::{LocalBackupSettings, LocalBackupStatus, PauseReason};
 use chrono::{DateTime, FixedOffset, Offset as _, Utc};
 use gpui_kit::component::{Theme, h_flex};
-use view::{message, metric};
+use view::{message, metric, metrics};
 
 fn server_timestamp(value: &str, timezone: &str, offset: i32) -> String {
     match DateTime::parse_from_rfc3339(value) {
@@ -69,22 +69,6 @@ impl Shell {
             .pause
             .as_ref()
             .is_some_and(|pause| pause.reason == PauseReason::Backup);
-        let status = if running {
-            "Backing up this server".into()
-        } else if local.managed_by_env {
-            "Local backup schedule managed by server".into()
-        } else if local.enabled {
-            format!("Daily local backup at {}", local.time)
-        } else {
-            "Automatic local backups off".into()
-        };
-        let tone = if running {
-            theme.warning
-        } else if local.enabled {
-            theme.success
-        } else {
-            theme.muted_foreground
-        };
         let next = local
             .next_at
             .as_deref()
@@ -102,7 +86,7 @@ impl Shell {
                 } else if local.enabled {
                     local.timezone.clone()
                 } else {
-                    "Enable automatic backups to schedule".into()
+                    "Automatic backups off".into()
                 }
             });
         let latest = local.recent.iter().find(|run| {
@@ -130,10 +114,10 @@ impl Shell {
             ),
             None => format!("{} on disk · free space unknown", byte_size(local.bytes)),
         };
-        let mut history = v_flex().gap_2().child(
+        let mut history = v_flex().gap_3().child(
             div()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
+                .text_base()
+                .font_weight(FontWeight::SEMIBOLD)
                 .child("Recent local backups"),
         );
         if local.recent.is_empty() {
@@ -194,35 +178,27 @@ impl Shell {
                 );
             }
         }
-        v_flex()
-            .gap_5()
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child("On this server"),
-            )
+        // Three groups, 32 px apart: the summary, the schedule, and what is
+        // kept. The summary's figures already say whether a backup is
+        // running or scheduled, so no status line repeats them.
+        let summary = v_flex()
+            .gap_3()
             .child(
                 h_flex()
                     .gap_3()
+                    .items_baseline()
                     .justify_between()
                     .when(stacked, |row| row.flex_col().items_start())
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(tone)
-                            .child(div().size_1p5().rounded_full().bg(tone))
-                            .child(status),
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("On this server"),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .px_2()
-                            .py_1()
-                            .rounded_full()
-                            .bg(theme.secondary)
                             .child(format!(
                                 "{} · server time {}",
                                 local.timezone,
@@ -235,32 +211,35 @@ impl Shell {
                             )),
                     ),
             )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_stretch()
-                    .when(stacked, |row| row.flex_col())
-                    .child(metric(
+            .child(metrics(
+                [
+                    metric(
                         "Next backup",
                         if running { "In progress".into() } else { next },
                         next_detail,
                         theme,
-                    ))
-                    .child(metric(
+                    ),
+                    metric(
                         "Last backup",
                         latest
                             .map(|run| stamp(run.finished_at.as_deref().unwrap_or(&run.started_at)))
                             .unwrap_or_else(|| "None yet".into()),
                         last_detail,
                         theme,
-                    ))
-                    .child(metric(
+                    ),
+                    metric(
                         "Local copies",
                         format!("{} of {}", local.copies, local.keep),
                         disk,
                         theme,
-                    )),
-            )
+                    ),
+                ],
+                stacked,
+                theme,
+            ));
+        v_flex()
+            .gap_6()
+            .child(summary)
             .when_some(view.local_form.as_ref(), |section, form| {
                 section.child(form.render(
                     local,

@@ -1,46 +1,12 @@
 use super::*;
-use gpui_kit::component::FocusableExt as _;
+use crate::controls::{Control as _, Scale, Tier, text_field};
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
-use gpui_kit::component::{Disableable as _, Icon, Sizable as _, Theme, h_flex};
+use gpui_kit::component::{Icon, Theme, h_flex};
 
 impl Shell {
-    pub(super) fn render_bar(&self, _active: &Active, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let content = h_flex()
-            .flex_1()
-            .min_w_0()
-            .gap_2()
-            .items_center()
-            .child(self.render_server_switcher("topbar-server-switcher", cx))
-            .child(div().flex_1())
-            .child(
-                Button::new("app-settings-open")
-                    .focus_ring(false)
-                    .track_focus(&self.settings_focus)
-                    .cursor_pointer()
-                    .icon(IconName::Settings)
-                    .label("Settings")
-                    .xsmall()
-                    .ghost()
-                    .on_click(cx.listener(|shell, _, window, cx| shell.open_settings(window, cx))),
-            );
-        if cfg!(target_os = "macos") {
-            return TitleBar::new().pr_2().child(content).into_any_element();
-        }
-        h_flex()
-            .flex_none()
-            .h(px(30.))
-            .px_3()
-            .border_b_1()
-            .border_color(theme.title_bar_border)
-            .bg(theme.title_bar)
-            .child(content)
-            .into_any_element()
-    }
-
     pub(super) fn render_setup(
         &self,
         setup: &Setup,
@@ -103,10 +69,8 @@ impl Shell {
                     .child(notice(title, &text, theme))
                     .child(
                         Button::new("connection-edit")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Primary, Scale::Standard, false, cx)
                             .label("Connect to a remote server")
-                            .primary()
                             .w_full()
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.open_remote(None, window, cx)
@@ -245,27 +209,20 @@ impl Shell {
             .child(card)
             .child(
                 Button::new("connection-start")
-                    .focus_ring(false)
-                    .cursor_pointer()
+                    .control(Tier::Primary, Scale::Standard, busy.is_some(), cx)
                     .label(label)
-                    .primary()
                     .w_full()
-                    .h(px(40.))
                     .loading(busy.is_some())
-                    .disabled(busy.is_some())
                     .on_click(cx.listener(|shell, _, window, cx| shell.start_local(window, cx))),
             )
             .when(setup.presentation == Presentation::Onboarding, |panel| {
                 panel
                     .child(
                         Button::new("connection-edit")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Secondary, Scale::Standard, busy.is_some(), cx)
                             .label("Edit configuration")
                             .w_full()
-                            .h(px(40.))
-                            .mt(px(9.))
-                            .disabled(busy.is_some())
+                            .mt_2()
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.open_remote(None, window, cx)
                             })),
@@ -308,12 +265,9 @@ impl Shell {
                 panel.child(
                     div().pb(px(16.)).child(
                         Button::new("connection-back")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Ghost, Scale::Compact, false, cx)
                             .label("Back to local setup")
                             .icon(IconName::ChevronLeft)
-                            .ghost()
-                            .small()
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.back_to_welcome(window, cx)
                             })),
@@ -335,16 +289,14 @@ impl Shell {
             ))
             .child(field(
                 "Server address",
-                Input::new(&form.origin)
-                    .focus_ring(false)
+                text_field(Input::new(&form.origin), cx)
                     .aria_label("Server address")
                     .into_any_element(),
                 "Use HTTPS, a Tailscale IP, or a local SSH tunnel.",
             ))
             .child(field(
                 "Owner key",
-                Input::new(&form.token)
-                    .focus_ring(false)
+                text_field(Input::new(&form.token), cx)
                     .aria_label("Owner key")
                     .mask_toggle()
                     .into_any_element(),
@@ -355,8 +307,7 @@ impl Shell {
             })
             .child(
                 Button::new("connection-connect")
-                    .focus_ring(false)
-                    .cursor_pointer()
+                    .control(Tier::Primary, Scale::Standard, busy, cx)
                     .label(if busy {
                         "Connecting…"
                     } else if settings {
@@ -364,11 +315,9 @@ impl Shell {
                     } else {
                         "Connect to server"
                     })
-                    .primary()
                     .w_full()
                     .h(px(40.))
                     .loading(busy)
-                    .disabled(busy)
                     .on_click(cx.listener(|shell, _, window, cx| shell.connect_remote(window, cx))),
             )
             .child(note("Connection checked before saving.", theme))

@@ -1,10 +1,11 @@
 use super::*;
+use crate::connection::settings::settings_column;
+use crate::controls::{Control as _, Scale, Tier, toggle};
 use chrono::{DateTime, Local, Utc};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Disableable as _, FocusableExt as _, Icon, Sizable as _, Theme, h_flex};
+use gpui_kit::component::{Icon, Theme, h_flex};
 
 fn interval(seconds: u64) -> String {
     match seconds {
@@ -59,10 +60,9 @@ pub(super) fn metric(label: &'static str, value: String, detail: String, theme: 
     v_flex()
         .flex_1()
         .min_w_0()
-        .gap_1p5()
-        .p_3()
-        .rounded(theme.radius)
-        .bg(theme.secondary.opacity(0.45))
+        .gap_1()
+        .px_4()
+        .py_3()
         .child(
             div()
                 .text_xs()
@@ -71,7 +71,7 @@ pub(super) fn metric(label: &'static str, value: String, detail: String, theme: 
         )
         .child(
             div()
-                .text_lg()
+                .text_base()
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(value),
         )
@@ -81,6 +81,28 @@ pub(super) fn metric(label: &'static str, value: String, detail: String, theme: 
                 .text_color(theme.muted_foreground)
                 .child(detail),
         )
+}
+
+/// Backup figures in one bordered row, separated by hairlines, so they read
+/// as one summary instead of three floating tiles.
+pub(super) fn metrics(cells: [Div; 3], stacked: bool, theme: &Theme) -> Div {
+    let mut row = h_flex()
+        .w_full()
+        .items_stretch()
+        .rounded(theme.radius_lg)
+        .border_1()
+        .border_color(theme.border)
+        .when(stacked, |row| row.flex_col());
+    for (index, cell) in cells.into_iter().enumerate() {
+        row = row.child(cell.when(index > 0, |cell| {
+            if stacked {
+                cell.border_t_1().border_color(theme.border)
+            } else {
+                cell.border_l_1().border_color(theme.border)
+            }
+        }));
+    }
+    row
 }
 
 pub(super) fn message(text: String, color: Hsla, theme: &Theme) -> Div {
@@ -128,8 +150,7 @@ impl Shell {
                     |content| {
                         content.child(
                             Button::new("backups-retry")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Secondary, Scale::Standard, false, cx)
                                 .label("Try again")
                                 .on_click(cx.listener(|shell, _, window, cx| {
                                     shell.open_backups(window, cx)
@@ -167,8 +188,9 @@ impl Shell {
             .recent
             .iter()
             .find(|run| run.remote_status.as_deref() == Some("completed"));
-        let mut content = v_flex()
-            .gap_5()
+        // Groups sit 32 px apart; rows inside a group 20 px.
+        let page = v_flex()
+            .gap_8()
             .child(super::super::settings::section_heading(
                 "Backups",
                 "Copies of every bot’s computer, projects and memory.",
@@ -176,42 +198,69 @@ impl Shell {
             ))
             .when_some(snapshot.local.as_ref(), |content, local| {
                 content.child(self.render_local_backups(view, snapshot, local, stacked, cx))
+            });
+        let run_now = Button::new("backup-run-now")
+            .control(
+                Tier::Primary,
+                Scale::Standard,
+                busy || snapshot.running || !has_destination || unavailable,
+                cx,
+            )
+            .label(if snapshot.running {
+                "Backing up…"
+            } else {
+                "Back up now"
             })
+            .loading(view.operation == Operation::Starting)
+            .on_click(cx.listener(|shell, _, window, cx| shell.run_remote_backup(window, cx)));
+        let mut content = v_flex()
+            .gap_5()
             .child(super::super::settings::section_heading(
                 "Remote",
                 "Your workspace, backed up off this server.",
                 cx,
             ))
+            // The remote summary: its state, the run action beside it, and
+            // the automatic switch.
             .child(
                 h_flex()
                     .justify_between()
+                    .items_center()
                     .gap_3()
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(tone)
-                            .child(div().size_1p5().rounded_full().bg(tone))
-                            .child(status),
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(div().text_sm().text_color(tone).child(status))
+                            .when(snapshot.running, |summary| {
+                                summary.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child("You can leave settings while this backup runs."),
+                                )
+                            }),
                     )
+                    .when(view.editor.is_none(), |row| row.child(run_now))
                     .child(
-                        Switch::new("remote-backups-enabled")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .small()
-                            .checked(snapshot.enabled)
-                            .disabled(
-                                busy || unavailable || !has_destination || view.editor.is_some(),
-                            )
-                            .accessibility_label("Automatic remote backups")
-                            .tooltip(if snapshot.enabled {
-                                "Pause automatic remote backups"
-                            } else {
-                                "Enable automatic remote backups"
-                            })
-                            .on_click(cx.listener(|shell, enabled: &bool, window, cx| {
+                        toggle(
+                            "remote-backups-enabled",
+                            snapshot.enabled,
+                            busy || unavailable || !has_destination || view.editor.is_some(),
+                            cx,
+                        )
+                        .accessibility_label("Automatic remote backups")
+                        .tooltip(if snapshot.enabled {
+                            "Pause automatic remote backups"
+                        } else {
+                            "Enable automatic remote backups"
+                        })
+                        .on_click(cx.listener(
+                            |shell, enabled: &bool, window, cx| {
                                 shell.toggle_remote_backups(*enabled, window, cx)
-                            })),
+                            },
+                        )),
                     ),
             )
             .when_some(snapshot.unavailable_reason.clone(), |content, reason| {
@@ -221,18 +270,15 @@ impl Shell {
                 content.child(message(reason, theme.warning, &theme))
             })
             .when(view.editor.is_none(), |content| {
-                content.child(
-                    h_flex()
-                        .items_stretch()
-                        .gap_3()
-                        .when(stacked, |row| row.flex_col())
-                        .child(metric(
+                content.child(metrics(
+                    [
+                        metric(
                             "Next backup",
                             next_backup(snapshot),
                             interval(snapshot.interval_secs),
                             &theme,
-                        ))
-                        .child(metric(
+                        ),
+                        metric(
                             "Uploaded last run",
                             latest
                                 .and_then(|run| run.uploaded_bytes.or(run.bytes))
@@ -243,8 +289,8 @@ impl Shell {
                                 .map(timestamp)
                                 .unwrap_or_else(|| "After your first remote backup".into()),
                             &theme,
-                        ))
-                        .child(metric(
+                        ),
+                        metric(
                             "Remote copies",
                             format!("{} copies", snapshot.remote_count),
                             format!(
@@ -253,25 +299,22 @@ impl Shell {
                                 byte_size(snapshot.remote_bytes)
                             ),
                             &theme,
-                        )),
-                )
+                        ),
+                    ],
+                    stacked,
+                    &theme,
+                ))
             });
         if let Some(destination) = &snapshot.destination {
             content = content.when(
                 !matches!(view.editor, Some(Editor::Destination(_))),
                 |content| {
-                    content.child(
-                        h_flex()
-                            .items_center()
-                            .gap_3()
-                            .pb_4()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .child(
-                                Icon::new(IconName::CloudUpload)
-                                    .size_5()
-                                    .text_color(theme.muted_foreground),
-                            )
+                    content.child(crate::panel_kit::grouped_list(
+                        [crate::panel_kit::list_row()
+                            .child(crate::panel_kit::row_icon(
+                                Icon::new(IconName::CloudUpload),
+                                cx,
+                            ))
                             .child(
                                 v_flex()
                                     .flex_1()
@@ -294,17 +337,21 @@ impl Shell {
                             )
                             .child(
                                 Button::new("backup-edit-destination")
-                                    .focus_ring(false)
-                                    .cursor_pointer()
+                                    .control(
+                                        Tier::Secondary,
+                                        Scale::Standard,
+                                        busy || view.editor.is_some(),
+                                        cx,
+                                    )
                                     .label("Edit destination")
                                     .icon(IconName::Pencil)
-                                    .secondary()
-                                    .disabled(busy || view.editor.is_some())
                                     .on_click(cx.listener(|shell, _, window, cx| {
                                         shell.edit_backup_destination(window, cx)
                                     })),
-                            ),
-                    )
+                            )
+                            .into_any_element()],
+                        cx,
+                    ))
                 },
             );
         } else {
@@ -326,11 +373,13 @@ impl Shell {
                         ))
                         .child(
                             Button::new("backup-configure-destination")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(
+                                    Tier::Primary,
+                                    Scale::Standard,
+                                    busy || view.editor.is_some(),
+                                    cx,
+                                )
                                 .label("Configure destination")
-                                .primary()
-                                .disabled(busy || view.editor.is_some())
                                 .on_click(cx.listener(|shell, _, window, cx| {
                                     shell.edit_backup_destination(window, cx)
                                 })),
@@ -348,18 +397,9 @@ impl Shell {
         content = content.when(
             !matches!(view.editor, Some(Editor::Destination(_))),
             |content| {
-                content.child(
-                    h_flex()
-                        .items_center()
-                        .gap_3()
-                        .pb_4()
-                        .border_b_1()
-                        .border_color(theme.border)
-                        .child(
-                            Icon::new(IconName::Clock)
-                                .size_5()
-                                .text_color(theme.muted_foreground),
-                        )
+                content.child(crate::panel_kit::grouped_list(
+                    [crate::panel_kit::list_row()
+                        .child(crate::panel_kit::row_icon(Icon::new(IconName::Clock), cx))
                         .child(
                             v_flex()
                                 .flex_1()
@@ -380,17 +420,21 @@ impl Shell {
                         )
                         .child(
                             Button::new("backup-edit-policy")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(
+                                    Tier::Secondary,
+                                    Scale::Standard,
+                                    busy || view.editor.is_some(),
+                                    cx,
+                                )
                                 .label("Edit policy")
                                 .icon(IconName::Pencil)
-                                .secondary()
-                                .disabled(busy || view.editor.is_some())
                                 .on_click(cx.listener(|shell, _, window, cx| {
                                     shell.edit_backup_policy(window, cx)
                                 })),
-                        ),
-                )
+                        )
+                        .into_any_element()],
+                    cx,
+                ))
             },
         );
         if let Some(Editor::Policy(form)) = &view.editor {
@@ -476,23 +520,17 @@ impl Shell {
                 content.child(message(err, theme.warning, &theme))
             })
             .child(h_flex().gap_2().items_start().text_xs().text_color(theme.muted_foreground).child(Icon::new(IconName::Lock).size_3()).child("Backups are encrypted before upload. Keep your installation's recovery key safe."));
-        let mut footer = h_flex()
-            .flex_none()
-            .px_6()
-            .py_3()
-            .gap_3()
-            .border_t_1()
-            .border_color(theme.border);
+        // Only an open editor keeps a footer bar, for its save and cancel.
+        let mut footer = None;
         if let Some(editor) = &view.editor {
+            let mut bar = h_flex().w_full().gap_3().items_center();
             if let Editor::Destination(form) = editor {
-                footer = footer
+                bar = bar
                     .child(
                         Button::new("backup-test-connection")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Secondary, Scale::Standard, busy, cx)
                             .label("Test connection")
                             .loading(view.operation == Operation::Testing)
-                            .disabled(busy)
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.test_backup_destination(window, cx)
                             })),
@@ -500,100 +538,64 @@ impl Shell {
                     .child(div().flex_1())
                     .child(
                         Button::new("backup-save-destination")
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Primary, Scale::Standard, busy || !form.verified, cx)
                             .label("Save changes")
-                            .primary()
                             .loading(view.operation == Operation::Saving)
-                            .disabled(busy || !form.verified)
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.save_backup_edit(window, cx)
                             })),
                     );
             } else {
-                footer = footer.child(div().flex_1()).child(
+                bar = bar.child(div().flex_1()).child(
                     Button::new("backup-save-policy")
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Primary, Scale::Standard, busy, cx)
                         .label("Save changes")
-                        .primary()
                         .loading(view.operation == Operation::Saving)
-                        .disabled(busy)
                         .on_click(
                             cx.listener(|shell, _, window, cx| shell.save_backup_edit(window, cx)),
                         ),
                 );
             }
-            footer = footer.child(
+            bar = bar.child(
                 Button::new("backup-cancel-edit")
-                    .focus_ring(false)
-                    .cursor_pointer()
+                    .control(Tier::Secondary, Scale::Standard, busy, cx)
                     .label("Cancel")
-                    .disabled(busy)
                     .on_click(cx.listener(|shell, _, _, cx| shell.cancel_backup_edit(cx))),
             );
-        } else {
-            footer = footer
-                .child(
-                    div()
-                        .flex_1()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(if snapshot.running {
-                            "You can leave settings while this backup runs."
-                        } else {
-                            "Old copies are removed after a new backup is verified."
-                        }),
-                )
-                .child(
-                    Button::new("backup-run-now")
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .label(if snapshot.running {
-                            "Backing up…"
-                        } else {
-                            "Back up now"
-                        })
-                        .primary()
-                        .loading(view.operation == Operation::Starting)
-                        .disabled(busy || snapshot.running || !has_destination || unavailable)
-                        .on_click(
-                            cx.listener(|shell, _, window, cx| shell.run_remote_backup(window, cx)),
-                        ),
-                );
+            footer = Some(bar);
         }
+        let status_line = |text: String, color: Hsla| {
+            div().flex_none().pt_2().child(settings_column(
+                div().text_xs().text_color(color).child(text),
+            ))
+        };
         v_flex()
-            .size_full()
+            .flex_1()
             .min_h_0()
-            .child(
+            .child(super::super::settings::sheet_scroller(
                 div()
                     .id("backup-settings-scroll")
-                    .flex_1()
-                    .min_h_0()
+                    .size_full()
                     .overflow_y_scrollbar()
-                    .child(content.p_6()),
-            )
+                    .child(div().py_8().child(settings_column(page.child(content)))),
+                cx,
+            ))
             .when_some(view.error.clone(), |content, text| {
-                content.child(
-                    div()
-                        .px_6()
-                        .py_2()
-                        .text_xs()
-                        .text_color(theme.warning)
-                        .child(text),
-                )
+                content.child(status_line(text, theme.warning))
             })
             .when_some(view.feedback.clone(), |content, text| {
+                content.child(status_line(text, theme.success))
+            })
+            .when_some(footer, |content, footer| {
                 content.child(
                     div()
-                        .px_6()
-                        .py_2()
-                        .text_xs()
-                        .text_color(theme.success)
-                        .child(text),
+                        .flex_none()
+                        .py_3()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(settings_column(footer)),
                 )
             })
-            .child(footer)
             .into_any_element()
     }
 }

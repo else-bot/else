@@ -4,6 +4,7 @@ use super::reply::Author;
 use super::row_text::RowText;
 use super::{ElseApp, RowKey};
 use crate::avatar::bot_avatar;
+use crate::controls::{Control as _, Scale, Tier};
 use crate::model::ReactionKind;
 use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
 use gpui_kit::assets::IconName;
@@ -12,18 +13,33 @@ use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Theme, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-/// Right gutter that sets the width of bot-side bubbles and cards.
-pub(super) const BOT_GUTTER: Pixels = px(60.);
+/// Bot-side cards use the full shared reading column.
+pub(super) const BOT_GUTTER: Pixels = px(0.);
+
+/// Timestamps and other trailing metadata sit at this share of the foreground
+/// in dark themes.
+pub(super) const META_OPACITY: f32 = 0.55;
+
+/// The colour of timestamps and other trailing metadata. A faded foreground
+/// stays quiet on a dark page, but on a light one it falls below 4.5:1, so
+/// light themes use their readable secondary text instead.
+pub(super) fn meta_color(theme: &Theme) -> Hsla {
+    if theme.mode.is_dark() {
+        theme.foreground.opacity(META_OPACITY)
+    } else {
+        theme.muted_foreground
+    }
+}
 
 impl ElseApp {
     pub(super) fn render_row(
         &mut self,
         ix: usize,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(row) = self
@@ -67,9 +83,9 @@ impl ElseApp {
         let body = if row.activity.is_some() {
             self.render_bot_activity(&row, cx)
         } else if let Some(task) = row.task.as_ref() {
-            self.render_task_reply(task, cx)
+            self.render_task_reply(task, row.footer_stamp, cx)
         } else {
-            self.render_row_content(&row, cx)
+            self.render_row_content(&row, window, cx)
         };
         let Some(body) = body else {
             return div().into_any_element();
@@ -122,34 +138,18 @@ impl ElseApp {
                             .and_then(|view| view.conversation.as_ref())
                             .and_then(|conversation| conversation.turn(task.turn))
                             .and_then(|turn| turn.routine.as_ref())
-                            .map(|run| {
-                                h_flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(Icon::new(IconName::Clock).xsmall().flex_none())
-                                    .child(div().flex_1().min_w_0().truncate().child(format!(
-                                        "{} · {}",
-                                        run.label(),
-                                        run.name
-                                    )))
-                                    .child(stamp(run.due_at))
-                            }),
+                            .map(|run| routine_run(run, cx)),
                     )
                     .child(body)
-                    .children(row.footer_stamp.map(|at| {
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(stamp(at))
-                    }))
                     .into_any_element()
             } else {
                 body
             };
+            let (top, bottom) = self.row_rhythm(ix);
             return column
-                .py_1p5()
+                .pt(top)
+                .pb(bottom)
+                .children(row.day.map(|at| day_separator(at, cx)))
                 .children(row.unread_start.then(|| unread_divider(cx)))
                 .child(body)
                 .into_any_element();
@@ -167,32 +167,41 @@ impl ElseApp {
             .checked_sub(1)
             .and_then(|ix| view.rows.get(ix))
             .is_some_and(|row| row.key == RowKey::Task(group.turn));
-        let theme = cx.theme().clone();
+        let follows_name = self.follows_name(ix);
+        let actionable = matches!(
+            row.key,
+            RowKey::Question(_)
+                | RowKey::SecretRequest(_)
+                | RowKey::Draft(_)
+                | RowKey::OwnerNotice(_)
+        );
+        // A routine's rows sit on the page like any other reply; its banner names the run.
         let frame = gpui_kit::component::v_flex()
             .w_full()
-            .border_l_1()
-            .border_r_1()
-            .border_color(theme.primary.opacity(0.25))
-            .bg(theme.sidebar.opacity(0.6))
-            .when(group.first, |frame| {
-                frame.border_t_1().rounded_t(theme.radius_lg)
-            })
-            .when(group.last, |frame| {
-                frame.border_b_1().rounded_b(theme.radius_lg)
-            })
             .children(
                 turn.routine
                     .as_ref()
                     .filter(|_| group.first && !follows_task)
-                    .map(|run| routine_banner(run, cx)),
+                    .map(|run| routine_run(run, cx)),
             )
-            .child(div().w_full().px_1().pt_1().child(body))
-            .when(group.last, |frame| frame.pb_1());
+            .child(div().w_full().child(body));
         column
-            .when(group.first, |column| column.pt_1p5())
+            .when(group.first, |column| {
+                column.pt(if follows_name {
+                    LABEL_GAP - ROW_PAD
+                } else {
+                    ROW_PAD
+                })
+            })
             .when(group.last, |column| column.pb_1p5())
+            .children(row.day.map(|at| day_separator(at, cx)))
             .children(row.unread_start.then(|| unread_divider(cx)))
-            .child(div().w_full().pr(BOT_GUTTER).child(frame))
+            .child(
+                div()
+                    .w_full()
+                    .when(!actionable, |frame| frame.pr(BOT_GUTTER))
+                    .child(frame),
+            )
             .into_any_element()
     }
 
@@ -236,50 +245,49 @@ impl ElseApp {
     pub(super) fn render_row_content(
         &mut self,
         row: &super::conversation::TranscriptRow,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let view = self.view.as_ref()?;
         let key = row.key;
         let grouped = row.routine.is_some();
-        let footer = row.footer_stamp.filter(|_| !grouped).map(stamp);
+        let footer = row.footer_stamp.filter(|_| !grouped).map(clock);
         let theme = cx.theme().clone();
+        // The owner's bubble hugs its text up to three quarters of the column, with
+        // the same 12×16 padding whether or not it carries an attachment. The text
+        // widget may draw part of that padding itself.
         let card = |text: &RowText, user: bool| {
-            let card = div().w_full();
             if user {
-                card.px_3p5()
-                    .py_2()
+                let (inset_x, inset_y) = text.inset();
+                let (pad_x, pad_y) = (px(16.) - inset_x, px(12.) - inset_y);
+                div()
+                    .min_w_0()
+                    .when_some(text.natural_width(cx), |card, width| {
+                        card.w(width + pad_x * 2.)
+                    })
+                    .px(pad_x)
+                    .py(pad_y)
                     .rounded(theme.radius_lg)
-                    .bg(theme.secondary)
+                    // The owner's words sit a step above the page: lighter
+                    // than it in both themes.
+                    .bg(if theme.mode.is_dark() {
+                        theme.secondary
+                    } else {
+                        theme.popover
+                    })
                     .child(text.render(cx))
             } else {
-                card.px_3p5()
-                    .py_2()
-                    .rounded(theme.radius_lg)
-                    .border_1()
-                    .border_color(theme.border.opacity(0.6))
-                    .bg(theme.sidebar.opacity(0.6))
-                    .child(text.render(cx))
+                div().w_full().min_w_0().py_1().child(text.render(cx))
             }
         };
-        // Wrapped text needs a definite width.
-        let side = |user: bool, card: AnyElement| {
-            let side = div().w_full();
-            let side = if grouped {
-                side
-            } else if user {
-                side.pl(relative(0.15))
-            } else {
-                side.pr(BOT_GUTTER)
-            };
-            side.child(card)
-        };
+        let side = |card: AnyElement| div().w_full().min_w_0().child(card);
         let note = |text: String, error: bool| {
             div()
-                .text_xs()
+                .text_size(px(12.))
                 .text_color(if error {
                     theme.danger
                 } else {
-                    theme.muted_foreground
+                    meta_color(&theme)
                 })
                 .child(text)
         };
@@ -289,17 +297,21 @@ impl ElseApp {
                 let item = conversation.item(id)?;
                 if let Some(update) = &item.routine_update {
                     return Some(
-                        h_flex()
-                            .w_full()
-                            .justify_center()
-                            .items_center()
-                            .gap_1p5()
-                            .py_2()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Updated routine")
-                            .child(Icon::new(IconName::Clock).size_3p5())
-                            .child(div().min_w_0().truncate().child(update.name.clone()))
+                        super::action_card::event_row(&theme)
+                            .child(super::action_card::event_icon(IconName::Clock))
+                            .child(super::action_card::event_verb(&theme, "Updated routine"))
+                            .child(super::action_card::event_object(
+                                &theme,
+                                update.name.clone(),
+                            ))
+                            .child(super::action_card::event_end(
+                                &theme,
+                                super::action_card::EventEnd::Actions(vec![routine_details(
+                                    SharedString::from(format!("routine-update-{id}")),
+                                    cx,
+                                )]),
+                                super::action_card::Disclosure::None,
+                            ))
                             .into_any_element(),
                     );
                 }
@@ -318,8 +330,8 @@ impl ElseApp {
                 }
                 // Children stretch so bubbles get a definite width; notes
                 // are aligned to the bubble's side.
-                let mut column = gpui_kit::component::v_flex().w_full().gap_1();
-                let mut card = card(text, user).id(SharedString::from(format!("message-{id}")));
+                let mut column = gpui_kit::component::v_flex().w_full().min_w_0().gap_1();
+                let card = card(text, user).id(SharedString::from(format!("message-{id}")));
                 if !user
                     && run.first
                     && turn.and_then(|t| t.routine.as_ref()).is_none()
@@ -329,18 +341,12 @@ impl ElseApp {
                         h_flex()
                             .gap_1p5()
                             .items_center()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
                             .child(bot_avatar("message-author", bot.avatar, px(18.)).still())
                             .child(bot.name.clone()),
                     );
-                }
-                if grouped {
-                    card = card
-                        .border_0()
-                        .rounded(theme.radius)
-                        .bg(theme.secondary.opacity(0.4))
-                        .pr(px(60.));
                 }
                 let card = if conversation
                     .latest_reply()
@@ -385,20 +391,37 @@ impl ElseApp {
                     Some(author) => div()
                         .relative()
                         .group("message-bubble")
-                        .w_full()
-                        .child(side(user, card))
+                        .when(!user, |bubble| bubble.w_full())
+                        .when(user, |bubble| {
+                            bubble.flex().justify_end().max_w(relative(0.75))
+                        })
+                        .child(if user {
+                            card
+                        } else {
+                            side(card).into_any_element()
+                        })
                         .child(
                             div()
                                 .absolute()
                                 .top_1()
-                                .when(user, |this| this.left(relative(0.15)).ml(px(-28.)))
+                                .when(user, |this| this.left(px(-28.)))
                                 .when(!user, |this| this.right(px(4.)))
                                 .invisible()
                                 .group_hover("message-bubble", |this| this.visible())
                                 .child(self.message_actions(view.bot_id, id, author, cx)),
                         )
                         .into_any_element(),
-                    None => side(user, card).into_any_element(),
+                    None => side(card).into_any_element(),
+                };
+                let card = if user {
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .justify_end()
+                        .child(card)
+                        .into_any_element()
+                } else {
+                    card
                 };
                 column = column
                     .child(card)
@@ -414,24 +437,16 @@ impl ElseApp {
                     .children(footer.map(|at| note(at, false)))
                     .into_any_element()
             }
-            RowKey::SkillInstall(id) => {
-                side(false, self.render_skill_card(id, cx)).into_any_element()
-            }
-            RowKey::SecretRequest(id) => {
-                side(false, self.render_secret_card(id, cx)).into_any_element()
-            }
+            RowKey::SkillInstall(id) => side(self.render_skill_card(id, cx)).into_any_element(),
+            RowKey::SecretRequest(id) => side(self.render_secret_card(id, cx)).into_any_element(),
             RowKey::Question(id) => {
-                side(false, self.render_question_card(id, cx)).into_any_element()
+                side(self.render_question_card(id, window, cx)).into_any_element()
             }
-            RowKey::Draft(id) => side(false, self.render_draft_card(id, cx)).into_any_element(),
-            RowKey::SocialSetup(id) => {
-                side(false, self.render_social_card(id, cx)).into_any_element()
-            }
+            RowKey::Draft(id) => side(self.render_draft_card(id, cx)).into_any_element(),
+            RowKey::SocialSetup(id) => side(self.render_social_card(id, cx)).into_any_element(),
             RowKey::Handoff(id) => self.render_handoff(id, cx),
             RowKey::ComputerHandoff(id) => self.render_handoff_row(id, cx),
-            RowKey::OwnerNotice(id) => {
-                side(false, self.render_notice_card(id, cx)?).into_any_element()
-            }
+            RowKey::OwnerNotice(id) => side(self.render_notice_card(id, cx)?).into_any_element(),
             RowKey::Pending(request_id) => {
                 let pending = self
                     .selected
@@ -443,14 +458,15 @@ impl ElseApp {
                     pending.delivery(),
                     Delivery::Unknown { .. } | Delivery::Rejected { .. }
                 );
-                let mut column = gpui_kit::component::v_flex().w_full().gap_1();
+                let mut column = gpui_kit::component::v_flex().w_full().min_w_0().gap_1();
                 if mark.is_none() {
-                    column = column.child(side(
-                        true,
-                        card(text, true)
-                            .id(SharedString::from(format!("pending-{request_id}")))
-                            .into_any_element(),
-                    ));
+                    column = column.child(
+                        h_flex().w_full().min_w_0().justify_end().child(
+                            card(text, true)
+                                .max_w(relative(0.75))
+                                .id(SharedString::from(format!("pending-{request_id}"))),
+                        ),
+                    );
                     if !settled {
                         column = column.children(footer.map(|at| beside(true, note(at, false))));
                     }
@@ -458,10 +474,7 @@ impl ElseApp {
                 let subject = mark.map_or_else(String::new, |mark| format!("{mark} "));
                 let action = |id: &str, label: &'static str| {
                     Button::new(SharedString::from(format!("{id}-{request_id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .link()
-                        .xsmall()
+                        .control(Tier::Ghost, Scale::Compact, false, cx)
                         .label(label)
                 };
                 let failed = |status: &str, color: Hsla, reason: &str, retry: bool| {
@@ -558,38 +571,148 @@ pub(super) fn with_reaction(
         .into_any_element()
 }
 
-fn routine_banner(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> AnyElement {
+/// The row naming a routine run: when it was due in the row's slot, and the
+/// whole row opens the routines in bot details.
+fn routine_run(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> Button {
     let theme = cx.theme();
-    gpui_kit::component::v_flex()
-        .w_full()
-        .gap_1p5()
-        .px_3p5()
-        .py_2p5()
-        .rounded_t(theme.radius_lg)
-        .bg(theme.primary.opacity(0.07))
-        .child(
-            h_flex()
-                .items_center()
-                .gap_2()
-                .text_xs()
-                .text_color(theme.primary)
-                .child(Icon::new(IconName::Clock).size_3p5())
-                .child(run.label())
-                .child(
-                    div()
-                        .flex_1()
-                        .text_right()
-                        .text_color(theme.muted_foreground)
-                        .child(
-                            run.due_at
-                                .with_timezone(&Local)
-                                .format("%e %b · %H:%M %Z")
-                                .to_string(),
-                        ),
-                ),
-        )
-        .child(div().text_sm().font_semibold().child(run.name.clone()))
-        .into_any_element()
+    Button::new(SharedString::from(format!(
+        "routine-{}-{}",
+        run.routine_id,
+        run.due_at.timestamp()
+    )))
+    .ghost()
+    .focus_ring(false)
+    .cursor_pointer()
+    .w_full()
+    .h_auto()
+    .p_0()
+    .accessibility_label(format!(
+        "{} {}, {}. View routines in bot details",
+        run.label(),
+        run.name,
+        stamp(run.due_at)
+    ))
+    .child(
+        super::action_card::event_row(theme)
+            .child(super::action_card::event_icon(IconName::Clock))
+            .child(super::action_card::event_verb(theme, run.label()))
+            .child(super::action_card::event_object(theme, run.name.clone()))
+            .child(super::action_card::event_end(
+                theme,
+                super::action_card::EventEnd::Meta(stamp(run.due_at).into()),
+                super::action_card::Disclosure::None,
+            )),
+    )
+    .on_click(cx.listener(open_routines))
+}
+
+fn open_routines(
+    app: &mut ElseApp,
+    _: &ClickEvent,
+    window: &mut Window,
+    cx: &mut Context<ElseApp>,
+) {
+    if !app.settings_open {
+        app.toggle_settings(window, cx);
+    }
+}
+
+fn routine_details(id: SharedString, cx: &mut Context<ElseApp>) -> Button {
+    super::action_card::event_action(id, "View", false, cx)
+        .accessibility_label("View routines in bot details")
+        .on_click(cx.listener(open_routines))
+}
+
+/// The two families of one-line activity rows. A run of one family reads
+/// as one block; the next family starts a new block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventKind {
+    /// Task exchanges between bots, and the councils and hand-offs that
+    /// started them.
+    Exchange,
+    /// Changes to bots, rules and routines.
+    Change,
+}
+
+/// Rows 6 px from their neighbours, action cards 8 px (16 px between two
+/// stacked cards); activity rows of one family 4 px apart (a 40 px pitch),
+/// and 16 px from the next family. Each row's spacing depends only on the
+/// row itself and the row above it, so appending a row never changes the
+/// measured height of the rows before it.
+const ROW_PAD: Pixels = px(6.);
+const CARD_PAD: Pixels = px(8.);
+const EVENT_PAD: Pixels = px(2.);
+const EVENT_GROUP_GAP: Pixels = px(16.);
+const LABEL_GAP: Pixels = px(8.);
+
+impl ElseApp {
+    fn event_kind(&self, ix: usize) -> Option<EventKind> {
+        let view = self.view.as_ref()?;
+        let row = view.rows.get(ix)?;
+        if row.routine.is_some() {
+            return None;
+        }
+        if row.activity.is_some() || matches!(row.key, RowKey::Handoff(_)) {
+            return Some(EventKind::Exchange);
+        }
+        let RowKey::Item(id) = row.key else {
+            return None;
+        };
+        let item = view.conversation.as_ref()?.item(id)?;
+        (item.routine_update.is_some() || item.bot_created.is_some() || item.rules_update.is_some())
+            .then_some(EventKind::Change)
+    }
+
+    /// The top and bottom padding of row `ix`.
+    fn row_rhythm(&self, ix: usize) -> (Pixels, Pixels) {
+        let above = ix.checked_sub(1).and_then(|above| self.event_kind(above));
+        let pad = if self.is_card(ix) { CARD_PAD } else { ROW_PAD };
+        if self.follows_name(ix) {
+            return (LABEL_GAP - ROW_PAD, pad);
+        }
+        match (self.event_kind(ix), above) {
+            (Some(kind), Some(previous)) if kind == previous => (EVENT_PAD, EVENT_PAD),
+            (Some(_), Some(_)) => (EVENT_GROUP_GAP - EVENT_PAD, EVENT_PAD),
+            (Some(_), None) => (ROW_PAD, EVENT_PAD),
+            (None, Some(_)) => (pad * 2. - EVENT_PAD, pad),
+            (None, None) => (pad, pad),
+        }
+    }
+
+    /// Whether row `ix` sits right under a task row that shows only its
+    /// bot's name; the row then reads as that name's content, 8 px below it.
+    fn follows_name(&self, ix: usize) -> bool {
+        let Some(view) = self.view.as_ref() else {
+            return false;
+        };
+        let Some(above) = ix.checked_sub(1).and_then(|above| view.rows.get(above)) else {
+            return false;
+        };
+        let (Some(task), Some(conversation)) = (above.task.as_ref(), view.conversation.as_ref())
+        else {
+            return false;
+        };
+        conversation
+            .turn(task.turn)
+            .is_some_and(|turn| super::task_reply::shows_only_name(task, turn))
+    }
+
+    fn is_card(&self, ix: usize) -> bool {
+        self.view
+            .as_ref()
+            .and_then(|view| view.rows.get(ix))
+            .is_some_and(|row| {
+                matches!(
+                    row.key,
+                    RowKey::Question(_)
+                        | RowKey::SecretRequest(_)
+                        | RowKey::Draft(_)
+                        | RowKey::OwnerNotice(_)
+                        | RowKey::SkillInstall(_)
+                        | RowKey::SocialSetup(_)
+                )
+            })
+    }
 }
 
 pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
@@ -706,6 +829,36 @@ fn unread_divider(cx: &App) -> Div {
         .child(line())
 }
 
+/// A transcript stamp: the time only, because a day separator names the day.
+pub(super) fn clock(at: DateTime<Utc>) -> String {
+    at.with_timezone(&Local).format("%H:%M").to_string()
+}
+
+fn day_label_in<Tz: TimeZone>(at: DateTime<Utc>, now: DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let at = at.with_timezone(&now.timezone());
+    let days = (now.date_naive() - at.date_naive()).num_days();
+    match days {
+        0 => "Today".to_owned(),
+        1 => "Yesterday".to_owned(),
+        _ if at.year() == now.year() => at.format("%A, %-d %B").to_string(),
+        _ => at.format("%-d %B %Y").to_string(),
+    }
+}
+
+fn day_separator(at: DateTime<Utc>, cx: &App) -> Div {
+    h_flex()
+        .w_full()
+        .justify_center()
+        .pt_4()
+        .pb_2()
+        .text_size(px(12.))
+        .text_color(meta_color(cx.theme()))
+        .child(day_label_in(at, Local::now()))
+}
+
 pub(super) fn stamp(at: DateTime<Utc>) -> String {
     stamp_in(at, Local::now())
 }
@@ -799,7 +952,7 @@ impl Element for CenterReveal {
 
 #[cfg(test)]
 mod tests {
-    use super::{stamp_in, turn_label};
+    use super::{day_label_in, stamp_in, turn_label};
     use chrono::{DateTime, FixedOffset, Utc};
 
     #[test]
@@ -880,6 +1033,26 @@ mod tests {
         assert_eq!(
             stamp_in(at("2025-12-31T21:59:00Z"), now),
             "31 Dec 2025, 23:59"
+        );
+    }
+
+    #[test]
+    fn day_separators_name_recent_days_and_other_years() {
+        let zone = FixedOffset::east_opt(2 * 3600).unwrap();
+        let now = "2026-11-04T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .unwrap()
+            .with_timezone(&zone);
+        let at = |text: &str| text.parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(day_label_in(at("2026-11-03T22:30:00Z"), now), "Today");
+        assert_eq!(day_label_in(at("2026-11-03T21:30:00Z"), now), "Yesterday");
+        assert_eq!(
+            day_label_in(at("2026-10-29T10:00:00Z"), now),
+            "Thursday, 29 October"
+        );
+        assert_eq!(
+            day_label_in(at("2025-12-31T21:59:00Z"), now),
+            "31 December 2025"
         );
     }
 }

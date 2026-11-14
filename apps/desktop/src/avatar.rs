@@ -453,7 +453,7 @@ impl Element for BotAvatar {
                 work: if self.working { 1. } else { 0. },
                 ..Pose::default()
             };
-            paint_avatar(bounds, self.avatar, pose, 0., window);
+            paint_avatar(bounds, self.avatar, pose, 0., ring_color(cx), window);
             return;
         };
         let center = bounds.center();
@@ -499,7 +499,7 @@ impl Element for BotAvatar {
             }
             ((pose, elapsed, live.awake.clone()), live)
         });
-        paint_avatar(bounds, self.avatar, pose, elapsed, window);
+        paint_avatar(bounds, self.avatar, pose, elapsed, ring_color(cx), window);
 
         let moved = awake.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
@@ -537,6 +537,7 @@ fn paint_avatar(
     avatar: Avatar,
     pose: Pose,
     elapsed: f32,
+    ring: Hsla,
     window: &mut Window,
 ) {
     let art = avatar.shape.art();
@@ -547,7 +548,19 @@ fn paint_avatar(
     let gy = pose.gaze.1 + (0.3 * orbit.sin() - pose.gaze.1) * work;
     let pulse = (TAU * elapsed / 1.8).sin();
     let blink = pose.blink.max(focus_blink(elapsed) * work);
-    let scale = unit * (1. + 0.06 * pose.hover) * (1. + 0.015 * pulse * work);
+    let shape = outline(&art);
+    let reach = shape
+        .iter()
+        .map(|(x, y)| (x * x + y * y).sqrt())
+        .fold(0f32, f32::max);
+    // While working, the body shrinks so its farthest point keeps an even
+    // gap inside the ring.
+    let working_fit =
+        ((halo_radius(unit) - halo_width(unit) / 2. - HALO_GAP) / (unit * reach)).clamp(0., 1.);
+    let scale = unit
+        * (1. + 0.06 * pose.hover)
+        * (1. + 0.015 * pulse * work)
+        * (1. - work * (1. - working_fit));
     let lean = (gx * 0.025 * unit, gy * 0.02 * unit);
     let tilt = gx * 0.05 + 0.03 * orbit.cos() * work;
     let (sin, cos) = tilt.sin_cos();
@@ -563,17 +576,8 @@ fn paint_avatar(
     };
     let place = place_at(scale);
 
-    let shape = outline(&art);
     if work > 0.01 {
-        paint_halo(
-            shape.map(place_at(scale * 1.26)),
-            center,
-            unit,
-            avatar.color.fill(),
-            work,
-            elapsed,
-            window,
-        );
+        paint_halo(center, unit, ring, work, elapsed, window);
     }
     let points = shape.map(place);
     let mut body = PathBuilder::fill();
@@ -628,9 +632,37 @@ fn focus_blink(elapsed: f32) -> f32 {
     }
 }
 
-/// A soft glow behind the avatar and a light tracing its outline, one lap per 1.7 s.
+/// The clear space between a working body and its ring, in px.
+const HALO_GAP: f32 = 2.;
+
+fn halo_radius(unit: f32) -> f32 {
+    unit * 0.475
+}
+
+fn halo_width(unit: f32) -> f32 {
+    (unit * 0.05).max(1.5)
+}
+
+/// The working ring is the app's accent, lifted toward white in dark so it
+/// reads as light rather than a dark blue outline.
+fn ring_color(cx: &App) -> Hsla {
+    use gpui_kit::component::ActiveTheme as _;
+    let theme = cx.theme();
+    let accent = theme.primary;
+    if theme.mode.is_dark() {
+        Hsla {
+            l: accent.l + (1. - accent.l) * 0.25,
+            ..accent
+        }
+    } else {
+        accent
+    }
+}
+
+/// A concentric working ring contained inside the avatar's layout bounds: a
+/// faint full track, so the ring reads as one centered circle, with a
+/// brighter arc travelling around it.
 fn paint_halo(
-    points: [Point<Pixels>; SAMPLES],
     center: Point<Pixels>,
     unit: f32,
     color: Hsla,
@@ -638,30 +670,24 @@ fn paint_halo(
     elapsed: f32,
     window: &mut Window,
 ) {
-    let glow = 0.3 * unit;
-    let breathe = 0.35 + 0.15 * (TAU * elapsed / 1.8).sin();
-    window.paint_drop_shadows(
-        Bounds::centered_at(center, size(px(glow * 2.), px(glow * 2.))),
-        Corners::all(px(glow)),
-        &[BoxShadow {
-            color: color.opacity(breathe * work),
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(0.4 * unit),
-            spread_radius: px(0.),
-            inset: false,
-        }],
-    );
-
-    let mut track = PathBuilder::stroke(px((0.035 * unit).max(1.)));
+    let radius = halo_radius(unit);
+    let stroke = px(halo_width(unit));
+    let points: [_; SAMPLES] = std::array::from_fn(|i| {
+        let angle = i as f32 / SAMPLES as f32 * TAU;
+        point(
+            center.x + px(radius * angle.cos()),
+            center.y + px(radius * angle.sin()),
+        )
+    });
+    let mut track = PathBuilder::stroke(stroke);
     track.move_to(points[0]);
-    for p in &points[1..] {
-        track.line_to(*p);
+    for point in &points[1..] {
+        track.line_to(*point);
     }
     track.close();
     if let Ok(path) = track.build() {
-        window.paint_path(path, color.opacity(0.16 * work));
+        window.paint_path(path, color.opacity(0.32 * work));
     }
-
     const LIT: usize = SAMPLES * 38 / 100;
     let at = |i: isize| points[i.rem_euclid(SAMPLES as isize) as usize];
     let head = (elapsed / 1.7).fract() * SAMPLES as f32;
@@ -670,7 +696,7 @@ fn paint_halo(
         let position = head - i as f32;
         let index = position.floor() as isize;
         let (from, to, next) = (at(index - 1), at(index), at(index + 1));
-        let mut segment = PathBuilder::stroke(px((unit * (0.03 + 0.045 * k)).max(1.1)));
+        let mut segment = PathBuilder::stroke(stroke);
         segment.move_to(from);
         segment.line_to(to);
         segment.line_to(to + (next - to) * position.fract());

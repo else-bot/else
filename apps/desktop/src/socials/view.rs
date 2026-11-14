@@ -1,10 +1,9 @@
 use super::*;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use crate::controls::{Control as _, Scale, Tier, text_field};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Sizable as _, StyledExt as _, h_flex,
-    v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 
 impl SocialsView {
     fn render_receipt(&self, receipt: &Receipt, cx: &mut Context<Self>) -> AnyElement {
@@ -39,21 +38,17 @@ impl SocialsView {
         let mut card = v_flex().w_full().gap_3().p_4().rounded(theme.radius_lg).bg(theme.secondary)
             .child(h_flex().justify_between().items_center()
                 .child(div().font_semibold().child(format!("{} · {}", provider.label(), if replacing { "Replace token" } else { "Connect" })))
-                .child(Button::new("social-cancel").focus_ring(false).cursor_pointer().ghost().xsmall().label("Cancel")
-                    .disabled(self.busy || !self.available)
+                .child(Button::new("social-cancel").control(Tier::Ghost, Scale::Compact, self.busy || !self.available, cx).label("Cancel")
                     .on_click(cx.listener(|view, _, window, cx| view.cancel(window, cx)))))
             .child(div().text_sm().child(provider.token_help()))
             .child(div().text_xs().text_color(theme.muted_foreground).child("The API stores the token encrypted and uses it to call the platform. The assistant never sees the token, and it stays out of chat history."))
-            .child(Button::new("social-token-help").focus_ring(false).cursor_pointer().ghost().xsmall()
-                .label(if provider == Provider::Telegram { "Open BotFather" } else { "Open Discord Developer Portal" })
+            .child(Button::new("social-token-help").control(Tier::Ghost, Scale::Standard, false, cx).label(if provider == Provider::Telegram { "Open BotFather" } else { "Open Discord Developer Portal" })
                 .on_click(move |_, _, cx| cx.open_url(match provider {
                     Provider::Telegram => "https://t.me/BotFather",
                     Provider::Discord => "https://discord.com/developers/applications",
                 })))
-            .child(Input::new(&form.token).focus_ring(false).aria_label(format!("{} bot token", provider.label())).disabled(self.busy || !self.available))
-            .child(h_flex().justify_end().child(Button::new("social-connect").focus_ring(false).cursor_pointer().primary().small()
-                .label(if replacing { "Validate replacement token" } else { "Validate and connect" })
-                .disabled(self.busy || !self.available)
+            .child(text_field(Input::new(&form.token), cx).aria_label(format!("{} bot token", provider.label())).disabled(self.busy || !self.available))
+            .child(h_flex().justify_end().child(Button::new("social-connect").control(Tier::Primary, Scale::Standard, self.busy || !self.available, cx).label(if replacing { "Validate replacement token" } else { "Validate and connect" })
                 .on_click(cx.listener(|view, _, window, cx| view.connect(window, cx)))));
         if self.setup.is_some() && !replacing {
             let existing: Vec<_> = self
@@ -73,12 +68,13 @@ impl SocialsView {
                     let id = connection.id;
                     card = card.child(
                         Button::new(SharedString::from(format!("social-existing-{id}")))
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .small()
+                            .control(
+                                Tier::Secondary,
+                                Scale::Standard,
+                                self.busy || !self.available,
+                                cx,
+                            )
                             .label(connection.display_name.clone())
-                            .disabled(self.busy || !self.available)
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 view.complete(connection.clone(), window, cx)
                             })),
@@ -95,82 +91,86 @@ impl SocialsView {
         let paused = connection.state != "active";
         let active_connection = connection.clone();
         let replacement = connection.clone();
-        let mut card = v_flex()
-            .w_full()
-            .gap_3()
-            .p_4()
-            .rounded(theme.radius_lg)
-            .bg(theme.secondary)
-            .child(div().text_sm().font_semibold().child(format!(
-                "{} · {}",
-                connection.provider.label(),
-                connection.display_name
-            )))
-            .children(
-                connection
-                    .username
-                    .as_ref()
-                    .map(|username| div().text_sm().child(format!("@{username}"))),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(format!(
+        // A grouped-list row: the account, its state, and its actions at
+        // the trailing edge. A conflict or a pending disconnect follows it.
+        let detail = connection
+            .username
+            .as_ref()
+            .map(|username| format!("@{username} · "))
+            .unwrap_or_default()
+            + &format!("{} · {}", connection.state, connection.health_label());
+        let card = v_flex().w_full().child(
+            crate::panel_kit::list_row()
+                .child(crate::panel_kit::row_icon(
+                    provider_icon(connection.provider),
+                    cx,
+                ))
+                .child(crate::panel_kit::row_text(
+                    format!(
                         "{} · {}",
-                        connection.state,
-                        connection.health_label()
-                    )),
-            )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .flex_wrap()
-                    .child(
-                        Button::new(SharedString::from(format!("social-pause-{id}")))
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .xsmall()
-                            .label(if paused { "Resume" } else { "Pause" })
-                            .disabled(self.busy || !self.available)
-                            .on_click(cx.listener(move |view, _, window, cx| {
-                                view.active(active_connection.clone(), window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("social-replace-{id}")))
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .xsmall()
-                            .label("Replace token")
-                            .disabled(self.busy || !self.available)
-                            .on_click(cx.listener(move |view, _, window, cx| {
-                                view.replace(replacement.clone(), window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("social-disconnect-{id}")))
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .xsmall()
-                            .label("Disconnect")
-                            .disabled(self.busy || !self.available)
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                view.confirm_disconnect = Some(id);
-                                cx.notify();
-                            })),
+                        connection.provider.label(),
+                        connection.display_name
                     ),
-            );
+                    detail,
+                    cx,
+                ))
+                .child(
+                    h_flex()
+                        .flex_none()
+                        .gap_1()
+                        .child(
+                            Button::new(SharedString::from(format!("social-pause-{id}")))
+                                .control(
+                                    Tier::Secondary,
+                                    Scale::Compact,
+                                    self.busy || !self.available,
+                                    cx,
+                                )
+                                .label(if paused { "Resume" } else { "Pause" })
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.active(active_connection.clone(), window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("social-replace-{id}")))
+                                .control(
+                                    Tier::Secondary,
+                                    Scale::Compact,
+                                    self.busy || !self.available,
+                                    cx,
+                                )
+                                .label("Replace token")
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.replace(replacement.clone(), window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("social-disconnect-{id}")))
+                                .control(
+                                    Tier::Secondary,
+                                    Scale::Compact,
+                                    self.busy || !self.available,
+                                    cx,
+                                )
+                                .label("Disconnect")
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.confirm_disconnect = Some(id);
+                                    cx.notify();
+                                })),
+                        ),
+                ),
+        );
+        let mut notes = v_flex().px_4().pb_3().gap_3();
+        let mut notes_shown = false;
         if connection.receiver_conflict() {
-            card = card.child(div().text_sm().text_color(theme.danger).child(
+            notes_shown = true;
+            notes = notes.child(div().text_sm().text_color(theme.danger).child(
                 "Another webhook, app, or server is receiving this bot's messages. Telegram delivers them to only one receiver. Remove the bot's webhook or stop the other app, then refresh.",
             ));
         }
         if self.confirm_disconnect == Some(id) {
-            card = card
+            notes_shown = true;
+            notes = notes
                 .child(
                     div()
                         .text_sm()
@@ -181,12 +181,13 @@ impl SocialsView {
                         .gap_2()
                         .child(
                             Button::new(SharedString::from(format!("social-keep-{id}")))
-                                .focus_ring(false)
-                                .cursor_pointer()
-                                .ghost()
-                                .small()
+                                .control(
+                                    Tier::Secondary,
+                                    Scale::Compact,
+                                    self.busy || !self.available,
+                                    cx,
+                                )
                                 .label("Keep connected")
-                                .disabled(self.busy || !self.available)
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.confirm_disconnect = None;
                                     cx.notify();
@@ -196,19 +197,28 @@ impl SocialsView {
                             Button::new(SharedString::from(format!(
                                 "social-confirm-disconnect-{id}"
                             )))
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .danger()
-                            .small()
+                            .control(
+                                Tier::Danger,
+                                Scale::Standard,
+                                self.busy || !self.available,
+                                cx,
+                            )
                             .label("Disconnect account")
-                            .disabled(self.busy || !self.available)
                             .on_click(cx.listener(
                                 move |view, _, window, cx| view.disconnect(id, window, cx),
                             )),
                         ),
                 );
         }
-        card.into_any_element()
+        card.when(notes_shown, |card| card.child(notes))
+            .into_any_element()
+    }
+}
+
+fn provider_icon(provider: Provider) -> gpui_kit::component::Icon {
+    match provider {
+        Provider::Telegram => gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Send),
+        Provider::Discord => gpui_kit::component::Icon::empty().path(crate::DISCORD_ICON),
     }
 }
 
@@ -217,48 +227,75 @@ impl Render for SocialsView {
         let theme = cx.theme().clone();
         let mut root = v_flex().w_full().gap_3();
         if self.setup.is_none() {
-            root = root.child(div().text_lg().font_semibold().child("Socials"))
-                .child(div().text_sm().text_color(theme.muted_foreground).child("Connect Telegram and Discord bots. Any bot can use a connection when you ask. Manage message triggers in each bot's sidebar."));
-            for connection in &self.connections {
-                root = root.child(self.render_connection(connection, cx));
+            root = root.child(crate::panel_kit::page_heading(
+                "Socials",
+                "Connect Telegram and Discord bots for any of your bots to use.",
+                vec![
+                    Button::new("social-refresh")
+                        .control(
+                            Tier::Secondary,
+                            Scale::Compact,
+                            self.busy || !self.available,
+                            cx,
+                        )
+                        .icon(gpui_kit::assets::IconName::RefreshCw)
+                        .label("Refresh")
+                        .on_click(cx.listener(|view, _, window, cx| view.refresh(window, cx)))
+                        .into_any_element(),
+                ],
+                cx,
+            ));
+            if !self.connections.is_empty() {
+                let rows: Vec<_> = self
+                    .connections
+                    .iter()
+                    .map(|connection| self.render_connection(connection, cx))
+                    .collect();
+                root = root.child(div().mt_3().child(crate::panel_kit::grouped_list(rows, cx)));
+            }
+            let mut providers = Vec::new();
+            for (provider, id, description) in [
+                (
+                    Provider::Telegram,
+                    "social-add-telegram",
+                    "Send messages and watch Telegram chats.",
+                ),
+                (
+                    Provider::Discord,
+                    "social-add-discord",
+                    "Send messages and follow Discord channels.",
+                ),
+            ] {
+                providers.push(
+                    crate::panel_kit::list_row()
+                        .child(crate::panel_kit::row_icon(provider_icon(provider), cx))
+                        .child(crate::panel_kit::row_text(
+                            provider.label(),
+                            description,
+                            cx,
+                        ))
+                        .child(
+                            Button::new(id)
+                                .control(
+                                    Tier::Secondary,
+                                    Scale::Compact,
+                                    self.busy || !self.available,
+                                    cx,
+                                )
+                                .label(format!("Add {}", provider.label()))
+                                // Paired rows share one button width.
+                                .w(px(120.))
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.add(provider, window, cx)
+                                })),
+                        )
+                        .into_any_element(),
+                );
             }
             root = root.child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("social-add-telegram")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .small()
-                            .label("Add Telegram")
-                            .disabled(self.busy || !self.available)
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.add(Provider::Telegram, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("social-add-discord")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .small()
-                            .label("Add Discord")
-                            .disabled(self.busy || !self.available)
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.add(Provider::Discord, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("social-refresh")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .xsmall()
-                            .label("Refresh")
-                            .disabled(self.busy || !self.available)
-                            .on_click(cx.listener(|view, _, window, cx| view.refresh(window, cx))),
-                    ),
+                div()
+                    .mt_3()
+                    .child(crate::panel_kit::grouped_list(providers, cx)),
             );
         }
         if self.busy {

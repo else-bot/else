@@ -1,4 +1,5 @@
 use super::*;
+use crate::controls::{Control as _, Scale, Tier};
 use crate::updates::{
     Channel as UpdateChannel, Check as UpdateCheck, Commands, Operation, Snapshot, Work,
 };
@@ -385,7 +386,9 @@ impl Shell {
                 ),
                 UpdateCheck::Failed(_) if snapshot.unavailable.is_some() => (
                     "Updates managed outside this app",
-                    "Automatic installation is unavailable for this session.".to_owned(),
+                    snapshot.unavailable.clone().unwrap_or_else(|| {
+                        "Automatic installation is unavailable for this session.".to_owned()
+                    }),
                     IconName::Laptop,
                     theme.muted_foreground,
                 ),
@@ -402,93 +405,100 @@ impl Shell {
             let at: chrono::DateTime<chrono::Local> = at.into();
             format!("{source} · Checked {}", at.format("%H:%M"))
         });
+        // The status card reads as the heading's answer, 24 px under it.
         let mut content = v_flex()
-            .gap_5()
+            .gap_6()
             .when(output_visible, |content| content.gap_3())
             .when(!output_visible, |content| {
-                content
-                    .child(super::settings::section_heading(
-                        if server {
-                            "Server updates"
-                        } else {
-                            "App updates"
-                        },
-                        if server {
-                            "Update this server and reconnect when it restarts."
-                        } else {
-                            "The desktop app on this computer. Your servers keep running."
-                        },
-                        cx,
-                    ))
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        last_check.unwrap_or_else(|| "Stable releases from git tags".into()),
-                    ))
-            })
-            .child(
-                h_flex()
-                    .items_start()
-                    .gap_3()
-                    .child(
-                        div()
-                            .size_10()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(theme.radius)
-                            .bg(theme.secondary.opacity(0.45))
-                            .child(if loading {
-                                checking_icon("update-status-loading", px(20.), tone)
-                            } else {
-                                Icon::new(icon).size_5().text_color(tone).into_any_element()
-                            }),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_base()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child(description),
-                            ),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(if let Some(id) = self.server_update_target {
-                        self.registry
-                            .find(id)
-                            .map(|s| s.name.clone())
-                            .unwrap_or_default()
+                content.child(super::settings::section_heading(
+                    if server {
+                        "Server updates"
                     } else {
-                        format!("Running v{}", env!("ELSE_VERSION"))
-                    })
-                    .when_some(view.latest(), |row, version| {
-                        row.child(Icon::new(IconName::ArrowRight).size_3())
-                            .child(format!("Latest {version}"))
-                    }),
+                        "App updates"
+                    },
+                    if server {
+                        "Update this server and reconnect when it restarts."
+                    } else {
+                        "The desktop app on this computer. Your servers keep running."
+                    },
+                    cx,
+                ))
+            })
+            // The status is one group card, like every other Settings group.
+            .child(
+                div().w_full().child(
+                    h_flex()
+                        .w_full()
+                        .p_4()
+                        .rounded(theme.radius_lg)
+                        .border_1()
+                        .border_color(theme.border)
+                        .items_start()
+                        .gap_3()
+                        .child(
+                            div()
+                                .size_10()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(theme.radius)
+                                .bg(theme.secondary.opacity(0.45))
+                                .child(if loading {
+                                    checking_icon("update-status-loading", px(20.), tone)
+                                } else {
+                                    Icon::new(icon).size_5().text_color(tone).into_any_element()
+                                }),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_size(px(15.))
+                                        .line_height(px(20.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .max_w(crate::panel_kit::PARAGRAPH)
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child(description),
+                                )
+                                .child(
+                                    h_flex()
+                                        .pt_1()
+                                        .gap_2()
+                                        .flex_wrap()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(if let Some(id) = self.server_update_target {
+                                            self.registry
+                                                .find(id)
+                                                .map(|s| s.name.clone())
+                                                .unwrap_or_default()
+                                        } else {
+                                            format!("Running v{}", env!("ELSE_VERSION"))
+                                        })
+                                        .when_some(view.latest(), |row, version| {
+                                            row.child(Icon::new(IconName::ArrowRight).size_3())
+                                                .child(format!("Latest {version}"))
+                                        })
+                                        .when(snapshot.unavailable.is_none(), |row| {
+                                            row.child("·").child(
+                                                last_check.unwrap_or_else(|| source.to_owned()),
+                                            )
+                                        }),
+                                ),
+                        ),
+                ),
             );
-        if let Some(reason) = &snapshot.unavailable {
-            content = content.child(update_notice(
-                "Installation unavailable",
-                reason.clone(),
-                IconName::Laptop,
-                theme.muted_foreground,
-                theme,
-            ));
-        } else if server
+        if snapshot.unavailable.is_none()
+            && server
             && !output_visible
             && !view.busy()
             && !matches!(
@@ -529,23 +539,28 @@ impl Shell {
         if output_visible {
             content = content.child(self.render_update_output(theme, cx));
         }
-        let mut panel = v_flex().size_full().min_h_0().gap_4().child(
-            div()
-                .id("updates-status-scroll")
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .overflow_y_scroll()
-                .track_scroll(&view.page_scroll)
-                .vertical_scrollbar(&view.page_scroll)
-                .child(
-                    content
-                        .w_full()
-                        .when(output_visible, |content| content.flex_1())
-                        .when(!output_visible, |content| content.flex_none()),
-                ),
-        );
+        let mut panel = v_flex()
+            .w_full()
+            .when(output_visible, |panel| panel.h_full())
+            .min_h_0()
+            .gap_4()
+            .child(
+                div()
+                    .id("updates-status-scroll")
+                    .when(output_visible, |area| area.flex_1())
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .track_scroll(&view.page_scroll)
+                    .vertical_scrollbar(&view.page_scroll)
+                    .child(
+                        content
+                            .w_full()
+                            .when(output_visible, |content| content.flex_1())
+                            .when(!output_visible, |content| content.flex_none()),
+                    ),
+            );
         if view.confirm_restart {
             panel = panel.child(
                 v_flex()
@@ -572,8 +587,12 @@ impl Shell {
                     .child(error.clone()),
             );
         }
+        // A copy whose updates are managed elsewhere has nothing to check
+        // or schedule, so the automatic-checks row would only show a
+        // disabled button.
+        let checks_apply = snapshot.unavailable.is_none() || view.remote_profile.is_some();
         panel
-            .child(
+            .when(checks_apply, |panel| panel.child(
                 h_flex()
                     .items_start()
                     .gap_2()
@@ -604,10 +623,10 @@ impl Shell {
                         "Check again",
                         Action::Check,
                         false,
-                        view.busy() || (snapshot.unavailable.is_some() && view.remote_profile.is_none()) || matches!(snapshot.check, UpdateCheck::Checking),
+                        view.busy() || matches!(snapshot.check, UpdateCheck::Checking),
                         cx,
                     )),
-            )
+            ))
             .into_any_element()
     }
 
@@ -667,30 +686,35 @@ impl Shell {
                     ))
                 },
             )
-            .when(view.snapshot.output.is_empty() && !view.busy(), |row| {
-                row.child(self.update_button(
-                    "updates-output-toggle",
-                    if view.show_output {
-                        "Hide output"
-                    } else {
-                        "View output"
-                    },
-                    Action::ToggleOutput,
-                    false,
-                    false,
-                    cx,
-                ))
-            })
+            .when(
+                view.snapshot.unavailable.is_none()
+                    && view.snapshot.output.is_empty()
+                    && !view.busy(),
+                |row| {
+                    row.child(self.update_button(
+                        "updates-output-toggle",
+                        if view.show_output {
+                            "Hide output"
+                        } else {
+                            "View output"
+                        },
+                        Action::ToggleOutput,
+                        false,
+                        false,
+                        cx,
+                    ))
+                },
+            )
             .into_any_element()
     }
 
     fn render_update_output(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let view = self.update_view();
         let status = match view.snapshot.operation {
-            Operation::Installing | Operation::Preparing => "LIVE",
-            Operation::Ready { .. } => "COMPLETE",
-            Operation::Failed(_) => "FAILED",
-            _ => "OUTPUT",
+            Operation::Installing | Operation::Preparing => "Live",
+            Operation::Ready { .. } => "Complete",
+            Operation::Failed(_) => "Failed",
+            _ => "Output",
         };
         v_flex()
             .flex_1()
@@ -817,12 +841,16 @@ impl Shell {
     ) -> Button {
         Button::new(id)
             .label(label)
-            .small()
-            .focus_ring(false)
-            .when(primary, |button| button.primary())
-            .when(!primary, |button| button.ghost())
-            .when(!disabled, |button| button.cursor_pointer())
-            .disabled(disabled)
+            .control(
+                if primary {
+                    Tier::Primary
+                } else {
+                    Tier::Secondary
+                },
+                Scale::Standard,
+                disabled,
+                cx,
+            )
             .on_click(cx.listener(move |shell, _, window, cx| {
                 if matches!(action, Action::Later) {
                     shell.cancel(window, cx);

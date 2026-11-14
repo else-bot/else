@@ -1,15 +1,14 @@
 use super::ElseApp;
 use crate::api::{Category, CreateBotRequest};
 use crate::avatar::{Avatar, AvatarColor, AvatarPicker, AvatarShape, bot_avatar};
+use crate::controls::{Control as _, Scale, Tier, field_style, text_field};
 use crate::profile_picker::ProfilePicker;
 use gpui_kit::component::FocusableExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::searchable_list::SearchableListItem;
 use gpui_kit::component::select::{Select, SelectState};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IndexPath, WindowExt as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, IndexPath, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use uuid::Uuid;
@@ -129,19 +128,21 @@ impl ElseApp {
             });
             let stacked = window.viewport_size().width < px(760.);
             let choose = holder.downgrade();
+            // The avatar studio starts on the "Bot name" line, preview first,
+            // and its last swatch row ends on the details' last control.
             let studio =
                 v_flex()
                     .flex_none()
                     .items_center()
+                    .justify_between()
                     .gap_5()
-                    .border_color(theme.border)
-                    .when(stacked, |studio| studio.w_full().pb_5().border_b_1())
-                    .when(!stacked, |studio| studio.w(px(248.)).pr_6().border_r_1())
+                    .when(stacked, |studio| studio.w_full().pb_2())
+                    .when(!stacked, |studio| studio.w(px(256.)))
                     .child(
                         v_flex()
                             .items_center()
                             .gap_2()
-                            .child(bot_avatar("create-avatar-preview", form.avatar, px(84.)))
+                            .child(bot_avatar("create-avatar-preview", form.avatar, px(120.)))
                             .child(div().text_xs().text_color(theme.muted_foreground).child(
                                 format!(
                                     "{} · {}",
@@ -161,34 +162,25 @@ impl ElseApp {
                         .compact()
                         .disabled(locked || !avatar_supported),
                     )
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        if avatar_supported {
-                            "Your bot's look in the sidebar."
-                        } else {
-                            "Update the server to choose an avatar."
-                        },
-                    ));
-            let mut details = v_flex().flex_1().min_w_0().gap_4().child(
-                v_flex()
-                    .gap_1()
-                    .child(field_label("Bot name", cx))
-                    .child(
-                        Input::new(&form.name)
-                            .focus_ring(false)
-                            .aria_label("Bot name")
-                            .disabled(locked),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("You can change this later."),
-                    ),
+                    .when(!avatar_supported, |studio| {
+                        studio.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("Update the server to choose an avatar."),
+                        )
+                    });
+            let mut details = v_flex().flex_1().min_w_0().gap_5().child(
+                v_flex().gap_2().child(field_label("Bot name", cx)).child(
+                    text_field(Input::new(&form.name), cx)
+                        .aria_label("Bot name")
+                        .disabled(locked),
+                ),
             );
             if !categories.is_empty() {
                 details = details.child(
-                    v_flex().gap_1().child(field_label("Category", cx)).child(
-                        Select::new(&form.category)
+                    v_flex().gap_2().child(field_label("Category", cx)).child(
+                        field_style(Select::new(&form.category), cx)
                             .focus_ring(false)
                             .cursor_pointer()
                             .accessibility_label("Category")
@@ -197,13 +189,7 @@ impl ElseApp {
                 );
             }
             if let Some(profile) = &form.profile {
-                details = details.child(
-                    div()
-                        .pt_4()
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .child(profile.clone()),
-                );
+                details = details.child(profile.clone());
             }
             if let Some(error) = &form.error {
                 details = details.child(
@@ -219,22 +205,28 @@ impl ElseApp {
                 h_flex().items_stretch()
             };
             let body = v_flex()
-                .gap_5()
+                .gap_3()
                 .child(
                     div()
                         .text_sm()
                         .text_color(theme.muted_foreground)
                         .child("A new bot for whatever you have in mind."),
                 )
-                .child(columns.gap_6().child(studio).child(details));
+                .child(columns.gap_8().child(studio).child(details));
             let app_create = app.clone();
             let busy = form.busy;
             let can_submit = !form.name.read(cx).value().trim().is_empty();
             let app_ok = app.clone();
             let app_close = app.clone();
             let mine = holder.clone();
-            dialog
-                .title("Create bot")
+            crate::appearance::modal_surface(dialog, cx)
+                .title(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Create bot"),
+                )
+                .centered()
                 .w(px(704.))
                 .on_close(move |_, _, cx| {
                     let _ = app_close.update(cx, |app, _| {
@@ -258,20 +250,15 @@ impl ElseApp {
                         .gap_2()
                         .child(
                             Button::new("create-cancel")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Secondary, Scale::Standard, false, cx)
                                 .label("Cancel")
-                                .ghost()
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("create-submit")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Primary, Scale::Standard, busy || !can_submit, cx)
                                 .label("Create bot")
-                                .primary()
                                 .loading(busy)
-                                .disabled(busy || !can_submit)
                                 .on_click(move |_, window, cx| {
                                     let _ = app_create
                                         .update(cx, |app, cx| app.submit_create(window, cx));
@@ -355,9 +342,12 @@ impl ElseApp {
     }
 }
 
+/// A field's label, in the same voice as the model picker's "Provider",
+/// "Reasoning" and "Speed".
 fn field_label(text: &'static str, cx: &App) -> Div {
     div()
         .text_xs()
+        .font_weight(FontWeight::MEDIUM)
         .text_color(cx.theme().muted_foreground)
         .child(text)
 }

@@ -1,10 +1,9 @@
+use crate::controls::{Control as _, Scale, Tier, hugging_segment, segment_track};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Sizable as _, h_flex, v_flex,
-};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
@@ -431,14 +430,12 @@ impl ComputerView {
                 )
                 .child(
                     Button::new("upgrade-computer")
-                        .cursor_pointer()
-                        .focus_ring(false)
+                        .control(Tier::Secondary, Scale::Compact, false, cx)
                         .label(if failed {
                             "Try upgrading again"
                         } else {
                             "Upgrade computer"
                         })
-                        .small()
                         .w_full()
                         .on_click(cx.listener(|view, _, _, cx| view.upgrade(cx))),
                 )
@@ -643,7 +640,7 @@ impl ComputerView {
             .h_full()
             .rounded(radius)
             .overflow_hidden()
-            .bg(rgb(0x111111));
+            .bg(cx.theme().secondary);
         if let Some(image) = &self.image {
             area = area.child(
                 img(image.clone())
@@ -667,20 +664,31 @@ impl ComputerView {
                 Screen::Live => ("Connecting…", ""),
                 Screen::Upgrading => ("Upgrading computer…", "This takes a few minutes"),
             };
+            // Without a screen to show, the bot keeps its shape in neutral
+            // grey: absent, not dimmed.
+            let resting = crate::avatar::Avatar {
+                color: crate::avatar::AvatarColor::Gray,
+                ..self.avatar
+            };
+            // The state centres in the space it has, a little above the
+            // middle so it reads as centred under the panel's header.
             area = area.child(
                 v_flex()
                     .size_full()
                     .items_center()
                     .justify_center()
+                    .when(!self.expanded, |state| state.pb_16())
                     .gap_2()
-                    .text_color(rgb(0xaaaaaa))
-                    .child(div().opacity(0.55).child(
-                        crate::avatar::bot_avatar("computer-avatar", self.avatar, px(56.)).still(),
+                    .text_color(cx.theme().muted_foreground)
+                    .child(div().opacity(0.8).child(
+                        crate::avatar::bot_avatar("computer-avatar", resting, px(56.)).still(),
                     ))
                     .child(
                         div()
+                            .pt_1()
                             .text_sm()
-                            .text_color(rgb(0xf5f5f5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(cx.theme().foreground)
                             .child(text.to_owned()),
                     )
                     .child(div().text_xs().child(hint)),
@@ -835,22 +843,25 @@ impl Render for ComputerView {
         }
         let theme = cx.theme().clone();
         if !self.expanded {
+            // Without a screen to show, the state message sits on the panel
+            // itself, centered in the tab, rather than in an empty frame.
+            let screen = self.image.is_some();
             return v_flex()
                 .gap_2()
                 .w_full()
-                .child(
+                .flex_1()
+                .child(if screen {
                     self.image_area(cx)
                         .h(px(176.))
                         .border_1()
-                        .border_color(theme.border),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .text_center()
-                        .child(format!("{}'s screen", self.name)),
-                )
+                        .border_color(theme.border)
+                } else {
+                    self.image_area(cx)
+                        .flex_1()
+                        .min_h(px(240.))
+                        .pb(px(64.))
+                        .bg(transparent_black())
+                })
                 .children(self.upgrade_section(cx))
                 .children(match &self.screen {
                     Screen::Failed(error) => Some(
@@ -924,10 +935,9 @@ impl Render for ComputerView {
                     )
                     .child(
                         Button::new("close-computer")
-                            .cursor_pointer()
+                            .control(Tier::Ghost, Scale::Standard, false, cx)
                             .label("Close")
                             .icon(IconName::Minimize)
-                            .ghost()
                             .on_click(cx.listener(|view, _, _, cx| view.collapse(cx))),
                     ),
             )
@@ -938,31 +948,43 @@ impl Render for ComputerView {
                     .gap_3()
                     .items_center()
                     .justify_center()
-                    .child(
-                        Button::new("watch-computer")
-                            .cursor_pointer()
-                            .label("Watching")
-                            .disabled(self.mode_pending || !matches!(self.screen, Screen::Live))
-                            .icon(IconName::Eye)
-                            .when(mode == DesktopMode::Watch, |button| button.primary())
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.set_mode(DesktopMode::Watch, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("control-computer")
-                            .cursor_pointer()
-                            .disabled(self.mode_pending || !matches!(self.screen, Screen::Live))
-                            .label(if self.mode_pending {
-                                "Switching…"
-                            } else {
-                                "Take over"
-                            })
-                            .when(mode == DesktopMode::Control, |button| button.primary())
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.set_mode(DesktopMode::Control, window, cx)
-                            })),
-                    )
+                    .child({
+                        let locked = self.mode_pending || !matches!(self.screen, Screen::Live);
+                        segment_track(cx)
+                            .child(
+                                hugging_segment(
+                                    "watch-computer",
+                                    "Watching",
+                                    mode == DesktopMode::Watch,
+                                    locked,
+                                    cx,
+                                )
+                                .icon(IconName::Eye)
+                                .on_click(cx.listener(
+                                    |view, _, window, cx| {
+                                        view.set_mode(DesktopMode::Watch, window, cx)
+                                    },
+                                )),
+                            )
+                            .child(
+                                hugging_segment(
+                                    "control-computer",
+                                    if self.mode_pending {
+                                        "Switching…"
+                                    } else {
+                                        "Take over"
+                                    },
+                                    mode == DesktopMode::Control,
+                                    locked,
+                                    cx,
+                                )
+                                .on_click(cx.listener(
+                                    |view, _, window, cx| {
+                                        view.set_mode(DesktopMode::Control, window, cx)
+                                    },
+                                )),
+                            )
+                    })
                     .child(div().text_xs().text_color(theme.muted_foreground).child(
                         if mode == DesktopMode::Control {
                             "You control this computer"

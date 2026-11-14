@@ -1,9 +1,10 @@
 use super::*;
 use crate::api::{Bot, ClientError, EmailConfig, EmailEndpoint, EmailProvider};
+use crate::controls::{Control as _, Scale, Tier, field_style, segment, segment_track, text_field};
+use gpui_kit::component::IndexPath;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::searchable_list::SearchableListItem;
 use gpui_kit::component::select::{Select, SelectState};
-use gpui_kit::component::{IndexPath, Selectable as _};
 
 #[derive(Clone, PartialEq, Eq)]
 struct BotChoice {
@@ -234,6 +235,7 @@ impl Form {
         let theme = cx.theme().clone();
         let note = |text: &str| {
             div()
+                .max_w(crate::panel_kit::PARAGRAPH)
                 .text_xs()
                 .text_color(theme.muted_foreground)
                 .child(text.to_owned())
@@ -245,16 +247,15 @@ impl Form {
                 .min_w_0()
                 .child(div().text_sm().font_medium().child(label.to_owned()))
                 .child(
-                    Input::new(input)
-                        .focus_ring(false)
+                    text_field(Input::new(input), cx)
                         .aria_label(label.to_owned())
                         .disabled(busy),
                 )
         };
-        let mut form = v_flex()
-            .gap_4()
-            .w_full()
-            .child(div().font_semibold().child("Add email account"));
+        // One group: its title, the provider and its fields, the optional
+        // bot, and the action that closes the group at its trailing edge.
+        let mut form = crate::panel_kit::group_card(cx)
+            .child(crate::panel_kit::group_title("Add email account"));
         if let Some(authorization) = &self.authorization {
             let waiting = matches!(authorization, Authorization::Waiting(_));
             form = form.child(note(&if waiting {
@@ -264,26 +265,21 @@ impl Form {
                 let url = url.clone();
                 form = form.child(
                     Button::new("email-open-signin")
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Ghost, Scale::Standard, false, cx)
                         .label("Open sign-in page")
-                        .ghost()
                         .on_click(move |_, _, cx| cx.open_url(&url)),
                 );
             }
             return form
                 .child(
                     Button::new("email-cancel-signin")
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Ghost, Scale::Standard, !waiting, cx)
                         .label("Cancel")
-                        .ghost()
-                        .disabled(!waiting)
                         .on_click(cx.listener(|view, _, _, cx| view.cancel_signin(cx))),
                 )
                 .into_any_element();
         }
-        let mut providers = h_flex().gap_2().flex_wrap();
+        let mut providers = segment_track(cx).w_full();
         for provider in [
             EmailProvider::Gmail,
             EmailProvider::Microsoft,
@@ -291,24 +287,31 @@ impl Form {
             EmailProvider::Icloud,
             EmailProvider::Imap,
         ] {
+            let chosen = self.provider == provider;
             providers = providers.child(
-                Button::new(SharedString::from(format!("email-provider-{provider:?}")))
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .small()
-                    .label(provider.label())
-                    .selected(self.provider == provider)
-                    .disabled(busy)
-                    .on_click(cx.listener(move |view, _, window, cx| {
-                        if let Some(form) = &mut view.form {
-                            form.clear_secrets(window, cx);
-                            form.provider = provider;
-                        }
-                        view.error = None;
-                        cx.notify();
-                    })),
+                segment(
+                    SharedString::from(format!("email-provider-{provider:?}")),
+                    match provider {
+                        EmailProvider::Microsoft => "Microsoft",
+                        provider => provider.label(),
+                    },
+                    chosen,
+                    busy,
+                    cx,
+                )
+                .accessibility_label(provider.label())
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    if let Some(form) = &mut view.form {
+                        form.clear_secrets(window, cx);
+                        form.provider = provider;
+                    }
+                    view.error = None;
+                    cx.notify();
+                })),
             );
         }
+        // The track spans the column; Microsoft 365 shows as "Microsoft" so
+        // five equal segments fit the 560 px column untruncated.
         form = form.child(providers);
         if self.provider != EmailProvider::Gmail {
             form = form.child(field("Email address", &self.address));
@@ -336,17 +339,25 @@ impl Form {
                     .child(note("TLS is required. Ports 143 and 587 use STARTTLS; other ports use implicit TLS."));
             }
         }
-        form = form.child(v_flex().gap_1()
-            .child(div().text_sm().font_medium().child("Ask a bot to help, optional"))
-            .child(Select::new(&self.bot).focus_ring(false).cursor_pointer().accessibility_label("Email bot").disabled(busy)))
-            .child(note("The bot will ask what this inbox is for and whether you want a first triage. All your other bots can still use it when asked."));
+        form = form.child(v_flex().gap_2().pt_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().text_sm().font_medium().child("Ask a bot to help"))
+                    .child(crate::panel_kit::tag("Optional", cx)),
+            )
+            .child(div().max_w(px(320.)).child(field_style(Select::new(&self.bot), cx).focus_ring(false).cursor_pointer().accessibility_label("Email bot").disabled(busy)))
+            .child(note("The bot will ask what this inbox is for and whether you want a first triage. All your other bots can still use it when asked.")));
         form.child(
-            h_flex().gap_2().justify_end().child(
+            h_flex().justify_end().gap_2().child(
                 Button::new("email-connect")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .primary()
-                    .disabled(busy || oauth.is_some_and(|provider| !provider.configured()))
+                    .control(
+                        Tier::Primary,
+                        Scale::Standard,
+                        busy || oauth.is_some_and(|provider| !provider.configured()),
+                        cx,
+                    )
                     .label(if busy {
                         "Connecting…".to_owned()
                     } else if let Some(provider) = oauth {

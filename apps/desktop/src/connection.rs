@@ -360,6 +360,16 @@ impl Shell {
             })
             .unwrap_or_default();
         let app = cx.new(|cx| ElseApp::new(client.clone(), preferences, window, cx));
+        let shell = cx.weak_entity();
+        app.update(cx, |app, _| {
+            app.set_server_switcher(std::rc::Rc::new(move |link, cx| {
+                shell
+                    .update(cx, |shell, cx| {
+                        shell.render_server_switcher("sidebar-server-switcher", link, cx)
+                    })
+                    .unwrap_or_else(|_| div().into_any_element())
+            }))
+        });
         if let Some(widths) = widths {
             app.update(cx, |app, cx| app.set_panel_widths(widths, cx));
         }
@@ -851,7 +861,11 @@ impl Render for Shell {
         let Some(active) = &self.active else {
             return root;
         };
-        root.child(self.render_bar(active, cx))
+        // macOS draws its traffic lights over a title bar the app owns.
+        root.track_focus(&self.settings_focus)
+            .when(cfg!(target_os = "macos"), |root| {
+                root.child(TitleBar::new())
+            })
             .when_some(
                 self.connection_error
                     .clone()

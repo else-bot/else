@@ -1,5 +1,6 @@
 use super::*;
 use crate::api::InstalledSkill;
+use crate::controls::{Control as _, Scale, Tier, text_field};
 use crate::model::SkillScope;
 use crate::skill_ui::{SkillFiles, SkillKeys, chip, source};
 use gpui_kit::assets::IconName;
@@ -370,18 +371,14 @@ impl Shell {
                         .gap_2()
                         .child(
                             Button::new("skill-remove-cancel")
-                                .focus_ring(false)
-                                .cursor_pointer()
+                                .control(Tier::Secondary, Scale::Standard, false, cx)
                                 .label("Cancel")
-                                .ghost()
-                                .track_focus(&cancel)
+                                                                .track_focus(&cancel)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("skill-remove-confirm")
-                                .focus_ring(false)
-                                .cursor_pointer()
-                                .danger()
+                                .control(Tier::Danger, Scale::Standard, false, cx)
                                 .label(if shared { "Delete for all bots" } else { "Delete" })
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
@@ -455,10 +452,31 @@ impl Shell {
             return body.child("Loading installed skills…").into_any_element();
         };
         let busy = view.busy || !connected;
+        let Some(entries) = &view.entries else {
+            return body.child("Loading installed skills…").into_any_element();
+        };
+        if entries.is_empty() {
+            return body
+                .flex_1()
+                .child(settings::empty_state(
+                    IconName::FileText,
+                    "No skills installed yet",
+                    "Ask a bot to install a skill from a GitHub link.",
+                    Button::new("empty-open-chat")
+                        .control(Tier::Secondary, Scale::Standard, false, cx)
+                        .icon(IconName::MessageSquare)
+                        .label("Ask a bot in chat")
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            window.close_dialog(cx);
+                            shell.cancel(window, cx);
+                        })),
+                    cx,
+                ))
+                .into_any_element();
+        }
         body = body.child(
             div().max_w(px(340.)).child(
-                Input::new(&view.search)
-                    .focus_ring(false)
+                text_field(Input::new(&view.search), cx)
                     .aria_label("Search installed skills")
                     .small()
                     .prefix(Icon::new(IconName::Search).size_3()),
@@ -477,21 +495,14 @@ impl Shell {
                     )
                     .child(
                         Button::new("skills-retry")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .small()
-                            .ghost()
+                            .control(Tier::Secondary, Scale::Standard, busy, cx)
                             .label("Retry")
-                            .disabled(busy)
                             .on_click(
                                 cx.listener(|shell, _, window, cx| shell.open_skills(window, cx)),
                             ),
                     ),
             );
         }
-        let Some(entries) = &view.entries else {
-            return body.child("Loading installed skills…").into_any_element();
-        };
         let query = view.search.read(cx).value().trim().to_lowercase();
         let filtered: Vec<_> = entries
             .iter()
@@ -703,23 +714,16 @@ impl Shell {
                                 )
                                 .child(
                                     Button::new("skill-key-replace")
-                                        .focus_ring(false)
-                                        .cursor_pointer()
-                                        .small()
+                                        .control(Tier::Secondary, Scale::Standard, busy, cx)
                                         .label("Replace")
-                                        .disabled(busy)
                                         .on_click(cx.listener(move |shell, _, window, cx| {
                                             shell.edit_skill_key(replace.clone(), window, cx)
                                         })),
                                 )
                                 .child(
                                     Button::new("skill-key-clear")
-                                        .focus_ring(false)
-                                        .cursor_pointer()
-                                        .small()
-                                        .ghost()
+                                        .control(Tier::Secondary, Scale::Standard, busy, cx)
                                         .label("Clear")
-                                        .disabled(busy)
                                         .on_click(cx.listener(move |shell, _, window, cx| {
                                             shell.write_skill_key(clear.clone(), false, window, cx)
                                         })),
@@ -729,12 +733,8 @@ impl Shell {
                         key = key.child(keys.clone()).child(
                             h_flex().justify_end().child(
                                 Button::new("skill-key-save")
-                                    .focus_ring(false)
-                                    .cursor_pointer()
-                                    .small()
-                                    .primary()
+                                    .control(Tier::Primary, Scale::Standard, busy, cx)
                                     .label("Save")
-                                    .disabled(busy)
                                     .on_click(cx.listener(move |shell, _, window, cx| {
                                         shell.write_skill_key(save.clone(), true, window, cx)
                                     })),
@@ -743,11 +743,8 @@ impl Shell {
                     } else {
                         key = key.child(
                             Button::new("skill-key-edit")
-                                .focus_ring(false)
-                                .cursor_pointer()
-                                .small()
+                                .control(Tier::Secondary, Scale::Standard, busy, cx)
                                 .label("Add key")
-                                .disabled(busy)
                                 .on_click(cx.listener(move |shell, _, window, cx| {
                                     shell.edit_skill_key(replace.clone(), window, cx)
                                 })),

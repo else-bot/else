@@ -1,13 +1,11 @@
 mod form;
 pub(crate) mod oauth;
 
+use crate::controls::{Control as _, Scale, Tier};
 use std::sync::Arc;
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Sizable as _, StyledExt as _, h_flex,
-    v_flex,
-};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{ActiveTheme as _, FocusableExt as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -241,57 +239,50 @@ impl Render for EmailSettings {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let mut content = v_flex()
-            .gap_5()
+            .gap_6()
             .w_full()
-            .child(div().text_xl().font_semibold().child("Email"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("Connect an inbox for any of your bots to use when you ask."),
-            );
-        for account in &self.accounts {
-            content = content.child(
-                h_flex()
-                    .gap_3()
-                    .justify_between()
-                    .p_3()
-                    .rounded(theme.radius)
-                    .bg(theme.secondary)
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child(account.config.address.clone()))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(account.config.provider.label()),
-                            ),
-                    )
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        if account.state == "paused" {
-                            "Paused"
-                        } else {
-                            match account.health.as_str() {
-                                "connected" => "Connected",
-                                "unknown" => "Checking connection…",
-                                _ => "Check credentials and server settings",
-                            }
-                        },
-                    )),
-            );
+            .child(crate::panel_kit::page_heading(
+                "Email",
+                "Connect an inbox for any of your bots to use when you ask.",
+                Vec::new(),
+                cx,
+            ));
+        if !self.accounts.is_empty() {
+            let rows: Vec<AnyElement> = self
+                .accounts
+                .iter()
+                .map(|account| {
+                    let status = if account.state == "paused" {
+                        "Paused"
+                    } else {
+                        match account.health.as_str() {
+                            "connected" => "Connected",
+                            "unknown" => "Checking connection…",
+                            _ => "Check credentials and server settings",
+                        }
+                    };
+                    crate::panel_kit::list_row()
+                        .child(crate::panel_kit::row_icon(
+                            gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Mail),
+                            cx,
+                        ))
+                        .child(crate::panel_kit::row_text(
+                            account.config.address.clone(),
+                            format!("{} · {status}", account.config.provider.label()),
+                            cx,
+                        ))
+                        .into_any_element()
+                })
+                .collect();
+            content = content.child(crate::panel_kit::grouped_list(rows, cx));
         }
         if let Some(form) = &self.form {
             content = content.child(form.render(self.busy, cx));
         } else if self.loaded && self.introduction.is_none() {
             content = content.child(
                 Button::new("email-add")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .primary()
+                    .control(Tier::Primary, Scale::Standard, self.busy, cx)
                     .label("Add email account")
-                    .disabled(self.busy)
                     .on_click(cx.listener(|view, _, window, cx| view.load(None, window, cx))),
             );
         }
@@ -308,10 +299,8 @@ impl Render for EmailSettings {
             if !self.loaded {
                 content = content.child(
                     Button::new("email-reload")
-                        .focus_ring(false)
-                        .cursor_pointer()
+                        .control(Tier::Secondary, Scale::Standard, self.busy, cx)
                         .label("Try again")
-                        .disabled(self.busy)
                         .on_click(cx.listener(|view, _, window, cx| view.load(None, window, cx))),
                 );
             }
@@ -319,14 +308,12 @@ impl Render for EmailSettings {
         if self.introduction.is_some() {
             content = content.child(
                 Button::new("email-retry-introduction")
-                    .focus_ring(false)
-                    .cursor_pointer()
+                    .control(Tier::Secondary, Scale::Standard, self.busy, cx)
                     .label(if self.busy {
                         "Starting conversation…"
                     } else {
                         "Start bot conversation"
                     })
-                    .disabled(self.busy)
                     .on_click(cx.listener(|view, _, window, cx| view.introduce(window, cx))),
             );
         }

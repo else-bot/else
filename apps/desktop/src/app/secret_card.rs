@@ -4,14 +4,14 @@
 //! to the owner API; they are cleared on success, decline, navigation, and
 //! disconnect, and never enter a draft, a pending message, or the chat.
 
-use gpui_kit::component::FocusableExt as _;
+use crate::controls::{Control as _, Scale, Tier, text_field};
+use gpui_kit::assets::IconName;
 use std::collections::BTreeMap;
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -23,6 +23,13 @@ pub(super) struct SecretForm {
     fields: Vec<SecretField>,
     submitting: bool,
     error: Option<String>,
+}
+
+impl SecretForm {
+    /// Whether the owner already sent this form and waits on the server.
+    pub(super) fn locks(&self) -> bool {
+        self.submitting
+    }
 }
 
 struct SecretField {
@@ -49,7 +56,7 @@ impl SecretForm {
                 input: cx.new(|cx| {
                     InputState::new(window, cx)
                         .masked(true)
-                        .placeholder(format!("Paste or type {var}"))
+                        .placeholder("Paste the value")
                 }),
                 captured: None,
             })
@@ -269,6 +276,7 @@ impl ElseApp {
         let note = |text: String| {
             div()
                 .text_xs()
+                .whitespace_normal()
                 .text_color(theme.muted_foreground)
                 .child(text)
         };
@@ -290,9 +298,16 @@ impl ElseApp {
         };
         let app = cx.entity().downgrade();
         let busy = form.submitting || self.connection != Connection::Connected;
-        let mut fields = v_flex().gap_2();
+        let mut fields = v_flex().w_full().gap_2();
         for (ix, field) in form.fields.iter().enumerate() {
-            let label = div().text_xs().font_semibold().child(field.var.clone());
+            // The variable's name, quiet and in its own spelling: a label,
+            // not a heading.
+            let label = div()
+                .text_size(px(12.))
+                .font_weight(FontWeight::MEDIUM)
+                .font_family(theme.mono_font_family.clone())
+                .text_color(theme.muted_foreground)
+                .child(field.var.clone());
             let control: AnyElement = match &field.captured {
                 Some(text) => h_flex()
                     .gap_2()
@@ -304,12 +319,8 @@ impl ElseApp {
                     )))
                     .child(
                         Button::new(SharedString::from(format!("secret-replace-{id}-{ix}")))
-                            .focus_ring(false)
-                            .cursor_pointer()
+                            .control(Tier::Ghost, Scale::Compact, busy, cx)
                             .label("Replace")
-                            .xsmall()
-                            .ghost()
-                            .disabled(busy)
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 app.replace_paste(id, ix, window, cx)
                             })),
@@ -317,8 +328,7 @@ impl ElseApp {
                     .into_any_element(),
                 None => {
                     let app = app.clone();
-                    Input::new(&field.input)
-                        .focus_ring(false)
+                    text_field(Input::new(&field.input).aria_label(field.var.clone()), cx)
                         .disabled(busy)
                         .on_paste(move |item, window, cx| {
                             let Some(text) = item.text().filter(|t| is_multiline(t)) else {
@@ -331,72 +341,78 @@ impl ElseApp {
                         .into_any_element()
                 }
             };
-            fields = fields.child(v_flex().gap_1().child(label).child(control));
+            fields = fields.child(v_flex().gap_1p5().child(label).child(control));
         }
-        let mut card = v_flex()
-            .w_full()
-            .gap_2()
-            .p_3()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.secondary)
-            .child(
-                div()
-                    .font_semibold()
-                    .child(format!("{bot_name} needs credentials: {}", request.name)),
-            )
-            .child(div().text_sm().child(request.reason.clone()))
-            .child(note(format!(
-                "Stored encrypted as the task secret {} for every bot on this server when you save, \
-                 replacing one with the same name. {bot_name} never sees the values, \
-                 and they are not added to the conversation. A multi-line value such as a \
-                 private key can be pasted whole.",
+        let expanded = view.expanded_events.contains(&id);
+        let mut card =
+            super::action_card::card(IconName::Lock, format!("Save {}", request.name), "")
+                .child(
+                    div()
+                        .text_sm()
+                        .whitespace_normal()
+                        .child(request.reason.clone()),
+                )
+                .child(fields)
+                .when(expanded, |card| {
+                    card.child(note(format!(
+                "Saved as the task secret {} for every bot on this server, replacing one with the \
+                 same name. {bot_name} never sees the values. Paste multi-line values such as \
+                 private keys whole.",
                 request.name
             )))
-            .child(fields);
+                });
         if let Some(error) = &form.error {
-            card = card.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.danger)
-                    .child(error.clone()),
-            );
+            card = card.child(super::action_card::failure(&theme, error.clone()));
         }
-        card = card.child(
-            h_flex()
-                .justify_end()
-                .gap_2()
-                .child(
-                    Button::new(SharedString::from(format!("secret-decline-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .label("Decline")
-                        .small()
-                        .ghost()
-                        .disabled(busy)
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            app.answer_secret(id, false, window, cx)
-                        })),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("secret-save-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .label(if form.submitting {
-                            "Saving…"
-                        } else {
-                            "Save and continue"
-                        })
-                        .small()
-                        .primary()
-                        .disabled(busy)
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            app.answer_secret(id, true, window, cx)
-                        })),
-                ),
-        );
-        row.child(card).into_any_element()
+        let footer = super::action_card::footer()
+            .note("Encrypted on this server. Values stay out of chat.")
+            .note_link(
+                Button::new(SharedString::from(format!("secret-about-{id}")))
+                    .label(if expanded {
+                        "Hide details"
+                    } else {
+                        "About saving"
+                    })
+                    .accessibility_label(if expanded {
+                        "Hide details about saving credentials"
+                    } else {
+                        "About saving credentials"
+                    })
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        if let Some(view) = app.view.as_mut()
+                            && !view.expanded_events.remove(&id)
+                        {
+                            view.expanded_events.insert(id);
+                        }
+                        app.remeasure_row(super::RowKey::SecretRequest(id), cx);
+                    })),
+            )
+            .child(
+                Button::new(SharedString::from(format!("secret-decline-{id}")))
+                    .control(Tier::Secondary, Scale::Compact, busy, cx)
+                    .label("Decline")
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.answer_secret(id, false, window, cx)
+                    })),
+            )
+            .child(
+                Button::new(SharedString::from(format!("secret-save-{id}")))
+                    .control(Tier::Primary, Scale::Compact, busy, cx)
+                    .label(if form.submitting {
+                        "Saving…"
+                    } else {
+                        "Save and continue"
+                    })
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.answer_secret(id, true, window, cx)
+                    })),
+            );
+        let card = row.child(card.footer(footer)).into_any_element();
+        if form.locks() {
+            card
+        } else {
+            self.sighted(RowKey::SecretRequest(id), card, cx)
+        }
     }
 }
 

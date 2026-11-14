@@ -1,10 +1,12 @@
 use super::servers::{Editor, Health, ReleaseStatus};
 use super::*;
+use crate::app::Link;
+use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex};
+use gpui_kit::component::{Icon, Sizable as _, h_flex};
 
 impl Shell {
     fn server_status(&self, id: Uuid, cx: &App) -> (&'static str, Hsla) {
@@ -18,9 +20,13 @@ impl Shell {
         }
     }
 
+    /// The server switcher: the current server's name and status dot,
+    /// opening the server menu. It sits in the sidebar header beside the
+    /// brand, so it stays as quiet as secondary text.
     pub(super) fn render_server_switcher(
         &self,
         id: &'static str,
+        link: Link,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(active) = &self.active else {
@@ -31,27 +37,18 @@ impl Shell {
             .find(active.id)
             .map(|s| s.name.clone())
             .unwrap_or_else(|| active.profile.origin.as_str().to_owned());
-        let (_, observed_color) = self.server_status(active.id, cx);
-        let color = if active.app.read(cx).connected() {
-            observed_color
-        } else if active.app.read(cx).status_text().1 {
-            cx.theme().danger
-        } else {
-            cx.theme().warning
+        let theme = cx.theme();
+        let color = match link {
+            Link::Connected => self.server_status(active.id, cx).1,
+            Link::Failed => theme.danger,
+            Link::Connecting => theme.warning,
         };
-        let icon = if self.managed_server(&active.profile) {
-            IconName::Laptop
-        } else {
-            IconName::Server
-        };
+        let text = theme.muted_foreground;
         let owner = cx.weak_entity();
         let toggle = owner.clone();
         Popover::new(id)
             .anchor(Anchor::TopLeft)
-            .open(
-                self.server_menu
-                    && (id == "settings-server-switcher") == self.settings_section().is_some(),
-            )
+            .open(self.server_menu && self.settings_section().is_none())
             .on_open_change(move |open, _, cx| {
                 let _ = toggle.update(cx, |shell, cx| {
                     shell.server_menu = *open;
@@ -60,20 +57,25 @@ impl Shell {
             })
             .trigger(
                 Button::new(SharedString::from(format!("{id}-trigger")))
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .ghost()
-                    .xsmall()
+                    .control(Tier::Ghost, Scale::Compact, false, cx)
+                    .px_2()
                     .loading(self.switch_attempt.is_some())
                     .accessibility_label(format!("Switch server. Current server {name}"))
                     .child(
                         h_flex()
                             .min_w_0()
-                            .gap_2()
-                            .child(Icon::new(icon).size_3())
-                            .child(div().max_w(px(170.)).truncate().child(name))
-                            .child(div().size_1p5().rounded_full().bg(color))
-                            .child(Icon::new(IconName::ChevronDown).size_3()),
+                            .gap(px(6.))
+                            .items_center()
+                            .text_size(px(13.))
+                            .text_color(text)
+                            .child(div().flex_none().size(px(6.)).rounded_full().bg(color))
+                            .child(div().min_w_0().truncate().child(name))
+                            .child(
+                                Icon::new(IconName::ChevronDown)
+                                    .flex_none()
+                                    .size_3()
+                                    .text_color(text),
+                            ),
                     ),
             )
             .content(move |_, _, cx| {
@@ -175,47 +177,52 @@ impl Shell {
             self.server_update_view(saved.id)
                 .is_some_and(updates::View::busy)
         });
+        let mut actions = vec![
+            Button::new("servers-check-all")
+                .control(Tier::Secondary, Scale::Compact, false, cx)
+                .icon(IconName::RefreshCw)
+                .label("Check all")
+                .on_click(cx.listener(|shell, _, window, cx| shell.refresh_servers(window, cx)))
+                .into_any_element(),
+        ];
+        if can_update || updating {
+            actions.push(
+                Button::new("servers-update-all")
+                    .control(Tier::Secondary, Scale::Compact, updating, cx)
+                    .label(if updating {
+                        "Updating…"
+                    } else {
+                        "Update all"
+                    })
+                    .loading(updating)
+                    .on_click(cx.listener(|shell, _, _, cx| shell.update_all_servers(cx)))
+                    .into_any_element(),
+            );
+        }
+        actions.push(
+            Button::new("servers-add")
+                .control(Tier::Secondary, Scale::Compact, false, cx)
+                .icon(IconName::Plus)
+                .label("Add server")
+                .on_click(cx.listener(|shell, _, window, cx| {
+                    shell.open_server_editor(Editor::Add, window, cx)
+                }))
+                .into_any_element(),
+        );
         let mut content = v_flex()
             .gap_0()
-            .child(
-                h_flex()
-                    .items_start()
-                    .gap_3()
-                    .child(div().flex_1().min_w_0().child(settings::section_heading(
-                        "Servers",
-                        "Manage where your bots run.",
-                        cx,
-                    )))
-                    .child(
-                        Button::new("servers-update-all")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .small()
-                            .label(if updating {
-                                "Updating…"
-                            } else {
-                                "Update all"
-                            })
-                            .loading(updating)
-                            .disabled(!can_update || updating)
-                            .on_click(cx.listener(|shell, _, _, cx| shell.update_all_servers(cx))),
-                    )
-                    .child(
-                        Button::new("servers-add")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .small()
-                            .label("+ Add server")
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.open_server_editor(Editor::Add, window, cx)
-                            })),
-                    ),
-            )
+            .child(crate::panel_kit::page_heading(
+                "Servers",
+                "Manage where your bots run.",
+                actions,
+                cx,
+            ))
             .child(
                 div()
                     .pt_6()
-                    .pb_2()
+                    .pb_3()
                     .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.muted_foreground)
                     .child(format!(
                         "Saved connections · {}",
@@ -231,6 +238,7 @@ impl Shell {
                     .child(error.clone()),
             );
         }
+        let mut rows = Vec::new();
         for saved in &self.registry.servers {
             let id = saved.id;
             let selected = self.active.as_ref().is_some_and(|active| active.id == id);
@@ -252,34 +260,33 @@ impl Shell {
             } else {
                 installed.to_owned()
             };
-            let mut facts = h_flex()
-                .gap_3()
-                .flex_wrap()
+            // Health reads beside the name; the meta line below carries only
+            // the version, release and work facts.
+            let health = h_flex()
+                .flex_none()
+                .gap_1p5()
+                .items_center()
                 .text_xs()
+                .text_color(color)
                 .child(
-                    h_flex()
-                        .gap_1p5()
-                        .text_color(color)
-                        .child(
-                            if observation.is_none_or(|entry| entry.health == Health::Checking) {
-                                updates::checking_icon(
-                                    SharedString::from(format!("server-health-{id}")),
-                                    px(12.),
-                                    color,
-                                )
-                            } else {
-                                div().size_1p5().rounded_full().bg(color).into_any_element()
-                            },
+                    if observation.is_none_or(|entry| entry.health == Health::Checking) {
+                        updates::checking_icon(
+                            SharedString::from(format!("server-health-{id}")),
+                            px(12.),
+                            color,
                         )
-                        .child(status),
+                    } else {
+                        div().size_1p5().rounded_full().bg(color).into_any_element()
+                    },
                 )
-                .child(
-                    div()
-                        .text_color(theme.muted_foreground)
-                        .child(shown_version),
-                );
+                .child(status);
+            let mut facts = h_flex().gap_x_2().flex_wrap().text_xs().child(
+                div()
+                    .text_color(theme.muted_foreground)
+                    .child(shown_version),
+            );
             if online {
-                facts = facts.child(
+                facts = facts.child(dot_separator(&theme)).child(
                     h_flex()
                         .gap_1p5()
                         .when(release == ReleaseStatus::Checking, |row| {
@@ -301,20 +308,21 @@ impl Shell {
                 .and_then(|entry| entry.working)
                 .filter(|n| *n > 0)
             {
-                facts = facts.child(
+                facts = facts.child(dot_separator(&theme)).child(
                     div()
                         .text_color(theme.muted_foreground)
-                        .child(format!("{working} tasks running")),
+                        .child(if working == 1 {
+                            "1 task running".to_owned()
+                        } else {
+                            format!("{working} tasks running")
+                        }),
                 );
             }
-            let mut actions = h_flex().gap_1().flex_wrap().justify_end();
+            let mut actions = h_flex().gap_1().items_center();
             if !selected {
                 actions = actions.child(
                     Button::new(SharedString::from(format!("use-server-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .ghost()
-                        .xsmall()
+                        .control(Tier::Secondary, Scale::Standard, false, cx)
                         .label("Use server")
                         .on_click(cx.listener(move |shell, _, window, cx| {
                             shell.select_server(id, window, cx)
@@ -340,7 +348,9 @@ impl Shell {
                     Operation::Idle => None,
                 };
                 if let Some((label, color)) = progress {
-                    facts = facts.child(div().text_color(color).child(label));
+                    facts = facts
+                        .child(dot_separator(&theme))
+                        .child(div().text_color(color).child(label));
                 }
             }
             if (update_available && online)
@@ -349,9 +359,7 @@ impl Shell {
             {
                 actions = actions.child(
                     Button::new(SharedString::from(format!("update-server-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .xsmall()
+                        .control(Tier::Secondary, Scale::Standard, false, cx)
                         .label(if update_activity {
                             "View update"
                         } else {
@@ -364,72 +372,63 @@ impl Shell {
             } else if !online {
                 actions = actions.child(
                     Button::new(SharedString::from(format!("retry-server-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .ghost()
-                        .xsmall()
+                        .control(Tier::Secondary, Scale::Standard, false, cx)
                         .label("Retry")
                         .on_click(
                             cx.listener(|shell, _, window, cx| shell.refresh_servers(window, cx)),
                         ),
                 );
             }
+            // Both row icons: 16 px at 60% in 28 px targets. The server in
+            // use can't be removed, so it shows no trash at all.
+            let row_icon_button = |id: SharedString, icon: IconName, label: String| {
+                Button::new(id)
+                    .control(Tier::Ghost, Scale::Compact, false, cx)
+                    .w(Scale::Compact.height())
+                    .px_0()
+                    .text_color(theme.foreground.opacity(0.6))
+                    .icon(Icon::new(icon).size_4())
+                    .accessibility_label(label)
+            };
             let connection_actions = h_flex()
                 .gap_1()
                 .child(
-                    Button::new(SharedString::from(format!("edit-server-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Pencil)
-                        .accessibility_label(format!("Edit {}", saved.name))
-                        .on_click(cx.listener(move |shell, _, window, cx| {
-                            shell.open_server_editor(Editor::Edit(id), window, cx)
-                        })),
+                    row_icon_button(
+                        SharedString::from(format!("edit-server-{id}")),
+                        IconName::Pencil,
+                        format!("Edit {}", saved.name),
+                    )
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        shell.open_server_editor(Editor::Edit(id), window, cx)
+                    })),
                 )
-                .child(
-                    Button::new(SharedString::from(format!("remove-server-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Trash)
-                        .accessibility_label(format!("Remove connection to {}", saved.name))
-                        .disabled(selected)
-                        .on_click(cx.listener(move |shell, _, window, cx| {
-                            shell.remove_server(id, window, cx)
-                        })),
-                );
-            content = content.child(
+                .when(!selected, |actions| {
+                    actions.child(
+                        row_icon_button(
+                            SharedString::from(format!("remove-server-{id}")),
+                            IconName::Trash,
+                            format!("Remove connection to {}", saved.name),
+                        )
+                        .on_click(cx.listener(
+                            move |shell, _, window, cx| shell.remove_server(id, window, cx),
+                        )),
+                    )
+                });
+            // One grouped-list row: the server, its address and status
+            // tokens, with every action at the trailing edge.
+            rows.push(
                 v_flex()
-                    .py_4()
-                    .gap_3()
-                    .border_t_1()
-                    .border_color(theme.border)
+                    .w_full()
                     .child(
-                        h_flex()
-                            .gap_3()
-                            .items_center()
-                            .child(
-                                div()
-                                    .size_8()
-                                    .flex_none()
-                                    .rounded(theme.radius)
-                                    .bg(theme.secondary)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        Icon::new(if self.managed_server(&saved.profile) {
-                                            IconName::Laptop
-                                        } else {
-                                            IconName::Server
-                                        })
-                                        .size_4()
-                                        .text_color(theme.muted_foreground),
-                                    ),
-                            )
+                        crate::panel_kit::list_row()
+                            .child(crate::panel_kit::row_icon(
+                                Icon::new(if self.managed_server(&saved.profile) {
+                                    IconName::Laptop
+                                } else {
+                                    IconName::Server
+                                }),
+                                cx,
+                            ))
                             .child(
                                 v_flex()
                                     .flex_1()
@@ -438,113 +437,61 @@ impl Shell {
                                     .child(
                                         h_flex()
                                             .gap_2()
+                                            .items_center()
                                             .child(
                                                 div()
+                                                    .min_w_0()
+                                                    .truncate()
                                                     .text_sm()
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .child(saved.name.clone()),
                                             )
                                             .when(selected, |row| {
-                                                row.child(
-                                                    div()
-                                                        .text_xs()
-                                                        .px_1p5()
-                                                        .rounded_sm()
-                                                        .bg(theme.list_active)
-                                                        .text_color(theme.primary)
-                                                        .child("In use"),
-                                                )
-                                            }),
+                                                row.child(crate::panel_kit::tag("In use", cx))
+                                            })
+                                            .child(health),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
-                                            .font_family(theme.mono_font_family.clone())
                                             .text_color(theme.muted_foreground)
                                             .truncate()
                                             .child(saved.profile.origin.as_str().to_owned()),
-                                    ),
+                                    )
+                                    .child(facts),
                             )
-                            .child(connection_actions),
-                    )
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_3()
-                            .flex_wrap()
-                            .child(div().flex_1().min_w_0().child(facts))
-                            .child(actions),
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(actions)
+                                    .child(connection_actions),
+                            ),
                     )
                     .when_some(
                         observation.and_then(|entry| entry.error.as_ref()),
                         |row, error| {
                             row.child(
                                 div()
+                                    .px_4()
+                                    .pb_3()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .child(error.clone()),
                             )
                         },
-                    ),
+                    )
+                    .into_any_element(),
             );
         }
         content
-            .child(
-                h_flex()
-                    .justify_between()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Offline versions are from the last successful check."),
-                    )
-                    .child(
-                        Button::new("servers-check-all")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::RefreshCw)
-                            .label("Check all")
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.refresh_servers(window, cx)
-                            })),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .pt_5()
-                    .gap_2()
-                    .flex_wrap()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Server updates live here."),
-                    )
-                    .child(
-                        Button::new("servers-app-updates")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .xsmall()
-                            .label("Desktop app updates")
-                            .icon(IconName::ArrowRight)
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.select_settings(
-                                    settings::SettingsSection::Updates,
-                                    window,
-                                    cx,
-                                )
-                            })),
-                    ),
-            )
+            .child(crate::panel_kit::grouped_list(rows, cx))
             .into_any_element()
     }
 
+    /// The server these settings edit, as one 12 px line under the sheet's
+    /// title: its name, health and address.
     pub(super) fn render_server_identity(&self, cx: &App) -> AnyElement {
         let Some(active) = &self.active else {
             return div().into_any_element();
@@ -558,31 +505,17 @@ impl Shell {
         let (status, color) = self.server_status(active.id, cx);
         h_flex()
             .id("settings-server-context")
-            .flex_none()
             .w_full()
             .min_w_0()
-            .h(px(32.))
-            .px_8()
-            .gap_2()
+            .gap_1p5()
             .items_center()
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.secondary.opacity(0.35))
             .text_xs()
+            .line_height(px(16.))
             .text_color(theme.muted_foreground)
             .aria_label(format!(
                 "Editing settings on {name}. {}. {status}",
                 active.profile.origin.as_str()
             ))
-            .child(
-                Icon::new(if self.managed_server(&active.profile) {
-                    IconName::Laptop
-                } else {
-                    IconName::Server
-                })
-                .size_3()
-                .flex_none(),
-            )
             .child(div().flex_none().child("Editing settings on"))
             .child(
                 div()
@@ -594,14 +527,21 @@ impl Shell {
                     .child(name.to_owned()),
             )
             .child(div().flex_none().size_1p5().rounded_full().bg(color))
-            .child(div().flex_1())
             .child(
                 div()
                     .min_w_0()
+                    .pl_1()
                     .truncate()
-                    .font_family(theme.mono_font_family.clone())
+                    .text_color(theme.foreground.opacity(0.6))
                     .child(active.profile.origin.as_str().to_owned()),
             )
             .into_any_element()
     }
+}
+
+/// The "·" between facts in a server's status line.
+fn dot_separator(theme: &gpui_kit::component::Theme) -> Div {
+    div()
+        .text_color(theme.muted_foreground.opacity(0.6))
+        .child("·")
 }

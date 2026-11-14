@@ -1,5 +1,6 @@
 use super::*;
 use crate::api::EmailProvider;
+use crate::controls::{Scale, Tier};
 use flow::{Consent, Flow, Resolution};
 
 mod flow;
@@ -371,12 +372,10 @@ impl ElseApp {
             _ => pill(id, "Checking", theme.muted_foreground, true, still),
         };
         let ready_label = form.map_or("Connect in browser", |f| f.flow.ready_label());
-        let mut card = v_flex()
+        let mut card = super::super::action_card::surface(v_flex(), &theme)
             .w_full()
             .gap_3()
-            .p_4()
-            .rounded(theme.radius_lg)
-            .bg(theme.secondary)
+            .p_5()
             .child(
                 h_flex()
                     .w_full()
@@ -559,38 +558,26 @@ impl ElseApp {
             )
             .child(
                 Button::new(SharedString::from(format!("connection-cancel-{id}")))
-                    .focus_ring(false)
+                    .control(Tier::Ghost, Scale::Compact, locked || !can_cancel, cx)
                     .label("Cancel")
-                    .small()
-                    .ghost()
-                    .disabled(locked || !can_cancel)
-                    .when(!locked && can_cancel, |button| button.cursor_pointer())
                     .on_click(cx.listener(move |app, _, _, cx| app.cancel_connection(id, cx))),
             );
         if matches!(phase, Phase::SigningIn) {
             let reopen = form.is_some_and(|f| f.signin_url.is_some());
             footer = footer.child(
                 Button::new(SharedString::from(format!("connection-reopen-{id}")))
-                    .focus_ring(false)
+                    .control(Tier::Ghost, Scale::Compact, locked || !reopen, cx)
                     .icon(IconName::ExternalLink)
                     .label("Reopen browser")
-                    .small()
-                    .ghost()
-                    .disabled(locked || !reopen)
-                    .when(!locked && reopen, |button| button.cursor_pointer())
                     .on_click(cx.listener(move |app, _, _, cx| app.reopen_signin(id, cx))),
             );
         }
         if let Some((label, icon, active)) = action {
             footer = footer.child(
                 Button::new(SharedString::from(format!("connection-connect-{id}")))
-                    .focus_ring(false)
+                    .control(Tier::Primary, Scale::Compact, locked || !active, cx)
                     .when_some(icon, |button, icon| button.icon(icon))
                     .label(label)
-                    .small()
-                    .primary()
-                    .disabled(locked || !active)
-                    .when(!locked && active, |button| button.cursor_pointer())
                     .on_click(cx.listener(move |app, _, _, cx| app.activate_connection(id, cx))),
             );
         }
