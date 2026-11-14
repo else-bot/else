@@ -978,8 +978,9 @@ pub(super) fn turn_content<'a>(
                 "Continue the owner's request with these results. The owner sees your earlier \
                  replies to this message directly above this one, so write only what is new: \
                  what these results change, what is still open, and any action the owner needs \
-                 to take. Do not repeat or summarise earlier work, or list what stayed the same. \
-                 If a result makes something you said wrong or outdated, say so."
+                 to take. Do not repeat or summarise what those replies already say, or mention \
+                 work these results did not change. If a result makes something you said wrong \
+                 or outdated, say so."
             };
             segments = vec![Segment::Text(format!("{outcomes}{reader}"))];
         } else {
@@ -1053,7 +1054,7 @@ mod tests {
             )
         );
         assert!(packet.contains("status=\"completed\">\nTask: Check the reply."));
-        assert!(packet.contains("Do not repeat or summarise earlier work"));
+        assert!(packet.contains("Do not repeat or summarise what those replies already say"));
         assert!(
             !packet.contains(&input.text),
             "a resumed session already has the message"
