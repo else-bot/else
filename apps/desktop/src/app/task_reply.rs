@@ -72,7 +72,8 @@ impl ElseApp {
         if !show_reply && let Some(id) = task.latest {
             history.push(id);
         }
-        let expandable = !history.is_empty();
+        let hidden = history.len() + task.superseded_count(conversation);
+        let expandable = hidden > 0;
         let owner_waiting = waits_on_owner(task, turn);
         let meta = super::message_row::meta_color(&theme);
         let chevron = || {
@@ -84,7 +85,7 @@ impl ElseApp {
             .xsmall()
             .flex_none()
         };
-        let updates = expandable.then(|| task.fold_label(history.len()));
+        let updates = expandable.then(|| task.fold_label(conversation, hidden));
         // Every assistant turn opens with the same name row as a plain reply.
         let name_row = h_flex()
             .w_full()

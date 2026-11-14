@@ -469,11 +469,26 @@ fn a_resumed_task_shows_no_duration_once_finished() {
 
 #[test]
 fn the_fold_counts_only_what_it_hides_and_says_more_beside_the_rail() {
-    let parked = parked_turn("completed", true);
-    let (tasks, _) = placed(&parked);
-    let beside = &tasks[&id(10)];
-    assert_eq!(beside.fold_label(1), "1 more update");
-    assert_eq!(beside.fold_label(3), "3 more updates");
+    let mut chart = item(2, 10, "assistant");
+    chart["parts"] = json!([{"type": "text", "text": "Message 2"},
+        {"type": "file", "file": {"id": id(1002), "name": "chart.png",
+        "media_type": "image/png", "size": 4_096}}]);
+    let rail = conversation(
+        vec![item(1, 10, "user"), chart, item(3, 10, "assistant")],
+        vec![turn(10, "completed")],
+    );
+    let beside = &task_replies(&rail)[&id(10)];
+    assert_eq!(beside.kept, [id(2)]);
+    assert_eq!(beside.fold_label(&rail, 1), "1 more update");
+    assert_eq!(beside.fold_label(&rail, 3), "3 more updates");
+    let done = parked_turn("completed", true);
+    let (tasks, _) = placed(&done);
+    let folded = &tasks[&id(10)];
+    assert_eq!(
+        folded.fold_label(&done, 3),
+        "3 updates",
+        "nothing beside the fold once the final reply supersedes it"
+    );
     let c = conversation(
         vec![
             item(1, 10, "user"),
@@ -483,8 +498,8 @@ fn the_fold_counts_only_what_it_hides_and_says_more_beside_the_rail() {
         vec![turn(10, "completed")],
     );
     let alone = &task_replies(&c)[&id(10)];
-    assert_eq!(alone.fold_label(1), "1 update");
-    assert_eq!(alone.fold_label(2), "2 updates");
+    assert_eq!(alone.fold_label(&c, 1), "1 update");
+    assert_eq!(alone.fold_label(&c, 2), "2 updates");
 }
 
 #[test]
@@ -644,11 +659,11 @@ fn a_reply_from_before_a_park_reads_before_the_reply_that_ended_the_turn() {
     let task = &task_replies(&c)[&id(10)];
     assert_eq!(task.latest, Some(id(101)), "the discard reply is current");
 
-    assert_eq!(
-        task.earlier(&c, &task.history, false),
-        [Earlier::Reply(id(100))],
-        "the reply from before the park shows above the current one"
+    assert!(
+        task.earlier(&c, &task.history, false).is_empty(),
+        "the resumed reply carries the answer; the stale claim folds"
     );
+    assert_eq!(task.superseded_count(&c), 1);
     assert_eq!(
         task.earlier(&c, &task.history, true),
         [Earlier::Reply(id(99)), Earlier::Reply(id(100))],
@@ -894,15 +909,11 @@ fn a_card_settled_in_a_resumed_turn_reads_between_the_earlier_and_current_reply(
             "{status}: the cards render inside the task, not as rows: {rows:?}"
         );
         assert_eq!(task.latest, Some(id(4)), "{status}");
-        assert_eq!(
-            task.earlier(&c, &task.history, false),
-            [
-                Earlier::Reply(id(3)),
-                Earlier::Card(RowKey::Question(id(210))),
-                Earlier::Card(RowKey::Draft(id(310))),
-            ],
-            "{status}: each card follows the reply that asked for it, once"
+        assert!(
+            task.earlier(&c, &task.history, false).is_empty(),
+            "{status}: attempt 2 replied, so attempt 1's reply and cards fold"
         );
+        assert_eq!(task.superseded_count(&c), 3, "{status}");
         assert_eq!(
             task.earlier(&c, &task.history, true),
             [
@@ -917,7 +928,8 @@ fn a_card_settled_in_a_resumed_turn_reads_between_the_earlier_and_current_reply(
 }
 
 /// Two parks: a question answered after attempt 1, a draft discarded
-/// after attempt 2. The reply each card followed stays visible beside it.
+/// after attempt 2. Expanded, each card follows the reply it followed;
+/// collapsed, the final reply stands alone.
 #[test]
 fn every_card_in_a_task_keeps_the_reply_it_followed_in_view() {
     let reply = |number: u128, attempt, at: &str| {
@@ -953,19 +965,70 @@ fn every_card_in_a_task_keeps_the_reply_it_followed_in_view() {
         rows.is_empty(),
         "both cards render inside the task: {rows:?}"
     );
+    assert!(task.earlier(&c, &task.history, false).is_empty());
+    assert_eq!(task.superseded_count(&c), 4);
     assert_eq!(
-        task.earlier(&c, &task.history, false),
+        task.earlier(&c, &task.history, true),
         [
             Earlier::Reply(id(2)),
             Earlier::Card(RowKey::Question(id(210))),
             Earlier::Reply(id(3)),
             Earlier::Card(RowKey::Draft(id(310))),
         ],
-        "each card follows the reply that asked for it, even collapsed"
+        "each card follows the reply that asked for it"
     );
-    assert!(
-        task.history.is_empty(),
-        "a reply on view is not counted as hidden"
+    assert!(task.history.is_empty(), "nothing is counted twice");
+}
+
+/// The Marketing Manager turn from production: two delegations, each
+/// resumed with a reply. Once the last reply lands, the earlier one and
+/// both delegation cards fold; a running attempt with no reply yet keeps
+/// the earlier reply in view as context.
+#[test]
+fn the_latest_attempts_reply_folds_what_came_before_it() {
+    let reply = |number: u128, attempt: i64| {
+        let mut reply = item(number, 10, "assistant");
+        reply["attempt"] = json!(attempt);
+        reply
+    };
+    let mut running = turn(10, "running");
+    running["attempt"] = json!(2);
+    let before = conversation(vec![item(1, 10, "user"), reply(2, 1)], vec![running]);
+    let task = &task_replies(&before)[&id(10)];
+    assert_eq!(task.superseded_count(&before), 0, "no newer reply yet");
+    let mut done = turn(10, "completed");
+    done["attempt"] = json!(2);
+    let after = conversation(
+        vec![item(1, 10, "user"), reply(2, 1), reply(3, 2)],
+        vec![done],
+    );
+    let task = &task_replies(&after)[&id(10)];
+    assert_eq!(task.latest, Some(id(3)));
+    assert!(task.earlier(&after, &task.history, false).is_empty());
+    assert_eq!(
+        task.fold_label(&after, task.superseded_count(&after)),
+        "1 update"
+    );
+}
+
+/// A reply with a file no later reply delivers stays beside the final
+/// reply, because text cannot carry the file.
+#[test]
+fn a_delivered_file_stays_beside_the_final_reply() {
+    let mut chart = item(2, 10, "assistant");
+    chart["attempt"] = json!(1);
+    chart["parts"] = json!([{"type": "text", "text": "Message 2"},
+        {"type": "file", "file": {"id": id(1002), "name": "chart.png",
+        "media_type": "image/png", "size": 4_096}}]);
+    let mut last = item(3, 10, "assistant");
+    last["attempt"] = json!(2);
+    let mut done = turn(10, "completed");
+    done["attempt"] = json!(2);
+    let c = conversation(vec![item(1, 10, "user"), chart, last], vec![done]);
+    let task = &task_replies(&c)[&id(10)];
+    assert_eq!(
+        task.earlier(&c, &task.history, false),
+        [Earlier::Reply(id(2))]
     );
 }
 
