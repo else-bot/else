@@ -328,10 +328,13 @@ pub(in crate::app) fn place_cards(
 }
 
 /// Moves the earlier replies the owner still needs from `history` to `kept`:
-/// a reacted reply, the reply that ended the most recent earlier attempt, and
-/// a reply with a file no later reply delivers again. A bot that restates its
-/// work after each park re-uploads the same file, sometimes renaming an image,
-/// so an image of the same type and byte size counts as the same file.
+/// a reacted reply, the reply that ended each earlier attempt, and a reply
+/// with a file no later reply delivers again. A resumed attempt reports only
+/// what changed, so every attempt's ending reply stays in view. Turns from
+/// before that restated their work after each park and re-uploaded the same
+/// file, sometimes renaming an image: an image of the same type and byte size
+/// counts as the same file, and only the most recent of those restated ending
+/// replies stays.
 fn keep_earlier_replies(
     conversation: &Conversation,
     reactions: &HashMap<Uuid, crate::model::ReactionKind>,
@@ -353,11 +356,11 @@ fn keep_earlier_replies(
             .collect::<Vec<_>>()
     };
     let replies: Vec<_> = reply.history.iter().copied().chain([latest]).collect();
-    let ended_attempt = replies
+    let ended: Vec<Uuid> = replies
         .windows(2)
-        .rev()
-        .find(|pair| attempt(pair[0]).is_some_and(|ended| attempt(pair[1]) > Some(ended)))
-        .map(|pair| pair[0]);
+        .filter(|pair| attempt(pair[0]).is_some_and(|ended| attempt(pair[1]) > Some(ended)))
+        .map(|pair| pair[0])
+        .collect();
     let same = |a: &crate::attachments::Attachment, b: &crate::attachments::Attachment| {
         a.media_type == b.media_type
             && a.size == b.size
@@ -370,8 +373,9 @@ fn keep_earlier_replies(
         let new_file = files
             .iter()
             .any(|file| !delivered_later.iter().any(|later| same(file, later)));
+        let ended_attempt = ended.contains(&id) && (files.is_empty() || ended.last() == Some(&id));
         delivered_later.extend(files);
-        if new_file || reactions.contains_key(&id) || ended_attempt == Some(id) {
+        if new_file || reactions.contains_key(&id) || ended_attempt {
             kept.push(id);
         }
     }

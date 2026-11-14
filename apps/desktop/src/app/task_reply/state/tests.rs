@@ -698,6 +698,31 @@ fn a_turn_that_parks_repeatedly_keeps_one_copy_of_a_restated_reply() {
     }
 }
 
+/// A resumed attempt reports only what changed, so with three attempts the
+/// reply that ended attempt 1 is still news the owner has not read twice.
+#[test]
+fn every_earlier_attempts_ending_reply_stays_in_view() {
+    let reply = |number: u128, attempt: i64| {
+        let mut reply = item(number, 10, "assistant");
+        reply["attempt"] = json!(attempt);
+        reply
+    };
+    let mut finished = turn(10, "completed");
+    finished["attempt"] = json!(3);
+    let items = vec![
+        item(1, 10, "user"),
+        reply(2, 1),
+        reply(3, 1),
+        reply(4, 2),
+        reply(5, 2),
+        reply(6, 3),
+    ];
+    let task = &task_replies(&conversation(items, vec![finished]))[&id(10)];
+    assert_eq!(task.latest, Some(id(6)));
+    assert_eq!(task.kept, [id(3), id(5)], "each attempt's last word");
+    assert_eq!(task.history, [id(2), id(4)], "progress still folds");
+}
+
 #[test]
 fn a_distinct_earlier_file_stays_beside_a_later_one() {
     let file = |number: u128, size: u64| {
@@ -817,8 +842,7 @@ fn a_card_settled_in_a_resumed_turn_reads_between_the_earlier_and_current_reply(
 }
 
 /// Two parks: a question answered after attempt 1, a draft discarded
-/// after attempt 2. Only attempt 2's reply is kept by the attempt rule, so
-/// the reply the question followed must stay visible beside it.
+/// after attempt 2. The reply each card followed stays visible beside it.
 #[test]
 fn every_card_in_a_task_keeps_the_reply_it_followed_in_view() {
     let reply = |number: u128, attempt, at: &str| {
