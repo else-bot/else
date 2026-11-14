@@ -73,3 +73,7 @@ The installer can also set up only the server, for a VPS, or only the app, to co
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) to build from source, run a development session, and run the tests.
+
+## License
+
+[MIT](LICENSE). The shared agent skills in `.agents/` keep their upstream copyright notices in [.agents/NOTICE](.agents/NOTICE).
