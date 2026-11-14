@@ -405,17 +405,8 @@ impl Shell {
         if dragged == target {
             return;
         }
-        let mut registry = self.registry.clone();
-        let result = registry.reorder(dragged, target).and_then(|()| {
-            self.launch
-                .store
-                .as_ref()
-                .map_err(Clone::clone)
-                .and_then(|store| store.save(&registry))
-        });
-        match result {
-            Ok(()) => self.registry = registry,
-            Err(err) => self.connection_error = Some(err),
+        if let Err(err) = self.commit_registry(|registry| registry.reorder(dragged, target)) {
+            self.connection_error = Some(err);
         }
         cx.notify();
     }
