@@ -991,8 +991,9 @@ async fn earlier_replies(
 }
 
 /// Replies given newest first, returned oldest first within `budget`
-/// bytes. The reply that crosses the budget keeps its opening, cut at a
-/// character boundary, so even one long reply still arrives.
+/// bytes. The reply that crosses the budget keeps its end, where a reply
+/// states what is open and what the owner must do, cut at a character
+/// boundary, so even one long reply still arrives.
 fn within_budget(newest_first: Vec<String>, budget: usize) -> Vec<String> {
     let mut left = budget;
     let mut kept = Vec::new();
@@ -1002,12 +1003,12 @@ fn within_budget(newest_first: Vec<String>, budget: usize) -> Vec<String> {
             kept.push(text);
             continue;
         }
-        let mut end = left;
-        while !text.is_char_boundary(end) {
-            end -= 1;
+        let mut start = text.len() - left;
+        while !text.is_char_boundary(start) {
+            start += 1;
         }
-        if end > 0 {
-            kept.push(format!("{}…", &text[..end]));
+        if start < text.len() {
+            kept.push(format!("…{}", &text[start..]));
         }
         break;
     }
@@ -1369,11 +1370,15 @@ mod tests {
         let kept = super::within_budget(vec!["é".repeat(10), "old".into()], 5);
         assert_eq!(
             kept,
-            ["éé…"],
+            ["…éé"],
             "the newest reply arrives, cut at a character"
         );
         let kept = super::within_budget(vec!["new".into(), "older".into(), "oldest".into()], 9);
-        assert_eq!(kept, ["o…", "older", "new"], "oldest first");
+        assert_eq!(
+            kept,
+            ["…t", "older", "new"],
+            "oldest first, each cut keeps its end"
+        );
     }
 
     use super::*;
