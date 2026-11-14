@@ -689,13 +689,54 @@ fn a_turn_that_parks_repeatedly_keeps_one_copy_of_a_restated_reply() {
         finished["attempt"] = json!(4);
         let task = &task_replies(&conversation(items, vec![finished]))[&id(10)];
         assert_eq!(task.latest, Some(id(9)), "attempts={attempts}");
-        assert_eq!(
-            task.kept,
-            [id(8)],
-            "attempts={attempts}: one copy of the card and the last park's reply"
-        );
-        assert_eq!(task.history, [id(2), id(3), id(4), id(5), id(6), id(7)]);
+        if attempts {
+            assert_eq!(
+                task.kept,
+                [id(4), id(6), id(8)],
+                "each attempt's ending text"
+            );
+            assert_eq!(task.history, [id(2), id(3), id(5), id(7)]);
+            assert_eq!(
+                task.repeated_files,
+                [id(1004), id(1006)].into(),
+                "one copy of the card: the last one"
+            );
+        } else {
+            assert_eq!(task.kept, [id(8)], "one copy of the card");
+            assert_eq!(task.history, [id(2), id(3), id(4), id(5), id(6), id(7)]);
+            assert!(task.repeated_files.is_empty());
+        }
     }
+}
+
+/// A re-attached file is not a repeated text: attempt 1's "filed" news stays
+/// in view after attempt 2 re-sends its chart with other text, and the chart
+/// shows once, on the later reply.
+#[test]
+fn an_ending_reply_keeps_its_text_when_a_later_reply_resends_its_file() {
+    let reply = |number: u128, attempt: i64, file: bool| {
+        let mut reply = item(number, 10, "assistant");
+        reply["attempt"] = json!(attempt);
+        if file {
+            reply["parts"] = json!([{"type": "file", "file": {
+                "id": id(1000 + number), "name": "chart.png",
+                "media_type": "image/png", "size": 4_096
+            }}]);
+        }
+        reply
+    };
+    let mut finished = turn(10, "completed");
+    finished["attempt"] = json!(3);
+    let items = vec![
+        item(1, 10, "user"),
+        reply(2, 1, true),
+        reply(3, 2, true),
+        reply(4, 3, false),
+    ];
+    let task = &task_replies(&conversation(items, vec![finished]))[&id(10)];
+    assert_eq!(task.kept, [id(2), id(3)]);
+    assert_eq!(task.repeated_files, [id(1002)].into());
+    assert!(task.history.is_empty());
 }
 
 /// A resumed attempt reports only what changed, so with three attempts the

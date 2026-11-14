@@ -851,13 +851,26 @@ impl ElseApp {
                 rows.push(RowKey::Item(item.id));
             }
             let format = RowFormat::for_item(item);
+            // A kept task reply leaves out a file a later reply delivers again.
+            let repeated = tasks.get(&item.turn_id).map(|reply| &reply.repeated_files);
+            let parts = item
+                .parts
+                .iter()
+                .filter(|part| match part {
+                    crate::attachments::MessagePart::File { file } => {
+                        !repeated.is_some_and(|ids| ids.contains(&file.id))
+                    }
+                    crate::attachments::MessagePart::Text { .. } => true,
+                })
+                .cloned()
+                .collect();
             texts.push((
                 RowKey::Item(item.id),
                 item.bot_task
                     .as_ref()
                     .map_or_else(|| item.text.clone(), |task| task.prompt.clone()),
                 format,
-                item.parts.clone(),
+                parts,
             ));
             if tasks
                 .get(&item.turn_id)
