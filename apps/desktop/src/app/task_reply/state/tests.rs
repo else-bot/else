@@ -1052,7 +1052,18 @@ fn the_latest_attempts_reply_folds_what_came_before_it() {
     let working = marketing("running", 3, false);
     let (tasks, _) = placed(&working);
     let task = &tasks[&id(10)];
-    assert_eq!(task.superseded_count(&working), 0, "no answer shows yet");
+    assert_eq!(
+        task.superseded_count(&working),
+        1,
+        "attempt 2's reply still shows and keeps attempt 1's card folded"
+    );
+    assert_eq!(
+        task.earlier(&working, &task.history, false),
+        [
+            Earlier::Reply(id(2)),
+            Earlier::Card(RowKey::Handoff(id(41)))
+        ]
+    );
 }
 
 /// A reply with a file no later reply delivers stays beside the final

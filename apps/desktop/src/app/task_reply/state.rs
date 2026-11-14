@@ -126,17 +126,20 @@ impl TaskReply {
         replies + cards
     }
 
-    /// The attempt of the reply the card shows last, once it shows: a
-    /// resumed reply carries the task's whole current answer, so what came
-    /// before it folds, as T3 Code folds its work log under the final
-    /// message. A progress reply of a working attempt is itself folded, so
-    /// it supersedes nothing.
+    /// The attempt of the newest reply the card shows: a resumed reply
+    /// carries the task's whole current answer, so what came before it
+    /// folds, as T3 Code folds its work log under the final message. While a
+    /// working attempt's progress reply is itself folded, the newest kept
+    /// reply holds that place, so a fold does not reopen mid-task.
     fn superseding_attempt(&self, conversation: &Conversation) -> Option<i64> {
+        let attempt = |id| conversation.item(id).and_then(|item| item.attempt);
         let shown =
             self.latest_kept || !matches!(self.state, ReplyState::Queued | ReplyState::Working);
-        shown
-            .then_some(self.latest?)
-            .and_then(|id| conversation.item(id)?.attempt)
+        if shown {
+            self.latest.and_then(attempt)
+        } else {
+            self.kept.iter().filter_map(|&id| attempt(id)).max()
+        }
     }
 
     /// A kept reply from an earlier attempt folds, unless it delivers a file
