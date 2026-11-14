@@ -254,8 +254,21 @@ def run(runner):
                                               "A browser on X. ![screenshot](screens/30000000-0000-0000-0000-000000000001.png)",
                                               "I took a screenshot; the screen shows a browser."),
                 "carried-result-keeps-current-request-status": (
-                    [], "Issue https://github.com/else-bot/else/issues/260 is filed, as I said. Twitter saved draft 7 without the chart; it is not posted.",
-                    "Twitter saved draft 7 without the chart; it is not posted."),
+                    [], "Twitter saved draft 7 without the chart; it is not posted.",
+                    "Issue https://github.com/else-bot/else/issues/260 is filed, as I said. Twitter saved draft 7 without the chart; it is not posted."),
+                "resumed-reply-reports-only-what-changed": (
+                    [], "Sentry confirmed the revert: its triage routine reports to me again, at prompt revision 4. "
+                        "You don't need to reply to Sentry.",
+                    "Sentry confirmed it, now at prompt revision 4. As I reported earlier, my routine runs hourly from "
+                    "16:00 UTC."),
+                "resumed-reply-corrects-an-outdated-claim": (
+                    [], "Correction: Sentry did not change its routine. It still hands [SENTRY] tickets to Dev until you "
+                        "approve the edit in Sentry's chat.",
+                    "Sentry's triage routine is back to reporting issues to me."),
+                "resumed-delegated-task-keeps-its-whole-result": (
+                    [], "Recommend Acme Uptime ($40/mo, 1-minute checks). Beacon ($55/mo) checks every 30 seconds, and "
+                        "Canary ($70/mo) adds status pages the owner does not need.",
+                    "Recommend Acme Uptime, since the owner doesn't need status pages."),
                 "task-result-handoff-is-delegated": (
                     [self.call("delegate", {"target_bot_id": "00000000-0000-0000-0000-000000000005",
                                             "task": "Implement ENG-412: skip removed products in CartService.total."},
