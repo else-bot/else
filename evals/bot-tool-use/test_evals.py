@@ -254,13 +254,13 @@ def run(runner):
                                               "A browser on X. ![screenshot](screens/30000000-0000-0000-0000-000000000001.png)",
                                               "I took a screenshot; the screen shows a browser."),
                 "carried-result-keeps-current-request-status": (
-                    [], "Twitter saved draft 7 without the chart; it is not posted.",
+                    [], "Issue https://github.com/else-bot/else/issues/260 is filed. Twitter saved draft 7 without the chart; it is not posted.",
                     "Issue https://github.com/else-bot/else/issues/260 is filed, as I said. Twitter saved draft 7 without the chart; it is not posted."),
-                "resumed-reply-reports-only-what-changed": (
-                    [], "Sentry confirmed the revert: its triage routine reports to me again, at prompt revision 4. "
-                        "You don't need to reply to Sentry.",
-                    "Sentry confirmed its revert, now at prompt revision 4. My own handoff routine (\"Sentry tickets: "
-                    "Dev handoff and merge\", hourly) is unaffected by this and stays as I described."),
+                "resumed-reply-gives-the-state-without-narrating-history": (
+                    [], "Sentry confirmed the revert at prompt revision 4: it reports issues to me again. My hourly "
+                        "routine hands [SENTRY] tickets to Dev and squash merges the PRs Dev marks ready.",
+                    "Sentry confirmed it, now at prompt revision 4. As I reported earlier, my routine hands tickets to "
+                    "Dev."),
                 "resumed-reply-corrects-an-outdated-claim": (
                     [], "Correction: Sentry did not change its routine. It still hands [SENTRY] tickets to Dev until you "
                         "approve the edit in Sentry's chat.",
