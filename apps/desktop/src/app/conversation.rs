@@ -655,6 +655,7 @@ impl ElseApp {
             let row = &view.rows[ix];
             if let Some(task) = &row.task
                 && (task.history.contains(&target)
+                    || (task.kept.contains(&target) && task.reply_superseded(conversation, target))
                     || (task.latest == Some(target)
                         && !task.latest_kept
                         && matches!(task.state, ReplyState::Queued | ReplyState::Working)))

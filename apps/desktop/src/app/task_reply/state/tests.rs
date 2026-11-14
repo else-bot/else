@@ -909,11 +909,24 @@ fn a_card_settled_in_a_resumed_turn_reads_between_the_earlier_and_current_reply(
             "{status}: the cards render inside the task, not as rows: {rows:?}"
         );
         assert_eq!(task.latest, Some(id(4)), "{status}");
-        assert!(
-            task.earlier(&c, &task.history, false).is_empty(),
-            "{status}: attempt 2 replied, so attempt 1's reply and cards fold"
-        );
-        assert_eq!(task.superseded_count(&c), 3, "{status}");
+        if status == "completed" {
+            assert!(
+                task.earlier(&c, &task.history, false).is_empty(),
+                "attempt 2's answer shows, so attempt 1's reply and cards fold"
+            );
+            assert_eq!(task.superseded_count(&c), 3);
+        } else {
+            assert_eq!(
+                task.earlier(&c, &task.history, false),
+                [
+                    Earlier::Reply(id(3)),
+                    Earlier::Card(RowKey::Question(id(210))),
+                    Earlier::Card(RowKey::Draft(id(310))),
+                ],
+                "a working attempt's progress reply is folded itself, so it supersedes nothing"
+            );
+            assert_eq!(task.superseded_count(&c), 0);
+        }
         assert_eq!(
             task.earlier(&c, &task.history, true),
             [
@@ -980,35 +993,66 @@ fn every_card_in_a_task_keeps_the_reply_it_followed_in_view() {
     assert!(task.history.is_empty(), "nothing is counted twice");
 }
 
-/// The Marketing Manager turn from production: two delegations, each
-/// resumed with a reply. Once the last reply lands, the earlier one and
-/// both delegation cards fold; a running attempt with no reply yet keeps
-/// the earlier reply in view as context.
+/// The Marketing Manager turn from production: attempt 1 asked Growth
+/// before writing anything, so its card anchors on the owner's message;
+/// attempt 2 replied and asked Growth again; attempt 3 gave the answer.
+/// Once that answer shows, both replies and both delegation cards fold.
+/// While attempt 3 works, attempt 2's reply stays as context.
 #[test]
 fn the_latest_attempts_reply_folds_what_came_before_it() {
-    let reply = |number: u128, attempt: i64| {
+    let reply = |number: u128, attempt: i64, at: &str| {
         let mut reply = item(number, 10, "assistant");
         reply["attempt"] = json!(attempt);
+        reply["created_at"] = json!(at);
         reply
     };
-    let mut running = turn(10, "running");
-    running["attempt"] = json!(2);
-    let before = conversation(vec![item(1, 10, "user"), reply(2, 1)], vec![running]);
-    let task = &task_replies(&before)[&id(10)];
-    assert_eq!(task.superseded_count(&before), 0, "no newer reply yet");
-    let mut done = turn(10, "completed");
-    done["attempt"] = json!(2);
-    let after = conversation(
-        vec![item(1, 10, "user"), reply(2, 1), reply(3, 2)],
-        vec![done],
+    let asked = |n: u128, attempt: i64, at: &str| {
+        json!({ "id": id(n), "attempt": attempt, "target_bot_id": id(50),
+                "target_name": "Growth", "task": "Send the digest numbers",
+                "status": "completed", "created_at": at,
+                "finished_at": "2026-11-14T21:59:00Z" })
+    };
+    let mut owner = item(1, 10, "user");
+    owner["created_at"] = json!("2026-11-14T21:46:00Z");
+    let marketing = |status: &str, attempt: i64, done: bool| {
+        let mut t = turn(10, status);
+        t["attempt"] = json!(attempt);
+        t["delegations"] = json!([
+            asked(40, 1, "2026-11-14T21:47:00Z"),
+            asked(41, 2, "2026-11-14T21:50:00Z")
+        ]);
+        let mut items = vec![
+            owner.clone(),
+            reply(2, 2, "2026-11-14T21:49:00Z"),
+            reply(3, 3, "2026-11-14T21:52:00Z"),
+        ];
+        if done {
+            items.push(reply(4, 3, "2026-11-14T21:53:00Z"));
+        }
+        conversation(items, vec![t])
+    };
+    let after = marketing("completed", 3, true);
+    let (tasks, rows) = placed(&after);
+    let task = &tasks[&id(10)];
+    assert!(
+        rows.is_empty(),
+        "both delegations sit inside the task: {rows:?}"
     );
-    let task = &task_replies(&after)[&id(10)];
-    assert_eq!(task.latest, Some(id(3)));
+    assert_eq!(task.latest, Some(id(4)));
     assert!(task.earlier(&after, &task.history, false).is_empty());
     assert_eq!(
-        task.fold_label(&after, task.superseded_count(&after)),
-        "1 update"
+        task.superseded_count(&after),
+        3,
+        "attempt 2's reply and both cards"
     );
+    assert_eq!(
+        task.fold_label(&after, task.history.len() + task.superseded_count(&after)),
+        "4 updates"
+    );
+    let working = marketing("running", 3, false);
+    let (tasks, _) = placed(&working);
+    let task = &tasks[&id(10)];
+    assert_eq!(task.superseded_count(&working), 0, "no answer shows yet");
 }
 
 /// A reply with a file no later reply delivers stays beside the final
