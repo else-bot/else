@@ -286,8 +286,9 @@ impl ElseApp {
                 self.task_message(id, conversation.reaction_for(id), cx)
             } else if complete {
                 Some(
+                    // A note about the reply, not a reply: 13 px meta.
                     div()
-                        .text_sm()
+                        .text_size(px(13.))
                         .text_color(theme.muted_foreground)
                         .child("Finished without a text reply.")
                         .into_any_element(),
