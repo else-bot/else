@@ -257,6 +257,18 @@ impl ServerRegistry {
         Ok(())
     }
 
+    /// Move `dragged` to `target`'s place: after it when moving down, before
+    /// it when moving up, as a sidebar drop lands.
+    pub fn reorder(&mut self, dragged: ServerId, target: ServerId) -> Result<(), String> {
+        let at = |id| self.servers.iter().position(|server| server.id == id);
+        let (Some(from), Some(to)) = (at(dragged), at(target)) else {
+            return Err("This saved server no longer exists.".into());
+        };
+        let server = self.servers.remove(from);
+        self.servers.insert(to, server);
+        Ok(())
+    }
+
     pub fn remove(&mut self, id: ServerId) -> Result<(), String> {
         if self.selected == Some(id) {
             return Err("Switch to another server before removing this connection.".into());
@@ -397,6 +409,14 @@ impl ProfileStore {
 
     pub(crate) fn server_preferences_path(&self, id: ServerId) -> PathBuf {
         self.path.with_extension(format!("{id}.layout.json"))
+    }
+
+    pub(crate) fn server_icons_path(&self) -> PathBuf {
+        self.path.with_extension("icons.json")
+    }
+
+    pub(crate) fn server_picture_path(&self, id: ServerId) -> PathBuf {
+        self.path.with_extension(format!("{id}.icon.png"))
     }
 
     fn registry_path(&self) -> PathBuf {
@@ -562,7 +582,7 @@ pub(crate) fn read_private(path: &Path) -> Result<Option<String>, String> {
     read_private_limited(path, 16 * 1024)
 }
 
-fn read_private_limited(path: &Path, limit: u64) -> Result<Option<String>, String> {
+pub(crate) fn read_private_limited(path: &Path, limit: u64) -> Result<Option<String>, String> {
     let shown = path.display();
     let mut file = match OpenOptions::new()
         .read(true)
@@ -971,6 +991,34 @@ mod tests {
             registry.find(first).unwrap().profile.origin.as_str(),
             "https://new.example.com"
         );
+    }
+
+    #[test]
+    fn reordered_servers_land_where_dropped_and_survive_a_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = ProfileStore::at(dir.path().join("desktop.json"));
+        let mut registry = ServerRegistry::default();
+        let [a, b, c] = ["a", "b", "c"].map(|host| {
+            registry
+                .upsert(profile(&format!("https://{host}.example.com")), None, None)
+                .unwrap()
+        });
+        let order = |registry: &ServerRegistry| -> Vec<ServerId> {
+            registry.servers.iter().map(|server| server.id).collect()
+        };
+        registry.reorder(a, c).unwrap();
+        assert_eq!(order(&registry), [b, c, a], "moving down lands after");
+        registry.reorder(a, b).unwrap();
+        assert_eq!(order(&registry), [a, b, c], "moving up lands before");
+        registry.reorder(b, b).unwrap();
+        assert_eq!(order(&registry), [a, b, c]);
+        assert!(registry.reorder(Uuid::new_v4(), a).is_err());
+        assert_eq!(order(&registry), [a, b, c]);
+        registry.reorder(c, a).unwrap();
+        registry.selected = Some(b);
+        store.save(&registry).unwrap();
+        assert_eq!(order(&store.load().unwrap()), [c, a, b]);
     }
 
     #[test]

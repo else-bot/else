@@ -41,6 +41,7 @@ use categories::CategoryFormHolder;
 use conversation::{ConversationView, RowKey};
 use create_bot::CreateFormHolder;
 use dialogs::Welcome;
+pub(crate) use images::decode_image;
 use pending_send::{Failure, Lookup, PendingSend};
 use reply::Draft;
 use settings::{BotSettings, ModelDialog};

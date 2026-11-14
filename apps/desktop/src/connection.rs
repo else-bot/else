@@ -4,6 +4,7 @@
 
 mod backups;
 mod mcp;
+mod server_rail;
 mod server_views;
 mod servers;
 mod settings;
@@ -19,7 +20,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme as _, TitleBar, WindowExt as _, v_flex};
+use gpui_kit::component::{ActiveTheme as _, TitleBar, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -164,7 +165,8 @@ pub struct Shell {
     inactive: HashMap<Uuid, Active>,
     servers: servers::Connections,
     server_editor: Option<servers::Editor>,
-    server_menu: bool,
+    icons: crate::server_icon::Icons,
+    rail_card: server_rail::RailCard,
     switch_attempt: Option<Uuid>,
     notification_target: Option<(Uuid, Uuid, Uuid)>,
     _switch: Option<Task<()>>,
@@ -226,6 +228,12 @@ impl Shell {
         let updates = updates::View::new(&launch, &runtime, window, cx);
         let server_updates = updates::View::new_server(&launch, &runtime, window, cx);
         let servers = servers::Connections::new(&registry, &runtime, window, cx);
+        let (icons, icons_error) = match launch.store.as_ref().map(crate::server_icon::Icons::load)
+        {
+            Ok(Ok(icons)) => (icons, None),
+            Ok(Err(err)) => (Default::default(), Some(err)),
+            Err(_) => (Default::default(), None),
+        };
         let mut shell = Self {
             launch,
             key,
@@ -235,11 +243,12 @@ impl Shell {
             inactive: HashMap::new(),
             servers,
             server_editor: None,
-            server_menu: false,
+            icons,
+            rail_card: Default::default(),
             switch_attempt: None,
             notification_target: None,
             _switch: None,
-            connection_error: loaded.err(),
+            connection_error: loaded.err().or(icons_error),
             server_updates,
             remote_updates: HashMap::new(),
             names: Default::default(),
@@ -364,9 +373,7 @@ impl Shell {
         app.update(cx, |app, _| {
             app.set_server_switcher(std::rc::Rc::new(move |link, cx| {
                 shell
-                    .update(cx, |shell, cx| {
-                        shell.render_server_switcher("sidebar-server-switcher", link, cx)
-                    })
+                    .update(cx, |shell, cx| shell.render_server_label(link, cx))
                     .unwrap_or_else(|_| div().into_any_element())
             }))
         });
@@ -767,7 +774,6 @@ impl Shell {
             self.updates.dismiss();
             self.server_updates.dismiss();
             self.server_editor = None;
-            self.server_menu = false;
             self.backups = None;
             self.mcp = None;
             self.email = None;
@@ -881,7 +887,14 @@ impl Render for Shell {
                     )
                 },
             )
-            .child(div().flex_1().min_h_0().w_full().child(active.app.clone()))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(self.render_server_rail(cx))
+                    .child(div().flex_1().min_w_0().h_full().child(active.app.clone())),
+            )
     }
 }
 

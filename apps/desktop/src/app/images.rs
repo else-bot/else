@@ -334,7 +334,7 @@ fn clipboard_png(image: &Image) -> Result<Vec<u8>, String> {
     Ok(png.into_inner())
 }
 
-fn decode_image(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+pub(crate) fn decode_image(bytes: &[u8]) -> Result<image::DynamicImage, String> {
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|error| error.to_string())?;

@@ -566,7 +566,6 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.server_menu = false;
         self.switch_attempt = None;
         self._switch = None;
         self.server_update_target = None;
@@ -613,7 +612,6 @@ impl Shell {
     }
 
     pub(super) fn select_server(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        self.server_menu = false;
         if self.active.as_ref().is_some_and(|active| active.id == id) {
             self.switch_attempt = None;
             self._switch = None;
@@ -853,6 +851,12 @@ impl Shell {
                                             match result {
                                                 Ok(()) => {
                                                     shell.registry = registry;
+                                                    if let Ok(store) = &shell.launch.store
+                                                        && let Err(err) =
+                                                            shell.icons.forget(store, id)
+                                                    {
+                                                        shell.connection_error = Some(err);
+                                                    }
                                                     shell.inactive.remove(&id);
                                                     shell.remote_updates.remove(&id);
                                                     shell.refresh_servers(window, cx);

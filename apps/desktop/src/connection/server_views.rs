@@ -3,13 +3,11 @@ use super::*;
 use crate::app::Link;
 use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::FocusableExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::popover::Popover;
-use gpui_kit::component::{Icon, Sizable as _, h_flex};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{Icon, h_flex};
 
 impl Shell {
-    fn server_status(&self, id: Uuid, cx: &App) -> (&'static str, Hsla) {
+    pub(super) fn server_status(&self, id: Uuid, cx: &App) -> (&'static str, Hsla) {
         let theme = cx.theme();
         match self.servers.entries.get(&id).map(|entry| &entry.health) {
             Some(Health::Online) => ("Online", theme.success),
@@ -20,15 +18,10 @@ impl Shell {
         }
     }
 
-    /// The server switcher: the current server's name and status dot,
-    /// opening the server menu. It sits in the sidebar header beside the
-    /// brand, so it stays as quiet as secondary text.
-    pub(super) fn render_server_switcher(
-        &self,
-        id: &'static str,
-        link: Link,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// The current server's name and connection dot in the sidebar header.
+    /// The server rail switches servers, so this stays as quiet as
+    /// secondary text.
+    pub(super) fn render_server_label(&self, link: Link, cx: &mut Context<Self>) -> AnyElement {
         let Some(active) = &self.active else {
             return div().into_any_element();
         };
@@ -43,127 +36,16 @@ impl Shell {
             Link::Failed => theme.danger,
             Link::Connecting => theme.warning,
         };
-        let text = theme.muted_foreground;
-        let owner = cx.weak_entity();
-        let toggle = owner.clone();
-        Popover::new(id)
-            .anchor(Anchor::TopLeft)
-            .open(self.server_menu && self.settings_section().is_none())
-            .on_open_change(move |open, _, cx| {
-                let _ = toggle.update(cx, |shell, cx| {
-                    shell.server_menu = *open;
-                    cx.notify();
-                });
-            })
-            .trigger(
-                Button::new(SharedString::from(format!("{id}-trigger")))
-                    .control(Tier::Ghost, Scale::Compact, false, cx)
-                    .px_2()
-                    .loading(self.switch_attempt.is_some())
-                    .accessibility_label(format!("Switch server. Current server {name}"))
-                    .child(
-                        h_flex()
-                            .min_w_0()
-                            .gap(px(6.))
-                            .items_center()
-                            .text_size(px(13.))
-                            .text_color(text)
-                            .child(div().flex_none().size(px(6.)).rounded_full().bg(color))
-                            .child(div().min_w_0().truncate().child(name))
-                            .child(
-                                Icon::new(IconName::ChevronDown)
-                                    .flex_none()
-                                    .size_3()
-                                    .text_color(text),
-                            ),
-                    ),
-            )
-            .content(move |_, _, cx| {
-                owner
-                    .update(cx, |shell, cx| shell.render_server_menu(cx))
-                    .unwrap_or_else(|_| div().into_any_element())
-            })
+        h_flex()
+            .min_w_0()
+            .px_2()
+            .gap(px(6.))
+            .items_center()
+            .text_size(px(13.))
+            .text_color(theme.muted_foreground)
+            .child(div().flex_none().size(px(6.)).rounded_full().bg(color))
+            .child(div().min_w_0().truncate().child(name))
             .into_any_element()
-    }
-
-    fn render_server_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let mut menu = v_flex()
-            .id("server-switcher-list")
-            .w(px(282.))
-            .max_h(px(460.))
-            .overflow_y_scroll()
-            .p_1()
-            .gap_1()
-            .child(
-                div()
-                    .px_2()
-                    .py_2()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("Your servers"),
-            );
-        for saved in &self.registry.servers {
-            let id = saved.id;
-            let selected = self.active.as_ref().is_some_and(|active| active.id == id);
-            let (status, color) = self.server_status(id, cx);
-            let release = self.server_release(id);
-            let detail = if release == ReleaseStatus::Available {
-                format!("{status} · Update available")
-            } else {
-                status.to_owned()
-            };
-            menu = menu.child(
-                Button::new(SharedString::from(format!("switch-server-{id}")))
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .ghost()
-                    .small()
-                    .w_full()
-                    .h(px(48.))
-                    .accessibility_label(format!("Switch to {}. {detail}", saved.name))
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap_2()
-                            .child(
-                                Icon::new(if self.managed_server(&saved.profile) {
-                                    IconName::Laptop
-                                } else {
-                                    IconName::Server
-                                })
-                                .size_4(),
-                            )
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap_1()
-                                    .child(div().text_sm().truncate().child(saved.name.clone()))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(detail),
-                                    ),
-                            )
-                            .child(if selected {
-                                div().child(
-                                    Icon::new(IconName::Check)
-                                        .size_3()
-                                        .text_color(theme.primary),
-                                )
-                            } else {
-                                div().size_1p5().rounded_full().bg(color)
-                            }),
-                    )
-                    .on_click(cx.listener(move |shell, _, window, cx| {
-                        shell.server_menu = false;
-                        shell.select_server(id, window, cx);
-                    })),
-            );
-        }
-        menu.into_any_element()
     }
 
     pub(super) fn render_server_list(&self, cx: &mut Context<Self>) -> AnyElement {
