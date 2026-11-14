@@ -3,6 +3,7 @@
 //! Switching selects a session without rebinding requests or discarding drafts.
 
 mod backups;
+mod icon_editor;
 mod mcp;
 mod server_rail;
 mod server_views;
