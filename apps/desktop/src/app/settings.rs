@@ -1585,7 +1585,7 @@ impl ElseApp {
                 .gap_1p5()
                 .items_center()
                 .text_color(theme.muted_foreground)
-                .child(Icon::new(card.icon).size_3().flex_none())
+                .child(card.icon.clone().size_3().flex_none())
                 .child(meta(facts.first().cloned().unwrap_or_default(), cx).whitespace_nowrap())
                 .into_any_element(),
         ];
@@ -2371,7 +2371,7 @@ impl TriggerSource {
 /// One trigger as its sidebar card shows it.
 struct TriggerCard {
     source: TriggerSource,
-    icon: gpui_kit::assets::IconName,
+    icon: Icon,
     title: String,
     /// How the delete dialog names it.
     delete_name: String,
@@ -2392,7 +2392,7 @@ fn trigger_cards(conversation: &Conversation) -> Vec<TriggerCard> {
             source: TriggerSource::Mail {
                 account: trigger.account_id,
             },
-            icon: gpui_kit::assets::IconName::Mail,
+            icon: Icon::new(gpui_kit::assets::IconName::Mail),
             title: trigger.address.clone(),
             delete_name: format!("the trigger for {}", trigger.address),
             instructions: trigger
@@ -2413,8 +2413,8 @@ fn trigger_cards(conversation: &Conversation) -> Vec<TriggerCard> {
         TriggerCard {
             source: TriggerSource::Social { id: trigger.id },
             icon: match trigger.provider {
-                Provider::Telegram => gpui_kit::assets::IconName::Send,
-                Provider::Discord => gpui_kit::assets::IconName::Gamepad2,
+                Provider::Telegram => Icon::new(gpui_kit::assets::IconName::Send),
+                Provider::Discord => Icon::empty().path(crate::DISCORD_ICON),
             },
             title: trigger.title().to_owned(),
             delete_name: match trigger.destination {
@@ -2433,7 +2433,7 @@ fn trigger_cards(conversation: &Conversation) -> Vec<TriggerCard> {
     });
     let webhooks = conversation.webhooks().iter().map(|webhook| TriggerCard {
         source: TriggerSource::Webhook { id: webhook.id },
-        icon: gpui_kit::assets::IconName::Webhook,
+        icon: Icon::new(gpui_kit::assets::IconName::Webhook),
         title: webhook.name.clone(),
         delete_name: webhook.name.clone(),
         instructions: webhook.prompt.clone(),

@@ -102,7 +102,7 @@ impl SocialsView {
         let card = v_flex().w_full().child(
             crate::panel_kit::list_row()
                 .child(crate::panel_kit::row_icon(
-                    gpui_kit::component::Icon::new(provider_icon(connection.provider)),
+                    provider_icon(connection.provider),
                     cx,
                 ))
                 .child(crate::panel_kit::row_text(
@@ -215,10 +215,10 @@ impl SocialsView {
     }
 }
 
-fn provider_icon(provider: Provider) -> gpui_kit::assets::IconName {
+fn provider_icon(provider: Provider) -> gpui_kit::component::Icon {
     match provider {
-        Provider::Telegram => gpui_kit::assets::IconName::Send,
-        Provider::Discord => gpui_kit::assets::IconName::Gamepad2,
+        Provider::Telegram => gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Send),
+        Provider::Discord => gpui_kit::component::Icon::empty().path(crate::DISCORD_ICON),
     }
 }
 
@@ -268,10 +268,7 @@ impl Render for SocialsView {
             ] {
                 providers.push(
                     crate::panel_kit::list_row()
-                        .child(crate::panel_kit::row_icon(
-                            gpui_kit::component::Icon::new(provider_icon(provider)),
-                            cx,
-                        ))
+                        .child(crate::panel_kit::row_icon(provider_icon(provider), cx))
                         .child(crate::panel_kit::row_text(
                             provider.label(),
                             description,

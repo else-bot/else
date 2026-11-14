@@ -126,6 +126,21 @@ fn icon_type_names(sources: &[Vec<TokenTree>]) -> BTreeSet<String> {
 }
 
 #[test]
+fn brand_icons_load_and_list_as_svg() {
+    let bytes = AppAssets
+        .load(super::DISCORD_ICON)
+        .expect("load the Discord icon")
+        .expect("the Discord icon is bundled");
+    assert!(std::str::from_utf8(&bytes).is_ok_and(|svg| svg.starts_with("<svg")));
+    let listed = AppAssets.list("icons/brand/").expect("list brand icons");
+    assert!(
+        listed
+            .iter()
+            .any(|path| path.as_ref() == super::DISCORD_ICON)
+    );
+}
+
+#[test]
 fn every_desktop_icon_has_bundled_svg_bytes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
