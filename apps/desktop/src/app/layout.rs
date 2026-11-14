@@ -142,7 +142,7 @@ impl ElseApp {
         if !matches!(event.drag(cx).edge, SidebarEdge::Left) {
             return;
         }
-        let room = f32::from(window.viewport_size().width - event.bounds.left());
+        let room = self.width(window);
         let right = if self.settings_shown() {
             self.preferences.details_width
         } else {
@@ -163,9 +163,8 @@ impl ElseApp {
         if !matches!(event.drag(cx).edge, SidebarEdge::Right) {
             return;
         }
-        let width = f32::from(window.viewport_size().width);
-        let left = if width < self.preferences.sidebar_width + self.preferences.details_width + 360.
-        {
+        let width = self.width(window);
+        let left = if self.crowded(width) {
             0.
         } else {
             self.preferences.sidebar_width
@@ -174,6 +173,37 @@ impl ElseApp {
             dragged_width(SidebarEdge::Right, event.bounds, event.event.position.x)
                 .clamp(280., (width - left - 360.).clamp(280., 560.));
         self.save_preferences(cx);
+    }
+
+    /// The width this view gets, or the whole window's before its first layout.
+    pub(super) fn width(&self, window: &Window) -> f32 {
+        self.width
+            .unwrap_or_else(|| f32::from(window.viewport_size().width))
+    }
+
+    /// An invisible layer that records the view's laid-out width.
+    pub(super) fn measure_width(cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity().downgrade();
+        canvas(
+            move |bounds, _, cx| {
+                let width = f32::from(bounds.size.width);
+                let _ = entity.update(cx, |app, cx| {
+                    if app.width != Some(width) {
+                        app.width = Some(width);
+                        cx.notify();
+                    }
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+    }
+
+    /// Whether the sidebar must hide so the bot settings panel and the
+    /// conversation keep their room.
+    pub(super) fn crowded(&self, width: f32) -> bool {
+        width < self.preferences.sidebar_width + self.preferences.details_width + 360.
     }
 
     pub(crate) fn panel_widths(&self) -> (f32, f32) {
