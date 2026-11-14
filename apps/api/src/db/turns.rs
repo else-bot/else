@@ -971,7 +971,6 @@ pub async fn fail_unstarted(
     tx.commit().await
 }
 
-/// Build the adapter input for a claimed turn.
 /// Bytes of earlier replies a fresh continuation receives, newest kept.
 const EARLIER_REPLIES_BUDGET: usize = 8_000;
 
@@ -1016,6 +1015,7 @@ fn within_budget(newest_first: Vec<String>, budget: usize) -> Vec<String> {
     kept
 }
 
+/// Build the adapter input for a claimed turn.
 pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     let turn = load_turn(&mut conn, turn_id).await?;

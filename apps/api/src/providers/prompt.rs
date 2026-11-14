@@ -981,7 +981,9 @@ pub(super) fn turn_content<'a>(
              limits that still apply, what is still open, and any action the owner needs to \
              take. State earlier work as fact: do not narrate the history, point to earlier \
              replies, or re-check work you reported as done unless a result contradicts it. If \
-             a result makes something you said wrong or outdated, give the corrected state."
+             a result makes something you said wrong or outdated, give the corrected state. \
+             Before you finish, check that every link, limit and owner action from earlier \
+             replies that still applies is in this reply."
         };
         if considered >= input.turn_no {
             segments = vec![Segment::Text(format!("{outcomes}{reader}"))];
