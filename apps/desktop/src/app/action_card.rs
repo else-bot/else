@@ -21,7 +21,7 @@ use gpui_kit::*;
 const LEAD: f32 = 20.;
 /// The line height of a card title; the icon centres on it.
 const TITLE_LINE: f32 = 22.;
-/// The disclosure column every activity row reserves at its right end.
+/// The disclosure column of an activity row that expands.
 const CHEVRON: f32 = 12.;
 /// A card footer's helper line.
 const NOTE_TEXT: f32 = 12.;
@@ -288,7 +288,8 @@ pub(super) const OPTION_HEIGHT: f32 = 44.;
 
 /// One activity row: a 36 px line with the icon column, then actor, verb
 /// and object, then [`event_end`]. Rows of one family sit 4 px apart, a
-/// 40 px pitch.
+/// 40 px pitch. The row has no side padding, so its icon starts on the
+/// message column's left edge and its end slot stops on the right edge.
 pub(super) fn event_row(theme: &Theme) -> Div {
     h_flex()
         .w_full()
@@ -296,7 +297,6 @@ pub(super) fn event_row(theme: &Theme) -> Div {
         .h(px(36.))
         .items_center()
         .gap_2()
-        .px_2()
         .rounded(theme.radius)
         .text_size(px(13.))
         .text_color(theme.muted_foreground)
@@ -311,8 +311,7 @@ pub(super) enum EventEnd {
     Actions(Vec<Button>),
 }
 
-/// How a row's disclosure column reads. Every row reserves the column, so
-/// meta and action labels end on one edge whether or not a row expands.
+/// How a row's disclosure column reads. Only a row that expands has one.
 #[derive(Clone, Copy)]
 pub(super) enum Disclosure {
     None,
@@ -321,31 +320,39 @@ pub(super) enum Disclosure {
 }
 
 /// The right end of an activity row: its one slot, then the disclosure
-/// column. Meta is inset by a compact button's padding so its text ends
-/// where an action's label ends.
+/// column when the row expands. Meta text, an action's label, or the
+/// chevron ends on the row's right edge: actions hang their button padding
+/// past it.
 pub(super) fn event_end(theme: &Theme, end: EventEnd, disclosure: Disclosure) -> Div {
-    let slot = match end {
-        EventEnd::Meta(meta) => h_flex().child(
-            div()
-                .mr(Scale::Compact.padding())
-                .text_size(px(12.5))
-                .text_color(super::message_row::meta_color(theme))
-                .child(meta),
-        ),
-        EventEnd::Actions(actions) => h_flex().gap_1().children(actions),
-    };
     let chevron = match disclosure {
         Disclosure::None => None,
         Disclosure::Collapsed => Some(IconName::ChevronRight),
         Disclosure::Expanded => Some(IconName::ChevronDown),
     };
-    h_flex().flex_none().items_center().child(slot).child(
-        h_flex()
-            .flex_none()
-            .w(px(CHEVRON))
-            .justify_end()
-            .children(chevron.map(|icon| Icon::new(icon).xsmall())),
-    )
+    let slot = match end {
+        EventEnd::Meta(meta) => h_flex().child(
+            div()
+                .when(chevron.is_some(), |meta| meta.mr_2())
+                .text_size(px(12.5))
+                .text_color(super::message_row::meta_color(theme))
+                .child(meta),
+        ),
+        EventEnd::Actions(actions) => h_flex()
+            .gap_1()
+            .when(chevron.is_none(), |slot| slot.mr(-Scale::Compact.padding()))
+            .children(actions),
+    };
+    h_flex()
+        .flex_none()
+        .items_center()
+        .child(slot)
+        .children(chevron.map(|icon| {
+            h_flex()
+                .flex_none()
+                .w(px(CHEVRON))
+                .justify_end()
+                .child(Icon::new(icon).xsmall())
+        }))
 }
 
 /// The fixed icon column of an activity row. Two faces overlap diagonally
@@ -357,7 +364,8 @@ pub(super) fn event_lead(faces: Vec<AnyElement>) -> Div {
         (Some(first), Some(second)) => lead
             .child(div().absolute().top_0().left_0().child(first))
             .child(div().absolute().bottom_0().right_0().child(second)),
-        (Some(only), None) => lead.flex().items_center().justify_center().child(only),
+        // A lone face starts on the column's edge, like the text above it.
+        (Some(only), None) => lead.flex().items_center().justify_start().child(only),
         _ => lead,
     }
 }
