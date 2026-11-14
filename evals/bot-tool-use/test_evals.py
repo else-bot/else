@@ -259,8 +259,8 @@ def run(runner):
                 "resumed-reply-reports-only-what-changed": (
                     [], "Sentry confirmed the revert: its triage routine reports to me again, at prompt revision 4. "
                         "You don't need to reply to Sentry.",
-                    "Sentry confirmed it, now at prompt revision 4. As I reported earlier, my routine runs hourly from "
-                    "16:00 UTC."),
+                    "Sentry confirmed its revert, now at prompt revision 4. My own handoff routine (\"Sentry tickets: "
+                    "Dev handoff and merge\", hourly) is unaffected by this and stays as I described."),
                 "resumed-reply-corrects-an-outdated-claim": (
                     [], "Correction: Sentry did not change its routine. It still hands [SENTRY] tickets to Dev until you "
                         "approve the edit in Sentry's chat.",
