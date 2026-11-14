@@ -90,12 +90,20 @@ impl RenderOnce for AvatarPicker {
                 ..self.current
             };
             let pick = self.on_change.clone();
+            // A swatch close to the dialog's own tone (white on a light
+            // theme) needs a firmer edge than the hairline to stay visible.
+            let fill = color.fill();
+            let edge = if (fill.l - theme.popover.l).abs() < 0.12 {
+                theme.foreground.opacity(0.25)
+            } else {
+                theme.border
+            };
             let swatch = div()
                 .size(swatch_size)
                 .rounded_full()
                 .p(px(1.))
-                .bg(theme.border)
-                .child(div().size_full().rounded_full().bg(color.fill()));
+                .bg(edge)
+                .child(div().size_full().rounded_full().bg(fill));
             // A round swatch takes a round ring: 2 px, then a 2 px gap.
             let ring_size = swatch_size + px(8.);
             Button::new(ElementId::Name(format!("avatar-color-{color:?}").into()))
@@ -140,7 +148,9 @@ impl RenderOnce for AvatarPicker {
                                 cx,
                             )
                             .icon(IconName::Undo2)
-                            .label("Reset")
+                            // The kit's labels are 14 px; this one matches
+                            // the 12 px "Shape" label beside it.
+                            .child(div().text_xs().child("Reset"))
                             .accessibility_label("Reset avatar")
                             .mr(-Scale::Compact.padding())
                             .on_click(move |_, window, cx| reset(Avatar::default(), window, cx)),

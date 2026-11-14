@@ -397,7 +397,13 @@ impl ProfilePicker {
                     .child(
                         Button::new(SharedString::from(format!("setup-details-{}", provider.id)))
                             .control(Tier::Ghost, Scale::Compact, false, cx)
-                            .label(if explained { "Hide details" } else { "Details" })
+                            // 13 px, like the warning it explains.
+                            .child(div().text_size(px(13.)).child(if explained {
+                                "Hide details"
+                            } else {
+                                "Details"
+                            }))
+                            .accessibility_label(if explained { "Hide details" } else { "Details" })
                             .icon(if explained {
                                 IconName::ChevronUp
                             } else {
