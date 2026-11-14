@@ -181,9 +181,9 @@ fn diff_block(diff: &[DiffLine], cx: &App) -> Div {
 /// The tallest a tab's body grows before it scrolls; shorter content
 /// leaves the dialog shorter.
 const BODY_MAX: f32 = 380.;
-/// The shortest a tab's body gets, so the dialog keeps a stable ~420 px
-/// minimum height between tabs and versions.
-const BODY_MIN: f32 = 248.;
+/// The shortest a tab's body gets: enough for a version or two, so a short
+/// diff leaves no dead space under it.
+const BODY_MIN: f32 = 120.;
 
 fn quote(words: &str, cx: &App) -> Div {
     let theme = cx.theme();
@@ -287,12 +287,33 @@ impl ElseApp {
                 .find(|b| b.id == bot)
                 .map_or_else(|| "Bot".to_owned(), |b| b.name.clone());
             let content = app.render_rules_dialog(bot, &name, &owner, cx);
+            // The close button shares the title's line, centred on it, at
+            // the kit's usual distance from the dialog's right edge.
             dialog
+                .close_button(false)
                 .title(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(format!("{name} rules")),
+                    h_flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_lg()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(format!("{name} rules")),
+                        )
+                        .child(
+                            Button::new("rules-close")
+                                .focus_ring(false)
+                                .cursor_pointer()
+                                .small()
+                                .ghost()
+                                .mr(px(-10.))
+                                .icon(IconName::Close)
+                                .accessibility_label("Close")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        ),
                 )
                 .child(content)
         });
