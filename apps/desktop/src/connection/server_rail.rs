@@ -64,6 +64,7 @@ impl Shell {
         let order: Vec<Uuid> = self.registry.servers.iter().map(|s| s.id).collect();
         let mut list = v_flex()
             .id("server-rail")
+            .tab_group()
             .role(Role::List)
             .aria_label("Servers")
             .flex_1()
@@ -87,6 +88,7 @@ impl Shell {
             .py_2()
             .rounded(px(10.))
             .cursor_pointer()
+            .tab_index(0)
             .text_color(theme.muted_foreground)
             .hover(|style| style.text_color(theme.foreground))
             .child(
@@ -246,6 +248,7 @@ impl Shell {
             .px(px(2.))
             .rounded(px(10.))
             .cursor_pointer()
+            .tab_index(0)
             .map(|item| {
                 if selected {
                     item.bg(theme.foreground.opacity(0.08))
@@ -523,6 +526,7 @@ impl IconEditor {
     }
 
     fn set_letters(&mut self, text: &str) {
+        self._pick = None;
         let editing = matches!(self.draft, ServerIcon::Letters { .. });
         if text.trim().is_empty() && !editing {
             self.error = None;
@@ -544,6 +548,7 @@ impl IconEditor {
 
     /// Tint the draft, keeping it in the open tab's kind of icon.
     fn set_hue(&mut self, hue: Option<u16>, cx: &mut Context<Self>) {
+        self._pick = None;
         self.draft = match (self.tab, self.draft.clone()) {
             (Tab::Emoji, icon @ ServerIcon::Emoji { .. }) => icon.with_hue(hue),
             (Tab::Emoji, _) => ServerIcon::Emoji {
@@ -600,6 +605,15 @@ impl IconEditor {
     }
 
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.letters.read(cx).value().to_string();
+        if matches!(self.draft, ServerIcon::Letters { .. })
+            && !typed.trim().is_empty()
+            && server_icon::letters(&typed).is_none()
+        {
+            self.error = Some("Use one or two characters.".to_owned());
+            cx.notify();
+            return;
+        }
         let (id, draft) = (self.id, self.draft.clone());
         let saved = self
             .shell
@@ -678,6 +692,7 @@ impl IconEditor {
                     .rounded(px(10.))
                     .border_1()
                     .cursor_pointer()
+                    .tab_index(0)
                     .border_color(if on {
                         theme.primary
                     } else {
@@ -693,6 +708,7 @@ impl IconEditor {
                     .child(self.icon(&icon, 40., cx))
                     .child(label)
                     .on_click(cx.listener(move |editor, _, _, cx| {
+                        editor._pick = None;
                         editor.draft = icon.clone();
                         cx.notify();
                     }))
@@ -750,6 +766,7 @@ impl IconEditor {
                 .size(px(22.))
                 .rounded_full()
                 .cursor_pointer()
+                .tab_index(0)
                 .border_2()
                 .border_color(if on {
                     theme.foreground
@@ -798,6 +815,7 @@ impl IconEditor {
                         .justify_center()
                         .rounded(px(8.))
                         .cursor_pointer()
+                        .tab_index(0)
                         .text_size(px(20.))
                         .map(|cell| {
                             if on {
@@ -808,6 +826,7 @@ impl IconEditor {
                         })
                         .child(emoji.clone())
                         .on_click(cx.listener(move |editor, _, _, cx| {
+                            editor._pick = None;
                             editor.draft = ServerIcon::Emoji {
                                 emoji: emoji.clone(),
                                 hue,
@@ -853,6 +872,7 @@ impl IconEditor {
             .border_dashed()
             .border_color(theme.border)
             .cursor_pointer()
+            .tab_index(0)
             .text_color(theme.muted_foreground)
             .hover(|s| s.border_color(theme.primary).text_color(theme.foreground))
             .child(Icon::new(IconName::ImagePlus).size_6())
@@ -932,6 +952,7 @@ impl Render for IconEditor {
                         editor
                             .letters
                             .update(cx, |input, cx| input.set_value("", window, cx));
+                        editor._pick = None;
                         editor.draft = ServerIcon::Default;
                         editor.error = None;
                         editor.tab = Tab::Generated;
@@ -952,6 +973,8 @@ impl Render for IconEditor {
                     .on_click(cx.listener(|editor, _, window, cx| editor.save(window, cx))),
             );
         v_flex()
+            .id("server-icon-editor")
+            .tab_group()
             .gap_4()
             .child(
                 h_flex()

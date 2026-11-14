@@ -189,7 +189,11 @@ fn read_picture(path: &Path) -> Option<Arc<Image>> {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
-    (image::guess_format(&bytes).ok()? == image::ImageFormat::Png)
+    if image::guess_format(&bytes).ok()? != image::ImageFormat::Png {
+        return None;
+    }
+    let decoded = crate::app::decode_image(&bytes).ok()?;
+    ((decoded.width(), decoded.height()) == (PICTURE_SIDE, PICTURE_SIDE))
         .then(|| Arc::new(Image::from_bytes(ImageFormat::Png, bytes)))
 }
 
@@ -254,11 +258,14 @@ impl Icons {
             icon => chosen.insert(id, icon),
         };
         Self::write(store, &chosen)?;
-        if !matches!(chosen.get(&id), Some(ServerIcon::Picture(_))) {
-            remove_if_present(&picture).map_err(fail)?;
-        }
+        let keeps_picture = matches!(chosen.get(&id), Some(ServerIcon::Picture(_)));
         self.chosen = chosen;
-        Ok(())
+        if keeps_picture {
+            return Ok(());
+        }
+        // The list no longer names the picture, so a leftover file is only
+        // clutter; report it without undoing the saved choice.
+        remove_if_present(&picture).map_err(fail)
     }
 
     /// Drop a removed server's icon and picture.
@@ -561,22 +568,34 @@ mod tests {
     #[::core::prelude::v1::test]
     fn invalid_entries_and_missing_pictures_fall_back_to_the_default() {
         let (_dir, store) = store();
-        let (good, bad_hue, too_long, gone) = (
-            ServerId::new_v4(),
-            ServerId::new_v4(),
-            ServerId::new_v4(),
-            ServerId::new_v4(),
-        );
+        let [good, bad_hue, too_long, gone, truncated, oversized] =
+            std::array::from_fn(|_| ServerId::new_v4());
+        let png = |side: u32| {
+            let mut png = Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(side, side)
+                .write_to(&mut png, image::ImageFormat::Png)
+                .unwrap();
+            png.into_inner()
+        };
+        let whole = png(PICTURE_SIDE);
+        replace_private(
+            &store.server_picture_path(truncated),
+            &whole[..whole.len() / 2],
+        )
+        .unwrap();
+        replace_private(&store.server_picture_path(oversized), &png(4096)).unwrap();
         let json = format!(
             r#"{{"{good}": {{"kind": "pattern", "hue": 145}},
                 "{bad_hue}": {{"kind": "pattern", "hue": 400}},
                 "{too_long}": {{"kind": "letters", "style": "gradient", "letters": "abc"}},
-                "{gone}": {{"kind": "picture"}}}}"#
+                "{gone}": {{"kind": "picture"}},
+                "{truncated}": {{"kind": "picture"}},
+                "{oversized}": {{"kind": "picture"}}}}"#
         );
         replace_private(&store.server_icons_path(), json.as_bytes()).unwrap();
         let icons = Icons::load(&store).unwrap();
         assert_eq!(icons.get(good), &ServerIcon::Pattern { hue: Some(145) });
-        for id in [bad_hue, too_long, gone] {
+        for id in [bad_hue, too_long, gone, truncated, oversized] {
             assert_eq!(icons.get(id), &ServerIcon::Default);
         }
         replace_private(&store.server_icons_path(), b"not json").unwrap();
