@@ -20,17 +20,18 @@ impl DraftStatus {
         matches!(self, Self::Pending | Self::Failed | Self::Uncertain)
     }
 
+    /// What became of the draft, without who approved it.
     pub fn label(self, content: &DraftContent) -> &'static str {
         match self {
             Self::Pending => "Needs approval",
-            Self::Approved if content.is_post() => "Approved, waiting to post",
-            Self::Approved => "Approved, waiting to send",
+            Self::Approved if content.is_post() => "Waiting to post",
+            Self::Approved => "Waiting to send",
             Self::Sending if content.is_post() => "Posting…",
             Self::Sending if content.is_email() => "Sending email…",
             Self::Sending => "Sending message…",
             Self::Sent if content.is_post() => "Posted",
-            Self::Sent if content.is_email() => "Sent email",
-            Self::Sent => "Sent message",
+            Self::Sent if content.is_email() => "Email sent",
+            Self::Sent => "Message sent",
             Self::Failed if content.is_post() => "Post not published",
             Self::Failed if content.is_email() => "Email not sent",
             Self::Failed => "Message not sent",
@@ -93,6 +94,25 @@ impl DraftContent {
         match self {
             Self::Email { subject, .. } => Some(subject),
             Self::Message { .. } => None,
+        }
+    }
+
+    /// What a receipt inside a task leads with: the email's subject, else
+    /// what the draft is.
+    pub fn title(&self) -> String {
+        match self {
+            Self::Email { subject, .. } if !subject.is_empty() => subject.clone(),
+            Self::Email { .. } => "Email".into(),
+            Self::Message { .. } if self.is_post() => "X post".into(),
+            Self::Message { .. } => format!("{} message", self.label()),
+        }
+    }
+
+    /// Who it goes to, when it names someone.
+    fn recipient(&self) -> Option<String> {
+        match self {
+            Self::Email { to, .. } => Some(to.join(", ")),
+            Self::Message { destination, .. } => destination.clone(),
         }
     }
 
@@ -206,6 +226,10 @@ impl DraftContent {
     }
 }
 
+/// The detail the API writes when it closes a draft because the owner's reply
+/// moved on (migration `0037_reply_closes_drafts`), not by the Discard button.
+const REPLY_MOVED_ON: &str = "Your reply moved on without sending it.";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ApprovalSource {
@@ -258,12 +282,45 @@ impl OutgoingDraft {
         self.status == DraftStatus::Pending && !self.in_reply
     }
 
-    pub fn label(&self) -> &'static str {
-        if self.status == DraftStatus::Pending && self.in_reply {
-            "Continued in your reply"
-        } else {
-            self.status.label(&self.content)
+    /// The receipt line: who acted, then what became of the draft.
+    pub fn label(&self) -> String {
+        match self.status {
+            DraftStatus::Pending if self.in_reply => "Continued in your reply".into(),
+            DraftStatus::Discarded if self.result_detail.as_deref() == Some(REPLY_MOVED_ON) => {
+                "Closed by your reply".into()
+            }
+            // Otherwise only the owner's Discard button discards a draft.
+            DraftStatus::Discarded => "You discarded this draft".into(),
+            _ => {
+                let outcome = self.status.label(&self.content);
+                match self.approver() {
+                    Some(who) => format!("{who} · {outcome}"),
+                    None => outcome.into(),
+                }
+            }
         }
+    }
+
+    /// Who approved the draft, once it has left review.
+    fn approver(&self) -> Option<&'static str> {
+        match (self.status, self.approval_source) {
+            (DraftStatus::Pending | DraftStatus::Superseded, _) => None,
+            (_, Some(ApprovalSource::Button)) => Some("You approved"),
+            (_, Some(ApprovalSource::Message)) => Some("You approved in chat"),
+            (_, Some(ApprovalSource::Standing)) => Some("Approved by your standing rule"),
+            (DraftStatus::Approved, None) => Some("Approved"),
+            (_, None) => None,
+        }
+    }
+
+    /// The receipt's title and outcome lines inside a task, whose meta row
+    /// already carries the time.
+    pub fn task_receipt(&self) -> (String, String) {
+        let outcome = match self.content.recipient() {
+            Some(to) => format!("{} · to {to}", self.label()),
+            None => self.label(),
+        };
+        (self.content.title(), outcome)
     }
 
     pub fn edit(&self) -> DraftEdit {
@@ -303,7 +360,7 @@ mod tests {
             card.result_detail.as_deref(),
             Some("The mail server accepted it from the connected account.")
         );
-        assert_eq!(card.status.label(&card.content), "Sent email");
+        assert_eq!(card.status.label(&card.content), "Email sent");
         assert!(
             card.content
                 .metadata()
@@ -351,7 +408,119 @@ mod tests {
         assert!(card("pending", false).is_open());
         assert!(!card("pending", true).is_open());
         assert_eq!(card("pending", true).label(), "Continued in your reply");
-        assert_eq!(card("discarded", false).label(), "Draft discarded");
+        assert_eq!(card("discarded", false).label(), "You discarded this draft");
+    }
+
+    #[test]
+    fn the_reply_closed_detail_matches_the_migration_that_writes_it() {
+        assert!(
+            include_str!("../../../api/migrations/0037_reply_closes_drafts.sql")
+                .contains(REPLY_MOVED_ON),
+            "rewording the trigger's detail would credit the owner with its discards"
+        );
+    }
+
+    #[test]
+    fn a_receipt_names_who_approved_or_discarded_it() {
+        let card = |status: &str, source: Option<&str>, detail: Option<&str>| -> String {
+            serde_json::from_value::<OutgoingDraft>(json!({
+                "id": Uuid::nil(), "lineage_id": Uuid::nil(), "revision": 1,
+                "content": {"channel":"email", "from":"me@example.com", "to":["ada@example.com"],
+                    "cc":[], "bcc":[], "subject":"Hi", "body":"Hi"},
+                "version":1, "status":status, "can_approve":false,
+                "approval_source":source, "result_detail":detail,
+                "updated_at":"2026-11-14T11:00:00Z", "settled_at":"2026-11-14T11:00:00Z"
+            }))
+            .unwrap()
+            .label()
+        };
+        assert_eq!(
+            card("sent", Some("button"), None),
+            "You approved · Email sent"
+        );
+        assert_eq!(
+            card("sent", Some("message"), None),
+            "You approved in chat · Email sent"
+        );
+        assert_eq!(
+            card("sent", Some("standing"), None),
+            "Approved by your standing rule · Email sent"
+        );
+        assert_eq!(
+            card("failed", Some("button"), Some("Refused")),
+            "You approved · Email not sent"
+        );
+        assert_eq!(
+            card("approved", Some("standing"), None),
+            "Approved by your standing rule · Waiting to send"
+        );
+        assert_eq!(card("approved", None, None), "Approved · Waiting to send");
+        assert_eq!(card("sent", None, None), "Email sent");
+        assert_eq!(card("discarded", None, None), "You discarded this draft");
+        assert_eq!(
+            card("discarded", Some("button"), Some("Email not sent: refused")),
+            "You discarded this draft",
+            "a failed draft the owner discarded keeps its failure detail"
+        );
+        assert_eq!(
+            card("discarded", None, Some(REPLY_MOVED_ON)),
+            "Closed by your reply"
+        );
+        assert_eq!(card("superseded", Some("button"), None), "Draft replaced");
+        assert_eq!(card("pending", None, None), "Needs approval");
+    }
+
+    #[test]
+    fn a_receipt_inside_a_task_leads_with_the_draft_then_the_decision() {
+        let card = |content: serde_json::Value, status: &str, source: Option<&str>| {
+            serde_json::from_value::<OutgoingDraft>(json!({
+                "id": Uuid::nil(), "lineage_id": Uuid::nil(), "revision": 1,
+                "content": content, "version":1, "status":status, "can_approve":false,
+                "approval_source":source, "result_detail":null,
+                "updated_at":"2026-11-14T11:00:00Z", "settled_at":"2026-11-14T11:00:00Z"
+            }))
+            .unwrap()
+            .task_receipt()
+        };
+        let email = json!({"channel":"email", "from":"me@example.com",
+            "to":["iam4x@me.com"], "cc":[], "bcc":[], "subject":"Proposal", "body":"Hi"});
+        let lines = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+        assert_eq!(
+            card(email.clone(), "discarded", None),
+            lines("Proposal", "You discarded this draft · to iam4x@me.com")
+        );
+        assert_eq!(
+            card(email.clone(), "sent", Some("button")),
+            lines("Proposal", "You approved · Email sent · to iam4x@me.com")
+        );
+        assert_eq!(
+            card(email, "sent", Some("standing")),
+            lines(
+                "Proposal",
+                "Approved by your standing rule · Email sent · to iam4x@me.com"
+            )
+        );
+        assert_eq!(
+            card(
+                json!({"channel":"message", "platform":"telegram",
+                "destination":"Family", "body":"Hi"}),
+                "sent",
+                Some("button")
+            ),
+            lines(
+                "Telegram message",
+                "You approved · Message sent · to Family"
+            )
+        );
+        assert_eq!(
+            card(
+                json!({"channel":"message", "platform":"x", "account":"@acme",
+                "body":"Hi"}),
+                "discarded",
+                None
+            ),
+            lines("X post", "You discarded this draft")
+        );
     }
 
     #[test]

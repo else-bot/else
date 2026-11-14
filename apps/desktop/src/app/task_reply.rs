@@ -1,7 +1,8 @@
 pub(super) mod state;
 
-use self::state::{ReplyState, TaskReply};
+use self::state::{Earlier, ReplyState, TaskReply};
 use super::conversation::ReplyLayout;
+use super::message_row::CardPlacement;
 use super::reply::Author;
 use super::{ElseApp, RowKey};
 use crate::avatar::bot_avatar;
@@ -22,6 +23,7 @@ impl ElseApp {
         &self,
         task: &TaskReply,
         stamp: Option<DateTime<Utc>>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let view = self.view.as_ref()?;
@@ -82,10 +84,7 @@ impl ElseApp {
             .xsmall()
             .flex_none()
         };
-        let updates = expandable.then(|| {
-            let count = history.len();
-            format!("{count} {}", if count == 1 { "update" } else { "updates" })
-        });
+        let updates = expandable.then(|| task.fold_label(history.len()));
         // Every assistant turn opens with the same name row as a plain reply.
         let name_row = h_flex()
             .w_full()
@@ -149,7 +148,9 @@ impl ElseApp {
         };
         let mut explanation = None;
         let status = if owner_waiting {
-            expandable.then(|| meta_row().child("Earlier updates").child(chevron()))
+            updates
+                .clone()
+                .map(|updates| meta_row().child(updates).child(chevron()))
         } else if complete {
             Some(tail(
                 meta_row()
@@ -233,6 +234,9 @@ impl ElseApp {
                     .cursor_pointer()
                     .toggled(expanded)
                     .h_auto()
+                    // A column stretches its children, which centers the label.
+                    .self_start()
+                    .max_w_full()
                     .py_0p5()
                     .px_1p5()
                     .ml(px(-6.))
@@ -254,7 +258,8 @@ impl ElseApp {
                 status.into_any_element()
             }
         });
-        let earlier = (expanded && expandable).then(|| {
+        let entries = task.earlier(conversation, &history, expanded);
+        let earlier = (!entries.is_empty()).then(|| {
             let mut updates = v_flex()
                 .w_full()
                 .min_w_0()
@@ -262,7 +267,19 @@ impl ElseApp {
                 .pl_3()
                 .border_l_1()
                 .border_color(theme.border);
-            for id in history {
+            for entry in entries {
+                let id = match entry {
+                    Earlier::Reply(id) => id,
+                    Earlier::Card(key) => {
+                        updates = updates.children(self.render_card(
+                            key,
+                            CardPlacement::InTask,
+                            window,
+                            cx,
+                        ));
+                        continue;
+                    }
+                };
                 updates = updates.child(
                     v_flex()
                         .w_full()
@@ -273,7 +290,7 @@ impl ElseApp {
                                 div()
                                     .text_size(px(12.))
                                     .text_color(meta)
-                                    .child(super::message_row::stamp(at))
+                                    .child(super::message_row::short_stamp(at))
                             },
                         ))
                         .children(self.task_message(id, conversation.reaction_for(id), cx)),
@@ -305,30 +322,16 @@ impl ElseApp {
             .min_w_0()
             .gap_1p5()
             .child(name_row);
-        // A turn that ended closes on its meta row; a live one leads with it.
+        // Earlier replies always read before the current one. A completed,
+        // failed or uncertain turn closes on its meta row; others lead with it.
         card = if complete || error {
-            card.children(reply)
-                .children(earlier)
+            card.children(earlier)
+                .children(reply)
                 .children(explanation)
                 .children(status)
         } else {
             card.children(status).children(earlier).children(reply)
         };
-        for &id in &task.kept {
-            card = card.child(
-                v_flex()
-                    .w_full()
-                    .gap_1()
-                    .pt_1()
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(meta)
-                            .child("Kept from this task"),
-                    )
-                    .children(self.task_message(id, conversation.reaction_for(id), cx)),
-            );
-        }
         let animate = !cx.reduce_motion()
             && view
                 .reply_transitions
@@ -406,7 +409,6 @@ impl ElseApp {
     }
 }
 
-/// Three dots that pulse in turn beside a working turn's label, one lap per 1.2 s.
 fn waits_on_owner(task: &TaskReply, turn: &crate::model::Turn) -> bool {
     task.state == ReplyState::Waiting
         && (turn.waits_on_owner()
@@ -425,6 +427,7 @@ pub(super) fn shows_only_name(task: &TaskReply, turn: &crate::model::Turn) -> bo
         && task.kept.is_empty()
 }
 
+/// Three dots that pulse in turn beside a working turn's label, one lap per 1.2 s.
 fn working_dots(turn: Uuid, color: Hsla, still: bool) -> impl IntoElement {
     h_flex()
         .flex_none()

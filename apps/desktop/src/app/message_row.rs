@@ -82,7 +82,7 @@ impl ElseApp {
         let body = if row.activity.is_some() {
             self.render_bot_activity(&row, cx)
         } else if let Some(task) = row.task.as_ref() {
-            self.render_task_reply(task, row.footer_stamp, cx)
+            self.render_task_reply(task, row.footer_stamp, window, cx)
         } else {
             self.render_row_content(&row, window, cx)
         };
@@ -436,16 +436,14 @@ impl ElseApp {
                     .children(footer.map(|at| note(at, false)))
                     .into_any_element()
             }
-            RowKey::SkillInstall(id) => side(self.render_skill_card(id, cx)).into_any_element(),
-            RowKey::SecretRequest(id) => side(self.render_secret_card(id, cx)).into_any_element(),
-            RowKey::Question(id) => {
-                side(self.render_question_card(id, window, cx)).into_any_element()
-            }
-            RowKey::Draft(id) => side(self.render_draft_card(id, cx)).into_any_element(),
-            RowKey::SocialSetup(id) => side(self.render_social_card(id, cx)).into_any_element(),
-            RowKey::Handoff(id) => self.render_handoff(id, cx),
-            RowKey::ComputerHandoff(id) => self.render_handoff_row(id, cx),
-            RowKey::OwnerNotice(id) => side(self.render_notice_card(id, cx)?).into_any_element(),
+            RowKey::SkillInstall(_)
+            | RowKey::SecretRequest(_)
+            | RowKey::Question(_)
+            | RowKey::Draft(_)
+            | RowKey::SocialSetup(_)
+            | RowKey::Handoff(_)
+            | RowKey::ComputerHandoff(_)
+            | RowKey::OwnerNotice(_) => self.render_card(key, CardPlacement::Row, window, cx)?,
             RowKey::Pending(request_id) => {
                 let pending = self
                     .selected
@@ -535,6 +533,37 @@ impl ElseApp {
                 column = column.child(beside(true, line));
                 column.into_any_element()
             }
+        })
+    }
+}
+
+/// Where an owner action card renders: as its own transcript row, or inside
+/// its task's card after the reply it followed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CardPlacement {
+    Row,
+    InTask,
+}
+
+impl ElseApp {
+    pub(super) fn render_card(
+        &self,
+        key: RowKey,
+        placement: CardPlacement,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let side = |card: AnyElement| div().w_full().min_w_0().child(card).into_any_element();
+        Some(match key {
+            RowKey::SkillInstall(id) => side(self.render_skill_card(id, cx)),
+            RowKey::SecretRequest(id) => side(self.render_secret_card(id, cx)),
+            RowKey::Question(id) => side(self.render_question_card(id, placement, window, cx)),
+            RowKey::Draft(id) => side(self.render_draft_card(id, placement, cx)),
+            RowKey::SocialSetup(id) => side(self.render_social_card(id, cx)),
+            RowKey::Handoff(id) => self.render_handoff(id, cx),
+            RowKey::ComputerHandoff(id) => self.render_handoff_row(id, cx),
+            RowKey::OwnerNotice(id) => side(self.render_notice_card(id, cx)?),
+            RowKey::Item(_) | RowKey::Task(_) | RowKey::Pending(_) => return None,
         })
     }
 }
@@ -856,6 +885,24 @@ pub(super) fn stamp(at: DateTime<Utc>) -> String {
     stamp_in(at, Local::now())
 }
 
+/// The time alone today, the date as well on another day.
+pub(super) fn short_stamp(at: DateTime<Utc>) -> String {
+    short_stamp_in(at, Local::now())
+}
+
+fn short_stamp_in<Tz: TimeZone>(at: DateTime<Utc>, now: DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    if at.with_timezone(&now.timezone()).date_naive() == now.date_naive() {
+        at.with_timezone(&now.timezone())
+            .format("%H:%M")
+            .to_string()
+    } else {
+        stamp_in(at, now)
+    }
+}
+
 fn stamp_in<Tz: TimeZone>(at: DateTime<Utc>, now: DateTime<Tz>) -> String
 where
     Tz::Offset: std::fmt::Display,
@@ -945,7 +992,7 @@ impl Element for CenterReveal {
 
 #[cfg(test)]
 mod tests {
-    use super::{day_label_in, stamp_in, turn_label};
+    use super::{day_label_in, short_stamp_in, stamp_in, turn_label};
     use chrono::{DateTime, FixedOffset, Utc};
 
     #[test]
@@ -1026,6 +1073,16 @@ mod tests {
         assert_eq!(
             stamp_in(at("2025-12-31T21:59:00Z"), now),
             "31 Dec 2025, 23:59"
+        );
+        assert_eq!(short_stamp_in(at("2026-11-04T07:05:00Z"), now), "09:05");
+        assert_eq!(
+            short_stamp_in(at("2026-11-03T22:30:00Z"), now),
+            "00:30",
+            "the viewer's day, not UTC's"
+        );
+        assert_eq!(
+            short_stamp_in(at("2026-11-03T21:30:00Z"), now),
+            "3 Nov, 23:30"
         );
     }
 

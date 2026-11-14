@@ -13,6 +13,7 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use super::super::action_card::OPTION_HEIGHT;
+use super::super::message_row::CardPlacement;
 use super::{Connection, ElseApp, QuestionForm, RowKey, SubmitState, callout, letter, receipt};
 use crate::model::{Question, QuestionAnswer};
 
@@ -133,6 +134,7 @@ impl ElseApp {
         question: &Question,
         form: Option<&QuestionForm>,
         bot_name: &str,
+        placement: CardPlacement,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -185,6 +187,11 @@ impl ElseApp {
                         .text_color(theme.muted_foreground)
                         .child(context.clone()),
                 );
+            }
+            // Inside its task the card already sits where the bot paused, so
+            // the divider would head the replies from before the pause.
+            if placement == CardPlacement::InTask {
+                return card.into_any_element();
             }
             let at = question
                 .settled_at
@@ -491,7 +498,6 @@ fn chose(question: &Question, answer: Option<&QuestionAnswer>) -> String {
         .collect();
     match chosen.as_slice() {
         [] => "Answer sent.".into(),
-        [one] if !question.multiple => format!("You chose {} · {}.", letter(&one.id), one.label),
         many => format!(
             "You chose {}.",
             many.iter()
@@ -555,7 +561,7 @@ mod tests {
             Settled {
                 marker: "Resumed",
                 resumed: true,
-                outcome: "You chose B · HTML digest.".into()
+                outcome: "You chose HTML digest.".into()
             }
         );
         let many = question(
@@ -591,7 +597,7 @@ mod tests {
         form.state = SubmitState::Recorded;
         assert_eq!(
             settled(&pending, Some(&form), None).outcome,
-            "You chose A · Plain text."
+            "You chose Plain text."
         );
     }
 }

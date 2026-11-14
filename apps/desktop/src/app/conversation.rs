@@ -2,7 +2,7 @@ use super::ElseApp;
 use super::bot_activity::{BotActivity, group_activity};
 use super::reply::Author;
 use super::row_text::{RowFormat, RowSource, RowText};
-use super::task_reply::state::{ReplyState, TaskReply, task_replies};
+use super::task_reply::state::{ReplyState, TaskReply, place_cards, task_replies};
 use crate::api::{ClientError, LiveCommand, ReplyPosition, StreamMessage};
 use crate::model::{Applied, Conversation, Snapshot};
 use chrono::{DateTime, Local, TimeDelta, TimeZone, Utc};
@@ -71,6 +71,10 @@ impl TranscriptRow {
     pub(super) fn contains(&self, key: RowKey) -> bool {
         self.key == key
             || matches!(key, RowKey::Item(id) if self.activity.as_ref().is_some_and(|activity| activity.contains(id)))
+            || self
+                .task
+                .as_ref()
+                .is_some_and(|task| task.cards.iter().any(|card| card.key == key))
     }
 }
 
@@ -171,7 +175,16 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
+    turn_card_rows(c)
+        .into_iter()
+        .map(|(_, key, anchor)| (key, anchor))
+        .collect()
+}
+
+/// Each card row with its turn and the item it follows.
+pub(super) fn turn_card_rows(c: &Conversation) -> Vec<(Uuid, RowKey, Option<Uuid>)> {
     c.turns_in_order()
         .into_iter()
         .flat_map(|turn| {
@@ -256,8 +269,35 @@ pub(super) fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
                                 .then_some((RowKey::Draft(draft.id), anchor))
                         }),
                 )
+                .map(move |(key, anchor)| (turn.id, key, anchor))
         })
         .collect()
+}
+
+fn card_state(c: &Conversation, key: RowKey) -> Option<String> {
+    match key {
+        RowKey::Question(id) => c.question(id).map(|q| q.status.clone()),
+        RowKey::Draft(id) => c.outgoing_draft(id).map(|d| {
+            format!(
+                "{}:{}:{:?}:{}:{}",
+                d.version, d.updated_at, d.status, d.can_approve, d.in_reply
+            )
+        }),
+        RowKey::SkillInstall(id) => c.skill_install(id).map(|r| format!("{:?}", r.status)),
+        RowKey::SecretRequest(id) => c.secret_request(id).map(|r| r.status.clone()),
+        RowKey::SocialSetup(id) => c.social_setup(id).map(|s| s.status.clone()),
+        RowKey::OwnerNotice(id) => c.owner_notice(id).map(|n| format!("{n:?}")),
+        RowKey::ComputerHandoff(id) => c.computer_handoff(id).map(|h| format!("{:?}", h.status)),
+        RowKey::Handoff(id) => c
+            .handoff(id)
+            .map(|(_, group)| format!("{:?}", group.iter().map(|d| d.status).collect::<Vec<_>>())),
+        RowKey::Item(id) => c
+            .item(id)
+            .and_then(|i| c.turn(i.turn_id))
+            .map(|t| t.status.clone()),
+        RowKey::Task(id) => c.turn(id).map(|t| t.status.clone()),
+        RowKey::Pending(_) => None,
+    }
 }
 
 const BURST_GAP: TimeDelta = TimeDelta::minutes(5);
@@ -763,10 +803,12 @@ impl ElseApp {
         if let (Some(pending), Some(conversation)) = (self.pending.get_mut(&bot), conversation) {
             pending.retain(|p| !conversation.has_request(p.request_id));
         }
-        let tasks = conversation.map(task_replies).unwrap_or_default();
+        let mut tasks = conversation.map(task_replies).unwrap_or_default();
         let mut rows = Vec::new();
         let mut texts = Vec::new();
-        let mut requests = conversation.map(request_rows).unwrap_or_default();
+        let mut requests = conversation
+            .map(|c| place_cards(c, &mut tasks, turn_card_rows(c)))
+            .unwrap_or_default();
         requests.extend(conversation.into_iter().flat_map(|c| {
             c.turns_in_order()
                 .into_iter()
@@ -917,31 +959,16 @@ impl ElseApp {
                 let routine_turn = routine.and_then(|r| conversation?.turn(r.turn));
                 let routine_status = routine_turn.map(super::message_row::turn_label);
                 let state = conversation.and_then(|c| match key {
-                    RowKey::Question(id) => c.question(id).map(|q| q.status.clone()),
-                    RowKey::Draft(id) => c.outgoing_draft(id).map(|d| {
-                        format!(
-                            "{}:{}:{:?}:{}:{}",
-                            d.version, d.updated_at, d.status, d.can_approve, d.in_reply
-                        )
+                    // A task row also changes when a card inside it does.
+                    RowKey::Task(id) => c.turn(id).map(|t| {
+                        tasks
+                            .get(&id)
+                            .into_iter()
+                            .flat_map(|task| &task.cards)
+                            .filter_map(|card| card_state(c, card.key))
+                            .fold(t.status.clone(), |state, card| state + ":" + &card)
                     }),
-                    RowKey::SkillInstall(id) => {
-                        c.skill_install(id).map(|r| format!("{:?}", r.status))
-                    }
-                    RowKey::SecretRequest(id) => c.secret_request(id).map(|r| r.status.clone()),
-                    RowKey::SocialSetup(id) => c.social_setup(id).map(|s| s.status.clone()),
-                    RowKey::OwnerNotice(id) => c.owner_notice(id).map(|n| format!("{n:?}")),
-                    RowKey::ComputerHandoff(id) => {
-                        c.computer_handoff(id).map(|h| format!("{:?}", h.status))
-                    }
-                    RowKey::Handoff(id) => c.handoff(id).map(|(_, group)| {
-                        format!("{:?}", group.iter().map(|d| d.status).collect::<Vec<_>>())
-                    }),
-                    RowKey::Item(id) => c
-                        .item(id)
-                        .and_then(|i| c.turn(i.turn_id))
-                        .map(|t| t.status.clone()),
-                    RowKey::Task(id) => c.turn(id).map(|t| t.status.clone()),
-                    RowKey::Pending(_) => None,
+                    _ => card_state(c, key),
                 });
                 TranscriptRow {
                     key,
