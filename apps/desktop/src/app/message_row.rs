@@ -9,8 +9,7 @@ use crate::model::ReactionKind;
 use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
-use gpui_kit::component::FocusableExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Theme, h_flex};
@@ -575,17 +574,11 @@ pub(super) fn with_reaction(
 /// whole row opens the routines in bot details.
 fn routine_run(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> Button {
     let theme = cx.theme();
-    Button::new(SharedString::from(format!(
+    super::action_card::event_button(SharedString::from(format!(
         "routine-{}-{}",
         run.routine_id,
         run.due_at.timestamp()
     )))
-    .ghost()
-    .focus_ring(false)
-    .cursor_pointer()
-    .w_full()
-    .h_auto()
-    .p_0()
     .accessibility_label(format!(
         "{} {}, {}. View routines in bot details",
         run.label(),

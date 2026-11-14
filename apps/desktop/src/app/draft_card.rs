@@ -451,15 +451,24 @@ impl ElseApp {
             Some(subject) => super::action_card::titled(
                 content_icon,
                 // The input is taller than a title line; centre it on one.
-                div().h(px(22.)).flex().items_center().child(
-                    Input::new(subject)
-                        .appearance(false)
-                        .px_0()
-                        .text_size(px(15.))
-                        .disabled(busy)
-                        .aria_label("Email subject")
-                        .font_semibold(),
-                ),
+                // A hover shade, hung past the title's edge, shows it edits.
+                div()
+                    .h(px(22.))
+                    .mx(px(-6.))
+                    .px(px(6.))
+                    .flex()
+                    .items_center()
+                    .rounded(theme.radius)
+                    .hover(|style| style.bg(theme.foreground.opacity(0.06)))
+                    .child(
+                        Input::new(subject)
+                            .appearance(false)
+                            .px_0()
+                            .text_size(px(15.))
+                            .disabled(busy)
+                            .aria_label("Email subject")
+                            .font_semibold(),
+                    ),
                 "",
             )
             .meta(
@@ -474,15 +483,26 @@ impl ElseApp {
             .when(!draft.can_approve, |card| card.tag("Reply in chat"))
             .child(
                 v_flex().gap_2().children(metadata()).child(
-                    // The editor pads its text by the medium input inset;
-                    // pull it back so the body starts on the card's text edge.
-                    div().mx(px(-10.)).mt_1().child(
-                        Textarea::new(&form.body)
-                            .appearance(false)
-                            .line_height(relative(1.5))
-                            .disabled(busy)
-                            .aria_label(draft.content.body_label()),
-                    ),
+                    // A deeper fill and a visible edge mark the body as
+                    // editable, apart from the card's read-only lines.
+                    div()
+                        .mt_1()
+                        .rounded(theme.radius)
+                        .bg(if theme.mode.is_dark() {
+                            theme.background.opacity(0.6)
+                        } else {
+                            gpui_kit::white()
+                        })
+                        .border_1()
+                        .border_color(theme.foreground.opacity(0.1))
+                        .hover(|style| style.border_color(theme.foreground.opacity(0.2)))
+                        .child(
+                            Textarea::new(&form.body)
+                                .appearance(false)
+                                .line_height(relative(1.5))
+                                .disabled(busy)
+                                .aria_label(draft.content.body_label()),
+                        ),
                 ),
             );
         let footer = super::action_card::footer()

@@ -3,8 +3,6 @@ use super::conversation::{ReplyLayout, TranscriptRow};
 use super::{ElseApp, RowKey};
 use crate::model::{BotCreated, BotReplyStatus, Conversation, Item};
 use gpui_kit::base::ElementExt as _;
-use gpui_kit::component::FocusableExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -188,13 +186,7 @@ impl ElseApp {
             ));
         let title = names.clone();
         let mut card = v_flex().w_full().min_w_0().child(
-            Button::new(SharedString::from(format!("bot-activity-{anchor}")))
-                .ghost()
-                .focus_ring(false)
-                .cursor_pointer()
-                .w_full()
-                .h_auto()
-                .p_0()
+            super::action_card::event_button(SharedString::from(format!("bot-activity-{anchor}")))
                 .accessibility_label(format!(
                     "Open conversation between {names}, {messages}, {}. {last_sender}: {last_text}",
                     status.label()

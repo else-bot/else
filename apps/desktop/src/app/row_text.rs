@@ -316,6 +316,7 @@ impl RowText {
         let text = match &self.widget {
             Widget::Markdown { state, .. } => state.read(cx).rendered_text().as_str().to_owned(),
             Widget::Plain(_) if !self.files.is_empty() => self.source.clone(),
+            Widget::Plain(_) if self.quote.is_some() => self.display.text.clone(),
             Widget::Plain(_) => return None,
         };
         let system = cx.text_system();
@@ -342,7 +343,21 @@ impl RowText {
         // Plain text also needs its own inset and the textarea's 10 px caret margin.
         let (inset_x, _) = self.inset();
         let caret = if inset_x > px(0.) { px(10.) } else { px(0.) };
-        Some(widest + inset_x * 2. + caret + px(4.))
+        // The quote line above the body: reply icon, author, "·" and the
+        // excerpt, 8 px apart.
+        let quote = self.quote_line().map_or(px(0.), |(author, excerpt)| {
+            px(12.) + measure(&author) + measure("·") + measure(&excerpt) + px(24.)
+        });
+        Some((widest + inset_x * 2. + caret).max(quote) + px(4.))
+    }
+
+    fn quote_line(&self) -> Option<(String, String)> {
+        let reply = QuotedReply::parse(&self.source)?;
+        let author = match reply.author {
+            Author::Owner => "You".to_owned(),
+            Author::Bot => self.bots.name(self.bot)?.to_owned(),
+        };
+        Some((author, reply.excerpt()))
     }
 
     /// The horizontal and vertical padding the widget draws inside itself: a
@@ -744,10 +759,7 @@ impl RowText {
         let bot = self.bot;
         let from = self.key;
         let author_kind = reply.author;
-        let author = match reply.author {
-            Author::Owner => "You".to_owned(),
-            Author::Bot => self.bots.name(self.bot)?.to_owned(),
-        };
+        let (author, excerpt) = self.quote_line()?;
         let theme = cx.theme();
         Some(
             Button::new("quoted-reply-preview")
@@ -775,7 +787,7 @@ impl RowText {
                                 .child(author.clone()),
                         )
                         .child(div().flex_none().child("·"))
-                        .child(div().flex_1().min_w_0().truncate().child(reply.excerpt())),
+                        .child(div().flex_1().min_w_0().truncate().child(excerpt)),
                 )
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();

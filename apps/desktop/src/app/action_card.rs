@@ -297,10 +297,22 @@ pub(super) fn event_row(theme: &Theme) -> Div {
         .h(px(36.))
         .items_center()
         .gap_2()
-        .rounded(theme.radius)
         .text_size(px(13.))
         .text_color(theme.muted_foreground)
-        .hover(|style| style.bg(theme.muted.opacity(0.5)))
+}
+
+/// The button around an activity row the whole of which opens something.
+/// Its hover fill hangs 8 px past the row on each side, so the icon keeps
+/// the message column's edge and clears the fill's corner.
+pub(super) fn event_button(id: impl Into<ElementId>) -> Button {
+    Button::new(id)
+        .ghost()
+        .focus_ring(false)
+        .cursor_pointer()
+        .h_auto()
+        .mx(px(-8.))
+        .px(px(8.))
+        .py_0()
 }
 
 /// What an activity row shows in its one right-hand slot.
