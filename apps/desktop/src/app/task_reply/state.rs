@@ -53,7 +53,7 @@ pub(in crate::app) struct TaskReply {
     pub history: Vec<Uuid>,
     pub kept: Vec<Uuid>,
     /// Cards that follow an earlier item of the turn, such as a settled draft
-    /// or question; [`earlier_entries`] places each after the item it followed.
+    /// or question; [`TaskReply::earlier`] places each after the item it followed.
     pub cards: Vec<TaskCard>,
     pub reactions: Vec<(Uuid, crate::model::ReactionKind)>,
     pub started_at: Option<DateTime<Utc>>,
