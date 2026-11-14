@@ -52,7 +52,8 @@ pub(in crate::app) struct TaskReply {
     pub summary: Option<String>,
     pub history: Vec<Uuid>,
     pub kept: Vec<Uuid>,
-    /// Owner action cards that settled before the current reply, in timeline order.
+    /// Cards that follow an earlier item of the turn, such as a settled draft
+    /// or question; [`earlier_entries`] places each after the item it followed.
     pub cards: Vec<TaskCard>,
     pub reactions: Vec<(Uuid, crate::model::ReactionKind)>,
     pub started_at: Option<DateTime<Utc>>,
@@ -289,6 +290,11 @@ pub(in crate::app) fn place_cards(
             match (inside, task) {
                 (Some(after), Some(task)) => {
                     task.cards.push(TaskCard { after, key });
+                    // The reply a card followed stays in view beside it.
+                    if let Some(at) = task.history.iter().position(|&id| id == after) {
+                        task.kept.push(task.history.remove(at));
+                        task.kept.sort_by_key(|&id| seq(id));
+                    }
                     None
                 }
                 _ => Some((key, anchor)),
@@ -1196,6 +1202,60 @@ mod tests {
                 "{status}: expanded progress keeps the cards after the reply they followed"
             );
         }
+    }
+
+    /// Two parks: a question answered after attempt 1, a draft discarded
+    /// after attempt 2. Only attempt 2's reply is kept by the attempt rule, so
+    /// the reply the question followed must stay visible beside it.
+    #[test]
+    fn every_card_in_a_task_keeps_the_reply_it_followed_in_view() {
+        let reply = |number: u128, attempt, at: &str| {
+            let mut reply = item(number, 10, "assistant");
+            reply["attempt"] = json!(attempt);
+            reply["created_at"] = json!(at);
+            reply
+        };
+        let mut done = turn(10, "completed");
+        done["attempt"] = json!(3);
+        done["questions"] = json!([{"id": id(210), "kind": "choice",
+            "title": "Which proposal should I schedule?",
+            "choices": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+            "status": "answered", "answer": "b", "settled_at": "2026-11-05T10:03:00Z"}]);
+        done["outgoing_drafts"] = json!([{"id": id(310), "lineage_id": id(311),
+            "revision": 1, "content": {"channel": "email", "from": "main@example.invalid",
+            "to": ["edward@example.invalid"], "cc": [], "bcc": [], "subject": "Re: help",
+            "body": "Hello"}, "version": 1, "status": "discarded", "can_approve": false,
+            "result_detail": null, "updated_at": "2026-11-05T10:05:00Z",
+            "settled_at": "2026-11-05T10:05:00Z"}]);
+        let c = conversation(
+            vec![
+                item(1, 10, "user"),
+                reply(2, 1, "2026-11-05T10:02:00Z"),
+                reply(3, 2, "2026-11-05T10:04:00Z"),
+                reply(4, 3, "2026-11-05T10:06:00Z"),
+            ],
+            vec![done],
+        );
+        let (tasks, rows) = placed(&c);
+        let task = &tasks[&id(10)];
+        assert!(
+            rows.is_empty(),
+            "both cards render inside the task: {rows:?}"
+        );
+        assert_eq!(
+            earlier_entries(&c, task, &task.history, false),
+            [
+                Earlier::Reply(id(2)),
+                Earlier::Card(RowKey::Question(id(210))),
+                Earlier::Reply(id(3)),
+                Earlier::Card(RowKey::Draft(id(310))),
+            ],
+            "each card follows the reply that asked for it, even collapsed"
+        );
+        assert!(
+            task.history.is_empty(),
+            "a reply on view is not counted as hidden"
+        );
     }
 
     #[test]
