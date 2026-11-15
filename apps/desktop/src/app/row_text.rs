@@ -550,6 +550,7 @@ impl RowText {
 
     pub(super) fn render(&self, cx: &App) -> AnyElement {
         let mentions = self.mentions.clone();
+        let clicked_mentions = mentions.clone();
         let files = self.files.clone();
         let preview_files = files.clone();
         let link_files = files.clone();
@@ -586,12 +587,17 @@ impl RowText {
                         .token_element(token.line_height(), token.is_selected(), cx)
                 })
                 .on_token_click(move |event, window, cx| {
-                    if let Some(file) =
-                        file_id(event.token().id()).and_then(|id| preview_files.get(&id))
-                    {
+                    let id = event.token().id();
+                    if let Some(file) = file_id(id).and_then(|id| preview_files.get(&id)) {
                         let _ = owner.update(cx, |app, cx| {
                             app.preview_attachment(bot, file.clone(), window, cx)
                         });
+                    } else if let Some(mentioned) = clicked_mentions
+                        .iter()
+                        .find(|mention| mention.token_id() == id.as_ref())
+                        .map(BotMention::bot)
+                    {
+                        let _ = owner.update(cx, |app, cx| app.open_bot(mentioned, window, cx));
                     }
                 })
                 .into_any_element(),
@@ -685,7 +691,10 @@ impl RowText {
                     })
                     .markdown_extensions(
                         MarkdownExtensions::default()
-                            .plugin(MentionPlugin(mentions))
+                            .plugin(MentionPlugin {
+                                mentions,
+                                owner: link_owner.clone(),
+                            })
                             .plugin(UnavailableImage),
                     )
                     .w_full()

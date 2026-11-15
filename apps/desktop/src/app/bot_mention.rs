@@ -9,6 +9,7 @@ use gpui_kit::*;
 use markdown::mdast::Node;
 use uuid::Uuid;
 
+use super::ElseApp;
 use crate::api::Bot;
 use crate::avatar::{Avatar, bot_avatar};
 
@@ -181,7 +182,7 @@ impl BotMention {
     }
 
     pub(super) fn token_element(&self, height: Pixels, selected: bool, cx: &App) -> AnyElement {
-        let element = self.element(height);
+        let element = self.element(height).into_any_element();
         if selected {
             use gpui_kit::component::ActiveTheme as _;
             div()
@@ -197,15 +198,23 @@ impl BotMention {
         self.id.to_string()
     }
 
-    fn element(&self, height: Pixels) -> AnyElement {
+    pub(super) fn bot(&self) -> Uuid {
+        self.id
+    }
+
+    fn element(&self, height: Pixels) -> Stateful<Div> {
         h_flex()
+            .id(SharedString::from(format!(
+                "bot-mention-{}-{}",
+                self.id, self.range.start
+            )))
+            .cursor_pointer()
             .h(height)
             .gap_1()
             .items_center()
             .font_weight(FontWeight::BOLD)
             .child(bot_avatar("mention-avatar", self.avatar, px(18.)).still())
             .child(self.name.clone())
-            .into_any_element()
     }
 }
 
@@ -266,7 +275,10 @@ impl MentionDisplay {
 }
 
 #[derive(Clone)]
-pub(super) struct MentionPlugin(pub Vec<BotMention>);
+pub(super) struct MentionPlugin {
+    pub mentions: Vec<BotMention>,
+    pub owner: WeakEntity<ElseApp>,
+}
 
 impl MarkdownPlugin for MentionPlugin {
     fn name(&self) -> &str {
@@ -278,7 +290,7 @@ impl MarkdownPlugin for MentionPlugin {
         let (id, offset) = link.url.strip_prefix("bot-mention:")?.split_once(':')?;
         let key = (id.parse::<Uuid>().ok()?, offset.parse::<usize>().ok()?);
         let mention = self
-            .0
+            .mentions
             .iter()
             .find(|mention| (mention.id, mention.range.start) == key)?;
         Some(MarkdownNode::new("bot-mention", key).text(mention.text.clone()))
@@ -293,10 +305,19 @@ impl MarkdownPlugin for MentionPlugin {
     ) -> Option<InlineElement> {
         let key = node.data::<(Uuid, usize)>()?;
         let mention = self
-            .0
+            .mentions
             .iter()
             .find(|mention| (mention.id, mention.range.start) == *key)?;
-        Some(InlineElement::new(mention.element(context.line_height())))
+        let (owner, bot) = (self.owner.clone(), mention.id);
+        Some(InlineElement::new(
+            mention
+                .element(context.line_height())
+                // Keeps the press from starting a text selection.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, window, cx| {
+                    let _ = owner.update(cx, |app, cx| app.open_bot(bot, window, cx));
+                }),
+        ))
     }
 }
 
