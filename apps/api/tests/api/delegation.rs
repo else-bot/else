@@ -1471,6 +1471,18 @@ async fn delegations_at_every_depth_share_one_request_budget() {
             "the top's task and the task's own both count"
         );
     }
+    // An owner follow-up carries the task forward (attempt 0): the new
+    // message starts with its whole budget, and the task keeps what it spent.
+    sqlx::query("UPDATE delegations SET parent_attempt = 0 WHERE child_turn_id = ?1")
+        .bind(child)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(delegation_context(&db, root).await.remaining, MAX_CHILDREN);
+    assert_eq!(
+        delegation_context(&db, child).await.remaining,
+        MAX_CHILDREN - 1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

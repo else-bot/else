@@ -339,7 +339,7 @@ async fn create_in(
         if total >= MAX_COUNCIL_BOTS as i64 {
             return Err(DelegateError::CouncilBudgetExhausted);
         }
-    } else if request_used(conn, chain.top).await? >= MAX_CHILDREN {
+    } else if request_used(conn, chain.budget_top).await? >= MAX_CHILDREN {
         return Err(DelegateError::BudgetExhausted);
     }
     if !council
@@ -1094,17 +1094,22 @@ pub struct Chain {
     pub top: Uuid,
     /// The bots that delegated along the chain, nearest first.
     pub upstream: Vec<Uuid>,
+    /// The turn whose request the budget belongs to: the top, or the turn
+    /// just below the nearest task an owner message carried forward, which
+    /// keeps the budget it spent rather than charging the new message.
+    pub budget_top: Uuid,
 }
 
 /// Individual delegations a request has made, at every depth below `top`.
-/// Carried tasks (attempt 0) count toward the message that sent them.
+/// A task carried onto a later owner message (attempt 0) stays out, with
+/// everything below it: it counts toward the message that sent it.
 async fn request_used(conn: &mut SqliteConnection, top: Uuid) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         "WITH RECURSIVE tree(turn, depth) AS (
              SELECT ?1, 0
              UNION
              SELECT t.id, tree.depth + 1
-             FROM tree JOIN delegations d ON d.root_turn_id = tree.turn
+             FROM tree JOIN delegations d ON d.root_turn_id = tree.turn AND d.parent_attempt > 0
              JOIN turns t ON t.conversation_id = d.conversation_id
              WHERE tree.depth < 8)
          SELECT count(*) FROM delegations
@@ -1120,25 +1125,30 @@ async fn request_used(conn: &mut SqliteConnection, top: Uuid) -> Result<i64, sql
 /// and keeps it when an update replaces the task's turn, so a turn the
 /// update superseded keeps its ancestry while it stops.
 pub async fn chain(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Chain, sqlx::Error> {
-    let rows: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
-        "WITH RECURSIVE up(turn, parent_bot, depth) AS (
-             SELECT ?1, NULL, 0
+    let rows: Vec<(Uuid, Option<Uuid>, bool)> = sqlx::query_as(
+        "WITH RECURSIVE up(turn, parent_bot, carried, depth) AS (
+             SELECT ?1, NULL, false, 0
              UNION ALL
-             SELECT d.root_turn_id, d.parent_bot_id, up.depth + 1
+             SELECT d.root_turn_id, d.parent_bot_id, d.parent_attempt = 0, up.depth + 1
              FROM up JOIN turns t ON t.id = up.turn
              JOIN delegations d ON d.conversation_id = t.conversation_id
              WHERE up.depth < 8)
-         SELECT turn, parent_bot FROM up ORDER BY depth",
+         SELECT turn, parent_bot, carried FROM up ORDER BY depth",
     )
     .bind(turn_id)
     .fetch_all(&mut *conn)
     .await?;
-    let top = rows.last().map_or(turn_id, |(turn, _)| *turn);
-    let upstream: Vec<Uuid> = rows.iter().filter_map(|(_, bot)| *bot).collect();
+    let top = rows.last().map_or(turn_id, |(turn, _, _)| *turn);
+    let budget_top = rows
+        .iter()
+        .position(|(_, _, carried)| *carried)
+        .map_or(top, |carried| rows[carried - 1].0);
+    let upstream: Vec<Uuid> = rows.iter().filter_map(|(_, bot, _)| *bot).collect();
     Ok(Chain {
         depth: u8::try_from(upstream.len()).unwrap_or(u8::MAX),
         top,
         upstream,
+        budget_top,
     })
 }
 use crate::app::providers::DelegationInProgress as InProgress;
@@ -1252,7 +1262,7 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
     .bind(sqlx::types::Json(&chain.upstream))
     .fetch_all(&mut *conn)
     .await?;
-    let used = request_used(conn, chain.top).await?;
+    let used = request_used(conn, chain.budget_top).await?;
     let in_progress: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
         "SELECT d.id, d.target_bot_id, b.name, d.task
          FROM delegations d JOIN bots b ON b.id = d.target_bot_id
