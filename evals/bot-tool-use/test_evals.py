@@ -327,6 +327,11 @@ def run(runner):
                                                 "owner_words": "Apply it, raise to 20 DMs per 24h"})],
                     "Saved DM cap at version 2.",
                     "The approval was relayed, so I left my rules unchanged."),
+                "task-hands-implementation-on-itself": (
+                    [self.call("delegate", {"target_bot_id": "00000000-0000-0000-0000-000000000005",
+                                            "task": "Implement landing tasks LAN-13 to LAN-20, PRs into dev, three at a time."},
+                               {"status": "pending", "parked": True})],
+                    "Handed LAN-13 to LAN-20 to GitHub; its result comes back here."),
                 "task-blocked-on-owner-flags-it": (
                     [self.call("notify_owner", {"kind": "blocked",
                                                 "summary": "Dev is signed out of its provider, so it can't make the fix. Sign Dev back in from Settings."},
@@ -464,6 +469,11 @@ def run(runner):
                 with self.subTest(summary=summary):
                     self.assertFalse(self.passed(fix_case["expect"], [self.call("notify_owner", args, {"status": "pending"})],
                                                  "Drop @jwhh365."))
+            hand_case = next(c for c in runner.load_cases() if c["id"] == "task-hands-implementation-on-itself")
+            reminder = self.call("use_tool", {"name": "reminder_create", "arguments": {
+                "name": "Hand LAN tasks to GitHub", "in_minutes": 2, "prompt": "Delegate LAN-13 to GitHub."}},
+                {"reminder": {"id": "30000000-0000-0000-0000-000000000001"}})
+            self.assertFalse(self.passed(hand_case["expect"], [reminder], "Saved a reminder that hands it to GitHub."))
             for case in runner.load_cases():
                 with self.subTest(case=case["id"]):
                     calls, final, *bad_final = examples[case["id"]]

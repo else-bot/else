@@ -11,7 +11,8 @@ use crate::app::tools::DEFERRED_TOOLS;
 pub enum Turn {
     /// The main bot answering the owner in its own conversation.
     Owner,
-    /// A task the main bot delegated to Research for an owner request.
+    /// A task the main bot delegated to Research for an owner request, at
+    /// the depth limit so it cannot delegate.
     DelegatedTask,
     /// A task the main bot delegated to Research during a routine run.
     RoutineTask,
@@ -20,6 +21,9 @@ pub enum Turn {
     /// A task the main bot delegated to Research during a routine run,
     /// with the owner's answer on a card that run asked.
     AnsweredTask,
+    /// A task the main bot delegated to Research for an owner request, one
+    /// hop deep, so it may hand part of its work to GitHub.
+    HandingTask,
 }
 
 /// A representative turn. Keep schemas on the same path as MCP tools/list.
@@ -36,13 +40,21 @@ pub fn export(turn: Turn) -> Value {
             remaining: crate::db::delegations::MAX_CHILDREN,
             ..DelegationContext::default()
         },
+        Turn::HandingTask => DelegationContext {
+            origin: Origin::OwnerRequest,
+            task_depth: 1,
+            delegated_by: Some((Uuid::from_u128(1), "Main".into())),
+            registry: vec![(Uuid::from_u128(5), "GitHub".into())],
+            remaining: crate::db::delegations::MAX_CHILDREN,
+            ..DelegationContext::default()
+        },
         Turn::DelegatedTask | Turn::RoutineTask | Turn::AnsweredTask => DelegationContext {
             origin: if matches!(turn, Turn::RoutineTask | Turn::AnsweredTask) {
                 Origin::RoutineRun
             } else {
                 Origin::OwnerRequest
             },
-            delegated_task: true,
+            task_depth: crate::db::delegations::MAX_DEPTH,
             delegated_by: Some((Uuid::from_u128(1), "Main".into())),
             owner_answer: (turn == Turn::AnsweredTask).then(|| {
                 crate::app::providers::OwnerAnswer {
@@ -65,18 +77,22 @@ pub fn export(turn: Turn) -> Value {
     let input = TurnInput {
         bot_id: match turn {
             Turn::Owner => Uuid::from_u128(1),
-            Turn::DelegatedTask | Turn::RoutineTask | Turn::MailEvent | Turn::AnsweredTask => {
-                Uuid::from_u128(4)
-            }
+            Turn::DelegatedTask
+            | Turn::RoutineTask
+            | Turn::MailEvent
+            | Turn::AnsweredTask
+            | Turn::HandingTask => Uuid::from_u128(4),
         },
         conversation_id: Uuid::from_u128(2),
         turn_id: Uuid::from_u128(3),
         turn_no: 1,
         bot_name: match turn {
             Turn::Owner => "Main".into(),
-            Turn::DelegatedTask | Turn::RoutineTask | Turn::MailEvent | Turn::AnsweredTask => {
-                "Research".into()
-            }
+            Turn::DelegatedTask
+            | Turn::RoutineTask
+            | Turn::MailEvent
+            | Turn::AnsweredTask
+            | Turn::HandingTask => "Research".into(),
         },
         text: "Help me with my tasks.".into(),
         parts: vec![],

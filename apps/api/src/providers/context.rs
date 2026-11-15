@@ -153,7 +153,12 @@ mod tests {
         let done = for_session(&turn, Some(&session(waiting.applied)));
         assert!(done.text.unwrap().contains("None."));
 
-        turn.delegation.delegated_task = true;
+        turn.delegation.task_depth = 1;
+        assert!(
+            prompt::in_progress_block(&turn).contains("None."),
+            "a task that can hand work on learns its own tasks"
+        );
+        turn.delegation.task_depth = crate::db::delegations::MAX_DEPTH;
         assert!(prompt::in_progress_block(&turn).is_empty());
     }
 

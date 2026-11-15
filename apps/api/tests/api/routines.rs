@@ -667,11 +667,10 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
     )
     .await;
     assert!(delegated.error, "{}", delegated.body);
-    assert!(
-        delegated.result["error"]
-            .as_str()
-            .is_some_and(|e| e.starts_with("NOT_ALLOWED")),
-        "{}",
+    assert_eq!(
+        delegated.code(),
+        "UPSTREAM_TARGET",
+        "a task never hands work back up its chain: {}",
         delegated.body
     );
     let created = tool(
@@ -692,8 +691,8 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
             None
         )
         .await,
-        Err(else_api::db::delegations::DelegateError::NotAllowed),
-        "one hop, even with a forged grant"
+        Err(else_api::db::delegations::DelegateError::UpstreamTarget),
+        "never back up the chain, even with a forged grant"
     );
     h.release(child).await;
     let (_, continuation_token) = h.started(root).await;

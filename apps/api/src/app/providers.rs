@@ -209,7 +209,7 @@ impl TurnInput {
         super::questions::GrantReach::of(
             self.delegation.origin,
             matches!(self.run, Some(SavedRun::Routine(_))),
-            !self.delegation.delegated_task,
+            !self.delegation.delegated_task(),
         )
     }
 }
@@ -321,8 +321,9 @@ pub enum Origin {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DelegationContext {
     pub origin: Origin,
-    /// This turn is a delegated task (a leaf): it cannot delegate.
-    pub delegated_task: bool,
+    /// Delegations above this turn: 0 in a bot's own conversation, 1 for a
+    /// task, 2 for a task that task delegated. See `delegations::MAX_DEPTH`.
+    pub task_depth: u8,
     /// For a delegated task: the bot that delegated it, ID and name.
     pub delegated_by: Option<(Uuid, String)>,
     /// For a delegated task: the owner's answer on a card the delegating
@@ -363,10 +364,16 @@ pub struct DelegationInProgress {
 }
 
 impl DelegationContext {
-    /// Any bot's own conversation may hand work to another bot; a
-    /// delegated task may not (one hop).
+    /// A task another bot delegated to this turn.
+    pub fn delegated_task(&self) -> bool {
+        self.task_depth > 0
+    }
+
+    /// A bot's own conversation, or a task above the depth limit, may hand
+    /// work to another bot; work an incoming event started may not.
     pub fn can_delegate(&self) -> bool {
-        !self.delegated_task && !matches!(self.origin, Origin::ConnectorEvent | Origin::SocialEvent)
+        self.task_depth < crate::db::delegations::MAX_DEPTH
+            && !matches!(self.origin, Origin::ConnectorEvent | Origin::SocialEvent)
     }
 
     /// Work done for the owner: the bot's own conversation, or a task another
@@ -374,7 +381,7 @@ impl DelegationContext {
     /// owner itself. It may use mail and social tools and show the owner
     /// cards, which a task shows in its own bot's chat.
     pub fn acts_for_owner(&self) -> bool {
-        !self.delegated_task || matches!(self.origin, Origin::OwnerRequest | Origin::RoutineRun)
+        !self.delegated_task() || matches!(self.origin, Origin::OwnerRequest | Origin::RoutineRun)
     }
 
     /// A bot manages its own routines for work rooted in an owner message,
@@ -388,7 +395,8 @@ impl DelegationContext {
     /// conversation, or in a task delegated with the owner's answer on a
     /// card; never for a routine, event, or other delegated task.
     pub fn can_edit_rules(&self) -> bool {
-        (self.origin == Origin::OwnerRequest && !self.delegated_task) || self.owner_answer.is_some()
+        (self.origin == Origin::OwnerRequest && !self.delegated_task())
+            || self.owner_answer.is_some()
     }
 
     /// The provider's own host shell, file, and web tools. Never for work an

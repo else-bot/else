@@ -1,7 +1,8 @@
-//! One-hop asynchronous delegation.
+//! Asynchronous delegation, up to [`MAX_DEPTH`] hops.
 //!
 //! A bot's provider attempt in its own owner conversation may hand one task
-//! to another registered bot (the main bot included), at most six individual
+//! to another registered bot (the main bot included), and that task may hand
+//! part of its work on once more, at most six individual
 //! delegations per request: a triage, implementation and merge chain plus
 //! one review round back to the implementer, with a hop to spare. A council accepts a group of up to 32 reports
 //! atomically. Each child runs as an ordinary queued turn of the target bot,
@@ -16,12 +17,16 @@
 //! and the chat turn's outcome becomes the child's. Identity, budget,
 //! target, and permissions come from the server, never from tool arguments.
 //!
-//! A task cannot delegate. Follow-up work for another bot, such as a fix a
-//! triage task found, goes in the task's reply with that bot's ID and a
-//! self-contained task. The delegating turn reads the reply in its
-//! continuation and delegates the follow-up itself, within its request's
-//! budget and its own origin's permissions. The task hash makes a repeated
-//! delegation of the same follow-up return the existing task.
+//! A task delegates like an owner turn: it parks, and the same triggers
+//! requeue it when its children settle. The chain is a turn's delegations
+//! followed up to the owner conversation turn at its top. That top's source
+//! item gives every turn in the chain its origin, so a sub-task never gains
+//! authority its request lacked, and a target already in the chain is
+//! refused. Councils stay with the top turn. A task at [`MAX_DEPTH`] cannot
+//! delegate: follow-up work for another bot goes in its reply with that
+//! bot's name and a self-contained task, and the delegating turn hands it on
+//! in its continuation. The task hash makes a repeated delegation of the
+//! same follow-up return the existing task.
 
 use std::collections::HashMap;
 
@@ -42,6 +47,9 @@ pub use control::{ControlError, Status, Task, TaskState, Updated, cancel, update
 
 /// Child limit when accepting an individual delegation.
 pub const MAX_CHILDREN: i64 = 6;
+/// Delegations from an owner conversation turn to the deepest task: the
+/// turn's task may delegate, that task's own task may not.
+pub const MAX_DEPTH: u8 = 2;
 /// Individual delegations per provider attempt; a council parks after its group.
 pub const PER_ATTEMPT: i64 = 1;
 pub const MAX_COUNCIL_BOTS: usize = 32;
@@ -60,10 +68,14 @@ pub const READY: &str = "d.delivered_attempt IS NULL
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DelegateError {
-    #[error("only a bot's own conversation can delegate; delegated tasks cannot delegate")]
+    #[error(
+        "this turn cannot delegate: a task {MAX_DEPTH} hops deep, a council from a task, or an event"
+    )]
     NotAllowed,
     #[error("a bot cannot delegate to itself")]
     SelfTarget,
+    #[error("that bot already works on this request upstream; reply to it instead")]
+    UpstreamTarget,
     #[error("that bot is not available")]
     BotUnavailable,
     #[error("this request already used its {MAX_CHILDREN} delegations")]
@@ -246,7 +258,10 @@ async fn create_in(
     if !status.serves_tools() || bot_status != "active" {
         return Err(DelegateError::NotRunning);
     }
-    if kind != "owner"
+    let chain = chain(conn, turn_id).await?;
+    if chain.depth >= MAX_DEPTH
+        || (council && chain.depth > 0)
+        || (kind != "owner" && chain.depth == 0)
         || matches!(
             origin(conn, turn_id).await?,
             crate::app::providers::Origin::ConnectorEvent
@@ -257,6 +272,9 @@ async fn create_in(
     }
     if target == parent {
         return Err(DelegateError::SelfTarget);
+    }
+    if chain.upstream.contains(&target) {
+        return Err(DelegateError::UpstreamTarget);
     }
     if let Some(question) = owner_answer {
         let answered: bool = sqlx::query_scalar(
@@ -663,9 +681,10 @@ async fn stop_children(
     Ok(())
 }
 
-/// End a task's turn with `code`: one that has not started is interrupted
-/// at once, one in progress moves to `cancelling` for the scheduler to
-/// interrupt. Returns whether the turn was still in progress.
+/// End a task's turn with `code`: one that has not started, or waits on its
+/// own tasks, is interrupted at once and stops those tasks; one in progress
+/// moves to `cancelling` for the scheduler to interrupt, and its finish
+/// stops them. Returns whether the turn was still in progress.
 async fn end_child_turn(
     conn: &mut SqliteConnection,
     turn: Uuid,
@@ -673,26 +692,30 @@ async fn end_child_turn(
     code: &str,
     message: &str,
 ) -> Result<bool, sqlx::Error> {
-    let changed = sqlx::query(
+    let ended: Option<TurnStatus> = sqlx::query_scalar(
         "UPDATE turns SET
              status = CASE WHEN status IN ('queued', 'waiting') THEN 'interrupted' ELSE 'cancelling' END,
              error_code = ?2,
              error_message = ?3,
              finished_at = CASE WHEN status IN ('queued', 'waiting') THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') ELSE finished_at END,
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE id = ?1 AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running')",
+         WHERE id = ?1 AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running')
+         RETURNING status",
     )
     .bind(turn)
     .bind(code)
     .bind(message)
-    .execute(&mut *conn)
-    .await?
-    .rows_affected()
-        > 0;
-    if changed {
-        events::turn_changed(conn, target, turn).await?;
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(status) = ended else {
+        return Ok(false);
+    };
+    events::turn_changed(conn, target, turn).await?;
+    if status == TurnStatus::Interrupted {
+        // The chain is at most MAX_DEPTH deep, so this recursion is bounded.
+        Box::pin(cancel_for_root(conn, turn)).await?;
     }
-    Ok(changed)
+    Ok(true)
 }
 
 /// Give a conversation turn `turn_no` and reserve its next item sequence.
@@ -1061,6 +1084,43 @@ pub async fn mark_delivered(
 }
 
 pub use crate::app::providers::DelegationContext as Context;
+
+/// Where a turn sits in its request's delegation chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chain {
+    /// Delegations between the turn and the top: 0 for a turn of a bot's
+    /// own conversation, 1 for its task, and so on.
+    pub depth: u8,
+    /// The turn at the top: an owner conversation turn, or the turn itself.
+    pub top: Uuid,
+    /// The bots that delegated along the chain, nearest first.
+    pub upstream: Vec<Uuid>,
+}
+
+/// Follow `turn_id`'s delegations up to the top of its chain. A task updated
+/// by its delegating bot runs as a new turn the delegation then names, so
+/// each task turn has at most one delegation above it.
+pub async fn chain(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Chain, sqlx::Error> {
+    let rows: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
+        "WITH RECURSIVE up(turn, parent_bot, depth) AS (
+             SELECT ?1, NULL, 0
+             UNION ALL
+             SELECT d.root_turn_id, d.parent_bot_id, up.depth + 1
+             FROM delegations d JOIN up ON d.child_turn_id = up.turn
+             WHERE up.depth < 8)
+         SELECT turn, parent_bot FROM up ORDER BY depth",
+    )
+    .bind(turn_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let top = rows.last().map_or(turn_id, |(turn, _)| *turn);
+    let upstream: Vec<Uuid> = rows.iter().filter_map(|(_, bot)| *bot).collect();
+    Ok(Chain {
+        depth: u8::try_from(upstream.len()).unwrap_or(u8::MAX),
+        top,
+        upstream,
+    })
+}
 use crate::app::providers::DelegationInProgress as InProgress;
 use crate::app::providers::Origin;
 
@@ -1068,19 +1128,15 @@ use crate::app::providers::Origin;
 /// in an owner conversation, or of the root that delegated it for a task.
 /// Never derived from text a model wrote.
 pub async fn origin(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Origin, sqlx::Error> {
+    let top = chain(conn, turn_id).await?.top;
     let source: Option<String> = sqlx::query_scalar(
-        "SELECT CASE c.kind WHEN 'owner' THEN i.kind ELSE ri.kind END
-         FROM turns t JOIN conversations c ON c.id = t.conversation_id
+        "SELECT i.kind FROM turns t JOIN conversations c ON c.id = t.conversation_id
          JOIN items i ON i.id = t.owner_item_id
-         LEFT JOIN delegations d ON d.child_turn_id = t.id
-         LEFT JOIN turns r ON r.id = d.root_turn_id
-         LEFT JOIN items ri ON ri.id = r.owner_item_id
-         WHERE t.id = ?1",
+         WHERE t.id = ?1 AND c.kind = 'owner'",
     )
-    .bind(turn_id)
+    .bind(top)
     .fetch_optional(&mut *conn)
-    .await?
-    .flatten();
+    .await?;
     Ok(match source.as_deref() {
         Some("user") => Origin::OwnerRequest,
         Some("routine") => Origin::RoutineRun,
@@ -1125,6 +1181,11 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
     .fetch_one(&mut *conn)
     .await?;
     let origin = origin(conn, turn_id).await?;
+    let chain = chain(conn, turn_id).await?;
+    let mut context = Context {
+        origin,
+        ..Context::default()
+    };
     if kind == "task" {
         let parent: Option<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
             "SELECT d.parent_bot_id, b.name, d.owner_question_id
@@ -1149,19 +1210,26 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
             }
             None => None,
         };
-        return Ok(Context {
-            origin,
-            delegated_task: true,
-            delegated_by: parent.map(|(id, name, _)| (id, name)),
-            owner_answer,
-            ..Context::default()
-        });
+        context.task_depth = chain.depth.max(1);
+        context.delegated_by = parent.map(|(id, name, _)| (id, name));
+        context.owner_answer = owner_answer;
+    } else {
+        context.main_bot = main == Some(bot);
+        context.can_create_bot = origin == Origin::OwnerRequest;
+    }
+    // A task at the depth limit still receives outcomes, which it has none
+    // of; the rest only matters to a turn that can delegate.
+    context.outcomes = undelivered(conn, turn_id).await?;
+    if !context.can_delegate() {
+        return Ok(context);
     }
     let registry: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT id, name FROM bots WHERE status = 'active' AND id <> ?1
+             AND NOT (lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?2)))
          ORDER BY created_at, id",
     )
     .bind(bot)
+    .bind(sqlx::types::Json(&chain.upstream))
     .fetch_all(&mut *conn)
     .await?;
     let used: i64 = sqlx::query_scalar(
@@ -1179,26 +1247,18 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
     .bind(turn_id)
     .fetch_all(&mut *conn)
     .await?;
-    Ok(Context {
-        origin,
-        delegated_task: false,
-        delegated_by: None,
-        owner_answer: None,
-        main_bot: main == Some(bot),
-        can_create_bot: origin == Origin::OwnerRequest,
-        registry,
-        remaining: (MAX_CHILDREN - used).max(0),
-        outcomes: undelivered(conn, turn_id).await?,
-        in_progress: in_progress
-            .into_iter()
-            .map(|(id, target_bot_id, target_name, task)| InProgress {
-                id,
-                target_bot_id,
-                target_name,
-                task,
-            })
-            .collect(),
-    })
+    context.registry = registry;
+    context.remaining = (MAX_CHILDREN - used).max(0);
+    context.in_progress = in_progress
+        .into_iter()
+        .map(|(id, target_bot_id, target_name, task)| InProgress {
+            id,
+            target_bot_id,
+            target_name,
+            task,
+        })
+        .collect();
+    Ok(context)
 }
 
 #[cfg(test)]

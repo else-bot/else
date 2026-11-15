@@ -92,6 +92,8 @@ enum ContextKind {
     MailEvent,
     /// A task answered with an owner's card answer
     DelegatedAnswerTask,
+    /// A task one hop deep, which may hand part of its work on
+    HandingTask,
 }
 
 fn context_turn(kind: Option<ContextKind>) -> http::context::Turn {
@@ -102,6 +104,7 @@ fn context_turn(kind: Option<ContextKind>) -> http::context::Turn {
         Some(ContextKind::DelegatedRoutineTask) => Turn::RoutineTask,
         Some(ContextKind::MailEvent) => Turn::MailEvent,
         Some(ContextKind::DelegatedAnswerTask) => Turn::AnsweredTask,
+        Some(ContextKind::HandingTask) => Turn::HandingTask,
     }
 }
 

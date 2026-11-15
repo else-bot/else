@@ -793,10 +793,10 @@ async fn delegation_limits_fail_in_code() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let leaf_result = else_api::db::delegations::create(
+    let loop_back = else_api::db::delegations::create(
         &app.db.pool,
         child,
-        family.parse().unwrap(),
+        main.parse().unwrap(),
         "loop back",
         &[],
         None,
@@ -804,11 +804,11 @@ async fn delegation_limits_fail_in_code() {
     .await;
     assert!(
         matches!(
-            leaf_result,
-            Err(else_api::db::delegations::DelegateError::NotAllowed)
+            loop_back,
+            Err(else_api::db::delegations::DelegateError::UpstreamTarget)
                 | Err(else_api::db::delegations::DelegateError::NotRunning)
         ),
-        "{leaf_result:?}"
+        "{loop_back:?}"
     );
     wait_status(&app, root, "completed").await;
     let children: i64 =
@@ -1231,6 +1231,209 @@ async fn the_delegating_bot_shows_whom_it_waits_on_until_the_task_ends() {
     );
 }
 
+/// A bot with an owner conversation, for seeded chains.
+async fn seed_bot(db: &TestDb, name: &str) -> Uuid {
+    let bot = Uuid::new_v4();
+    sqlx::query("INSERT INTO bots (id, name) VALUES (?1, ?2)")
+        .bind(bot)
+        .bind(name)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO conversations (id, bot_id) VALUES (?1, ?2)")
+        .bind(Uuid::new_v4())
+        .bind(bot)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    bot
+}
+
+/// Seed main -> Target, then Target's running task hands work to Third.
+/// Returns (main, root, child, first delegation, grandchild, second delegation, Third).
+async fn seed_chain(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid, Uuid, Uuid, Uuid) {
+    let (main, root, child, first) = seed(db).await;
+    set_status(db, child, "running").await;
+    sqlx::query("UPDATE turns SET attempt = 1 WHERE id = ?1")
+        .bind(child)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let third = seed_bot(db, "Third").await;
+    let second = else_api::db::delegations::create(&db.pool, child, third, "sub task", &[], None)
+        .await
+        .unwrap();
+    let grandchild: Uuid =
+        sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
+            .bind(second.delegation_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    (
+        main,
+        root,
+        child,
+        first,
+        grandchild,
+        second.delegation_id,
+        third,
+    )
+}
+
+async fn delegation_context(db: &TestDb, turn: Uuid) -> else_api::db::delegations::Context {
+    let mut conn = db.pool.acquire().await.unwrap();
+    else_api::db::delegations::context(&mut conn, turn)
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_hands_part_of_its_work_on_and_reports_once_it_returns() {
+    use else_api::db::delegations::{DelegateError, MAX_DEPTH, council, create};
+    let db = TestDb::migrated().await;
+    let (main, root, child, first, grandchild, second, third) = seed_chain(&db).await;
+    let target: Uuid = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
+        .bind(child)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+
+    let middle = delegation_context(&db, child).await;
+    assert_eq!(middle.task_depth, 1);
+    assert!(middle.can_delegate());
+    let listed: Vec<Uuid> = middle.registry.iter().map(|(id, _)| *id).collect();
+    assert!(listed.contains(&third), "{listed:?}");
+    assert!(
+        !listed.contains(&main),
+        "the bot above it is not offered: {listed:?}"
+    );
+    let leaf = delegation_context(&db, grandchild).await;
+    assert_eq!(leaf.task_depth, MAX_DEPTH);
+    assert!(!leaf.can_delegate());
+    assert_eq!(leaf.delegated_by.map(|(id, _)| id), Some(target));
+
+    let fourth = seed_bot(&db, "Fourth").await;
+    assert_eq!(
+        create(&db.pool, child, main, "back to the top", &[], None).await,
+        Err(DelegateError::UpstreamTarget)
+    );
+    assert_eq!(
+        council(&db.pool, child, &[fourth], "a council from a task").await,
+        Err(DelegateError::NotAllowed)
+    );
+    set_status(&db, grandchild, "running").await;
+    assert_eq!(
+        create(&db.pool, grandchild, fourth, "a third hop", &[], None).await,
+        Err(DelegateError::NotAllowed)
+    );
+
+    set_status(&db, child, "waiting").await;
+    set_status(&db, root, "waiting").await;
+    sqlx::query(
+        "UPDATE turns SET status = 'completed',
+             finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
+    )
+    .bind(grandchild)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+        .bind(child)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "queued", "the sub-task's end resumes the task");
+    let outcomes: Vec<Uuid> = delegation_context(&db, child)
+        .await
+        .outcomes
+        .iter()
+        .map(|o| o.id)
+        .collect();
+    assert_eq!(outcomes, vec![second], "its continuation reads the result");
+    let root_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+        .bind(root)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(root_status, "waiting", "the top still waits on the task");
+
+    sqlx::query(
+        "UPDATE turns SET status = 'completed',
+             finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
+    )
+    .bind(child)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let (root_status, first_status): (String, String) = sqlx::query_as(
+        "SELECT t.status, d.status FROM delegations d JOIN turns t ON t.id = d.root_turn_id
+         WHERE d.id = ?1",
+    )
+    .bind(first)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (root_status.as_str(), first_status.as_str()),
+        ("queued", "completed")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_a_task_stops_the_work_it_handed_on() {
+    let db = TestDb::migrated().await;
+    let (_, root, child, first, grandchild, second, _) = seed_chain(&db).await;
+    set_status(&db, child, "waiting").await;
+    else_api::db::delegations::cancel(&db.pool, root, first)
+        .await
+        .unwrap();
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT t.status, d.status FROM delegations d JOIN turns t ON t.id = d.child_turn_id
+         WHERE d.id IN (?1, ?2) ORDER BY d.created_at",
+    )
+    .bind(first)
+    .bind(second)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("interrupted".to_owned(), "cancelled".to_owned()),
+            ("interrupted".to_owned(), "cancelled".to_owned()),
+        ],
+        "no orphan sub-task keeps running"
+    );
+    let _ = grandchild;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sub_task_of_a_routine_run_keeps_the_routine_origin() {
+    use else_api::app::providers::Origin;
+    let db = TestDb::migrated().await;
+    let (main, root, child, _, grandchild, _, _) = seed_chain(&db).await;
+    sqlx::query(
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+         SELECT t.owner_item_id, t.conversation_id, 1000, t.id, 'routine', 'Hourly triage'
+         FROM turns t WHERE t.id = ?1",
+    )
+    .bind(root)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let _ = main;
+    let mut conn = db.pool.acquire().await.unwrap();
+    for turn in [root, child, grandchild] {
+        assert_eq!(
+            else_api::db::delegations::origin(&mut conn, turn)
+                .await
+                .unwrap(),
+            Origin::RoutineRun,
+            "a task's own request item never makes it an owner request"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_settling_while_the_parent_parks_still_requeues_it() {
     let db = TestDb::migrated().await;
@@ -1418,7 +1621,7 @@ async fn a_delegated_task_cannot_read_memory_the_parent_could_not() {
     }
     let scope = else_api::scheduler::delegated_scope(
         &app.db.pool,
-        main.parse().unwrap(),
+        &[main.parse().unwrap()],
         work.parse().unwrap(),
     )
     .await
@@ -2539,23 +2742,31 @@ async fn the_delegating_turn_hears_a_tasks_progress_while_its_message_streams() 
     }
 }
 
+/// Issue: Tech Manager, delegated work by Marketing Manager, could not hand
+/// it to Dev and scheduled a reminder whose run delegated instead. A task
+/// now hands work on once; the last hop routes follow-ups back up.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_task_routes_follow_up_work_through_the_bot_that_delegated_it() {
-    use common::recorder::{GATE_EVERY_ATTEMPT, harness, tool};
-    let h = harness(2).await;
+async fn a_task_hands_work_on_once_and_the_last_hop_routes_follow_ups_back() {
+    use common::recorder::{GATE, GATE_EVERY_ATTEMPT, harness, tool};
+    let h = harness(3).await;
     let main = h.app.main_bot().await;
-    let (manager, dev) = tokio::join!(h.app.create_bot("Manager"), h.app.create_bot("Dev"));
-    let main_name: String = sqlx::query_scalar("SELECT name FROM bots WHERE id = ?1")
-        .bind(main.parse::<Uuid>().unwrap())
-        .fetch_one(&h.app.db.pool)
-        .await
-        .unwrap();
-    let to_dev = || async {
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM delegations WHERE target_bot_id = ?1")
-            .bind(dev.parse::<Uuid>().unwrap())
-            .fetch_one(&h.app.db.pool)
+    let (manager, dev, reviewer) = tokio::join!(
+        h.app.create_bot("Manager"),
+        h.app.create_bot("Dev"),
+        h.app.create_bot("Reviewer")
+    );
+    let pool = h.app.db.pool.clone();
+    let child_of_turn = |turn: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1",
+            )
+            .bind(turn)
+            .fetch_one(&pool)
             .await
             .unwrap()
+        }
     };
 
     let (root, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
@@ -2564,27 +2775,50 @@ async fn a_task_routes_follow_up_work_through_the_bot_that_delegated_it() {
         &token,
         "delegate",
         json!({ "target_bot_id": manager,
-                "task": "[gate] Triage the checkout 500s; the fix goes to Dev." }),
+                "task": format!("{GATE_EVERY_ATTEMPT} Triage the checkout 500s; hand the fix to Dev.") }),
     )
     .await;
     assert_eq!(triage.result["status"], "pending", "{}", triage.body);
-    let task: Uuid =
-        sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
-            .bind(root)
-            .fetch_one(&h.app.db.pool)
-            .await
-            .unwrap();
+    let task = child_of_turn(root).await;
     h.release(root).await;
 
     let (_, task_token) = h.started(task).await;
-    let refused = tool(
+    let back_up = tool(
         &h.app,
         &task_token,
         "delegate",
-        json!({ "target_bot_id": dev, "task": "Implement the checkout fix." }),
+        json!({ "target_bot_id": main, "task": "Do the triage yourself." }),
     )
     .await;
-    assert_eq!(refused.status, StatusCode::OK, "{}", refused.body);
+    assert!(
+        back_up.error
+            && back_up
+                .result
+                .as_str()
+                .is_some_and(|e| e.starts_with("UPSTREAM_TARGET")),
+        "{}",
+        back_up.body
+    );
+    let fix = tool(
+        &h.app,
+        &task_token,
+        "delegate",
+        json!({ "target_bot_id": dev,
+                "task": format!("{GATE} Implement the checkout fix Manager's triage found.") }),
+    )
+    .await;
+    assert_eq!(fix.result["status"], "pending", "{}", fix.body);
+    let dev_task = child_of_turn(task).await;
+    h.release(task).await;
+
+    let (_, dev_token) = h.started(dev_task).await;
+    let refused = tool(
+        &h.app,
+        &dev_token,
+        "delegate",
+        json!({ "target_bot_id": reviewer, "task": "Review the checkout fix." }),
+    )
+    .await;
     assert!(refused.error, "{}", refused.body);
     assert!(
         refused.result["error"]
@@ -2596,66 +2830,33 @@ async fn a_task_routes_follow_up_work_through_the_bot_that_delegated_it() {
     );
     let next = refused.result["next"].as_str().unwrap();
     assert!(
-        next.contains("bot_id") && next.contains(&main_name),
-        "{next}"
+        next.contains("bot_id") && next.contains("Manager"),
+        "the last hop hands follow-ups to the bot that delegated it: {next}"
     );
-    assert_eq!(to_dev().await, 0, "a task stays one hop");
+    h.release(dev_task).await;
+
+    let task_token = h.continued(task, &task_token).await;
     h.release(task).await;
-
-    let follow_up = json!({ "target_bot_id": dev,
-                            "task": "Implement the checkout fix Manager's triage found." });
-    let token = h.continued(root, &token).await;
-    let started = tool(&h.app, &token, "delegate", follow_up.clone()).await;
-    assert_eq!(started.result["status"], "pending", "{}", started.body);
-    assert_eq!(to_dev().await, 1);
-    h.release(root).await;
-
-    let token = h.continued(root, &token).await;
-    let repeated = tool(&h.app, &token, "delegate", follow_up).await;
-    assert_eq!(
-        (
-            repeated.result["status"].as_str(),
-            repeated.result["task_id"].clone()
-        ),
-        (Some("completed"), started.result["task_id"].clone()),
-        "the follow-up starts once: {}",
-        repeated.body
-    );
-    assert_eq!(to_dev().await, 1);
-    let merge = tool(
-        &h.app,
-        &token,
-        "delegate",
-        json!({ "target_bot_id": manager, "task": "Dev's PR is ready: squash merge it." }),
-    )
-    .await;
-    assert_eq!(
-        merge.result["status"], "pending",
-        "issue #407: the merge goes back to Manager as a third hop: {}",
-        merge.body
-    );
-    h.release(root).await;
+    let _ = task_token;
     h.continued(root, &token).await;
     h.release(root).await;
     wait_status(&h.app, root, "completed").await;
 
-    let hops: Vec<(Uuid, String, Option<i32>)> = sqlx::query_as(
-        "SELECT target_bot_id, status, delivered_attempt FROM delegations
-         WHERE root_turn_id = ?1 ORDER BY parent_attempt",
+    let hops: Vec<(Uuid, Uuid, String, Option<i32>)> = sqlx::query_as(
+        "SELECT parent_bot_id, target_bot_id, status, delivered_attempt FROM delegations
+         ORDER BY created_at",
     )
-    .bind(root)
     .fetch_all(&h.app.db.pool)
     .await
     .unwrap();
-    let [manager, dev] = [&manager, &dev].map(|id| id.parse::<Uuid>().unwrap());
+    let [main, manager, dev] = [&main, &manager, &dev].map(|id| id.parse::<Uuid>().unwrap());
     assert_eq!(
         hops,
         [
-            (manager, "completed".to_owned(), Some(2)),
-            (dev, "completed".to_owned(), Some(3)),
-            (manager, "completed".to_owned(), Some(4)),
+            (main, manager, "completed".to_owned(), Some(2)),
+            (manager, dev, "completed".to_owned(), Some(2)),
         ],
-        "each hop started once and was read once"
+        "each hop ran once and its result was read once"
     );
 }
 

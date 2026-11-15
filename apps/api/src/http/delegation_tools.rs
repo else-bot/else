@@ -136,6 +136,7 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> O
             let code = match err {
                 DelegateError::NotAllowed => "NOT_ALLOWED",
                 DelegateError::SelfTarget => "SELF_DELEGATION",
+                DelegateError::UpstreamTarget => "UPSTREAM_TARGET",
                 DelegateError::BotUnavailable => "BOT_UNAVAILABLE",
                 DelegateError::BudgetExhausted | DelegateError::CouncilBudgetExhausted => {
                     "BUDGET_EXHAUSTED"

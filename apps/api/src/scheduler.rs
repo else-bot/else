@@ -382,8 +382,18 @@ impl Scheduler {
             }
         };
         let memory_scope = match input.delegation.delegated_by {
-            Some((parent, _)) if input.delegation.delegated_task => {
-                match delegated_scope(&self.pool, parent, input.bot_id).await {
+            Some(_) if input.delegation.delegated_task() => {
+                let upstream = match self.pool.acquire().await {
+                    Ok(mut conn) => crate::db::delegations::chain(&mut conn, turn_id)
+                        .await
+                        .map(|chain| chain.upstream),
+                    Err(err) => Err(err),
+                };
+                let scope = match upstream {
+                    Ok(upstream) => delegated_scope(&self.pool, &upstream, input.bot_id).await,
+                    Err(err) => Err(err),
+                };
+                match scope {
                     Ok(scope) => Some(scope),
                     Err(err) => {
                         tracing::warn!(error = %err, "loading a delegated memory scope failed");
@@ -391,7 +401,7 @@ impl Scheduler {
                     }
                 }
             }
-            _ if input.delegation.delegated_task
+            _ if input.delegation.delegated_task()
                 || matches!(
                     input.delegation.origin,
                     crate::app::providers::Origin::ConnectorEvent
@@ -569,21 +579,29 @@ fn turn_tools(delegation: &crate::app::providers::DelegationContext) -> Vec<Tool
 
 /// The bots a delegated task may read: its own, plus those both the
 /// delegating bot and its own bot may read.
+/// The memory a task of `target` may read: its own, plus each bot it may
+/// read that every bot above it in the chain (`upstream`) may read too, so
+/// handing work down a chain never widens what the request can see.
 pub async fn delegated_scope(
     pool: &sqlx::SqlitePool,
-    parent: Uuid,
+    upstream: &[Uuid],
     target: Uuid,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
-    let parent_reads: Vec<Uuid> = crate::db::memory::readable_bots(pool, parent)
-        .await?
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect();
     let mut scope = vec![target];
-    for (id, _) in crate::db::memory::readable_bots(pool, target).await? {
-        if id != target && parent_reads.contains(&id) {
-            scope.push(id);
-        }
+    scope.extend(
+        crate::db::memory::readable_bots(pool, target)
+            .await?
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|id| *id != target),
+    );
+    for bot in upstream {
+        let reads: Vec<Uuid> = crate::db::memory::readable_bots(pool, *bot)
+            .await?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        scope.retain(|id| *id == target || reads.contains(id));
     }
     Ok(scope)
 }
@@ -596,7 +614,7 @@ mod tests {
     fn task(origin: Origin) -> Vec<Tool> {
         turn_tools(&DelegationContext {
             origin,
-            delegated_task: true,
+            task_depth: 1,
             ..DelegationContext::default()
         })
     }
@@ -612,8 +630,20 @@ mod tests {
         ] {
             assert!(tools.contains(&tool), "{tool:?} missing from {tools:?}");
         }
-        assert!(!tools.contains(&Tool::Delegate), "a task stays one hop");
+        assert!(
+            tools.contains(&Tool::Delegate),
+            "a task may hand work on once"
+        );
         assert!(!tools.contains(&Tool::CreateBot));
+        let leaf = turn_tools(&DelegationContext {
+            origin: Origin::OwnerRequest,
+            task_depth: crate::db::delegations::MAX_DEPTH,
+            ..DelegationContext::default()
+        });
+        assert!(
+            !leaf.contains(&Tool::Delegate),
+            "a task at the depth limit cannot"
+        );
     }
 
     #[test]
@@ -683,7 +713,7 @@ mod tests {
         ] {
             assert!(tools.contains(&tool), "{tool:?} missing from {tools:?}");
         }
-        for tool in [Tool::Delegate, Tool::Routines, Tool::Rules, Tool::EditBot] {
+        for tool in [Tool::Routines, Tool::Rules, Tool::EditBot] {
             assert!(!tools.contains(&tool), "{tool:?} granted in {tools:?}");
         }
         assert!(!task(Origin::Other).contains(&Tool::AskOwner));
