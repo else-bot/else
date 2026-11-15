@@ -313,10 +313,13 @@ impl RowText {
     /// report only their narrowest layout, so this measures their widest line;
     /// plain text without chips sizes itself and returns `None`.
     pub(super) fn natural_width(&self, cx: &App) -> Option<Pixels> {
-        let text = match &self.widget {
-            Widget::Markdown { state, .. } => state.read(cx).rendered_text().as_str().to_owned(),
-            Widget::Plain(_) if !self.files.is_empty() => self.source.clone(),
-            Widget::Plain(_) if self.quote.is_some() => self.display.text.clone(),
+        let (text, rendered) = match &self.widget {
+            Widget::Markdown { state, .. } => {
+                let rendered = state.read(cx).rendered_text();
+                (rendered.as_str().to_owned(), Some(rendered))
+            }
+            Widget::Plain(_) if !self.files.is_empty() => (self.source.clone(), None),
+            Widget::Plain(_) if self.quote.is_some() => (self.display.text.clone(), None),
             Widget::Plain(_) => return None,
         };
         let system = cx.text_system();
@@ -335,9 +338,32 @@ impl RowText {
             .files
             .values()
             .map(|file| measure(&file.name) + px(64.));
+        // A list item hangs its marker in a column 1.4 em wide, indents its
+        // later blocks by that column, and each nesting level shifts it by one
+        // more; none of that is in the rendered text.
+        let mut indents = vec![px(0.); text.lines().count()];
+        if let Some(rendered) = rendered {
+            let column = px(14.) * 1.4;
+            for block in list_blocks(rendered.source()) {
+                let Some(range) = rendered.range_for_source(block.content) else {
+                    continue;
+                };
+                let first = text[..range.start.min(text.len())].matches('\n').count();
+                let lines = text[range.start.min(text.len())..range.end.min(text.len())]
+                    .matches('\n')
+                    .count();
+                let hang = block.marker.map_or(column, |marker| {
+                    (measure(marker) + column * 0.3).max(column)
+                });
+                for indent in indents.iter_mut().skip(first).take(lines + 1) {
+                    *indent = column * block.depth as f32 + hang;
+                }
+            }
+        }
         let widest = text
             .lines()
-            .map(measure)
+            .zip(indents)
+            .map(|(line, indent)| measure(line) + indent)
             .chain(chips)
             .fold(px(0.), Pixels::max);
         // Plain text also needs its own inset and the textarea's 10 px caret margin.
@@ -938,9 +964,57 @@ fn activates_link(event: &ClickEvent) -> bool {
     }
 }
 
+/// A block inside a Markdown list item: the source it renders from, how many
+/// lists enclose its own, and the item's marker when it is the item's first block.
+#[derive(Debug, PartialEq)]
+struct ListBlock<'a> {
+    content: Range<usize>,
+    depth: usize,
+    marker: Option<&'a str>,
+}
+
+/// The blocks of every list item in Markdown `source`, parsed the way the text
+/// view parses it.
+fn list_blocks(source: &str) -> Vec<ListBlock<'_>> {
+    use markdown::mdast::Node;
+    fn visit<'a>(node: &Node, source: &'a str, depth: usize, out: &mut Vec<ListBlock<'a>>) {
+        let Some(children) = node.children() else {
+            return;
+        };
+        if let Node::ListItem(item) = node {
+            let marker = item.position.as_ref().and_then(|at| {
+                let rest = &source[at.start.offset..];
+                rest.split([' ', '\t', '\n']).next()
+            });
+            for (ix, child) in children.iter().enumerate() {
+                match (child, child.position()) {
+                    (Node::List(_), _) => visit(child, source, depth + 1, out),
+                    (_, Some(at)) => out.push(ListBlock {
+                        content: at.start.offset..at.end.offset,
+                        depth,
+                        marker: marker.filter(|_| ix == 0),
+                    }),
+                    (_, None) => {}
+                }
+            }
+            return;
+        }
+        for child in children {
+            visit(child, source, depth, out);
+        }
+    }
+    let mut out = Vec::new();
+    if let Ok(root) = markdown::to_mdast(source, &markdown::ParseOptions::gfm()) {
+        visit(&root, source, 0, &mut out);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{RowFormat, RowSource, file_links, file_map, linked_file, plain_content};
+    use super::{
+        RowFormat, RowSource, file_links, file_map, linked_file, list_blocks, plain_content,
+    };
     use crate::api::Bot;
     use crate::app::bot_mention::MentionDisplay;
     use crate::app::bot_mention::{BotMention, MentionRegistry};
@@ -948,6 +1022,26 @@ mod tests {
     use crate::attachments::{Attachment, MessagePart, file_id};
     use gpui_kit::component::input::InputContent;
     use uuid::Uuid;
+
+    #[test]
+    fn list_blocks_follow_the_markdown_parse() {
+        let source = "Intro\n\n- Forget it\n  1. first\n  lazy\n\n     more\n  10) tenth\n* back\n\n````\n```\n- code\n````\n-\ttab";
+        let found: Vec<_> = list_blocks(source)
+            .into_iter()
+            .map(|block| (&source[block.content], block.depth, block.marker))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("Forget it", 0, Some("-")),
+                ("first\n  lazy", 1, Some("1.")),
+                ("more", 1, None),
+                ("tenth", 1, Some("10)")),
+                ("back", 0, Some("*")),
+                ("tab", 0, Some("-")),
+            ]
+        );
+    }
 
     #[test]
     fn a_multi_passage_reply_folds_each_quote_into_one_linked_line() {
