@@ -154,7 +154,7 @@ impl ElseApp {
         let Some(reference) = self.reference(bot, item) else {
             return;
         };
-        self.add_quote(bot, Quote::new(reference, None), window, cx);
+        self.add_quote(bot, Quote::reply(reference), window, cx);
     }
 
     fn react(

@@ -1,5 +1,5 @@
 use super::conversation::{ConversationView, Reveal, Spot};
-use super::reply::{Author, MessageReference, Quote};
+use super::reply::{Author, MessageReference, Quote, QuoteKind};
 use super::row_text::RowText;
 use super::{APP_CONTEXT, CiteSelection, ElseApp, RowKey};
 use crate::controls::{Control as _, Scale, Tier};
@@ -119,11 +119,13 @@ impl ElseApp {
         };
         TextSelection::clear(window, cx);
         let below = prompt.below();
-        let quote = Quote::new(prompt.source, prompt.highlight);
+        let quote = Quote::passage(prompt.source, prompt.highlight);
         self.open_quote_editor(prompt.bot, quote, below, window, cx);
         cx.notify();
     }
 
+    /// Puts `quote` in `bot`'s draft: a reply replaces the draft's earlier
+    /// reply, and a passage joins the others.
     pub(super) fn add_quote(
         &mut self,
         bot: Uuid,
@@ -131,7 +133,11 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.drafts.entry(bot).or_default().quotes.push(quote);
+        let draft = self.drafts.entry(bot).or_default();
+        match quote.kind {
+            QuoteKind::Reply => draft.set_reply(quote),
+            QuoteKind::Passage => draft.quotes.push(quote),
+        }
         self.paint_quotes(cx);
         if self.selected == Some(bot) {
             self.composer.read(cx).focus_handle(cx).focus(window, cx);
@@ -474,6 +480,7 @@ impl ElseApp {
         let numbered = quotes.len() > 1;
         let cards = quotes.iter().enumerate().map(|(ix, quote)| {
             let id = quote.id;
+            let passage = quote.kind == QuoteKind::Passage;
             let expanded = self.expanded_quotes.contains(&id);
             let excerpt = quote.excerpt();
             let long = excerpt.chars().count() > LONG_EXCERPT
@@ -574,33 +581,35 @@ impl ElseApp {
                     h_flex()
                         .flex_none()
                         .gap_0p5()
-                        .child(
-                            Button::new(SharedString::from(format!("quote-edit-{id}")))
-                                .focus_ring(false)
-                                .cursor_pointer()
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::Pencil)
-                                .accessibility_label(if quote.comment.is_empty() {
-                                    "Add a comment"
-                                } else {
-                                    "Edit comment"
-                                })
-                                .on_click(cx.listener(
-                                    move |app, event: &ClickEvent, window, cx| {
-                                        let Some(quote) = app
-                                            .drafts
-                                            .get(&bot)
-                                            .and_then(|d| d.quotes.iter().find(|q| q.id == id))
-                                            .cloned()
-                                        else {
-                                            return;
-                                        };
-                                        let at = event.position();
-                                        app.open_quote_editor(bot, quote, at, window, cx);
-                                    },
-                                )),
-                        )
+                        .when(passage, |actions| {
+                            actions.child(
+                                Button::new(SharedString::from(format!("quote-edit-{id}")))
+                                    .focus_ring(false)
+                                    .cursor_pointer()
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Pencil)
+                                    .accessibility_label(if quote.comment.is_empty() {
+                                        "Add a comment"
+                                    } else {
+                                        "Edit comment"
+                                    })
+                                    .on_click(cx.listener(
+                                        move |app, event: &ClickEvent, window, cx| {
+                                            let Some(quote) = app
+                                                .drafts
+                                                .get(&bot)
+                                                .and_then(|d| d.quotes.iter().find(|q| q.id == id))
+                                                .cloned()
+                                            else {
+                                                return;
+                                            };
+                                            let at = event.position();
+                                            app.open_quote_editor(bot, quote, at, window, cx);
+                                        },
+                                    )),
+                            )
+                        })
                         .child(
                             Button::new(SharedString::from(format!("quote-remove-{id}")))
                                 .focus_ring(false)
