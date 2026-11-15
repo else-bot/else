@@ -108,7 +108,7 @@ fn saved_task_permissions_are_refreshed_even_in_resumed_sessions() {
     .0;
     assert!(revoked.contains("Current saved scopes that apply to this request: []"));
     assert!(!revoked.contains("Manage Tailscale"));
-    turn.delegation.delegated_task = true;
+    turn.delegation.task_depth = 1;
     assert!(
         prompt::turn_packet(
             &turn,

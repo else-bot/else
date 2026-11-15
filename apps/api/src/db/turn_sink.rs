@@ -80,7 +80,7 @@ impl SqliteSink {
                 delivered_socials: input.social_setups.iter().map(|s| s.id).collect(),
                 delivered_waits: input.mcp_waits.iter().map(|w| w.id).collect(),
                 delivered_job_waits: input.computer_job_waits.iter().map(|w| w.id).collect(),
-                delegated: input.delegation.delegated_task,
+                delegated: input.delegation.delegated_task(),
                 progress_at: None,
                 delivered_skills: input.skill_installs.iter().map(|o| o.id).collect(),
                 delivered_handoffs: input.computer_handoffs.iter().map(|o| o.id).collect(),
