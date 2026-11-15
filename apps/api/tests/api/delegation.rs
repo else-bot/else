@@ -1045,12 +1045,19 @@ async fn an_owner_aside_waits_for_a_running_delegated_task() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_steering_message_runs_before_another_queued_task() {
+async fn an_owner_aside_runs_after_the_running_task_before_other_queued_tasks() {
     let app = app_with(3).await;
     let work = leaf(&app, "Work").await;
     let other = leaf(&app, "Other").await;
     let (_, _, token) = running_main(&app).await;
-    delegate(&app, &token, &work, "[synthetic:hang] first research").await;
+    delegate(
+        &app,
+        &token,
+        &work,
+        "[synthetic:slow] merge the landing PR into dev once its checks pass, then move \
+         the ticket to Done and tell me which commit landed.",
+    )
+    .await;
     let sent = app
         .send(&other, Uuid::new_v4(), SLOW, Some("synthetic"))
         .await;
@@ -1078,13 +1085,32 @@ async fn a_steering_message_runs_before_another_queued_task() {
     wait_status(&app, first, "running").await;
 
     let sent = app
-        .send(&work, Uuid::new_v4(), "Stop this.", Some("synthetic"))
+        .send(&work, Uuid::new_v4(), "Release a patch.", Some("synthetic"))
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
-    wait_status(&app, first, "interrupted").await;
-    app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
-        .await;
-    wait_status(&app, second, "running").await;
+    let aside: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    wait_status(&app, first, "completed").await;
+    wait_status(&app, aside, "completed").await;
+    let second_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+        .bind(second)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    let second_started: Option<String> =
+        sqlx::query_scalar("SELECT started_at FROM turns WHERE id = ?1")
+            .bind(second)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    let aside_started: String = sqlx::query_scalar("SELECT started_at FROM turns WHERE id = ?1")
+        .bind(aside)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert!(
+        second_started.is_none_or(|second| second > aside_started),
+        "the aside ran before the other queued task ({second_status})"
+    );
 }
 
 async fn seed(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid) {
@@ -3368,7 +3394,7 @@ async fn a_later_update_can_repeat_an_earlier_one() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_owner_message_takes_over_an_update_still_queued() {
+async fn an_owner_aside_leaves_a_queued_update_to_run() {
     let (app, synthetic) = app_with_synthetic().await;
     let work = leaf(&app, "Work").await;
     let (task, first, token) =
@@ -3379,20 +3405,22 @@ async fn an_owner_message_takes_over_an_update_still_queued() {
     let replacement = child_of(&app, task).await;
     wait_status(&app, replacement, "queued").await;
 
-    let steer = "Stop this, Dev is on it.";
+    let aside = "Release a patch.";
     let sent = app
-        .send(&work, Uuid::new_v4(), steer, Some("synthetic"))
+        .send(&work, Uuid::new_v4(), aside, Some("synthetic"))
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
-    let steer_turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    wait_status(&app, replacement, "interrupted").await;
+    let aside_turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     synthetic.hold_hangs(false).await;
-    wait_status(&app, steer_turn, "completed").await;
+    wait_status(&app, replacement, "completed").await;
     let (_, result, _) = wait_task(&app, task, "completed").await;
     assert!(
-        result.as_deref().is_some_and(|r| r.contains(steer)),
-        "the owner's message answers the task: {result:?}"
+        result
+            .as_deref()
+            .is_some_and(|r| r.contains("permission slip") && !r.contains(aside)),
+        "the update answers the task: {result:?}"
     );
+    wait_status(&app, aside_turn, "completed").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
