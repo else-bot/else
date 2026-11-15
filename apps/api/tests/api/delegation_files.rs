@@ -334,6 +334,36 @@ async fn owner_takeover_gets_the_task_files(updated: bool) {
         let replacement = child_of().await;
         app.wait_turn(&replacement.to_string(), &["running"]).await;
     }
+    let asking = child_of().await;
+    let task_conversation: Uuid =
+        sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
+            .bind(asking)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    let ask_token = app
+        .scheduler
+        .grants()
+        .issue(
+            twitter.parse().unwrap(),
+            task_conversation,
+            asking,
+            vec![Tool::AskOwner],
+            DEFAULT_TTL,
+        )
+        .await;
+    let asked = app
+        .call(
+            "POST",
+            "/tools/v1/mcp",
+            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                         "params": { "name": "ask_owner", "arguments": {
+                             "question": "Which caption should the card use?",
+                             "choices": ["The blue one", "The red one"] } } })),
+            Some(&ask_token),
+        )
+        .await;
+    assert_ne!(asked.body["result"]["isError"], true, "{}", asked.body);
 
     let sent = app
         .send(

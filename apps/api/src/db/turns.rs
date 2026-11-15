@@ -879,8 +879,10 @@ pub struct Claimed {
 /// Claim the oldest queued turn of the next eligible bot, oldest first
 /// across bots. A bot's owner message that took over its delegated work, and
 /// a delegating bot's update to a task, go ahead of the bot's other queued
-/// turns, so the steer is not left behind. A bot is eligible when it is active, not stopping work, and
-/// has no turn in an active status. A waiting owner turn holds only owner
+/// turns, so the steer is not left behind. The owner's other messages come
+/// next, ahead of queued tasks, so an aside waits only for the running one.
+/// A bot is eligible when it is active, not stopping work, and has no turn
+/// in an active status. A waiting owner turn holds only owner
 /// work, and a waiting task holds nothing. The claimed turn moves to
 /// `preparing` and is returned; the caller must start it before claiming
 /// again, so a later failure never strands an already committed claim. A
@@ -899,11 +901,15 @@ pub async fn claim_next(
             SELECT t.id, t.bot_id, t.created_at, {BACKGROUND} AS background,
                    row_number() OVER (
                        PARTITION BY t.bot_id
-                       -- Takeovers and update turns (control::update_request_id) first.
+                       -- Takeovers and update turns (control::update_request_id)
+                       -- first, then the owner's messages ahead of queued tasks.
                        ORDER BY EXISTS (SELECT 1 FROM delegations d
                                         WHERE (d.takeover_turn_id = t.id
                                                OR (d.child_turn_id = t.id AND d.id <> t.request_id))
                                           AND d.status IN ('queued', 'running')) DESC,
+                                EXISTS (SELECT 1 FROM conversations k JOIN items i ON i.id = t.owner_item_id
+                                        WHERE k.id = t.conversation_id AND k.kind = 'owner'
+                                          AND i.kind = 'user') DESC,
                                 t.turn_no) AS queue_rank
             FROM turns t JOIN bots b ON b.id = t.bot_id
             WHERE t.status = 'queued' AND NOT t.deferred
