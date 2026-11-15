@@ -302,11 +302,11 @@ pub(super) fn notice_schema() -> Value {
     use crate::db::owner_notices::{MAX_SUMMARY, MAX_TRIED};
     json!({
         "name": "notify_owner",
-        "description": "In a task another bot delegated to you, flag that it ends needing the owner: a \
-            decision, or a blocker only they can clear. Shows a Needs you card in your chat with the \
-            owner. Not for anything a card already asks (ask_owner, ask_permission, request_secret, \
-            drafts, computer_handoff). Calling again rewrites it. Still give the full result in your \
-            final message.",
+        "description": "In a delegated task, flag that it ends needing the owner: a decision, or a \
+            blocker only they can clear. Shows a Needs you card in your chat with the owner. Not for \
+            what a card asks (ask_owner, ask_permission, request_secret, drafts, \
+            computer_handoff) or for work the owner already chose for another bot: name that in your \
+            final message. Calling again rewrites it. Still give the full result there.",
         "inputSchema": {
             "type": "object",
             "properties": {
