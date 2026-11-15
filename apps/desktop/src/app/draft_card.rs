@@ -301,8 +301,9 @@ impl ElseApp {
                         .line_height(px(20.))
                         .child(
                             div()
-                                .w(px(56.))
+                                .w(px(80.))
                                 .flex_none()
+                                .whitespace_nowrap()
                                 .text_color(theme.muted_foreground)
                                 .child(label),
                         )
@@ -431,13 +432,18 @@ impl ElseApp {
                         .px_4()
                         .pb_3()
                         .gap_2()
-                        .child(muted(format!(
-                            "You approve {} always.",
-                            draft.content.kind_label()
-                        )))
-                        .child(div().flex_1())
+                        .child(
+                            muted(format!(
+                                "You approve {} always.",
+                                draft.content.kind_label()
+                            ))
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_normal(),
+                        )
                         .child(
                             Button::new(SharedString::from(format!("draft-stop-always-{id}")))
+                                .flex_none()
                                 .control(Tier::Ghost, Scale::Compact, !connected, cx)
                                 .label("Stop approving always")
                                 .on_click(cx.listener(move |app, _, window, cx| {
