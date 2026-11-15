@@ -81,9 +81,10 @@ impl TaskReply {
     }
 
     /// What the card shows above its current reply, oldest first: kept
-    /// replies and cards always, the folded `history` once expanded. The
-    /// current reply must read last, because an earlier one can describe a
-    /// state the turn has since left, like a draft the owner then discarded.
+    /// replies and cards the latest reply has not superseded, and the rest
+    /// with the folded `history` once expanded. The current reply must read
+    /// last, because an earlier one can describe a state the turn has since
+    /// left, like a draft the owner then discarded.
     pub(in crate::app) fn earlier(
         &self,
         conversation: &Conversation,
@@ -95,11 +96,14 @@ impl TaskReply {
         let mut entries: Vec<_> = self
             .kept
             .iter()
-            .chain(folded)
-            .map(|&id| ((seq(id), 0), Earlier::Reply(id)))
+            .copied()
+            .filter(|&id| expanded || !self.reply_superseded(conversation, id))
+            .chain(folded.iter().copied())
+            .map(|id| ((seq(id), 0), Earlier::Reply(id)))
             .chain(
                 self.cards
                     .iter()
+                    .filter(|card| expanded || !self.card_superseded(conversation, card))
                     .map(|card| ((seq(card.after), 1), Earlier::Card(card.key))),
             )
             .collect();
@@ -107,10 +111,63 @@ impl TaskReply {
         entries.into_iter().map(|(_, entry)| entry).collect()
     }
 
-    /// The fold's label: it counts only the `hidden` replies, so beside
-    /// entries the card already shows it says "more".
-    pub(in crate::app) fn fold_label(&self, hidden: usize) -> String {
-        let more = !self.kept.is_empty() || !self.cards.is_empty();
+    /// Kept replies and cards that fold with `history` while collapsed.
+    pub(in crate::app) fn superseded_count(&self, conversation: &Conversation) -> usize {
+        let replies = self
+            .kept
+            .iter()
+            .filter(|&&id| self.reply_superseded(conversation, id))
+            .count();
+        let cards = self
+            .cards
+            .iter()
+            .filter(|card| self.card_superseded(conversation, card))
+            .count();
+        replies + cards
+    }
+
+    /// The attempt of the newest reply the card shows: a resumed reply
+    /// carries the task's whole current answer, so what came before it
+    /// folds, as T3 Code folds its work log under the final message. While a
+    /// working attempt's progress reply is itself folded, the newest kept
+    /// reply holds that place, so a fold does not reopen mid-task.
+    fn superseding_attempt(&self, conversation: &Conversation) -> Option<i64> {
+        let attempt = |id| conversation.item(id).and_then(|item| item.attempt);
+        let shown =
+            self.latest_kept || !matches!(self.state, ReplyState::Queued | ReplyState::Working);
+        if shown {
+            self.latest.and_then(attempt)
+        } else {
+            self.kept.iter().filter_map(|&id| attempt(id)).max()
+        }
+    }
+
+    /// A kept reply from an earlier attempt folds, unless it delivers a file
+    /// no later reply delivers, because no later text can carry the file.
+    pub(in crate::app) fn reply_superseded(&self, conversation: &Conversation, id: Uuid) -> bool {
+        let Some(latest) = self.superseding_attempt(conversation) else {
+            return false;
+        };
+        let Some(item) = conversation.item(id) else {
+            return false;
+        };
+        let delivers = item.parts.iter().any(|part| {
+            matches!(part, crate::attachments::MessagePart::File { file }
+                if !self.repeated_files.contains(&file.id))
+        });
+        item.attempt.is_some_and(|earlier| earlier < latest) && !delivers
+    }
+
+    /// A card from an earlier attempt folds with the replies around it.
+    fn card_superseded(&self, conversation: &Conversation, card: &TaskCard) -> bool {
+        self.superseding_attempt(conversation)
+            .is_some_and(|latest| card.attempt < latest)
+    }
+
+    /// The fold's label: it counts only the `hidden` entries, so beside
+    /// entries the card still shows it says "more".
+    pub(in crate::app) fn fold_label(&self, conversation: &Conversation, hidden: usize) -> String {
+        let more = self.kept.len() + self.cards.len() > self.superseded_count(conversation);
         format!(
             "{hidden} {}{}",
             if more { "more " } else { "" },
@@ -287,6 +344,9 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
 pub(in crate::app) struct TaskCard {
     pub after: Uuid,
     pub key: RowKey,
+    /// The attempt that raised it: a delegation's own, or else the attempt
+    /// of the reply it follows (attempt 1 before any reply).
+    pub attempt: i64,
 }
 
 /// What a task card shows above its current reply.
@@ -321,7 +381,20 @@ pub(in crate::app) fn place_cards(
             if turn_of(after) != Some(turn) || !before_row {
                 return Some((key, anchor));
             }
-            task.cards.push(TaskCard { after, key });
+            let attempt = match key {
+                RowKey::Handoff(id) => conversation
+                    .turn(turn)
+                    .and_then(|t| t.delegations.iter().find(|d| d.id == id))
+                    .map(|d| d.attempt),
+                _ => None,
+            }
+            .or_else(|| conversation.item(after).and_then(|item| item.attempt))
+            .unwrap_or(1);
+            task.cards.push(TaskCard {
+                after,
+                key,
+                attempt,
+            });
             if let Some(at) = task.history.iter().position(|&id| id == after) {
                 task.kept.push(task.history.remove(at));
                 task.kept.sort_by_key(|&id| seq(id));

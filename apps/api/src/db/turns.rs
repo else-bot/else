@@ -971,6 +971,51 @@ pub async fn fail_unstarted(
     tx.commit().await
 }
 
+/// Bytes of earlier replies a fresh continuation receives, newest kept.
+const EARLIER_REPLIES_BUDGET: usize = 8_000;
+
+/// This turn's replies from its earlier attempts, oldest first, keeping the
+/// newest within [`EARLIER_REPLIES_BUDGET`].
+async fn earlier_replies(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<Vec<String>, sqlx::Error> {
+    let texts: Vec<String> = sqlx::query_scalar(
+        "SELECT text FROM items WHERE turn_id = ?1 AND kind = 'assistant' AND text != ''
+         ORDER BY seq DESC",
+    )
+    .bind(turn_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(within_budget(texts, EARLIER_REPLIES_BUDGET))
+}
+
+/// Replies given newest first, returned oldest first within `budget`
+/// bytes. The reply that crosses the budget keeps its end, where a reply
+/// states what is open and what the owner must do, cut at a character
+/// boundary, so even one long reply still arrives.
+fn within_budget(newest_first: Vec<String>, budget: usize) -> Vec<String> {
+    let mut left = budget;
+    let mut kept = Vec::new();
+    for text in newest_first {
+        if text.len() <= left {
+            left -= text.len();
+            kept.push(text);
+            continue;
+        }
+        let mut start = text.len() - left;
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        if start < text.len() {
+            kept.push(format!("…{}", &text[start..]));
+        }
+        break;
+    }
+    kept.reverse();
+    kept
+}
+
 /// Build the adapter input for a claimed turn.
 pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::Error> {
     let mut conn = pool.acquire().await?;
@@ -1143,6 +1188,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
             turn.turn_no,
         )
         .await?,
+        earlier_replies: earlier_replies(&mut conn, turn_id).await?,
     };
     let draft_tasks = crate::db::outgoing_drafts::always_approved(&mut conn, turn.bot_id).await?;
     drop(conn);
@@ -1319,6 +1365,22 @@ pub async fn cancelling(pool: &SqlitePool) -> Result<Vec<Uuid>, sqlx::Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_long_newest_reply_is_cut_not_dropped() {
+        let kept = super::within_budget(vec!["é".repeat(10), "old".into()], 5);
+        assert_eq!(
+            kept,
+            ["…éé"],
+            "the newest reply arrives, cut at a character"
+        );
+        let kept = super::within_budget(vec!["new".into(), "older".into(), "oldest".into()], 9);
+        assert_eq!(
+            kept,
+            ["…t", "older", "new"],
+            "oldest first, each cut keeps its end"
+        );
+    }
+
     use super::*;
     use crate::app::messages::ReactionKind;
 

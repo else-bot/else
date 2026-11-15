@@ -190,6 +190,10 @@ pub struct TurnInput {
     /// Owner-approved calls that ran in recent turns of this conversation
     /// that did not complete, oldest first.
     pub ran_actions: Vec<crate::db::owner_questions::RanAction>,
+    /// This turn's replies from its earlier attempts, oldest first and
+    /// bounded, for a continuation in a session that never saw them: the
+    /// owner's chat folds them under the next reply.
+    pub earlier_replies: Vec<String>,
 }
 
 /// One shared MCP as a turn lists it.
