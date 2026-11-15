@@ -336,11 +336,12 @@ pub(crate) fn render(
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
+    let radius = size * 0.275;
     let tile = div()
         .relative()
         .flex_none()
         .size(size)
-        .rounded(size * 0.275)
+        .rounded(radius)
         .overflow_hidden()
         .flex()
         .items_center()
@@ -411,7 +412,12 @@ pub(crate) fn render(
             .into_any_element(),
         ServerIcon::Picture(image) => tile
             .bg(theme.muted)
-            .child(img(image.clone()).size_full().object_fit(ObjectFit::Cover))
+            .child(
+                img(image.clone())
+                    .size_full()
+                    .rounded(radius)
+                    .object_fit(ObjectFit::Cover),
+            )
             .into_any_element(),
     }
 }
