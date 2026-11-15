@@ -56,11 +56,22 @@ impl MessageReference {
     }
 }
 
+/// How a quote entered the draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum QuoteKind {
+    /// A whole message picked with Reply; a draft holds at most one, and the
+    /// composer's own text answers it.
+    Reply,
+    /// Text the owner selected and cited, which may carry its own comment.
+    Passage,
+}
+
 /// A passage of an earlier message the owner is answering, with what they
 /// want to say about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Quote {
     pub(super) id: Uuid,
+    pub(super) kind: QuoteKind,
     pub(super) source: MessageReference,
     /// The quoted span in the source row's rendered text, for highlighting.
     pub(super) highlight: Option<Range<usize>>,
@@ -68,9 +79,18 @@ pub(super) struct Quote {
 }
 
 impl Quote {
-    pub(super) fn new(source: MessageReference, highlight: Option<Range<usize>>) -> Self {
+    pub(super) fn reply(source: MessageReference) -> Self {
+        Self::new(QuoteKind::Reply, source, None)
+    }
+
+    pub(super) fn passage(source: MessageReference, highlight: Option<Range<usize>>) -> Self {
+        Self::new(QuoteKind::Passage, source, highlight)
+    }
+
+    fn new(kind: QuoteKind, source: MessageReference, highlight: Option<Range<usize>>) -> Self {
         Self {
             id: Uuid::new_v4(),
+            kind,
             source,
             highlight,
             comment: String::new(),
@@ -100,6 +120,15 @@ impl Default for Draft {
 }
 
 impl Draft {
+    /// Makes `reply` the draft's one whole-message reply, in place of any
+    /// earlier one, keeping cited passages.
+    pub(super) fn set_reply(&mut self, reply: Quote) {
+        match self.quotes.iter_mut().find(|q| q.kind == QuoteKind::Reply) {
+            Some(existing) => *existing = reply,
+            None => self.quotes.push(reply),
+        }
+    }
+
     pub(super) fn has_unsaved_work(&self) -> bool {
         self.message().is_some()
             || super::attachments::active_file_ids(&self.content)
@@ -430,8 +459,27 @@ mod tests {
         Draft {
             content: InputContent::new(text.to_owned()),
             files: HashMap::new(),
-            quotes: reply_to.map(|r| Quote::new(r, None)).into_iter().collect(),
+            quotes: reply_to.map(Quote::reply).into_iter().collect(),
         }
+    }
+
+    #[test]
+    fn a_new_reply_replaces_the_earlier_one_and_keeps_cited_passages() {
+        let mut draft = passages("", &[(Author::Bot, "Cited.", "Why?")]);
+        draft.set_reply(Quote::reply(reference(Author::Bot, "First message.")));
+        draft.set_reply(Quote::reply(reference(Author::Owner, "Second message.")));
+        let quotes: Vec<_> = draft
+            .quotes
+            .iter()
+            .map(|q| (q.kind, q.source.text.as_str()))
+            .collect();
+        assert_eq!(
+            quotes,
+            [
+                (QuoteKind::Passage, "Cited."),
+                (QuoteKind::Reply, "Second message."),
+            ]
+        );
     }
 
     fn passages(note: &str, quotes: &[(Author, &str, &str)]) -> Draft {
@@ -442,7 +490,7 @@ mod tests {
                 .iter()
                 .map(|(author, text, comment)| Quote {
                     comment: (*comment).to_owned(),
-                    ..Quote::new(reference(*author, text), None)
+                    ..Quote::passage(reference(*author, text), None)
                 })
                 .collect(),
         }

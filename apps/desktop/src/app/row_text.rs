@@ -944,7 +944,7 @@ mod tests {
     fn a_multi_passage_reply_folds_each_quote_into_one_linked_line() {
         let quote = |text: &str, comment: &str| Quote {
             comment: comment.to_owned(),
-            ..Quote::new(
+            ..Quote::passage(
                 MessageReference {
                     item: Uuid::nil(),
                     author: Author::Bot,
@@ -1023,10 +1023,10 @@ mod tests {
         for author in [Author::Owner, Author::Bot] {
             let draft = Draft {
                 content: InputContent::new("You can already mark it as always approved."),
-                quotes: vec![Quote::new(MessageReference {
+                quotes: vec![Quote::reply(MessageReference {
                     item: Uuid::nil(), author,
                     text: "Created the routine for **04:00 Europe/Paris**.\n\nPreserve `main`.\n> An earlier quote.".into(),
-                }, None)],
+                })],
                 ..Draft::default()
             };
             let text = draft.message().unwrap();
@@ -1116,14 +1116,11 @@ mod tests {
         let body = format!("{lead}{}", file.fallback());
         let message = Draft {
             content: InputContent::new(body.clone()),
-            quotes: vec![Quote::new(
-                MessageReference {
-                    item: Uuid::nil(),
-                    author: Author::Bot,
-                    text: "**Résumé**\n\nPreserve `main`.".into(),
-                },
-                None,
-            )],
+            quotes: vec![Quote::reply(MessageReference {
+                item: Uuid::nil(),
+                author: Author::Bot,
+                text: "**Résumé**\n\nPreserve `main`.".into(),
+            })],
             ..Draft::default()
         }
         .message()
