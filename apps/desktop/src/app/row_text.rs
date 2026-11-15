@@ -312,7 +312,7 @@ impl RowText {
     /// bubble can hug the text. Rich text and text carrying attachment chips
     /// report only their narrowest layout, so this measures their widest line;
     /// plain text without chips sizes itself and returns `None`.
-    pub(super) fn natural_width(&self, cx: &App) -> Option<Pixels> {
+    pub(super) fn natural_width(&self, window: &Window, cx: &App) -> Option<Pixels> {
         let (text, rendered) = match &self.widget {
             Widget::Markdown { state, .. } => {
                 let rendered = state.read(cx).rendered_text();
@@ -322,16 +322,23 @@ impl RowText {
             Widget::Plain(_) if self.quote.is_some() => (self.display.text.clone(), None),
             Widget::Plain(_) => return None,
         };
-        let system = cx.text_system();
-        let font_id = system.resolve_font(&font(cx.theme().font_family.clone()));
+        // Shape each line whole, as the text view does before it decides a
+        // line fits. Summed glyph advances leave out the platform's shaping,
+        // which on macOS draws wider and wrapped the last word.
+        let font = font(cx.theme().font_family.clone());
         let measure = |line: &str| {
-            line.chars()
-                .map(|ch| {
-                    system
-                        .advance(font_id, px(14.), ch)
-                        .map_or(px(8.), |size| size.width)
-                })
-                .fold(px(0.), |sum, width| sum + width)
+            let run = TextRun {
+                len: line.len(),
+                font: font.clone(),
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            window
+                .text_system()
+                .layout_line(line, px(14.), &[run], None)
+                .width
         };
         // An attachment chip adds its icon, padding and size label to the file name.
         let chips = self

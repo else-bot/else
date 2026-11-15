@@ -261,7 +261,7 @@ impl ElseApp {
                 let (pad_x, pad_y) = (px(16.) - inset_x, px(12.) - inset_y);
                 div()
                     .min_w_0()
-                    .when_some(text.natural_width(cx), |card, width| {
+                    .when_some(text.natural_width(window, cx), |card, width| {
                         card.w(width + pad_x * 2.)
                     })
                     .px(pad_x)
