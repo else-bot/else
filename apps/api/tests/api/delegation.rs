@@ -999,44 +999,49 @@ async fn an_owner_follow_up_keeps_earlier_tasks_running_and_receives_every_reply
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_owner_message_steers_a_running_delegated_task_and_reports_back() {
+async fn an_owner_aside_waits_for_a_running_delegated_task() {
     let app = app_with(2).await;
     let work = leaf(&app, "Work").await;
-    let (_, root, token) = running_main(&app).await;
-    let reply = delegate(&app, &token, &work, "[synthetic:hang] long research").await;
+    let (_, _, token) = running_main(&app).await;
+    let reply = delegate(
+        &app,
+        &token,
+        &work,
+        "[synthetic:slow] merge the landing PR into dev once its checks pass, then move \
+         the ticket to Done and tell me which commit landed.",
+    )
+    .await;
     let task_id: Uuid = tool_text(&reply)["task_id"]
         .as_str()
         .unwrap()
         .parse()
         .unwrap();
-    wait_status(&app, root, "waiting").await;
-    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
-        .bind(task_id)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
+    let child = child_of(&app, task_id).await;
     wait_status(&app, child, "running").await;
 
-    let steer = "Stop this, Dev is on it.";
+    let aside = "Release a patch.";
     let sent = app
-        .send(&work, Uuid::new_v4(), steer, Some("synthetic"))
+        .send(&work, Uuid::new_v4(), aside, Some("synthetic"))
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
-    let steer_turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
-    wait_status(&app, child, "interrupted").await;
-    app.wait_turn(&steer_turn, &["completed"]).await;
-    wait_status(&app, root, "completed").await;
-    let (state, result): (String, Option<String>) =
-        sqlx::query_as("SELECT status, result FROM delegations WHERE id = ?1")
+    assert_eq!(sent.body["turn"]["status"], "queued", "{}", sent.body);
+    let aside_turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    let takeover: Option<Uuid> =
+        sqlx::query_scalar("SELECT takeover_turn_id FROM delegations WHERE id = ?1")
             .bind(task_id)
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
-    assert_eq!(state, "completed");
+    assert_eq!(takeover, None, "an aside leaves the task to its bot");
+
+    let (_, result, _) = wait_task(&app, task_id, "completed").await;
+    assert_eq!(child_of(&app, task_id).await, child);
+    wait_status(&app, child, "completed").await;
     assert!(
-        result.as_deref().is_some_and(|r| r.contains(steer)),
-        "the delegating bot gets the steered reply: {result:?}"
+        result.as_deref().is_some_and(|r| !r.contains(aside)),
+        "the delegating bot gets the task's own reply: {result:?}"
     );
+    wait_status(&app, aside_turn, "completed").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
