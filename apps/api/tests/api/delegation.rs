@@ -1408,6 +1408,72 @@ async fn cancelling_a_task_stops_the_work_it_handed_on() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn cancelling_a_running_task_stops_its_queued_sub_task_at_once() {
+    let db = TestDb::migrated().await;
+    let (_, root, child, first, grandchild, second, _) = seed_chain(&db).await;
+    else_api::db::delegations::cancel(&db.pool, root, first)
+        .await
+        .unwrap();
+    let statuses: Vec<String> =
+        sqlx::query_scalar("SELECT status FROM turns WHERE id IN (?1, ?2) ORDER BY id = ?2")
+            .bind(child)
+            .bind(grandchild)
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        statuses,
+        ["cancelling", "interrupted"],
+        "the sub-task never starts"
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
+        .bind(second)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "cancelled");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sub_task_keeps_its_depth_when_its_delegating_task_is_updated() {
+    use else_api::db::delegations::{MAX_DEPTH, chain, update};
+    let db = TestDb::migrated().await;
+    let (_, root, child, first, grandchild, _, _) = seed_chain(&db).await;
+    update(&db.pool, root, first, "Also cover the refund path.")
+        .await
+        .unwrap();
+    let replacement: Uuid =
+        sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
+            .bind(first)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_ne!(replacement, child);
+    let mut conn = db.pool.acquire().await.unwrap();
+    let leaf = chain(&mut conn, grandchild).await.unwrap();
+    assert_eq!(
+        leaf.depth, MAX_DEPTH,
+        "the superseded task keeps its ancestry"
+    );
+    assert_eq!(leaf.top, root);
+    assert_eq!(chain(&mut conn, replacement).await.unwrap().depth, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delegations_at_every_depth_share_one_request_budget() {
+    use else_api::db::delegations::MAX_CHILDREN;
+    let db = TestDb::migrated().await;
+    let (_, root, child, _, _, _, _) = seed_chain(&db).await;
+    for turn in [root, child] {
+        assert_eq!(
+            delegation_context(&db, turn).await.remaining,
+            MAX_CHILDREN - 2,
+            "the top's task and the task's own both count"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_sub_task_of_a_routine_run_keeps_the_routine_origin() {
     use else_api::app::providers::Origin;
     let db = TestDb::migrated().await;
@@ -1432,6 +1498,19 @@ async fn a_sub_task_of_a_routine_run_keeps_the_routine_origin() {
             "a task's own request item never makes it an owner request"
         );
     }
+    drop(conn);
+    assert!(
+        else_api::db::turns::claim_next(&db.pool, &[], false)
+            .await
+            .unwrap()
+            .is_none(),
+        "the routine's sub-task never takes the slot kept for owner work"
+    );
+    let claimed = else_api::db::turns::claim_next(&db.pool, &[], true)
+        .await
+        .unwrap()
+        .expect("the sub-task is claimed as background work");
+    assert_eq!((claimed.id, claimed.background), (grandchild, true));
 }
 
 #[tokio::test(flavor = "multi_thread")]

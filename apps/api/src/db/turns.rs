@@ -839,13 +839,37 @@ const TASK_OR_NO_WAITING_OWNER: &str = "(EXISTS (SELECT 1 FROM conversations k
                          WHERE w.conversation_id = t.conversation_id AND w.status = 'waiting'))";
 
 /// Whether turn `t` is background work: a routine run or connector event, or
-/// a task delegated from one. Matches `delegations::origin`.
-const BACKGROUND: &str = "coalesce((SELECT CASE c.kind WHEN 'owner' THEN i.kind ELSE ri.kind END
-          FROM conversations c JOIN items i ON i.id = t.owner_item_id
-          LEFT JOIN delegations d ON d.child_turn_id = t.id
-          LEFT JOIN turns r ON r.id = d.root_turn_id
-          LEFT JOIN items ri ON ri.id = r.owner_item_id
-          WHERE c.id = t.conversation_id), '') IN ('routine', 'connector')";
+/// a task delegated, directly or through another task, from one. Matches
+/// `delegations::origin`: the source item of the owner conversation turn at
+/// the top of the chain, followed by task conversation up to
+/// `delegations::MAX_DEPTH` hops.
+const BACKGROUND: &str = "coalesce((SELECT CASE WHEN c0.kind = 'owner' THEN i0.kind
+                                 WHEN c1.kind = 'owner' THEN i1.kind
+                                 WHEN c2.kind = 'owner' THEN i2.kind END
+          FROM conversations c0 JOIN items i0 ON i0.id = t.owner_item_id
+          LEFT JOIN delegations d1 ON d1.conversation_id = c0.id
+          LEFT JOIN turns r1 ON r1.id = d1.root_turn_id
+          LEFT JOIN conversations c1 ON c1.id = r1.conversation_id
+          LEFT JOIN items i1 ON i1.id = r1.owner_item_id
+          LEFT JOIN delegations d2 ON d2.conversation_id = c1.id
+          LEFT JOIN turns r2 ON r2.id = d2.root_turn_id
+          LEFT JOIN conversations c2 ON c2.id = r2.conversation_id
+          LEFT JOIN items i2 ON i2.id = r2.owner_item_id
+          WHERE c0.id = t.conversation_id), '') IN ('routine', 'connector')";
+
+#[cfg(test)]
+mod background_tests {
+    /// `BACKGROUND` unrolls the chain one join group per hop.
+    #[test]
+    fn background_follows_every_hop_a_chain_can_have() {
+        assert_eq!(
+            crate::db::delegations::MAX_DEPTH,
+            2,
+            "extend BACKGROUND first"
+        );
+        assert!(super::BACKGROUND.contains("c2.kind = 'owner'"));
+    }
+}
 
 pub struct Claimed {
     pub id: Uuid,

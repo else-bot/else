@@ -339,7 +339,7 @@ async fn create_in(
         if total >= MAX_COUNCIL_BOTS as i64 {
             return Err(DelegateError::CouncilBudgetExhausted);
         }
-    } else if total >= MAX_CHILDREN {
+    } else if request_used(conn, chain.top).await? >= MAX_CHILDREN {
         return Err(DelegateError::BudgetExhausted);
     }
     if !council
@@ -682,9 +682,9 @@ async fn stop_children(
 }
 
 /// End a task's turn with `code`: one that has not started, or waits on its
-/// own tasks, is interrupted at once and stops those tasks; one in progress
-/// moves to `cancelling` for the scheduler to interrupt, and its finish
-/// stops them. Returns whether the turn was still in progress.
+/// own tasks, is interrupted at once; one in progress moves to `cancelling`
+/// for the scheduler to interrupt. Either way the tasks it handed on stop
+/// in the same transaction. Returns whether the turn was still in progress.
 async fn end_child_turn(
     conn: &mut SqliteConnection,
     turn: Uuid,
@@ -692,7 +692,7 @@ async fn end_child_turn(
     code: &str,
     message: &str,
 ) -> Result<bool, sqlx::Error> {
-    let ended: Option<TurnStatus> = sqlx::query_scalar(
+    let ended: Option<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET
              status = CASE WHEN status IN ('queued', 'waiting') THEN 'interrupted' ELSE 'cancelling' END,
              error_code = ?2,
@@ -700,21 +700,20 @@ async fn end_child_turn(
              finished_at = CASE WHEN status IN ('queued', 'waiting') THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') ELSE finished_at END,
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1 AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running')
-         RETURNING status",
+         RETURNING id",
     )
     .bind(turn)
     .bind(code)
     .bind(message)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some(status) = ended else {
+    if ended.is_none() {
         return Ok(false);
-    };
-    events::turn_changed(conn, target, turn).await?;
-    if status == TurnStatus::Interrupted {
-        // The chain is at most MAX_DEPTH deep, so this recursion is bounded.
-        Box::pin(cancel_for_root(conn, turn)).await?;
     }
+    events::turn_changed(conn, target, turn).await?;
+    // Its tasks stop now, not when a cancelling provider finishes, so none
+    // starts meanwhile. The chain is at most MAX_DEPTH deep.
+    Box::pin(cancel_for_root(conn, turn)).await?;
     Ok(true)
 }
 
@@ -1097,16 +1096,37 @@ pub struct Chain {
     pub upstream: Vec<Uuid>,
 }
 
-/// Follow `turn_id`'s delegations up to the top of its chain. A task updated
-/// by its delegating bot runs as a new turn the delegation then names, so
-/// each task turn has at most one delegation above it.
+/// Individual delegations a request has made, at every depth below `top`.
+/// Carried tasks (attempt 0) count toward the message that sent them.
+async fn request_used(conn: &mut SqliteConnection, top: Uuid) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "WITH RECURSIVE tree(turn, depth) AS (
+             SELECT ?1, 0
+             UNION
+             SELECT t.id, tree.depth + 1
+             FROM tree JOIN delegations d ON d.root_turn_id = tree.turn
+             JOIN turns t ON t.conversation_id = d.conversation_id
+             WHERE tree.depth < 8)
+         SELECT count(*) FROM delegations
+         WHERE parent_attempt > 0 AND root_turn_id IN (SELECT turn FROM tree)",
+    )
+    .bind(top)
+    .fetch_one(&mut *conn)
+    .await
+}
+
+/// Follow `turn_id`'s delegations up to the top of its chain. Each step goes
+/// through the turn's task conversation, which belongs to one delegation
+/// and keeps it when an update replaces the task's turn, so a turn the
+/// update superseded keeps its ancestry while it stops.
 pub async fn chain(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Chain, sqlx::Error> {
     let rows: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
         "WITH RECURSIVE up(turn, parent_bot, depth) AS (
              SELECT ?1, NULL, 0
              UNION ALL
              SELECT d.root_turn_id, d.parent_bot_id, up.depth + 1
-             FROM delegations d JOIN up ON d.child_turn_id = up.turn
+             FROM up JOIN turns t ON t.id = up.turn
+             JOIN delegations d ON d.conversation_id = t.conversation_id
              WHERE up.depth < 8)
          SELECT turn, parent_bot FROM up ORDER BY depth",
     )
@@ -1232,12 +1252,7 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
     .bind(sqlx::types::Json(&chain.upstream))
     .fetch_all(&mut *conn)
     .await?;
-    let used: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM delegations WHERE root_turn_id = ?1 AND parent_attempt > 0",
-    )
-    .bind(turn_id)
-    .fetch_one(&mut *conn)
-    .await?;
+    let used = request_used(conn, chain.top).await?;
     let in_progress: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
         "SELECT d.id, d.target_bot_id, b.name, d.task
          FROM delegations d JOIN bots b ON b.id = d.target_bot_id
