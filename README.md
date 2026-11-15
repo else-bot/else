@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/hero.webp" width="100%" alt="The else.bot app. The main assistant asked Research and Code Reviewer for a review, created a Release Monitor bot and added a rule. Four bots wait for the owner in the Needs you list." />
+  <img src="docs/screenshots/hero.webp" width="100%" alt="The else.bot app. A rail on the left edge lists three servers. The main assistant asked Research and Code Reviewer for a review, created a Release Monitor bot, added a rule and updated a routine. Four bots wait for the owner in the Needs you list." />
 </p>
 
 else.bot is a desktop app for chatting with AI bots. Each bot has its own job, model, memory and computer. They work in the background, hand tasks to each other, and ask you before they send anything in your name.
@@ -33,12 +33,12 @@ Bots run on the Codex, Claude Code or Grok Build CLI you already use, with your 
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshots/email-approval.webp" alt="An email draft from the Inbox bot with Discard and Approve and send buttons" /><p align="center">Approve emails before they go out</p></td>
-    <td width="50%"><img src="docs/screenshots/secret-request.webp" alt="The Travel Planner bot asks for a travel account password in a private field" /><p align="center">Hand over passwords privately</p></td>
+    <td width="50%"><img src="docs/screenshots/email-approval.webp" alt="The Inbox bot flags a blocker, then shows an email draft with an editable body and Discard and Approve and send buttons" /><p align="center">Approve emails before they go out</p></td>
+    <td width="50%"><img src="docs/screenshots/secret-request.webp" alt="The Travel Planner bot asks for a travel account key in a private field with Decline and Save and continue buttons" /><p align="center">Hand over passwords privately</p></td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/screenshots/questions.webp" alt="The Research bot asks a question with three choices and a free-text answer" /><p align="center">Answer questions in one click</p></td>
-    <td width="50%"><img src="docs/screenshots/answers.webp" alt="A release plan with a table, a numbered list and a Rust code block" /><p align="center">Read rich answers with tables and code</p></td>
+    <td width="50%"><img src="docs/screenshots/answers.webp" alt="A release plan written from an attached notes file, with a table, a numbered list and a Rust code block" /><p align="center">Read rich answers with tables and code</p></td>
   </tr>
 </table>
 
