@@ -332,6 +332,15 @@ def run(runner):
                                             "task": "Implement landing tasks LAN-13 to LAN-20, PRs into dev, three at a time."},
                                {"status": "pending", "parked": True})],
                     "Handed LAN-13 to LAN-20 to GitHub; its result comes back here."),
+                "task-hands-owner-picked-posts-to-delegating-bot": (
+                    [], "v0.94.30 is live. Follow-ups for Main: the Telegram bot posts \"Proliquid v0.94.30. More "
+                        "reliable handling when moving Hyperliquid orders.\" to @proliquid_updates, and the "
+                        "Discord bot posts it to #updates.",
+                    "v0.94.30 is live and the release note draft is ready.",
+                    "v0.94.30 is live. Please ask the owner to brief Telegram @proliquid_updates and Discord "
+                    "#updates with the follow-up: More reliable handling when moving Hyperliquid orders.",
+                    "v0.94.30 is live. Posted More reliable handling when moving Hyperliquid orders to "
+                    "@proliquid_updates and #updates."),
                 "task-blocked-on-owner-flags-it": (
                     [self.call("notify_owner", {"kind": "blocked",
                                                 "summary": "Dev is signed out of its provider, so it can't make the fix. Sign Dev back in from Settings."},
@@ -474,6 +483,12 @@ def run(runner):
                 "name": "Hand LAN tasks to GitHub", "in_minutes": 2, "prompt": "Delegate LAN-13 to GitHub."}},
                 {"reminder": {"id": "30000000-0000-0000-0000-000000000001"}})
             self.assertFalse(self.passed(hand_case["expect"], [reminder], "Saved a reminder that hands it to GitHub."))
+            posts_case = next(c for c in runner.load_cases()
+                              if c["id"] == "task-hands-owner-picked-posts-to-delegating-bot")
+            self.assertFalse(self.passed(posts_case["expect"], [self.call("notify_owner", {
+                "kind": "blocked", "summary": "Ask @Telegram and @Discord to post the release note."},
+                {"status": "pending"})], "v0.94.30 is live. Follow-ups: Telegram bot posts \"More reliable handling\" "
+                "to @proliquid_updates, Discord bot to #updates."))
             for case in runner.load_cases():
                 with self.subTest(case=case["id"]):
                     calls, final, *bad_final = examples[case["id"]]

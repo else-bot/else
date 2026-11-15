@@ -240,6 +240,16 @@ fn delegation_rules(input: &TurnInput) -> String {
         } else {
             "You cannot delegate further.".to_owned()
         };
+        let follow_ups = if delegation.can_delegate() {
+            String::new()
+        } else {
+            format!(
+                " When the owner already asked for or chose work another bot should do, such \
+                 as a post for a channel that bot runs, end your final message with each \
+                 follow-up, naming the bot and giving it a self-contained task; {sender} \
+                 delegates it."
+            )
+        };
         let approvals = if delegation.acts_for_owner() {
             let (root, saved) = if delegation.origin == crate::app::providers::Origin::OwnerRequest
             {
@@ -257,7 +267,7 @@ fn delegation_rules(input: &TurnInput) -> String {
                 )
             };
             format!(
-                "{handing} {root} started this task and you act for the \
+                "{handing}{follow_ups} {root} started this task and you act for the \
                  owner, so when the work needs the owner, ask the owner yourself instead of \
                  reporting back: social_connect, request_secret, ask_owner, drafts, and gated \
                  tool calls show their cards in your own chat with the owner and return parked. \
