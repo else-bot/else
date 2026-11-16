@@ -25,6 +25,26 @@ impl EmailProvider {
             Self::Imap => "Other email",
         }
     }
+
+    /// Where the owner makes an app password for this provider, shown on a
+    /// card that asks for one.
+    pub fn app_password_help(self) -> Option<AppPasswordHelp> {
+        match self {
+            Self::Icloud => Some(AppPasswordHelp {
+                note: "Use an app-specific password, not your Apple Account password. \
+                       Two-factor authentication must be on.",
+                link: "Open account.apple.com",
+                url: "https://account.apple.com/",
+            }),
+            _ => None,
+        }
+    }
+}
+
+pub struct AppPasswordHelp {
+    pub note: &'static str,
+    pub link: &'static str,
+    pub url: &'static str,
 }
 
 /// A bot's trigger on an inbox: whether new mail wakes it, and what to do

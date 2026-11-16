@@ -306,7 +306,7 @@ async fn an_icloud_card_saves_its_inbox_then_replaces_the_password() {
     let (sent, mut saved) = mpsc::channel(4);
     let (flow, task) = mail_server(sent).await;
     assert!(flow.takes_password());
-    assert_eq!(flow.ready_label(), "Connect");
+    assert_eq!(flow.ready_copy().action, "Connect");
     let mut gmail = flow.clone();
     gmail.consent = inbox("owner@gmail.com");
     assert!(!gmail.takes_password());

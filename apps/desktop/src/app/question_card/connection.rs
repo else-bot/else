@@ -427,7 +427,8 @@ impl ElseApp {
             Phase::Cancelling => pill(id, "Cancelling", theme.muted_foreground, true, still),
             _ => pill(id, "Checking", theme.muted_foreground, true, still),
         };
-        let ready_label = form.map_or("Connect in browser", |f| f.flow.ready_label());
+        let copy = form.map(|f| f.flow.ready_copy());
+        let ready_label = copy.as_ref().map_or("Connect in browser", |c| c.action);
         let password = form.and_then(|f| f.password.as_ref());
         let mut card = super::super::action_card::surface(v_flex(), &theme)
             .w_full()
@@ -573,61 +574,35 @@ impl ElseApp {
         }
         let locked = self.connection != Connection::Connected;
         if let Some(input) = password {
-            let editable = matches!(phase, Phase::Ready(_));
-            let apple = question
+            let editable = !locked && matches!(phase, Phase::Ready(_));
+            let help = question
                 .email_connection()
-                .is_some_and(|email| email.provider == EmailProvider::Icloud);
-            card = card.child(
-                v_flex()
-                    .w_full()
-                    .gap_1p5()
-                    .child(
-                        text_field(Input::new(input).aria_label("App-specific password"), cx)
-                            .disabled(locked || !editable),
-                    )
-                    .when(apple, |field| {
-                        field.child(
-                            h_flex()
-                                .w_full()
-                                .gap_2()
-                                .flex_wrap()
-                                .child(note(
-                                    "Use an app-specific password, not your Apple Account \
-                                     password. Two-factor authentication must be on."
-                                        .into(),
-                                ))
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "connection-apple-{id}"
-                                    )))
-                                    .control(Tier::Ghost, Scale::Compact, false, cx)
-                                    .icon(IconName::ExternalLink)
-                                    .label("Open account.apple.com")
-                                    .on_click(|_, _, cx| cx.open_url("https://account.apple.com/")),
-                                ),
-                        )
-                    }),
-            );
+                .and_then(|email| email.provider.app_password_help());
+            card = card.child(password_field(id, input, editable, help, cx));
         }
         let can_cancel = matches!(
             phase,
             Phase::Ready(_) | Phase::SigningIn | Phase::CheckFailed(_)
         );
-        let hint: Option<(Option<IconName>, &'static str)> = match phase {
-            Phase::Ready(None) if password.is_some() => {
-                Some((Some(IconName::Lock), "Encrypted on this server"))
-            }
-            Phase::Ready(None) => Some((Some(IconName::Lock), "Opens your browser")),
-            Phase::SigningIn => {
+        let hint: Option<(Option<IconName>, &'static str)> = match (phase, &copy) {
+            (Phase::Ready(None), Some(copy)) => Some((Some(IconName::Lock), copy.hint)),
+            (Phase::SigningIn, _) => {
                 Some((None, "Finish in your browser. This card updates by itself."))
             }
             _ => None,
         };
+        let browser_icon = |copy: &Option<flow::ReadyCopy>| {
+            copy.as_ref()
+                .is_none_or(|c| c.opens_browser)
+                .then_some(IconName::ExternalLink)
+        };
         let action = match phase {
-            Phase::Ready(None) if password.is_some() => Some((ready_label, None, true)),
-            Phase::Ready(Some(_)) if password.is_some() => Some(("Try again", None, true)),
-            Phase::Ready(None) => Some((ready_label, Some(IconName::ExternalLink), true)),
-            Phase::Ready(Some(_)) => Some(("Sign in again", Some(IconName::ExternalLink), true)),
+            Phase::Ready(None) => Some((ready_label, browser_icon(&copy), true)),
+            Phase::Ready(Some(_)) => Some((
+                copy.as_ref().map_or("Sign in again", |c| c.retry),
+                browser_icon(&copy),
+                true,
+            )),
             Phase::CheckFailed(_) => Some(("Check again", Some(IconName::RefreshCw), true)),
             Phase::ConfirmationRequired(_) => {
                 Some(("Retry confirmation", Some(IconName::RefreshCw), true))
@@ -685,6 +660,48 @@ impl ElseApp {
         }
         card.child(footer).into_any_element()
     }
+}
+
+/// The masked password field of a card that takes one, with the provider's
+/// help for making it.
+fn password_field(
+    id: Uuid,
+    input: &Entity<InputState>,
+    editable: bool,
+    help: Option<crate::api::AppPasswordHelp>,
+    cx: &mut Context<ElseApp>,
+) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    v_flex()
+        .w_full()
+        .gap_1p5()
+        .child(
+            text_field(Input::new(input).aria_label("App-specific password"), cx)
+                .disabled(!editable),
+        )
+        .when_some(help, |field, help| {
+            field.child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(
+                        div()
+                            .text_xs()
+                            .whitespace_normal()
+                            .text_color(muted)
+                            .child(help.note),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("connection-help-{id}")))
+                            .control(Tier::Ghost, Scale::Compact, false, cx)
+                            .icon(IconName::ExternalLink)
+                            .label(help.link)
+                            .on_click(move |_, _, cx| cx.open_url(help.url)),
+                    ),
+            )
+        })
+        .into_any_element()
 }
 
 /// What a connection card signs in to, as its header and facts show it.

@@ -71,6 +71,15 @@ impl SignIn {
     }
 }
 
+/// What a card waiting for the owner offers, by how it signs in.
+pub(super) struct ReadyCopy {
+    pub action: &'static str,
+    /// The action after a failed attempt.
+    pub retry: &'static str,
+    pub hint: &'static str,
+    pub opens_browser: bool,
+}
+
 #[derive(Debug, PartialEq)]
 pub(super) enum Resolution {
     Disconnected,
@@ -119,13 +128,24 @@ impl Flow {
             if oauth::Provider::for_email(consent.provider).is_none())
     }
 
-    pub fn ready_label(&self) -> &'static str {
+    pub fn ready_copy(&self) -> ReadyCopy {
+        let browser = |action| ReadyCopy {
+            action,
+            retry: "Sign in again",
+            hint: "Opens your browser",
+            opens_browser: true,
+        };
         match &self.consent {
-            Consent::Mcp(_) => "Connect in browser",
+            Consent::Mcp(_) => browser("Connect in browser"),
             Consent::Email(consent) => match oauth::Provider::for_email(consent.provider) {
-                Some(oauth::Provider::Microsoft) => "Sign in with Microsoft",
-                Some(oauth::Provider::Google) => "Sign in with Google",
-                None => "Connect",
+                Some(oauth::Provider::Microsoft) => browser("Sign in with Microsoft"),
+                Some(oauth::Provider::Google) => browser("Sign in with Google"),
+                None => ReadyCopy {
+                    action: "Connect",
+                    retry: "Try again",
+                    hint: "Encrypted on this server",
+                    opens_browser: false,
+                },
             },
         }
     }
