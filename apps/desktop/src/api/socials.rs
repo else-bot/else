@@ -40,7 +40,10 @@ impl Provider {
     /// Whether the owner links this provider by scanning a code instead of
     /// pasting a bot token.
     pub fn pairs(self) -> bool {
-        self == Self::WhatsApp
+        match self {
+            Self::Telegram | Self::Discord => false,
+            Self::WhatsApp => true,
+        }
     }
 
     pub fn token_help(self) -> &'static str {
