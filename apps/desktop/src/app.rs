@@ -33,6 +33,7 @@ mod settings;
 mod skill_card;
 mod social_card;
 mod task_reply;
+mod usage;
 mod view;
 mod visuals;
 mod waiting_tray;
@@ -555,6 +556,10 @@ impl ElseApp {
         cx.notify();
     }
 
+    pub(crate) fn bots(&self) -> &[Bot] {
+        &self.bots
+    }
+
     fn active_bots(&self) -> impl Iterator<Item = &Bot> {
         self.bots.iter().filter(|bot| bot.is_active())
     }
@@ -636,10 +641,8 @@ impl ElseApp {
                 let _ = this.update(cx, |app, cx| app.check_reading(window, cx));
             });
         }
-        let cached_settings = id.is_some_and(|id| self.settings.contains_key(&id));
         self.ensure_settings(window, cx);
         if self.settings_open
-            && cached_settings
             && let Some(id) = id
         {
             self.load_bot_usage(id, window, cx);

@@ -6,7 +6,7 @@ use gpui_kit::component::FocusableExt as _;
 use std::collections::HashMap;
 
 use crate::api::socials::Provider;
-use crate::api::{Bot, BotProfile, ProfileChoice, ProviderUsage};
+use crate::api::{Bot, BotProfile, ProfileChoice};
 use crate::avatar::{Avatar, AvatarPicker, bot_avatar};
 use crate::model::{Conversation, LastRun, Routine};
 use crate::profile_picker::{ProfilePicker, effort_label, model_label};
@@ -298,29 +298,8 @@ impl TriggerSave {
     }
 }
 
-enum UsageState {
-    Loading(Uuid),
-    /// Keeps showing `providers` while the `refresh` attempt runs, so the
-    /// section neither collapses nor flashes on every refetch.
-    Ready {
-        providers: Vec<ProviderUsage>,
-        refresh: Option<Uuid>,
-    },
-    Failed(String),
-}
-
-impl UsageState {
-    fn awaits(&self, attempt: Uuid) -> bool {
-        match self {
-            Self::Loading(current) => *current == attempt,
-            Self::Ready { refresh, .. } => *refresh == Some(attempt),
-            Self::Failed(_) => false,
-        }
-    }
-}
-
 pub(super) struct BotSettings {
-    usage: UsageState,
+    pub(super) usage: super::usage::UsageState,
     details: Details,
     /// The bot's `metadata_revision` when its profile was last loaded: a
     /// bot can change another bot's model, which publishes `bot.updated`.
@@ -401,7 +380,7 @@ impl ElseApp {
             bot.id,
             BotSettings {
                 details,
-                usage: UsageState::Loading(Uuid::nil()),
+                usage: super::usage::UsageState::Loading(Uuid::nil()),
                 revision: bot.metadata_revision,
                 model: ModelState::Loading(Uuid::nil()),
                 routines: HashMap::new(),
@@ -409,9 +388,6 @@ impl ElseApp {
             },
         );
         self.load_profile(bot.id, window, cx);
-        if self.settings_open {
-            self.load_bot_usage(bot.id, window, cx);
-        }
     }
 
     pub(super) fn sync_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -518,206 +494,6 @@ impl ElseApp {
             });
         })
         .detach();
-    }
-
-    pub(crate) fn usage_bots(&self) -> &[Bot] {
-        &self.bots
-    }
-
-    pub(super) fn load_bot_usage(
-        &mut self,
-        bot: Uuid,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(entry) = self.settings.get_mut(&bot) else {
-            return;
-        };
-        let attempt = Uuid::new_v4();
-        match &mut entry.usage {
-            UsageState::Ready { refresh, .. } => *refresh = Some(attempt),
-            usage => *usage = UsageState::Loading(attempt),
-        }
-        let client = self.client.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = client.usage().await;
-            let _ = this.update(cx, |app, cx| {
-                let Some(entry) = app.settings.get_mut(&bot) else {
-                    return;
-                };
-                if !entry.usage.awaits(attempt) {
-                    return;
-                }
-                entry.usage = match result {
-                    Ok(report) => UsageState::Ready {
-                        providers: report
-                            .providers
-                            .into_iter()
-                            .filter_map(|mut provider| {
-                                for window in &mut provider.windows {
-                                    window.bots.retain(|entry| entry.bot_id == bot);
-                                    window.buckets.clear();
-                                }
-                                provider
-                                    .windows
-                                    .iter()
-                                    .any(|window| !window.bots.is_empty())
-                                    .then_some(provider)
-                            })
-                            .collect(),
-                        refresh: None,
-                    },
-                    Err(error) => UsageState::Failed(error.to_string()),
-                };
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn render_bot_usage(
-        &self,
-        bot: &Bot,
-        state: &UsageState,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        use crate::usage_ui::{bar, color, percent, resets};
-        let providers = match state {
-            UsageState::Loading(_) => {
-                return Some(
-                    section("Usage", cx)
-                        .child(muted("Loading usage…", cx))
-                        .into_any_element(),
-                );
-            }
-            UsageState::Failed(error) => {
-                return Some(
-                    section("Usage", cx)
-                        .child(note(format!("Couldn't load usage. {error}"), true, cx))
-                        .child(
-                            Button::new("retry-bot-usage")
-                                .control(Tier::Secondary, Scale::Compact, false, cx)
-                                .label("Retry")
-                                .on_click(cx.listener({
-                                    let id = bot.id;
-                                    move |app, _, window, cx| app.load_bot_usage(id, window, cx)
-                                })),
-                        )
-                        .into_any_element(),
-                );
-            }
-            UsageState::Ready { providers, .. } if providers.is_empty() => return None,
-            UsageState::Ready { providers, .. } => providers,
-        };
-        let theme = cx.theme().clone();
-        let mut body = section_frame(cx).gap_3().child(
-            h_flex()
-                .justify_between()
-                .gap_2()
-                .child(crate::appearance::section_label("Usage", cx))
-                .child(
-                    Button::new("open-bot-usage")
-                        .control(Tier::Ghost, Scale::Compact, false, cx)
-                        .label("Open in Usage →")
-                        .on_click(cx.listener(|app, _, window, cx| {
-                            app.sidebar_focus.focus(window, cx);
-                            window.dispatch_action(
-                                Box::new(crate::connection::OpenUsageSettings),
-                                cx,
-                            );
-                        })),
-                ),
-        );
-        for provider in providers {
-            let mut group = v_flex()
-                .gap_2()
-                .child(item_name(provider.label().to_owned()));
-            for window in &provider.windows {
-                let entry = window.bot(bot.id);
-                let amount = entry.map(|bot| bot.percent).unwrap_or(0.);
-                let attribution = window.attribution;
-                let capped = attribution.is_priced();
-                let label = match window.minutes {
-                    300 => "This 5-hour window".into(),
-                    10080 => "This week".into(),
-                    _ => window.label(),
-                };
-                group = group
-                    .child(
-                        h_flex()
-                            .justify_between()
-                            .gap_2()
-                            .text_xs()
-                            .child(label)
-                            .child(if capped {
-                                format!("{} of cap", percent(amount))
-                            } else {
-                                percent(amount)
-                            }),
-                    )
-                    .child(bar(
-                        [
-                            (amount, color(bot.id, Some(bot.avatar))),
-                            (
-                                (match attribution {
-                                    crate::api::Attribution::Priced { used, .. } => used,
-                                    _ => 100.,
-                                } - amount)
-                                    .max(0.),
-                                theme.muted_foreground.opacity(0.25),
-                            ),
-                        ],
-                        capped,
-                        cx,
-                    ));
-                let caption = match attribution {
-                    crate::api::Attribution::Priced {
-                        used, resets_at, ..
-                    } => format!(
-                        "{} of the {} used so far · {}",
-                        percent(if used > 0. { amount / used * 100. } else { 0. }),
-                        percent(used),
-                        resets(Some(resets_at))
-                    ),
-                    crate::api::Attribution::Unattributed { used, .. } => format!(
-                        "share of else.bot's {} use · {} of the cap used, not attributed yet",
-                        provider.label(),
-                        percent(used)
-                    ),
-                    crate::api::Attribution::Unreported => {
-                        format!("share of else.bot's {} use", provider.label())
-                    }
-                };
-                group = group.child(meta(caption, cx));
-            }
-            if let Some(entry) = provider
-                .windows
-                .iter()
-                .find_map(|window| window.bot(bot.id))
-            {
-                let mut sources: Vec<(crate::api::UsageSourceKind, f64)> = Vec::new();
-                for source in &entry.sources {
-                    if let Some((_, share)) =
-                        sources.iter_mut().find(|(kind, _)| *kind == source.source)
-                    {
-                        *share += source.share;
-                    } else {
-                        sources.push((source.source, source.share));
-                    }
-                }
-                sources.sort_by(|a, b| b.1.total_cmp(&a.1));
-                group = group.child(meta(
-                    sources
-                        .iter()
-                        .map(|(kind, share)| format!("{} {}", kind.label(), percent(share * 100.)))
-                        .collect::<Vec<_>>()
-                        .join(" · "),
-                    cx,
-                ));
-            }
-            body = body.child(group);
-        }
-        Some(body.into_any_element())
     }
 
     fn load_profile(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
@@ -2484,7 +2260,7 @@ pub(super) fn section_frame(cx: &App) -> Div {
 /// The gap from a section's label to its first row, and between rows.
 pub(super) const ROW_GAP: Pixels = px(12.);
 
-fn section(title: &'static str, cx: &App) -> Div {
+pub(super) fn section(title: &'static str, cx: &App) -> Div {
     section_frame(cx).child(crate::appearance::section_label(title, cx).pb(ROW_GAP))
 }
 
@@ -2495,7 +2271,7 @@ fn list_rows(rows: Vec<AnyElement>) -> Div {
 
 /// Secondary text in a row: a schedule, a model, a trigger's details. It
 /// wraps instead of truncating.
-fn meta(text: impl Into<SharedString>, cx: &App) -> Div {
+pub(super) fn meta(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .text_size(px(12.))
         .line_height(px(18.))
@@ -2567,14 +2343,14 @@ fn alert(text: impl Into<SharedString>, color: Hsla, _cx: &App) -> Div {
         )
 }
 
-fn muted(text: impl Into<SharedString>, cx: &App) -> Div {
+pub(super) fn muted(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .text_xs()
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
 }
 
-fn note(text: impl Into<SharedString>, error: bool, cx: &App) -> Div {
+pub(super) fn note(text: impl Into<SharedString>, error: bool, cx: &App) -> Div {
     let theme = cx.theme();
     div()
         .text_xs()

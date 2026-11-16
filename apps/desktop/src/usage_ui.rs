@@ -113,3 +113,97 @@ pub(crate) fn bar(segments: impl IntoIterator<Item = (f64, Hsla)>, capped: bool,
 pub(crate) fn dot(color: Hsla) -> Div {
     div().flex_none().size(px(7.)).rounded_sm().bg(color)
 }
+
+/// A fetched value that stays on screen while a refresh runs and after a
+/// refresh fails. Each fetch takes an attempt from [`Loaded::begin`]; the
+/// reply to an attempt a later fetch replaced is ignored.
+pub(crate) enum Loaded<T> {
+    Loading(Uuid),
+    Failed(String),
+    Ready {
+        value: T,
+        refresh: Option<Uuid>,
+        /// Why the last refresh failed, while `value` is from before it.
+        error: Option<String>,
+    },
+}
+
+impl<T> Loaded<T> {
+    pub(crate) fn begin(&mut self) -> Uuid {
+        let attempt = Uuid::new_v4();
+        match self {
+            Self::Ready { refresh, .. } => *refresh = Some(attempt),
+            state => *state = Self::Loading(attempt),
+        }
+        attempt
+    }
+
+    pub(crate) fn awaits(&self, attempt: Uuid) -> bool {
+        match self {
+            Self::Loading(current) => *current == attempt,
+            Self::Ready { refresh, .. } => *refresh == Some(attempt),
+            Self::Failed(_) => false,
+        }
+    }
+
+    /// Applies the reply to `attempt`; false when it was replaced.
+    pub(crate) fn settle(&mut self, attempt: Uuid, result: Result<T, String>) -> bool {
+        if !self.awaits(attempt) {
+            return false;
+        }
+        *self = match (std::mem::replace(self, Self::Loading(attempt)), result) {
+            (_, Ok(value)) => Self::Ready {
+                value,
+                refresh: None,
+                error: None,
+            },
+            (Self::Ready { value, .. }, Err(error)) => Self::Ready {
+                value,
+                refresh: None,
+                error: Some(error),
+            },
+            (_, Err(error)) => Self::Failed(error),
+        };
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Loaded;
+
+    #[test]
+    fn a_refresh_keeps_the_value_and_a_failed_one_reports_beside_it() {
+        let mut state = Loaded::Loading(uuid::Uuid::nil());
+        let first = state.begin();
+        assert!(state.settle(first, Ok(1)));
+        let refresh = state.begin();
+        assert!(matches!(state, Loaded::Ready { value: 1, .. }));
+        assert!(state.settle(refresh, Err("offline".into())));
+        assert!(matches!(
+            state,
+            Loaded::Ready { value: 1, refresh: None, error: Some(ref e) } if e == "offline"
+        ));
+        let next = state.begin();
+        assert!(state.settle(next, Ok(2)));
+        assert!(matches!(
+            state,
+            Loaded::Ready {
+                value: 2,
+                error: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_replaced_attempt_is_ignored_and_a_first_failure_has_no_value() {
+        let mut state = Loaded::Loading(uuid::Uuid::nil());
+        let stale = state.begin();
+        let current = state.begin();
+        assert!(!state.settle(stale, Ok(1)), "a later fetch replaced it");
+        assert!(state.settle(current, Err("offline".into())));
+        assert!(matches!(state, Loaded::Failed(ref e) if e == "offline"));
+        assert!(!state.settle(current, Ok(1)), "already settled");
+    }
+}

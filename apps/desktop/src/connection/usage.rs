@@ -2,7 +2,7 @@ use super::*;
 use crate::api::{Attribution, BotUsage, ProviderUsage, UsageReport, UsageWindow};
 use crate::avatar::{Avatar, bot_avatar};
 use crate::controls::{Control as _, Scale, Tier, field_style, segment, segment_track};
-use crate::usage_ui::{bar, color, dot, local_time, percent, resets, tokens, turns};
+use crate::usage_ui::{Loaded, bar, color, dot, local_time, percent, resets, tokens, turns};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::searchable_list::SearchableListItem;
@@ -26,18 +26,9 @@ impl SearchableListItem for BotChoice {
     }
 }
 
-enum ReportState {
-    Loading,
-    Failed(String),
-    Ready {
-        report: UsageReport,
-        refresh_error: Option<String>,
-    },
-}
-
 pub(super) struct View {
     id: Uuid,
-    state: ReportState,
+    state: Loaded<UsageReport>,
     provider: Option<String>,
     filter: Entity<SelectState<Vec<BotChoice>>>,
     expanded: Option<Uuid>,
@@ -63,31 +54,22 @@ impl Shell {
         let subscription = cx.observe(&filter, |_, _, cx| cx.notify());
         let id = Uuid::new_v4();
         let poll = cx.spawn_in(window, async move |this, cx| {
-            loop {
+            while let Ok(Some(attempt)) = this.update(cx, |shell, _| shell.begin_usage(id)) {
                 let result = client.clone().usage().await;
-                let active = this.update_in(cx, |shell, window, cx| {
-                    shell.apply_usage(id, result, window, cx)
+                let open = this.update_in(cx, |shell, window, cx| {
+                    shell.apply_usage(id, attempt, result, window, cx)
                 });
-                if !matches!(active, Ok(true)) {
+                if !matches!(open, Ok(true)) {
                     break;
                 }
                 cx.background_executor()
                     .timer(Duration::from_secs(10))
                     .await;
-                if !matches!(
-                    this.update(cx, |shell, _| shell
-                        .usage
-                        .as_ref()
-                        .is_some_and(|view| view.id == id)),
-                    Ok(true)
-                ) {
-                    break;
-                }
             }
         });
         self.usage = Some(View {
             id,
-            state: ReportState::Loading,
+            state: Loaded::Loading(Uuid::nil()),
             provider: None,
             filter,
             expanded: None,
@@ -97,11 +79,19 @@ impl Shell {
         cx.notify();
     }
 
-    /// Applies one fetch to the open usage view with this `id`; false once
-    /// that view is gone.
+    /// Starts a fetch for the open usage view with this `id`, if it is
+    /// still open.
+    fn begin_usage(&mut self, id: Uuid) -> Option<Uuid> {
+        let view = self.usage.as_mut().filter(|view| view.id == id)?;
+        Some(view.state.begin())
+    }
+
+    /// Applies the reply to `attempt` to the usage view with this `id`;
+    /// false once that view is gone.
     fn apply_usage(
         &mut self,
         id: Uuid,
+        attempt: Uuid,
         result: Result<UsageReport, crate::api::ClientError>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -110,82 +100,81 @@ impl Shell {
         let Some(view) = shell.usage.as_mut().filter(|view| view.id == id) else {
             return false;
         };
-        match result {
-            Ok(report) => {
-                if !report
-                    .providers
-                    .iter()
-                    .any(|provider| Some(&provider.provider_id) == view.provider.as_ref())
-                {
-                    let wanted = view.filter.read(cx).selected_value().copied().flatten();
-                    view.provider = wanted
-                        .and_then(|bot| {
-                            report.providers.iter().find(|provider| {
-                                provider.windows.iter().any(|w| w.bot(bot).is_some())
-                            })
-                        })
-                        .or_else(|| report.default_provider())
-                        .map(|provider| provider.provider_id.clone());
-                    view.expanded = None;
-                }
-                let mut bots: std::collections::BTreeMap<_, _> = shell
-                    .active
-                    .as_ref()
-                    .map(|active| {
-                        active
-                            .app
-                            .read(cx)
-                            .usage_bots()
-                            .iter()
-                            .map(|bot| (bot.id, bot.name.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                for bot in report
-                    .providers
-                    .iter()
-                    .flat_map(|p| &p.windows)
-                    .flat_map(|w| &w.bots)
-                {
-                    bots.insert(bot.bot_id, bot.name.clone());
-                }
-                let choices = std::iter::once(BotChoice {
-                    id: None,
-                    name: "All bots".into(),
-                })
-                .chain(bots.into_iter().map(|(id, name)| BotChoice {
-                    id: Some(id),
-                    name: name.into(),
-                }))
-                .collect();
-                view.filter
-                    .update(cx, |filter, cx| filter.set_items(choices, window, cx));
-                view.state = ReportState::Ready {
-                    report,
-                    refresh_error: None,
-                };
-            }
-            Err(error) => match &mut view.state {
-                ReportState::Ready { refresh_error, .. } => {
-                    *refresh_error = Some(error.to_string())
-                }
-                _ => view.state = ReportState::Failed(error.to_string()),
-            },
+        if !view.state.awaits(attempt) {
+            return true;
         }
+        if let Ok(report) = &result {
+            if !report
+                .providers
+                .iter()
+                .any(|provider| Some(&provider.provider_id) == view.provider.as_ref())
+            {
+                let wanted = view.filter.read(cx).selected_value().copied().flatten();
+                view.provider = wanted
+                    .and_then(|bot| {
+                        report
+                            .providers
+                            .iter()
+                            .find(|provider| provider.windows.iter().any(|w| w.bot(bot).is_some()))
+                    })
+                    .or_else(|| report.default_provider())
+                    .map(|provider| provider.provider_id.clone());
+                view.expanded = None;
+            }
+            let mut bots: std::collections::BTreeMap<_, _> = shell
+                .active
+                .as_ref()
+                .map(|active| {
+                    active
+                        .app
+                        .read(cx)
+                        .bots()
+                        .iter()
+                        .map(|bot| (bot.id, bot.name.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for bot in report
+                .providers
+                .iter()
+                .flat_map(|p| &p.windows)
+                .flat_map(|w| &w.bots)
+            {
+                bots.insert(bot.bot_id, bot.name.clone());
+            }
+            let choices = std::iter::once(BotChoice {
+                id: None,
+                name: "All bots".into(),
+            })
+            .chain(bots.into_iter().map(|(id, name)| BotChoice {
+                id: Some(id),
+                name: name.into(),
+            }))
+            .collect();
+            view.filter
+                .update(cx, |filter, cx| filter.set_items(choices, window, cx));
+        }
+        view.state
+            .settle(attempt, result.map_err(|error| error.to_string()));
         cx.notify();
         true
     }
 
     /// Fetches the report once, keeping the page as it is until it arrives.
     fn refetch_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(active), Some(view)) = (&self.active, &self.usage) else {
+        let (Some(client), Some(id)) = (
+            self.active.as_ref().map(|active| active.client.clone()),
+            self.usage.as_ref().map(|view| view.id),
+        ) else {
             return;
         };
-        let (client, id) = (active.client.clone(), view.id);
+        let Some(attempt) = self.begin_usage(id) else {
+            return;
+        };
         cx.spawn_in(window, async move |this, cx| {
             let result = client.usage().await;
             this.update_in(cx, |shell, window, cx| {
-                shell.apply_usage(id, result, window, cx);
+                shell.apply_usage(id, attempt, result, window, cx);
             })
             .ok();
         })
@@ -202,7 +191,7 @@ impl Shell {
             active
                 .app
                 .read(cx)
-                .usage_bots()
+                .bots()
                 .iter()
                 .find(|entry| Some(entry.id) == bot)
                 .map(|bot| bot.name.clone())
@@ -254,17 +243,14 @@ impl Shell {
                 .into_any_element();
         };
         let (report, error) = match &view.state {
-            ReportState::Loading => {
+            Loaded::Loading(_) => {
                 return body
                     .child(heading)
                     .child("Loading usage…")
                     .into_any_element();
             }
-            ReportState::Failed(error) => (None, Some(error)),
-            ReportState::Ready {
-                report,
-                refresh_error,
-            } => (Some(report), refresh_error.as_ref()),
+            Loaded::Failed(error) => (None, Some(error)),
+            Loaded::Ready { value, error, .. } => (Some(value), error.as_ref()),
         };
         if let Some(error) = error {
             body = body.child(
@@ -358,7 +344,7 @@ impl Shell {
                 active
                     .app
                     .read(cx)
-                    .usage_bots()
+                    .bots()
                     .iter()
                     .map(|bot| (bot.id, bot.avatar))
                     .collect()
