@@ -354,10 +354,9 @@ async fn oauth_start(
     ApiJson(request): ApiJson<oauth::Start>,
 ) -> Result<Json<oauth::Started>, ApiError> {
     let accounts = store::accounts(&state.db).await.map_err(unavailable)?;
-    if accounts
-        .iter()
-        .any(|a| a.config.address.eq_ignore_ascii_case(&request.address))
-    {
+    if accounts.iter().any(|a| {
+        a.config.address.eq_ignore_ascii_case(&request.address) && !a.health.needs_new_credential()
+    }) {
         return Err(ApiError::new(
             axum::http::StatusCode::CONFLICT,
             "mail_account_exists",
@@ -378,10 +377,34 @@ async fn oauth_complete(
     let config = provider.config(address)?;
     config.validate()?;
     credential.validate(provider)?;
-    let account = store::create(&state.db, &manager.key, &config, &credential)
+    // Signing in again to an inbox whose grant expired keeps the account,
+    // so its permissions, triggers and history stay.
+    let expired = store::accounts(&state.db)
         .await
-        .map_err(unavailable)?;
-    manager.changed(account.id).await;
+        .map_err(unavailable)?
+        .into_iter()
+        .find(|a| {
+            a.config.provider == provider
+                && a.config.address.eq_ignore_ascii_case(&config.address)
+                && a.health.needs_new_credential()
+        });
+    let id = match expired {
+        Some(account) => {
+            manager.replace_credential(account.id, credential).await?;
+            account.id
+        }
+        None => {
+            store::create(&state.db, &manager.key, &config, &credential)
+                .await
+                .map_err(unavailable)?
+                .id
+        }
+    };
+    manager.changed(id).await;
+    let account = store::account(&state.db, id)
+        .await
+        .map_err(unavailable)?
+        .ok_or_else(ApiError::not_found)?;
     Ok(Json(json!({"account":account})))
 }
 
@@ -539,13 +562,10 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
     let existing = accounts
         .iter()
         .find(|a| a.config.address.eq_ignore_ascii_case(&request.address));
-    // An inbox whose app password the server now rejects gets the card
-    // again, so the owner can enter a new one.
+    // An inbox whose saved password or OAuth grant no longer works gets
+    // the card again, so the owner can enter a new password or sign in.
     let replaces = existing
-        .filter(|account| {
-            matches!(sign_in, CardSignIn::AppPassword { .. })
-                && account.health == Health::CredentialRejected
-        })
+        .filter(|account| account.health.needs_new_credential())
         .map(|account| account.generation);
     if let Some(account) = existing.filter(|_| replaces.is_none()) {
         return (
@@ -557,7 +577,10 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
     }
     let address = &request.address;
     let sign_in = match (sign_in, replaces) {
-        (CardSignIn::Browser(company), _) => format!("Sign in with {company} as {address}."),
+        (CardSignIn::Browser(company), None) => format!("Sign in with {company} as {address}."),
+        (CardSignIn::Browser(company), Some(_)) => {
+            format!("Sign in with {company} as {address} again.")
+        }
         (CardSignIn::AppPassword { issuer, help }, Some(_)) => format!(
             "{issuer} rejected the saved password for {address}. Enter a new app-specific \
              password. Make one at {help}."
@@ -895,6 +918,13 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                 "the server rejected the inbox's saved password. For an iCloud inbox, call \
                  mail_connect with provider icloud and its address so the owner enters a new \
                  one. Otherwise the owner replaces it in Settings, Email.",
+            );
+            (tool_error(&error.to_string()), None)
+        }
+        Err(error) if error.code == REAUTHENTICATION_REQUIRED => {
+            let error = error.detail(
+                "the inbox's sign-in expired. Call mail_connect with its provider and address \
+                 so the owner signs in again.",
             );
             (tool_error(&error.to_string()), None)
         }

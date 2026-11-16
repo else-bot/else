@@ -686,14 +686,14 @@ pub async fn answer(
     // sign-in, an account of its provider connected since it was asked:
     // Google may authorize a different mailbox than the bot named. A card
     // that takes a password names its mailbox exactly. An account whose
-    // server rejects its saved password does not count until the owner
-    // replaces it. The asking bot then wakes on that inbox's new mail.
+    // server rejects its saved password, or whose OAuth grant expired, does
+    // not count until the owner replaces it. The asking bot then wakes on that inbox's new mail.
     if choice == Some(APPROVE)
         && let Some(Action::EmailConnection { email_connection }) = &question.action
     {
         let connected: Vec<(Uuid, bool)> = sqlx::query_as(
             "SELECT id, lower(json_extract(config, '$.address')) = ?1 FROM connector_accounts
-             WHERE state <> 'removed' AND health <> ?4
+             WHERE state <> 'removed' AND health NOT IN (?4, ?6)
                 AND (lower(json_extract(config, '$.address')) = ?1
                      OR (?5 AND json_extract(config, '$.provider') = ?3
                          AND created_at >= (SELECT created_at FROM owner_questions WHERE id = ?2)))",
@@ -712,6 +712,7 @@ pub async fn answer(
             email_connection.provider.card_sign_in(),
             Some(crate::connectors::types::CardSignIn::Browser(_))
         ))
+        .bind(crate::connectors::types::REAUTHENTICATION_REQUIRED)
         .fetch_all(&mut *tx)
         .await?;
         if connected.is_empty() {

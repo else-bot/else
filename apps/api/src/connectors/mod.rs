@@ -380,7 +380,7 @@ impl ConnectorManager {
             Credential::OAuth2 { access_token, .. } => (
                 access_token
                     .clone()
-                    .ok_or_else(|| MailError::new("oauth_reauthentication_required"))?,
+                    .ok_or_else(|| MailError::new(REAUTHENTICATION_REQUIRED))?,
                 true,
             ),
         };

@@ -109,6 +109,9 @@ pub enum Health {
     /// The server rejected the saved credential. Only a later sign-in or a
     /// new credential clears it.
     CredentialRejected,
+    /// The OAuth provider no longer accepts the saved grant, as when its
+    /// refresh token expires. Only a new sign-in clears it.
+    ReauthenticationRequired,
     /// Any other failure, by its error code.
     Failing(String),
 }
@@ -119,8 +122,17 @@ impl Health {
             Self::Unknown => "unknown",
             Self::Connected => "connected",
             Self::CredentialRejected => AUTHENTICATION_FAILED,
+            Self::ReauthenticationRequired => REAUTHENTICATION_REQUIRED,
             Self::Failing(code) => code,
         }
+    }
+
+    /// Whether only a new credential or sign-in can restore the inbox.
+    pub fn needs_new_credential(&self) -> bool {
+        matches!(
+            self,
+            Self::CredentialRejected | Self::ReauthenticationRequired
+        )
     }
 }
 
@@ -130,6 +142,7 @@ impl From<String> for Health {
             "unknown" => Self::Unknown,
             "connected" => Self::Connected,
             AUTHENTICATION_FAILED => Self::CredentialRejected,
+            REAUTHENTICATION_REQUIRED => Self::ReauthenticationRequired,
             _ => Self::Failing(code),
         }
     }
@@ -144,6 +157,10 @@ impl From<Health> for String {
 /// The error code of a server rejecting the saved credential, stored as
 /// `Health::CredentialRejected`.
 pub const AUTHENTICATION_FAILED: &str = "mail_authentication_failed";
+
+/// The error code of an OAuth provider refusing the saved grant, stored as
+/// `Health::ReauthenticationRequired`.
+pub const REAUTHENTICATION_REQUIRED: &str = "oauth_reauthentication_required";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
