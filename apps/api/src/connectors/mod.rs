@@ -391,12 +391,28 @@ impl ConnectorManager {
         })
     }
 
-    async fn dispatch(&self, id: Uuid, command: Command) {
-        let result = self.perform(id, &command).await;
+    /// Runs one command. When the server rejects the credential, it stops
+    /// the watch session and records the rejection before it replies, so a
+    /// session that signed in before the password was revoked cannot
+    /// report the inbox connected, and the bot's next call sees it. It
+    /// returns whether the watch must sign in again.
+    async fn dispatch(&self, id: Uuid, command: Command, watching: &mut Option<Watching>) -> bool {
+        let mut rejected = None;
+        let result = self.perform(id, &command, &mut rejected).await;
+        if let Some(generation) = rejected {
+            stop_watch(watching).await;
+            self.health(id, generation, AUTHENTICATION_FAILED).await;
+        }
         let _ = command.reply.send(result);
+        rejected.is_some()
     }
 
-    async fn perform(&self, id: Uuid, command: &Command) -> Result<Value, MailError> {
+    async fn perform(
+        &self,
+        id: Uuid,
+        command: &Command,
+        rejected: &mut Option<i64>,
+    ) -> Result<Value, MailError> {
         if tokio::time::Instant::now() >= command.deadline {
             return Err(MailError::new("mail_queue_expired"));
         }
@@ -429,7 +445,9 @@ impl ConnectorManager {
                 store::ActionStart::Existing(receipt) => return Ok(receipt),
                 store::ActionStart::Dispatch => {}
             }
-            let result = self.execute_as(&account, &auth, &command.command).await;
+            let result = self
+                .execute_as(&account, &auth, &command.command, rejected)
+                .await;
             let (status, receipt) = match result {
                 Ok(value) => (
                     store::ActionStatus::Succeeded,
@@ -445,26 +463,23 @@ impl ConnectorManager {
                 .map_err(|_| MailError::new("mail_receipt_unavailable"))?;
             Ok(receipt)
         } else {
-            self.execute_as(&account, &auth, &command.command).await
+            self.execute_as(&account, &auth, &command.command, rejected)
+                .await
         }
     }
 
-    /// Runs one command and records a rejected credential at once, so a bot
-    /// told to reconnect finds the inbox needing it even while an earlier
-    /// watch session stays signed in.
     async fn execute_as(
         &self,
         account: &Account,
         auth: &Auth,
         command: &MailCommand,
+        rejected: &mut Option<i64>,
     ) -> Result<Value, MailError> {
-        let since = store::timestamp();
         let result = self.transport.execute(&account.config, auth, command).await;
         if let Err(error) = &result
             && error.code == AUTHENTICATION_FAILED
         {
-            self.health(account.id, account.generation, error.code, &since)
-                .await;
+            *rejected = Some(account.generation);
         }
         result
     }
@@ -488,7 +503,6 @@ impl ConnectorManager {
         stop: CancellationToken,
     ) -> Result<(), MailError> {
         let id = account.id;
-        let since = store::timestamp();
         let cursor = loop {
             let old = store::cursor(&self.db, id)
                 .await
@@ -516,20 +530,19 @@ impl ConnectorManager {
                 break scan.cursor;
             }
         };
-        self.health(id, account.generation, "connected", &since)
-            .await;
+        self.health(id, account.generation, "connected").await;
         self.transport
             .wait(&account.config, auth, &cursor, stop)
             .await
     }
 
-    async fn health(&self, id: Uuid, generation: i64, code: &str, since: &str) {
+    async fn health(&self, id: Uuid, generation: i64, code: &str) {
         if code == "mail_account_paused" {
             return;
         }
         if let Some(_admission) = self.scheduler.gate().enter() {
             let health = Health::from(code.to_owned());
-            let _ = store::set_health(&self.db, id, generation, &health, since).await;
+            let _ = store::set_health(&self.db, id, generation, &health).await;
         }
     }
 
@@ -566,8 +579,7 @@ impl ConnectorManager {
                         if let Ok(Some(account)) = store::account(&self.db, id).await
                             && account.state == "active"
                         {
-                            self.health(id, account.generation, error.code, &store::timestamp())
-                                .await;
+                            self.health(id, account.generation, error.code).await;
                         }
                         failures = failures.saturating_add(1);
                         retry_at = tokio::time::Instant::now() + retry_delay(failures);
@@ -580,7 +592,11 @@ impl ConnectorManager {
                 command = commands.recv() => {
                     let Some(command) = command else { break; };
                     match command {
-                        Request::Mail(command) => self.dispatch(id,command).await,
+                        Request::Mail(command) => {
+                            if self.dispatch(id,command,&mut watching).await {
+                                retry_at = tokio::time::Instant::now();
+                            }
+                        }
                         Request::Credential { credential,reply } => {
                             stop_watch(&mut watching).await;
                             let result = self.save_owner_credential(id,credential).await;
@@ -601,7 +617,7 @@ impl ConnectorManager {
                         Ok(Ok(())) => { failures = 0; retry_at = tokio::time::Instant::now(); }
                         result => {
                             let code = match result { Ok(Err(error)) => error.code, _ => "mail_watch_failed" };
-                            self.health(id,completed.generation,code,&store::timestamp()).await;
+                            self.health(id,completed.generation,code).await;
                             failures = failures.saturating_add(1);
                             retry_at = tokio::time::Instant::now() + retry_delay(failures);
                         }

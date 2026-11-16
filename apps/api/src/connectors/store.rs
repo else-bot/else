@@ -201,14 +201,6 @@ struct AccountRow {
     health: String,
 }
 
-/// The current time in the format of the `updated_at` columns, so the two
-/// compare in order.
-pub fn timestamp() -> String {
-    chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3f+00:00")
-        .to_string()
-}
-
 impl From<AccountRow> for Account {
     fn from(row: AccountRow) -> Self {
         Self {
@@ -503,17 +495,16 @@ pub async fn set_active(
     account(pool, id).await
 }
 
-/// Record the runtime's view of an account's health for this generation,
-/// from a check that began at `checked_since` (a `timestamp`). A rejected
-/// credential stays rejected until the owner replaces it or a sign-in that
-/// began after the rejection succeeds, so neither a network error nor an
-/// older session hides it.
+/// Record the runtime's view of an account's health for this generation.
+/// A rejected credential stays rejected until the owner replaces it or a
+/// sign-in succeeds, so a network error cannot hide it. The account's
+/// worker stops a watch session before it records a rejection, so only a
+/// sign-in that began afterwards reports `connected`.
 pub async fn set_health(
     pool: &SqlitePool,
     id: Uuid,
     generation: i64,
     health: &Health,
-    checked_since: &str,
 ) -> Result<bool, StoreError> {
     let health = health.code();
     if !field(health) || health.len() > 64 {
@@ -522,13 +513,12 @@ pub async fn set_health(
     let done = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE connector_accounts SET health = ?3, updated_at = {NOW}
          WHERE id = ?1 AND generation = ?2 AND state <> 'removed'
-            AND (health <> ?4 OR (?3 = 'connected' AND updated_at < ?5))"
+            AND (health <> ?4 OR ?3 = 'connected')"
     )))
     .bind(id)
     .bind(generation)
     .bind(health)
     .bind(AUTHENTICATION_FAILED)
-    .bind(checked_since)
     .execute(pool)
     .await?;
     Ok(done.rows_affected() == 1)

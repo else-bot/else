@@ -698,24 +698,28 @@ struct Transport {
 /// app-specific password.
 const REVOKED: &str = "revoked-app-password";
 
-fn rejects(auth: &Auth) -> Result<(), MailError> {
-    if auth.secret.as_str() == REVOKED {
-        Err(MailError::new(AUTHENTICATION_FAILED))
-    } else {
-        Ok(())
-    }
-}
-
 #[derive(Default)]
 struct QuietInbox {
     scans: AtomicUsize,
     waits: AtomicUsize,
     ready: tokio::sync::Notify,
+    /// Rejects every new sign-in, as after the owner revokes the password.
+    /// A watch session that already signed in keeps waiting.
+    revoked: std::sync::atomic::AtomicBool,
+}
+impl QuietInbox {
+    fn signs_in(&self, auth: &Auth) -> Result<(), MailError> {
+        if auth.secret.as_str() == REVOKED || self.revoked.load(Ordering::SeqCst) {
+            Err(MailError::new(AUTHENTICATION_FAILED))
+        } else {
+            Ok(())
+        }
+    }
 }
 #[async_trait::async_trait]
 impl MailTransport for QuietInbox {
     async fn verify(&self, _: &MailConfig, auth: &Auth) -> Result<(), MailError> {
-        rejects(auth)
+        self.signs_in(auth)
     }
     async fn execute(
         &self,
@@ -723,10 +727,16 @@ impl MailTransport for QuietInbox {
         auth: &Auth,
         _: &MailCommand,
     ) -> Result<Value, MailError> {
-        rejects(auth)?;
+        self.signs_in(auth)?;
         Ok(json!({"folders":[]}))
     }
-    async fn scan(&self, _: &MailConfig, _: &Auth, _: Option<&Cursor>) -> Result<Scan, MailError> {
+    async fn scan(
+        &self,
+        _: &MailConfig,
+        auth: &Auth,
+        _: Option<&Cursor>,
+    ) -> Result<Scan, MailError> {
+        self.signs_in(auth)?;
         self.scans.fetch_add(1, Ordering::SeqCst);
         Ok(Scan {
             cursor: Cursor {
@@ -1691,17 +1701,12 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_in_the_same_turn_when_
         .unwrap()
         .unwrap()
         .generation;
-    let health = |health: Health, since: String| async move {
-        store::set_health(&app.db.pool, account, generation, &health, &since)
+    let health = |health: Health| async move {
+        store::set_health(&app.db.pool, account, generation, &health)
             .await
             .unwrap()
     };
-    let signed_in_before = store::timestamp();
-    assert!(health(Health::CredentialRejected, store::timestamp()).await);
-    assert!(
-        !health(Health::Connected, signed_in_before).await,
-        "a session that signed in before the rejection does not clear it"
-    );
+    assert!(health(Health::CredentialRejected).await);
     let (path, card) = parked_card(
         app,
         &token,
@@ -1721,13 +1726,7 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_in_the_same_turn_when_
         "inbox_not_connected",
         "an inbox Apple rejects is not connected"
     );
-    assert!(
-        !health(
-            Health::Failing("mail_transport_failed".into()),
-            store::timestamp()
-        )
-        .await
-    );
+    assert!(!health(Health::Failing("mail_transport_failed".into())).await);
     assert_eq!(
         approve(path.clone()).await.body["error"]["code"],
         "inbox_not_connected",
@@ -1745,63 +1744,76 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_in_the_same_turn_when_
     assert_eq!(replace("qrst-uvwx-yzab-cdef").await.status, StatusCode::OK);
     let answered = approve(path).await;
     assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
+}
 
-    let generation = store::account(&app.db.pool, account)
-        .await
-        .unwrap()
-        .unwrap()
-        .generation;
-    let set = |health: Health| async move {
-        store::set_health(
-            &app.db.pool,
-            account,
-            generation,
-            &health,
-            &store::timestamp(),
-        )
-        .await
-        .unwrap()
-    };
-    assert!(set(Health::CredentialRejected).await);
-    // Timestamps have millisecond precision: the sign-in must begin later.
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    assert!(
-        set(Health::Connected).await,
-        "a sign-in that began after a rejection clears it"
-    );
+/// Waits until the account's runtime reports `want`.
+async fn health_becomes(app: &TestApp, account: Uuid, want: Health) {
+    tokio::time::timeout(common::SETTLE, async {
+        while store::account(&app.db.pool, account)
+            .await
+            .unwrap()
+            .unwrap()
+            .health
+            != want
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the inbox never became {want:?}"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_rejected_inbox_password_tells_the_bot_to_reopen_the_card() {
+async fn a_revoked_inbox_password_reopens_the_card_until_a_sign_in_succeeds() {
     let inbox = Arc::new(QuietInbox::default());
     let h = recorder::harness_with(4, Some(inbox.clone())).await;
-    let bot = h.app.main_bot().await;
+    let app = &h.app;
+    let bot = app.main_bot().await;
     let (_, token) = h.running(&bot, GATE).await;
     let account = store::create(
-        &h.app.db.pool,
-        h.app.state.secret_key.as_ref().unwrap(),
+        &app.db.pool,
+        app.state.secret_key.as_ref().unwrap(),
         &Provider::Icloud.config("owner@icloud.com".into()).unwrap(),
         &Credential::Password {
-            password: REVOKED.into(),
+            password: "abcd-efgh-ijkl-mnop".into(),
         },
     )
     .await
     .unwrap();
     store::set_permissions(
-        &h.app.db.pool,
+        &app.db.pool,
         account.id,
         bot.parse().unwrap(),
         &permissions(),
     )
     .await
     .unwrap();
-    let failed = tool(
-        &h.app,
-        &token,
-        "mail_action",
-        json!({"account_id":account.id,"command":{"operation":"folders"}}),
-    )
-    .await;
+    let connect = || {
+        tool(
+            app,
+            &token,
+            "mail_connect",
+            json!({"provider":"icloud","address":"owner@icloud.com"}),
+        )
+    };
+    let folders = || {
+        tool(
+            app,
+            &token,
+            "mail_action",
+            json!({"account_id":account.id,"command":{"operation":"folders"}}),
+        )
+    };
+    assert!(!folders().await.error);
+    tokio::time::timeout(common::SETTLE, inbox.ready.notified())
+        .await
+        .expect("the inbox is watched");
+    health_becomes(app, account.id, Health::Connected).await;
+
+    // The watch session signed in before the revocation and keeps waiting,
+    // as an IDLE session does, so only the failed command shows it.
+    inbox.revoked.store(true, Ordering::SeqCst);
+    let failed = folders().await;
     assert!(failed.error, "{}", failed.body);
     assert_eq!(
         failed.code(),
@@ -1814,31 +1826,21 @@ async fn a_rejected_inbox_password_tells_the_bot_to_reopen_the_card() {
         "{}",
         failed.body
     );
-    // QuietInbox's watch stays signed in, like an IDLE session opened before
-    // Apple revoked the password, so only the failed command shows it.
-    tokio::time::timeout(common::SETTLE, inbox.ready.notified())
-        .await
-        .expect("the inbox is watched");
-    let failed = tool(
-        &h.app,
-        &token,
-        "mail_action",
-        json!({"account_id":account.id,"command":{"operation":"folders"}}),
-    )
-    .await;
-    assert!(failed.error, "{}", failed.body);
-    let reopened = tool(
-        &h.app,
-        &token,
-        "mail_connect",
-        json!({"provider":"icloud","address":"owner@icloud.com"}),
-    )
-    .await;
+    let reopened = connect().await;
     assert_eq!(
         reopened.result["status"], "pending_owner_auth",
         "{}",
         reopened.body
     );
+
+    inbox.revoked.store(false, Ordering::SeqCst);
+    app.state
+        .connectors
+        .as_ref()
+        .unwrap()
+        .changed(account.id)
+        .await;
+    health_becomes(app, account.id, Health::Connected).await;
 }
 
 fn gmail(address: &str) -> (MailConfig, Credential) {
