@@ -206,22 +206,15 @@ mod tests {
     }
 
     #[test]
-    fn reply_previews_show_plain_text_without_changing_the_reply() {
+    fn reply_previews_show_the_server_plain_text_as_is() {
         for (source, expected) in [
             (
-                "Created **Github**, your specialist.",
-                "Created Github, your specialist.",
+                "Escaped *literal* and *code*",
+                "Escaped *literal* and *code*",
             ),
-            (
-                "**Ready** _now_ with `cargo test`",
-                "Ready now with cargo test",
-            ),
-            ("## [Report](https://example.com) ~~old~~", "Report old"),
-            ("  **Résumé**\nwith   details  ", "Résumé with details"),
-            ("`a_b * c` + **bold**", "a_b * c + bold"),
-            ("2 * 3 = 6 and foo_bar", "2 * 3 = 6 and foo_bar"),
-            ("\\*literal\\* &amp; café", "*literal* & café"),
-            ("---", "No text in last reply"),
+            ("<path> exists & café", "<path> exists & café"),
+            ("  Résumé\nwith   details  ", "Résumé with details"),
+            ("", "No text in last reply"),
         ] {
             let bot = bot(json!({"read_state": {
                 "latest": {

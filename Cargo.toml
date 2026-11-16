@@ -1,5 +1,5 @@
 [workspace]
-members = ["apps/api", "apps/desktop", "crates/tailnet", "crates/visual"]
+members = ["apps/api", "apps/desktop", "crates/plain-text", "crates/tailnet", "crates/visual"]
 resolver = "3"
 
 [workspace.package]
@@ -8,6 +8,7 @@ edition = "2024"
 rust-version = "1.100"
 
 [workspace.dependencies]
+else-plain-text = { path = "crates/plain-text" }
 else-tailnet = { path = "crates/tailnet" }
 else-visual = { path = "crates/visual" }
 anyhow = "1.0.104"

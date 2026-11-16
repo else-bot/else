@@ -150,7 +150,7 @@ pub async fn for_turns(
                  WHERE i.turn_id = coalesce(d.takeover_turn_id, d.child_turn_id)
                    AND i.kind = 'assistant') AS updates,
                 CASE WHEN d.status IN ('queued', 'running') THEN
-                    (SELECT substr(i.text, 1, 400) FROM items i
+                    (SELECT i.text FROM items i
                      WHERE i.turn_id = coalesce(d.takeover_turn_id, d.child_turn_id)
                        AND i.kind = 'assistant'
                      ORDER BY i.seq DESC LIMIT 1)

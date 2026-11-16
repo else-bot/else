@@ -579,6 +579,23 @@ fn progress_title_uses_plain_markdown_text() {
 }
 
 #[test]
+fn progress_title_keeps_link_text_when_the_url_runs_past_the_cut() {
+    let url = format!(
+        "https://app.t3.codes/threads/032fb8c7-85fb-4c1e-9d6a-1f2e3d4c5b6a/mcp%3Alaunch%3A{}",
+        "ab".repeat(32)
+    );
+    let mut update = item(2, 10, "assistant");
+    update["text"] = json!(format!(
+        "I started [Implement #468: stacked waiting rows]({url}) now."
+    ));
+    let c = conversation(vec![item(1, 10, "user"), update], vec![turn(10, "running")]);
+    assert_eq!(
+        task_replies(&c)[&id(10)].summary.as_deref(),
+        Some("I started Implement #468: stacked waiting rows now.")
+    );
+}
+
+#[test]
 fn a_file_in_the_current_live_update_is_kept_visible() {
     let mut file = item(2, 10, "assistant");
     file["parts"] = json!([{"type":"file", "file": {

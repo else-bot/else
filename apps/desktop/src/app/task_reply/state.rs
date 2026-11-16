@@ -322,19 +322,8 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
         reply.summary = reply
             .latest
             .and_then(|id| conversation.item(id))
-            .and_then(|item| {
-                let line: String = item
-                    .text
-                    .lines()
-                    .find(|line| !line.trim().is_empty())?
-                    .chars()
-                    .take(180)
-                    .collect();
-                let plain = markdown::to_mdast(&line, &markdown::ParseOptions::default())
-                    .ok()?
-                    .to_string();
-                (!plain.trim().is_empty()).then_some(plain)
-            });
+            .and_then(|item| else_plain_text::lines(&item.text).into_iter().next())
+            .map(|line| else_plain_text::cut(&line, 180));
     }
     replies
 }

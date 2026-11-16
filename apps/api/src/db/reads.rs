@@ -96,17 +96,10 @@ impl ReadRow {
     }
 }
 
+/// The reply as one short line of plain text. Markdown is stripped before
+/// the cut, so a cut never lands inside a link.
 pub(super) fn preview(text: &str) -> String {
-    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if line.chars().count() <= PREVIEW_CHARS {
-        return line;
-    }
-    let cut: String = line.chars().take(PREVIEW_CHARS).collect();
-    let cut = match cut.rfind(' ') {
-        Some(space) if space > PREVIEW_CHARS / 2 => &cut[..space],
-        _ => &cut,
-    };
-    format!("{}…", cut.trim_end())
+    else_plain_text::cut(&else_plain_text::one_line(text), PREVIEW_CHARS)
 }
 
 /// An owner change to the read state.
@@ -218,5 +211,19 @@ mod tests {
         assert!(cut.ends_with(" abcdefghij…"), "cut at a word: {cut}");
         let wide = "✓".repeat(500);
         assert_eq!(preview(&wide).chars().count(), PREVIEW_CHARS + 1);
+    }
+
+    #[test]
+    fn previews_are_plain_text_even_when_a_link_runs_past_the_cut() {
+        let url = format!(
+            "https://app.t3.codes/threads/mcp%3Alaunch%3A{}",
+            "ab".repeat(80)
+        );
+        assert_eq!(
+            preview(&format!(
+                "**Done.** I started [Implement #468]({url}).\n\n## Next\n`cargo test`"
+            )),
+            "Done. I started Implement #468. Next cargo test"
+        );
     }
 }

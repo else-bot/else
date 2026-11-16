@@ -14,12 +14,7 @@ const MAX_ROWS_HEIGHT: f32 = 240.;
 
 /// The first non-empty line of a task's latest message, as plain text.
 fn first_line(text: &str) -> Option<String> {
-    let line = text.lines().find(|line| !line.trim().is_empty())?;
-    let plain = markdown::to_mdast(line, &markdown::ParseOptions::default())
-        .ok()?
-        .to_string();
-    let plain = plain.trim();
-    (!plain.is_empty()).then(|| plain.to_owned())
+    else_plain_text::lines(text).into_iter().next()
 }
 
 fn one_line(task: &str) -> String {
@@ -262,5 +257,9 @@ mod tests {
             Some("Opened Search Console".to_owned())
         );
         assert_eq!(first_line("  \n"), None);
+        assert_eq!(
+            first_line("~~Drafting~~ Sent https://example.com/report"),
+            Some("Drafting Sent https://example.com/report".to_owned())
+        );
     }
 }
