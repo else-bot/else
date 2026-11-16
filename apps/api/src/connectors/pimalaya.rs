@@ -160,6 +160,129 @@ impl Imap {
         }
         Err(MailError::new("message_not_found"))
     }
+    async fn search_messages(
+        &mut self,
+        folder: &str,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<Value, MailError> {
+        if limit == 0 || limit > 100 {
+            return Err(MailError::new("invalid_mail_limit"));
+        }
+        let selected = self
+            .examine(mailbox(folder)?, Default::default())
+            .await
+            .map_err(failure)?;
+        let validity = selected
+            .uid_validity
+            .ok_or_else(|| MailError::new("mail_missing_uid_validity"))?
+            .get();
+        let key = if let Some(query) = query {
+            if query.len() > 2048 {
+                return Err(MailError::new("mail_query_too_large"));
+            }
+            SearchKey::Text(query.to_owned().try_into().map_err(invalid)?)
+        } else {
+            SearchKey::All
+        };
+        let mut found = self
+            .search(
+                Vec1::try_from(vec![key]).expect("one search key"),
+                ImapMessageSearchOptions { uid: true },
+            )
+            .await
+            .map_err(failure)?;
+        found.sort_unstable();
+        found.dedup();
+        let truncated = found.len() > limit;
+        let chosen: Vec<_> = found.into_iter().rev().take(limit).collect();
+        if chosen.is_empty() {
+            return Ok(json!({"messages":[],"truncated":false}));
+        }
+        let set = SequenceSet::try_from(
+            chosen
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+                .as_str(),
+        )
+        .map_err(invalid)?;
+        let rows = self
+            .fetch(
+                set,
+                items(vec![
+                    MessageDataItemName::Uid,
+                    MessageDataItemName::Envelope,
+                    MessageDataItemName::Flags,
+                ]),
+                ImapMessageFetchOptions {
+                    uid: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(failure)?;
+        let mut messages = Vec::new();
+        for row in rows.values() {
+            let Some(uid) = row.as_ref().iter().find_map(|i| {
+                if let MessageDataItem::Uid(id) = i {
+                    Some(id.get())
+                } else {
+                    None
+                }
+            }) else {
+                continue;
+            };
+            if !chosen.iter().any(|id| id.get() == uid) {
+                continue;
+            }
+            let mut value =
+                json!({"message":MessageRef{folder:folder.to_owned(),uid_validity:validity,uid}});
+            for item in row.as_ref().iter() {
+                match item {
+                    MessageDataItem::Envelope(e) => {
+                        value["subject"] = json!(nstring(&e.subject));
+                        value["from"] = json!(
+                            e.from
+                                .iter()
+                                .map(|a| format!(
+                                    "{}@{}",
+                                    nstring(&a.mailbox).unwrap_or_default(),
+                                    nstring(&a.host).unwrap_or_default()
+                                ))
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                    MessageDataItem::Flags(flags) => {
+                        value["flags"] = json!(
+                            flags
+                                .iter()
+                                .map(|f| match f {
+                                    io_imap::types::flag::FlagFetch::Flag(f) => f.to_string(),
+                                    io_imap::types::flag::FlagFetch::Recent => "\\Recent".into(),
+                                })
+                                .collect::<Vec<_>>()
+                        )
+                    }
+                    _ => (),
+                }
+            }
+            messages.push(value);
+        }
+        Ok(json!({"messages":messages,"truncated":truncated,"source":"external_email"}))
+    }
+    async fn read_message(&mut self, message: &MessageRef) -> Result<Value, MailError> {
+        let bytes = self.body(message).await?;
+        let parsed = MessageParser::default()
+            .parse(&bytes)
+            .ok_or_else(|| MailError::new("invalid_email_message"))?;
+        let body = parsed.body_text(0).unwrap_or_default();
+        let text: String = body.chars().take(32000).collect();
+        Ok(
+            json!({"message":message,"source":"external_email","subject":parsed.subject(),"from":addresses(parsed.from()),"to":addresses(parsed.to()),"cc":addresses(parsed.cc()),"reply_to":addresses(parsed.reply_to()),"body":text,"truncated":body.chars().count()>32000,"attachments":parsed.attachments().enumerate().map(|(part,a)|json!({"part":part,"name":a.attachment_name(),"size":a.contents().len()})).collect::<Vec<_>>()}),
+        )
+    }
     async fn flag(
         &mut self,
         message: &MessageRef,
@@ -407,124 +530,11 @@ async fn execute(
             query,
             limit,
         } => {
-            if *limit == 0 || *limit > 100 {
-                return Err(MailError::new("invalid_mail_limit"));
-            }
-            let selected = client
-                .examine(mailbox(folder)?, Default::default())
+            client
+                .search_messages(folder, query.as_deref(), *limit)
                 .await
-                .map_err(failure)?;
-            let validity = selected
-                .uid_validity
-                .ok_or_else(|| MailError::new("mail_missing_uid_validity"))?
-                .get();
-            let key = if let Some(query) = query {
-                if query.len() > 2048 {
-                    return Err(MailError::new("mail_query_too_large"));
-                }
-                SearchKey::Text(query.clone().try_into().map_err(invalid)?)
-            } else {
-                SearchKey::All
-            };
-            let mut found = client
-                .search(
-                    Vec1::try_from(vec![key]).expect("one search key"),
-                    ImapMessageSearchOptions { uid: true },
-                )
-                .await
-                .map_err(failure)?;
-            found.sort_unstable();
-            found.dedup();
-            let truncated = found.len() > *limit;
-            let chosen: Vec<_> = found.into_iter().rev().take(*limit).collect();
-            if chosen.is_empty() {
-                return Ok(json!({"messages":[],"truncated":false}));
-            }
-            let set = SequenceSet::try_from(
-                chosen
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",")
-                    .as_str(),
-            )
-            .map_err(invalid)?;
-            let rows = client
-                .fetch(
-                    set,
-                    items(vec![
-                        MessageDataItemName::Uid,
-                        MessageDataItemName::Envelope,
-                        MessageDataItemName::Flags,
-                    ]),
-                    ImapMessageFetchOptions {
-                        uid: true,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(failure)?;
-            let mut messages = Vec::new();
-            for row in rows.values() {
-                let Some(uid) = row.as_ref().iter().find_map(|i| {
-                    if let MessageDataItem::Uid(id) = i {
-                        Some(id.get())
-                    } else {
-                        None
-                    }
-                }) else {
-                    continue;
-                };
-                if !chosen.iter().any(|id| id.get() == uid) {
-                    continue;
-                }
-                let mut value =
-                    json!({"message":MessageRef{folder:folder.clone(),uid_validity:validity,uid}});
-                for item in row.as_ref().iter() {
-                    match item {
-                        MessageDataItem::Envelope(e) => {
-                            value["subject"] = json!(nstring(&e.subject));
-                            value["from"] = json!(
-                                e.from
-                                    .iter()
-                                    .map(|a| format!(
-                                        "{}@{}",
-                                        nstring(&a.mailbox).unwrap_or_default(),
-                                        nstring(&a.host).unwrap_or_default()
-                                    ))
-                                    .collect::<Vec<_>>()
-                            );
-                        }
-                        MessageDataItem::Flags(flags) => {
-                            value["flags"] = json!(
-                                flags
-                                    .iter()
-                                    .map(|f| match f {
-                                        io_imap::types::flag::FlagFetch::Flag(f) => f.to_string(),
-                                        io_imap::types::flag::FlagFetch::Recent =>
-                                            "\\Recent".into(),
-                                    })
-                                    .collect::<Vec<_>>()
-                            )
-                        }
-                        _ => (),
-                    }
-                }
-                messages.push(value);
-            }
-            Ok(json!({"messages":messages,"truncated":truncated,"source":"external_email"}))
         }
-        MailCommand::Read { message } => {
-            let bytes = client.body(message).await?;
-            let parsed = MessageParser::default()
-                .parse(&bytes)
-                .ok_or_else(|| MailError::new("invalid_email_message"))?;
-            let body = parsed.body_text(0).unwrap_or_default();
-            let text: String = body.chars().take(32000).collect();
-            Ok(
-                json!({"message":message,"source":"external_email","subject":parsed.subject(),"from":addresses(parsed.from()),"to":addresses(parsed.to()),"cc":addresses(parsed.cc()),"reply_to":addresses(parsed.reply_to()),"body":text,"truncated":body.chars().count()>32000,"attachments":parsed.attachments().enumerate().map(|(part,a)|json!({"part":part,"name":a.attachment_name(),"size":a.contents().len()})).collect::<Vec<_>>()}),
-            )
-        }
+        MailCommand::Read { message } => client.read_message(message).await,
         MailCommand::Attachment { message, part } => {
             let bytes = client.body(message).await?;
             let parsed = MessageParser::default()
