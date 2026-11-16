@@ -127,3 +127,56 @@ async fn a_gmail_inbox_google_signed_out_reopens_the_sign_in_card() {
     assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
     health_becomes(app, account.id, Health::Connected).await;
 }
+
+#[tokio::test]
+async fn signing_in_again_takes_no_account_slot() {
+    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+    let app = &h.app;
+    let key = app.state.secret_key.as_ref().unwrap();
+    let (config, credential) = gmail("owner@gmail.com");
+    let expired = store::create(&app.db.pool, key, &config, &credential)
+        .await
+        .unwrap();
+    for n in 1..store::MAX_ACCOUNTS {
+        let mut config = super::config();
+        config.address = format!("bot{n}@example.com");
+        config.username = config.address.clone();
+        store::create(
+            &app.db.pool,
+            key,
+            &config,
+            &Credential::Password {
+                password: "private-app-password".into(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let start = |address: &str| {
+        app.owner(
+            "POST",
+            "/v1/connectors/email/oauth/start",
+            Some(json!({
+                "provider":"gmail", "address":address, "client_id":"desktop",
+                "redirect_uri":"http://127.0.0.1:45678/google/callback"
+            })),
+        )
+    };
+    assert_eq!(
+        start("new@gmail.com").await.body["error"]["code"],
+        "connector_limit"
+    );
+    let health = Health::from("oauth_reauthentication_required".to_owned());
+    assert!(
+        store::set_health(&app.db.pool, expired.id, expired.generation, &health)
+            .await
+            .unwrap()
+    );
+    let renew = start("owner@gmail.com").await;
+    assert_eq!(renew.status, StatusCode::OK, "{}", renew.body);
+    assert_eq!(
+        start("new@gmail.com").await.body["error"]["code"],
+        "connector_limit",
+        "a new address still needs a free slot"
+    );
+}

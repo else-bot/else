@@ -363,7 +363,15 @@ async fn oauth_start(
             "This email address is already connected.",
         ));
     }
-    if accounts.len() >= store::MAX_ACCOUNTS as usize {
+    // A sign-in may only renew an inbox's grant, which takes no new slot.
+    // Completing one that creates an account still checks the limit.
+    let may_renew = accounts.iter().any(|a| {
+        a.config.provider == request.provider
+            && a.health.needs_new_credential()
+            && (request.address.is_empty()
+                || a.config.address.eq_ignore_ascii_case(&request.address))
+    });
+    if accounts.len() >= store::MAX_ACCOUNTS as usize && !may_renew {
         return Err(MailError::new("connector_limit").into());
     }
     Ok(Json(manager(&state)?.oauth.start(request).await?))
