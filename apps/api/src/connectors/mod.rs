@@ -507,10 +507,12 @@ impl ConnectorManager {
             let old = store::cursor(&self.db, id)
                 .await
                 .map_err(|_| MailError::new("mail_unavailable"))?;
-            let scan = self
-                .transport
-                .scan(&account.config, auth, old.as_ref())
-                .await?;
+            // Only the server waits stop early. A database write that began
+            // finishes, so a stopped watch leaves no late health behind.
+            let scan = tokio::select! {
+                _ = stop.cancelled() => return Ok(()),
+                scan = self.transport.scan(&account.config, auth, old.as_ref()) => scan?,
+            };
             let more = scan.more || scan.arrivals.len() > store::MAX_ARRIVALS;
             {
                 let _admission = self
@@ -567,7 +569,7 @@ impl ConnectorManager {
                         let watch_stop = stop.clone();
                         let generation = account.generation;
                         let task = tokio::spawn(async move {
-                            tokio::select! { _ = watch_stop.cancelled() => Ok(()), result = manager.watch(&account,&auth,watch_stop.clone()) => result }
+                            manager.watch(&account, &auth, watch_stop).await
                         });
                         watching = Some(Watching {
                             task,

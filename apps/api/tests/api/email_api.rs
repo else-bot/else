@@ -706,6 +706,9 @@ struct QuietInbox {
     /// Rejects every new sign-in, as after the owner revokes the password.
     /// A watch session that already signed in keeps waiting.
     revoked: std::sync::atomic::AtomicBool,
+    /// Holds the next scan after it signs in, until the watch stops.
+    hold_scan: std::sync::atomic::AtomicBool,
+    scan_held: tokio::sync::Notify,
 }
 impl QuietInbox {
     fn signs_in(&self, auth: &Auth) -> Result<(), MailError> {
@@ -737,6 +740,10 @@ impl MailTransport for QuietInbox {
         _: Option<&Cursor>,
     ) -> Result<Scan, MailError> {
         self.signs_in(auth)?;
+        if self.hold_scan.swap(false, Ordering::SeqCst) {
+            self.scan_held.notify_one();
+            std::future::pending::<()>().await;
+        }
         self.scans.fetch_add(1, Ordering::SeqCst);
         Ok(Scan {
             cursor: Cursor {
@@ -1841,6 +1848,78 @@ async fn a_revoked_inbox_password_reopens_the_card_until_a_sign_in_succeeds() {
         .changed(account.id)
         .await;
     health_becomes(app, account.id, Health::Connected).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scan_that_signed_in_before_revocation_cannot_hide_the_rejection() {
+    let inbox = Arc::new(QuietInbox::default());
+    let h = recorder::harness_with(4, Some(inbox.clone())).await;
+    let app = &h.app;
+    let bot = app.main_bot().await;
+    let (_, token) = h.running(&bot, GATE).await;
+    let account = store::create(
+        &app.db.pool,
+        app.state.secret_key.as_ref().unwrap(),
+        &Provider::Icloud.config("owner@icloud.com".into()).unwrap(),
+        &Credential::Password {
+            password: "abcd-efgh-ijkl-mnop".into(),
+        },
+    )
+    .await
+    .unwrap();
+    store::set_permissions(
+        &app.db.pool,
+        account.id,
+        bot.parse().unwrap(),
+        &permissions(),
+    )
+    .await
+    .unwrap();
+    inbox.hold_scan.store(true, Ordering::SeqCst);
+    app.state
+        .connectors
+        .as_ref()
+        .unwrap()
+        .changed(account.id)
+        .await;
+    tokio::time::timeout(common::SETTLE, inbox.scan_held.notified())
+        .await
+        .expect("the watch signs in and scans");
+
+    inbox.revoked.store(true, Ordering::SeqCst);
+    let failed = tool(
+        app,
+        &token,
+        "mail_action",
+        json!({"account_id":account.id,"command":{"operation":"folders"}}),
+    )
+    .await;
+    assert_eq!(
+        failed.code(),
+        "mail_authentication_failed",
+        "{}",
+        failed.body
+    );
+    let reopened = tool(
+        app,
+        &token,
+        "mail_connect",
+        json!({"provider":"icloud","address":"owner@icloud.com"}),
+    )
+    .await;
+    assert_eq!(
+        reopened.result["status"], "pending_owner_auth",
+        "{}",
+        reopened.body
+    );
+    assert_eq!(
+        store::account(&app.db.pool, account.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .health,
+        Health::CredentialRejected
+    );
 }
 
 fn gmail(address: &str) -> (MailConfig, Credential) {
