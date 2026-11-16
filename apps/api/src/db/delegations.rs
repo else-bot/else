@@ -43,7 +43,9 @@ use crate::app::providers::Profile;
 use crate::providers::output_files::OutputFile;
 
 mod control;
-pub use control::{ControlError, Status, Task, TaskState, Updated, cancel, update};
+pub use control::{
+    ControlError, OwnerStop, Status, Task, TaskState, Updated, cancel, stop_by_owner, update,
+};
 
 /// Child limit when accepting an individual delegation.
 pub const MAX_CHILDREN: i64 = 6;
@@ -596,11 +598,14 @@ pub async fn carry_forward(
     turn_no: i64,
     turn_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    const EARLIER: &str = "SELECT id FROM turns WHERE conversation_id = ?1 AND turn_no < ?2
-         AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running')";
+    let earlier = format!(
+        "SELECT id FROM turns WHERE conversation_id = ?1 AND turn_no < ?2 AND {}",
+        crate::db::turns::HOLDS_CARRY
+    );
+    let earlier = earlier.as_str();
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE delegations SET root_turn_id = ?3, parent_attempt = 0
-         WHERE root_turn_id IN ({EARLIER})
+         WHERE root_turn_id IN ({earlier})
            AND ((takeover_turn_id IS NULL AND status IN ('queued', 'running')
                  AND root_turn_id IN (SELECT t.id FROM turns t
                                       JOIN items i ON i.id = t.owner_item_id
@@ -614,7 +619,7 @@ pub async fn carry_forward(
     .await?;
     let taken_over: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT id, takeover_turn_id FROM delegations
-         WHERE root_turn_id IN ({EARLIER}) AND takeover_turn_id IS NOT NULL
+         WHERE root_turn_id IN ({earlier}) AND takeover_turn_id IS NOT NULL
            AND status IN ('queued', 'running')"
     )))
     .bind(conversation_id)
@@ -629,7 +634,7 @@ pub async fn carry_forward(
                  FROM delegations d JOIN waits w ON d.root_turn_id = w.turn
                  WHERE d.status IN ('queued', 'running'))
              SELECT EXISTS (SELECT 1 FROM waits
-                            WHERE turn = ?3 OR turn IN ({EARLIER}))"
+                            WHERE turn = ?3 OR turn IN ({earlier}))"
         )))
         .bind(conversation_id)
         .bind(turn_no)

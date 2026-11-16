@@ -317,8 +317,12 @@ async fn councils_are_atomic_bounded_and_cannot_create_nested_work() {
         )
         .await;
     assert!(stopped.status.is_success(), "{}", stopped.body);
-    h.app.wait_turn(&root.to_string(), &["interrupted"]).await;
-    h.app.wait_turn(&child.to_string(), &["interrupted"]).await;
+    h.app.wait_turn(&root.to_string(), &["waiting"]).await;
+    assert_eq!(
+        h.app.wait_turn(&child.to_string(), &["running"]).await,
+        "running",
+        "Stop leaves the council's tasks running"
+    );
     assert_eq!(
         tool(&h.app, &token, "list_bots", json!({})).await.status,
         StatusCode::UNAUTHORIZED

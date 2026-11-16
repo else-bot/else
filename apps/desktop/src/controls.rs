@@ -424,6 +424,19 @@ pub enum Turn {
     Stopping,
 }
 
+/// The composer's turn from the bot's activity `phase`. A turn parked on
+/// jobs, tasks or the owner runs no attempt: the owner sends to steer it,
+/// and each wait has its own stop.
+pub fn composer_turn(phase: &str, stopping: bool, parked: bool) -> Turn {
+    if stopping || phase == "cancelling" {
+        Turn::Stopping
+    } else if matches!(phase, "working" | "queued") && !parked {
+        Turn::Running
+    } else {
+        Turn::Idle
+    }
+}
+
 /// The composer's trailing buttons for a turn: send whenever nothing runs
 /// or there is something to send, stop only while a turn runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,6 +522,23 @@ mod tests {
             let padding = scale.padding();
             assert!(padding >= px(12.) && padding <= px(14.));
         }
+    }
+
+    #[test]
+    fn a_turn_parked_on_waits_offers_send_not_stop() {
+        assert_eq!(composer_turn("working", false, true), Turn::Idle);
+        assert_eq!(
+            composer_actions(composer_turn("working", false, true), true),
+            ComposerActions {
+                send: Some(true),
+                stop: None
+            }
+        );
+        assert_eq!(composer_turn("working", false, false), Turn::Running);
+        assert_eq!(composer_turn("queued", false, false), Turn::Running);
+        assert_eq!(composer_turn("idle", false, false), Turn::Idle);
+        assert_eq!(composer_turn("working", true, true), Turn::Stopping);
+        assert_eq!(composer_turn("cancelling", false, false), Turn::Stopping);
     }
 
     #[test]

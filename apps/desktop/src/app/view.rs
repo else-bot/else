@@ -10,7 +10,8 @@ use crate::appearance::{Tone, tone};
 use crate::avatar::bot_avatar;
 use crate::connection::{OpenAppSettings, SHELL_CONTEXT};
 use crate::controls::{
-    COMPOSER_ACTION, Control as _, Scale, Tier, Turn, composer_actions, send_button, stop_button,
+    COMPOSER_ACTION, Control as _, Scale, Tier, composer_actions, composer_turn, send_button,
+    stop_button,
 };
 use crate::sidebar::status::{Kind, Subtitle};
 use gpui_kit::assets::IconName;
@@ -850,16 +851,17 @@ impl ElseApp {
             .and_then(|v| v.conversation.as_ref())
             .and_then(|c| c.activity.clone())
             .or(bot.activity.clone());
-        // A turn that only waits for the owner is not running: stop stays
-        // reachable from the menu and its shortcut, not as a composer button.
+        // A turn that only waits, on the owner or on jobs and tasks, is not
+        // running: stop stays reachable from the menu and its shortcut, not
+        // as a composer button.
         let phase = activity.as_ref().map_or("idle", |a| a.phase.as_str());
-        let turn = if self.stopping.contains(&bot.id) || phase == "cancelling" {
-            Turn::Stopping
-        } else if matches!(phase, "working" | "queued") && bot.waiting().is_none() {
-            Turn::Running
-        } else {
-            Turn::Idle
-        };
+        let parked = bot.waiting().is_some()
+            || activity
+                .as_ref()
+                .and_then(|a| a.active_turn_id)
+                .and_then(|id| self.view.as_ref()?.conversation.as_ref()?.turn(id))
+                .is_some_and(|turn| turn.status == "waiting");
+        let turn = composer_turn(phase, self.stopping.contains(&bot.id), parked);
         let actions = composer_actions(turn, can_send);
         let reserved = match (actions.send, actions.stop) {
             (Some(_), Some(_)) => 2. * COMPOSER_ACTION + px(8. + 12.),

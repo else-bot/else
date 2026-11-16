@@ -416,12 +416,14 @@ impl SinkState {
             .bind(self.turn_id)
             .execute(&mut *tx)
             .await?;
-        let (current, pending, unseen): (TurnStatus, i64, i64) = sqlx::query_as(
-            "SELECT t.status, coalesce(sum(h.pending), 0), coalesce(sum(h.unseen), 0)
+        let (current, stopped, pending, unseen): (TurnStatus, bool, i64, i64) = sqlx::query_as(
+            "SELECT t.status, t.error_code IS ?2, coalesce(sum(h.pending), 0),
+                 coalesce(sum(h.unseen), 0)
              FROM turns t LEFT JOIN turn_holds h ON h.turn_id = t.id
              WHERE t.id = ?1 GROUP BY t.id",
         )
         .bind(self.turn_id)
+        .bind(crate::db::stop::KEEPS_WAITS)
         .fetch_one(&mut *tx)
         .await?;
         let (tasks_pending, carried, tasks_unseen, ready): (i64, i64, i64, i64) =
@@ -445,7 +447,17 @@ impl SinkState {
         // ready batch or any other unseen outcome, as `turns_continuable`
         // decides for a waiting turn.
         let own_outcome = ready > 0 || unseen > tasks_unseen;
-        let status = if parks && pending == tasks_pending + carried && own_outcome {
+        // The owner stopped only this attempt: the turn keeps waiting for
+        // its jobs and tasks, but no outcome restarts it now.
+        let kept = current == TurnStatus::Cancelling && stopped && pending > 0;
+        let (status, code, message) = if kept {
+            (TurnStatus::Waiting, None, None)
+        } else {
+            (status, code, message)
+        };
+        let status = if kept {
+            status
+        } else if parks && pending == tasks_pending + carried && own_outcome {
             TurnStatus::Queued
         } else if parks && pending > 0 {
             TurnStatus::Waiting

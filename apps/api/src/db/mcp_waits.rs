@@ -7,7 +7,9 @@
 //! keep failing or report no status, or the deadline passes; settling
 //! requeues the turn as a continuation that receives the last result.
 //! A new owner message carries the wait to its own turn ([`carry_forward`]);
-//! any other end of the turn withdraws a pending wait (a trigger).
+//! the owner may stop it ([`stop_by_owner`]), which the bot receives like
+//! any other result; any other end of the turn withdraws a pending wait (a
+//! trigger), except the owner's Stop of the attempt alone.
 
 use serde_json::Value;
 use sqlx::types::Json;
@@ -25,6 +27,20 @@ pub const MAX_TIMEOUT_MINUTES: u32 = 1440;
 pub const MAX_FAILURES: i64 = 3;
 /// Bytes of the last status result kept for the continuation.
 pub const MAX_RESULT: usize = 16 * 1024;
+
+/// A wait's lifecycle, as stored in `mcp_waits.status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+pub enum Status {
+    Pending,
+    Finished,
+    Failed,
+    Expired,
+    /// Withdrawn with its turn; never delivered.
+    Cancelled,
+    /// The owner stopped it; delivered like a result.
+    Stopped,
+}
 
 /// The status call to repeat and when to stop.
 #[derive(Debug, Clone, PartialEq)]
@@ -286,13 +302,15 @@ pub async fn carry_forward(
     turn_no: i64,
     turn_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE mcp_waits SET turn_id = ?3, attempt = 0
          WHERE turn_id IN (SELECT id FROM turns WHERE conversation_id = ?1 AND turn_no < ?2
-                           AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running'))
+                           AND {})
            AND (status = 'pending'
-                OR (delivered_attempt IS NULL AND status IN ('finished', 'failed', 'expired')))",
-    )
+                OR (delivered_attempt IS NULL
+                    AND status IN ('finished', 'failed', 'expired', 'stopped')))",
+        super::turns::HOLDS_CARRY
+    )))
     .bind(conversation_id)
     .bind(turn_no)
     .bind(turn_id)
@@ -318,13 +336,55 @@ pub async fn in_progress(
 
 pub use crate::app::providers::McpWaitInProgress as InProgress;
 
+/// Bytes of the last result the owner's turn view shows.
+const SHOWN_RESULT: usize = 2048;
+
 /// A wait still checking its job, as the owner's turn view shows it.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Pending {
     pub id: Uuid,
     #[serde(skip)]
     pub turn_id: Uuid,
     pub mcp_id: String,
+    pub tool: String,
+    pub purpose: String,
+    pub interval_seconds: i64,
+    pub deadline_at: String,
+    pub checks: i64,
+    /// The job's status value in the last result, when it is readable.
+    pub last_status: Option<String>,
+    /// The start of the last status result.
+    pub last_result: Option<String>,
+    pub created_at: String,
+}
+
+/// The status a tool result reports at `pointer`: from structuredContent,
+/// or else from the JSON in its first text block that parses.
+pub fn status_at(result: &Value, pointer: &str) -> Option<Value> {
+    if let Some(found) = result
+        .get("structuredContent")
+        .and_then(|d| d.pointer(pointer))
+    {
+        return Some(found.clone());
+    }
+    result["content"].as_array()?.iter().find_map(|block| {
+        let text = block["text"].as_str().filter(|_| block["type"] == "text")?;
+        serde_json::from_str::<Value>(text)
+            .ok()?
+            .pointer(pointer)
+            .cloned()
+    })
+}
+
+/// The status a stored result reports at `pointer`, as short text.
+fn shown_status(result: &str, pointer: &str) -> Option<String> {
+    let result: Value = serde_json::from_str(result).ok()?;
+    let text = match status_at(&result, pointer)? {
+        Value::String(text) => text,
+        Value::Null | Value::Array(_) | Value::Object(_) => return None,
+        other => other.to_string(),
+    };
+    Some(text.chars().take(64).collect())
 }
 
 /// The pending waits of these turns.
@@ -332,8 +392,24 @@ pub async fn pending_for_turns(
     conn: &mut SqliteConnection,
     turn_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, Vec<Pending>>, sqlx::Error> {
-    let rows: Vec<Pending> = sqlx::query_as(
-        "SELECT id, turn_id, mcp_id FROM mcp_waits
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: Uuid,
+        turn_id: Uuid,
+        mcp_id: String,
+        tool: String,
+        purpose: String,
+        interval_seconds: i64,
+        deadline_at: String,
+        checks: i64,
+        status_pointer: String,
+        last_result: Option<String>,
+        created_at: String,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id, turn_id, mcp_id, tool, purpose, interval_seconds, deadline_at, checks,
+             status_pointer, last_result, created_at
+         FROM mcp_waits
          WHERE status = 'pending'
            AND lower(hex(turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))
          ORDER BY created_at, id",
@@ -342,10 +418,63 @@ pub async fn pending_for_turns(
     .fetch_all(&mut *conn)
     .await?;
     let mut by_turn: std::collections::HashMap<Uuid, Vec<Pending>> = Default::default();
-    for wait in rows {
-        by_turn.entry(wait.turn_id).or_default().push(wait);
+    for row in rows {
+        let last_status = row
+            .last_result
+            .as_deref()
+            .and_then(|result| shown_status(result, &row.status_pointer));
+        by_turn.entry(row.turn_id).or_default().push(Pending {
+            id: row.id,
+            turn_id: row.turn_id,
+            mcp_id: row.mcp_id,
+            tool: row.tool,
+            purpose: row.purpose,
+            interval_seconds: row.interval_seconds,
+            deadline_at: row.deadline_at,
+            checks: row.checks,
+            last_status,
+            last_result: row
+                .last_result
+                .map(|result| result[..result.floor_char_boundary(SHOWN_RESULT)].to_owned()),
+            created_at: row.created_at,
+        });
     }
     Ok(by_turn)
+}
+
+/// The owner stops wait `id` of `bot_id`. A pending wait becomes `stopped`,
+/// an outcome its turn receives, and the turn continues if nothing else
+/// holds it. `None` when the bot has no such wait.
+pub async fn stop_by_owner(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+    id: Uuid,
+) -> Result<Option<super::waits::Stop>, sqlx::Error> {
+    use super::waits::Stop;
+    let found: Option<(Status, Uuid)> =
+        sqlx::query_as("SELECT status, turn_id FROM mcp_waits WHERE id = ?1 AND bot_id = ?2")
+            .bind(id)
+            .bind(bot_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some((status, turn_id)) = found else {
+        return Ok(None);
+    };
+    Ok(Some(match status {
+        Status::Stopped => Stop::Repeated { turn_id },
+        Status::Pending => {
+            sqlx::query(
+                "UPDATE mcp_waits SET status = 'stopped',
+                     settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                 WHERE id = ?1 AND status = 'pending'",
+            )
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+            Stop::Stopped { turn_id }
+        }
+        Status::Finished | Status::Failed | Status::Expired | Status::Cancelled => Stop::Ended,
+    }))
 }
 
 /// Settled waits of `turn_id` that no attempt has received yet.
@@ -357,7 +486,7 @@ pub async fn undelivered(
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT id, mcp_id, tool, purpose, status, checks, last_result FROM mcp_waits
          WHERE turn_id = ?1 AND delivered_attempt IS NULL
-           AND status IN ('finished', 'failed', 'expired')
+           AND status IN ('finished', 'failed', 'expired', 'stopped')
          ORDER BY created_at, id",
     )
     .bind(turn_id)
@@ -377,6 +506,22 @@ pub async fn undelivered(
             },
         )
         .collect())
+}
+
+/// Withdraw every pending wait of `bot_id`, as its deletion does.
+pub async fn withdraw_for_bot(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE mcp_waits SET status = 'cancelled',
+             settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE bot_id = ?1 AND status = 'pending'",
+    )
+    .bind(bot_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 /// Record that `attempt` received these results.

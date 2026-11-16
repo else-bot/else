@@ -66,8 +66,7 @@ impl ElseApp {
             px(12.),
         );
         let handed_off = delegate_faces.is_some();
-        let show_reply =
-            task.latest_kept || !matches!(task.state, ReplyState::Queued | ReplyState::Working);
+        let show_reply = task.shows_latest();
         let mut history = task.history.clone();
         if !show_reply && let Some(id) = task.latest {
             history.push(id);

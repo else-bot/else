@@ -860,7 +860,7 @@ async fn delegation_limits_fail_in_code() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stopping_the_root_and_deleting_the_target_resolve_child_work() {
+async fn stop_keeps_a_task_the_owner_stops_on_its_own_and_deletion_resolves_it() {
     let app = app_with(2).await;
     let work = leaf(&app, "Work").await;
     let (main, root, token) = running_main(&app).await;
@@ -888,7 +888,34 @@ async fn stopping_the_root_and_deleting_the_target_resolve_child_work() {
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    wait_status(&app, root, "interrupted").await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let task_status = || async {
+        sqlx::query_as::<_, (String, Option<String>, Option<i32>)>(
+            "SELECT status, error, delivered_attempt FROM delegations WHERE id = ?1",
+        )
+        .bind(task_id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(
+        (
+            app.wait_turn(&root.to_string(), &["waiting"]).await,
+            task_status().await.0
+        ),
+        ("waiting".into(), "running".into()),
+        "Stop leaves the task running"
+    );
+
+    let cancel = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/waits/{task_id}/cancel"),
+            None,
+        )
+        .await;
+    assert_eq!(cancel.status, StatusCode::OK, "{}", cancel.body);
+    assert_eq!(cancel.body["kind"], "task", "{}", cancel.body);
     let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
         .bind(task_id)
         .fetch_one(&app.db.pool)
@@ -900,12 +927,17 @@ async fn stopping_the_root_and_deleting_the_target_resolve_child_work() {
         Duration::from_secs(20),
     )
     .await;
-    let status: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
-        .bind(task_id)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    assert_eq!(status, "cancelled");
+    wait_status(&app, root, "completed").await;
+    let (status, _, delivered) = task_status().await;
+    assert_eq!((status.as_str(), delivered), ("cancelled", Some(2)));
+    let again = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/waits/{task_id}/cancel"),
+            None,
+        )
+        .await;
+    assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.body);
 
     let (_, root, token) = running_main(&app).await;
     let reply = delegate(&app, &token, &work, "[synthetic:hang] another long task").await;
@@ -2022,7 +2054,7 @@ async fn creation_requires_an_owner_request_and_a_purpose_for_peer_bots() {
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    wait_status(&app, root, "interrupted").await;
+    wait_status(&app, root, "waiting").await;
     assert_eq!(
         create_bot(&app, &token, args).await.status,
         StatusCode::UNAUTHORIZED
@@ -2129,7 +2161,7 @@ async fn two_bots_waiting_on_each_other_both_finish_with_one_provider_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stopping_a_peer_cancels_its_task_on_the_main_bot() {
+async fn stopping_a_peer_leaves_its_task_until_the_owner_stops_the_task() {
     use common::recorder::{GATE, harness, tool};
     let h = harness(1).await;
     let main = h.app.main_bot().await;
@@ -2161,10 +2193,25 @@ async fn stopping_a_peer_cancels_its_task_on_the_main_bot() {
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    tokio::join!(
-        wait_status(&h.app, root, "interrupted"),
-        wait_status(&h.app, child, "interrupted"),
-    );
+    wait_status(&h.app, root, "waiting").await;
+    let (_, _, status, _, _) = delegation_of(&h.app, root).await;
+    assert_eq!(status, "running", "Stop leaves the task running");
+
+    let task: Uuid = sqlx::query_scalar("SELECT id FROM delegations WHERE root_turn_id = ?1")
+        .bind(root)
+        .fetch_one(&h.app.db.pool)
+        .await
+        .unwrap();
+    let cancel = h
+        .app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{peer}/waits/{task}/cancel"),
+            None,
+        )
+        .await;
+    assert_eq!(cancel.status, StatusCode::OK, "{}", cancel.body);
+    wait_status(&h.app, child, "interrupted").await;
     let (_, _, status, _, _) = delegation_of(&h.app, root).await;
     assert_eq!(status, "cancelled");
 }

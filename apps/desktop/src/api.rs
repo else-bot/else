@@ -858,6 +858,15 @@ impl Client {
             .map(|_| ())
     }
 
+    /// Stop one thing a bot waits on: an MCP job, a computer job, or a
+    /// task it delegated. A wait that already ended is `409 wait_ended`.
+    pub async fn cancel_wait(self: Arc<Self>, bot: Uuid, wait: Uuid) -> Result<(), ClientError> {
+        let path = format!("/v1/bots/{bot}/waits/{wait}/cancel");
+        self.call::<serde_json::Value>(Method::POST, path, None)
+            .await
+            .map(|_| ())
+    }
+
     pub async fn dismiss_owner_notice(
         self: Arc<Self>,
         bot: Uuid,

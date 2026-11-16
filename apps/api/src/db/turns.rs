@@ -102,6 +102,12 @@ pub const ENDED_STATUSES: &str = "('completed', 'interrupted', 'failed', 'uncert
 pub const UNFINISHED_STATUSES: &str =
     "('queued', 'preparing', 'sending', 'running', 'cancelling', 'waiting')";
 
+/// The turns of a conversation whose jobs, tasks and unseen results a newer
+/// owner message takes over, as an SQL condition on `turns`: unfinished
+/// ones, and one the owner's Stop left `cancelling` with its waits.
+pub const HOLDS_CARRY: &str = "(status IN ('queued', 'waiting', 'preparing', 'sending', 'running')
+     OR (status = 'cancelling' AND error_code IS 'stopped'))";
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TurnRecord {
     pub id: Uuid,

@@ -26,6 +26,7 @@ pub mod task_secrets;
 pub mod turn_sink;
 pub mod turns;
 pub mod usage;
+pub mod waits;
 pub mod webhooks;
 
 use std::time::Duration;

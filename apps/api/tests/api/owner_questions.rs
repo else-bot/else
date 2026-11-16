@@ -1432,7 +1432,7 @@ async fn stop_and_restart_settle_or_keep_pending_cards() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stopping_the_delegating_request_closes_a_delegated_card() {
+async fn stopping_the_delegated_task_closes_its_card() {
     let Harness { app, .. } = harness().await;
     let main = app.main_bot().await;
     let leaf = app.create_bot("Ops").await;
@@ -1474,6 +1474,20 @@ async fn stopping_the_delegating_request_closes_a_delegated_card() {
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
+    wait(&app, turn, "waiting").await;
+    assert_eq!(
+        question_row(&app, question).await.0,
+        "pending",
+        "Stop leaves the task and its card"
+    );
+    let cancel = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/waits/{task}/cancel"),
+            None,
+        )
+        .await;
+    assert_eq!(cancel.status, StatusCode::OK, "{}", cancel.body);
     wait(&app, child, "interrupted").await;
     assert_eq!(question_row(&app, question).await.0, "cancelled");
     assert_eq!(
@@ -1632,7 +1646,7 @@ async fn an_owner_reply_in_chat_takes_over_a_delegated_card_and_reports_back() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stopping_the_delegating_request_after_a_takeover_keeps_the_owner_chat_turn() {
+async fn stopping_a_taken_over_task_keeps_the_owner_chat_turn() {
     let Harness { app, .. } = harness().await;
     let main = app.main_bot().await;
     let leaf = app.create_bot("Release").await;
@@ -1651,11 +1665,11 @@ async fn stopping_the_delegating_request_after_a_takeover_keeps_the_owner_chat_t
     let stop = app
         .owner(
             "POST",
-            &format!("/v1/bots/{main}/cancel"),
-            Some(json!({ "request_id": Uuid::new_v4() })),
+            &format!("/v1/bots/{main}/waits/{task}/cancel"),
+            None,
         )
         .await;
-    assert!(stop.status.is_success(), "{}", stop.body);
+    assert_eq!(stop.status, StatusCode::OK, "{}", stop.body);
     let state: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
         .bind(task)
         .fetch_one(&app.db.pool)

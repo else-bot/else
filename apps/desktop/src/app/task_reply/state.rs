@@ -65,6 +65,13 @@ pub(in crate::app) struct TaskReply {
 }
 
 impl TaskReply {
+    /// Whether the latest reply reads as a reply rather than folding into
+    /// the updates: it does unless an attempt is still generating or about
+    /// to, and it was not kept for a reaction or a file.
+    pub(in crate::app) fn shows_latest(&self) -> bool {
+        self.latest_kept || !matches!(self.state, ReplyState::Queued | ReplyState::Working)
+    }
+
     pub(in crate::app) fn elapsed(&self, now: DateTime<Utc>) -> Option<String> {
         // `started_at` restarts with each attempt, so a resumed task's
         // finished span would cover only its last attempt.
@@ -203,7 +210,6 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             let state = match turn.status.as_str() {
                 "queued" => ReplyState::Queued,
                 "preparing" | "sending" | "running" => ReplyState::Working,
-                "waiting" if turn.waits_on_job() => ReplyState::Working,
                 "waiting" => ReplyState::Waiting,
                 "cancelling" => ReplyState::Stopping,
                 "completed" => ReplyState::Complete,

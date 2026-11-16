@@ -775,7 +775,7 @@ pub async fn delete(pool: &SqlitePool, bot_id: Uuid) -> Result<Deleted, BotError
                 .execute(&mut *tx)
                 .await?;
             interrupt =
-                super::stop::halt_accepted(&mut tx, bot_id, i64::MAX, "The bot was deleted.")
+                super::stop::halt_accepted(&mut tx, bot_id, i64::MAX, super::stop::Halt::Delete)
                     .await?;
             super::stop::settle(&mut tx, bot_id).await?;
             super::events::notify(&mut tx, bot_id).await?;

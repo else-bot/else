@@ -223,6 +223,23 @@ pub async fn request_cancel<'c>(
     .await
 }
 
+/// [`request_cancel`] for every active job of the bot that no turn waits
+/// on: the owner's Stop leaves a waited-on job to its wait.
+pub async fn request_cancel_unwaited<'c>(
+    conn: impl sqlx::SqliteExecutor<'c>,
+    bot_id: Uuid,
+) -> Result<Vec<(Uuid, Option<Uuid>)>, sqlx::Error> {
+    sqlx::query_as(
+        "UPDATE guest_jobs SET status = 'cancelling'
+         WHERE bot_id = ?1 AND status IN ('starting', 'running', 'cancelling')
+           AND id NOT IN (SELECT job_id FROM computer_job_waits WHERE status = 'pending')
+         RETURNING id, lease_id",
+    )
+    .bind(bot_id)
+    .fetch_all(conn)
+    .await
+}
+
 /// What a tool learns about a job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobState {

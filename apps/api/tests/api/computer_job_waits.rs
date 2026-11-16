@@ -342,3 +342,77 @@ async fn a_second_wait_is_refused_and_a_follow_up_carries_the_wait() {
     );
     assert_eq!(attempts(&app, turn).await, 1, "the superseded one did not");
 }
+
+async fn job_status(app: &TestApp, job: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = ?1")
+        .bind(job)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_keeps_a_waited_job_and_the_owner_stops_that_wait_and_its_job() {
+    let Setup {
+        app,
+        synthetic,
+        manager,
+        ..
+    } = setup().await;
+    let bot = app.create_bot("Scout").await;
+    let (turn, token) = running(&app, &bot).await;
+    let job = start_job(&app, &token).await;
+    let loose = start_job(&app, &token).await;
+    text(
+        &tool(
+            &app,
+            &token,
+            "computer_job",
+            json!({ "job_id": job, "wait": true }),
+        )
+        .await,
+    );
+    settle(&app, turn, "waiting").await;
+
+    let stopped = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{bot}/cancel"),
+            Some(json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert!(stopped.status.is_success(), "{}", stopped.body);
+    assert_eq!(job_status(&app, loose).await, "cancelling");
+    manager
+        .cancel_job(bot.parse().unwrap(), loose)
+        .await
+        .unwrap();
+    else_api::db::stop::settle_all(&app.db.pool).await.unwrap();
+    assert_eq!(
+        (
+            job_status(&app, job).await.as_str(),
+            wait_row(&app, turn).await.0.as_str()
+        ),
+        ("running", "pending"),
+        "Stop leaves the waited job to its wait"
+    );
+    assert_eq!(
+        app.wait_turn(&turn.to_string(), &["waiting"]).await,
+        "waiting"
+    );
+
+    let shown = shown_waits(&app, &bot, turn).await;
+    assert_eq!(shown[0]["command"], "./crawl.sh", "{shown}");
+    let wait = shown[0]["id"].as_str().unwrap();
+    let cancel = app
+        .owner("POST", &format!("/v1/bots/{bot}/waits/{wait}/cancel"), None)
+        .await;
+    assert_eq!(cancel.status, StatusCode::OK, "{}", cancel.body);
+    assert_eq!(cancel.body["kind"], "computer_job", "{}", cancel.body);
+    assert_eq!(job_status(&app, job).await, "cancelling");
+    settle(&app, turn, "completed").await;
+    assert_eq!(wait_row(&app, turn).await, ("stopped".into(), Some(2)));
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(packet.contains("status=\"stopped\""), "{packet}");
+    assert!(packet.contains("Cancelled by owner"), "{packet}");
+}

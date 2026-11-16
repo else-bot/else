@@ -383,8 +383,12 @@ pub(super) struct ConversationView {
     /// Delegation groups whose task details are expanded.
     pub(super) expanded_councils: HashSet<Uuid>,
     pub(super) expanded_events: HashSet<Uuid>,
-    /// The waiting tray lists its tasks instead of only its header.
+    /// The waiting tray lists its waits instead of only its header.
     pub(super) tray_expanded: bool,
+    /// Waits in the tray whose details are open.
+    pub(super) expanded_waits: HashSet<Uuid>,
+    /// Waits the owner asked to stop that the server has not settled yet.
+    pub(super) stopping_waits: HashSet<Uuid>,
     pub(super) reply_transitions: HashMap<Uuid, std::time::Instant>,
     pub(super) _reply_clock: Option<Task<()>>,
     pub(super) latest_seen: bool,
@@ -491,7 +495,9 @@ impl ConversationView {
             expanded_tasks: HashSet::new(),
             expanded_councils: HashSet::new(),
             expanded_events: HashSet::new(),
-            tray_expanded: false,
+            tray_expanded: true,
+            expanded_waits: HashSet::new(),
+            stopping_waits: HashSet::new(),
             reply_transitions: HashMap::new(),
             _reply_clock: None,
             latest_seen: false,
@@ -1593,7 +1599,7 @@ mod tests {
         }))
         .unwrap();
         let c = Conversation::from_snapshot(snapshot).unwrap();
-        let waiting: Vec<_> = c.waiting_on().iter().map(|d| d.id).collect();
+        let waiting: Vec<_> = c.waiting_on().iter().map(|w| w.id()).collect();
         assert_eq!(waiting, [Uuid::from_u128(21), Uuid::from_u128(22)]);
     }
 

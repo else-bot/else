@@ -341,3 +341,44 @@ pub async fn cancel(pool: &SqlitePool, caller: Uuid, task: Uuid) -> Result<Task,
     tx.commit().await?;
     Ok(task)
 }
+
+/// How the owner's stop of a task went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerStop {
+    /// The task was stopping or is now; its turn ends with `cancelled`.
+    Stopped { root_turn_id: Uuid },
+    /// The task had already ended.
+    Ended,
+}
+
+/// The owner stops task `task` that `bot_id` delegated, as its sender's
+/// `delegation_cancel` would. The sender learns the task was cancelled by
+/// the owner when its turn continues. `None` when `bot_id` sent no such task.
+pub async fn stop_by_owner(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+    task: Uuid,
+) -> Result<Option<OwnerStop>, sqlx::Error> {
+    let found: Option<(Uuid, Uuid, Uuid, Option<Uuid>, Status)> = sqlx::query_as(
+        "SELECT root_turn_id, child_turn_id, target_bot_id, takeover_turn_id, status
+         FROM delegations WHERE id = ?1 AND parent_bot_id = ?2",
+    )
+    .bind(task)
+    .bind(bot_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((root, child, target, takeover, status)) = found else {
+        return Ok(None);
+    };
+    if status.is_ended() {
+        return Ok(Some(OwnerStop::Ended));
+    }
+    lock_targets_of_root(conn, root).await?;
+    stop_children(
+        conn,
+        vec![(child, target, takeover)],
+        "The owner cancelled the task.",
+    )
+    .await?;
+    Ok(Some(OwnerStop::Stopped { root_turn_id: root }))
+}

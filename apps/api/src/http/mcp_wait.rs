@@ -142,24 +142,6 @@ fn parse(args: &Value) -> Result<(Spec, Option<Kind>), String> {
     Ok((spec, approval))
 }
 
-/// The status a tool result reports at `pointer`: from structuredContent,
-/// or else from the JSON in its first text block that parses.
-fn status_at(result: &Value, pointer: &str) -> Option<Value> {
-    if let Some(found) = result
-        .get("structuredContent")
-        .and_then(|d| d.pointer(pointer))
-    {
-        return Some(found.clone());
-    }
-    result["content"].as_array()?.iter().find_map(|block| {
-        let text = block["text"].as_str().filter(|_| block["type"] == "text")?;
-        serde_json::from_str::<Value>(text)
-            .ok()?
-            .pointer(pointer)
-            .cloned()
-    })
-}
-
 fn classify(result: &Value, pointer: &str, running: &[Value]) -> Check {
     let text = result.to_string();
     if result["isError"] == true {
@@ -168,7 +150,7 @@ fn classify(result: &Value, pointer: &str, running: &[Value]) -> Check {
             permanent: false,
         };
     }
-    match status_at(result, pointer) {
+    match crate::db::mcp_waits::status_at(result, pointer) {
         Some(status) if running.contains(&status) => Check::Running(text),
         None | Some(Value::Null) => Check::Unreadable(format!(
             "UNREADABLE_STATUS: the result has no status at {pointer}, so whether the job \

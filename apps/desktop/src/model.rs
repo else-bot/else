@@ -509,19 +509,81 @@ pub struct Turn {
 }
 
 /// A job in an installed MCP that a waiting turn rechecks until it ends.
-/// A pending wait is the only hold of its attempt.
+/// A pending wait is the only hold of its attempt. The details are absent
+/// from older servers.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct McpWait {
     pub id: Uuid,
     pub mcp_id: String,
+    #[serde(default)]
+    pub tool: String,
+    /// What the bot waits for, in its own words.
+    #[serde(default)]
+    pub purpose: String,
+    #[serde(default)]
+    pub interval_seconds: i64,
+    #[serde(default)]
+    pub deadline_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub checks: i64,
+    /// The job's status in the last check, when it was readable.
+    #[serde(default)]
+    pub last_status: Option<String>,
+    #[serde(default)]
+    pub last_result: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 /// A background job in the bot's computer that a waiting turn continues
-/// after. A pending wait is the only hold of its attempt.
+/// after. A pending wait is the only hold of its attempt. The details are
+/// absent from older servers.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ComputerJobWait {
     pub id: Uuid,
     pub job_id: Uuid,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub job_status: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// One thing a bot waits on, as the owner sees it above the composer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Wait<'a> {
+    Mcp(&'a McpWait),
+    Job(&'a ComputerJobWait),
+    Task(&'a Delegation),
+}
+
+impl Wait<'_> {
+    /// The ID the server stops it by.
+    pub fn id(&self) -> Uuid {
+        match self {
+            Self::Mcp(wait) => wait.id,
+            Self::Job(wait) => wait.id,
+            Self::Task(task) => task.id,
+        }
+    }
+
+    pub fn created_at(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Mcp(wait) => wait.created_at,
+            Self::Job(wait) => wait.created_at,
+            Self::Task(task) => Some(task.created_at),
+        }
+    }
+
+    /// Whether the owner can still stop it: a task that ended only waits
+    /// for its sender to read the outcome.
+    pub fn stoppable(&self) -> bool {
+        match self {
+            Self::Mcp(_) | Self::Job(_) => true,
+            Self::Task(task) => !task.status.settled(),
+        }
+    }
 }
 
 impl Turn {
@@ -1081,21 +1143,22 @@ impl Conversation {
         Some((turn, group))
     }
 
-    /// The tasks this conversation waits on, oldest first: each single task
-    /// of an unfinished turn with no outcome yet, or whose outcome no
-    /// attempt has read. A council keeps its card in the transcript.
-    pub fn waiting_on(&self) -> Vec<&Delegation> {
-        let mut tasks: Vec<&Delegation> = self
+    /// What this conversation waits on, oldest first: the jobs of its
+    /// unfinished turns, and each single task with no outcome yet or whose
+    /// outcome no attempt has read. A council keeps its card in the
+    /// transcript.
+    pub fn waiting_on(&self) -> Vec<Wait<'_>> {
+        let mut waits: Vec<Wait<'_>> = self
             .turns
             .values()
             .filter(|turn| {
                 matches!(
                     turn.status.as_str(),
-                    "queued" | "waiting" | "preparing" | "sending" | "running"
+                    "queued" | "waiting" | "preparing" | "sending" | "running" | "cancelling"
                 )
             })
             .flat_map(|turn| {
-                turn.delegations.iter().filter(|d| {
+                let tasks = turn.delegations.iter().filter(|d| {
                     (!d.status.settled() || !d.seen)
                         && turn
                             .delegations
@@ -1103,11 +1166,16 @@ impl Conversation {
                             .filter(|other| other.shares_handoff(d))
                             .count()
                             == 1
-                })
+                });
+                turn.mcp_waits
+                    .iter()
+                    .map(Wait::Mcp)
+                    .chain(turn.computer_job_waits.iter().map(Wait::Job))
+                    .chain(tasks.map(Wait::Task))
             })
             .collect();
-        tasks.sort_by_key(|d| (d.created_at, d.id));
-        tasks
+        waits.sort_by_key(|wait| (wait.created_at(), wait.id()));
+        waits
     }
 
     pub fn social_setup(&self, id: Uuid) -> Option<&crate::api::socials::SocialSetup> {
