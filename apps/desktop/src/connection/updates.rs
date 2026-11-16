@@ -26,7 +26,6 @@ pub(super) struct View {
     /// The reader's choice to show or hide the output for the current
     /// operation; `None` follows the default for that operation.
     output_open: Option<bool>,
-    confirm_restart: bool,
     feedback: Option<String>,
     _watch: Task<()>,
 }
@@ -36,8 +35,6 @@ pub(super) enum Action {
     Check,
     Install,
     Restart,
-    ConfirmRestart,
-    CancelRestart,
     ToggleOutput,
     Copy,
     Follow,
@@ -49,7 +46,6 @@ impl View {
     }
 
     pub(super) fn dismiss(&mut self) {
-        self.confirm_restart = false;
         self.feedback = None;
     }
 
@@ -132,7 +128,6 @@ impl View {
             scroll: ScrollHandle::new(),
             page_scroll: ScrollHandle::new(),
             output_open: None,
-            confirm_restart: false,
             feedback: None,
             _watch: cx.spawn_in(window, async move |this, cx| {
                 while states.changed().await.is_ok() {
@@ -281,18 +276,7 @@ impl Shell {
         let outcome = match action {
             Action::Check => view.commands.check(),
             Action::Install => view.install(),
-            Action::Restart => {
-                view.confirm_restart = true;
-                Ok(())
-            }
-            Action::ConfirmRestart => {
-                view.confirm_restart = false;
-                view.commands.restart()
-            }
-            Action::CancelRestart => {
-                view.confirm_restart = false;
-                Ok(())
-            }
+            Action::Restart => view.commands.restart(),
             Action::ToggleOutput => {
                 view.output_open = Some(!view.output_visible());
                 Ok(())
@@ -549,22 +533,6 @@ impl Shell {
                     .child(content.w_full().flex_none()),
             )
         };
-        if view.confirm_restart {
-            panel = panel.child(
-                v_flex()
-                    .gap_3()
-                    .p_4()
-                    .rounded(theme.radius)
-                    .bg(theme.secondary)
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Restart else.bot?"))
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        "The app will close and reopen with the installed update. Your conversations stay saved. Bot work continues on the server.",
-                    ))
-                    .child(h_flex().justify_end().gap_2()
-                        .child(self.update_button("update-restart-later", "Later", Action::CancelRestart, false, false, cx))
-                        .child(self.update_button("update-restart-confirm", "Restart app", Action::ConfirmRestart, true, view.busy(), cx))),
-            );
-        }
         if let Some(error) = &view.feedback {
             panel = panel.child(
                 div()
