@@ -473,6 +473,39 @@ fn completion_requires_a_verified_init_and_a_stop_explains_a_failure() {
     ));
 }
 
+#[test]
+fn an_api_error_fails_the_turn_with_the_clis_message() {
+    let mut t = tracker();
+    t.on(&init(claude_home::tool_names(), connected())).unwrap();
+    t.on(&json!({"type":"user","uuid":"u-1","isReplay":true}))
+        .unwrap();
+    let failure = "Failed to authenticate. API Error: 401 OAuth access token is invalid.";
+    let report = json!({"type":"assistant","parent_tool_use_id":null,
+        "error":"authentication_failed","is_api_error_message":true,"api_error_status":401,
+        "message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":failure}]}});
+    assert_eq!(t.on(&report), Ok(Emitted::new()));
+    let Ok(events) = t.on(&json!({"type":"result","subtype":"success","is_error":true,
+        "result":failure,"num_turns":1,"terminal_reason":"api_error"}))
+    else {
+        panic!("the result is accepted");
+    };
+    let Some(Event::Finished(result)) = events.last() else {
+        panic!("the result finishes the turn");
+    };
+    assert_eq!(
+        t.outcome(result.clone(), None, true),
+        TurnOutcome::Failed {
+            code: "provider_failed".into(),
+            message: failure.into(),
+        }
+    );
+    let model_output = json!({"type":"assistant","message":{"model":"<synthetic>","content":[]}});
+    assert_eq!(
+        tracker().on(&model_output).unwrap_err().code,
+        "profile_mismatch"
+    );
+}
+
 fn fake_claude(dir: &std::path::Path) -> (Claude, std::path::PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let received = dir.join("received.jsonl");
