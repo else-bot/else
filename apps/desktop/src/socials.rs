@@ -4,12 +4,12 @@ mod view;
 
 use std::sync::Arc;
 
-use gpui_kit::component::input::InputState;
+use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::*;
 use uuid::Uuid;
 
 use crate::api::Client;
-use crate::api::socials::{Connection, Provider};
+use crate::api::socials::{Connection, Pairing, PairingTarget, PairingView, Provider};
 
 enum Receipt {
     Loading {
@@ -42,21 +42,83 @@ impl Receipt {
 struct Form {
     provider: Provider,
     replacement: Option<Connection>,
-    token: Entity<InputState>,
+    entry: Entry,
+}
+
+/// How the owner proves the account: a pasted bot token, or a device
+/// paired by scanning a code.
+enum Entry {
+    Token(Entity<InputState>),
+    Pairing(Box<PairingCard>),
+}
+
+struct PairingCard {
+    target: PairingTarget,
+    view: Option<PairingView>,
+    /// The code shown, rendered as a QR image.
+    qr: Option<(String, Arc<Image>)>,
+    /// The owner's words for the bot, returned with the result.
+    note: Entity<TextareaState>,
+    _poll: Task<()>,
 }
 
 impl Form {
-    fn new(provider: Provider, window: &mut Window, cx: &mut Context<SocialsView>) -> Self {
+    fn token(provider: Provider, window: &mut Window, cx: &mut Context<SocialsView>) -> Self {
         Self {
             provider,
             replacement: None,
-            token: cx.new(|cx| {
+            entry: Entry::Token(cx.new(|cx| {
                 InputState::new(window, cx)
                     .masked(true)
                     .placeholder("Paste the bot token")
-            }),
+            })),
         }
     }
+
+    fn pairing(
+        provider: Provider,
+        target: PairingTarget,
+        replacement: Option<Connection>,
+        window: &mut Window,
+        cx: &mut Context<SocialsView>,
+    ) -> Self {
+        Self {
+            provider,
+            replacement,
+            entry: Entry::Pairing(Box::new(PairingCard {
+                target,
+                view: None,
+                qr: None,
+                note: cx.new(|cx| {
+                    TextareaState::new(window, cx)
+                        .auto_grow(2, 6)
+                        .placeholder("What should the bot do once connected? (optional)")
+                }),
+                _poll: SocialsView::poll_pairing(target, window, cx),
+            })),
+        }
+    }
+
+    fn pairing_card(&mut self) -> Option<&mut PairingCard> {
+        match &mut self.entry {
+            Entry::Pairing(card) => Some(card),
+            Entry::Token(_) => None,
+        }
+    }
+}
+
+/// `code` as a scannable QR image, dark on light whatever the theme.
+fn qr_image(code: &str) -> Option<Arc<Image>> {
+    let svg = qrcode::QrCode::new(code.as_bytes())
+        .ok()?
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(240, 240)
+        .quiet_zone(true)
+        .build();
+    Some(Arc::new(Image::from_bytes(
+        ImageFormat::Svg,
+        svg.into_bytes(),
+    )))
 }
 
 pub(crate) struct SocialsView {
@@ -86,8 +148,14 @@ impl SocialsView {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self::empty(client, setup.map(|(id, _)| id));
-        view.form = setup.map(|(_, provider)| Form::new(provider, window, cx));
         view.refresh(window, cx);
+        view.form = setup.map(|(id, provider)| {
+            if provider.pairs() {
+                Form::pairing(provider, PairingTarget::Setup(id), None, window, cx)
+            } else {
+                Form::token(provider, window, cx)
+            }
+        });
         view
     }
 
@@ -124,9 +192,12 @@ impl SocialsView {
         self.revision += 1;
         self._request = None;
         self.busy = false;
-        if let Some(form) = &self.form {
-            form.token
-                .update(cx, |input, cx| input.set_value("", window, cx));
+        if let Some(Form {
+            entry: Entry::Token(token),
+            ..
+        }) = &self.form
+        {
+            token.update(cx, |input, cx| input.set_value("", window, cx));
         }
         cx.notify();
     }
@@ -217,24 +288,155 @@ impl SocialsView {
 
     fn add(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
         self.clear(window, cx);
-        self.form = Some(Form::new(provider, window, cx));
+        self.form = Some(Form::token(provider, window, cx));
         self.error = None;
         self.notice = None;
         cx.notify();
     }
 
+    /// Replace a connection's token, or pair its device again.
     fn replace(&mut self, connection: Connection, window: &mut Window, cx: &mut Context<Self>) {
-        self.add(connection.provider, window, cx);
-        if let Some(form) = &mut self.form {
-            form.replacement = Some(connection);
+        if !connection.provider.pairs() {
+            self.add(connection.provider, window, cx);
+            if let Some(form) = &mut self.form {
+                form.replacement = Some(connection);
+            }
+            return;
         }
+        self.clear(window, cx);
+        self.error = None;
+        self.notice = None;
+        let target = PairingTarget::Connection(connection.id);
+        self.form = Some(Form::pairing(
+            connection.provider,
+            target,
+            Some(connection),
+            window,
+            cx,
+        ));
+        cx.notify();
+    }
+
+    /// Follow a pairing until it finishes, showing each code as it rotates.
+    fn poll_pairing(
+        target: PairingTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(client) = this.read_with(cx, |view, _| view.client.clone()) else {
+                return;
+            };
+            let mut next = client.clone().start_social_pairing(target).await;
+            loop {
+                let shown = match next {
+                    Ok(view) => {
+                        let finished = view.pairing.finished();
+                        let revision = view.revision;
+                        let alive = this
+                            .update_in(cx, |socials, window, cx| {
+                                socials.show_pairing(target, view, window, cx)
+                            })
+                            .is_ok();
+                        (!finished && alive).then_some(revision)
+                    }
+                    Err(error) => {
+                        let alive = this
+                            .update(cx, |socials, cx| {
+                                socials.error = Some(error.to_string());
+                                cx.notify();
+                            })
+                            .is_ok();
+                        if !alive {
+                            return;
+                        }
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(3))
+                            .await;
+                        next = client.clone().start_social_pairing(target).await;
+                        continue;
+                    }
+                };
+                let Some(after) = shown else { return };
+                next = client.clone().social_pairing(target, after).await;
+            }
+        })
+    }
+
+    fn show_pairing(
+        &mut self,
+        target: PairingTarget,
+        view: PairingView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(card) = self.form.as_mut().and_then(Form::pairing_card) else {
+            return;
+        };
+        if card.target != target {
+            return;
+        }
+        self.error = None;
+        if let Pairing::Code { code, .. } = &view.pairing
+            && card.qr.as_ref().is_none_or(|(shown, _)| shown != code)
+        {
+            card.qr = qr_image(code).map(|image| (code.clone(), image));
+        }
+        let paired = match &view.pairing {
+            Pairing::Paired { connection } => Some(connection.clone()),
+            _ => None,
+        };
+        card.view = Some(view);
+        if let Some(connection) = paired {
+            self.connections.retain(|c| c.id != connection.id);
+            self.connections.push(connection.clone());
+            if let PairingTarget::Connection(_) = target {
+                self.form = None;
+                self.notice = Some(format!(
+                    "{} paired again. Bots can use it as before.",
+                    connection.provider.label()
+                ));
+            }
+        }
+        let _ = window;
+        cx.notify();
+    }
+
+    /// Ask for a new code after one expired or failed.
+    fn restart_pairing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(card) = self.form.as_mut().and_then(Form::pairing_card) else {
+            return;
+        };
+        card.view = None;
+        card.qr = None;
+        card._poll = Self::poll_pairing(card.target, window, cx);
+        self.error = None;
+        cx.notify();
+    }
+
+    /// Finish a bot's setup with the paired connection and the owner's words.
+    fn finish_pairing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(card) = self.form.as_mut().and_then(Form::pairing_card) else {
+            return;
+        };
+        let Some(Pairing::Paired { connection }) = card.view.as_ref().map(|v| &v.pairing) else {
+            return;
+        };
+        let connection = connection.clone();
+        let note = card.note.read(cx).value().trim().to_string();
+        self.complete(connection, (!note.is_empty()).then_some(note), window, cx);
     }
 
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(form) = &self.form else {
+        let Some(Form {
+            entry: Entry::Token(token),
+            ..
+        }) = &self.form
+        else {
             return;
         };
-        let token = form.token.read(cx).value().trim().to_string();
+        let form = self.form.as_ref().expect("token form");
+        let token = token.read(cx).value().trim().to_string();
         if token.is_empty() {
             self.error = Some("Paste the bot token first.".into());
             cx.notify();
@@ -263,7 +465,7 @@ impl SocialsView {
                         view.connections.retain(|c| c.id != connection.id);
                         view.connections.push(connection.clone());
                         if view.setup.is_some() {
-                            view.complete(connection, window, cx);
+                            view.complete(connection, None, window, cx);
                         } else {
                             view.form = None;
                             view.notice = Some(if replacing.is_some() {
@@ -280,14 +482,22 @@ impl SocialsView {
         }));
     }
 
-    fn complete(&mut self, connection: Connection, window: &mut Window, cx: &mut Context<Self>) {
+    fn complete(
+        &mut self,
+        connection: Connection,
+        note: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(setup) = self.setup else {
             return;
         };
         let revision = self.begin(window, cx);
         let client = self.client.clone();
         self._request = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = client.complete_social_setup(setup, connection.id).await;
+            let result = client
+                .complete_social_setup(setup, connection.id, note)
+                .await;
             let _ = this.update_in(cx, |view, window, cx| {
                 if view.revision != revision {
                     return;
@@ -367,7 +577,18 @@ impl SocialsView {
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear(window, cx);
         let Some(id) = self.setup else {
-            self.form = None;
+            if let Some(Form {
+                replacement: Some(connection),
+                entry: Entry::Pairing(_),
+                ..
+            }) = self.form.take()
+            {
+                let client = self.client.clone();
+                cx.background_spawn(async move {
+                    let _ = client.stop_social_pairing(connection.id).await;
+                })
+                .detach();
+            }
             cx.notify();
             return;
         };

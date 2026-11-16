@@ -79,6 +79,7 @@ impl DraftContent {
                 "x" => "X",
                 "telegram" => "Telegram",
                 "discord" => "Discord",
+                "whatsapp" => "WhatsApp",
                 _ => platform,
             },
         }

@@ -23,6 +23,7 @@ futures-util = { workspace = true }
 gpui-kit = { version = "=0.10.0", features = ["syntect"] }
 iana-time-zone = { workspace = true }
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "ico"] }
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 libc = { workspace = true }
 rustix = { workspace = true, features = ["event", "process", "std"] }
 markdown = { workspace = true }
