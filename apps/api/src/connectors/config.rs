@@ -274,9 +274,20 @@ impl MailCommand {
             | Self::Archive { message }
             | Self::Trash { message }
             | Self::Delete { message } => message_ref(message),
-            Self::Attachment { message, part } => {
+            Self::OpenAttachments { message, parts } => {
                 message_ref(message)?;
-                ensure(*part < 1000, "part must be below 1000")
+                ensure(
+                    (1..=MAX_OPEN_ATTACHMENTS).contains(&parts.len()),
+                    "parts must list 1 to 10 attachments",
+                )?;
+                ensure(
+                    parts.iter().all(|part| *part < 1000),
+                    "each part must be below 1000",
+                )?;
+                ensure(
+                    parts.iter().collect::<std::collections::HashSet<_>>().len() == parts.len(),
+                    "parts must not repeat",
+                )
             }
             Self::Move { message, folder: f } => {
                 message_ref(message)?;

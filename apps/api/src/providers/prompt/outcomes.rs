@@ -377,6 +377,16 @@ fn questions_block(input: &TurnInput) -> String {
                     Action::EmailRemoval { email_removal } => {
                         format!("{}\nInbox: {}", question.title, email_removal.account_id)
                     }
+                    Action::MailAttachments { mail_attachments } => format!(
+                        "{}\nAccount: {}\nParts: {:?}",
+                        question.title,
+                        mail_attachments.account_id,
+                        mail_attachments
+                            .files
+                            .iter()
+                            .map(|file| file.part)
+                            .collect::<Vec<_>>()
+                    ),
                 };
                 let standing = match answer.as_str() {
                     APPROVE_FOREVER => {
@@ -445,6 +455,16 @@ fn questions_block(input: &TurnInput) -> String {
                     (APPROVE, Action::EmailRemoval { .. }) => {
                         "Approved: call mail_disconnect again with the same account_id, once, \
                          then report the result."
+                            .to_owned()
+                    }
+                    (APPROVE, Action::MailAttachments { .. }) => {
+                        "Approved: call mail_action open_attachments again with the same \
+                         account_id, message and parts, once, then search the files it returns."
+                            .to_owned()
+                    }
+                    (DENY, Action::MailAttachments { .. }) => {
+                        "Denied: do not open these attachments. The email's body and the rest \
+                         of the inbox stay readable; answer from them or ask the owner."
                             .to_owned()
                     }
                     (DENY, _) => format!(

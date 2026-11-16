@@ -109,10 +109,15 @@ fn context_turn(kind: Option<ContextKind>) -> http::context::Turn {
 }
 
 fn main() -> ExitCode {
-    if std::env::args().nth(1).as_deref() == Some(else_visual::isolate::WORKER_ARG) {
-        else_visual::isolate::run_worker();
+    match std::env::args().nth(1).as_deref() {
+        Some(else_visual::isolate::WORKER_ARG) => else_visual::isolate::run_worker(),
+        Some(else_api::connectors::documents::pdf::WORKER_ARG) => {
+            else_api::connectors::documents::pdf::run_worker()
+        }
+        _ => {}
     }
     else_visual::isolate::use_this_executable();
+    else_api::connectors::documents::pdf::use_this_executable();
     let command = Cli::parse().command.unwrap_or(Command::Serve);
     match command {
         Command::Context { kind } => {

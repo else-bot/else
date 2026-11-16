@@ -223,13 +223,20 @@ pub enum Action {
     EmailRemoval {
         email_removal: EmailRemoval,
     },
+    MailAttachments {
+        mail_attachments: MailAttachments,
+    },
 }
 
 impl Action {
-    /// Whether a saved permission may ever cover this action. Deleting a bot
-    /// or removing an inbox always needs its own card.
+    /// Whether a saved permission may ever cover this action. Deleting a bot,
+    /// removing an inbox, or opening email attachments always needs its own
+    /// card.
     pub fn standing_allowed(&self) -> bool {
-        !matches!(self, Self::BotDeletion { .. } | Self::EmailRemoval { .. })
+        !matches!(
+            self,
+            Self::BotDeletion { .. } | Self::EmailRemoval { .. } | Self::MailAttachments { .. }
+        )
     }
 }
 
@@ -360,6 +367,30 @@ pub struct BotDeletion {
 pub struct EmailRemoval {
     pub account_id: Uuid,
     pub address: String,
+}
+
+/// Email attachments a bot asks to read, as the card lists them. Approving
+/// lets the bot read and search the text of exactly these files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailAttachments {
+    pub account_id: Uuid,
+    pub address: String,
+    pub message: crate::connectors::types::MessageRef,
+    pub subject: Option<String>,
+    pub from: Vec<String>,
+    pub files: Vec<MailFile>,
+}
+
+/// One attachment on a [`MailAttachments`] card: its part index from
+/// `read`, and the name, type and decoded size the message declares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailFile {
+    pub part: usize,
+    pub name: String,
+    pub media_type: String,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -562,6 +593,11 @@ fn text_arg<'a>(args: &'a Value, key: &str, max: usize) -> Result<Option<&'a str
     }
 }
 
+/// `text` cut to at most `max` bytes on a character boundary.
+fn clip(text: &str, max: usize) -> String {
+    text[..text.floor_char_boundary(max)].to_owned()
+}
+
 fn only_keys(args: &Value, allowed: &[&str]) -> Result<(), ()> {
     let object = args.as_object().ok_or(())?;
     if object.keys().all(|k| allowed.contains(&k.as_str())) {
@@ -655,6 +691,52 @@ impl Spec {
                 hash: hash(&[b"email_removal", removal.account_id.as_bytes()]),
                 action: Action::EmailRemoval {
                     email_removal: removal,
+                },
+            }),
+        }
+    }
+
+    /// A card approving one read of these attachments. Its identity is the
+    /// message and the set of parts, so a retry with the parts in another
+    /// order finds the same card.
+    pub fn mail_attachments(attachments: MailAttachments) -> Self {
+        let mut parts: Vec<_> = attachments.files.iter().map(|f| f.part).collect();
+        parts.sort_unstable();
+        let message = &attachments.message;
+        let identity = format!(
+            "{}:{}:{}:{}:{parts:?}",
+            attachments.account_id, message.uid_validity, message.uid, message.folder
+        );
+        let title = match attachments.files.as_slice() {
+            [file] => format!("Open {}", file.name),
+            files => format!("Open {} attachments", files.len()),
+        };
+        let mut context = format!(
+            "The bot reads and searches the text of these files. Nothing else in {} changes.",
+            attachments.address
+        );
+        if let Some(subject) = &attachments.subject {
+            context.push_str(&format!("\nEmail: {subject}"));
+        }
+        if !attachments.from.is_empty() {
+            context.push_str(&format!("\nFrom: {}", attachments.from.join(", ")));
+        }
+        for file in &attachments.files {
+            context.push_str(&format!(
+                "\n- {} ({}, {} bytes)",
+                file.name, file.media_type, file.size
+            ));
+        }
+        Self {
+            kind: Kind::External,
+            title: clip(&title, MAX_TITLE),
+            context: Some(clip(&context, MAX_CONTEXT)),
+            choices: approval_choices(Kind::External, None),
+            multiple: false,
+            approval: Some(Approval {
+                hash: hash(&[b"mail_attachments", identity.as_bytes()]),
+                action: Action::MailAttachments {
+                    mail_attachments: attachments,
                 },
             }),
         }

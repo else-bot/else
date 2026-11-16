@@ -1,5 +1,6 @@
 mod config;
 pub mod delivery;
+pub mod documents;
 pub mod oauth;
 pub mod pimalaya;
 pub mod store;
