@@ -6,7 +6,8 @@
 //! and settles the wait once the status leaves those values, the checks
 //! keep failing or report no status, or the deadline passes; settling
 //! requeues the turn as a continuation that receives the last result.
-//! Ending the turn for any reason withdraws a pending wait (a trigger).
+//! A new owner message carries the wait to its own turn ([`carry_forward`]);
+//! any other end of the turn withdraws a pending wait (a trigger).
 
 use serde_json::Value;
 use sqlx::types::Json;
@@ -274,6 +275,48 @@ pub async fn expire(pool: &SqlitePool) -> Result<usize, sqlx::Error> {
     tx.commit().await?;
     Ok(expired.len())
 }
+
+/// The owner's new message `turn_id` takes the waits of the earlier active
+/// turns of `conversation_id` that are pending or settled and unseen, so
+/// superseding a turn never drops a job's result. They get attempt 0: no
+/// attempt of the new turn parked on them, so each may still ask or wait.
+pub async fn carry_forward(
+    conn: &mut SqliteConnection,
+    conversation_id: Uuid,
+    turn_no: i64,
+    turn_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE mcp_waits SET turn_id = ?3, attempt = 0
+         WHERE turn_id IN (SELECT id FROM turns WHERE conversation_id = ?1 AND turn_no < ?2
+                           AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running'))
+           AND (status = 'pending'
+                OR (delivered_attempt IS NULL AND status IN ('finished', 'failed', 'expired')))",
+    )
+    .bind(conversation_id)
+    .bind(turn_no)
+    .bind(turn_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// The pending waits of `turn_id`, oldest first, for the bot's context.
+pub async fn in_progress(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<Vec<InProgress>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, mcp_id, tool, purpose, checks FROM mcp_waits
+         WHERE turn_id = ?1 AND status = 'pending'
+         ORDER BY created_at, id",
+    )
+    .bind(turn_id)
+    .fetch_all(&mut *conn)
+    .await
+}
+
+pub use crate::app::providers::McpWaitInProgress as InProgress;
 
 /// A wait still checking its job, as the owner's turn view shows it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, sqlx::FromRow)]

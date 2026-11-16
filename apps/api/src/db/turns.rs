@@ -517,7 +517,7 @@ pub async fn accept(
 }
 
 /// A new owner message takes over its conversation: it takes over delegated
-/// work, skips older questions and handoffs, carries tasks forward, and
+/// work, skips older questions and handoffs, carries tasks and waits forward, and
 /// supersedes or cancels the turns before it. Returns the turns to cancel.
 async fn take_conversation(
     tx: &mut SqliteConnection,
@@ -555,6 +555,9 @@ async fn take_conversation(
     }
     crate::db::computer_handoffs::skip_pending(&mut *tx, bot_id).await?;
     crate::db::delegations::carry_forward(&mut *tx, conversation_id, turn_no, turn_id).await?;
+    crate::db::mcp_waits::carry_forward(&mut *tx, conversation_id, turn_no, turn_id).await?;
+    crate::db::computer_job_waits::carry_forward(&mut *tx, conversation_id, turn_no, turn_id)
+        .await?;
     let superseded: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'interrupted', error_code = 'superseded',
              error_message = 'A newer owner message continued this conversation before this one finished.',
@@ -1194,6 +1197,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         outgoing_drafts: crate::db::outgoing_drafts::notes(&mut conn, turn_id).await?,
         social_setups: crate::socials::store::setup_outcomes(&mut conn, turn_id).await?,
         mcp_waits: crate::db::mcp_waits::undelivered(&mut conn, turn_id).await?,
+        mcp_waits_in_progress: crate::db::mcp_waits::in_progress(&mut conn, turn_id).await?,
         computer_job_waits: crate::db::computer_job_waits::undelivered(&mut conn, turn_id).await?,
         skill_installs: crate::db::skills::undelivered(&mut conn, turn_id).await?,
         computer_handoffs: crate::db::computer_handoffs::undelivered(&mut conn, turn_id).await?,

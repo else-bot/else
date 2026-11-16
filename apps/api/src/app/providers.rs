@@ -159,6 +159,9 @@ pub struct TurnInput {
     pub social_setups: Vec<crate::socials::store::Setup>,
     /// Settled waits on MCP jobs that no attempt has received yet.
     pub mcp_waits: Vec<McpWaitOutcome>,
+    /// Waits on MCP jobs this turn still holds, including those an earlier
+    /// owner message started and this one carried forward.
+    pub mcp_waits_in_progress: Vec<McpWaitInProgress>,
     /// Settled waits on the bot's background computer jobs that no
     /// attempt has received yet.
     pub computer_job_waits: Vec<crate::db::computer_job_waits::Outcome>,
@@ -297,6 +300,17 @@ pub struct McpWaitOutcome {
     pub status: String,
     pub checks: i64,
     pub result: Option<String>,
+}
+
+/// A wait on an MCP job that still runs; its result arrives later as a
+/// continuation of the turn that holds it.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct McpWaitInProgress {
+    pub id: Uuid,
+    pub mcp_id: String,
+    pub tool: String,
+    pub purpose: String,
+    pub checks: i64,
 }
 
 pub use super::questions::{Choice as QuestionChoice, Outcome as QuestionOutcome};

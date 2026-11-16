@@ -101,6 +101,33 @@ pub(super) fn mcps_block(input: &TurnInput) -> String {
     text
 }
 
+/// The MCP jobs this request still waits on. A turn that may use MCPs
+/// always gets the block, empty included, so a session that held a wait
+/// learns it ended.
+pub(super) fn mcp_waits_in_progress_block(input: &TurnInput) -> String {
+    let waits = &input.mcp_waits_in_progress;
+    if input.mcps.is_none() && waits.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from(
+        "[else.bot MCP jobs in progress] Jobs you parked on with mcp_wait that still run, \
+         including ones started for an earlier owner message. else.bot keeps checking them and \
+         each result arrives as a continuation of the current request. Do not start or wait on \
+         them again. This list replaces earlier ones.\n",
+    );
+    if waits.is_empty() {
+        text.push_str("None.\n");
+    }
+    for wait in waits {
+        text.push_str(&format!(
+            "<mcp_wait id=\"{}\" mcp=\"{}\" tool=\"{}\" checks=\"{}\">{}</mcp_wait>\n",
+            wait.id, wait.mcp_id, wait.tool, wait.checks, wait.purpose
+        ));
+    }
+    text.push('\n');
+    text
+}
+
 /// The delegated tasks this request still waits on. A bot that can delegate
 /// always gets the block, empty included, so a session that held a task
 /// learns its result has been given or that it ended.
