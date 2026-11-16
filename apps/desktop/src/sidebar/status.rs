@@ -137,11 +137,7 @@ impl Subtitle {
                 let text = match &bot.read_state {
                     Some(state) => match &state.latest {
                         Some(latest) => {
-                            let text =
-                                markdown::to_mdast(&latest.preview, &markdown::ParseOptions::gfm())
-                                    .map(|root| root.to_string())
-                                    .unwrap_or_else(|_| latest.preview.clone());
-                            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                            let text = latest.plain_preview();
                             if text.is_empty() {
                                 "No text in last reply".to_owned()
                             } else {

@@ -301,7 +301,7 @@ impl Inbox {
             alerts.push(Alert {
                 bot: bot.id,
                 title: bot.name.clone(),
-                body: latest.preview.clone(),
+                body: latest.plain_preview(),
             });
         }
         alerts.sort_by_key(|a| a.bot);
@@ -486,7 +486,10 @@ mod tests {
             assert!(!inbox.observe(std::slice::from_ref(&update)), "{phase}");
             assert!(inbox.alerts(&[update], nobody).is_empty(), "{phase}");
         }
-        let done = finished(bot(1, Some((1, at(3, 12))), at(0, 0)), "Final");
+        let done = finished(
+            bot(1, Some((1, at(3, 12))), at(0, 0)),
+            "**Final** is live on\n[production](https://example.com/version.json)",
+        );
         assert!(
             inbox.observe(std::slice::from_ref(&done)),
             "the bot went idle"
@@ -496,7 +499,7 @@ mod tests {
             [Alert {
                 bot: Uuid::from_u128(1),
                 title: "Bot 1".into(),
-                body: "Final".into(),
+                body: "Final is live on production".into(),
             }]
         );
         assert!(!inbox.observe(&[done]), "announced once");
