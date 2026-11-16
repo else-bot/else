@@ -36,6 +36,10 @@ struct Remote {
     pending: Arc<AtomicBool>,
     latest: Option<Version>,
     last_response: tokio::time::Instant,
+    /// The update request this app started or watched running. The server
+    /// keeps its last record indefinitely; any other finished record is
+    /// history, not this session's outcome.
+    followed: Option<Uuid>,
 }
 
 pub fn start(
@@ -61,6 +65,7 @@ fn start_with(
             pending: pending.clone(),
             latest: None,
             last_response: tokio::time::Instant::now(),
+            followed: None,
         }
         .run(commands),
     );
@@ -195,30 +200,47 @@ impl Remote {
             },
             Err(_) => Check::Failed("The server reported an invalid version.".into()),
         });
+        if let Some(operation) = &status.operation
+            && matches!(operation.state, RemoteState::Running)
+        {
+            self.followed = Some(operation.request_id);
+        }
         let operation = status.operation.map(|operation| {
+            let followed = self.followed == Some(operation.request_id);
             let mut log = output::Log::new(OUTPUT_CAP);
             log.push(operation.output.as_bytes());
             log.finish();
-            let state = match operation.state {
-                RemoteState::Running => Operation::Installing,
+            let failure = match operation.state {
+                RemoteState::Running => return (Operation::Installing, log.text().to_owned()),
                 RemoteState::Succeeded if matches!((installed, operation.version.parse::<Version>()), (Ok(installed), Ok(target)) if installed >= target) => {
-                    if matches!(check, Some(Check::Available { .. })) {
-                        Operation::Idle
+                    return if followed && !matches!(check, Some(Check::Available { .. })) {
+                        (Operation::Ready { version: format!("v{}", status.version) }, log.text().to_owned())
                     } else {
-                        Operation::Ready { version: format!("v{}", status.version) }
-                    }
+                        (Operation::Idle, String::new())
+                    };
                 },
-                RemoteState::Succeeded => Operation::Failed(format!(
+                RemoteState::Succeeded => format!(
                     "The installer finished, but the server reports {} instead of {}.",
                     status.version, operation.version
-                )),
-                RemoteState::Failed => Operation::Failed(operation.error.unwrap_or_else(|| {
+                ),
+                RemoteState::Failed => operation.error.unwrap_or_else(|| {
                     "The server update failed. Review the output and try again.".into()
-                })),
+                }),
+            };
+            let state = if followed {
+                Operation::Failed(failure)
+            } else {
+                Operation::PastFailure(failure)
             };
             (state, log.text().to_owned())
         });
-        let lost = operation.is_none() && self.state.borrow().running();
+        let (lost, unconfirmed) = {
+            let state = self.state.borrow();
+            (
+                operation.is_none() && state.running(),
+                matches!(state.operation, Operation::Unconfirmed(_)),
+            )
+        };
         self.state.send_modify(|snapshot| {
             snapshot.unavailable = status.unavailable;
             if let Some(check) = check {
@@ -231,10 +253,13 @@ impl Remote {
                 snapshot.operation = operation;
                 snapshot.output = output;
             } else if lost {
-                snapshot.operation = Operation::Failed(
+                snapshot.operation = Operation::Unconfirmed(
                     "The server has no record of the update. Check its status before retrying."
                         .into(),
                 );
+            } else if unconfirmed {
+                snapshot.operation = Operation::Idle;
+                snapshot.output.clear();
             }
         });
     }
@@ -259,7 +284,7 @@ impl Remote {
             } else if running && error.outcome_unknown() && self.last_response.elapsed() < RECONNECT_LIMIT {
                 state.operation = Operation::Restarting;
             } else if running {
-                state.operation = Operation::Failed(format!("Could not follow the server update. Check again to reconnect. {error}"));
+                state.operation = Operation::Unconfirmed(format!("Lost contact with the server while it updated. {error}"));
             } else {
                 state.check = Check::Failed(error.to_string());
             }
@@ -282,6 +307,7 @@ impl Remote {
             return;
         }
         let request_id = Uuid::new_v4();
+        self.followed = Some(request_id);
         self.last_response = tokio::time::Instant::now();
         let request = self
             .client
@@ -290,12 +316,21 @@ impl Remote {
             .json(&serde_json::json!({"request_id":request_id,"version":version.plain()}));
         match self.client.send_json::<Status>(request).await {
             Ok((_, status)) => self.apply(status),
-            Err(error) => {
-                match self.status().await {
-                    Ok(status) if status.operation.as_ref().is_some_and(|operation| operation.request_id == request_id) => self.apply(status),
-                    _ => self.state.send_modify(|state| state.operation = Operation::Failed(format!("Could not confirm that the server accepted the update. Check again before retrying. {error}"))),
+            Err(error) => match self.status().await {
+                Ok(status)
+                    if status
+                        .operation
+                        .as_ref()
+                        .is_some_and(|operation| operation.request_id == request_id) =>
+                {
+                    self.apply(status)
                 }
-            }
+                _ => self.state.send_modify(|state| {
+                    state.operation = Operation::Unconfirmed(format!(
+                        "Couldn't confirm that the server accepted the update. {error}"
+                    ))
+                }),
+            },
         }
     }
 }
@@ -323,6 +358,7 @@ mod tests {
         posts: Arc<AtomicU64>,
         offline: Arc<AtomicBool>,
         lose_response: Arc<AtomicBool>,
+        reject: Arc<AtomicBool>,
         gateway: Arc<AtomicBool>,
         supported: Arc<AtomicBool>,
     }
@@ -365,6 +401,9 @@ mod tests {
         assert_eq!(headers["authorization"], format!("Bearer {TOKEN}"));
         assert_eq!(request["version"], "0.0.20");
         server.posts.fetch_add(1, Ordering::Relaxed);
+        if server.reject.load(Ordering::Relaxed) {
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
         server.status.send_modify(|status| status["operation"] = json!({
             "request_id":request["request_id"], "version":request["version"], "state":"running", "output":"\u{1b}[32mDownloading\u{1b}[0m\n", "error":null
         }));
@@ -385,6 +424,7 @@ mod tests {
                 posts: Arc::default(),
                 offline: Arc::default(),
                 lose_response: Arc::default(),
+                reject: Arc::default(),
                 gateway: Arc::default(),
                 supported: Arc::new(AtomicBool::new(supported)),
             };
@@ -543,11 +583,73 @@ mod tests {
         drop(commands);
         drop(states);
         let (_, mut reopened) = fixture.start();
-        until(&mut reopened, |state| {
-            matches!(state.operation, Operation::Ready { .. })
+        let remembered = until(&mut reopened, |state| {
+            matches!(state.check, Check::Current { .. })
         })
         .await;
+        assert_eq!(remembered.operation, Operation::Idle);
+        assert_eq!(remembered.output, "");
         assert_eq!(fixture.server.posts.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failure_recorded_before_this_session_is_history_and_does_not_block_updates() {
+        let fixture = Fixture::new(true).await;
+        fixture.server.status.send_modify(|status| {
+            status["operation"] = json!({
+                "request_id": Uuid::new_v4(), "version": "0.0.20", "state": "failed",
+                "output": "Old run\n", "error": "Download failed"
+            });
+        });
+        let (commands, mut states) = fixture.start();
+        let remembered = until(&mut states, |state| {
+            matches!(state.check, Check::Available { .. }) && state.work == Work::Idle
+        })
+        .await;
+        assert_eq!(
+            remembered.operation,
+            Operation::PastFailure("Download failed".into())
+        );
+        commands.install().unwrap();
+        let installing = until(&mut states, |state| {
+            state.operation == Operation::Installing
+        })
+        .await;
+        assert_eq!(installing.output, "Downloading\n");
+        fixture.server.status.send_modify(|status| {
+            status["operation"]["state"] = json!("failed");
+        });
+        until(&mut states, |state| {
+            matches!(state.operation, Operation::Failed(_))
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_unconfirmed_install_blocks_retry_until_a_check_reconciles_it() {
+        let mut fixture = Fixture::new(true).await;
+        fixture.settings.work_every = Duration::from_secs(60 * 60);
+        fixture.server.reject.store(true, Ordering::Relaxed);
+        let (commands, mut states) = fixture.start();
+        until(&mut states, |state| {
+            matches!(state.check, Check::Available { .. }) && state.work == Work::Idle
+        })
+        .await;
+        commands.install().unwrap();
+        until(&mut states, |state| {
+            matches!(state.operation, Operation::Unconfirmed(_))
+        })
+        .await;
+        assert!(commands.install().is_err());
+        fixture.server.reject.store(false, Ordering::Relaxed);
+        commands.check().unwrap();
+        until(&mut states, |state| state.operation == Operation::Idle).await;
+        commands.install().unwrap();
+        until(&mut states, |state| {
+            state.operation == Operation::Installing
+        })
+        .await;
+        assert_eq!(fixture.server.posts.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]

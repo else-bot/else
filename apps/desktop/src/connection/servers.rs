@@ -563,18 +563,35 @@ impl Shell {
             .filter(|saved| self.can_update_server(saved.id))
             .map(|saved| (saved.id, saved.name.clone()))
             .collect();
-        let mut errors = Vec::new();
-        for (id, name) in targets {
-            let view = self
-                .remote_updates
-                .get_mut(&id)
-                .unwrap_or(&mut self.server_updates);
-            if let Err(error) = view.install() {
-                errors.push(format!("{name}: {error}"));
-            }
-        }
+        let errors: Vec<_> = targets
+            .into_iter()
+            .filter_map(|(id, name)| {
+                self.start_server_update(id)
+                    .err()
+                    .map(|error| format!("{name}: {error}"))
+            })
+            .collect();
         self.connection_error = (!errors.is_empty()).then(|| errors.join("\n"));
         cx.notify();
+    }
+
+    pub(super) fn install_server_update(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if !self.can_update_server(id) {
+            return;
+        }
+        let name = self.registry.find(id).map(|saved| saved.name.clone());
+        self.connection_error = self
+            .start_server_update(id)
+            .err()
+            .map(|error| format!("{}: {error}", name.unwrap_or_default()));
+        cx.notify();
+    }
+
+    fn start_server_update(&mut self, id: Uuid) -> Result<(), String> {
+        self.remote_updates
+            .get_mut(&id)
+            .unwrap_or(&mut self.server_updates)
+            .install()
     }
 
     pub(super) fn open_server_editor(
