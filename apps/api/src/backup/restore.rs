@@ -328,7 +328,7 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
             "a new SQLite file path is required".into(),
         ));
     }
-    let (_, manifest, identity) = open_set(request.set_dir, request.key)?;
+    let (completion, manifest, identity) = open_set(request.set_dir, request.key)?;
     if manifest
         .artifacts
         .iter()
@@ -369,7 +369,7 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
     super::private_dir(&staging)?;
     super::mark_owned(&staging)?;
     let rebuilt = staging.join(&manifest.set_id);
-    let (request, manifest, identity) = if super::store::is_chunked(request.set_dir)? {
+    let (request, manifest, identity) = if completion.manifest.object == super::chunks::INDEX {
         {
             let opened = super::store::open(request.set_dir, request.key)?;
             let (set_dir, out, max) = (

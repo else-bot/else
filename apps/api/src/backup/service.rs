@@ -555,7 +555,7 @@ impl Backups {
             let sets = super::completed_sets(&dir).unwrap_or_default();
             let bytes = sets
                 .iter()
-                .fold(super::store::stored_bytes(&dir), |sum, set| {
+                .fold(size(&dir.join(super::chunks::CHUNKS)), |sum, set| {
                     sum.saturating_add(size(&dir.join(set)))
                 });
             (sets.len(), bytes, free_space(&dir))

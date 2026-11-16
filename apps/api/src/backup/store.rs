@@ -23,7 +23,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use super::chunks::{self, CHUNKS, ChunkKeys, ChunkRef, Encoding, INDEX, Index, Stored};
+use super::chunks::{self, ChunkKeys, ChunkRef, Encoding, INDEX, Index, Stored};
 use super::{BackupError, Completion, ObjectRef};
 use crate::credentials::SecretKey;
 
@@ -282,24 +282,6 @@ pub fn sweep(backups: &Path, key: &SecretKey) -> Result<usize, BackupError> {
     }
     super::sync_dir(&store.root)?;
     Ok(removed)
-}
-
-/// The bytes the backup directory's chunk stores hold.
-pub fn stored_bytes(backups: &Path) -> u64 {
-    let Ok(keys) = fs::read_dir(backups.join(CHUNKS.trim_end_matches('/'))) else {
-        return 0;
-    };
-    keys.flatten()
-        .filter(|k| k.file_type().is_ok_and(|t| t.is_dir()))
-        .flat_map(|k| fs::read_dir(k.path()).into_iter().flatten().flatten())
-        .filter_map(|c| c.metadata().ok())
-        .filter(|m| m.is_file())
-        .fold(0u64, |sum, m| sum.saturating_add(m.len()))
-}
-
-/// Whether the published set at `set_dir` keeps its artifacts in the store.
-pub fn is_chunked(set_dir: &Path) -> Result<bool, BackupError> {
-    Ok(super::restore::read_completion(set_dir)?.manifest.object == INDEX)
 }
 
 #[cfg(test)]
