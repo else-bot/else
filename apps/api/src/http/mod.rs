@@ -365,7 +365,7 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
         .all()
         .iter()
         .map(|provider| {
-            let mut view = provider_view(provider.as_ref(), configured.as_deref());
+            let mut view = provider_view(provider.as_ref(), configured.as_deref(), false);
             view["catalog"] = json!(provider.catalog());
             view
         })
@@ -410,15 +410,47 @@ async fn configured_profiles(db: &SqlitePool) -> Option<Vec<String>> {
     .and_then(Result::ok)
 }
 
+/// Per provider: a saved default, and how many bots and routines carry
+/// their own model (paused routines too, since run now still runs them).
+/// `None` when they cannot be read in time.
+async fn saved_models(db: &SqlitePool) -> Option<Vec<(String, bool, i64, i64)>> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sqlx::query_as(
+            "SELECT provider_id, MAX(is_default), SUM(bot), SUM(routine) FROM (
+                 SELECT provider_id, 1 AS is_default, 0 AS bot, 0 AS routine
+                 FROM provider_profiles
+                 UNION ALL
+                 SELECT p.provider_id, 0, 1, 0 FROM bot_profiles p
+                 JOIN bots b ON b.id = p.bot_id WHERE b.status = 'active'
+                 UNION ALL
+                 SELECT json_extract(r.model, '$.provider_id'), 0, 0, 1 FROM routines r
+                 JOIN bots b ON b.id = r.bot_id
+                 WHERE r.model IS NOT NULL AND r.deleted_at IS NULL
+                     AND b.status = 'active'
+             ) GROUP BY provider_id",
+        )
+        .fetch_all(db),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+}
+
+/// A provider's state. Without a saved default, `has_own_models` (a bot or
+/// routine naming its own model) still makes it available.
 fn provider_view(
     provider: &dyn crate::app::providers::Provider,
     configured: Option<&[String]>,
+    has_own_models: bool,
 ) -> serde_json::Value {
     let has_profile = configured.map(|ids| ids.iter().any(|id| id == provider.id()));
     let cli = provider.availability();
     let reason = match &cli {
         Availability::Unavailable(reason) => Some(reason.clone()),
-        Availability::Available if provider.uses_profile() && has_profile == Some(false) => {
+        Availability::Available
+            if provider.uses_profile() && has_profile == Some(false) && !has_own_models =>
+        {
             Some(format!(
                 "No saved {} execution profile. Save an explicit model first \
                  (PATCH /v1/settings/providers/{}).",
@@ -446,7 +478,7 @@ fn provider_view(
 /// What a bot reports when else.bot itself seems broken: the version and
 /// each part's state with the reason it gives.
 pub(crate) async fn status(state: &AppState) -> serde_json::Value {
-    let (configured, backups) = tokio::join!(configured_profiles(&state.db), async {
+    let (saved, backups) = tokio::join!(saved_models(&state.db), async {
         let backups = state.backups.as_ref()?;
         let read = tokio::time::timeout(std::time::Duration::from_secs(2), backups.snapshot());
         Some(
@@ -454,12 +486,31 @@ pub(crate) async fn status(state: &AppState) -> serde_json::Value {
                 .map_err(|_| "backup status did not answer in 2 seconds".to_owned()),
         )
     });
+    let defaults: Option<Vec<String>> = saved.as_ref().map(|rows| {
+        rows.iter()
+            .filter(|row| row.1)
+            .map(|row| row.0.clone())
+            .collect()
+    });
     let providers: Vec<_> = state
         .scheduler
         .registry()
         .all()
         .iter()
-        .map(|provider| provider_view(provider.as_ref(), configured.as_deref()))
+        .map(|provider| {
+            let id = provider.id();
+            let row = saved
+                .as_ref()
+                .and_then(|rows| rows.iter().find(|row| row.0 == id));
+            let (bots, routines) = row.map_or((0, 0), |row| (row.2, row.3));
+            let mut view =
+                provider_view(provider.as_ref(), defaults.as_deref(), bots + routines > 0);
+            if saved.is_some() {
+                view["bots_with_own_model"] = json!(bots);
+                view["routines_with_own_model"] = json!(routines);
+            }
+            view
+        })
         .collect();
     let backups = match backups {
         None => json!({ "available": false, "unavailable_reason": state.startup_faults.backups }),
@@ -478,7 +529,7 @@ pub(crate) async fn status(state: &AppState) -> serde_json::Value {
     json!({
         "version": crate::VERSION,
         "providers": providers,
-        "profiles_readable": configured.is_some(),
+        "profiles_readable": saved.is_some(),
         "computers": {
             "available": state.computers.is_some(),
             "unavailable_reason": state.startup_faults.computers,
