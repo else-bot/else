@@ -3,14 +3,13 @@ use crate::api::{BotUsage, ProviderUsage, UsageWindow};
 use crate::avatar::bot_avatar;
 use crate::connection::Shell;
 use crate::controls::{hugging_segment, segment_track};
-use crate::usage_ui::{bar, dot, share, source_summary, sources};
+use crate::usage_ui::{initial, percent, share, share_bar, source_summary};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 
 const AVATAR: f32 = 24.;
 const NAME: f32 = 180.;
-const SHARE: f32 = 150.;
-const SOURCE: f32 = 170.;
+const SHARE: f32 = 64.;
 
 impl Shell {
     pub(super) fn usage_table(
@@ -38,9 +37,9 @@ impl Shell {
             .gap_3()
             .child(crate::appearance::section_label(
                 if periods.len() > 1 {
-                    format!("How your bots split their {name} use")
+                    format!("Share of your bots' {name} use")
                 } else {
-                    format!("How your bots split their {name} use {}", window.period())
+                    format!("Share of your bots' {name} use, {}", window.period())
                 },
                 cx,
             ));
@@ -49,7 +48,7 @@ impl Shell {
                 let minutes = period.minutes;
                 hugging_segment(
                     SharedString::from(format!("usage-period-{minutes}")),
-                    sentence(&period.period()),
+                    period.title(),
                     minutes == window.minutes,
                     false,
                     cx,
@@ -78,9 +77,17 @@ impl Shell {
         let mut table = v_flex()
             .gap_1()
             .child(heading)
-            .child(div().text_xs().mb_2().text_color(theme.muted_foreground).child(
-                "Estimated from each turn's tokens. Your own use outside else.bot isn't included.",
-            ))
+            .child(div().text_xs().mb_2().text_color(theme.muted_foreground).child(match (window.attribution.used(), window.attribution.outside()) {
+                (Some(used), Some(outside)) => format!(
+                    "Estimated by weighting each bot's tokens at its model's price. Together your bots used about {} of this limit.",
+                    percent((used - outside).max(0.).round()),
+                ),
+                (Some(used), None) => format!(
+                    "Estimated by weighting each bot's tokens at its model's price. It compares your bots with each other; how much of the {} they used isn't known yet.",
+                    percent(used)
+                ),
+                (None, _) => "Estimated by weighting each bot's tokens at its model's price.".into(),
+            }))
             .child(
                 h_flex()
                     .w_full()
@@ -91,8 +98,7 @@ impl Shell {
                     .child(div().w(px(AVATAR)).flex_none())
                     .child(column("Bot", Some(NAME), false))
                     .child(column("", None, false))
-                    .child(column("Share of your bots' use", Some(SHARE), true))
-                    .child(column("Main source", Some(SOURCE), false)),
+                    .child(column("Share", Some(SHARE), true)),
             );
         if bots.is_empty() {
             table = table.child(
@@ -107,9 +113,6 @@ impl Shell {
             .filter(|bot| view.show_more || bot.share >= 0.01)
         {
             let id = bot.bot_id;
-            let main = sources(bot)
-                .first()
-                .map(|(kind, amount)| format!("{} {}", kind.label(), share(*amount)));
             let row = h_flex()
                 .id(SharedString::from(format!("usage-bot-{id}")))
                 .w_full()
@@ -143,7 +146,9 @@ impl Shell {
                                 .still()
                                 .into_any_element()
                             })
-                            .unwrap_or_else(|| dot(palette.color(id)).into_any_element()),
+                            .unwrap_or_else(|| {
+                                initial(&bot.name, palette.color(id), px(AVATAR)).into_any_element()
+                            }),
                     ),
                 )
                 .child(
@@ -157,7 +162,7 @@ impl Shell {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(bar([(bot.share * 100., palette.color(id))], cx)),
+                        .child(share_bar(bot.share, palette.color(id))),
                 )
                 .child(
                     div()
@@ -166,15 +171,6 @@ impl Shell {
                         .text_right()
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(share(bot.share)),
-                )
-                .child(
-                    div()
-                        .w(px(SOURCE))
-                        .flex_none()
-                        .truncate()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .children(main),
                 );
             table = table.child(row);
             if view.expanded == Some(id) {
@@ -195,7 +191,7 @@ impl Shell {
                     .py_3()
                     .cursor_pointer()
                     .text_xs()
-                    .text_color(theme.muted_foreground)
+                    .text_color(theme.primary)
                     .role(Role::Button)
                     .tab_index(0)
                     .aria_expanded(view.show_more)
@@ -208,7 +204,7 @@ impl Shell {
                         "Show fewer bots".into()
                     } else {
                         format!(
-                            "{small_count} more bots, {} together. Show them",
+                            "Show {small_count} more bots ({} together)",
                             share(small_share)
                         )
                     })
@@ -222,16 +218,6 @@ impl Shell {
         }
         table.into_any_element()
     }
-}
-
-/// "this week" → "This week".
-fn sentence(text: &str) -> SharedString {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect::<String>())
-        .unwrap_or_default()
-        .into()
 }
 
 fn folded(bots: &[&BotUsage]) -> (usize, f64) {

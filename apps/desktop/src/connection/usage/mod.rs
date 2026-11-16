@@ -174,7 +174,7 @@ impl Shell {
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child("Your AI subscriptions, shared by your bots and your own use."),
+                        .child("How much of each AI subscription is used, and which bots use it."),
                 ),
         );
         let (view, report, error) = match self.usage.as_ref().map(|view| (view, &view.state)) {
@@ -290,7 +290,7 @@ impl Shell {
                         .children(reported.iter().map(|window| gauge::gauge(window, cx))),
                 )
                 .child(div().text_xs().text_color(theme.muted_foreground).child(format!(
-                    "Exact, from {name}, as of {}. Includes your own {name} use outside else.bot.",
+                    "Exact, from {name}, as of {}. Counts all your {name} use, including outside else.bot.",
                     local_time(updated)
                 )));
         }

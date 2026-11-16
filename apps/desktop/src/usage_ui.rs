@@ -55,13 +55,23 @@ pub(crate) fn sources(bot: &crate::api::BotUsage) -> Vec<(crate::api::UsageSourc
     groups
 }
 
-/// "Chat 44% · Routines 33% · Other bots' tasks 22%", largest first.
+/// "Chat 44% · Routines 33% · Asked by other bots 22%", largest first.
 pub(crate) fn source_summary(bot: &crate::api::BotUsage) -> String {
     sources(bot)
         .iter()
         .map(|(kind, amount)| format!("{} {}", kind.label(), share(*amount)))
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// "this week" → "This week".
+pub(crate) fn sentence(text: &str) -> SharedString {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+        .unwrap_or_default()
+        .into()
 }
 
 pub(crate) fn local_time(value: DateTime<Utc>) -> String {
@@ -133,8 +143,35 @@ pub(crate) fn bar(segments: impl IntoIterator<Item = (f64, Hsla)>, cx: &App) -> 
         )
 }
 
-pub(crate) fn dot(color: Hsla) -> Div {
-    div().flex_none().size(px(7.)).rounded_sm().bg(color)
+/// A bot's share as a bare fill with no track, so it doesn't read as a
+/// limit meter.
+pub(crate) fn share_bar(share: f64, color: Hsla) -> Div {
+    div()
+        .h(px(6.))
+        .rounded_sm()
+        .bg(color)
+        .w(relative(share.clamp(0., 1.) as f32))
+}
+
+/// A bot without an avatar: its initial on a tint of its colour.
+pub(crate) fn initial(name: &str, color: Hsla, size: Pixels) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(size)
+        .rounded_full()
+        .bg(color.opacity(0.25))
+        .text_color(color)
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(
+            name.chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_default(),
+        )
 }
 
 /// A fetched value that stays on screen while a refresh runs and after a
@@ -250,7 +287,7 @@ mod tests {
         };
         assert_eq!(
             super::source_summary(&bot),
-            "Chat 44% · Routines 33% · Other bots' tasks 22%"
+            "Chat 44% · Routines 33% · Asked by other bots 22%"
         );
     }
 

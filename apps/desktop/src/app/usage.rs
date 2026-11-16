@@ -5,7 +5,7 @@ use super::ElseApp;
 use super::settings::{item_name, meta, muted, note, section, section_frame};
 use crate::api::{Attribution, Bot, ProviderUsage, UsageReport};
 use crate::controls::{Control as _, Scale, Tier};
-use crate::usage_ui::{Loaded, percent, reset_in, share};
+use crate::usage_ui::{Loaded, percent, sentence, share};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::*;
@@ -98,44 +98,53 @@ impl ElseApp {
                         })),
                 ),
         );
+        let mut unmeasured = false;
         for provider in providers {
             let name = self.provider_label(&provider.provider_id);
-            let mut group = v_flex().gap_2().child(item_name(name.clone()));
-            let Some(window) = provider.primary_window() else {
-                continue;
-            };
-            let amount = window.bot(bot.id).map(|entry| entry.share).unwrap_or(0.);
-            let headline = match window.attribution {
-                Attribution::Priced { used, outside, .. } => format!(
-                    "About {} of your {name} {} {}",
-                    percent(amount * (used - outside).max(0.)),
-                    window.title().to_lowercase(),
-                    window.period()
-                ),
-                _ => format!(
-                    "About {} of your bots' {name} use {}",
-                    share(amount),
-                    window.period()
-                ),
-            };
-            group = group.child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(headline),
-            );
-            let limit = match (window.attribution.used(), window.attribution.resets_at()) {
-                (Some(used), Some(resets_at)) => format!(
-                    " {name} {} {} used, resets {}.",
-                    window.title().to_lowercase(),
-                    percent(used),
-                    reset_in(resets_at, chrono::Utc::now())
-                ),
-                _ => String::new(),
-            };
-            group = group.child(meta(format!("Estimated from tokens.{limit}"), cx));
+            let mut group = v_flex().gap_1().child(item_name(name.clone()));
+            let mut windows: Vec<_> = provider.windows.iter().collect();
+            windows.sort_by_key(|window| std::cmp::Reverse(window.minutes));
+            for window in windows {
+                let Some(entry) = window.bot(bot.id) else {
+                    continue;
+                };
+                group = group.child(
+                    h_flex()
+                        .justify_between()
+                        .gap_2()
+                        .text_sm()
+                        .child(muted(sentence(&window.period()), cx))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(format!("{} of your bots' use", share(entry.share))),
+                        ),
+                );
+                match window.attribution {
+                    Attribution::Priced { used, outside, .. } => {
+                        group = group.child(meta(
+                            format!(
+                                "About {} of the {}.",
+                                percent((entry.share * (used - outside).max(0.)).round()),
+                                window.title().to_lowercase()
+                            ),
+                            cx,
+                        ));
+                    }
+                    Attribution::Unattributed { .. } => unmeasured = true,
+                    Attribution::Unreported => {}
+                }
+            }
             body = body.child(group);
         }
+        body = body.child(meta(
+            if unmeasured {
+                "Estimated by weighting each bot's tokens at its model's price. How much of your subscription limits this bot used can't be measured yet."
+            } else {
+                "Estimated by weighting each bot's tokens at its model's price."
+            },
+            cx,
+        ));
         Some(body.into_any_element())
     }
 }
@@ -171,7 +180,7 @@ mod tests {
         let own = own_usage(report, bot);
         assert_eq!(own.len(), 1);
         let provider = &own[0];
-        let weekly = provider.primary_window().unwrap();
+        let weekly = provider.selected_window(None).unwrap();
         assert_eq!(weekly.minutes, WEEK);
         assert_eq!(weekly.bot(bot).unwrap().share, 1.0);
         assert_eq!(

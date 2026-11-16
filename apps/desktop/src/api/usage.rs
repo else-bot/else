@@ -41,13 +41,6 @@ pub const FIVE_HOURS: u64 = 5 * 60;
 pub const WEEK: u64 = 7 * 24 * 60;
 
 impl ProviderUsage {
-    pub fn primary_window(&self) -> Option<&UsageWindow> {
-        self.windows
-            .iter()
-            .find(|window| window.minutes == WEEK)
-            .or_else(|| self.windows.iter().max_by_key(|window| window.minutes))
-    }
-
     pub fn selected_window(&self, minutes: Option<u64>) -> Option<&UsageWindow> {
         let has_limits = self
             .windows
@@ -141,7 +134,7 @@ impl UsageWindow {
 
     pub fn period(&self) -> String {
         match self.minutes {
-            WEEK if self.attribution.used().is_none() => "the last 7 days".into(),
+            WEEK if self.attribution.used().is_none() => "in the last 7 days".into(),
             WEEK => "this week".into(),
             FIVE_HOURS => "this 5-hour window".into(),
             m if m.is_multiple_of(1440) => format!("this {}-day window", m / 1440),
@@ -189,7 +182,7 @@ impl UsageSourceKind {
         match self {
             Self::Chat => "Chat",
             Self::Routine => "Routines",
-            Self::Delegated => "Other bots' tasks",
+            Self::Delegated => "Asked by other bots",
             Self::Webhook => "Webhooks",
             Self::Mail => "Mail",
             Self::Social => "Social",
@@ -222,9 +215,7 @@ mod tests {
         assert_eq!(provider.selected_window(Some(123)).unwrap().minutes, WEEK);
         provider.windows[1].minutes = 1440;
         assert_eq!(provider.selected_window(None).unwrap().minutes, FIVE_HOURS);
-        assert_eq!(provider.primary_window().unwrap().minutes, 1440);
         provider.windows.clear();
-        assert!(provider.primary_window().is_none());
         assert!(provider.selected_window(None).is_none());
     }
 
