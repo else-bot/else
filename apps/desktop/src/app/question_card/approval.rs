@@ -146,6 +146,7 @@ impl ElseApp {
         } else {
             IconName::Send
         };
+        let deletion = question.bot_deletion();
         let mut source = Vec::new();
         if let Some(scope) = question.task_scope() {
             source.extend([scope.task.clone(), scope.target.clone()]);
@@ -157,6 +158,39 @@ impl ElseApp {
         let mut card =
             super::super::action_card::card(icon, question.title.clone(), source.join(" · "))
                 .when(destructive, |card| card.tag("Hard to undo"));
+        if let Some(deletion) = deletion {
+            let detail = [deletion.model.as_deref(), deletion.category.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+            card = card.child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2p5()
+                    .child(
+                        crate::avatar::bot_avatar(
+                            SharedString::from(format!("question-deletion-avatar-{id}")),
+                            deletion.avatar,
+                            px(28.),
+                        )
+                        .still(),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(deletion.name.clone()),
+                            )
+                            .when(!detail.is_empty(), |column| column.child(note(detail))),
+                    ),
+            );
+        }
         if let Some(context) = &question.context {
             let short = preview(context);
             let shown = match (&short, expanded) {
@@ -270,6 +304,8 @@ impl ElseApp {
         };
         let mut footer = super::super::action_card::footer().note(if grants.len() > 1 {
             "Sending a new message skips this."
+        } else if deletion.is_some() {
+            "Deletes only this bot, once. Sending a new message skips this."
         } else {
             "Covers exactly this action, once. Sending a new message skips this."
         });
@@ -284,16 +320,17 @@ impl ElseApp {
             );
         }
         if let Some(choice) = selected {
-            let label = sending(&choice.id).unwrap_or(if choice.id == APPROVE {
-                "Approve once"
-            } else {
-                "Always allow"
-            });
+            let label: SharedString = match (sending(&choice.id), deletion) {
+                (Some(state), _) => state.into(),
+                (None, Some(deletion)) => format!("Delete {}", deletion.name).into(),
+                (None, None) if choice.id == APPROVE => "Approve once".into(),
+                (None, None) => "Always allow".into(),
+            };
             let choice_id = choice.id.clone();
             footer = footer.child(
                 Button::new(SharedString::from(format!("question-{id}-approve")))
                     .control(Tier::Primary, Scale::Compact, locked, cx)
-                    .label(label)
+                    .label(label.clone())
                     .accessibility_label(format!(
                         "{label}: {}",
                         scope(choice, question, bot_name).0

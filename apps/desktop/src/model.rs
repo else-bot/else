@@ -349,6 +349,20 @@ pub struct QuestionAction {
     pub task_scope: Option<TaskScope>,
     #[serde(default)]
     pub permission: Option<QuestionPermission>,
+    #[serde(default)]
+    pub bot_deletion: Option<BotDeletion>,
+}
+
+/// The bot a deletion card would delete, as it was when the card was made.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct BotDeletion {
+    pub name: String,
+    #[serde(default)]
+    pub avatar: crate::avatar::Avatar,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -392,6 +406,10 @@ impl Question {
 
     pub fn mcp_connection(&self) -> Option<&crate::api::McpConsent> {
         self.action.as_ref()?.mcp_connection.as_ref()
+    }
+
+    pub fn bot_deletion(&self) -> Option<&BotDeletion> {
+        self.action.as_ref()?.bot_deletion.as_ref()
     }
 
     pub fn email_connection(&self) -> Option<&crate::api::EmailConsent> {
