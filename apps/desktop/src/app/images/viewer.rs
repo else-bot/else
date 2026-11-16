@@ -9,6 +9,8 @@ use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::cell::Cell;
+use std::rc::Rc;
 
 pub(in crate::app) struct ImageViewer {
     gallery: Entity<MessageImages>,
@@ -16,6 +18,7 @@ pub(in crate::app) struct ImageViewer {
     owner: WeakEntity<ElseApp>,
     focus: FocusHandle,
     previous_focus: Option<FocusHandle>,
+    shown_image: Rc<Cell<Option<Bounds<Pixels>>>>,
     _observe: Subscription,
 }
 
@@ -37,6 +40,7 @@ impl ImageViewer {
             owner,
             focus,
             previous_focus,
+            shown_image: Rc::default(),
             _observe: observe,
         }
     }
@@ -63,6 +67,19 @@ impl ImageViewer {
         };
         cx.notify();
     }
+
+    fn on_image(&self, event: &ClickEvent) -> bool {
+        let Some(image) = self.shown_image.get() else {
+            return false;
+        };
+        match event {
+            ClickEvent::Mouse(click) => {
+                image.contains(&click.down.position) || image.contains(&click.up.position)
+            }
+            ClickEvent::Touch(tap) => image.contains(&tap.position),
+            ClickEvent::Keyboard(_) => true,
+        }
+    }
 }
 
 impl Render for ImageViewer {
@@ -82,7 +99,22 @@ impl Render for ImageViewer {
             .active(white().opacity(0.2));
         let index = self.selected;
         let image_menu = self.gallery.downgrade();
+        let shown_image = self.shown_image.clone();
+        let image_size = match &current.state {
+            ImageState::Ready(loaded) => Some(size(
+                DevicePixels::from(loaded.size.0),
+                DevicePixels::from(loaded.size.1),
+            )),
+            _ => None,
+        };
         let stage = div()
+            .on_children_prepainted(move |children, _, _| {
+                shown_image.set(
+                    image_size
+                        .zip(children.first())
+                        .map(|(size, bounds)| ObjectFit::Contain.get_bounds(*bounds, size)),
+                );
+            })
             .id("full-size-image")
             .flex_1()
             .min_w_0()
@@ -126,6 +158,7 @@ impl Render for ImageViewer {
                                     .cursor_pointer()
                                     .label("Retry")
                                     .on_click(cx.listener(move |viewer, _, window, cx| {
+                                        cx.stop_propagation();
                                         viewer.gallery.update(cx, |gallery, cx| {
                                             gallery.load(index, window, cx)
                                         });
@@ -134,6 +167,11 @@ impl Render for ImageViewer {
                     )
                 },
             )
+            .on_click(cx.listener(|viewer, event: &ClickEvent, _, cx| {
+                if viewer.on_image(event) {
+                    cx.stop_propagation();
+                }
+            }))
             .context_menu(move |menu, _, _| {
                 MessageImages::menu(image_menu.clone(), index, ready, menu)
             });
@@ -181,6 +219,7 @@ impl Render for ImageViewer {
                         },
                     )
                     .on_click(cx.listener(move |viewer, _, _, cx| {
+                        cx.stop_propagation();
                         viewer.selected = i;
                         cx.notify();
                     }))
@@ -219,6 +258,7 @@ impl Render for ImageViewer {
                 cx.stop_propagation();
             }))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|viewer, _, window, cx| viewer.close(window, cx)))
             .on_scroll(|_, _, cx| cx.stop_propagation())
             .flex()
             .flex_col()
@@ -243,9 +283,10 @@ impl Render for ImageViewer {
                             .icon(IconName::Close)
                             .label("Close  Esc")
                             .accessibility_label("Close image viewer")
-                            .on_click(
-                                cx.listener(|viewer, _, window, cx| viewer.close(window, cx)),
-                            ),
+                            .on_click(cx.listener(|viewer, _, window, cx| {
+                                cx.stop_propagation();
+                                viewer.close(window, cx);
+                            })),
                     ),
             )
             .child(
@@ -264,7 +305,10 @@ impl Render for ImageViewer {
                             .custom(overlay_button)
                             .icon(IconName::ChevronLeft)
                             .accessibility_label("Previous image")
-                            .on_click(cx.listener(|viewer, _, _, cx| viewer.step(false, cx)))
+                            .on_click(cx.listener(|viewer, _, _, cx| {
+                                cx.stop_propagation();
+                                viewer.step(false, cx);
+                            }))
                     }))
                     .child(stage)
                     .children((gallery.files.len() > 1).then(|| {
@@ -274,7 +318,10 @@ impl Render for ImageViewer {
                             .custom(overlay_button)
                             .icon(IconName::ChevronRight)
                             .accessibility_label("Next image")
-                            .on_click(cx.listener(|viewer, _, _, cx| viewer.step(true, cx)))
+                            .on_click(cx.listener(|viewer, _, _, cx| {
+                                cx.stop_propagation();
+                                viewer.step(true, cx);
+                            }))
                     })),
             )
             .children((gallery.files.len() > 1).then_some(strip))
@@ -286,6 +333,8 @@ impl Render for ImageViewer {
             )
             .child(
                 h_flex()
+                    .id("image-viewer-actions")
+                    .on_click(|_, _, cx| cx.stop_propagation())
                     .px_4()
                     .py_3()
                     .gap_2()
