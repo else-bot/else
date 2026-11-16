@@ -61,10 +61,6 @@ pub(super) fn error(e: Error) -> ApiError {
             ApiError::new(StatusCode::CONFLICT, "social_conflict", e.to_string())
         }
         Error::Invalid(text) => ApiError::bad_request("invalid_social_request", text),
-        Error::Unsupported => ApiError::bad_request(
-            "invalid_social_request",
-            "This provider does not pair a device.",
-        ),
         Error::Busy => {
             ApiError::new(StatusCode::TOO_MANY_REQUESTS, "social_busy", e.to_string()).retryable()
         }

@@ -277,7 +277,7 @@ async fn only_a_pending_pairing_setup_starts_a_pairing() {
         .unwrap();
     assert!(matches!(
         m.start_pairing(Purpose::Setup(telegram.id)).await,
-        Err(Error::Unsupported)
+        Err(Error::Invalid(_))
     ));
     let (_, setup) = whatsapp_setup(&db).await;
     store::settle_setup(&db.pool, setup.id, None, None)

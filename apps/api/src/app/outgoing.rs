@@ -176,6 +176,16 @@ impl Platform {
             Self::Telegram | Self::Discord | Self::WhatsApp => true,
         }
     }
+
+    /// Whether every message is approved on its own, so no draft kind is
+    /// ever approved always. The SQL `kind!` in `db::outgoing_drafts`
+    /// mirrors this.
+    pub fn approved_per_message(self) -> bool {
+        match self {
+            Self::WhatsApp => true,
+            Self::X | Self::Telegram | Self::Discord => false,
+        }
+    }
 }
 
 /// An email: headers, subject, and plain-text body. With `account_id` it
@@ -536,7 +546,7 @@ impl Message {
         let task = handle(args, "task")?
             .filter(|_| destination.is_some() || reply_to.is_some())
             .map(|task| task.split_whitespace().collect::<Vec<_>>().join(" "));
-        if task.is_some() && platform == Platform::WhatsApp {
+        if task.is_some() && platform.approved_per_message() {
             return Err(
                 "a WhatsApp message goes out as the owner and is approved one at a time; omit task",
             );

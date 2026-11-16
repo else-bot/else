@@ -208,11 +208,9 @@ impl Manager {
         destination: &str,
     ) -> Result<String, Error> {
         let c = store::connection(&self.db, id).await?;
-        if c.provider == Provider::WhatsApp {
-            return Ok(providers::whatsapp::jid(destination)?.to_string());
-        }
-        let Some(username) = public_username(destination)? else {
-            return Ok(destination.to_owned());
+        let username = match providers::Named::parse(c.provider, destination)? {
+            providers::Named::Id(id) => return Ok(id),
+            providers::Named::Username(username) => username,
         };
         let access = store::authorize(
             &mut *self.db.acquire().await?,

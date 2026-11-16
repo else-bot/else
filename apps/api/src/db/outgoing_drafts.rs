@@ -77,7 +77,10 @@ pub struct OutgoingDraft {
 }
 
 /// The [`DraftKind`] of draft `d` as JSON, or NULL when it has none: the one
-/// definition both granting and matching use.
+/// definition both granting and matching use. A platform whose messages are
+/// approved one at a time ([`Platform::approved_per_message`]) has none.
+///
+/// [`Platform::approved_per_message`]: crate::app::outgoing::Platform::approved_per_message
 macro_rules! kind {
     () => {
         "CASE WHEN json_extract(d.content, '$.platform') = 'whatsapp' THEN NULL

@@ -49,6 +49,24 @@ impl Session {
     }
 }
 
+/// How a bot named a chat: by the ID incoming messages carry, or by a
+/// public username only the platform can turn into one.
+pub enum Named {
+    Id(String),
+    Username(String),
+}
+impl Named {
+    pub fn parse(provider: Provider, destination: &str) -> Result<Self, Error> {
+        match provider {
+            Provider::WhatsApp => Ok(Self::Id(whatsapp::jid(destination)?.to_string())),
+            Provider::Telegram | Provider::Discord => Ok(match public_username(destination)? {
+                Some(username) => Self::Username(username),
+                None => Self::Id(destination.to_owned()),
+            }),
+        }
+    }
+}
+
 #[async_trait]
 pub trait Transport: Send + Sync {
     /// The bot identity a submitted token authenticates.

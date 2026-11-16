@@ -111,7 +111,7 @@ impl Manager {
             Purpose::Repair(id) => store::connection(&self.db, id).await?.provider,
         };
         if provider.setup() != SetupKind::Pairing {
-            return Err(Error::Unsupported);
+            return Err(Error::Invalid("This provider does not pair a device."));
         }
         let manager = self.clone();
         self.pairings
