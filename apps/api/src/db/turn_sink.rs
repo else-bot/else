@@ -459,8 +459,6 @@ impl SinkState {
         };
         crate::db::owner_notices::supersede_by_card(&mut tx, self.turn_id).await?;
         let finished = status.is_ended();
-        // A stop requested with a reason (a task update or cancel) stored it
-        // on the `cancelling` turn; the provider's interrupt keeps it.
         let keeps_reason = current == TurnStatus::Cancelling && status == TurnStatus::Interrupted;
         let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE turns SET status = ?2,

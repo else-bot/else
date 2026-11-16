@@ -3458,7 +3458,13 @@ async fn a_delegating_bot_cancels_a_running_task() {
     assert!(!failed, "{stopping}");
     assert_eq!(stopping["status"], "stopping", "{stopping}");
     wait_status(&app, child, "interrupted").await;
-    wait_task(&app, task, "cancelled").await;
+    let (_, _, error) = wait_task(&app, task, "cancelled").await;
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("cancelled: ") && e.contains("cancelled the task")),
+        "the delegating bot learns who stopped it: {error:?}"
+    );
 
     let (failed, again) = control(
         &app,

@@ -319,7 +319,6 @@ fn activity_status(activity: &BotActivity, last: &Item, c: &Conversation) -> Act
     }
 }
 
-/// Why a received task's attempt ended, and the last message it wrote.
 fn received_note<'a>(conversation: &'a Conversation, task: &Item) -> (Option<&'a str>, &'a str) {
     let reason = conversation
         .turn(task.turn_id)
