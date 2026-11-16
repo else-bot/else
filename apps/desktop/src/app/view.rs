@@ -578,7 +578,10 @@ impl ElseApp {
                 })
                 .cursor_pointer()
                 .hover(|style| style.bg(theme.sidebar_accent).opacity(1.))
-                .on_click(cx.listener(move |app, _, window, cx| app.open_bot(id, window, cx)));
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    app.open_bot(id, window, cx);
+                    app.composer.read(cx).focus_handle(cx).focus(window, cx);
+                }));
         }
         if !self.categories.is_empty() && self.movable_bot(id).is_some() {
             row = row.on_drag(
