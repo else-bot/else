@@ -23,7 +23,9 @@ pub(super) struct View {
     logs: Entity<TextareaState>,
     scroll: ScrollHandle,
     page_scroll: ScrollHandle,
-    show_output: bool,
+    /// The reader's choice to show or hide the output for the current
+    /// operation; `None` follows the default for that operation.
+    output_open: Option<bool>,
     confirm_restart: bool,
     feedback: Option<String>,
     _watch: Task<()>,
@@ -36,7 +38,6 @@ pub(super) enum Action {
     Restart,
     ConfirmRestart,
     CancelRestart,
-    Later,
     ToggleOutput,
     Copy,
     Follow,
@@ -130,7 +131,7 @@ impl View {
             logs: cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 100_000)),
             scroll: ScrollHandle::new(),
             page_scroll: ScrollHandle::new(),
-            show_output: false,
+            output_open: None,
             confirm_restart: false,
             feedback: None,
             _watch: cx.spawn_in(window, async move |this, cx| {
@@ -160,13 +161,29 @@ impl View {
         )
     }
 
-    pub(super) fn has_activity(&self) -> bool {
-        self.busy()
-            || !self.snapshot.output.is_empty()
-            || !matches!(self.snapshot.operation, Operation::Idle)
+    /// Output belongs to the attempt in progress or one that went wrong. A
+    /// finished success has nothing left to read.
+    fn output_relevant(&self) -> bool {
+        match self.snapshot.operation {
+            Operation::Preparing | Operation::Installing | Operation::Restarting => true,
+            Operation::Failed(_) | Operation::Unconfirmed(_) | Operation::PastFailure(_) => {
+                !self.snapshot.output.is_empty()
+            }
+            Operation::Idle
+            | Operation::Ready { .. }
+            | Operation::RestartScheduled
+            | Operation::RestartFailed(_) => false,
+        }
     }
 
-    fn latest(&self) -> Option<&str> {
+    fn output_visible(&self) -> bool {
+        self.output_relevant()
+            && self
+                .output_open
+                .unwrap_or(matches!(self.snapshot.operation, Operation::Failed(_)))
+    }
+
+    pub(super) fn latest(&self) -> Option<&str> {
         match &self.snapshot.check {
             UpdateCheck::Available { latest } | UpdateCheck::Current { latest } => Some(latest),
             _ => None,
@@ -174,17 +191,10 @@ impl View {
     }
 
     pub(super) fn can_install(&self) -> bool {
-        self.snapshot.unavailable.is_none()
-            && matches!(self.snapshot.check, UpdateCheck::Available { .. })
-            && matches!(self.snapshot.work, Work::Idle)
-            && matches!(
-                self.snapshot.operation,
-                Operation::Idle | Operation::Failed(_)
-            )
+        self.snapshot.install_refusal().is_none()
     }
 
     pub(super) fn install(&mut self) -> Result<(), String> {
-        self.show_output = true;
         self.commands.install()
     }
 }
@@ -235,8 +245,16 @@ impl Shell {
             )
             && matches!(
                 snapshot.operation,
-                Operation::Idle | Operation::Ready { .. } | Operation::Failed(_)
+                Operation::Idle
+                    | Operation::Ready { .. }
+                    | Operation::Failed(_)
+                    | Operation::Unconfirmed(_)
             );
+        if std::mem::discriminant(&view.snapshot.operation)
+            != std::mem::discriminant(&snapshot.operation)
+        {
+            view.output_open = None;
+        }
         view.snapshot = snapshot;
         if changed {
             self.servers
@@ -274,12 +292,12 @@ impl Shell {
                 view.confirm_restart = false;
                 view.commands.restart()
             }
-            Action::CancelRestart | Action::Later => {
+            Action::CancelRestart => {
                 view.confirm_restart = false;
                 Ok(())
             }
             Action::ToggleOutput => {
-                view.show_output.toggle();
+                view.output_open = Some(!view.output_visible());
                 Ok(())
             }
             Action::Copy => {
@@ -308,84 +326,112 @@ impl Shell {
 
     pub(super) fn render_updates(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let server = self.server_update_target.is_some();
+        let server = self.server_update_target;
         let view = self.update_view();
         let snapshot = &view.snapshot;
-        let output_visible = view.show_output || !snapshot.output.is_empty();
+        let output_visible = view.output_visible();
+        let name = server
+            .and_then(|id| self.registry.find(id))
+            .map_or_else(|| "The server".to_owned(), |saved| saved.name.clone());
+        let installed = match server {
+            Some(id) => self
+                .servers
+                .entries
+                .get(&id)
+                .and_then(|entry| entry.version.clone()),
+            None => Some(format!("v{}", env!("ELSE_VERSION"))),
+        };
+        let latest = view.latest().unwrap_or("the update");
         let (target, source) = match snapshot.channel {
             UpdateChannel::Stable => ("latest stable release", "Stable releases"),
             UpdateChannel::Dev => ("newest commit of main", "Dev builds of main"),
         };
         let (title, description, icon, tone) = match &snapshot.operation {
             Operation::Preparing => (
-                "Checking for ongoing work",
-                "The update starts only when this installation is idle.".to_owned(),
+                "Checking for running work".to_owned(),
+                "The update starts only when nothing is running.".to_owned(),
                 IconName::ShieldCheck,
                 theme.muted_foreground,
             ),
             Operation::Installing => (
-                "Updating else.bot",
-                "Follow the output below. Keep the app open while updating.".to_owned(),
+                format!("Installing {latest}"),
+                if server.is_some() {
+                    format!(
+                        "{name} restarts when the install finishes. The app tries to reconnect on its own."
+                    )
+                } else {
+                    "Keep the app open while it installs.".to_owned()
+                },
                 IconName::RefreshCw,
                 theme.foreground,
             ),
+            Operation::Ready { version } if server.is_some() => (
+                format!("Updated to {version}"),
+                format!("{name} restarted and is running {version}."),
+                IconName::Check,
+                theme.success,
+            ),
             Operation::Ready { version } => (
-                "Update installed",
-                if server {
-                    format!("{version} is installed. The server has restarted.")
-                } else {
-                    format!("{version} is installed. Restart the app to start using it.")
-                },
+                "Update installed".to_owned(),
+                format!("{version} is installed. Restart the app to use it."),
                 IconName::Check,
                 theme.success,
             ),
             Operation::Failed(error) => (
-                "The update didn't finish",
-                if snapshot.output.is_empty() {
-                    error.clone()
-                } else {
-                    "The command stopped. Review the output below, then try again.".to_owned()
-                },
-                IconName::TriangleAlert,
-                theme.danger,
-            ),
-            Operation::Restarting | Operation::RestartScheduled => (
-                "Restarting else.bot",
-                if server {
-                    "Waiting for the server to reconnect after its update.".to_owned()
-                } else {
-                    "Reopening the installed app.".to_owned()
-                },
-                IconName::RotateCw,
-                theme.foreground,
-            ),
-            Operation::RestartFailed(error) => (
-                "Couldn't restart the app",
+                "Update failed".to_owned(),
                 error.clone(),
                 IconName::TriangleAlert,
                 theme.danger,
             ),
-            Operation::Idle => match &snapshot.check {
+            Operation::Unconfirmed(why) => (
+                "Couldn't confirm the update".to_owned(),
+                format!("{why} Check its status before trying again."),
+                IconName::TriangleAlert,
+                theme.warning,
+            ),
+            Operation::Restarting | Operation::RestartScheduled if server.is_some() => (
+                format!("Waiting for {name} to reconnect"),
+                "It restarts after installing. The app tries to reconnect on its own.".to_owned(),
+                IconName::RotateCw,
+                theme.foreground,
+            ),
+            Operation::Restarting | Operation::RestartScheduled => (
+                "Restarting else.bot".to_owned(),
+                "Reopening the installed app.".to_owned(),
+                IconName::RotateCw,
+                theme.foreground,
+            ),
+            Operation::RestartFailed(error) => (
+                "Couldn't restart the app".to_owned(),
+                format!("{error} Quit and reopen else.bot to use the update."),
+                IconName::TriangleAlert,
+                theme.danger,
+            ),
+            Operation::Idle | Operation::PastFailure(_) => match &snapshot.check {
                 UpdateCheck::Checking => (
-                    "Checking for updates",
+                    "Checking for updates".to_owned(),
                     format!("Looking for the {target}."),
                     IconName::RefreshCw,
                     theme.muted_foreground,
                 ),
                 UpdateCheck::Current { .. } => (
-                    "You're up to date",
+                    "You're up to date".to_owned(),
                     format!("You're running the {target}."),
                     IconName::Check,
                     theme.success,
                 ),
-                UpdateCheck::Available { .. } => (
-                    "A new version is available",
-                    format!("Install the {target} when you're ready."),
+                UpdateCheck::Available { latest } => (
+                    format!("{latest} is available"),
+                    if server.is_some() {
+                        format!("Updating restarts {name}. The app tries to reconnect on its own.")
+                    } else {
+                        "Your servers keep running while the app updates.".to_owned()
+                    },
                     IconName::Download,
                     theme.foreground,
                 ),
                 UpdateCheck::Failed(_) if snapshot.unavailable.is_some() => (
-                    "Updates managed outside this app",
+                    "Updates managed outside this app".to_owned(),
                     snapshot.unavailable.clone().unwrap_or_else(|| {
                         "Automatic installation is unavailable for this session.".to_owned()
                     }),
@@ -393,7 +439,7 @@ impl Shell {
                     theme.muted_foreground,
                 ),
                 UpdateCheck::Failed(error) => (
-                    "Couldn't check for updates",
+                    "Couldn't check for updates".to_owned(),
                     error.clone(),
                     IconName::TriangleAlert,
                     theme.warning,
@@ -401,22 +447,79 @@ impl Shell {
             },
         };
         let loading = view.busy() || matches!(snapshot.check, UpdateCheck::Checking);
-        let last_check = snapshot.checked_at.map(|at| {
-            let at: chrono::DateTime<chrono::Local> = at.into();
-            format!("{source} · Checked {}", at.format("%H:%M"))
-        });
-        // The status card reads as the heading's answer, 24 px under it.
+        let versions = match (&installed, &snapshot.check) {
+            (Some(installed), UpdateCheck::Available { latest })
+                if !matches!(snapshot.operation, Operation::Ready { .. }) =>
+            {
+                Some(format!("{installed} → {latest}"))
+            }
+            (Some(installed), _) => Some(format!("Running {installed}")),
+            (None, _) => None,
+        };
+        let card = h_flex()
+            .w_full()
+            .p_4()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .items_start()
+            .gap_3()
+            .child(
+                div()
+                    .size_10()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(theme.radius)
+                    .bg(theme.secondary.opacity(0.45))
+                    .child(if loading {
+                        checking_icon("update-status-loading", px(20.), tone)
+                    } else {
+                        Icon::new(icon).size_5().text_color(tone).into_any_element()
+                    }),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .line_height(px(20.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .max_w(crate::panel_kit::PARAGRAPH)
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(description),
+                    )
+                    .when_some(versions, |card, versions| {
+                        card.child(
+                            div()
+                                .pt_1()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(versions),
+                        )
+                    })
+                    .child(div().pt_3().child(self.render_update_actions(cx))),
+            );
         let mut content = v_flex()
             .gap_6()
             .when(output_visible, |content| content.gap_3())
             .when(!output_visible, |content| {
                 content.child(super::settings::section_heading(
-                    if server {
+                    if server.is_some() {
                         "Server updates"
                     } else {
                         "App updates"
                     },
-                    if server {
+                    if server.is_some() {
                         "Update this server and reconnect when it restarts."
                     } else {
                         "The desktop app on this computer. Your servers keep running."
@@ -424,116 +527,8 @@ impl Shell {
                     cx,
                 ))
             })
-            // The status is one group card, like every other Settings group.
-            .child(
-                div().w_full().child(
-                    h_flex()
-                        .w_full()
-                        .p_4()
-                        .rounded(theme.radius_lg)
-                        .border_1()
-                        .border_color(theme.border)
-                        .items_start()
-                        .gap_3()
-                        .child(
-                            div()
-                                .size_10()
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(theme.radius)
-                                .bg(theme.secondary.opacity(0.45))
-                                .child(if loading {
-                                    checking_icon("update-status-loading", px(20.), tone)
-                                } else {
-                                    Icon::new(icon).size_5().text_color(tone).into_any_element()
-                                }),
-                        )
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(px(15.))
-                                        .line_height(px(20.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .max_w(crate::panel_kit::PARAGRAPH)
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .child(description),
-                                )
-                                .child(
-                                    h_flex()
-                                        .pt_1()
-                                        .gap_2()
-                                        .flex_wrap()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(if let Some(id) = self.server_update_target {
-                                            self.registry
-                                                .find(id)
-                                                .map(|s| s.name.clone())
-                                                .unwrap_or_default()
-                                        } else {
-                                            format!("Running v{}", env!("ELSE_VERSION"))
-                                        })
-                                        .when_some(view.latest(), |row, version| {
-                                            row.child(Icon::new(IconName::ArrowRight).size_3())
-                                                .child(format!("Latest {version}"))
-                                        })
-                                        .when(snapshot.unavailable.is_none(), |row| {
-                                            row.child("·").child(
-                                                last_check.unwrap_or_else(|| source.to_owned()),
-                                            )
-                                        }),
-                                ),
-                        ),
-                ),
-            );
-        if snapshot.unavailable.is_none()
-            && server
-            && !output_visible
-            && !view.busy()
-            && !matches!(
-                snapshot.operation,
-                Operation::Ready { .. } | Operation::RestartFailed(_)
-            )
-        {
-            let (label, detail, icon, color) = match &snapshot.work {
-                Work::Checking => (
-                    "Checking ongoing work",
-                    "Installation waits until the work check finishes.".to_owned(),
-                    IconName::Clock,
-                    theme.muted_foreground,
-                ),
-                Work::Idle => (
-                    "No ongoing work",
-                    "We'll check again before the update starts.".to_owned(),
-                    IconName::ShieldCheck,
-                    theme.success,
-                ),
-                Work::Busy { turns, commands } => (
-                    "Work is still running",
-                    format!(
-                        "{turns} active turns · {commands} running commands. Updates wait until they finish."
-                    ),
-                    IconName::Clock,
-                    theme.warning,
-                ),
-                Work::Unavailable(error) => (
-                    "Couldn't check ongoing work",
-                    format!("{error} Installation stays unavailable until we can check."),
-                    IconName::TriangleAlert,
-                    theme.warning,
-                ),
-            };
+            .child(card);
+        if let Some((label, detail, icon, color)) = self.update_blocker(view, theme) {
             content = content.child(update_notice(label, detail, icon, color, theme));
         }
         if output_visible {
@@ -576,8 +571,6 @@ impl Shell {
                         .child(self.update_button("update-restart-later", "Later", Action::CancelRestart, false, false, cx))
                         .child(self.update_button("update-restart-confirm", "Restart app", Action::ConfirmRestart, true, view.busy(), cx))),
             );
-        } else {
-            panel = panel.child(self.render_update_actions(cx));
         }
         if let Some(error) = &view.feedback {
             panel = panel.child(
@@ -588,124 +581,166 @@ impl Shell {
             );
         }
         // A copy whose updates are managed elsewhere has nothing to check
-        // or schedule, so the automatic-checks row would only show a
-        // disabled button.
+        // or schedule, so the footer would only describe a disabled check.
         let checks_apply = snapshot.unavailable.is_none() || view.remote_profile.is_some();
+        let checked = snapshot.checked_at.map(|at| {
+            let at: chrono::DateTime<chrono::Local> = at.into();
+            format!("Checked {}", at.format("%H:%M"))
+        });
+        let idle = !view.busy() && !matches!(snapshot.operation, Operation::RestartScheduled);
         panel
-            .when(checks_apply, |panel| panel.child(
-                h_flex()
-                    .items_start()
-                    .gap_2()
-                    .pt_4()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .child(
-                        Icon::new(IconName::RefreshCw)
-                            .size_3()
-                            .mt_1()
-                            .text_color(theme.muted_foreground),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
-                            .child(div().text_xs().child("Automatic update checks"))
-                            .child(div().text_xs().text_color(theme.muted_foreground).child(
-                                if snapshot.unavailable.is_some() {
-                                    "Available for installed copies of else.bot."
-                                } else {
-                                    "On launch, every 4 hours, and when you open these settings. You choose when to install."
-                                },
-                            )),
-                    )
-                    .child(self.update_button(
-                        "updates-check",
-                        "Check again",
-                        Action::Check,
-                        false,
-                        view.busy() || matches!(snapshot.check, UpdateCheck::Checking),
-                        cx,
-                    ).flex_none()),
-            ))
+            .when(checks_apply, |panel| {
+                panel.child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .pt_3()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(
+                                    [
+                                        Some(source.to_owned()),
+                                        checked,
+                                        Some("Checks on launch and every 4 hours".to_owned()),
+                                    ]
+                                    .into_iter()
+                                    .flatten()
+                                    .collect::<Vec<_>>()
+                                    .join(" · "),
+                                ),
+                        )
+                        .when(idle, |row| {
+                            row.child(
+                                Button::new("updates-check")
+                                    .control(
+                                        Tier::Ghost,
+                                        Scale::Compact,
+                                        matches!(snapshot.check, UpdateCheck::Checking),
+                                        cx,
+                                    )
+                                    .label("Check again")
+                                    .flex_none()
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.update_action(Action::Check, cx)
+                                    })),
+                            )
+                        }),
+                )
+            })
             .into_any_element()
+    }
+
+    /// Why an available update cannot install right now, when the reason is
+    /// not already the card's headline.
+    fn update_blocker(
+        &self,
+        view: &View,
+        theme: &Theme,
+    ) -> Option<(&'static str, String, IconName, Hsla)> {
+        let snapshot = &view.snapshot;
+        let waiting = self.server_update_target.is_some()
+            && snapshot.unavailable.is_none()
+            && matches!(snapshot.check, UpdateCheck::Available { .. })
+            && matches!(
+                snapshot.operation,
+                Operation::Idle | Operation::Failed(_) | Operation::PastFailure(_)
+            );
+        if let Operation::PastFailure(error) = &snapshot.operation
+            && matches!(snapshot.check, UpdateCheck::Available { .. })
+            && matches!(snapshot.work, Work::Idle)
+        {
+            return Some((
+                "Previous attempt failed",
+                error.clone(),
+                IconName::Clock,
+                theme.muted_foreground,
+            ));
+        }
+        if !waiting {
+            return None;
+        }
+        match &snapshot.work {
+            Work::Idle => None,
+            Work::Checking => Some((
+                "Checking for running work",
+                "The update can start once this check finishes.".to_owned(),
+                IconName::Clock,
+                theme.muted_foreground,
+            )),
+            Work::Busy { turns, commands } => Some((
+                "Can't update while bots are working",
+                work_summary(*turns, *commands),
+                IconName::Clock,
+                theme.warning,
+            )),
+            Work::Unavailable(error) => Some((
+                "Couldn't check for running work",
+                format!("{error} The update stays unavailable until this check succeeds."),
+                IconName::TriangleAlert,
+                theme.warning,
+            )),
+        }
     }
 
     fn render_update_actions(&self, cx: &Context<Self>) -> AnyElement {
         let view = self.update_view();
         let server = self.server_update_target.is_some();
-        if server && matches!(view.snapshot.operation, Operation::Ready { .. }) {
+        let snapshot = &view.snapshot;
+        let primary = match &snapshot.operation {
+            Operation::Preparing
+            | Operation::Installing
+            | Operation::Restarting
+            | Operation::RestartScheduled => None,
+            Operation::Ready { .. } if server => None,
+            Operation::Ready { .. } => Some(("Restart app".to_owned(), Action::Restart, false)),
+            Operation::RestartFailed(_) => {
+                Some(("Retry restart".to_owned(), Action::Restart, false))
+            }
+            Operation::Unconfirmed(_) => Some(("Check status".to_owned(), Action::Check, false)),
+            Operation::Failed(_) => {
+                Some(("Try again".to_owned(), Action::Install, !view.can_install()))
+            }
+            Operation::Idle | Operation::PastFailure(_) => view
+                .latest()
+                .filter(|_| matches!(snapshot.check, UpdateCheck::Available { .. }))
+                .map(|latest| {
+                    (
+                        format!("Update to {latest}"),
+                        Action::Install,
+                        !view.can_install(),
+                    )
+                }),
+        };
+        let toggle = view.output_relevant();
+        if primary.is_none() && !toggle {
             return div().into_any_element();
         }
-        let (label, action, disabled) = match &view.snapshot.operation {
-            Operation::Preparing => ("Checking work…".to_owned(), Action::Install, true),
-            Operation::Installing => ("Updating…".to_owned(), Action::Install, true),
-            Operation::Restarting | Operation::RestartScheduled => {
-                ("Restarting…".to_owned(), Action::Restart, true)
-            }
-            Operation::Ready { .. } | Operation::RestartFailed(_) => {
-                ("Restart app".to_owned(), Action::Restart, false)
-            }
-            Operation::Idle | Operation::Failed(_) => {
-                let label = if matches!(view.snapshot.work, Work::Busy { .. }) {
-                    "Waiting for work to finish".to_owned()
-                } else if matches!(view.snapshot.operation, Operation::Failed(_)) {
-                    "Try update again".to_owned()
-                } else {
-                    view.latest().map_or_else(
-                        || "Update".to_owned(),
-                        |version| format!("Update to {version}"),
-                    )
-                };
-                (label, Action::Install, !view.can_install())
-            }
-        };
-        let no_update = matches!(view.snapshot.operation, Operation::Idle)
-            && matches!(
-                view.snapshot.check,
-                UpdateCheck::Current { .. } | UpdateCheck::Failed(_)
-            );
         h_flex()
             .flex_wrap()
             .gap_2()
-            .when(!no_update, |row| {
+            .when_some(primary, |row, (label, action, disabled)| {
                 row.child(self.update_button("updates-install", label, action, true, disabled, cx))
             })
-            .when(
-                matches!(
-                    view.snapshot.operation,
-                    Operation::Ready { .. } | Operation::RestartFailed(_)
-                ),
-                |row| {
-                    row.child(self.update_button(
-                        "updates-later",
-                        "Later",
-                        Action::Later,
-                        false,
-                        false,
-                        cx,
-                    ))
-                },
-            )
-            .when(
-                view.snapshot.unavailable.is_none()
-                    && view.snapshot.output.is_empty()
-                    && !view.busy(),
-                |row| {
-                    row.child(self.update_button(
-                        "updates-output-toggle",
-                        if view.show_output {
-                            "Hide output"
-                        } else {
-                            "View output"
-                        },
-                        Action::ToggleOutput,
-                        false,
-                        false,
-                        cx,
-                    ))
-                },
-            )
+            .when(toggle, |row| {
+                row.child(self.update_button(
+                    "updates-output-toggle",
+                    if view.output_visible() {
+                        "Hide output"
+                    } else {
+                        "Show output"
+                    },
+                    Action::ToggleOutput,
+                    false,
+                    false,
+                    cx,
+                ))
+            })
             .into_any_element()
     }
 
@@ -852,13 +887,8 @@ impl Shell {
                 disabled,
                 cx,
             )
-            .on_click(cx.listener(move |shell, _, window, cx| {
-                if matches!(action, Action::Later) {
-                    shell.cancel(window, cx);
-                    window.close_dialog(cx);
-                } else {
-                    shell.update_action(action, cx);
-                }
+            .on_click(cx.listener(move |shell, _, _, cx| {
+                shell.update_action(action, cx);
             }))
     }
 }
@@ -890,6 +920,16 @@ fn update_notice(
                         .child(detail),
                 ),
         )
+}
+
+/// Running work in plain counts, for a disabled update's explanation.
+pub(super) fn work_summary(turns: u64, commands: u64) -> String {
+    let count = |n: u64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    format!(
+        "{} and {} on this server. Update once they finish.",
+        count(turns, "active turn", "active turns"),
+        count(commands, "running command", "running commands")
+    )
 }
 
 pub(super) fn checking_icon(id: impl Into<ElementId>, size: Pixels, color: Hsla) -> AnyElement {

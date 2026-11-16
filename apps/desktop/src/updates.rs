@@ -83,8 +83,16 @@ pub enum Operation {
     Idle,
     Preparing,
     Installing,
-    Ready { version: String },
+    Ready {
+        version: String,
+    },
     Failed(String),
+    /// The update request may or may not have taken effect; check the
+    /// installation's status before trying again.
+    Unconfirmed(String),
+    /// A failure recorded before this app started following the
+    /// installation. It is history: a new install may start.
+    PastFailure(String),
     Restarting,
     RestartScheduled,
     RestartFailed(String),
@@ -137,7 +145,7 @@ impl Snapshot {
         )
     }
 
-    fn install_refusal(&self) -> Option<String> {
+    pub fn install_refusal(&self) -> Option<String> {
         if let Some(why) = &self.unavailable {
             return Some(why.clone());
         }
@@ -153,7 +161,13 @@ impl Snapshot {
             Operation::Restarting | Operation::RestartScheduled => {
                 return Some("else.bot is restarting.".into());
             }
-            Operation::Idle | Operation::Failed(_) | Operation::RestartFailed(_) => {}
+            Operation::Unconfirmed(_) => {
+                return Some("Check the update's status before trying again.".into());
+            }
+            Operation::Idle
+            | Operation::Failed(_)
+            | Operation::PastFailure(_)
+            | Operation::RestartFailed(_) => {}
         }
         match &self.check {
             Check::Available { .. } => {}
@@ -558,6 +572,12 @@ impl Actor {
                         state.operation = Operation::Ready {
                             version: installed.to_string(),
                         };
+                    } else if available
+                        && self.component == Component::Server
+                        && matches!(state.operation, Operation::Ready { .. })
+                    {
+                        state.operation = Operation::Idle;
+                        state.output.clear();
                     }
                 });
                 if available {
@@ -595,7 +615,6 @@ impl Actor {
                 self.state.send_modify(|state| {
                     state.output = text;
                     state.operation = match result {
-                        Ok(_) if self.component == Component::Server => Operation::Idle,
                         Ok(version) => Operation::Ready {
                             version: version.to_string(),
                         },
@@ -1705,12 +1724,23 @@ mod tests {
         until(&mut state, "idle once work ends", available).await;
         commands.install().unwrap();
         until(&mut state, "installed", |s| {
-            s.operation == Operation::Idle && matches!(s.check, Check::Current { .. })
+            matches!(s.operation, Operation::Ready { .. })
+                && matches!(s.check, Check::Current { .. })
         })
         .await;
         assert_eq!(home.calls().len(), 1);
         assert!(home.calls()[0].contains("--server-only"));
         assert!(commands.restart().is_err());
+        git(Path::new(&home.repo), &["tag", "v0.0.22"]);
+        commands.check().unwrap();
+        let newer = until(
+            &mut state,
+            "a newer release clears the finished update",
+            |s| matches!(s.check, Check::Available { .. }),
+        )
+        .await;
+        assert_eq!(newer.operation, Operation::Idle);
+        assert_eq!(newer.output, "");
         assert_eq!(
             release::installed(&home.home(), Component::App)
                 .unwrap()
