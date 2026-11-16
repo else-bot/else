@@ -372,7 +372,12 @@ impl ElseApp {
             .group("message-bubble")
             .w_full()
             .min_w_0()
-            .child(div().w_full().pr(px(64.)).child(text.render(cx)))
+            .child(
+                div()
+                    .w_full()
+                    .pr(super::message_row::BOT_ACTIONS_GUTTER)
+                    .child(text.render(cx)),
+            )
             .context_menu(move |menu, window, cx| {
                 Self::message_menu(owner.clone(), bot, id, Author::Bot, menu, window, cx)
             });
@@ -401,7 +406,7 @@ impl ElseApp {
                 .right_0()
                 .invisible()
                 .group_hover("message-bubble", |this| this.visible())
-                .child(self.message_actions(bot, id, Author::Bot, cx)),
+                .child(self.message_actions(bot, id, cx)),
         );
         Some(match reaction {
             Some(kind) => super::message_row::with_reaction(body.into_any_element(), kind, cx),

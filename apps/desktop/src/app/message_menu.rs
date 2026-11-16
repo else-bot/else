@@ -16,14 +16,13 @@ impl ElseApp {
         &self,
         bot: Uuid,
         item: Uuid,
-        author: Author,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let connected = self.connection == Connection::Connected;
+        let owner = cx.entity().downgrade();
         h_flex()
             .gap_1()
-            .children((author == Author::Bot).then(|| {
-                let owner = cx.entity().downgrade();
+            .child(
                 Popover::new(SharedString::from(format!("react-{item}")))
                     .anchor(Anchor::TopRight)
                     .p_1()
@@ -59,8 +58,8 @@ impl ElseApp {
                                     })
                             }),
                         )
-                    })
-            }))
+                    }),
+            )
             .child(
                 Button::new(SharedString::from(format!("reply-{item}")))
                     .focus_ring(false)
@@ -123,12 +122,14 @@ impl ElseApp {
                 let _ = owner.update(cx, |app, cx| f(app, bot, item, window, cx));
             }
         };
+        if author == Author::Bot {
+            menu = menu.item(
+                PopupMenuItem::new("Reply")
+                    .icon(IconName::Reply)
+                    .on_click(act(Self::start_reply)),
+            );
+        }
         menu.item(
-            PopupMenuItem::new("Reply")
-                .icon(IconName::Reply)
-                .on_click(act(Self::start_reply)),
-        )
-        .item(
             PopupMenuItem::new("Copy")
                 .icon(IconName::Copy)
                 .on_click(act(Self::copy_message)),
