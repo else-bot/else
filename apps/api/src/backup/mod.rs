@@ -647,24 +647,35 @@ pub fn mark_owned(dir: &Path) -> Result<(), BackupError> {
 
 /// Completed sets under `dir`, oldest first by completion time (then name).
 /// Only real, owned directories with a regular `complete.json` count.
+/// Anything that cannot be read is an error rather than a set left out, so
+/// retention and the chunk sweep never act on a partial list.
 pub fn completed_sets(dir: &Path) -> Result<Vec<String>, BackupError> {
-    let mut sets = Vec::new();
+    let io = |path: &Path, err| BackupError::io(path.display(), err);
+    let file = |path: &Path| match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(Some(meta)),
+        Ok(_) => Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(io(path, err)),
+    };
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(BackupError::io(dir.display(), err)),
+        Err(err) => return Err(io(dir, err)),
     };
-    for entry in entries.flatten() {
+    let mut sets = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| io(dir, e))?;
+        let path = entry.path();
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        let path = dir.join(&name);
-        if !valid_set_id(&name) || !owned_dir(&path) {
+        if !valid_set_id(&name) || !entry.file_type().map_err(|e| io(&path, e))?.is_dir() {
             continue;
         }
-        if let Ok(meta) = fs::symlink_metadata(path.join(COMPLETE))
-            && meta.is_file()
-        {
+        if file(&path.join(MARKER))?.is_none() {
+            continue;
+        }
+        if let Some(meta) = file(&path.join(COMPLETE))? {
             let at = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             sets.push((at, name));
         }

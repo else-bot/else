@@ -260,7 +260,8 @@ pub fn sweep(backups: &Path, key: &SecretKey) -> Result<usize, BackupError> {
     };
     let ours = super::key_id(key);
     let mut referenced = HashSet::new();
-    for set_dir in published_sets(backups)? {
+    for set in super::completed_sets(backups)? {
+        let set_dir = backups.join(&set);
         let completion = super::restore::read_completion(&set_dir)?;
         if completion.manifest.object != INDEX || completion.encryption.key_id != ours {
             continue;
@@ -281,33 +282,6 @@ pub fn sweep(backups: &Path, key: &SecretKey) -> Result<usize, BackupError> {
     }
     super::sync_dir(&store.root)?;
     Ok(removed)
-}
-
-/// Every published set directory in `backups`, failing on anything that
-/// cannot be read rather than leaving a set out, so a sweep never takes a
-/// set's chunks for unused.
-fn published_sets(backups: &Path) -> Result<Vec<PathBuf>, BackupError> {
-    let io = |path: &Path, err| BackupError::io(path.display(), err);
-    let present = |path: &Path| match fs::symlink_metadata(path) {
-        Ok(meta) => Ok(meta.is_file()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(io(path, err)),
-    };
-    let mut sets = Vec::new();
-    for entry in fs::read_dir(backups).map_err(|e| io(backups, e))? {
-        let entry = entry.map_err(|e| io(backups, e))?;
-        let path = entry.path();
-        let named = entry.file_name().to_str().is_some_and(super::valid_set_id);
-        let is_dir = entry.file_type().map_err(|e| io(&path, e))?.is_dir();
-        if named
-            && is_dir
-            && present(&path.join(super::MARKER))?
-            && present(&path.join(super::COMPLETE))?
-        {
-            sets.push(path);
-        }
-    }
-    Ok(sets)
 }
 
 /// The bytes the backup directory's chunk stores hold.
