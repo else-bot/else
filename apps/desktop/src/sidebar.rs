@@ -243,11 +243,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Ledger", "Scout"]
         );
-        assert_eq!(shape(&layout), vec![(Some("Growth"), vec!["Atlas"])]);
+        assert_eq!(
+            shape(&layout),
+            vec![
+                (Some("Growth"), vec!["Atlas", "Scout"]),
+                (None, vec!["Ledger"])
+            ],
+            "a waiting bot stays in its category too"
+        );
         assert_eq!(
             layout.visible_order(&prefs.collapsed),
             [10, 13, 12].map(Uuid::from_u128),
             "a collapsed group does not hide a waiting bot"
+        );
+        prefs.collapsed.clear();
+        assert_eq!(
+            layout.visible_order(&prefs.collapsed),
+            [10, 13, 12, 11].map(Uuid::from_u128),
+            "navigation visits a waiting bot once"
         );
     }
 
