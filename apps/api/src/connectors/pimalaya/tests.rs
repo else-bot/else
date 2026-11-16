@@ -33,7 +33,7 @@ fn auth() -> Auth {
         oauth: false,
     }
 }
-const RAW:&[u8]=b"From: Sender <sender@example.org>\r\nTo: owner@example.org\r\nSubject: New message\r\nMessage-ID: <fixture@example.org>\r\n\r\nA body without marking read.\r\n";
+const RAW:&[u8]=b"Date: Mon, 16 Nov 2026 10:00:00 +0100\r\nFrom: Sender <sender@example.org>\r\nTo: owner@example.org\r\nSubject: New message\r\nMessage-ID: <fixture@example.org>\r\n\r\nA body without marking read.\r\n";
 struct ImapFixture {
     endpoint: Endpoint,
     connector: TlsConnector,
@@ -118,9 +118,21 @@ async fn imap_fixture_options(start_tls: bool, uid_next: u32) -> ImapFixture {
                     )
                 } else if upper.starts_with("UID SEARCH ") {
                     format!("* SEARCH 11 12 13\r\n{tag} OK search\r\n")
-                } else if upper.starts_with("UID FETCH ") && upper.contains("RFC822.SIZE") {
+                } else if upper.starts_with("UID FETCH ") && upper.contains("ENVELOPE") {
                     format!(
-                        "* 1 FETCH (UID 11 RFC822.SIZE {})\r\n{tag} OK size\r\n",
+                        "* 1 FETCH (UID 11 FLAGS (\\Seen) INTERNALDATE \"16-Nov-2026 09:00:00 +0000\" ENVELOPE (\"Mon, 16 Nov 2026 10:00:00 +0100\" \"Morning\" ((NIL NIL \"a\" \"example.org\")) NIL NIL NIL NIL NIL NIL NIL))\r\n\
+                         * 2 FETCH (UID 12 FLAGS () INTERNALDATE \"16-Nov-2026 18:30:00 -0500\" ENVELOPE (NIL \"No date\" ((NIL NIL \"b\" \"example.org\")) NIL NIL NIL NIL NIL NIL NIL))\r\n\
+                         * 3 FETCH (UID 13 FLAGS () INTERNALDATE \"15-Nov-2026 08:00:00 +0000\" ENVELOPE (\"sometime last week\" \"Moved in\" ((NIL NIL \"c\" \"example.org\")) NIL NIL NIL NIL NIL NIL NIL))\r\n\
+                         {tag} OK fetch\r\n"
+                    )
+                } else if upper.starts_with("UID FETCH ") && upper.contains("RFC822.SIZE") {
+                    let received = if upper.contains("INTERNALDATE") {
+                        " INTERNALDATE \"16-Nov-2026 09:00:00 +0000\""
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "* 1 FETCH (UID 11 RFC822.SIZE {}{received})\r\n{tag} OK size\r\n",
                         RAW.len()
                     )
                 } else if upper.starts_with("UID FETCH ") && upper.contains("BODY.PEEK[]") {
@@ -227,6 +239,55 @@ async fn uid_identity_peek_flags_move_and_bounded_arrivals() {
             .any(|c| c.starts_with("UID MOVE 11 Archive"))
     );
     assert!(!commands.iter().any(|c| c == "EXPUNGE" || c == "CLOSE"));
+    fixture.task.abort();
+}
+
+#[tokio::test]
+async fn search_and_read_return_sender_date_and_received_time_newest_first() {
+    let fixture = imap_fixture().await;
+    let mut client = Imap::connect(&fixture.endpoint, &auth(), &fixture.connector)
+        .await
+        .unwrap();
+    let found = client.search_messages("INBOX", None, 50).await.unwrap();
+    let dated: Vec<_> = found["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["message"]["uid"].as_u64().unwrap(),
+                m["date"].clone(),
+                m["received_at"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        dated,
+        vec![
+            (12, Value::Null, json!("2026-11-16T23:30:00Z")),
+            (
+                11,
+                json!("2026-11-16T10:00:00+01:00"),
+                json!("2026-11-16T09:00:00Z")
+            ),
+            (
+                13,
+                json!("sometime last week"),
+                json!("2026-11-15T08:00:00Z")
+            ),
+        ],
+        "newest received first; a missing Date is null and an unparsable one stays raw"
+    );
+    let read = client
+        .read_message(&MessageRef {
+            folder: "INBOX".into(),
+            uid_validity: 77,
+            uid: 11,
+        })
+        .await
+        .unwrap();
+    assert_eq!(read["date"], "2026-11-16T10:00:00+01:00");
+    assert_eq!(read["received_at"], "2026-11-16T09:00:00Z");
     fixture.task.abort();
 }
 
@@ -607,4 +668,19 @@ fn attachments_round_trip_and_forward_preserves_the_original_message() {
             .code,
         "mail_attachments_too_large"
     );
+}
+
+#[test]
+fn sender_date_keeps_offsets_and_falls_back_to_the_header_text() {
+    assert_eq!(
+        header_date(Some(" Mon, 16 Nov 2026 10:00:00 -0500\r\n")).as_deref(),
+        Some("2026-11-16T10:00:00-05:00")
+    );
+    assert_eq!(
+        header_date(Some("31 Feb 2026 10:00:00 +0100")).as_deref(),
+        Some("31 Feb 2026 10:00:00 +0100"),
+        "an impossible calendar date is not presented as a timestamp"
+    );
+    assert_eq!(header_date(Some("  ")), None);
+    assert_eq!(header_date(None), None);
 }
