@@ -61,3 +61,32 @@ PRAGMA legacy_alter_table = OFF;
 CREATE UNIQUE INDEX computer_job_waits_attempt ON computer_job_waits (turn_id, attempt)
     WHERE attempt > 0;
 CREATE INDEX computer_job_waits_job ON computer_job_waits (job_id) WHERE status = 'pending';
+
+-- A carried wait holds its new turn like a carried task: it keeps the turn
+-- waiting, but an outcome of the turn's own, such as an answered question or
+-- a shorter job that ended, still continues it.
+CREATE VIEW carried_waits AS
+    SELECT turn_id FROM mcp_waits WHERE attempt = 0 AND status = 'pending'
+    UNION ALL
+    SELECT turn_id FROM computer_job_waits WHERE attempt = 0 AND status = 'pending';
+
+DROP VIEW turns_continuable;
+CREATE VIEW turns_continuable AS
+    SELECT t.id FROM turns t
+    WHERE t.status = 'waiting'
+      AND (SELECT coalesce(sum(h.pending), 0) FROM turn_holds h WHERE h.turn_id = t.id)
+          = (SELECT count(*) FROM delegations p
+             WHERE p.root_turn_id = t.id AND p.status IN ('queued', 'running'))
+            + (SELECT count(*) FROM carried_waits c WHERE c.turn_id = t.id)
+      AND ((NOT EXISTS (SELECT 1 FROM delegations p
+                        WHERE p.root_turn_id = t.id AND p.status IN ('queued', 'running'))
+            AND (NOT EXISTS (SELECT 1 FROM carried_waits c WHERE c.turn_id = t.id)
+                 OR EXISTS (SELECT 1 FROM turn_holds h WHERE h.turn_id = t.id AND h.unseen)))
+           OR EXISTS (SELECT 1 FROM delegations d
+                      WHERE d.root_turn_id = t.id AND d.delivered_attempt IS NULL
+                        AND d.status IN ('completed', 'failed', 'cancelled')
+                        AND NOT EXISTS (SELECT 1 FROM delegations p
+                                        WHERE p.root_turn_id = d.root_turn_id
+                                          AND p.status IN ('queued', 'running')
+                                          AND d.parent_attempt > 0
+                                          AND p.parent_attempt = d.parent_attempt)));

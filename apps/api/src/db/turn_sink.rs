@@ -424,19 +424,24 @@ impl SinkState {
         .bind(self.turn_id)
         .fetch_one(&mut *tx)
         .await?;
-        let (tasks_pending, ready): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT (SELECT count(*) FROM delegations
+        let (tasks_pending, carried, ready): (i64, i64, i64) =
+            sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "SELECT (SELECT count(*) FROM delegations
                      WHERE root_turn_id = ?1 AND status IN ('queued', 'running')),
+                    (SELECT count(*) FROM carried_waits WHERE turn_id = ?1),
                     (SELECT count(*) FROM delegations d
                      WHERE d.root_turn_id = ?1 AND {})",
-            crate::db::delegations::READY
-        )))
-        .bind(self.turn_id)
-        .fetch_one(&mut *tx)
-        .await?;
+                crate::db::delegations::READY
+            )))
+            .bind(self.turn_id)
+            .fetch_one(&mut *tx)
+            .await?;
         let parks = current != TurnStatus::Cancelling
             && matches!(status, TurnStatus::Completed | TurnStatus::Interrupted);
-        let status = if parks && pending == tasks_pending && ready > 0 {
+        // Carried tasks and waits hold the turn without blocking an outcome
+        // of its own, as `turns_continuable` decides for a waiting turn.
+        let own_outcome = ready > 0 || (tasks_pending == 0 && carried > 0 && unseen > 0);
+        let status = if parks && pending == tasks_pending + carried && own_outcome {
             TurnStatus::Queued
         } else if parks && pending > 0 {
             TurnStatus::Waiting

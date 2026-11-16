@@ -28,7 +28,8 @@ for line in sys.stdin:
         r = {'tools':[{'name':'task_status','inputSchema':{'type':'object'},'annotations':hints}]}
     elif m['method'] == 'tools/call':
         open(state + '.calls', 'a').write(m['params']['name'] + '\n')
-        work = open(state).read().strip()
+        own = state + '.' + m['params']['arguments']['taskId']
+        work = open(own if os.path.exists(own) else state).read().strip()
         body = {'taskId': m['params']['arguments']['taskId'], 'workState': work, 'summary': 'Opened PR #775' if work == 'result_available' else None}
         if work == 'unreadable': body = {'taskId': body['taskId'], 'error': 'upstream schema changed'}
         r = {'content':[{'type':'text','text':json.dumps(body)}]}
@@ -273,8 +274,32 @@ async fn a_wait_survives_a_restart_and_only_a_stop_withdraws_it() {
     assert_eq!(wait_row(&app, turn).await.0, "cancelled");
 }
 
+async fn running_follow_up(app: &TestApp, bot: &str, before: Uuid) -> (Uuid, String) {
+    let sent = app.send(bot, Uuid::new_v4(), SLOW, Some("synthetic")).await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    let turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    settle(app, before, "interrupted").await;
+    app.wait_turn(&turn.to_string(), &["running"]).await;
+    (turn, grant(app, turn, vec![Tool::Mcp]).await)
+}
+
+fn wait_on(task: &str, purpose: &str) -> Value {
+    let mut args = wait_args();
+    args["arguments"]["taskId"] = json!(task);
+    args["purpose"] = json!(purpose);
+    args
+}
+
+async fn carried(app: &TestApp, turn: Uuid) -> Vec<(i32, String)> {
+    sqlx::query_as("SELECT attempt, status FROM mcp_waits WHERE turn_id = ?1 ORDER BY created_at")
+        .bind(turn)
+        .fetch_all(&app.db.pool)
+        .await
+        .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn follow_ups_carry_pending_waits_and_their_results_continue_the_latest_request() {
+async fn follow_ups_carry_pending_waits_without_blocking_the_latest_requests_own_results() {
     let (app, synthetic) = harness().await;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
@@ -285,13 +310,7 @@ async fn follow_ups_carry_pending_waits_and_their_results_continue_the_latest_re
     text(&tool(&app, &token, "mcp_wait", wait_args()).await);
     settle(&app, first, "waiting").await;
 
-    let sent = app
-        .send(&main, Uuid::new_v4(), SLOW, Some("synthetic"))
-        .await;
-    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
-    let second: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    settle(&app, first, "interrupted").await;
-    app.wait_turn(&second.to_string(), &["running"]).await;
+    let (second, token) = running_follow_up(&app, &main, first).await;
     let packet = synthetic.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("[else.bot MCP jobs in progress]"),
@@ -301,39 +320,53 @@ async fn follow_ups_carry_pending_waits_and_their_results_continue_the_latest_re
         packet.contains("Review the WEB-284 PR once T3 finishes."),
         "{packet}"
     );
-    let token = grant(&app, second, vec![Tool::Mcp]).await;
-    let mut other = wait_args();
-    other["arguments"]["taskId"] = json!("WEB-285");
-    other["purpose"] = json!("Merge WEB-285 once T3 finishes.");
-    text(&tool(&app, &token, "mcp_wait", other).await);
+    let deploy = wait_on("WEB-286", "Check the WEB-286 deploy.");
+    text(&tool(&app, &token, "mcp_wait", deploy).await);
     settle(&app, second, "waiting").await;
 
-    let sent = app
-        .send(
-            &main,
-            Uuid::new_v4(),
-            "Also open an issue for the flaky test.",
-            Some("synthetic"),
-        )
-        .await;
-    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
-    let latest: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    settle(&app, second, "interrupted").await;
-    settle(&app, latest, "waiting").await;
-    let carried: Vec<(i32, String)> = sqlx::query_as(
-        "SELECT attempt, status FROM mcp_waits WHERE turn_id = ?1 ORDER BY created_at",
-    )
-    .bind(latest)
-    .fetch_all(&app.db.pool)
-    .await
-    .unwrap();
+    let (latest, token) = running_follow_up(&app, &main, second).await;
     assert_eq!(
-        carried,
+        carried(&app, latest).await,
         vec![(0, "pending".into()), (0, "pending".into())],
         "both waits moved to the latest request"
     );
+    let merge = wait_on("WEB-285", "Merge WEB-285 once T3 finishes.");
+    text(&tool(&app, &token, "mcp_wait", merge).await);
+    settle(&app, latest, "waiting").await;
     let shown = shown_waits(&app, &main, latest).await;
-    assert_eq!(shown.as_array().map(Vec::len), Some(2), "{shown}");
+    assert_eq!(shown.as_array().map(Vec::len), Some(3), "{shown}");
+
+    std::fs::write(dir.path().join("job.WEB-285"), "result_available").unwrap();
+    check_now(&app).await;
+    let deadline = std::time::Instant::now() + common::SETTLE;
+    loop {
+        let (attempt, status): (i32, String) =
+            sqlx::query_as("SELECT attempt, status FROM turns WHERE id = ?1")
+                .bind(latest)
+                .fetch_one(&app.db.pool)
+                .await
+                .unwrap();
+        if (attempt, status.as_str()) == (2, "waiting") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the request's own result continues it while carried waits still run: \
+             attempt {attempt}, {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(packet.contains("Merge WEB-285"), "{packet}");
+    assert!(packet.contains("Opened PR #775"), "{packet}");
+    assert_eq!(
+        carried(&app, latest).await,
+        vec![
+            (0, "pending".into()),
+            (0, "pending".into()),
+            (1, "finished".into())
+        ]
+    );
 
     std::fs::write(&state, "result_available").unwrap();
     for _ in 0..2 {
@@ -358,8 +391,6 @@ async fn follow_ups_carry_pending_waits_and_their_results_continue_the_latest_re
     .fetch_all(&app.db.pool)
     .await
     .unwrap();
-    let attempt = attempts(&app, latest).await;
-    assert!(attempt >= 2, "the latest request continued: {attempt}");
     assert!(
         delivered
             .iter()
@@ -367,11 +398,15 @@ async fn follow_ups_carry_pending_waits_and_their_results_continue_the_latest_re
         "{delivered:?}"
     );
     let packets = synthetic.packets().await;
-    for purpose in ["Review the WEB-284 PR", "Merge WEB-285"] {
+    for purpose in [
+        "Review the WEB-284 PR",
+        "Check the WEB-286 deploy",
+        "Merge WEB-285",
+    ] {
         assert_eq!(
             packets
                 .iter()
-                .filter(|p| p.contains("[else.bot MCP waits]") && p.contains(purpose))
+                .filter(|p| p.contains(&format!("Purpose: {purpose}")))
                 .count(),
             1,
             "each result arrives once: {purpose}"
