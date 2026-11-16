@@ -18,12 +18,8 @@ use uuid::Uuid;
 
 use super::providers::LimitWindow;
 
-/// The windows a provider reports nothing for are shown as rolling windows
-/// of these lengths, by share of else.bot's own use.
-const DEFAULT_WINDOWS: [i64; 2] = [LimitWindow::FIVE_HOURS, LimitWindow::WEEK];
-/// Windows up to this long get a timeline of [`BUCKETS`] columns.
-const TIMELINE_MAX_MINUTES: i64 = LimitWindow::FIVE_HOURS;
-const BUCKETS: i32 = 20;
+/// Providers without a current limit reading use a rolling week.
+const DEFAULT_WINDOW: i64 = LimitWindow::WEEK;
 /// A stretch between two readings calibrates the rate only when bot turns
 /// ran for at least this share of it.
 const CLEAN_COVERAGE: f64 = 0.5;
@@ -54,9 +50,6 @@ pub struct Turn {
     pub provider_id: String,
     pub model: Option<String>,
     pub source: Source,
-    /// The routine, webhook, or delegating bot behind the turn.
-    pub label: Option<String>,
-    pub routine_id: Option<Uuid>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub input_tokens: i64,
@@ -191,34 +184,28 @@ pub struct ProviderUsage {
 #[derive(Debug, Serialize)]
 pub struct WindowUsage {
     pub minutes: i64,
-    pub starts_at: DateTime<Utc>,
     pub attribution: Attribution,
     pub bots: Vec<BotUsage>,
-    pub buckets: Vec<Bucket>,
 }
 
-/// What the window's total is, and so what every bot, source and bucket
-/// `percent` in it measures.
+/// The provider's exact total and any learned attribution of that total.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Attribution {
-    /// Percents are points of the provider's cap; `outside` is the part of
-    /// `used` that came from outside else.bot.
+    /// `outside` is the estimated part of `used` from outside else.bot.
     Priced {
         used: f64,
         outside: f64,
         resets_at: DateTime<Utc>,
         observed_at: DateTime<Utc>,
     },
-    /// The provider reported `used`, but what a turn costs isn't known yet:
-    /// percents are of else.bot's own use in the window.
+    /// The provider reported `used`, but the cost of a turn is not known yet.
     Unattributed {
         used: f64,
         resets_at: DateTime<Utc>,
         observed_at: DateTime<Utc>,
     },
-    /// No current total (the provider reports none, or the window reset
-    /// after its last reading): percents are of else.bot's own use.
+    /// No current total, either unreported or past its reset.
     Unreported,
 }
 
@@ -226,41 +213,16 @@ pub enum Attribution {
 pub struct BotUsage {
     pub bot_id: Uuid,
     pub name: String,
-    /// In the unit the window's [`Attribution`] gives.
-    pub percent: f64,
     /// Fraction of else.bot's weighted use in the window.
     pub share: f64,
-    pub turns: u32,
-    pub input_tokens: i64,
-    pub cached_input_tokens: i64,
-    pub cache_write_tokens: i64,
-    pub output_tokens: i64,
-    pub models: Vec<String>,
     pub sources: Vec<SourceUsage>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct SourceUsage {
     pub source: Source,
-    pub label: Option<String>,
-    pub routine_id: Option<Uuid>,
-    pub turns: u32,
-    pub percent: f64,
     /// Fraction of the bot's own weighted use.
     pub share: f64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Bucket {
-    pub starts_at: DateTime<Utc>,
-    pub bots: Vec<BucketBot>,
-    pub outside: f64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct BucketBot {
-    pub bot_id: Uuid,
-    pub percent: f64,
 }
 
 /// Builds the report from turns and readings of the last week or so.
@@ -285,11 +247,8 @@ pub fn report(now: DateTime<Utc>, turns: &[Turn], readings: &[Reading]) -> Repor
                     .or_default()
                     .push(reading);
             }
-            let windows = if by_length.is_empty() {
-                DEFAULT_WINDOWS
-                    .iter()
-                    .map(|&minutes| window(now, minutes, &turns, &[], None))
-                    .collect()
+            let windows: Vec<WindowUsage> = if by_length.is_empty() {
+                vec![window(now, DEFAULT_WINDOW, &turns, &[], None)]
             } else {
                 let series: BTreeMap<i64, Vec<Group>> = by_length
                     .into_iter()
@@ -311,6 +270,14 @@ pub fn report(now: DateTime<Utc>, turns: &[Turn], readings: &[Reading]) -> Repor
                         window(now, minutes, &turns, windows, rates.get(&minutes).copied())
                     })
                     .collect()
+            };
+            let windows = if windows
+                .iter()
+                .all(|window| window.attribution == Attribution::Unreported)
+            {
+                vec![window(now, DEFAULT_WINDOW, &turns, &[], None)]
+            } else {
+                windows
             };
             ProviderUsage {
                 provider_id: provider.to_owned(),
@@ -350,8 +317,6 @@ struct Group<'a> {
 /// A stretch between two readings of one window, starting from zero at the
 /// window's start.
 struct Stretch {
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
     rise: f64,
     /// Weight of bot work done inside the stretch.
     weight: f64,
@@ -374,8 +339,6 @@ fn stretches(minutes: i64, window: &[&Reading], turns: &[Weighed]) -> Vec<Stretc
         }
         let (weight, covered) = activity(turns, from, to);
         stretches.push(Stretch {
-            from,
-            to,
             rise,
             weight,
             coverage: covered.num_milliseconds() as f64 / (to - from).num_milliseconds() as f64,
@@ -450,51 +413,6 @@ fn rise_ratio(base: &[Group], other: &[Group]) -> Option<f64> {
     (base_rise >= CLEAN_SIGNAL).then(|| other_rise / base_rise)
 }
 
-/// How a window prices else.bot's turns.
-enum Pricing<'a> {
-    /// The provider reported the total and the rate is known. Turns count
-    /// up to the latest reading at `unit` percent of the cap per weight,
-    /// so work done after it waits for the reading that includes it.
-    Priced {
-        latest: &'a Reading,
-        unit: f64,
-        outside: f64,
-        stretches: &'a [Stretch],
-    },
-    /// The provider reported the total, but no rate is known yet.
-    Unattributed { latest: &'a Reading },
-    /// No current total.
-    Unreported,
-}
-
-impl Pricing<'_> {
-    fn attribution(&self) -> Attribution {
-        match self {
-            Self::Priced {
-                latest, outside, ..
-            } => Attribution::Priced {
-                used: round(latest.used_percent),
-                outside: round(outside.max(0.0)),
-                resets_at: latest.resets_at,
-                observed_at: latest.observed_at,
-            },
-            Self::Unattributed { latest } => Attribution::Unattributed {
-                used: round(latest.used_percent),
-                resets_at: latest.resets_at,
-                observed_at: latest.observed_at,
-            },
-            Self::Unreported => Attribution::Unreported,
-        }
-    }
-}
-
-/// Turns weight inside the window into the percent the report shows:
-/// `factor` per weight unit, counting work up to `until`.
-struct Scale {
-    factor: f64,
-    until: DateTime<Utc>,
-}
-
 fn window<'a>(
     now: DateTime<Utc>,
     minutes: i64,
@@ -518,8 +436,8 @@ fn window<'a>(
     };
     let weight_until =
         |until| -> f64 { members.iter().map(|t| in_window(t, starts_at, until)).sum() };
-    let pricing = match (current, latest, rate) {
-        (Some(group), Some(latest), Some(rate)) => {
+    let attribution = match (latest, rate) {
+        (Some(latest), Some(rate)) => {
             // Bots never take more than the reported total.
             let priced = weight_until(latest.observed_at);
             let unit = if priced > 0.0 {
@@ -527,108 +445,25 @@ fn window<'a>(
             } else {
                 rate
             };
-            Pricing::Priced {
-                latest,
-                unit,
-                outside: latest.used_percent - priced * unit,
-                stretches: &group.stretches,
+            Attribution::Priced {
+                used: round(latest.used_percent),
+                outside: round((latest.used_percent - priced * unit).max(0.0)),
+                resets_at: latest.resets_at,
+                observed_at: latest.observed_at,
             }
         }
-        (_, Some(latest), None) => Pricing::Unattributed { latest },
-        _ => Pricing::Unreported,
-    };
-    let scale = match &pricing {
-        Pricing::Priced { latest, unit, .. } => Scale {
-            factor: *unit,
-            until: latest.observed_at,
+        (Some(latest), None) => Attribution::Unattributed {
+            used: round(latest.used_percent),
+            resets_at: latest.resets_at,
+            observed_at: latest.observed_at,
         },
-        Pricing::Unattributed { .. } | Pricing::Unreported => {
-            let total = weight_until(now);
-            Scale {
-                factor: if total > 0.0 { 100.0 / total } else { 0.0 },
-                until: now,
-            }
-        }
-    };
-    let percent = |turn: &Weighed, from: DateTime<Utc>, to: DateTime<Utc>| {
-        in_window(turn, from, to.min(scale.until)) * scale.factor
-    };
-    let buckets = if minutes <= TIMELINE_MAX_MINUTES {
-        timeline(starts_at, length, &members, percent, &pricing)
-    } else {
-        Vec::new()
+        _ => Attribution::Unreported,
     };
     WindowUsage {
         minutes,
-        starts_at,
-        attribution: pricing.attribution(),
-        bots: bots(
-            &members,
-            |t| percent(t, starts_at, now),
-            |t| in_window(t, starts_at, now),
-        ),
-        buckets,
+        attribution,
+        bots: bots(&members, |t| in_window(t, starts_at, now)),
     }
-}
-
-/// [`BUCKETS`] columns across the window: each bot's percent, and the use
-/// outside else.bot spread over the stretches where the total rose beyond
-/// what the bots' work explains.
-fn timeline(
-    starts_at: DateTime<Utc>,
-    length: Duration,
-    members: &[&Weighed],
-    percent: impl Fn(&Weighed, DateTime<Utc>, DateTime<Utc>) -> f64,
-    pricing: &Pricing,
-) -> Vec<Bucket> {
-    let leftovers: Vec<(DateTime<Utc>, DateTime<Utc>, f64)> = match pricing {
-        Pricing::Priced {
-            unit,
-            outside,
-            stretches,
-            ..
-        } => {
-            let raw: Vec<_> = stretches
-                .iter()
-                .map(|s| (s.from, s.to, (s.rise - s.weight * unit).max(0.0)))
-                .collect();
-            let total: f64 = raw.iter().map(|l| l.2).sum();
-            if total > 0.0 {
-                let scale = outside.max(0.0) / total;
-                raw.into_iter().map(|(a, b, r)| (a, b, r * scale)).collect()
-            } else {
-                Vec::new()
-            }
-        }
-        Pricing::Unattributed { .. } | Pricing::Unreported => Vec::new(),
-    };
-    let step = length / BUCKETS;
-    (0..BUCKETS)
-        .map(|i| {
-            let from = starts_at + step * i;
-            let to = from + step;
-            let mut by_bot: BTreeMap<Uuid, f64> = BTreeMap::new();
-            for turn in members {
-                *by_bot.entry(turn.turn.bot_id).or_default() += percent(turn, from, to);
-            }
-            let outside: f64 = leftovers
-                .iter()
-                .map(|&(a, b, rise)| rise * overlap((a, b), (from, to)))
-                .sum();
-            Bucket {
-                starts_at: from,
-                bots: by_bot
-                    .into_iter()
-                    .map(|(bot_id, percent)| BucketBot {
-                        bot_id,
-                        percent: fine(percent),
-                    })
-                    .filter(|b| b.percent > 0.0)
-                    .collect(),
-                outside: fine(outside),
-            }
-        })
-        .collect()
 }
 
 /// The weight of the turns' work inside `from..to`, and how long at least
@@ -676,16 +511,8 @@ fn overlap(
     inside.num_milliseconds() as f64 / (end - start).num_milliseconds() as f64
 }
 
-/// A bot's usage grouped by what started it: kind, label, and routine.
-type SourceKey<'a> = (Source, Option<&'a str>, Option<Uuid>);
-
-/// Groups the window's turns by bot. `percent` is a turn's percent in the
-/// window's unit; `weight` is its weight inside the window.
-fn bots(
-    turns: &[&Weighed],
-    percent: impl Fn(&Weighed) -> f64,
-    weight: impl Fn(&Weighed) -> f64,
-) -> Vec<BotUsage> {
+/// Groups the window's weighted work by bot and source kind.
+fn bots(turns: &[&Weighed], weight: impl Fn(&Weighed) -> f64) -> Vec<BotUsage> {
     let total: f64 = turns.iter().map(|t| weight(t)).sum();
     let mut by_bot: BTreeMap<Uuid, Vec<&Weighed>> = BTreeMap::new();
     for turn in turns {
@@ -695,51 +522,22 @@ fn bots(
         .into_values()
         .map(|turns| {
             let bot_weight: f64 = turns.iter().map(|t| weight(t)).sum();
-            let mut models: BTreeMap<&str, f64> = BTreeMap::new();
-            let mut sources: BTreeMap<SourceKey, (u32, f64, f64)> = BTreeMap::new();
+            let mut sources: BTreeMap<Source, f64> = BTreeMap::new();
             for turn in &turns {
-                if let Some(model) = turn.turn.model.as_deref() {
-                    *models.entry(model).or_default() += weight(turn);
-                }
-                let entry = sources
-                    .entry((
-                        turn.turn.source,
-                        turn.turn.label.as_deref(),
-                        turn.turn.routine_id,
-                    ))
-                    .or_default();
-                entry.0 += 1;
-                entry.1 += weight(turn);
-                entry.2 += percent(turn);
+                *sources.entry(turn.turn.source).or_default() += weight(turn);
             }
-            let mut models: Vec<(&str, f64)> = models.into_iter().collect();
-            models.sort_by(|a, b| b.1.total_cmp(&a.1));
             let mut sources: Vec<SourceUsage> = sources
                 .into_iter()
-                .map(
-                    |((source, label, routine_id), (count, w, amount))| SourceUsage {
-                        source,
-                        label: label.map(str::to_owned),
-                        routine_id,
-                        turns: count,
-                        percent: round(amount),
-                        share: ratio(w, bot_weight),
-                    },
-                )
+                .map(|(source, weight)| SourceUsage {
+                    source,
+                    share: ratio(weight, bot_weight),
+                })
                 .collect();
             sources.sort_by(|a, b| b.share.total_cmp(&a.share));
-            let sum = |f: fn(&Turn) -> i64| turns.iter().map(|t| f(t.turn)).sum();
             BotUsage {
                 bot_id: turns[0].turn.bot_id,
                 name: turns[0].turn.bot_name.clone(),
-                percent: round(turns.iter().map(|t| percent(t)).sum()),
                 share: ratio(bot_weight, total),
-                turns: turns.len() as u32,
-                input_tokens: sum(|t| t.input_tokens),
-                cached_input_tokens: sum(|t| t.cached_input_tokens),
-                cache_write_tokens: sum(|t| t.cache_write_tokens),
-                output_tokens: sum(|t| t.output_tokens),
-                models: models.into_iter().map(|(m, _)| m.to_owned()).collect(),
                 sources,
             }
         })
@@ -749,16 +547,7 @@ fn bots(
 }
 
 fn ratio(part: f64, whole: f64) -> f64 {
-    if whole > 0.0 {
-        (part / whole * 1000.0).round() / 1000.0
-    } else {
-        0.0
-    }
-}
-
-/// Timeline columns are small, so they keep two decimals.
-fn fine(value: f64) -> f64 {
-    (value * 100.0).round() / 100.0
+    if whole > 0.0 { part / whole } else { 0.0 }
 }
 
 fn round(value: f64) -> f64 {

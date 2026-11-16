@@ -854,7 +854,7 @@ impl Render for Shell {
                         .and_then(|active| active.app.read(cx).selected_bot_id());
                     shell.open_settings(window, cx);
                     shell.select_settings(settings::SettingsSection::Usage, window, cx);
-                    shell.filter_usage(bot, window, cx);
+                    shell.focus_usage(bot, cx);
                 }))
                 .on_action(cx.listener(|shell, _: &OpenEmailSettings, window, cx| {
                     if window.has_active_dialog(cx) {

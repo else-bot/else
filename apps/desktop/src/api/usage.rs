@@ -40,56 +40,54 @@ pub struct ProviderUsage {
 pub const FIVE_HOURS: u64 = 5 * 60;
 pub const WEEK: u64 = 7 * 24 * 60;
 
-/// Where a window's name appears.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WindowName {
-    /// A card or section title: "Weekly limit".
-    Title,
-    /// A table column: "Week".
-    Column,
-    /// A line about the window now: "This week".
-    Current,
+impl ProviderUsage {
+    pub fn selected_window(&self, minutes: Option<u64>) -> Option<&UsageWindow> {
+        let has_limits = self
+            .windows
+            .iter()
+            .any(|window| window.attribution.used().is_some());
+        let available = || {
+            self.windows
+                .iter()
+                .filter(|window| !has_limits || window.attribution.used().is_some())
+        };
+        minutes
+            .and_then(|minutes| available().find(|window| window.minutes == minutes))
+            .or_else(|| available().find(|window| window.minutes == WEEK))
+            .or_else(|| available().next())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct UsageWindow {
     pub minutes: u64,
-    pub starts_at: DateTime<Utc>,
     pub attribution: Attribution,
     pub bots: Vec<BotUsage>,
-    pub buckets: Vec<UsageBucket>,
 }
 
-/// What a window's total is, and so what every bot, source and bucket
-/// `percent` in it measures.
+/// The provider's exact total and any learned attribution of that total.
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Attribution {
-    /// Percents are points of the provider's cap; `outside` is the part of
-    /// `used` that came from outside else.bot.
+    /// `outside` is the estimated part of `used` from outside else.bot.
     Priced {
         used: f64,
         outside: f64,
         resets_at: DateTime<Utc>,
         observed_at: DateTime<Utc>,
     },
-    /// The provider reported `used`, but else.bot hasn't learned what a turn
-    /// costs yet: percents are of else.bot's own use.
+    /// The provider reported `used`, but the cost of a turn is not known yet.
     Unattributed {
         used: f64,
         resets_at: DateTime<Utc>,
         observed_at: DateTime<Utc>,
     },
-    /// No current total: percents are of else.bot's own use.
+    /// No current total.
     #[serde(other)]
     Unreported,
 }
 
 impl Attribution {
-    pub fn is_priced(&self) -> bool {
-        matches!(self, Self::Priced { .. })
-    }
-
     /// The provider's reported total, priced or not.
     pub fn used(&self) -> Option<f64> {
         match self {
@@ -113,7 +111,6 @@ impl Attribution {
             Self::Unreported => None,
         }
     }
-
     pub fn observed_at(&self) -> Option<DateTime<Utc>> {
         match self {
             Self::Priced { observed_at, .. } | Self::Unattributed { observed_at, .. } => {
@@ -125,19 +122,27 @@ impl Attribution {
 }
 
 impl UsageWindow {
-    pub fn name(&self, style: WindowName) -> String {
-        let named = match (self.minutes, style) {
-            (FIVE_HOURS, WindowName::Title) => "5-hour window",
-            (FIVE_HOURS, WindowName::Column) => "5-hour",
-            (FIVE_HOURS, WindowName::Current) => "This 5-hour window",
-            (WEEK, WindowName::Title) => "Weekly limit",
-            (WEEK, WindowName::Column) => "Week",
-            (WEEK, WindowName::Current) => "This week",
-            (m, _) if m.is_multiple_of(1440) => return format!("{}-day window", m / 1440),
-            (m, _) if m.is_multiple_of(60) => return format!("{}-hour window", m / 60),
-            (m, _) => return format!("{m}-minute window"),
-        };
-        named.into()
+    pub fn title(&self) -> String {
+        match self.minutes {
+            FIVE_HOURS => "5-hour limit".into(),
+            WEEK => "Weekly limit".into(),
+            m if m.is_multiple_of(1440) => format!("{}-day limit", m / 1440),
+            m if m.is_multiple_of(60) => format!("{}-hour limit", m / 60),
+            m => format!("{m}-minute limit"),
+        }
+    }
+
+    /// The stretch the window's bot shares cover: since the limit last
+    /// reset, or a plain rolling span when the provider reports no limit.
+    pub fn period(&self) -> String {
+        if self.attribution.used().is_some() {
+            return format!("since the {} reset", self.title().to_lowercase());
+        }
+        match self.minutes {
+            m if m.is_multiple_of(1440) && m > 1440 => format!("in the last {} days", m / 1440),
+            m if m.is_multiple_of(60) && m > 60 => format!("in the last {} hours", m / 60),
+            m => format!("in the last {m} minutes"),
+        }
     }
 
     pub fn bot(&self, id: Uuid) -> Option<&BotUsage> {
@@ -149,24 +154,14 @@ impl UsageWindow {
 pub struct BotUsage {
     pub bot_id: Uuid,
     pub name: String,
-    /// In the unit the window's [`Attribution`] gives.
-    pub percent: f64,
-    pub turns: u64,
-    pub input_tokens: u64,
-    pub cached_input_tokens: u64,
-    pub cache_write_tokens: u64,
-    pub output_tokens: u64,
-    pub models: Vec<String>,
+    /// Fraction of your bots' weighted use in the window.
+    pub share: f64,
     pub sources: Vec<UsageSource>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct UsageSource {
     pub source: UsageSourceKind,
-    pub label: Option<String>,
-    pub routine_id: Option<Uuid>,
-    pub turns: u64,
-    pub percent: f64,
     /// Fraction of the bot's own use.
     pub share: f64,
 }
@@ -189,26 +184,13 @@ impl UsageSourceKind {
         match self {
             Self::Chat => "Chat",
             Self::Routine => "Routines",
-            Self::Delegated => "Delegated",
+            Self::Delegated => "Asked by other bots",
             Self::Webhook => "Webhooks",
             Self::Mail => "Mail",
             Self::Social => "Social",
             Self::Unknown => "Other",
         }
     }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct UsageBucket {
-    pub starts_at: DateTime<Utc>,
-    pub bots: Vec<BucketBotUsage>,
-    pub outside: f64,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct BucketBotUsage {
-    pub bot_id: Uuid,
-    pub percent: f64,
 }
 
 impl Client {
@@ -224,6 +206,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn usage_window_selection_defaults_to_week_and_keeps_periods_separate() {
+        let report: UsageReport = serde_json::from_str(include_str!("usage_fixture.json")).unwrap();
+        let mut provider = report.providers[0].clone();
+        assert_eq!(provider.selected_window(None).unwrap().minutes, WEEK);
+        assert_eq!(
+            provider.selected_window(Some(FIVE_HOURS)).unwrap().minutes,
+            FIVE_HOURS
+        );
+        assert_eq!(provider.selected_window(Some(123)).unwrap().minutes, WEEK);
+        provider.windows[1].minutes = 1440;
+        assert_eq!(provider.selected_window(None).unwrap().minutes, FIVE_HOURS);
+        provider.windows.clear();
+        assert!(provider.selected_window(None).is_none());
+    }
+
+    #[test]
     fn usage_fixture_preserves_provider_windows_and_attribution() {
         let report: UsageReport = serde_json::from_str(include_str!("usage_fixture.json")).unwrap();
         let claude = &report.providers[0];
@@ -232,11 +230,10 @@ mod tests {
         assert_eq!(claude.windows[0].attribution.outside(), Some(11.));
         let bot = &claude.windows[0].bots[0];
         assert_eq!(bot.sources[0].source, UsageSourceKind::Routine);
-        assert_eq!(bot.percent, 26.);
-        assert_eq!(claude.windows[0].buckets[0].bots[0].bot_id, bot.bot_id);
+        assert_eq!(bot.share, 0.51);
         let grok = &report.providers[1];
         assert_eq!(grok.windows[0].attribution, Attribution::Unreported);
-        assert_eq!(grok.windows[0].bots[0].percent, 100.);
+        assert_eq!(grok.windows[0].bots[0].share, 1.);
     }
 
     #[test]
@@ -270,7 +267,6 @@ mod tests {
         }));
         assert_eq!(unattributed.used(), Some(12.));
         assert_eq!(unattributed.outside(), None);
-        assert!(!unattributed.is_priced());
         assert_eq!(
             decode(serde_json::json!({ "state": "unreported" })),
             Attribution::Unreported
@@ -287,12 +283,14 @@ mod tests {
         let [five, week] = &report.providers[0].windows[..] else {
             panic!("two windows")
         };
-        assert_eq!(five.name(WindowName::Title), "5-hour window");
-        assert_eq!(week.name(WindowName::Column), "Week");
-        assert_eq!(week.name(WindowName::Current), "This week");
+        assert_eq!(five.title(), "5-hour limit");
+        assert_eq!(week.title(), "Weekly limit");
+        assert_eq!(week.period(), "since the weekly limit reset");
         let mut daily = five.clone();
-        daily.minutes = 1440;
-        assert_eq!(daily.name(WindowName::Column), "1-day window");
+        daily.minutes = 2880;
+        assert_eq!(daily.period(), "since the 2-day limit reset");
+        daily.attribution = Attribution::Unreported;
+        assert_eq!(daily.period(), "in the last 2 days");
     }
 
     #[test]
