@@ -26,6 +26,7 @@ pub mod runtime;
 pub mod screens;
 mod snapshot;
 pub mod upgrade;
+pub mod upgrade_queue;
 pub mod viewer;
 
 pub use desktop::{ViewerLease, ViewerRefusal, ViewerTarget};
@@ -79,6 +80,9 @@ pub struct ComputerConfig {
     /// Root of the bots' host project directories; each computer created
     /// here mounts `<projects_dir>/<bot id>` at the guest user's `~/work`.
     pub projects_dir: Option<std::path::PathBuf>,
+    /// How long Upgrade all waits before it retries the computers that
+    /// were busy.
+    pub upgrade_retry: Duration,
 }
 
 /// Where a bot's host project directory appears in a desktop computer: the
@@ -120,6 +124,7 @@ impl Default for ComputerConfig {
             desktop: false,
             state_dir: std::env::temp_dir().join("else-computers"),
             projects_dir: None,
+            upgrade_retry: Duration::from_secs(30),
         }
     }
 }
@@ -305,11 +310,18 @@ pub struct ComputerManager {
     secret_key: Option<Arc<crate::credentials::SecretKey>>,
     input_batches: Actor<HashMap<Uuid, u32>>,
     controllers: Actor<HashMap<Uuid, Uuid>>,
-    upgrades: Actor<HashMap<Uuid, upgrade::UpgradeStatus>>,
+    upgrades: Actor<upgrade_queue::Upgrades>,
     upgrade_tasks: tokio_util::task::TaskTracker,
     upgrade_stop: tokio_util::sync::CancellationToken,
     browser_refs: Actor<HashMap<Uuid, HashMap<String, browser_refs::RefLabel>>>,
+    disks: Actor<Option<(std::time::Instant, Disks)>>,
 }
+
+/// Every computer's disk, by runtime name.
+type Disks = Arc<HashMap<String, runtime::DiskUsage>>;
+
+/// How long a scan of the computers' disks is reused.
+const DISK_SCAN_TTL: Duration = Duration::from_secs(60);
 
 impl ComputerManager {
     pub fn new(
@@ -332,7 +344,51 @@ impl ComputerManager {
             upgrade_tasks: tokio_util::task::TaskTracker::new(),
             upgrade_stop: tokio_util::sync::CancellationToken::new(),
             browser_refs: Actor::default(),
+            disks: Actor::default(),
         }
+    }
+
+    /// Live use of each running computer, by runtime name; empty when the
+    /// runtime cannot say.
+    pub async fn usage(&self) -> HashMap<String, runtime::Usage> {
+        self.runtime.usage().await.unwrap_or_else(|err| {
+            tracing::debug!(error = %err, "reading computer usage failed");
+            HashMap::new()
+        })
+    }
+
+    /// Every computer's disk by runtime name, rescanned at most once per
+    /// [`DISK_SCAN_TTL`] (a failed scan too); concurrent callers share one
+    /// scan.
+    pub async fn disks(&self) -> Disks {
+        let runtime = self.runtime.clone();
+        self.disks
+            .call_async(move |cache| {
+                Box::pin(async move {
+                    if let Some((at, disks)) = cache.as_ref()
+                        && at.elapsed() < DISK_SCAN_TTL
+                    {
+                        return disks.clone();
+                    }
+                    match runtime.disks().await {
+                        Ok(disks) => {
+                            let disks = Arc::new(disks);
+                            *cache = Some((std::time::Instant::now(), disks.clone()));
+                            disks
+                        }
+                        Err(err) => {
+                            tracing::debug!(error = %err, "scanning computer disks failed");
+                            let stale: Disks = cache
+                                .as_ref()
+                                .map(|(_, disks)| disks.clone())
+                                .unwrap_or_default();
+                            *cache = Some((std::time::Instant::now(), stale.clone()));
+                            stale
+                        }
+                    }
+                })
+            })
+            .await
     }
 
     /// Count one input batch for a turn; returns the count including it.

@@ -1,6 +1,7 @@
 //! Owner routes for a bot's computer: its state, an explicit stop that
 //! prevents implicit wake, resume (which starts nothing by itself), and an
-//! upgrade to the configured image that keeps the computer's data.
+//! upgrade to the configured image that keeps the computer's data. And for
+//! all of them: every computer with its use, and Upgrade all.
 
 use std::sync::Arc;
 
@@ -12,7 +13,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::computers::ComputerError;
-use crate::computers::upgrade::UpgradeStatus;
+use crate::computers::upgrade_queue::UpgradeStatus;
 use crate::db::computer_handoffs as handoffs;
 
 use super::AppState;
@@ -21,6 +22,9 @@ use super::turns::bot_deleted;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/computers", get(list))
+        .route("/computers/upgrade-all", post(upgrade_all))
+        .route("/computers/upgrade-all/cancel", post(cancel_upgrade_all))
         .route("/bots/{bot_id}/computer", get(show))
         .route("/bots/{bot_id}/computer/stop", post(stop))
         .route("/bots/{bot_id}/computer/resume", post(resume))
@@ -152,8 +156,7 @@ async fn show(
             Some(computers.config().image.clone()),
             match computers.upgrade_status(bot_id).await {
                 None => last_upgrade(&state, bot_id).await?,
-                Some(UpgradeStatus::Running) => json!({ "state": "running" }),
-                Some(UpgradeStatus::Failed(error)) => json!({ "state": "failed", "error": error }),
+                Some(status) => upgrade_json(status),
             },
         ),
         None => (None, Value::Null),
@@ -193,6 +196,115 @@ async fn show(
         "latest_image": latest_image,
         "upgrade": upgrade,
     })))
+}
+
+fn upgrade_json(status: UpgradeStatus) -> Value {
+    match status {
+        UpgradeStatus::Queued { position } => json!({ "state": "queued", "position": position }),
+        UpgradeStatus::Waiting(reason) => json!({ "state": "waiting", "reason": reason }),
+        UpgradeStatus::Running => json!({ "state": "running" }),
+        UpgradeStatus::Failed(error) => json!({ "state": "failed", "error": error }),
+    }
+}
+
+const MIB: u64 = 1024 * 1024;
+
+/// Every created computer of an active bot, oldest bot first, with its
+/// upgrade and its use: CPU and memory only while it runs, and disk from
+/// a scan at most a minute old. `rollback_bytes` is the disk still held by
+/// computers that upgrades replaced and kept for rollback.
+async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let computers = manager(&state)?;
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        bot_id: Uuid,
+        runtime_name: String,
+        image: String,
+        cpus: i32,
+        memory_mib: i32,
+        desired_state: String,
+        observed_state: String,
+        last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+    }
+    let rows = sqlx::query_as::<_, Row>(
+        "SELECT c.bot_id, c.runtime_name, c.image, c.cpus, c.memory_mib, c.desired_state,
+                c.observed_state, c.last_used_at
+         FROM bot_computers c JOIN bots b ON b.id = c.bot_id
+         WHERE b.status = 'active' AND c.observed_state <> 'absent'
+         ORDER BY b.created_at, b.id",
+    )
+    .fetch_all(&state.db);
+    let replaced = sqlx::query_scalar::<_, String>(
+        "SELECT from_runtime_name FROM computer_upgrades WHERE state = 'completed'
+         UNION SELECT to_runtime_name FROM computer_upgrades WHERE state = 'completed'
+         EXCEPT SELECT runtime_name FROM bot_computers",
+    )
+    .fetch_all(&state.db);
+    let (rows, replaced, usage, disks, statuses) = tokio::join!(
+        rows,
+        replaced,
+        computers.usage(),
+        computers.disks(),
+        computers.upgrade_statuses(),
+    );
+    let (rows, replaced) = (rows?, replaced?);
+    let latest = &computers.config().image;
+    let rollback_bytes = replaced
+        .iter()
+        .filter_map(|name| disks.get(name))
+        .map(|disk| disk.used_bytes)
+        .reduce(|a, b| a + b);
+    let mut listed = Vec::with_capacity(rows.len());
+    for row in rows {
+        let upgrade = match statuses.get(&row.bot_id) {
+            Some(status) => upgrade_json(status.clone()),
+            None => last_upgrade(&state, row.bot_id).await?,
+        };
+        let live = usage
+            .get(&row.runtime_name)
+            .filter(|_| row.observed_state == "running");
+        let cpus = live
+            .and_then(|usage| usage.cpus)
+            .unwrap_or(row.cpus.max(1) as u32);
+        let disk = disks.get(&row.runtime_name);
+        listed.push(json!({
+            "bot_id": row.bot_id,
+            "state": row.observed_state,
+            "desired_state": row.desired_state,
+            "image": row.image,
+            "latest_image": latest,
+            "upgrade": upgrade,
+            "disk_used_bytes": disk.map(|disk| disk.used_bytes),
+            "disk_size_bytes": disk.and_then(|disk| disk.size_bytes),
+            "cpus": cpus,
+            "cpu_percent": live.map(|usage| (usage.cpu_percent / cpus as f32).clamp(0.0, 100.0)),
+            "memory_used_bytes": live.and_then(|usage| usage.memory_bytes),
+            "memory_limit_bytes": live
+                .map(|usage| usage.memory_limit_bytes)
+                .unwrap_or(row.memory_mib.max(0) as u64 * MIB),
+            "last_used_at": row.last_used_at,
+        }));
+    }
+    Ok(Json(json!({
+        "latest_image": latest,
+        "rollback_bytes": rollback_bytes,
+        "computers": listed,
+    })))
+}
+
+async fn upgrade_all(
+    State(state): State<Arc<AppState>>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let queued = manager(&state)?
+        .upgrade_all(state.scheduler.gate().clone())
+        .await
+        .map_err(computer_error)?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "queued": queued }))))
+}
+
+async fn cancel_upgrade_all(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let cancelled = manager(&state)?.cancel_upgrade_all().await;
+    Ok(Json(json!({ "cancelled": cancelled })))
 }
 
 /// The newest recorded upgrade, when it failed (one a restart interrupted,

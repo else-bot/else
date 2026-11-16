@@ -28,8 +28,9 @@
 //! instead of failing. Other system changes, such as edits in `/etc`, stay
 //! behind.
 //!
-//! The owner starts one from the desktop ([`ComputerManager::start_upgrade`])
-//! or offline with `else-api upgrade-computer`. One started from the
+//! The owner starts one from the desktop ([`ComputerManager::start_upgrade`]),
+//! queues every outdated computer with Upgrade all ([`super::upgrade_queue`]),
+//! or runs one offline with `else-api upgrade-computer`. One started from the
 //! desktop holds a maintenance admission until it ends, so a backup or an
 //! update waits for it; it ends the owner's desktop sessions first, and
 //! while it runs, new leases and viewers are refused. A started upgrade's
@@ -44,6 +45,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use super::runtime::valid_image;
+use super::upgrade_queue::Ended;
 use super::{ComputerError, ComputerManager, DESKTOP_GUEST_PORT, RuntimeState, Spec};
 
 const COPY_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -131,13 +133,8 @@ fi
 sync
 cat /etc/elsebot/image.json 2>/dev/null || echo '{}'"#;
 
-/// An upgrade the owner started from the desktop. Kept in memory: a restart
-/// forgets it, and an interrupted upgrade is cleaned up by the next one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpgradeStatus {
-    Running,
-    Failed(String),
-}
+/// Why an upgrade waits for the computer, rather than failing.
+pub(super) const ACTIVE_JOB: &str = "a guest job is active; wait for it or cancel it first";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpgradeReport {
@@ -205,14 +202,16 @@ fn sha256_file(path: &Path) -> std::io::Result<(u64, String)> {
 }
 
 impl ComputerManager {
-    pub async fn upgrade_status(&self, bot_id: Uuid) -> Option<UpgradeStatus> {
-        self.upgrades
-            .call(move |upgrades| upgrades.get(&bot_id).cloned())
-            .await
-    }
-
-    pub(super) async fn upgrading(&self, bot_id: Uuid) -> bool {
-        self.upgrade_status(bot_id).await == Some(UpgradeStatus::Running)
+    pub(super) fn can_start_upgrade(&self) -> Result<(), ComputerError> {
+        if !self.inspected.load(super::Ordering::SeqCst) {
+            return Err(ComputerError::Busy(
+                "the computer runtime has not been inspected yet".into(),
+            ));
+        }
+        if self.upgrade_stop.is_cancelled() {
+            return Err(ComputerError::Busy("the API is stopping".into()));
+        }
+        Ok(())
     }
 
     /// Start moving a bot's computer to the configured image in the
@@ -223,14 +222,7 @@ impl ComputerManager {
         bot_id: Uuid,
         admission: crate::maintenance::Admission,
     ) -> Result<(), ComputerError> {
-        if !self.inspected.load(super::Ordering::SeqCst) {
-            return Err(ComputerError::Busy(
-                "the computer runtime has not been inspected yet".into(),
-            ));
-        }
-        if self.upgrade_stop.is_cancelled() {
-            return Err(ComputerError::Busy("the API is stopping".into()));
-        }
+        self.can_start_upgrade()?;
         let current: Option<String> =
             sqlx::query_scalar("SELECT image FROM bot_computers WHERE bot_id = ?1")
                 .bind(bot_id)
@@ -246,13 +238,7 @@ impl ComputerManager {
         }
         let claimed = self
             .upgrades
-            .call(move |upgrades| {
-                if upgrades.get(&bot_id) == Some(&UpgradeStatus::Running) {
-                    return false;
-                }
-                upgrades.insert(bot_id, UpgradeStatus::Running);
-                true
-            })
+            .call(move |upgrades| upgrades.claim(bot_id))
             .await;
         if !claimed {
             return Err(refused("an upgrade is already running"));
@@ -268,25 +254,18 @@ impl ComputerManager {
                 upgraded = upgrade => upgraded,
                 () = this.upgrade_stop.cancelled() => Err(refused("the API stopped during the upgrade")),
             };
-            let failed = match upgraded {
-                Ok(_) => None,
-                Err(ComputerError::Busy(reason)) if reason == "in use" => {
-                    Some("The bot is using its computer. Try again once it is idle.".to_owned())
-                }
+            let ended = match upgraded {
+                Ok(_) => Ended::Upgraded,
+                Err(ComputerError::Busy(reason)) if reason == "in use" => Ended::Failed(
+                    "The bot is using its computer. Try again once it is idle.".to_owned(),
+                ),
                 Err(err) => {
                     tracing::warn!(bot = %bot_id, error = %err, "computer upgrade failed");
-                    Some(err.to_string())
+                    Ended::Failed(err.to_string())
                 }
             };
             this.upgrades
-                .call(move |upgrades| match failed {
-                    None => {
-                        upgrades.remove(&bot_id);
-                    }
-                    Some(error) => {
-                        upgrades.insert(bot_id, UpgradeStatus::Failed(error));
-                    }
-                })
+                .call(move |upgrades| upgrades.end(bot_id, ended))
                 .await;
         });
         Ok(())
@@ -540,9 +519,7 @@ impl ComputerManager {
             ));
         };
         if self.active_jobs(bot_id).await? > 0 {
-            return Err(refused(
-                "a guest job is active; wait for it or cancel it first",
-            ));
+            return Err(ComputerError::Busy(ACTIVE_JOB.into()));
         }
         let row = self.close_browser(bot_id, row).await?;
         self.stop_for_disk(bot_id, &row).await?;
@@ -819,9 +796,7 @@ impl ComputerManager {
             ));
         };
         if self.active_jobs(bot_id).await? > 0 {
-            return Err(refused(
-                "a guest job is active; wait for it or cancel it first",
-            ));
+            return Err(ComputerError::Busy(ACTIVE_JOB.into()));
         }
         if self.runtime.state(&from_name).await? != Some(RuntimeState::Stopped) {
             return Err(refused(format!(

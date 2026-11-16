@@ -160,6 +160,43 @@ impl ComputerRuntime for Fake {
         }
         Ok(())
     }
+    async fn usage(
+        &self,
+    ) -> Result<HashMap<String, else_api::computers::runtime::Usage>, RuntimeError> {
+        Ok(self
+            .computers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, computer)| computer.state == RuntimeState::Running)
+            .map(|(name, _)| {
+                let usage = else_api::computers::runtime::Usage {
+                    cpu_percent: 150.0,
+                    cpus: Some(2),
+                    memory_bytes: Some(1 << 30),
+                    memory_limit_bytes: 2 << 30,
+                };
+                (name.clone(), usage)
+            })
+            .collect())
+    }
+    async fn disks(
+        &self,
+    ) -> Result<HashMap<String, else_api::computers::runtime::DiskUsage>, RuntimeError> {
+        Ok(self
+            .computers
+            .lock()
+            .unwrap()
+            .keys()
+            .map(|name| {
+                let disk = else_api::computers::runtime::DiskUsage {
+                    used_bytes: 1 << 20,
+                    size_bytes: Some(1 << 30),
+                };
+                (name.clone(), disk)
+            })
+            .collect())
+    }
     async fn remove(&self, name: &str) -> Result<(), RuntimeError> {
         self.log(format!("remove {name}"));
         let mut computers = self.computers.lock().unwrap();
@@ -1782,4 +1819,233 @@ async fn stopping_the_api_interrupts_an_upgrade_and_the_next_start_removes_its_r
     assert!(fake.computers.lock().unwrap().contains_key(&old_name));
     let failed = app.owner("GET", &path, None).await.body;
     assert_eq!(failed["upgrade"]["state"], "failed", "{failed}");
+}
+
+/// An app whose computers use `img:new`, with three bots on `img:old`
+/// computers, all stopped, and a fourth bot that never used one.
+async fn outdated_fleet(
+    config: ComputerConfig,
+) -> (TestApp, Arc<Fake>, Arc<ComputerManager>, Vec<Uuid>) {
+    let db = common::TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let fake = Arc::new(Fake::default());
+    let manager = Arc::new(ComputerManager::new(
+        db.pool.clone(),
+        fake.clone(),
+        ComputerConfig {
+            image: "img:new".into(),
+            upgrade_retry: Duration::from_millis(100),
+            ..config
+        },
+    ));
+    manager.reconcile_startup().await.unwrap();
+    let registry = else_api::providers::Registry::new(vec![Arc::new(
+        else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
+    )]);
+    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone()));
+    let mut bots = Vec::new();
+    for name in ["One", "Two", "Three"] {
+        let bot: Uuid = app.create_bot(name).await.parse().unwrap();
+        let (lease, _) = ready(&manager, bot, "turn:gone").await;
+        manager.release(lease).await.unwrap();
+        first_stop(&app, &manager, &fake, bot).await;
+        bots.push(bot);
+    }
+    app.create_bot("Never").await;
+    sqlx::query("UPDATE bot_computers SET image = 'img:old'")
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    (app, fake, manager, bots)
+}
+
+/// `GET /v1/computers` once `done` holds for its computers, keyed by bot.
+async fn computers_when(
+    app: &TestApp,
+    done: impl Fn(&HashMap<Uuid, serde_json::Value>) -> bool,
+) -> (serde_json::Value, HashMap<Uuid, serde_json::Value>) {
+    let deadline = tokio::time::Instant::now() + common::SETTLE;
+    loop {
+        let response = app.owner("GET", "/v1/computers", None).await;
+        assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+        let by_bot: HashMap<Uuid, serde_json::Value> = response.body["computers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|computer| {
+                (
+                    computer["bot_id"].as_str().unwrap().parse().unwrap(),
+                    computer.clone(),
+                )
+            })
+            .collect();
+        if done(&by_bot) {
+            return (response.body, by_bot);
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "computers never settled: {}",
+            response.body
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn upgrade_state(computer: &serde_json::Value) -> &str {
+    computer["upgrade"]["state"].as_str().unwrap_or("none")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn computers_list_every_created_computer_with_its_use() {
+    let (app, _fake, manager, bots) = outdated_fleet(config(1)).await;
+    let (body, by_bot) = computers_when(&app, |_| true).await;
+    assert_eq!(body["latest_image"], "img:new");
+    assert_eq!(body["rollback_bytes"], serde_json::Value::Null);
+    let listed: Vec<&str> = body["computers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|computer| computer["bot_id"].as_str().unwrap())
+        .collect();
+    let expected: Vec<String> = bots.iter().map(Uuid::to_string).collect();
+    assert_eq!(
+        listed, expected,
+        "oldest bot first; a bot without a computer is left out"
+    );
+    let stopped = &by_bot[&bots[0]];
+    assert_eq!(
+        (
+            &stopped["state"],
+            &stopped["image"],
+            &stopped["upgrade"],
+            &stopped["cpu_percent"],
+            &stopped["memory_used_bytes"],
+        ),
+        (
+            &serde_json::json!("stopped"),
+            &serde_json::json!("img:old"),
+            &serde_json::Value::Null,
+            &serde_json::Value::Null,
+            &serde_json::Value::Null,
+        ),
+        "{stopped}"
+    );
+    assert_eq!(stopped["memory_limit_bytes"], 1024 * 1024 * 1024u64);
+    assert_eq!(stopped["disk_used_bytes"], 1u64 << 20);
+    assert_eq!(stopped["disk_size_bytes"], 1u64 << 30);
+    assert!(stopped["last_used_at"].is_string(), "{stopped}");
+
+    let (_lease, _) = ready(&manager, bots[0], "cli:held").await;
+    let (_, by_bot) = computers_when(&app, |by_bot| by_bot[&bots[0]]["state"] == "running").await;
+    let running = &by_bot[&bots[0]];
+    assert_eq!(running["cpus"], 2);
+    assert_eq!(running["cpu_percent"], 75.0, "a share of its own vCPUs");
+    assert_eq!(running["memory_used_bytes"], 1u64 << 30);
+    assert_eq!(running["memory_limit_bytes"], 2u64 << 30);
+}
+
+/// Upgrade all puts off a computer in use and the ones the budget has no
+/// room for, retries them after the others, and upgrades each once it can.
+#[tokio::test(flavor = "multi_thread")]
+async fn upgrade_all_waits_for_busy_computers_and_the_budget_then_upgrades_each() {
+    let (app, _fake, manager, bots) = outdated_fleet(config(1)).await;
+    let (held, _) = ready(&manager, bots[2], "cli:held").await;
+    let queued = app.owner("POST", "/v1/computers/upgrade-all", None).await;
+    assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
+    let expected: Vec<String> = bots.iter().map(Uuid::to_string).collect();
+    assert_eq!(queued.body["queued"], serde_json::json!(expected));
+
+    let (_, by_bot) = computers_when(&app, |by_bot| {
+        bots.iter()
+            .all(|bot| upgrade_state(&by_bot[bot]) == "waiting")
+    })
+    .await;
+    assert_eq!(
+        by_bot[&bots[0]]["upgrade"]["reason"],
+        "Other computers use the whole budget."
+    );
+    assert_eq!(
+        by_bot[&bots[2]]["upgrade"]["reason"],
+        "The bot is using its computer."
+    );
+    let again = app.owner("POST", "/v1/computers/upgrade-all", None).await;
+    assert_eq!(
+        again.body["queued"].as_array().map(Vec::len),
+        Some(3),
+        "queueing again adds nothing: {:?}",
+        again.body
+    );
+
+    manager.release(held).await.unwrap();
+    manager.tick(&never()).await.unwrap();
+    let (body, _) = computers_when(&app, |by_bot| {
+        bots.iter()
+            .all(|bot| by_bot[bot]["image"] == "img:new" && by_bot[bot]["upgrade"].is_null())
+    })
+    .await;
+    assert!(
+        body["rollback_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0),
+        "{body}"
+    );
+}
+
+/// One failed upgrade doesn't stop the queue, a single upgrade of a bot the
+/// queue is upgrading is refused, and cancelling takes out the rest while
+/// the running upgrade finishes.
+#[tokio::test(flavor = "multi_thread")]
+async fn upgrade_all_goes_on_after_a_failure_and_cancels_what_is_left() {
+    let (app, fake, _manager, bots) = outdated_fleet(config(3)).await;
+    sqlx::query("UPDATE bot_computers SET network = NULL WHERE bot_id = ?1")
+        .bind(bots[0])
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    *fake.create_delay.lock().unwrap() = Duration::from_millis(400);
+    let queued = app.owner("POST", "/v1/computers/upgrade-all", None).await;
+    assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
+
+    let (_, by_bot) =
+        computers_when(&app, |by_bot| upgrade_state(&by_bot[&bots[1]]) == "running").await;
+    assert_eq!(upgrade_state(&by_bot[&bots[0]]), "failed");
+    assert!(
+        by_bot[&bots[0]]["upgrade"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("--network")),
+        "{}",
+        by_bot[&bots[0]]
+    );
+    assert_eq!(
+        by_bot[&bots[2]]["upgrade"],
+        serde_json::json!({ "state": "queued", "position": 1 })
+    );
+    let single = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{}/computer/upgrade", bots[1]),
+            None,
+        )
+        .await;
+    assert_eq!(single.status, StatusCode::CONFLICT, "{:?}", single.body);
+
+    let cancelled = app
+        .owner("POST", "/v1/computers/upgrade-all/cancel", None)
+        .await;
+    assert_eq!(cancelled.status, StatusCode::OK);
+    assert_eq!(
+        cancelled.body["cancelled"],
+        serde_json::json!([bots[2].to_string()])
+    );
+    let (_, by_bot) = computers_when(&app, |by_bot| by_bot[&bots[1]]["upgrade"].is_null()).await;
+    assert_eq!(by_bot[&bots[1]]["image"], "img:new");
+    assert_eq!(
+        (&by_bot[&bots[2]]["image"], &by_bot[&bots[2]]["upgrade"]),
+        (&serde_json::json!("img:old"), &serde_json::Value::Null)
+    );
+    assert_eq!(upgrade_state(&by_bot[&bots[0]]), "failed");
+    let shown = app
+        .owner("GET", &format!("/v1/bots/{}/computer", bots[0]), None)
+        .await;
+    assert_eq!(shown.body["upgrade"]["state"], "failed");
 }
