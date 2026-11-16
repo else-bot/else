@@ -238,10 +238,11 @@ async fn complete(
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<Complete>,
 ) -> Result<Json<Value>, ApiError> {
-    manager(&s)?;
+    let m = manager(&s)?;
     let setup = store::settle_setup(&s.db, id, Some(input.connection_id), input.note.as_deref())
         .await
         .map_err(error)?;
+    m.stop_pairing(Purpose::Setup(id)).await;
     s.scheduler.wake();
     Ok(Json(json!({"setup":setup})))
 }

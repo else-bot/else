@@ -579,6 +579,19 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn a_whatsapp_message_is_never_filed_under_an_always_approved_task() {
+        let refused = Message::parse(
+            &json!({ "platform": "whatsapp", "destination": "33612345678@s.whatsapp.net",
+            "account": "+33612345678", "task": "Weekly check-ins", "body": "Hi" }),
+        );
+        assert!(refused.is_err());
+        let one = Message::parse(&json!({ "platform": "whatsapp",
+            "destination": "33612345678@s.whatsapp.net", "body": "Hi" }))
+        .unwrap();
+        assert_eq!(one.platform, Platform::WhatsApp);
+    }
+
+    #[test]
     fn a_task_files_messages_to_a_chat_or_user_never_public_posts() {
         let dm = Message::parse(&json!({ "platform": "x", "account": "@acme",
             "destination": "@ada", "task": " Initial   lead DMs ", "body": "Hi" }))

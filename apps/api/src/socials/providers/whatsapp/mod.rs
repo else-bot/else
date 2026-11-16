@@ -673,3 +673,31 @@ pub async fn listen(
     let _ = handle.shutdown().await;
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_chat_is_named_by_its_id_or_a_phone_number_with_country_code() {
+        for number in [
+            "+33 6 12 34 56 78",
+            "33612345678",
+            "+33-6-12-34-56-78",
+            "(33) 612345678",
+        ] {
+            assert_eq!(
+                jid(number).unwrap().to_string(),
+                "33612345678@s.whatsapp.net",
+                "{number}"
+            );
+        }
+        assert_eq!(
+            jid("120363025246125486@g.us").unwrap().to_string(),
+            "120363025246125486@g.us"
+        );
+        for refused in ["", "12345", "+33 6 12 AB", "not a chat"] {
+            assert!(jid(refused).is_err(), "{refused}");
+        }
+    }
+}

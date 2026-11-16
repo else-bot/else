@@ -41,7 +41,7 @@ pub(super) struct Live {
 
 const MAX_PAIRINGS: usize = 4;
 /// How long a card waits for the next change before asking again.
-pub const POLL: Duration = Duration::from_secs(25);
+pub const POLL: Duration = Duration::from_secs(10);
 
 impl Manager {
     /// Start pairing for `purpose`, or return the one already running. A
