@@ -326,7 +326,11 @@ const DISK_SCAN_TTL: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScanState {
     Stale,
-    Scanning,
+    /// `stale` once the computers changed after this scan began, so its
+    /// result is out of date when it ends.
+    Scanning {
+        stale: bool,
+    },
     /// The last scan ended then, whether or not it succeeded.
     Ended(std::time::Instant),
 }
@@ -350,7 +354,7 @@ impl DiskScan {
     fn due(&self) -> bool {
         match self.state {
             ScanState::Stale => true,
-            ScanState::Scanning => false,
+            ScanState::Scanning { .. } => false,
             ScanState::Ended(at) => at.elapsed() >= DISK_SCAN_TTL,
         }
     }
@@ -359,7 +363,17 @@ impl DiskScan {
         if let Some(disks) = disks {
             self.disks = disks;
         }
-        self.state = ScanState::Ended(std::time::Instant::now());
+        self.state = match self.state {
+            ScanState::Scanning { stale: true } => ScanState::Stale,
+            _ => ScanState::Ended(std::time::Instant::now()),
+        };
+    }
+
+    fn invalidate(&mut self) {
+        self.state = match self.state {
+            ScanState::Scanning { .. } => ScanState::Scanning { stale: true },
+            _ => ScanState::Stale,
+        };
     }
 }
 
@@ -407,7 +421,7 @@ impl ComputerManager {
         self.disks
             .call(move |scan| {
                 if scan.due() {
-                    scan.state = ScanState::Scanning;
+                    scan.state = ScanState::Scanning { stale: false };
                     tokio::spawn(async move {
                         let scanned = match runtime.disks().await {
                             Ok(disks) => Some(Arc::new(disks)),
@@ -427,13 +441,7 @@ impl ComputerManager {
     /// Scan again on the next read: an upgrade or rollback changed which
     /// computers exist.
     pub(super) async fn rescan_disks(&self) {
-        self.disks
-            .call(|scan| {
-                if scan.state != ScanState::Scanning {
-                    scan.state = ScanState::Stale;
-                }
-            })
-            .await;
+        self.disks.call(|scan| scan.invalidate()).await;
     }
 
     /// Count one input batch for a turn; returns the count including it.
@@ -890,6 +898,26 @@ impl ComputerManager {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_change_during_a_disk_scan_makes_its_result_stale() {
+        let mut scan = DiskScan::default();
+        assert!(scan.due());
+        scan.state = ScanState::Scanning { stale: false };
+        assert!(!scan.due(), "one scan at a time");
+        scan.invalidate();
+        scan.scanned(Some(Arc::new(HashMap::from([("a".to_owned(), 1)]))));
+        assert_eq!(scan.disks.get("a"), Some(&1), "the result is still shown");
+        assert!(scan.due(), "and scanned again");
+        scan.state = ScanState::Scanning { stale: false };
+        scan.scanned(None);
+        assert!(!scan.due(), "a failed scan waits like a successful one");
+        assert_eq!(scan.disks.get("a"), Some(&1));
+        scan.invalidate();
+        assert!(scan.due());
+    }
+
     #[test]
     fn only_digest_references_pin_an_image() {
         let digest = "a".repeat(64);

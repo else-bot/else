@@ -212,25 +212,27 @@ impl Upgrades {
     }
 }
 
-/// The owner-facing reason a computer was put off.
-fn deferred_reason(error: &ComputerError) -> Option<String> {
-    let reason = match error {
-        ComputerError::Busy(reason) if reason == "in use" => {
-            "The bot is using its computer.".to_owned()
-        }
-        ComputerError::Busy(reason) if reason.starts_with("the computer budget") => {
-            "Other computers use the whole budget.".to_owned()
-        }
-        ComputerError::Busy(reason) if reason == super::upgrade::ACTIVE_JOB => {
-            "The bot is running a job on its computer.".to_owned()
-        }
-        ComputerError::Busy(reason) if reason == "state missing" || reason == "state absent" => {
-            return None;
-        }
-        ComputerError::Busy(reason) => format!("The computer is busy: {reason}."),
-        _ => return None,
+/// The owner-facing reason to put a computer off, when the error is one
+/// that passes by itself. Any other error fails the computer's upgrade, so
+/// one that would never pass (a disk the runtime no longer has, a failing
+/// browser checkpoint) is shown instead of retried forever.
+fn deferred_reason(error: &ComputerError) -> Option<&'static str> {
+    let ComputerError::Busy(reason) = error else {
+        return None;
     };
-    Some(reason)
+    match reason.as_str() {
+        "in use" => Some("The bot is using its computer."),
+        super::upgrade::ACTIVE_JOB => Some("The bot is running a job on its computer."),
+        "the computer changed during the upgrade" => {
+            Some("The computer changed during the upgrade.")
+        }
+        "state creating" | "state starting" | "state pausing" | "state resuming"
+        | "state stopping" => Some("The computer is starting or stopping."),
+        budget if budget.starts_with("the computer budget") => {
+            Some("Other computers use the whole budget.")
+        }
+        _ => None,
+    }
 }
 
 impl ComputerManager {
@@ -334,7 +336,7 @@ impl ComputerManager {
                         Ended::Upgraded
                     }
                     Err(err) => match deferred_reason(&err) {
-                        Some(reason) => Ended::Deferred { reason, round },
+                        Some(reason) => deferred(reason),
                         None => {
                             tracing::warn!(bot = %bot_id, error = %err, "queued computer upgrade failed");
                             Ended::Failed(err.to_string())
@@ -458,5 +460,19 @@ mod tests {
             "the running attempt began before the cancel"
         );
         assert_eq!(upgrades.next(), Step::Finished);
+    }
+
+    #[test]
+    fn only_contention_puts_a_computer_off() {
+        let busy = |reason: &str| deferred_reason(&ComputerError::Busy(reason.into()));
+        assert!(busy("in use").is_some());
+        assert!(busy(super::super::upgrade::ACTIVE_JOB).is_some());
+        assert!(busy("state stopping").is_some());
+        assert!(busy("the computer budget is in use; stop another computer first").is_some());
+        assert_eq!(busy("the runtime does not report it stopped"), None);
+        assert_eq!(busy("state missing"), None);
+        assert_eq!(busy("state error"), None);
+        assert_eq!(busy("its browser checkpoint failed: boom"), None);
+        assert_eq!(deferred_reason(&ComputerError::Refused("no".into())), None);
     }
 }

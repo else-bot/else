@@ -2148,3 +2148,27 @@ async fn computers_when_body(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+/// A computer the runtime no longer has fails its upgrade instead of
+/// waiting forever, and the queue goes on.
+#[tokio::test(flavor = "multi_thread")]
+async fn upgrade_all_fails_a_computer_the_runtime_lost() {
+    let (app, fake, _manager, bots) = outdated_fleet(config(3)).await;
+    let lost: String =
+        sqlx::query_scalar("SELECT runtime_name FROM bot_computers WHERE bot_id = ?1")
+            .bind(bots[1])
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    fake.computers.lock().unwrap().remove(&lost);
+    let queued = app.owner("POST", "/v1/computers/upgrade-all", None).await;
+    assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
+    let (_, by_bot) = computers_when(&app, |by_bot| {
+        upgrade_state(&by_bot[&bots[1]]) == "failed"
+            && [bots[0], bots[2]]
+                .iter()
+                .all(|bot| by_bot[bot]["image"] == "img:new")
+    })
+    .await;
+    assert_eq!(by_bot[&bots[1]]["image"], "img:old");
+}
