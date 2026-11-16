@@ -8,7 +8,7 @@ use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, Payload},
 };
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 const NONCE: usize = 24;
@@ -19,7 +19,7 @@ pub struct Vault {
     cipher: XChaCha20Poly1305,
 }
 
-/// One step of an atomic [`Vault::write`].
+/// One step of an atomic [`Vault::write`] or [`Txn::write`].
 pub enum Op<'a> {
     Put(&'a str, &'a Row<'a>),
     Delete(&'a str, &'a str),
@@ -111,16 +111,8 @@ impl Vault {
         space: &str,
         key: &str,
     ) -> Result<Option<(Vec<u8>, i64, bool)>, Error> {
-        let row: Option<(Vec<u8>, i64, bool)> = sqlx::query_as(
-            "SELECT value,stamp,flag FROM social_device_state WHERE store_id=?1 AND space=?2 AND key=?3",
-        )
-        .bind(self.store)
-        .bind(space)
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await?;
-        row.map(|(sealed, stamp, flag)| Ok((self.open(space, key, &sealed)?, stamp, flag)))
-            .transpose()
+        let mut conn = self.pool.acquire().await?;
+        self.read_row(&mut conn, space, key).await
     }
 
     pub async fn put(&self, space: &str, key: &str, value: &[u8]) -> Result<(), Error> {
@@ -157,58 +149,125 @@ impl Vault {
         if ops.is_empty() {
             return Ok(());
         }
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        for op in ops {
-            match op {
-                Op::Put(space, row) => {
-                    sqlx::query(
-                        "INSERT INTO social_device_state(store_id,space,key,stamp,flag,value) VALUES(?1,?2,?3,?4,?5,?6)
-                         ON CONFLICT(store_id,space,key) DO UPDATE SET stamp=excluded.stamp,flag=excluded.flag,value=excluded.value",
-                    )
-                    .bind(self.store)
-                    .bind(*space)
-                    .bind(row.key)
-                    .bind(row.stamp)
-                    .bind(row.flag)
-                    .bind(self.seal(space, row.key, row.value)?)
-                    .execute(&mut *tx)
-                    .await?;
-                }
-                Op::Delete(space, key) => {
-                    sqlx::query(
-                        "DELETE FROM social_device_state WHERE store_id=?1 AND space=?2 AND key=?3",
-                    )
-                    .bind(self.store)
-                    .bind(*space)
-                    .bind(*key)
-                    .execute(&mut *tx)
-                    .await?;
-                }
-                Op::DeletePrefix(space, prefix) => {
-                    sqlx::query(
-                        "DELETE FROM social_device_state WHERE store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB)",
-                    )
-                    .bind(self.store)
-                    .bind(*space)
-                    .bind(*prefix)
-                    .execute(&mut *tx)
-                    .await?;
-                }
-                Op::Flag(space, key, flag) => {
-                    sqlx::query(
-                        "UPDATE social_device_state SET flag=?4 WHERE store_id=?1 AND space=?2 AND key=?3",
-                    )
-                    .bind(self.store)
-                    .bind(*space)
-                    .bind(*key)
-                    .bind(*flag)
-                    .execute(&mut *tx)
-                    .await?;
-                }
+        let mut tx = self.begin().await?;
+        tx.write(ops).await?;
+        tx.commit().await
+    }
+
+    /// Open a write transaction that holds SQLite's write lock from its first
+    /// statement, so whatever it reads stays current until it commits.
+    pub async fn begin(&self) -> Result<Txn<'_>, Error> {
+        Ok(Txn {
+            vault: self,
+            tx: self.pool.begin_with("BEGIN IMMEDIATE").await?,
+        })
+    }
+
+    async fn apply(&self, tx: &mut SqliteConnection, op: &Op<'_>) -> Result<(), Error> {
+        match op {
+            Op::Put(space, row) => {
+                sqlx::query(
+                    "INSERT INTO social_device_state(store_id,space,key,stamp,flag,value) VALUES(?1,?2,?3,?4,?5,?6)
+                     ON CONFLICT(store_id,space,key) DO UPDATE SET stamp=excluded.stamp,flag=excluded.flag,value=excluded.value",
+                )
+                .bind(self.store)
+                .bind(*space)
+                .bind(row.key)
+                .bind(row.stamp)
+                .bind(row.flag)
+                .bind(self.seal(space, row.key, row.value)?)
+                .execute(&mut *tx)
+                .await?;
+            }
+            Op::Delete(space, key) => {
+                sqlx::query(
+                    "DELETE FROM social_device_state WHERE store_id=?1 AND space=?2 AND key=?3",
+                )
+                .bind(self.store)
+                .bind(*space)
+                .bind(*key)
+                .execute(&mut *tx)
+                .await?;
+            }
+            Op::DeletePrefix(space, prefix) => {
+                sqlx::query(
+                    "DELETE FROM social_device_state WHERE store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB)",
+                )
+                .bind(self.store)
+                .bind(*space)
+                .bind(*prefix)
+                .execute(&mut *tx)
+                .await?;
+            }
+            Op::Flag(space, key, flag) => {
+                sqlx::query(
+                    "UPDATE social_device_state SET flag=?4 WHERE store_id=?1 AND space=?2 AND key=?3",
+                )
+                .bind(self.store)
+                .bind(*space)
+                .bind(*key)
+                .bind(*flag)
+                .execute(&mut *tx)
+                .await?;
             }
         }
-        tx.commit().await?;
         Ok(())
+    }
+
+    async fn read_row(
+        &self,
+        tx: &mut SqliteConnection,
+        space: &str,
+        key: &str,
+    ) -> Result<Option<(Vec<u8>, i64, bool)>, Error> {
+        let row: Option<(Vec<u8>, i64, bool)> = sqlx::query_as(
+            "SELECT value,stamp,flag FROM social_device_state WHERE store_id=?1 AND space=?2 AND key=?3",
+        )
+        .bind(self.store)
+        .bind(space)
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        row.map(|(sealed, stamp, flag)| Ok((self.open(space, key, &sealed)?, stamp, flag)))
+            .transpose()
+    }
+
+    async fn read_scan(
+        &self,
+        tx: &mut SqliteConnection,
+        space: &str,
+        prefix: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, Error> {
+        let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+            "SELECT key,value FROM social_device_state WHERE store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB) ORDER BY key",
+        )
+        .bind(self.store)
+        .bind(space)
+        .bind(prefix)
+        .fetch_all(&mut *tx)
+        .await?;
+        rows.into_iter()
+            .map(|(key, sealed)| {
+                let value = self.open(space, &key, &sealed)?;
+                Ok((key, value))
+            })
+            .collect()
+    }
+
+    async fn read_exists(
+        &self,
+        tx: &mut SqliteConnection,
+        space: &str,
+        prefix: &str,
+    ) -> Result<bool, Error> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM social_device_state WHERE store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB))",
+        )
+        .bind(self.store)
+        .bind(space)
+        .bind(prefix)
+        .fetch_one(&mut *tx)
+        .await?)
     }
 
     /// The value at `key` in an open transaction, refusing one longer than
@@ -432,30 +491,60 @@ impl Vault {
 
     /// Rows whose key starts with `prefix`, in key order.
     pub async fn scan(&self, space: &str, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, Error> {
-        let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
-            "SELECT key,value FROM social_device_state WHERE store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB) ORDER BY key",
-        )
-        .bind(self.store)
-        .bind(space)
-        .bind(prefix)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|(key, sealed)| {
-                let value = self.open(space, &key, &sealed)?;
-                Ok((key, value))
-            })
-            .collect()
+        let mut conn = self.pool.acquire().await?;
+        self.read_scan(&mut conn, space, prefix).await
     }
 
     pub async fn exists(&self, space: &str, prefix: &str) -> Result<bool, Error> {
-        Ok(sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM social_device_state WHERE store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB))",
-        )
-        .bind(self.store)
-        .bind(space)
-        .bind(prefix)
-        .fetch_one(&self.pool)
-        .await?)
+        let mut conn = self.pool.acquire().await?;
+        self.read_exists(&mut conn, space, prefix).await
+    }
+}
+
+/// A [`Vault::begin`] transaction: reads see the rows as they stand under
+/// the write lock, and writes land together on [`Txn::commit`]. Dropping it
+/// rolls everything back.
+pub struct Txn<'a> {
+    vault: &'a Vault,
+    tx: sqlx::Transaction<'static, sqlx::Sqlite>,
+}
+
+impl Txn<'_> {
+    pub async fn get(&mut self, space: &str, key: &str) -> Result<Option<Vec<u8>>, Error> {
+        Ok(self.get_row(space, key).await?.map(|(value, _, _)| value))
+    }
+
+    /// A row's value, stamp, and flag.
+    pub async fn get_row(
+        &mut self,
+        space: &str,
+        key: &str,
+    ) -> Result<Option<(Vec<u8>, i64, bool)>, Error> {
+        self.vault.read_row(&mut self.tx, space, key).await
+    }
+
+    /// Rows whose key starts with `prefix`, in key order.
+    pub async fn scan(
+        &mut self,
+        space: &str,
+        prefix: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, Error> {
+        self.vault.read_scan(&mut self.tx, space, prefix).await
+    }
+
+    pub async fn exists(&mut self, space: &str, prefix: &str) -> Result<bool, Error> {
+        self.vault.read_exists(&mut self.tx, space, prefix).await
+    }
+
+    /// Apply `ops` in order inside this transaction.
+    pub async fn write(&mut self, ops: &[Op<'_>]) -> Result<(), Error> {
+        for op in ops {
+            self.vault.apply(&mut self.tx, op).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn commit(self) -> Result<(), Error> {
+        Ok(self.tx.commit().await?)
     }
 }

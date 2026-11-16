@@ -163,6 +163,34 @@ impl Backend {
         Ok(self.vault.put(space, key, &encode(value)?).await?)
     }
 
+    /// Read the token row for `jid`, merge into it with `merge`, and write
+    /// it back, all under one write lock so concurrent merges never lose an
+    /// input.
+    async fn merge_tc_token(
+        &self,
+        jid: &str,
+        merge: impl FnOnce(Option<TcTokenEntry>) -> TcTokenEntry,
+    ) -> Result<()> {
+        let mut tx = self.vault.begin().await?;
+        let current = tx
+            .get(TC_TOKEN, jid)
+            .await?
+            .map(|bytes| decode(&bytes))
+            .transpose()?;
+        let value = encode(&merge(current))?;
+        tx.write(&[Op::Put(
+            TC_TOKEN,
+            &Row {
+                key: jid,
+                value: &value,
+                stamp: 0,
+                flag: false,
+            },
+        )])
+        .await?;
+        Ok(tx.commit().await?)
+    }
+
     async fn delete_one(&self, space: &str, key: &str) -> Result<()> {
         Ok(self.vault.write(&[Op::Delete(space, key)]).await?)
     }
@@ -557,9 +585,12 @@ impl ProtocolStore for Backend {
     }
 
     async fn put_lid_mapping(&self, entry: &LidPnMappingEntry) -> Result<()> {
-        let old_phone = self
-            .get_lid_mapping(&entry.lid)
+        let mut tx = self.vault.begin().await?;
+        let old_phone = tx
+            .get(LID, &entry.lid)
             .await?
+            .map(|bytes| decode::<LidPnMappingEntry>(&bytes))
+            .transpose()?
             .map(|old| old.phone_number)
             .filter(|phone| *phone != entry.phone_number);
         let value = encode(entry)?;
@@ -581,7 +612,8 @@ impl ProtocolStore for Backend {
         }
         ops.push(Op::Put(PN, &pn_row));
         ops.push(Op::Put(LID, &lid_row));
-        Ok(self.vault.write(&ops).await?)
+        tx.write(&ops).await?;
+        Ok(tx.commit().await?)
     }
 
     async fn get_all_lid_mappings(&self) -> Result<Vec<LidPnMappingEntry>> {
@@ -673,8 +705,9 @@ impl ProtocolStore for Backend {
     }
 
     async fn delete_expired_tc_tokens(&self, token_cutoff: i64, sender_cutoff: i64) -> Result<u32> {
+        let mut tx = self.vault.begin().await?;
         let mut doomed = Vec::new();
-        for (jid, value) in self.vault.scan(TC_TOKEN, "").await? {
+        for (jid, value) in tx.scan(TC_TOKEN, "").await? {
             let entry: TcTokenEntry = decode(&value)?;
             let token_live = !entry.token.is_empty() && entry.token_timestamp >= token_cutoff;
             let sender_live = entry.sender_timestamp.is_some_and(|ts| ts >= sender_cutoff);
@@ -682,7 +715,9 @@ impl ProtocolStore for Backend {
                 doomed.push(jid);
             }
         }
-        self.vault.delete(TC_TOKEN, &doomed).await?;
+        let ops: Vec<Op<'_>> = doomed.iter().map(|jid| Op::Delete(TC_TOKEN, jid)).collect();
+        tx.write(&ops).await?;
+        tx.commit().await?;
         Ok(u32::try_from(doomed.len()).unwrap_or(u32::MAX))
     }
 
@@ -691,7 +726,7 @@ impl ProtocolStore for Backend {
         jid: &str,
         sender_timestamp: i64,
     ) -> Result<()> {
-        let entry = match self.get_tc_token(jid).await? {
+        self.merge_tc_token(jid, |current| match current {
             Some(mut entry) => {
                 entry.sender_timestamp = Some(
                     entry
@@ -705,8 +740,8 @@ impl ProtocolStore for Backend {
                 token_timestamp: sender_timestamp,
                 sender_timestamp: Some(sender_timestamp),
             },
-        };
-        self.put_tc_token(jid, &entry).await
+        })
+        .await
     }
 
     async fn store_received_tc_token(
@@ -715,7 +750,7 @@ impl ProtocolStore for Backend {
         token: &[u8],
         token_timestamp: i64,
     ) -> Result<()> {
-        let entry = match self.get_tc_token(jid).await? {
+        self.merge_tc_token(jid, |current| match current {
             Some(mut entry) => {
                 if entry.token.is_empty() || token_timestamp >= entry.token_timestamp {
                     entry.token = token.to_vec();
@@ -728,8 +763,8 @@ impl ProtocolStore for Backend {
                 token_timestamp,
                 sender_timestamp: None,
             },
-        };
-        self.put_tc_token(jid, &entry).await
+        })
+        .await
     }
 
     async fn store_sent_message(
@@ -972,13 +1007,13 @@ fn split_secret(value: &[u8]) -> Result<(&[u8], i64)> {
 impl MsgSecretStore for Backend {
     async fn put_msg_secrets(&self, entries: Vec<MsgSecretEntry>) -> Result<usize> {
         let stored = entries.len();
+        let mut tx = self.vault.begin().await?;
         let mut merged: HashMap<String, (i64, Vec<u8>)> = HashMap::new();
         for entry in entries {
             let key = join(&[&entry.chat, &entry.sender, &entry.msg_id]);
             let previous = match merged.remove(&key) {
                 Some((expires_at, value)) => Some((value, expires_at)),
-                None => self
-                    .vault
+                None => tx
                     .get_row(MSG_SECRET, &key)
                     .await?
                     .map(|(value, expires_at, _)| (value, expires_at)),
@@ -1001,7 +1036,9 @@ impl MsgSecretStore for Backend {
                 flag: false,
             })
             .collect();
-        self.vault.put_rows(MSG_SECRET, &rows).await?;
+        let ops: Vec<Op<'_>> = rows.iter().map(|row| Op::Put(MSG_SECRET, row)).collect();
+        tx.write(&ops).await?;
+        tx.commit().await?;
         Ok(stored)
     }
 
@@ -1048,9 +1085,21 @@ impl DeviceStore for Backend {
     }
 
     async fn create(&self) -> Result<i32> {
-        if !self.exists().await? {
-            self.save(&Device::new()).await?;
+        let mut tx = self.vault.begin().await?;
+        if !tx.exists(DEVICE, DEVICE).await? {
+            let value = encode(&Device::new())?;
+            tx.write(&[Op::Put(
+                DEVICE,
+                &Row {
+                    key: DEVICE,
+                    value: &value,
+                    stamp: 0,
+                    flag: false,
+                },
+            )])
+            .await?;
         }
+        tx.commit().await?;
         Ok(1)
     }
 }
@@ -1272,6 +1321,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(b.get_latest_sync_key_id().await.unwrap(), Some(vec![5, 6]));
+    }
+
+    #[tokio::test]
+    async fn concurrent_token_merges_keep_every_input() {
+        let db = pool().await;
+        let device = store::new_device(&db).await.unwrap();
+        let b = backend(&db, device, 1).await;
+        let touches = (0..16).map(|i| b.touch_tc_token_sender_timestamp("u", 5000 + i));
+        let tokens = (0..16).map(|i| {
+            let token = vec![u8::try_from(i).unwrap()];
+            let b = &b;
+            async move { b.store_received_tc_token("u", &token, 4000 + i).await }
+        });
+        let (touched, stored) = tokio::join!(
+            futures_util::future::join_all(touches),
+            futures_util::future::join_all(tokens.rev())
+        );
+        touched.into_iter().chain(stored).for_each(|r| r.unwrap());
+        let entry = b.get_tc_token("u").await.unwrap().unwrap();
+        assert_eq!(
+            entry.sender_timestamp,
+            Some(5015),
+            "a sender timestamp never regresses"
+        );
+        assert_eq!(entry.token, vec![15], "the newest token wins");
+        assert_eq!(entry.token_timestamp, 4015);
+
+        let secret = [4; MESSAGE_SECRET_SIZE];
+        let entry = |expires_at, message_ts| MsgSecretEntry {
+            chat: Arc::from("c"),
+            sender: Arc::from("s"),
+            msg_id: Arc::from("m"),
+            secret,
+            expires_at,
+            message_ts,
+        };
+        let (first, second) = tokio::join!(
+            b.put_msg_secrets(vec![entry(100, 50)]),
+            b.put_msg_secrets(vec![entry(200, 0)])
+        );
+        first.unwrap();
+        second.unwrap();
+        let stored = b
+            .get_stored_msg_secret("c", "s", "m")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.message_ts, Some(50), "the known time survives");
+        assert_eq!(
+            b.delete_expired_msg_secrets(199).await.unwrap(),
+            0,
+            "the later deadline survives"
+        );
     }
 
     #[tokio::test]
