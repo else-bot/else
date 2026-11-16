@@ -61,8 +61,11 @@ impl BackupWorker {
         let Some(replicator) = &self.replicator else {
             return Ok(None);
         };
-        let _lock = super::try_lock(&self.config.dir)?
-            .ok_or_else(|| BackupError::Refused("another backup is running".into()))?;
+        let lock = Arc::new(
+            super::try_lock(&self.config.dir)?
+                .ok_or_else(|| BackupError::Refused("another backup is running".into()))?,
+        );
+        self.adopt_sets(&lock).await?;
         replicator
             .replicate_pending(&self.config.dir, &self.key)
             .await
@@ -108,6 +111,7 @@ impl BackupWorker {
         );
         self.recover_locked(&lock).await?;
         let mut summary = self.locked_run(cancel).await?;
+        self.adopt_sets(&lock).await?;
         if upload && let Some(replicator) = &self.replicator {
             summary.remote = Some(
                 replicator
@@ -118,6 +122,24 @@ impl BackupWorker {
         }
         self.apply_local_retention(&summary.set_id, &lock).await?;
         Ok(summary)
+    }
+
+    /// Move every whole local set, the one just captured and any an earlier
+    /// version kept, into the chunk store. A set that fails stays whole and
+    /// is tried again on the next run.
+    async fn adopt_sets(&self, lock: &Arc<super::DirLock>) -> Result<(), BackupError> {
+        let (dir, key, lock) = (self.config.dir.clone(), self.key.clone(), lock.clone());
+        tokio::task::spawn_blocking(move || {
+            let _lock = lock;
+            for set in super::completed_sets(&dir)? {
+                if let Err(err) = super::store::adopt(&dir.join(&set), &key) {
+                    tracing::warn!(set = %set, error = %err, "a backup set stays whole for now");
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| BackupError::Io(e.to_string()))?
     }
 
     /// Blocking work that removes sets or chunks holds `lock` itself, so a

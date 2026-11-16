@@ -1157,3 +1157,79 @@ async fn the_chunk_store_sweeps_only_chunks_no_readable_kept_set_uses() {
         assert!(target.exists().await);
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn whole_sets_move_into_the_chunk_store_and_a_damaged_one_stays_whole() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let params = DatabaseParams::parse(app.db.url.expose()).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let coordinator = else_api::backup::capture::Coordinator::default();
+    let mut whole = Vec::new();
+    for _ in 0..2 {
+        let set = else_api::backup::capture::create_set(
+            &app.db.pool,
+            &params,
+            &key(1),
+            &cfg,
+            &backup::new_set_id(),
+            &cancel,
+            &coordinator,
+        )
+        .await
+        .unwrap();
+        assert!(set.path.join(backup::DATABASE).exists(), "captured whole");
+        whole.push(set);
+    }
+    let damaged = whole[1].path.join(backup::DATABASE);
+    let len = std::fs::metadata(&damaged).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&damaged)
+        .unwrap()
+        .set_len(len - 100)
+        .unwrap();
+
+    let names = |set: &Path| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(set)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let worker = worker(&app, key(1), cfg);
+    let newest = worker.run_once().await.unwrap();
+    for set in [&whole[0].path, &newest.path] {
+        assert_eq!(
+            names(set),
+            [".else-backup", "complete.json", "index.json.age"],
+            "{} keeps only its index",
+            set.display()
+        );
+    }
+    assert!(
+        names(&whole[1].path).contains(&backup::MANIFEST.to_owned()),
+        "a set whose artifacts do not match its manifest is not converted"
+    );
+
+    std::fs::write(
+        whole[0].path.join(backup::DATABASE),
+        "left by an interrupted move",
+    )
+    .unwrap();
+    worker.run_once().await.unwrap();
+    assert_eq!(
+        names(&whole[0].path),
+        [".else-backup", "complete.json", "index.json.age"]
+    );
+    let target = Target::new(&app);
+    let staging = dir.path().join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    restore_into(&app, &whole[0].path, &key(1), &target, &staging)
+        .await
+        .unwrap();
+    assert!(target.exists().await);
+}

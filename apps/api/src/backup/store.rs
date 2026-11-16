@@ -3,15 +3,15 @@
 //! A published local set is `<set id>/complete.json` and
 //! `<set id>/index.json.age`, the layout of a remote set (see [`super::chunks`]),
 //! over one `chunks/<key id>/` directory that every set in the backup
-//! directory shares. Capture writes a set whole into its staging directory,
-//! then [`chunk_set`] moves each artifact into the store before the set is
-//! published, so bytes that did not change since an earlier set are stored
-//! once however many sets keep them. Each chunk file is the object a bucket
+//! directory shares. Capture publishes a set whole, then [`adopt`] moves
+//! each artifact into the store, so bytes that did not change since an
+//! earlier set are stored once however many sets keep them. Sets an earlier
+//! version kept whole move the same way. Each chunk file is the object a bucket
 //! holds under the same name, so replication uploads it as it is.
 //!
 //! A chunk is written under a temporary name, synced, and renamed into
 //! place, so a chunk file present under its id is whole, and the store's
-//! directories are synced before the set is published. A capture checks an
+//! directories are synced before a set names its chunks. A capture checks an
 //! existing chunk before reusing it and replaces a damaged one. Only
 //! [`sweep`], under the backup lock during recovery and after retention,
 //! removes chunks: temporary files and chunks no published set's index
@@ -25,7 +25,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use super::chunks::{self, CHUNKS, ChunkKeys, ChunkRef, Encoding, INDEX, Index, Stored};
-use super::{BackupError, Completion, MANIFEST, Manifest, ObjectRef};
+use super::{BackupError, Completion, ObjectRef};
 use crate::credentials::SecretKey;
 
 const TEMP_PREFIX: &str = ".tmp-";
@@ -109,65 +109,84 @@ impl Store {
     }
 }
 
-/// Move every artifact of the whole set staged at `staging` into the store
-/// of `backups` and replace its manifest with a chunk index. Returns the
-/// completion record to publish.
-pub fn chunk_set(
-    staging: &Path,
-    backups: &Path,
-    keys: &ChunkKeys,
-    identity: &age::x25519::Identity,
-    manifest: &Manifest,
-    completion: &Completion,
-) -> Result<Completion, BackupError> {
-    let store = Store::open(backups, keys);
-    store.ensure()?;
-    let mut artifacts = Vec::new();
-    for artifact in &manifest.artifacts {
-        let encoding = Encoding::of(artifact, manifest.schema_version);
-        let (chunks, bytes, sha256) =
-            chunks::read_stored(staging, artifact, identity, encoding, |input| {
-                chunks::split(keys, input, |id, bytes| {
-                    store.put(keys, id, bytes).map(drop)
-                })
-            })?;
-        let path = staging.join(&artifact.object);
-        fs::remove_file(&path).map_err(|e| BackupError::io(path.display(), e))?;
-        artifacts.push(Stored {
-            object: artifact.object.clone(),
-            encoding,
-            bytes,
-            sha256,
-            chunks,
-        });
+/// Move the published set at `set_dir` into the store of its backup
+/// directory, if it is still whole, and leave only its index. Replacing the
+/// completion record is the one step that switches the set over, after its
+/// chunks and index are synced, so a crash leaves a whole set or a chunked
+/// one. Run again on a chunked set, it only removes whole files an
+/// interrupted run left. The caller holds the backup lock.
+pub fn adopt(set_dir: &Path, key: &SecretKey) -> Result<(), BackupError> {
+    let completion = super::restore::read_completion(set_dir)?;
+    if completion.manifest.object != INDEX {
+        let (completion, manifest, identity) = super::restore::open_set(set_dir, key)?;
+        let backups = set_dir
+            .parent()
+            .ok_or_else(|| BackupError::Invalid("the set has no backup directory".into()))?;
+        let keys = ChunkKeys::derive(key)?;
+        let store = Store::open(backups, &keys);
+        store.ensure()?;
+        let mut artifacts = Vec::new();
+        for artifact in &manifest.artifacts {
+            let encoding = Encoding::of(artifact, manifest.schema_version);
+            let (chunks, bytes, sha256) =
+                chunks::read_stored(set_dir, artifact, &identity, encoding, |input| {
+                    chunks::split(&keys, input, |id, bytes| {
+                        store.put(&keys, id, bytes).map(drop)
+                    })
+                })?;
+            artifacts.push(Stored {
+                object: artifact.object.clone(),
+                encoding,
+                bytes,
+                sha256,
+                chunks,
+            });
+        }
+        super::sync_dir(&store.root)?;
+        if let Some(chunks) = store.root.parent() {
+            super::sync_dir(chunks)?;
+        }
+        super::sync_dir(backups)?;
+        let index = Index {
+            index_version: chunks::INDEX_VERSION,
+            manifest,
+            artifacts,
+        };
+        let plain = serde_json::to_vec(&index).expect("serializable");
+        if plain.len() as u64 > chunks::MAX_INDEX_BYTES {
+            return Err(BackupError::Invalid("the chunk index is too large".into()));
+        }
+        let sealed = chunks::encrypt(&identity, &plain)?;
+        let index_path = set_dir.join(INDEX);
+        crate::private_file::replace(&index_path, &sealed)
+            .map_err(|e| BackupError::io(index_path.display(), e))?;
+        let chunked = Completion {
+            manifest: ObjectRef {
+                object: INDEX.into(),
+                ciphertext_bytes: sealed.len() as u64,
+                ciphertext_sha256: super::sha256_hex(&sealed),
+            },
+            ..completion
+        };
+        let complete = set_dir.join(super::COMPLETE);
+        crate::private_file::replace(
+            &complete,
+            &serde_json::to_vec_pretty(&chunked).expect("serializable"),
+        )
+        .map_err(|e| BackupError::io(complete.display(), e))?;
     }
-    super::sync_dir(&store.root)?;
-    if let Some(chunks) = store.root.parent() {
-        super::sync_dir(chunks)?;
+    for entry in fs::read_dir(set_dir).map_err(|e| BackupError::io(set_dir.display(), e))? {
+        let entry = entry.map_err(|e| BackupError::io(set_dir.display(), e))?;
+        let name = entry.file_name();
+        if ![super::MARKER, super::COMPLETE, INDEX]
+            .map(std::ffi::OsStr::new)
+            .contains(&name.as_os_str())
+        {
+            let path = entry.path();
+            fs::remove_file(&path).map_err(|e| BackupError::io(path.display(), e))?;
+        }
     }
-    super::sync_dir(backups)?;
-    let index = Index {
-        index_version: chunks::INDEX_VERSION,
-        manifest: manifest.clone(),
-        artifacts,
-    };
-    let plain = serde_json::to_vec(&index).expect("serializable");
-    if plain.len() as u64 > chunks::MAX_INDEX_BYTES {
-        return Err(BackupError::Invalid("the chunk index is too large".into()));
-    }
-    let sealed = chunks::encrypt(identity, &plain)?;
-    super::write_new(&staging.join(INDEX), &sealed)?;
-    let manifest_path = staging.join(MANIFEST);
-    fs::remove_file(&manifest_path).map_err(|e| BackupError::io(manifest_path.display(), e))?;
-    super::sync_dir(staging)?;
-    Ok(Completion {
-        manifest: ObjectRef {
-            object: INDEX.into(),
-            ciphertext_bytes: sealed.len() as u64,
-            ciphertext_sha256: super::sha256_hex(&sealed),
-        },
-        ..completion.clone()
-    })
+    super::sync_dir(set_dir)
 }
 
 /// Open the index of the chunked local set at `set_dir`.
