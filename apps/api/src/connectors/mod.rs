@@ -428,7 +428,7 @@ impl ConnectorManager {
         self.authorization(&account, command).await?;
         let auth = self.auth(&account).await?;
         self.authorization(&account, command).await?;
-        if command.command.mutates() {
+        let action_id = if command.command.mutates() {
             let action_id = command.action_id.expect("validated action ID");
             match store::begin_action(
                 &self.db,
@@ -443,45 +443,35 @@ impl ConnectorManager {
             .map_err(|_| MailError::new("mail_action_conflict"))?
             {
                 store::ActionStart::Existing(receipt) => return Ok(receipt),
-                store::ActionStart::Dispatch => {}
+                store::ActionStart::Dispatch => Some(action_id),
             }
-            let result = self
-                .execute_as(&account, &auth, &command.command, rejected)
-                .await;
-            let (status, receipt) = match result {
-                Ok(value) => (
-                    store::ActionStatus::Succeeded,
-                    json!({"action_id":action_id,"status":"succeeded","result":value}),
-                ),
-                Err(error) => (
-                    store::ActionStatus::Uncertain,
-                    json!({"action_id":action_id,"status":"uncertain","error":error.code,"instruction":"Inspect the mailbox before starting a different action. This action will not be retried."}),
-                ),
-            };
-            store::finish_action(&self.db, id, action_id, status, &receipt)
-                .await
-                .map_err(|_| MailError::new("mail_receipt_unavailable"))?;
-            Ok(receipt)
         } else {
-            self.execute_as(&account, &auth, &command.command, rejected)
-                .await
-        }
-    }
-
-    async fn execute_as(
-        &self,
-        account: &Account,
-        auth: &Auth,
-        command: &MailCommand,
-        rejected: &mut Option<i64>,
-    ) -> Result<Value, MailError> {
-        let result = self.transport.execute(&account.config, auth, command).await;
-        if let Err(error) = &result
-            && error.code == AUTHENTICATION_FAILED
-        {
+            None
+        };
+        let result = self
+            .transport
+            .execute(&account.config, &auth, &command.command)
+            .await;
+        if matches!(&result, Err(error) if error.code == AUTHENTICATION_FAILED) {
             *rejected = Some(account.generation);
         }
-        result
+        let Some(action_id) = action_id else {
+            return result;
+        };
+        let (status, receipt) = match result {
+            Ok(value) => (
+                store::ActionStatus::Succeeded,
+                json!({"action_id":action_id,"status":"succeeded","result":value}),
+            ),
+            Err(error) => (
+                store::ActionStatus::Uncertain,
+                json!({"action_id":action_id,"status":"uncertain","error":error.code,"instruction":"Inspect the mailbox before starting a different action. This action will not be retried."}),
+            ),
+        };
+        store::finish_action(&self.db, id, action_id, status, &receipt)
+            .await
+            .map_err(|_| MailError::new("mail_receipt_unavailable"))?;
+        Ok(receipt)
     }
 
     async fn prepare_watch(&self, id: Uuid) -> Result<(Account, Auth), MailError> {
