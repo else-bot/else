@@ -111,6 +111,7 @@ pub fn export(turn: Turn) -> Value {
         outgoing_drafts: vec![],
         social_setups: vec![],
         mcp_waits: vec![],
+        mcp_waits_in_progress: vec![],
         computer_job_waits: vec![],
         skill_installs: Vec::new(),
         computer_handoffs: Vec::new(),

@@ -261,7 +261,7 @@ async fn a_cancelled_job_also_continues_the_request_and_an_ended_job_returns_at_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_second_wait_is_refused_and_a_follow_up_withdraws_the_wait() {
+async fn a_second_wait_is_refused_and_a_follow_up_carries_the_wait() {
     let Setup {
         app,
         guest,
@@ -317,21 +317,28 @@ async fn a_second_wait_is_refused_and_a_follow_up_withdraws_the_wait() {
         .send(
             &bot,
             Uuid::new_v4(),
-            "Never mind, skip the crawl.",
+            "Also summarize the crawl when it ends.",
             Some("synthetic"),
         )
         .await;
     assert_eq!(follow_up.status, StatusCode::ACCEPTED, "{}", follow_up.body);
+    let next: Uuid = follow_up.body["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
     settle(&app, turn, "interrupted").await;
-    assert_eq!(wait_row(&app, turn).await, ("cancelled".into(), None));
+    settle(&app, next, "waiting").await;
+    assert_eq!(wait_row(&app, next).await, ("pending".into(), None));
 
     guest.report("done 0\n");
     manager.job(bot.parse().unwrap(), job).await.unwrap();
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    settle(&app, next, "completed").await;
+    assert_eq!(wait_row(&app, next).await, ("settled".into(), Some(2)));
     assert_eq!(
-        app.wait_turn(&turn.to_string(), &["interrupted"]).await,
-        "interrupted",
-        "a withdrawn wait does not revive its request"
+        attempts(&app, next).await,
+        2,
+        "the latest request continued"
     );
-    assert_eq!(attempts(&app, turn).await, 1);
+    assert_eq!(attempts(&app, turn).await, 1, "the superseded one did not");
 }

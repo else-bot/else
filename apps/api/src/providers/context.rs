@@ -1,6 +1,6 @@
 //! Context a native session keeps until it changes: the bot's rules file,
 //! the bot registry, the saved-permission snapshot, the installed shared
-//! MCPs, the delegated tasks still in progress, the installed skills the bot
+//! MCPs, the delegated tasks and MCP jobs still in progress, the installed skills the bot
 //! may use, whether the owner still holds its computer, and the approved
 //! calls that ran in turns that did not complete. Each block rides in the turn packet only
 //! when its content hash differs from the one the session acknowledged, so
@@ -23,7 +23,7 @@ pub struct Update {
 /// The blocks for this turn, by receipt key. An empty block does not apply
 /// to this turn (a webhook wake has no saved-permission snapshot): it is not
 /// sent and the session keeps the receipt of the copy it holds.
-fn blocks(input: &TurnInput) -> [(&'static str, String); 8] {
+fn blocks(input: &TurnInput) -> [(&'static str, String); 9] {
     [
         // The bot's rules file, verbatim; a cleared file renders its own block,
         // so a session that held rules learns they are gone.
@@ -39,6 +39,7 @@ fn blocks(input: &TurnInput) -> [(&'static str, String); 8] {
         ("permissions", prompt::permissions_block(input)),
         ("mcps", prompt::mcps_block(input)),
         ("in_progress", prompt::in_progress_block(input)),
+        ("mcp_waits", prompt::mcp_waits_in_progress_block(input)),
         ("skills", prompt::skills_block(input)),
         ("computer_control", prompt::computer_control_block(input)),
         ("ran_actions", prompt::ran_actions_block(input)),
@@ -160,6 +161,40 @@ mod tests {
         );
         turn.delegation.task_depth = crate::db::delegations::MAX_DEPTH;
         assert!(prompt::in_progress_block(&turn).is_empty());
+    }
+
+    #[test]
+    fn a_session_learns_which_mcp_jobs_it_still_waits_on() {
+        let mut turn = input();
+        assert_eq!(prompt::mcp_waits_in_progress_block(&turn), "");
+        turn.mcps = Some(vec![]);
+        let idle = for_session(&turn, None);
+        assert!(
+            idle.text
+                .unwrap()
+                .contains("[else.bot MCP jobs in progress]")
+        );
+        turn.mcp_waits_in_progress = vec![crate::app::providers::McpWaitInProgress {
+            id: Uuid::from_u128(7),
+            mcp_id: "t3-code".into(),
+            tool: "t3_thread_wait".into(),
+            purpose: "Review the PR once the thread finishes.".into(),
+            checks: 3,
+        }];
+        let waiting = for_session(&turn, Some(&session(idle.applied.clone())));
+        let text = waiting.text.unwrap();
+        assert!(
+            text.contains("mcp=\"t3-code\" tool=\"t3_thread_wait\" checks=\"3\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("Review the PR once the thread finishes."),
+            "{text}"
+        );
+
+        turn.mcp_waits_in_progress.clear();
+        let done = for_session(&turn, Some(&session(waiting.applied)));
+        assert!(done.text.unwrap().contains("None."));
     }
 
     #[test]
