@@ -119,7 +119,7 @@ impl Imap {
                     });
                 }
                 ImapCoroutineState::Complete(Err(_)) => {
-                    return Err(MailError::new("mail_authentication_failed"));
+                    return Err(MailError::new(AUTHENTICATION_FAILED));
                 }
                 ImapCoroutineState::Yielded(y) => match y {
                     ImapSessionOpenYield::WantsTcpConnect { host, port } => {
@@ -270,7 +270,7 @@ impl Smtp {
                     });
                 }
                 SmtpCoroutineState::Complete(Err(_)) => {
-                    return Err(MailError::new("mail_authentication_failed"));
+                    return Err(MailError::new(AUTHENTICATION_FAILED));
                 }
                 SmtpCoroutineState::Yielded(y) => match y {
                     SmtpSessionOpenYield::WantsTcpConnect { host, port } => {

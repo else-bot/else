@@ -84,6 +84,16 @@ pub struct Account {
     pub health: String,
 }
 
+/// The health an account records when its server rejects the saved
+/// credential, until the owner replaces it.
+pub const AUTHENTICATION_FAILED: &str = "mail_authentication_failed";
+
+impl Account {
+    pub fn credential_rejected(&self) -> bool {
+        self.health == AUTHENTICATION_FAILED
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Permissions {
@@ -289,6 +299,9 @@ pub struct Auth {
 
 #[async_trait::async_trait]
 pub trait MailTransport: Send + Sync {
+    /// Signs in to IMAP and SMTP once, so a rejected password fails before
+    /// it is saved.
+    async fn verify(&self, config: &MailConfig, auth: &Auth) -> Result<(), MailError>;
     async fn execute(
         &self,
         config: &MailConfig,

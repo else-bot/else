@@ -213,6 +213,39 @@ impl ConnectorManager {
             .map_err(|_| MailError::new("mail_account_unavailable"))?
     }
 
+    /// Signs in with an owner's new password before it is saved. An OAuth
+    /// credential comes from a completed sign-in and needs no check.
+    pub async fn verify(
+        &self,
+        config: &MailConfig,
+        credential: &Credential,
+    ) -> Result<(), MailError> {
+        let Credential::Password { password } = credential else {
+            return Ok(());
+        };
+        let auth = Auth {
+            username: config.username.clone(),
+            secret: zeroize::Zeroizing::new(password.clone()),
+            oauth: false,
+        };
+        self.transport.verify(config, &auth).await.map_err(|error| {
+            match (error.code, config.provider) {
+                (AUTHENTICATION_FAILED, Provider::Icloud) => error.detail(
+                    "Apple rejected the password. Use an app-specific password, not your Apple \
+                     Account password.",
+                ),
+                (AUTHENTICATION_FAILED, _) => error.detail(
+                    "The mail server rejected the username or password. Check them, or use an \
+                     app password from your provider.",
+                ),
+                _ => MailError::new("mail_sign_in_failed").detail(
+                    "Could not sign in to the mail server. Check your connection and the server \
+                     settings, then try again.",
+                ),
+            }
+        })
+    }
+
     async fn save_owner_credential(
         &self,
         id: Uuid,

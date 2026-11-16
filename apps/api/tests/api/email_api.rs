@@ -147,21 +147,32 @@ async fn desktop_oauth_can_choose_google_account_and_cancel_owner_only() {
 
 #[tokio::test]
 async fn owner_can_connect_pause_replace_credentials_and_disconnect_privately() {
-    let app = TestApp::installed().await;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let stub = tokio::spawn(async move {
-        while let Ok((socket, _)) = listener.accept().await {
-            drop(socket);
-        }
-    });
-    let mut config = config();
-    config.imap = Endpoint {
-        host: "127.0.0.1".into(),
-        port,
-        start_tls: false,
-    };
-    config.smtp = config.imap.clone();
+    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+    let app = &h.app;
+    let config = config();
+    let rejected = app
+        .owner(
+            "POST",
+            "/v1/connectors/email/accounts",
+            Some(json!({"config":config,"credential":{"kind":"password","password":REVOKED}})),
+        )
+        .await;
+    assert_eq!(
+        rejected.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        rejected.body
+    );
+    assert_eq!(rejected.body["error"]["code"], "mail_authentication_failed");
+    assert!(
+        app.owner("GET", "/v1/connectors/email/accounts", None)
+            .await
+            .body["accounts"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "a rejected password saves no account"
+    );
     let created = app.owner("POST","/v1/connectors/email/accounts",Some(json!({"config":config,"credential":{"kind":"password","password":"private-app-password"}}))).await;
     assert_eq!(created.status, StatusCode::OK, "{}", created.body);
     assert!(!created.body.to_string().contains("private-app-password"));
@@ -177,6 +188,19 @@ async fn owner_can_connect_pause_replace_credentials_and_disconnect_privately() 
             .await
             .status,
         StatusCode::OK
+    );
+    let replaced = app
+        .owner(
+            "PUT",
+            &format!("{path}/credentials"),
+            Some(json!({"kind":"password","password":REVOKED})),
+        )
+        .await;
+    assert_eq!(
+        replaced.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        replaced.body
     );
     assert_eq!(
         app.owner(
@@ -224,7 +248,6 @@ async fn owner_can_connect_pause_replace_credentials_and_disconnect_privately() 
         app.owner("GET", &path, None).await.status,
         StatusCode::NOT_FOUND
     );
-    stub.abort();
 }
 
 #[tokio::test]
@@ -671,6 +694,18 @@ struct Transport {
     uncertain: bool,
 }
 
+/// A password QuietInbox's server rejects, as Apple rejects a revoked
+/// app-specific password.
+const REVOKED: &str = "revoked-app-password";
+
+fn rejects(auth: &Auth) -> Result<(), MailError> {
+    if auth.secret.as_str() == REVOKED {
+        Err(MailError::new(AUTHENTICATION_FAILED))
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct QuietInbox {
     scans: AtomicUsize,
@@ -679,7 +714,16 @@ struct QuietInbox {
 }
 #[async_trait::async_trait]
 impl MailTransport for QuietInbox {
-    async fn execute(&self, _: &MailConfig, _: &Auth, _: &MailCommand) -> Result<Value, MailError> {
+    async fn verify(&self, _: &MailConfig, auth: &Auth) -> Result<(), MailError> {
+        rejects(auth)
+    }
+    async fn execute(
+        &self,
+        _: &MailConfig,
+        auth: &Auth,
+        _: &MailCommand,
+    ) -> Result<Value, MailError> {
+        rejects(auth)?;
         Ok(json!({"folders":[]}))
     }
     async fn scan(&self, _: &MailConfig, _: &Auth, _: Option<&Cursor>) -> Result<Scan, MailError> {
@@ -749,6 +793,9 @@ async fn quiet_watchers_survive_bot_commands_and_never_queue_empty_turns() {
 }
 #[async_trait::async_trait]
 impl MailTransport for Transport {
+    async fn verify(&self, _: &MailConfig, _: &Auth) -> Result<(), MailError> {
+        Ok(())
+    }
     async fn execute(&self, _: &MailConfig, _: &Auth, _: &MailCommand) -> Result<Value, MailError> {
         self.sends.fetch_add(1, Ordering::SeqCst);
         if self.uncertain {
@@ -1494,6 +1541,226 @@ async fn a_bot_asks_the_owner_to_sign_in_to_an_inbox_from_chat() {
     .await;
     assert_eq!(chosen.result["account_id"], other_mailbox.id.to_string());
     h.release(turn).await;
+}
+
+/// Parks a running turn on an inbox card and returns its question ID.
+async fn parked_card(app: &TestApp, token: &str, args: Value) -> (String, Value) {
+    let parked = tool(app, token, "mail_connect", args).await;
+    assert_eq!(
+        parked.result["status"], "pending_owner_auth",
+        "{}",
+        parked.body
+    );
+    let question = parked.result["question_id"].as_str().unwrap().to_owned();
+    let bot = app.main_bot().await;
+    let card = app
+        .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+        .await
+        .body["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|t| t["questions"].as_array().unwrap().clone())
+        .find(|q| q["id"] == question)
+        .unwrap();
+    (format!("/v1/bots/{bot}/questions/{question}/answer"), card)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_icloud_card_takes_an_app_password_and_reopens_when_apple_rejects_it() {
+    let inbox = Arc::new(QuietInbox::default());
+    let h = recorder::harness_with(4, Some(inbox.clone())).await;
+    let app = &h.app;
+    let bot = app.main_bot().await;
+    let approve = |path: String| async move {
+        app.owner("POST", &path, Some(json!({"choice":"approve"})))
+            .await
+    };
+    let (turn, token) = h
+        .running(&bot, &format!("{GATE} Connect my iCloud inbox"))
+        .await;
+    let (path, card) = parked_card(
+        app,
+        &token,
+        json!({"provider":"icloud","address":" Owner@iCloud.com "}),
+    )
+    .await;
+    assert_eq!(
+        card["action"]["email_connection"],
+        json!({"provider":"icloud","address":"owner@icloud.com"})
+    );
+    let context = card["context"].as_str().unwrap();
+    assert!(context.contains("app-specific password"), "{context}");
+    h.release(turn).await;
+    app.wait_turn_for(&turn.to_string(), &["waiting"], common::SETTLE)
+        .await;
+    assert_eq!(
+        approve(path.clone()).await.body["error"]["code"],
+        "inbox_not_connected"
+    );
+
+    let config = Provider::Icloud.config("owner@icloud.com".into()).unwrap();
+    assert_eq!(
+        (
+            config.imap.host.as_str(),
+            config.imap.port,
+            config.imap.start_tls
+        ),
+        ("imap.mail.me.com", 993, false)
+    );
+    assert_eq!(
+        (
+            config.smtp.host.as_str(),
+            config.smtp.port,
+            config.smtp.start_tls
+        ),
+        ("smtp.mail.me.com", 587, true)
+    );
+    let connect = |password: &str| {
+        app.owner(
+            "POST",
+            "/v1/connectors/email/accounts",
+            Some(json!({"config":config,"credential":{"kind":"password","password":password}})),
+        )
+    };
+    let rejected = connect(REVOKED).await;
+    assert_eq!(
+        rejected.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        rejected.body
+    );
+    assert_eq!(rejected.body["error"]["code"], "mail_authentication_failed");
+    assert!(
+        rejected.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not your Apple Account password"),
+        "{}",
+        rejected.body
+    );
+    assert_eq!(
+        approve(path.clone()).await.body["error"]["code"],
+        "inbox_not_connected",
+        "a rejected password connects nothing"
+    );
+    let created = connect("abcd-efgh-ijkl-mnop").await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+    let account: Uuid = created.body["account"]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let answered = approve(path).await;
+    assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
+    let token = h.continued(turn, &token).await;
+    let known = tool(
+        app,
+        &token,
+        "mail_connect",
+        json!({"provider":"icloud","address":"owner@icloud.com"}),
+    )
+    .await;
+    assert_eq!(
+        known.result["account_id"],
+        account.to_string(),
+        "{}",
+        known.body
+    );
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
+
+    tokio::time::timeout(common::SETTLE, inbox.ready.notified())
+        .await
+        .expect("the new inbox is watched");
+    let generation = store::account(&app.db.pool, account)
+        .await
+        .unwrap()
+        .unwrap()
+        .generation;
+    assert!(
+        store::set_health(&app.db.pool, account, generation, AUTHENTICATION_FAILED)
+            .await
+            .unwrap()
+    );
+    let (turn, token) = h
+        .running(&bot, &format!("{GATE} Check my iCloud inbox"))
+        .await;
+    let (path, card) = parked_card(
+        app,
+        &token,
+        json!({"provider":"icloud","address":"owner@icloud.com"}),
+    )
+    .await;
+    let context = card["context"].as_str().unwrap();
+    assert!(
+        context.contains("Apple rejected the saved password"),
+        "{context}"
+    );
+    h.release(turn).await;
+    app.wait_turn_for(&turn.to_string(), &["waiting"], common::SETTLE)
+        .await;
+    assert_eq!(
+        approve(path.clone()).await.body["error"]["code"],
+        "inbox_not_connected",
+        "an inbox Apple rejects is not connected"
+    );
+    let credentials = format!("/v1/connectors/email/accounts/{account}/credentials");
+    let replace = |password: &str| {
+        app.owner(
+            "PUT",
+            &credentials,
+            Some(json!({"kind":"password","password":password})),
+        )
+    };
+    assert_eq!(replace(REVOKED).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(replace("qrst-uvwx-yzab-cdef").await.status, StatusCode::OK);
+    let answered = approve(path).await;
+    assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_inbox_password_tells_the_bot_to_reopen_the_card() {
+    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+    let bot = h.app.main_bot().await;
+    let (_, token) = h.running(&bot, GATE).await;
+    let account = store::create(
+        &h.app.db.pool,
+        h.app.state.secret_key.as_ref().unwrap(),
+        &Provider::Icloud.config("owner@icloud.com".into()).unwrap(),
+        &Credential::Password {
+            password: REVOKED.into(),
+        },
+    )
+    .await
+    .unwrap();
+    store::set_permissions(
+        &h.app.db.pool,
+        account.id,
+        bot.parse().unwrap(),
+        &permissions(),
+    )
+    .await
+    .unwrap();
+    let failed = tool(
+        &h.app,
+        &token,
+        "mail_action",
+        json!({"account_id":account.id,"command":{"operation":"folders"}}),
+    )
+    .await;
+    assert!(failed.error, "{}", failed.body);
+    assert_eq!(
+        failed.code(),
+        "mail_authentication_failed",
+        "{}",
+        failed.body
+    );
+    assert!(
+        failed.body.to_string().contains("call mail_connect"),
+        "{}",
+        failed.body
+    );
 }
 
 fn gmail(address: &str) -> (MailConfig, Credential) {

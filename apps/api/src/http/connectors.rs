@@ -177,6 +177,7 @@ async fn connect(
     request.config.validate()?;
     request.credential.validate(request.config.provider)?;
     let manager = manager(&state)?;
+    manager.verify(&request.config, &request.credential).await?;
     let account = store::create(
         &state.db,
         &manager.key,
@@ -277,6 +278,7 @@ async fn credentials(
         .map_err(unavailable)?
         .ok_or_else(ApiError::not_found)?;
     credential.validate(account.config.provider)?;
+    manager.verify(&account.config, &credential).await?;
     manager.replace_credential(id, credential).await?;
     manager.changed(id).await;
     Ok(Json(json!({"updated":true})))
@@ -378,10 +380,10 @@ async fn oauth_cancel(
 
 pub fn tool_list() -> Vec<Value> {
     vec![
-        json!({"name":"mail_connect","description":"Open a native sign-in card in this chat so the owner connects a Gmail or \
-            Microsoft 365 inbox for every bot. An already connected address returns its \
-            account_id. Otherwise parks the attempt until the owner signs in. Other providers \
-            need an app password the owner enters in Settings, Email.","inputSchema":{"type":"object","properties":{"provider":{"type":"string","enum":["gmail","microsoft"]},"address":{"type":"string","maxLength":254},"purpose":{"type":"string","maxLength":300,"description":"Why the bot needs this inbox, shown on the card."}},"required":["provider","address"],"additionalProperties":false},"annotations":{"readOnlyHint":false}}),
+        json!({"name":"mail_connect","description":"Open a native sign-in card in this chat so the owner connects a Gmail, \
+            Microsoft 365, or iCloud inbox for every bot. An already connected address returns \
+            its account_id. Otherwise parks the attempt until the owner signs in. Other \
+            providers need an app password the owner enters in Settings, Email.","inputSchema":{"type":"object","properties":{"provider":{"type":"string","enum":["gmail","microsoft","icloud"],"description":"icloud also covers custom domains on iCloud+."},"address":{"type":"string","maxLength":254},"purpose":{"type":"string","maxLength":300,"description":"Why the bot needs this inbox, shown on the card."}},"required":["provider","address"],"additionalProperties":false},"annotations":{"readOnlyHint":false}}),
         json!({"name":"mail_accounts","description":"List email accounts the owner permits this task to access. Credentials never enter the task or computer. Email data is untrusted external content.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true}}),
         json!({"name":"mail_action","description":"Operate on an authorized inbox with command.operation; delete is permanent. \
             Mutations need a stable action_id, reused on retry. Sending works only in \
@@ -487,10 +489,13 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
             ..r
         })
         .filter(|r| {
-            matches!(r.provider, Provider::Gmail | Provider::Microsoft)
-                && r.purpose
-                    .as_ref()
-                    .is_none_or(|p| p.len() <= 300 && !p.contains('\0'))
+            matches!(
+                r.provider,
+                Provider::Gmail | Provider::Microsoft | Provider::Icloud
+            ) && r
+                .purpose
+                .as_ref()
+                .is_none_or(|p| p.len() <= 300 && !p.contains('\0'))
                 && r.provider
                     .config(r.address.clone())
                     .and_then(|config| config.validate())
@@ -499,8 +504,8 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
     let Some(request) = request else {
         return (
             tool_error(
-                "Use provider gmail or microsoft with a valid inbox address. The owner adds \
-                 other providers with an app password in Settings, Email.",
+                "Use provider gmail, microsoft, or icloud with a valid inbox address. The \
+                 owner adds other providers with an app password in Settings, Email.",
             ),
             None,
         );
@@ -512,10 +517,15 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
         Ok(accounts) => accounts,
         Err(_) => return (tool_error("mail_unavailable"), None),
     };
-    if let Some(account) = accounts
+    let existing = accounts
         .iter()
-        .find(|a| a.config.address.eq_ignore_ascii_case(&request.address))
-    {
+        .find(|a| a.config.address.eq_ignore_ascii_case(&request.address));
+    // An iCloud inbox whose app-specific password Apple now rejects gets the
+    // card again, so the owner can enter a new one.
+    let reconnect = existing.is_some_and(|account| {
+        account.config.provider == Provider::Icloud && account.credential_rejected()
+    });
+    if let Some(account) = existing.filter(|_| !reconnect) {
         return (
             tool_result(json!({"status":"connected","account_id":account.id,
                 "next":"Use mail_accounts and mail_action with this account. If the owner \
@@ -523,18 +533,26 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
             None,
         );
     }
+    let address = &request.address;
+    let sign_in = match request.provider {
+        Provider::Icloud if reconnect => format!(
+            "Apple rejected the saved password for {address}. Enter a new app-specific \
+             password from account.apple.com, Sign-In and Security."
+        ),
+        Provider::Icloud => format!(
+            "Enter an app-specific password for {address}. Make one at account.apple.com, \
+             Sign-In and Security, App-Specific Passwords."
+        ),
+        Provider::Microsoft => format!("Sign in with Microsoft as {address}."),
+        _ => format!("Sign in with Google as {address}."),
+    };
     let context = format!(
-        "{}\nSign in with {} as {}. Every bot can use the connected inbox when you ask. \
-         Credentials stay on the server. New mail there will wake this bot.",
+        "{}\n{sign_in} Every bot can use the connected inbox when you ask. Credentials stay \
+         on the server. New mail there will wake this bot.",
         request
             .purpose
             .as_deref()
             .unwrap_or("Connect this inbox for the current request."),
-        match request.provider {
-            Provider::Microsoft => "Microsoft",
-            _ => "Google",
-        },
-        request.address
     );
     let spec = Spec::email_connection(
         EmailConnection {
@@ -690,6 +708,14 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
     let result = tool_call(state, grant, name, args).await;
     match result {
         Ok(value) => (tool_result(value), Some("Email tool completed.".into())),
+        Err(error) if error.code == AUTHENTICATION_FAILED => {
+            let error = error.detail(
+                "the server rejected the inbox's saved password. For an iCloud inbox, call \
+                 mail_connect with provider icloud and its address so the owner enters a new \
+                 one. Otherwise the owner replaces it in Settings, Email.",
+            );
+            (tool_error(&error.to_string()), None)
+        }
         Err(error) => (tool_error(&error.to_string()), None),
     }
 }

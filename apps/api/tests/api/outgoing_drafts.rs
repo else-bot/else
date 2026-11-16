@@ -56,6 +56,9 @@ impl FakeMail {
 
 #[async_trait::async_trait]
 impl MailTransport for FakeMail {
+    async fn verify(&self, _: &MailConfig, _: &Auth) -> Result<(), MailError> {
+        Ok(())
+    }
     async fn execute(
         &self,
         _: &MailConfig,

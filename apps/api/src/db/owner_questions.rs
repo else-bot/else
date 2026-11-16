@@ -684,14 +684,15 @@ pub async fn answer(
     }
     // An inbox card approves only the requested address, or an account of
     // its provider connected since it was asked: Google may authorize a
-    // different mailbox than the bot named. The asking bot then wakes on
-    // that inbox's new mail.
+    // different mailbox than the bot named. An account whose server rejects
+    // its saved password does not count until the owner replaces it. The
+    // asking bot then wakes on that inbox's new mail.
     if choice == Some(APPROVE)
         && let Some(Action::EmailConnection { email_connection }) = &question.action
     {
         let connected: Vec<(Uuid, bool)> = sqlx::query_as(
             "SELECT id, lower(json_extract(config, '$.address')) = ?1 FROM connector_accounts
-             WHERE state <> 'removed'
+             WHERE state <> 'removed' AND health <> ?4
                 AND (lower(json_extract(config, '$.address')) = ?1
                      OR (json_extract(config, '$.provider') = ?3
                          AND created_at >= (SELECT created_at FROM owner_questions WHERE id = ?2)))",
@@ -705,6 +706,7 @@ pub async fn answer(
                 .unwrap_or_default()
                 .to_owned(),
         )
+        .bind(crate::connectors::types::AUTHENTICATION_FAILED)
         .fetch_all(&mut *tx)
         .await?;
         if connected.is_empty() {
