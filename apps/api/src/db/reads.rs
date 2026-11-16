@@ -219,4 +219,18 @@ mod tests {
         let wide = "✓".repeat(500);
         assert_eq!(preview(&wide).chars().count(), PREVIEW_CHARS + 1);
     }
+
+    #[test]
+    fn previews_are_plain_text_even_when_a_link_runs_past_the_cut() {
+        let url = format!(
+            "https://app.t3.codes/threads/mcp%3Alaunch%3A{}",
+            "ab".repeat(80)
+        );
+        assert_eq!(
+            preview(&format!(
+                "**Done.** I started [Implement #468]({url}).\n\n## Next\n`cargo test`"
+            )),
+            "Done. I started Implement #468. Next cargo test"
+        );
+    }
 }

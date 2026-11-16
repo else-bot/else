@@ -262,5 +262,9 @@ mod tests {
             Some("Opened Search Console".to_owned())
         );
         assert_eq!(first_line("  \n"), None);
+        assert_eq!(
+            first_line("~~Drafting~~ Sent https://example.com/report"),
+            Some("Drafting Sent https://example.com/report".to_owned())
+        );
     }
 }
