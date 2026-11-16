@@ -11,9 +11,16 @@ use gpui_kit::component::input::Input;
 use gpui_kit::component::{Icon, Selectable as _, h_flex};
 
 impl Shell {
-    fn save_server_icon(&mut self, id: Uuid, icon: ServerIcon) -> Result<(), String> {
-        let store = self.launch.store.as_ref().map_err(Clone::clone)?;
-        self.rail.icons.set(store, id, icon)
+    /// Show `icon` here now and save it on the server for every desktop.
+    fn save_server_icon(
+        &mut self,
+        id: Uuid,
+        icon: ServerIcon,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.cache_server_icon(id, icon.clone())?;
+        self.share_server_icon(id, icon, false, cx);
+        Ok(())
     }
 
     pub(super) fn open_icon_editor(
@@ -289,7 +296,7 @@ impl IconEditor {
         let saved = self
             .shell
             .update(cx, |shell, cx| {
-                let saved = shell.save_server_icon(id, icon);
+                let saved = shell.save_server_icon(id, icon, cx);
                 cx.notify();
                 saved
             })

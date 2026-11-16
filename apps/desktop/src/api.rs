@@ -153,6 +153,28 @@ pub struct ServerInfo {
     /// The owner's name for the server, shared by every desktop; `None`
     /// until someone names it.
     pub name: Option<String>,
+    #[serde(default, deserialize_with = "shared_icon")]
+    pub icon: crate::server_icon::Shared,
+}
+
+/// `null` is an icon nobody chose; one this desktop cannot read counts as
+/// unsupported, so it keeps its own.
+fn shared_icon<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<crate::server_icon::Shared, D::Error> {
+    use crate::server_icon::Shared;
+    Ok(
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            None => Shared::Unset,
+            Some(value) => serde_json::from_value(value).map_or(Shared::Unsupported, Shared::Set),
+        },
+    )
+}
+
+#[derive(Deserialize)]
+struct SharedIconBody {
+    icon: Option<crate::server_icon::Stored>,
+    picture: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -604,6 +626,52 @@ impl Client {
         self.call::<ServerEnvelope>(Method::PUT, "/v1/settings/server".into(), Some(body))
             .await
             .map(|(_, v)| v.server.name)
+    }
+
+    /// Give the server `icon` for every desktop, or only if nobody chose
+    /// one yet.
+    pub async fn set_server_icon(
+        self: Arc<Self>,
+        icon: crate::server_icon::ServerIcon,
+        only_if_unset: bool,
+    ) -> Result<(), ClientError> {
+        use base64::Engine as _;
+        let picture = match &icon {
+            crate::server_icon::ServerIcon::Picture(image) => {
+                let png = crate::server_icon::shareable_png(&image.bytes);
+                Some(base64::engine::general_purpose::STANDARD.encode(png))
+            }
+            _ => None,
+        };
+        let body = json!({
+            "icon": crate::server_icon::Stored::of(&icon),
+            "picture": picture,
+            "only_if_unset": only_if_unset,
+        });
+        self.call::<serde_json::Value>(Method::PUT, "/v1/settings/server/icon".into(), Some(body))
+            .await
+            .map(drop)
+    }
+
+    /// The server's picture when its icon is still the one with `digest`.
+    pub async fn server_picture(
+        self: Arc<Self>,
+        digest: String,
+    ) -> Result<Option<Vec<u8>>, ClientError> {
+        use base64::Engine as _;
+        let (_, body) = self
+            .call::<SharedIconBody>(Method::GET, "/v1/settings/server/icon".into(), None)
+            .await?;
+        let current = matches!(
+            body.icon,
+            Some(crate::server_icon::Stored::Picture { digest: Some(d) }) if d == digest
+        );
+        let png = body
+            .picture
+            .filter(|_| current)
+            .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
+            .filter(|png| crate::server_icon::digest(png) == digest);
+        Ok(png)
     }
 
     async fn call<T: DeserializeOwned + Send + 'static>(
@@ -1169,6 +1237,75 @@ pub(crate) mod tests {
             } else {
                 assert!(body.get("avatar").is_none());
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn server_icons_are_unsupported_unset_or_set_and_travel_as_the_server_expects() {
+        use crate::server_icon::{ServerIcon, Shared, Stored};
+        let icon =
+            |server: serde_json::Value| serde_json::from_value::<ServerInfo>(server).unwrap().icon;
+        assert_eq!(
+            icon(json!({ "name": null })),
+            Shared::Unsupported,
+            "old server"
+        );
+        assert_eq!(icon(json!({ "name": null, "icon": null })), Shared::Unset);
+        assert_eq!(
+            icon(json!({ "name": null, "icon": { "kind": "pattern", "hue": 145 } })),
+            Shared::Set(Stored::Pattern { hue: Some(145) })
+        );
+        assert_eq!(
+            icon(json!({ "name": null, "icon": { "kind": "sticker" } })),
+            Shared::Unsupported,
+            "a newer kind leaves this desktop's icon alone"
+        );
+
+        let (origin, server) = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        .await;
+        let emoji = ServerIcon::Emoji {
+            emoji: "🐙".into(),
+            hue: Some(195),
+        };
+        client(origin).set_server_icon(emoji, true).await.unwrap();
+        let request = server.await.unwrap();
+        assert!(request.starts_with("PUT /v1/settings/server/icon HTTP/1.1\r\n"));
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            json!({
+                "icon": { "kind": "emoji", "emoji": "🐙", "hue": 195 },
+                "picture": null,
+                "only_if_unset": true,
+            })
+        );
+
+        let png = b"png bytes".to_vec();
+        let digest = crate::server_icon::digest(&png);
+        let body = json!({
+            "icon": { "kind": "picture", "digest": digest },
+            "picture": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png),
+        })
+        .to_string();
+        let response: &'static str = Box::leak(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .into_boxed_str(),
+        );
+        for (asked, expected) in [(digest.clone(), Some(png.clone())), ("0".repeat(64), None)] {
+            let (origin, server) = serve_once(response).await;
+            let fetched = client(origin).server_picture(asked).await.unwrap();
+            assert_eq!(fetched, expected, "only the picture the check saw is drawn");
+            assert!(
+                server
+                    .await
+                    .unwrap()
+                    .starts_with("GET /v1/settings/server/icon HTTP/1.1\r\n")
+            );
         }
     }
 

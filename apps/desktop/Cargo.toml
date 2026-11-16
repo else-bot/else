@@ -33,6 +33,7 @@ rustls = { workspace = true, features = ["aws-lc-rs", "std", "tls12"] }
 rustls-platform-verifier = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "macros", "process", "fs", "io-util", "net"] }
@@ -52,7 +53,6 @@ wl-clipboard-rs = "0.9.5"
 axum = { workspace = true, features = ["json"] }
 futures-util = { workspace = true }
 proc-macro2 = "1.0.107"
-sha2 = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net"] }
 
 [lints]

@@ -9,6 +9,7 @@ mod server_rail;
 mod server_views;
 mod servers;
 mod settings;
+mod shared_icons;
 mod skills;
 mod updates;
 mod view;
@@ -16,7 +17,7 @@ pub(crate) use view::brand_mark;
 
 use settings::Presentation;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -171,7 +172,10 @@ pub struct Shell {
     notification_target: Option<(Uuid, Uuid, Uuid)>,
     _switch: Option<Task<()>>,
     connection_error: Option<String>,
-    names: servers::NameWrites,
+    names: servers::Writes<servers::NameWrite>,
+    icon_writes: servers::Writes<shared_icons::IconWrite>,
+    /// Servers whose picture is downloading.
+    icon_fetches: HashSet<Uuid>,
     /// The name the server editor opened with.
     editor_name: String,
     server_updates: updates::View,
@@ -246,6 +250,8 @@ impl Shell {
             server_updates,
             remote_updates: HashMap::new(),
             names: Default::default(),
+            icon_writes: Default::default(),
+            icon_fetches: HashSet::new(),
             editor_name: String::new(),
             server_update_target: None,
             setup: None,

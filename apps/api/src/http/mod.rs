@@ -310,8 +310,11 @@ async fn reject_large_body(max: usize, request: Request, next: Next) -> Response
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
-    let max = if attachments::is_upload(request.method(), request.uri().path()) {
+    let (method, path) = (request.method(), request.uri().path());
+    let max = if attachments::is_upload(method, path) {
         max.max(attachments::MAX_UPLOAD_BODY_BYTES)
+    } else if settings::is_icon_upload(method, path) {
+        max.max(settings::MAX_ICON_BODY_BYTES)
     } else {
         max
     };
@@ -347,11 +350,12 @@ async fn readiness(
 }
 
 async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let (configured, defaults, onboarding_required, server_name) = tokio::join!(
+    let (configured, defaults, onboarding_required, server_name, server_icon) = tokio::join!(
         configured_profiles(&state.db),
         settings::defaults(&state),
         onboarding::required(&state),
         crate::db::installation::server_name(&state.db),
+        crate::db::installation::server_icon(&state.db),
     );
     let providers: Vec<_> = state
         .scheduler
@@ -370,11 +374,17 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
         .map(|view| view["id"].clone());
     let defaults = defaults.ok().flatten();
     let onboarding_required = onboarding_required.unwrap_or(false);
+    let mut server = json!({ "name": server_name.ok().flatten() });
+    // Left out when unreadable, so desktops keep theirs rather than offer
+    // their own to a server that may already have one.
+    if let Ok(icon) = server_icon {
+        server["icon"] = json!(icon);
+    }
     Json(json!({
         "api_version": "v1",
         "bot_avatar_on_create": true,
         "server_instance_id": state.server_instance_id,
-        "server": { "name": server_name.ok().flatten() },
+        "server": server,
         "default_provider_id": default_id,
         "defaults": defaults,
         "onboarding_required": onboarding_required,
