@@ -16,6 +16,7 @@ pub(super) enum SettingsSection {
     Socials,
     Mcp,
     Skills,
+    Usage,
     Backups,
     Updates,
 }
@@ -121,8 +122,12 @@ impl Shell {
             let shell = shell.clone();
             let shell_close = shell_close.clone();
             let viewport = window.viewport_size();
+            let section = shell
+                .upgrade()
+                .and_then(|shell| shell.read(cx).settings_section())
+                .unwrap_or(SettingsSection::Server);
             crate::appearance::modal_surface(dialog, cx)
-                .w(sheet_size(viewport).width)
+                .w(settings_size(section, viewport).width)
                 .centered()
                 .entrance(DialogEntrance::None)
                 .p_0()
@@ -173,8 +178,9 @@ impl Shell {
                 SettingsSection::Socials => 2,
                 SettingsSection::Mcp => 3,
                 SettingsSection::Skills => 4,
-                SettingsSection::Backups => 5,
-                SettingsSection::Updates => 6,
+                SettingsSection::Usage => 5,
+                SettingsSection::Backups => 6,
+                SettingsSection::Updates => 7,
             }]
             .focus(window, cx);
             cx.notify();
@@ -185,6 +191,13 @@ impl Shell {
             }
         } else {
             self.clear_skills(window, cx);
+        }
+        if section == SettingsSection::Usage {
+            if self.usage.is_none() {
+                self.open_usage(window, cx);
+            }
+        } else {
+            self.usage = None;
         }
         if section == SettingsSection::Mcp {
             if self.mcp.is_none() {
@@ -274,7 +287,7 @@ impl Shell {
                 "App updates",
                 IconName::Download,
                 SettingsSection::Updates,
-                &setup.navigation_focus[6],
+                &setup.navigation_focus[7],
             ))
             .child(
                 crate::appearance::section_label("This server", cx)
@@ -312,11 +325,18 @@ impl Shell {
                 &setup.navigation_focus[4],
             ))
             .child(nav_item(
+                "settings-usage",
+                "Usage",
+                IconName::Gauge,
+                SettingsSection::Usage,
+                &setup.navigation_focus[5],
+            ))
+            .child(nav_item(
                 "settings-backups",
                 "Backups",
                 IconName::CloudUpload,
                 SettingsSection::Backups,
-                &setup.navigation_focus[5],
+                &setup.navigation_focus[6],
             ));
         let body = match section {
             SettingsSection::Server => self.render_server_settings(setup, window, cx),
@@ -326,6 +346,7 @@ impl Shell {
             SettingsSection::Socials => div().children(self.socials.clone()).into_any_element(),
             SettingsSection::Mcp => self.render_mcp(window, cx),
             SettingsSection::Skills => self.render_skills(cx),
+            SettingsSection::Usage => self.render_usage(cx),
             SettingsSection::Backups => self.render_backups(window, cx),
             SettingsSection::Updates => self.render_updates(cx),
         };
@@ -333,6 +354,16 @@ impl Shell {
         // its first and last lines clear of the edge fades at rest.
         let body = if section == SettingsSection::Backups {
             body
+        } else if section == SettingsSection::Usage {
+            sheet_scroller(
+                div()
+                    .id("usage-page-scroll")
+                    .size_full()
+                    .child(v_flex().min_h_full().py_8().px_6().child(body))
+                    .overflow_y_scrollbar(),
+                cx,
+            )
+            .into_any_element()
         } else if section == SettingsSection::Updates {
             v_flex()
                 .flex_1()
@@ -351,13 +382,11 @@ impl Shell {
             )
             .into_any_element()
         };
-        // One sheet size for every page: the header and navigation stay
-        // put while pages change, and a longer page scrolls inside it.
         v_flex()
             .id("app-settings")
             .track_focus(&setup.focus)
             .w_full()
-            .h(sheet_size(window.viewport_size()).height)
+            .h(settings_size(section, window.viewport_size()).height)
             .overflow_hidden()
             .child(
                 // One header: the sheet's title over the server it edits.
@@ -423,6 +452,7 @@ impl Shell {
                                 SettingsSection::Socials => "settings-socials-content",
                                 SettingsSection::Mcp => "settings-mcp-content",
                                 SettingsSection::Skills => "settings-skills-content",
+                                SettingsSection::Usage => "settings-usage-content",
                                 SettingsSection::Backups => "settings-backups-content",
                                 SettingsSection::Updates => "settings-updates-content",
                             })
@@ -791,13 +821,24 @@ fn settings_row(
         )
 }
 
-/// Width of the content column on every Settings page. The server strip,
-/// page bodies and footers share it so their left and right edges line up.
+fn settings_size(section: SettingsSection, viewport: Size<Pixels>) -> Size<Pixels> {
+    if section == SettingsSection::Usage {
+        let room = |extent: Pixels| (extent - SHEET_CLEARANCE * 2.).max(px(0.));
+        size(
+            px(1120.).min(room(viewport.width)),
+            px(900.).min(room(viewport.height)),
+        )
+    } else {
+        sheet_size(viewport)
+    }
+}
+
+/// Width of the content column on standard Settings pages.
 pub(super) const SETTINGS_COLUMN: Pixels = px(560.);
 /// Least inset of that column from the edges of the Settings pane; a wider
 /// pane centres the column.
 pub(super) const SETTINGS_INSET: Pixels = px(32.);
-/// The sheet's one size on every page.
+/// Standard Settings pages keep a compact sheet.
 const SHEET_SIZE: Size<Pixels> = Size {
     width: px(840.),
     height: px(620.),

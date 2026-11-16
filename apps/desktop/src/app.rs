@@ -636,7 +636,14 @@ impl ElseApp {
                 let _ = this.update(cx, |app, cx| app.check_reading(window, cx));
             });
         }
+        let cached_settings = id.is_some_and(|id| self.settings.contains_key(&id));
         self.ensure_settings(window, cx);
+        if self.settings_open
+            && cached_settings
+            && let Some(id) = id
+        {
+            self.load_bot_usage(id, window, cx);
+        }
         if id.is_some() {
             self.sync_rows(window, cx);
             self.load_conversation(window, cx);

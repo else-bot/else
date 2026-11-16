@@ -12,6 +12,7 @@ mod settings;
 mod shared_icons;
 mod skills;
 mod updates;
+mod usage;
 mod view;
 pub(crate) use view::brand_mark;
 
@@ -39,7 +40,12 @@ pub(crate) const SHELL_CONTEXT: &str = "AppShell";
 
 actions!(
     else_desktop,
-    [OpenAppSettings, OpenEmailSettings, OpenSkillsSettings]
+    [
+        OpenAppSettings,
+        OpenEmailSettings,
+        OpenSkillsSettings,
+        OpenUsageSettings
+    ]
 );
 
 struct Verified {
@@ -157,7 +163,7 @@ struct Setup {
     name: Entity<InputState>,
     error: Option<String>,
     focus: FocusHandle,
-    navigation_focus: [FocusHandle; 7],
+    navigation_focus: [FocusHandle; 8],
     _attempt: Option<Task<()>>,
 }
 
@@ -190,6 +196,7 @@ pub struct Shell {
     backups: Option<backups::View>,
     mcp: Option<mcp::View>,
     skills: Option<skills::View>,
+    usage: Option<usage::View>,
     socials: Option<Entity<crate::socials::SocialsView>>,
     email: Option<(Entity<crate::email::EmailSettings>, Subscription)>,
 }
@@ -263,6 +270,7 @@ impl Shell {
             backups: None,
             mcp: None,
             skills: None,
+            usage: None,
             socials: None,
             email: None,
         };
@@ -336,6 +344,7 @@ impl Shell {
             .as_ref()
             .map(|active| active.app.read(cx).panel_widths());
         self.clear_skills(window, cx);
+        self.usage = None;
         self.clear_socials(window, cx);
         self.backups = None;
         self.mcp = None;
@@ -776,6 +785,7 @@ impl Shell {
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_skills(window, cx);
+        self.usage = None;
         self.clear_socials(window, cx);
         if let Some(active) = &self.active {
             self.updates.dismiss();
@@ -833,6 +843,18 @@ impl Render for Shell {
                     }
                     shell.open_settings(window, cx);
                     shell.select_settings(settings::SettingsSection::Skills, window, cx);
+                }))
+                .on_action(cx.listener(|shell, _: &OpenUsageSettings, window, cx| {
+                    if window.has_active_dialog(cx) {
+                        return;
+                    }
+                    let bot = shell
+                        .active
+                        .as_ref()
+                        .and_then(|active| active.app.read(cx).selected_bot_id());
+                    shell.open_settings(window, cx);
+                    shell.select_settings(settings::SettingsSection::Usage, window, cx);
+                    shell.filter_usage(bot, window, cx);
                 }))
                 .on_action(cx.listener(|shell, _: &OpenEmailSettings, window, cx| {
                     if window.has_active_dialog(cx) {
