@@ -10,6 +10,8 @@ finish() {
 	local status=$?
 	printf '%s\n' "$status" >"$job/result.tmp"
 	mv "$job/result.tmp" "$job/result"
+	# A one-shot launchd job stays loaded after it exits; unloading ends this shell.
+	if command -v launchctl >/dev/null; then launchctl remove "bot.else.update.${job##*/}" 2>/dev/null; fi
 }
 trap finish EXIT
 while IFS= read -r name; do
