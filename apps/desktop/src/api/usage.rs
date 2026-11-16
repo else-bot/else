@@ -132,14 +132,16 @@ impl UsageWindow {
         }
     }
 
+    /// The stretch the window's bot shares cover: since the limit last
+    /// reset, or a plain rolling span when the provider reports no limit.
     pub fn period(&self) -> String {
+        if self.attribution.used().is_some() {
+            return format!("since the {} reset", self.title().to_lowercase());
+        }
         match self.minutes {
-            WEEK if self.attribution.used().is_none() => "in the last 7 days".into(),
-            WEEK => "this week".into(),
-            FIVE_HOURS => "this 5-hour window".into(),
-            m if m.is_multiple_of(1440) => format!("this {}-day window", m / 1440),
-            m if m.is_multiple_of(60) => format!("this {}-hour window", m / 60),
-            m => format!("this {m}-minute window"),
+            m if m.is_multiple_of(1440) && m > 1440 => format!("in the last {} days", m / 1440),
+            m if m.is_multiple_of(60) && m > 60 => format!("in the last {} hours", m / 60),
+            m => format!("in the last {m} minutes"),
         }
     }
 
@@ -283,10 +285,12 @@ mod tests {
         };
         assert_eq!(five.title(), "5-hour limit");
         assert_eq!(week.title(), "Weekly limit");
-        assert_eq!(week.period(), "this week");
+        assert_eq!(week.period(), "since the weekly limit reset");
         let mut daily = five.clone();
-        daily.minutes = 1440;
-        assert_eq!(daily.period(), "this 1-day window");
+        daily.minutes = 2880;
+        assert_eq!(daily.period(), "since the 2-day limit reset");
+        daily.attribution = Attribution::Unreported;
+        assert_eq!(daily.period(), "in the last 2 days");
     }
 
     #[test]

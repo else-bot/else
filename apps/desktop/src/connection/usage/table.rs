@@ -36,11 +36,7 @@ impl Shell {
             .items_center()
             .gap_3()
             .child(crate::appearance::section_label(
-                if periods.len() > 1 {
-                    format!("Share of your bots' {name} use")
-                } else {
-                    format!("Share of your bots' {name} use, {}", window.period())
-                },
+                format!("Share of your bots' {name} use {}", window.period()),
                 cx,
             ));
         if periods.len() > 1 {
@@ -77,17 +73,17 @@ impl Shell {
         let mut table = v_flex()
             .gap_1()
             .child(heading)
-            .child(div().text_xs().mb_2().text_color(theme.muted_foreground).child(match (window.attribution.used(), window.attribution.outside()) {
-                (Some(used), Some(outside)) => format!(
-                    "Estimated by weighting each bot's tokens at its model's price. Together your bots used about {} of this limit.",
+            .child(v_flex().mb_2().children(match (window.attribution.used(), window.attribution.outside()) {
+                (Some(used), Some(outside)) => vec![format!(
+                    "Estimated. Together your bots used about {} of this limit.",
                     percent((used - outside).max(0.).round()),
-                ),
-                (Some(used), None) => format!(
-                    "Estimated by weighting each bot's tokens at its model's price. It compares your bots with each other; how much of the {} they used isn't known yet.",
-                    percent(used)
-                ),
-                (None, _) => "Estimated by weighting each bot's tokens at its model's price.".into(),
-            }))
+                )],
+                (Some(used), None) => vec![
+                    format!("Estimated. They compare your bots with each other and are not shares of the {} used.", percent(used)),
+                    "Each bot's part of the limit isn't known yet.".into(),
+                ],
+                (None, _) => vec!["Estimated. They compare your bots with each other.".to_owned()],
+            }.into_iter().map(|line| div().text_xs().text_color(theme.muted_foreground).child(line))))
             .child(
                 h_flex()
                     .w_full()
@@ -98,7 +94,7 @@ impl Shell {
                     .child(div().w(px(AVATAR)).flex_none())
                     .child(column("Bot", Some(NAME), false))
                     .child(column("", None, false))
-                    .child(column("Share", Some(SHARE), true)),
+                    .child(column("Share of bots' use", Some(SHARE + 60.), true)),
             );
         if bots.is_empty() {
             table = table.child(
@@ -116,7 +112,7 @@ impl Shell {
             let row = h_flex()
                 .id(SharedString::from(format!("usage-bot-{id}")))
                 .w_full()
-                .py_3()
+                .py_1p5()
                 .gap_3()
                 .items_center()
                 .cursor_pointer()
@@ -166,7 +162,7 @@ impl Shell {
                 )
                 .child(
                     div()
-                        .w(px(SHARE))
+                        .w(px(SHARE + 60.))
                         .flex_none()
                         .text_right()
                         .font_weight(FontWeight::SEMIBOLD)
@@ -204,7 +200,7 @@ impl Shell {
                         "Show fewer bots".into()
                     } else {
                         format!(
-                            "Show {small_count} more bots ({} together)",
+                            "Show {small_count} more bots (about {} together)",
                             share(small_share)
                         )
                     })

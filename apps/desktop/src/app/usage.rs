@@ -98,53 +98,49 @@ impl ElseApp {
                         })),
                 ),
         );
-        let mut unmeasured = false;
+        let unmeasured = providers.iter().any(|provider| {
+            provider
+                .windows
+                .iter()
+                .any(|window| matches!(window.attribution, Attribution::Unattributed { .. }))
+        });
+        body = body.child(meta(
+            if unmeasured {
+                "Estimates. This bot's part of your subscription limits isn't known yet."
+            } else {
+                "Estimates."
+            },
+            cx,
+        ));
         for provider in providers {
             let name = self.provider_label(&provider.provider_id);
-            let mut group = v_flex().gap_1().child(item_name(name.clone()));
             let mut windows: Vec<_> = provider.windows.iter().collect();
             windows.sort_by_key(|window| std::cmp::Reverse(window.minutes));
+            let mut group = v_flex().gap_1().child(item_name(name.clone()));
             for window in windows {
                 let Some(entry) = window.bot(bot.id) else {
                     continue;
                 };
+                let mut amount = share(entry.share);
+                if let Attribution::Priced { used, outside, .. } = window.attribution {
+                    amount = format!(
+                        "{amount} · about {} of the limit",
+                        percent((entry.share * (used - outside).max(0.)).round())
+                    );
+                }
                 group = group.child(
-                    h_flex()
-                        .justify_between()
-                        .gap_2()
-                        .text_sm()
-                        .child(muted(sentence(&window.period()), cx))
+                    v_flex()
                         .child(
                             div()
+                                .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child(format!("{} of your bots' use", share(entry.share))),
-                        ),
+                                .child(format!("{amount} of your bots' {name} use")),
+                        )
+                        .child(meta(sentence(&window.period()), cx)),
                 );
-                match window.attribution {
-                    Attribution::Priced { used, outside, .. } => {
-                        group = group.child(meta(
-                            format!(
-                                "About {} of the {}.",
-                                percent((entry.share * (used - outside).max(0.)).round()),
-                                window.title().to_lowercase()
-                            ),
-                            cx,
-                        ));
-                    }
-                    Attribution::Unattributed { .. } => unmeasured = true,
-                    Attribution::Unreported => {}
-                }
             }
             body = body.child(group);
         }
-        body = body.child(meta(
-            if unmeasured {
-                "Estimated by weighting each bot's tokens at its model's price. How much of your subscription limits this bot used can't be measured yet."
-            } else {
-                "Estimated by weighting each bot's tokens at its model's price."
-            },
-            cx,
-        ));
         Some(body.into_any_element())
     }
 }

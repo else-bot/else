@@ -290,7 +290,7 @@ impl Shell {
                         .children(reported.iter().map(|window| gauge::gauge(window, cx))),
                 )
                 .child(div().text_xs().text_color(theme.muted_foreground).child(format!(
-                    "Exact, from {name}, as of {}. Counts all your {name} use, including outside else.bot.",
+                    "Reported by {name} at {}. Counts all your {name} use, including outside else.bot.",
                     local_time(updated)
                 )));
         }
