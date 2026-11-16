@@ -135,7 +135,7 @@ const SELECT_BOT: &str = concat!(
     handed_back!(),
     "
             AND NOT EXISTS (SELECT 1 FROM items v WHERE v.turn_id = u.turn_id
-                            AND v.conversation_id = c.id AND v.kind = 'assistant' AND v.seq > u.seq)
+                            AND v.kind = 'assistant' AND v.seq > u.seq)
             AND u.seq >= c.read_item_seq
             AND (u.seq > c.read_item_seq OR length(CAST(u.text AS BLOB)) > c.read_text_bytes))
             AS unread_count,
