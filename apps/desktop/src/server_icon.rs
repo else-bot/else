@@ -2,8 +2,10 @@
 //! generated from its name: letters on a gradient whose colour and faint
 //! pattern come from a hash of the name, or a laptop for this computer's
 //! server. The user may pick letters, a colour, a pattern, an emoji or a
-//! picture instead. Choices live beside the registry in `desktop.icons.json`,
-//! pictures in `desktop.<id>.icon.png`.
+//! picture instead. The server keeps the choice for every desktop; each
+//! desktop caches it beside the registry in `desktop.icons.json`, pictures
+//! in `desktop.<id>.icon.png`, and a server too old to keep one uses only
+//! the cache.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Cursor;
@@ -72,9 +74,12 @@ pub(crate) fn letters(raw: &str) -> Option<String> {
     valid.then(|| trimmed.to_owned())
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+/// An icon as the cache and the server write it. Only the server fills a
+/// picture's `digest`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum Stored {
+pub(crate) enum Stored {
+    Default {},
     Letters {
         style: LetterStyle,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,13 +96,16 @@ enum Stored {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hue: Option<u16>,
     },
-    Picture,
+    Picture {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        digest: Option<String>,
+    },
 }
 
 impl Stored {
-    fn of(icon: &ServerIcon) -> Option<Self> {
-        Some(match icon.clone() {
-            ServerIcon::Default => return None,
+    pub(crate) fn of(icon: &ServerIcon) -> Self {
+        match icon.clone() {
+            ServerIcon::Default => Self::Default {},
             ServerIcon::Letters {
                 style,
                 letters,
@@ -109,13 +117,13 @@ impl Stored {
             },
             ServerIcon::Pattern { hue } => Self::Pattern { hue },
             ServerIcon::Emoji { emoji, hue } => Self::Emoji { emoji, hue },
-            ServerIcon::Picture(_) => Self::Picture,
-        })
+            ServerIcon::Picture(_) => Self::Picture { digest: None },
+        }
     }
 
     /// The icon this entry describes, or `None` when it is invalid or its
     /// picture is gone.
-    fn icon(self, picture: &Path) -> Option<ServerIcon> {
+    fn icon(self, picture: impl FnOnce() -> Option<Arc<Image>>) -> Option<ServerIcon> {
         let hue_ok = |hue: Option<u16>| hue.is_none_or(|hue| hue < 360);
         match self {
             Self::Letters {
@@ -138,7 +146,8 @@ impl Stored {
             {
                 Some(ServerIcon::Emoji { emoji, hue })
             }
-            Self::Picture => read_picture(picture).map(ServerIcon::Picture),
+            Self::Default {} => Some(ServerIcon::Default),
+            Self::Picture { .. } => picture().map(ServerIcon::Picture),
             _ => None,
         }
     }
@@ -149,8 +158,15 @@ fn read_picture(path: &Path) -> Option<Arc<Image>> {
     if !meta.is_file() || meta.len() > MAX_PICTURE_BYTES {
         return None;
     }
-    let bytes = std::fs::read(path).ok()?;
-    if image::guess_format(&bytes).ok()? != image::ImageFormat::Png {
+    picture(std::fs::read(path).ok()?)
+}
+
+/// A stored picture from its PNG, or `None` unless it is one of the right
+/// size.
+pub(crate) fn picture(bytes: Vec<u8>) -> Option<Arc<Image>> {
+    if bytes.len() as u64 > MAX_PICTURE_BYTES
+        || image::guess_format(&bytes).ok()? != image::ImageFormat::Png
+    {
         return None;
     }
     let decoded = crate::app::decode_image(&bytes).ok()?;
@@ -185,9 +201,10 @@ impl Icons {
         let chosen = stored
             .into_iter()
             .filter_map(|(id, value)| {
+                let picture = store.server_picture_path(id);
                 let icon = serde_json::from_value::<Stored>(value)
                     .ok()?
-                    .icon(&store.server_picture_path(id))?;
+                    .icon(|| read_picture(&picture))?;
                 Some((id, icon))
             })
             .collect();
@@ -238,7 +255,8 @@ impl Icons {
     fn write(store: &ProfileStore, chosen: &HashMap<ServerId, ServerIcon>) -> Result<(), String> {
         let stored: BTreeMap<ServerId, Stored> = chosen
             .iter()
-            .filter_map(|(id, icon)| Some((*id, Stored::of(icon)?)))
+            .filter(|(_, icon)| **icon != ServerIcon::Default)
+            .map(|(id, icon)| (*id, Stored::of(icon)))
             .collect();
         let json = serde_json::to_vec_pretty(&stored).expect("icons serialize");
         replace_private(&store.server_icons_path(), &[&json[..], b"\n"].concat())
@@ -270,6 +288,59 @@ pub(crate) fn square_picture(bytes: &[u8]) -> Result<Arc<Image>, String> {
         ImageFormat::Png,
         png.into_inner(),
     )))
+}
+
+/// The lowercase hex SHA-256 the server names a picture by.
+pub(crate) fn digest(png: &[u8]) -> String {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(png)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The icon a server keeps for every desktop.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Shared {
+    /// The server is too old to keep one, or could not read it.
+    #[default]
+    Unsupported,
+    /// Nobody chose one yet.
+    Unset,
+    Set(Stored),
+}
+
+/// What a desktop does with the icon a saved server reports.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Sync {
+    Keep,
+    Adopt(ServerIcon),
+    /// Download the server's picture with this digest.
+    Fetch(String),
+    /// Offer this desktop's icon to a server nobody gave one yet.
+    Carry,
+}
+
+impl Sync {
+    pub(crate) fn of(cached: &ServerIcon, shared: &Shared) -> Self {
+        let Shared::Set(stored) = shared else {
+            return match (shared, cached) {
+                (Shared::Unset, icon) if *icon != ServerIcon::Default => Self::Carry,
+                _ => Self::Keep,
+            };
+        };
+        match (stored, cached) {
+            (Stored::Picture { digest: Some(want) }, ServerIcon::Picture(have))
+                if *want == digest(&have.bytes) =>
+            {
+                Self::Keep
+            }
+            (Stored::Picture { digest: Some(want) }, _) => Self::Fetch(want.clone()),
+            (Stored::Picture { digest: None }, _) => Self::Keep,
+            (stored, cached) if Stored::of(cached) == *stored => Self::Keep,
+            (stored, _) => stored.clone().icon(|| None).map_or(Self::Keep, Self::Adopt),
+        }
+    }
 }
 
 fn fnv(text: &str, salt: u32) -> u32 {
@@ -452,6 +523,58 @@ mod tests {
         assert_eq!(letters("   "), None);
         assert_eq!(letters("abc"), None);
         assert_eq!(letters("a\u{7}"), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_desktop_follows_the_server_and_offers_its_own_icon_only_to_a_server_without_one() {
+        let png = |side: u32| {
+            let mut png = Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(side, side)
+                .write_to(&mut png, image::ImageFormat::Png)
+                .unwrap();
+            png.into_inner()
+        };
+        let bytes = png(PICTURE_SIDE);
+        let picture = ServerIcon::Picture(picture(bytes.clone()).unwrap());
+        assert!(super::picture(png(64)).is_none(), "wrong size");
+        let shared_picture = Shared::Set(Stored::Picture {
+            digest: Some(digest(&bytes)),
+        });
+        let pattern = ServerIcon::Pattern { hue: Some(145) };
+        let shared_pattern = Shared::Set(Stored::Pattern { hue: Some(145) });
+        let default = Shared::Set(Stored::Default {});
+        let cases = [
+            (&pattern, &Shared::Unsupported, Sync::Keep),
+            (&pattern, &Shared::Unset, Sync::Carry),
+            (&picture, &Shared::Unset, Sync::Carry),
+            (&ServerIcon::Default, &Shared::Unset, Sync::Keep),
+            (&pattern, &shared_pattern, Sync::Keep),
+            (
+                &ServerIcon::Default,
+                &shared_pattern,
+                Sync::Adopt(pattern.clone()),
+            ),
+            (&picture, &shared_pattern, Sync::Adopt(pattern.clone())),
+            (&pattern, &default, Sync::Adopt(ServerIcon::Default)),
+            (&ServerIcon::Default, &default, Sync::Keep),
+            (&picture, &shared_picture, Sync::Keep),
+            (&pattern, &shared_picture, Sync::Fetch(digest(&bytes))),
+            (
+                &picture,
+                &Shared::Set(Stored::Picture {
+                    digest: Some("0".repeat(64)),
+                }),
+                Sync::Fetch("0".repeat(64)),
+            ),
+            (
+                &ServerIcon::Default,
+                &Shared::Set(Stored::Pattern { hue: Some(400) }),
+                Sync::Keep,
+            ),
+        ];
+        for (cached, shared, expected) in cases {
+            assert_eq!(Sync::of(cached, shared), expected, "{cached:?} {shared:?}");
+        }
     }
 
     fn store() -> (tempfile::TempDir, ProfileStore) {

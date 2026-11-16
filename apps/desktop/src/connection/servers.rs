@@ -116,17 +116,25 @@ pub(super) struct NameWrite {
     pub carried: bool,
 }
 
-/// Name writes per server: the one in flight with the latest name waiting
-/// behind it, and when the last write landed.
-#[derive(Default)]
-pub(super) struct NameWrites {
-    pending: HashMap<Uuid, Option<NameWrite>>,
+/// Writes of one shared setting per server: the one in flight with the
+/// latest value waiting behind it, and when the last write landed.
+pub(super) struct Writes<W> {
+    pending: HashMap<Uuid, Option<W>>,
     landed: HashMap<Uuid, Instant>,
 }
 
-impl NameWrites {
+impl<W> Default for Writes<W> {
+    fn default() -> Self {
+        Self {
+            pending: HashMap::new(),
+            landed: HashMap::new(),
+        }
+    }
+}
+
+impl<W> Writes<W> {
     /// The write to send now, or `None` when it waits behind one in flight.
-    fn begin(&mut self, id: Uuid, write: NameWrite) -> Option<NameWrite> {
+    pub(super) fn begin(&mut self, id: Uuid, write: W) -> Option<W> {
         match self.pending.get_mut(&id) {
             Some(next) => {
                 *next = Some(write);
@@ -140,16 +148,16 @@ impl NameWrites {
     }
 
     /// End the write in flight; returns the one waiting behind it.
-    fn finish(&mut self, id: Uuid, landed: bool) -> Option<NameWrite> {
+    pub(super) fn finish(&mut self, id: Uuid, landed: bool) -> Option<W> {
         if landed {
             self.landed.insert(id, Instant::now());
         }
         self.pending.remove(&id).flatten()
     }
 
-    /// Whether a check that started at `asked` can change the name: no
+    /// Whether a check that started at `asked` can change the setting: no
     /// write is in flight and it started after the last one landed.
-    fn settled(&self, id: Uuid, asked: Option<Instant>) -> bool {
+    pub(super) fn settled(&self, id: Uuid, asked: Option<Instant>) -> bool {
         !self.pending.contains_key(&id)
             && self
                 .landed
@@ -274,7 +282,7 @@ fn monitor(
 
 impl Connections {
     /// Check a saved server again now instead of at its next interval.
-    fn recheck(&self, id: Uuid) {
+    pub(super) fn recheck(&self, id: Uuid) {
         if let Some(monitor) = self.monitors.get(&id) {
             let _ = monitor.commands.try_send(());
         }
@@ -330,6 +338,7 @@ impl Connections {
                         }
                         shell.servers.entries.insert(id, snapshot);
                         shell.adopt_server_name(id, cx);
+                        shell.adopt_server_icon(id, cx);
                         cx.notify();
                         true
                     });
@@ -980,6 +989,7 @@ mod tests {
         };
         let named = |name: Option<&str>| crate::api::ServerInfo {
             name: name.map(Into::into),
+            icon: Default::default(),
         };
         let studio = saved("https://studio.example.com", "Studio");
         assert_eq!(
@@ -1007,7 +1017,7 @@ mod tests {
             name: name.into(),
             carried: false,
         };
-        let mut writes = NameWrites::default();
+        let mut writes = Writes::default();
         let before = Instant::now();
         assert!(writes.settled(id, Some(before)), "nothing written yet");
         assert_eq!(writes.begin(id, write("A")).unwrap().name, "A");
