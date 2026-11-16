@@ -519,11 +519,12 @@ impl ComputerRuntime for Fake {
     }
     async fn export_disk(&self, name: &str, archive: &Path, _: bool) -> Result<(), RuntimeError> {
         let disk = self.computers.lock().unwrap().get(name).unwrap().1.clone();
-        std::fs::write(archive, disk).unwrap();
+        std::fs::write(archive, zstd::encode_all(disk.as_bytes(), 3).unwrap()).unwrap();
         Ok(())
     }
     async fn restore_disk(&self, archive: &Path, spec: &Spec) -> Result<(), RuntimeError> {
-        let disk = std::fs::read_to_string(archive).unwrap();
+        let disk = String::from_utf8(zstd::decode_all(&*std::fs::read(archive).unwrap()).unwrap())
+            .unwrap();
         self.computers
             .lock()
             .unwrap()
@@ -786,7 +787,9 @@ async fn a_damaged_chunk_is_repaired_from_the_local_set_or_reported() {
     let clean = w.replicate_now().await.unwrap().unwrap();
     assert_eq!((clean.damaged, clean.repaired), (0, 0), "{clean:?}");
     flip_byte(&s3, &chunk).await;
-    std::fs::remove_dir_all(summary.path).unwrap();
+    let backups = summary.path.parent().unwrap().to_owned();
+    std::fs::remove_dir_all(&summary.path).unwrap();
+    std::fs::remove_dir_all(backups.join("chunks")).unwrap();
     let lost = w.replicate_now().await.unwrap_err().to_string();
     assert!(
         lost.contains("cannot be restored") && lost.contains(&summary.set_id),

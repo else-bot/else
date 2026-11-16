@@ -61,8 +61,11 @@ impl BackupWorker {
         let Some(replicator) = &self.replicator else {
             return Ok(None);
         };
-        let _lock = super::try_lock(&self.config.dir)?
-            .ok_or_else(|| BackupError::Refused("another backup is running".into()))?;
+        let lock = Arc::new(
+            super::try_lock(&self.config.dir)?
+                .ok_or_else(|| BackupError::Refused("another backup is running".into()))?,
+        );
+        self.adopt_sets(&lock).await?;
         replicator
             .replicate_pending(&self.config.dir, &self.key)
             .await
@@ -102,10 +105,13 @@ impl BackupWorker {
         cancel: &CancellationToken,
         upload: bool,
     ) -> Result<SetSummary, BackupError> {
-        let _lock = super::try_lock(&self.config.dir)?
-            .ok_or_else(|| BackupError::Refused("another backup is running".into()))?;
-        self.recover_locked().await?;
+        let lock = Arc::new(
+            super::try_lock(&self.config.dir)?
+                .ok_or_else(|| BackupError::Refused("another backup is running".into()))?,
+        );
+        self.recover_locked(&lock).await?;
         let mut summary = self.locked_run(cancel).await?;
+        self.adopt_sets(&lock).await?;
         if upload && let Some(replicator) = &self.replicator {
             summary.remote = Some(
                 replicator
@@ -114,11 +120,35 @@ impl BackupWorker {
                     .map_err(Arc::new),
             );
         }
-        self.apply_local_retention(&summary.set_id).await?;
+        self.apply_local_retention(&summary.set_id, &lock).await?;
         Ok(summary)
     }
 
-    async fn apply_local_retention(&self, newest: &str) -> Result<(), BackupError> {
+    /// Move every whole local set, the one just captured and any an earlier
+    /// version kept, into the chunk store. A set that fails stays whole and
+    /// is tried again on the next run.
+    async fn adopt_sets(&self, lock: &Arc<super::DirLock>) -> Result<(), BackupError> {
+        let (dir, key, lock) = (self.config.dir.clone(), self.key.clone(), lock.clone());
+        tokio::task::spawn_blocking(move || {
+            let _lock = lock;
+            for set in super::completed_sets(&dir)? {
+                if let Err(err) = super::store::adopt(&dir.join(&set), &key) {
+                    tracing::warn!(set = %set, error = %err, "a backup set stays whole for now");
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| BackupError::Io(e.to_string()))?
+    }
+
+    /// Blocking work that removes sets or chunks holds `lock` itself, so a
+    /// cancelled caller does not release it while that work still runs.
+    async fn apply_local_retention(
+        &self,
+        newest: &str,
+        lock: &Arc<super::DirLock>,
+    ) -> Result<(), BackupError> {
         let awaiting = match &self.replicator {
             Some(replicator) => replicator.awaiting(&self.config.dir).await?,
             None => Vec::new(),
@@ -126,13 +156,27 @@ impl BackupWorker {
         let dir = self.config.dir.clone();
         let keep = self.config.keep;
         let newest = newest.to_owned();
-        let removed = tokio::task::spawn_blocking(move || {
-            super::apply_retention_protecting(&dir, keep, &newest, &awaiting)
+        let key = self.key.clone();
+        let lock = lock.clone();
+        let (removed, swept) = tokio::task::spawn_blocking(move || {
+            let _lock = lock;
+            let removed = super::apply_retention_protecting(&dir, keep, &newest, &awaiting)?;
+            // The published set is fine either way; unused chunks wait for
+            // the next run.
+            let swept = super::store::sweep(&dir, &key).unwrap_or_else(|err| {
+                tracing::warn!(error = %err, "unused backup chunks were not removed");
+                0
+            });
+            Ok::<_, BackupError>((removed, swept))
         })
         .await
         .map_err(|e| BackupError::Io(e.to_string()))??;
-        if !removed.is_empty() {
-            tracing::info!(removed = removed.len(), "old local backup sets removed");
+        if !removed.is_empty() || swept > 0 {
+            tracing::info!(
+                removed = removed.len(),
+                swept,
+                "old local backup sets and unused chunks removed"
+            );
         }
         Ok(())
     }
@@ -211,12 +255,12 @@ impl BackupWorker {
     /// made are removed. Skipped while a backup is running.
     pub async fn recover(&self) -> Result<usize, BackupError> {
         match super::try_lock(&self.config.dir)? {
-            Some(_lock) => self.recover_locked().await,
+            Some(lock) => self.recover_locked(&Arc::new(lock)).await,
             None => Ok(0),
         }
     }
 
-    async fn recover_locked(&self) -> Result<usize, BackupError> {
+    async fn recover_locked(&self, lock: &Arc<super::DirLock>) -> Result<usize, BackupError> {
         let dir = self.config.dir.clone();
         let published = tokio::task::spawn_blocking(move || super::completed_sets(&dir))
             .await
@@ -237,9 +281,19 @@ impl BackupWorker {
         .execute(&self.pool)
         .await?;
         let dir = self.config.dir.clone();
-        tokio::task::spawn_blocking(move || super::clean_incomplete(&dir))
-            .await
-            .map_err(|e| BackupError::Io(e.to_string()))?
+        let (key, lock) = (self.key.clone(), lock.clone());
+        tokio::task::spawn_blocking(move || {
+            let _lock = lock;
+            let removed = super::clean_incomplete(&dir)?;
+            // Chunks an interrupted capture left could hold the space the
+            // next one needs to stage a whole set.
+            if let Err(err) = super::store::sweep(&dir, &key) {
+                tracing::warn!(error = %err, "unused backup chunks were not removed");
+            }
+            Ok(removed)
+        })
+        .await
+        .map_err(|e| BackupError::Io(e.to_string()))?
     }
 
     /// Run the schedule: captures and uploads have separate deadlines, so

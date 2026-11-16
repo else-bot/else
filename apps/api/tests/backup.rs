@@ -15,10 +15,16 @@ use serde_json::json;
 use sqlx::Connection;
 use uuid::Uuid;
 
+/// Entries of a backup directory besides its lock and shared chunk store.
 fn entries(dir: &Path) -> usize {
     std::fs::read_dir(dir)
         .unwrap()
-        .filter(|e| e.as_ref().unwrap().file_name() != ".lock")
+        .filter(|e| {
+            !matches!(
+                e.as_ref().unwrap().file_name().to_str(),
+                Some(".lock" | "chunks")
+            )
+        })
         .count()
 }
 
@@ -167,27 +173,36 @@ async fn a_backup_restores_into_a_new_database_with_matching_rows() {
     names.sort();
     assert_eq!(
         names,
-        [
-            ".else-backup",
-            "complete.json",
-            "database.dump.age",
-            "manifest.json.age"
-        ]
+        [".else-backup", "complete.json", "index.json.age"],
+        "the artifacts live in the shared chunk store"
     );
     use std::os::unix::fs::PermissionsExt;
-    for name in &names {
-        let mode = std::fs::metadata(summary.path.join(name))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o077, 0, "{name} is private");
+    let chunk_dirs = std::fs::read_dir(summary.path.parent().unwrap().join("chunks"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(chunk_dirs.len(), 1, "one key's chunks");
+    let chunk_files: Vec<PathBuf> = std::fs::read_dir(&chunk_dirs[0])
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert!(!chunk_files.is_empty());
+    for path in names
+        .iter()
+        .map(|n| summary.path.join(n))
+        .chain(chunk_dirs.iter().cloned())
+        .chain(chunk_files.iter().cloned())
+    {
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "{} is private", path.display());
     }
+    let (_whole, whole) = common::rebuilt_set(&summary.path, &key(1));
     let text = key_text(1);
     let raw = base64::engine::general_purpose::STANDARD
         .decode(&text)
         .unwrap();
-    let (_, _, identity) = else_api::backup::restore::open_set(&summary.path, &key(1)).unwrap();
-    let dump = std::fs::read(summary.path.join(backup::DATABASE)).unwrap();
+    let (_, _, identity) = else_api::backup::restore::open_set(&whole, &key(1)).unwrap();
+    let dump = std::fs::read(whole.join(backup::DATABASE)).unwrap();
     let plain = backup::open_small(&dump, &identity, 1 << 30).unwrap();
     assert!(
         plain.starts_with(b"SQLite format 3\0"),
@@ -196,6 +211,7 @@ async fn a_backup_restores_into_a_new_database_with_matching_rows() {
     for bytes in names
         .iter()
         .map(|n| std::fs::read(summary.path.join(n)).unwrap())
+        .chain(chunk_files.iter().map(|p| std::fs::read(p).unwrap()))
         .chain([plain.clone()])
     {
         assert!(!bytes.windows(text.len()).any(|w| w == text.as_bytes()));
@@ -263,13 +279,14 @@ async fn wrong_keys_damage_and_existing_databases_never_produce_a_restore() {
     );
     assert!(!target.exists().await);
 
+    let (_whole, whole) = common::rebuilt_set(&summary.path, &key(1));
     let damaged = |name: &str, change: &dyn Fn(&Path)| {
         let root = dir.path().join(name);
         std::fs::create_dir(&root).unwrap();
         let copy = root.join(&summary.set_id);
         std::fs::create_dir(&copy).unwrap();
         for file in ["complete.json", backup::DATABASE, backup::MANIFEST] {
-            std::fs::copy(summary.path.join(file), copy.join(file)).unwrap();
+            std::fs::copy(whole.join(file), copy.join(file)).unwrap();
         }
         change(&copy);
         copy
@@ -320,6 +337,32 @@ async fn wrong_keys_damage_and_existing_databases_never_produce_a_restore() {
         );
         assert!(!target.exists().await, "{what} created a database");
     }
+    let chunks = summary.path.parent().unwrap().join("chunks");
+    let key_dir = std::fs::read_dir(&chunks)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let chunk = std::fs::read_dir(&key_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let original = std::fs::read(&chunk).unwrap();
+    let mut flipped = original.clone();
+    let at = flipped.len() / 2;
+    flipped[at] ^= 0x40;
+    std::fs::write(&chunk, &flipped).unwrap();
+    let target = Target::new(&app);
+    let result = restore_into(&app, &summary.path, &key(1), &target, &staging).await;
+    assert!(
+        matches!(&result, Err(err) if err.to_string().contains("is damaged")),
+        "a damaged chunk: {result:?}"
+    );
+    assert!(!target.exists().await, "a damaged chunk created a database");
+    std::fs::write(&chunk, &original).unwrap();
 
     let existing = Target::new(&app);
     {
@@ -386,7 +429,7 @@ async fn producer_failures_interruptions_and_overruns_leave_no_completed_set() {
     let unfinished: Vec<PathBuf> = std::fs::read_dir(&backups)
         .unwrap()
         .map(|e| e.unwrap().path())
-        .filter(|p| !p.ends_with(".lock"))
+        .filter(|p| !p.ends_with(".lock") && !p.ends_with("chunks"))
         .collect();
     assert_eq!(unfinished.len(), 1);
     assert!(!unfinished[0].join("complete.json").exists());
@@ -964,6 +1007,19 @@ async fn a_database_only_backup_restores_without_touching_the_schedule() {
         serde_json::from_slice(&std::fs::read(set.join("complete.json")).unwrap()).unwrap();
     assert!(!complete.whole_assistant);
     assert!(out.contains("Database only"), "{out}");
+    for _ in 0..backup::BEFORE_UPDATE_KEEP {
+        let (ok, out) = run(&["backup", "--database-only"]);
+        assert!(ok, "{out}");
+    }
+    let before_update = backups.join(backup::BEFORE_UPDATE_DIR);
+    let kept = backup::completed_sets(&before_update).unwrap();
+    assert_eq!(
+        kept.len(),
+        backup::BEFORE_UPDATE_KEEP,
+        "before-update sets keep their own small retention"
+    );
+    assert!(!set.exists(), "the oldest before-update set is removed");
+    let set = before_update.join(kept.last().unwrap());
 
     let (ok, out) = run(&["backup", "--whole"]);
     assert!(!ok && out.contains("Usage:"), "{out}");
@@ -1014,4 +1070,166 @@ async fn a_database_only_backup_restores_without_touching_the_schedule() {
         rows(&target.url(), COMPARED[0]).await,
         rows(db.url.expose(), COMPARED[0]).await
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_chunk_store_sweeps_only_chunks_no_readable_kept_set_uses() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    cfg.keep = 2;
+    let worker = worker(&app, key(1), cfg);
+    let chunk_files = || -> Vec<String> {
+        let chunks = dir.path().join("backups/chunks");
+        let mut names: Vec<String> = std::fs::read_dir(&chunks)
+            .unwrap()
+            .flat_map(|k| std::fs::read_dir(k.unwrap().path()).unwrap())
+            .map(|c| c.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let named = |set: &Path| -> std::collections::BTreeSet<String> {
+        let (_, index) = backup::store::open_index(set, &key(1)).unwrap();
+        index.chunk_ids().map(str::to_owned).collect()
+    };
+
+    let first = worker.run_once().await.unwrap();
+    let after_first = chunk_files();
+    let second = worker.run_once().await.unwrap();
+
+    let key_dir = std::fs::read_dir(dir.path().join("backups/chunks"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let orphan = "ab".repeat(32);
+    std::fs::write(key_dir.join(&orphan), "from an interrupted capture").unwrap();
+    std::fs::write(key_dir.join(format!(".{orphan}.x1y2.tmp")), "half written").unwrap();
+    let index = second.path.join(backup::chunks::INDEX);
+    let sealed = std::fs::read(&index).unwrap();
+    let mut flipped = sealed.clone();
+    let at = flipped.len() / 2;
+    flipped[at] ^= 1;
+    std::fs::write(&index, &flipped).unwrap();
+    let third = worker.run_once().await.unwrap();
+    assert!(!first.path.exists(), "keep 2 removes the oldest set");
+    assert!(
+        chunk_files().contains(&orphan),
+        "nothing is swept while a kept set's index cannot be read"
+    );
+    assert!(
+        after_first.iter().all(|c| chunk_files().contains(c)),
+        "the unreadable set's chunks are all kept"
+    );
+
+    std::fs::write(&index, &sealed).unwrap();
+    let fourth = worker.run_once().await.unwrap();
+    assert!(!second.path.exists());
+    let kept: std::collections::BTreeSet<String> = named(&third.path)
+        .union(&named(&fourth.path))
+        .cloned()
+        .collect();
+    assert_eq!(
+        chunk_files(),
+        kept.into_iter().collect::<Vec<_>>(),
+        "only chunks the kept sets name remain, without temporary files"
+    );
+    std::fs::write(
+        key_dir.join(&orphan),
+        "from a capture that ran out of space",
+    )
+    .unwrap();
+    worker.recover().await.unwrap();
+    assert!(
+        !key_dir.join(&orphan).exists(),
+        "recovery sweeps before the next capture needs the space"
+    );
+    for set in [&third, &fourth] {
+        let target = Target::new(&app);
+        let staging = dir.path().join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        restore_into(&app, &set.path, &key(1), &target, &staging)
+            .await
+            .unwrap();
+        assert!(target.exists().await);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn whole_sets_move_into_the_chunk_store_and_a_damaged_one_stays_whole() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path());
+    let params = DatabaseParams::parse(app.db.url.expose()).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let coordinator = else_api::backup::capture::Coordinator::default();
+    let mut whole = Vec::new();
+    for _ in 0..2 {
+        let set = else_api::backup::capture::create_set(
+            &app.db.pool,
+            &params,
+            &key(1),
+            &cfg,
+            &backup::new_set_id(),
+            &cancel,
+            &coordinator,
+        )
+        .await
+        .unwrap();
+        assert!(set.path.join(backup::DATABASE).exists(), "captured whole");
+        whole.push(set);
+    }
+    let damaged = whole[1].path.join(backup::DATABASE);
+    let len = std::fs::metadata(&damaged).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&damaged)
+        .unwrap()
+        .set_len(len - 100)
+        .unwrap();
+
+    let names = |set: &Path| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(set)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let worker = worker(&app, key(1), cfg);
+    let newest = worker.run_once().await.unwrap();
+    for set in [&whole[0].path, &newest.path] {
+        assert_eq!(
+            names(set),
+            [".else-backup", "complete.json", "index.json.age"],
+            "{} keeps only its index",
+            set.display()
+        );
+    }
+    assert!(
+        names(&whole[1].path).contains(&backup::MANIFEST.to_owned()),
+        "a set whose artifacts do not match its manifest is not converted"
+    );
+
+    std::fs::write(
+        whole[0].path.join(backup::DATABASE),
+        "left by an interrupted move",
+    )
+    .unwrap();
+    worker.run_once().await.unwrap();
+    assert_eq!(
+        names(&whole[0].path),
+        [".else-backup", "complete.json", "index.json.age"]
+    );
+    let target = Target::new(&app);
+    let staging = dir.path().join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    restore_into(&app, &whole[0].path, &key(1), &target, &staging)
+        .await
+        .unwrap();
+    assert!(target.exists().await);
 }

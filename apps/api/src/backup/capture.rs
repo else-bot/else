@@ -2,7 +2,9 @@
 //!
 //! Table digests and the database image share one SQLite snapshot. The image
 //! is size-checked before allocation and encrypted from memory, never staged
-//! as plaintext. Completion is published only after every object is synced.
+//! as plaintext. Completion is published only after every object is synced;
+//! the worker then moves the set into the local chunk store
+//! ([`super::store::adopt`]).
 
 use std::path::{Path, PathBuf};
 
@@ -859,10 +861,10 @@ async fn capture_into(
             note: if complete {
                 "Whole assistant: the database, every active bot's computer (disk archives; \
                  each image is stored once, in the first archive that uses it, which a restore \
-                 imports first), every bot's project directory, and the shared MCP \
-                 skills, documentation and config. Native provider \
-                 sessions are not included: conversations are rebuilt from SQLite and \
-                 providers may need a fresh login."
+                 imports first), every bot's project directory (without node_modules, which a \
+                 reinstall restores), and the shared MCP skills, documentation and config. \
+                 Native provider sessions are not included: conversations are rebuilt from \
+                 SQLite and providers may need a fresh login."
                     .into()
             } else {
                 format!(

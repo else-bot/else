@@ -10,7 +10,8 @@
 //!
 //! Regular files, directories, and symbolic links (never followed) are
 //! archived with their modes and modification times; sockets, FIFOs, and
-//! devices are not data and are skipped. A file with several names inside
+//! devices are not data and are skipped, and so is every `node_modules`
+//! directory ([`SKIPPED_DIR`]). A file with several names inside
 //! the directory (package managers hard-link their stores) is stored once
 //! and its other names as hard links, so it restores as one file again. An
 //! entry that cannot be read is left out and reported, and the bot's
@@ -29,9 +30,12 @@ use std::path::{Path, PathBuf};
 use super::BackupError;
 
 /// zstd level 3 with a 128 MiB long-distance window: a workspace's second
-/// checkout or copied `node_modules` sits far behind the first in the tar.
+/// checkout sits far behind the first in the tar.
 const LEVEL: i32 = 3;
 const WINDOW_LOG: u32 = 27;
+/// Installed packages, left out at any depth: they were 80% of production
+/// project bytes and a package manager reinstalls them from the lockfile.
+pub const SKIPPED_DIR: &str = "node_modules";
 
 /// How a set stores project directories, fixed by its schema version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +165,8 @@ fn add_dir(
             builder
                 .append_link(&mut header, &rel, &link)
                 .map_err(fail)?;
+        } else if kind.is_dir() && name == SKIPPED_DIR {
+            continue;
         } else if kind.is_dir() {
             let mut header = tar::Header::new_gnu();
             header.set_metadata(&meta);
@@ -350,14 +356,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         fs::create_dir_all(src.join("store")).unwrap();
-        fs::create_dir_all(src.join("app/node_modules")).unwrap();
+        fs::create_dir_all(src.join("app/vendor")).unwrap();
         let body = "x".repeat(64 * 1024);
         fs::write(src.join("store/lib.js"), &body).unwrap();
-        fs::hard_link(
-            src.join("store/lib.js"),
-            src.join("app/node_modules/lib.js"),
-        )
-        .unwrap();
+        fs::hard_link(src.join("store/lib.js"), src.join("app/vendor/lib.js")).unwrap();
         fs::hard_link(src.join("store/lib.js"), src.join("copy.js")).unwrap();
         let outside = dir.path().join("cache.js");
         fs::write(&outside, "shared with a file outside").unwrap();
@@ -379,11 +381,11 @@ mod tests {
         let out = dir.path().join("out");
         unpack(&tar, &out, Format::TarZstd).unwrap();
         let ino = |p: &str| fs::metadata(out.join(p)).unwrap().ino();
-        assert_eq!(ino("store/lib.js"), ino("app/node_modules/lib.js"));
+        assert_eq!(ino("store/lib.js"), ino("app/vendor/lib.js"));
         assert_eq!(ino("store/lib.js"), ino("copy.js"));
         fs::write(out.join("copy.js"), "edited").unwrap();
         assert_eq!(
-            fs::read_to_string(out.join("app/node_modules/lib.js")).unwrap(),
+            fs::read_to_string(out.join("app/vendor/lib.js")).unwrap(),
             "edited"
         );
         assert_eq!(
@@ -391,6 +393,36 @@ mod tests {
             "shared with a file outside"
         );
         assert_eq!(fs::metadata(out.join("cached.js")).unwrap().nlink(), 1);
+    }
+
+    #[test]
+    fn node_modules_directories_are_left_out_at_any_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(src.join("node_modules/left")).unwrap();
+        fs::create_dir_all(src.join("app/node_modules/pkg")).unwrap();
+        fs::write(src.join("node_modules/left/index.js"), "INSTALLED").unwrap();
+        fs::write(src.join("app/node_modules/pkg/index.js"), "INSTALLED").unwrap();
+        fs::write(src.join("app/package.json"), "{}").unwrap();
+        fs::create_dir_all(src.join("web")).unwrap();
+        std::os::unix::fs::symlink("../app/node_modules", src.join("web/node_modules")).unwrap();
+
+        let tar = dir.path().join("p.tar.zst");
+        assert!(archive(&src, &tar).unwrap().is_empty());
+        assert!(!plain_tar(&tar).windows(9).any(|w| w == b"INSTALLED"));
+        let out = dir.path().join("out");
+        unpack(&tar, &out, Format::TarZstd).unwrap();
+        assert_eq!(
+            fs::read_to_string(out.join("app/package.json")).unwrap(),
+            "{}"
+        );
+        assert!(!out.join("node_modules").exists());
+        assert!(!out.join("app/node_modules").exists());
+        assert_eq!(
+            fs::read_link(out.join("web/node_modules")).unwrap(),
+            Path::new("../app/node_modules"),
+            "a link is kept: it holds no packages"
+        );
     }
 
     #[test]

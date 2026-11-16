@@ -91,11 +91,9 @@ fn clean_stale(parent: &Path) -> Result<(), BackupError> {
     Ok(())
 }
 
-/// Read and validate the bootstrap and the encrypted manifest.
-pub fn open_set(
-    set_dir: &Path,
-    key: &SecretKey,
-) -> Result<(Completion, Manifest, age::x25519::Identity), BackupError> {
+/// Read the bootstrap of the set at `set_dir` and check it names that set
+/// with a supported schema.
+pub fn read_completion(set_dir: &Path) -> Result<Completion, BackupError> {
     let set_id = set_dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -119,6 +117,23 @@ pub fn open_set(
         return Err(BackupError::Invalid(
             "the completion record names another set".into(),
         ));
+    }
+    Ok(completion)
+}
+
+/// Read and validate the bootstrap and the encrypted manifest, from the
+/// chunk index for a set kept in the local chunk store. Only a whole set's
+/// artifacts are files in `set_dir`; see [`super::store::rebuild`].
+pub fn open_set(
+    set_dir: &Path,
+    key: &SecretKey,
+) -> Result<(Completion, Manifest, age::x25519::Identity), BackupError> {
+    let completion = read_completion(set_dir)?;
+    if completion.manifest.object == super::chunks::INDEX {
+        let (completion, index) = super::store::open_index(set_dir, key)?;
+        let identity = super::identity_for(key, &completion.encryption)?;
+        validate_artifacts(&index.manifest)?;
+        return Ok((completion, index.manifest, identity));
     }
     if completion.manifest.object != MANIFEST {
         return Err(BackupError::Invalid("unexpected manifest object".into()));
@@ -313,7 +328,7 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
             "a new SQLite file path is required".into(),
         ));
     }
-    let (_, manifest, identity) = open_set(request.set_dir, request.key)?;
+    let (completion, manifest, identity) = open_set(request.set_dir, request.key)?;
     if manifest
         .artifacts
         .iter()
@@ -353,6 +368,28 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
     );
     super::private_dir(&staging)?;
     super::mark_owned(&staging)?;
+    let rebuilt = staging.join(&manifest.set_id);
+    let (request, manifest, identity) = if completion.manifest.object == super::chunks::INDEX {
+        {
+            let opened = super::store::open(request.set_dir, request.key)?;
+            let (set_dir, out, max) = (
+                request.set_dir.to_owned(),
+                rebuilt.clone(),
+                request.max_bytes,
+            );
+            tokio::task::spawn_blocking(move || super::store::rebuild(&set_dir, &out, opened, max))
+                .await
+                .map_err(|e| BackupError::Io(e.to_string()))??;
+        }
+        let (_, manifest, identity) = open_set(&rebuilt, request.key)?;
+        let request = RestoreRequest {
+            set_dir: &rebuilt,
+            ..request
+        };
+        (request, manifest, identity)
+    } else {
+        (request, manifest, identity)
+    };
     let dump = staging.join("database.dump");
     {
         let set_dir = request.set_dir.to_owned();
