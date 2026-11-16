@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod app_passwords;
+mod oauth_sign_in_again;
 mod removal;
 
 fn config() -> MailConfig {
@@ -53,6 +54,23 @@ async fn account(app: &TestApp) -> Account {
     .await
     .unwrap()
 }
+/// Waits until the account's runtime reports `want`.
+async fn health_becomes(app: &TestApp, account: Uuid, want: Health) {
+    tokio::time::timeout(common::SETTLE, async {
+        while store::account(&app.db.pool, account)
+            .await
+            .unwrap()
+            .unwrap()
+            .health
+            != want
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the inbox never became {want:?}"));
+}
+
 fn permissions() -> Permissions {
     Permissions {
         read: true,

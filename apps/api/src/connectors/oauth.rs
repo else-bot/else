@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
-use super::types::{Credential, MailError, Provider};
+use super::types::{Credential, MailError, Provider, REAUTHENTICATION_REQUIRED};
 use crate::actor::Actor;
 
 #[derive(Deserialize)]
@@ -120,7 +120,7 @@ fn token_error(error: RequestTokenError<std::io::Error, BasicErrorResponse>) -> 
         RequestTokenError::Request(error)
             if error.kind() == std::io::ErrorKind::PermissionDenied =>
         {
-            "oauth_reauthentication_required"
+            REAUTHENTICATION_REQUIRED
         }
         RequestTokenError::ServerResponse(response)
             if matches!(
@@ -128,7 +128,7 @@ fn token_error(error: RequestTokenError<std::io::Error, BasicErrorResponse>) -> 
                 InvalidGrant | InvalidClient | UnauthorizedClient
             ) =>
         {
-            "oauth_reauthentication_required"
+            REAUTHENTICATION_REQUIRED
         }
         RequestTokenError::ServerResponse(_) => "oauth_request_rejected",
         RequestTokenError::Request(_) => "oauth_unavailable",
@@ -303,7 +303,7 @@ async fn gmail_address(endpoint: &str, access_token: &str) -> Result<String, Mai
         .await
         .map_err(|_| MailError::new("oauth_unavailable"))?;
     if !response.status().is_success() {
-        return Err(MailError::new("oauth_reauthentication_required"));
+        return Err(MailError::new(REAUTHENTICATION_REQUIRED));
     }
     let profile: Profile = response
         .json()

@@ -197,23 +197,6 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_in_the_same_turn_when_
     assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
 }
 
-/// Waits until the account's runtime reports `want`.
-async fn health_becomes(app: &TestApp, account: Uuid, want: Health) {
-    tokio::time::timeout(common::SETTLE, async {
-        while store::account(&app.db.pool, account)
-            .await
-            .unwrap()
-            .unwrap()
-            .health
-            != want
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("the inbox never became {want:?}"));
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_revoked_inbox_password_reopens_the_card_until_a_sign_in_succeeds() {
     let inbox = Arc::new(QuietInbox::default());

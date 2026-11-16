@@ -380,7 +380,7 @@ impl ConnectorManager {
             Credential::OAuth2 { access_token, .. } => (
                 access_token
                     .clone()
-                    .ok_or_else(|| MailError::new("oauth_reauthentication_required"))?,
+                    .ok_or_else(|| MailError::new(REAUTHENTICATION_REQUIRED))?,
                 true,
             ),
         };
@@ -391,17 +391,17 @@ impl ConnectorManager {
         })
     }
 
-    /// Runs one command. When the server rejects the credential, it stops
-    /// the watch session and records the rejection before it replies, so a
-    /// session that signed in before the password was revoked cannot
-    /// report the inbox connected, and the bot's next call sees it. It
-    /// returns whether the watch must sign in again.
+    /// Runs one command. When the server rejects the credential or the
+    /// OAuth grant expired, it stops the watch session and records that
+    /// before it replies, so a session that signed in earlier cannot report
+    /// the inbox connected, and the bot's next call sees it. It returns
+    /// whether the watch must sign in again.
     async fn dispatch(&self, id: Uuid, command: Command, watching: &mut Option<Watching>) -> bool {
         let mut rejected = None;
         let result = self.perform(id, &command, &mut rejected).await;
-        if let Some(generation) = rejected {
+        if let Some((generation, health)) = rejected {
             stop_watch(watching).await;
-            self.health(id, generation, AUTHENTICATION_FAILED).await;
+            self.health(id, generation, health).await;
         }
         let _ = command.reply.send(result);
         rejected.is_some()
@@ -411,7 +411,7 @@ impl ConnectorManager {
         &self,
         id: Uuid,
         command: &Command,
-        rejected: &mut Option<i64>,
+        rejected: &mut Option<(i64, &'static str)>,
     ) -> Result<Value, MailError> {
         if tokio::time::Instant::now() >= command.deadline {
             return Err(MailError::new("mail_queue_expired"));
@@ -426,7 +426,11 @@ impl ConnectorManager {
             .map_err(|_| MailError::new("mail_unavailable"))?
             .ok_or_else(|| MailError::new("mail_forbidden"))?;
         self.authorization(&account, command).await?;
-        let auth = self.auth(&account).await?;
+        let auth = self.auth(&account).await.inspect_err(|error| {
+            if error.code == REAUTHENTICATION_REQUIRED {
+                *rejected = Some((account.generation, REAUTHENTICATION_REQUIRED));
+            }
+        })?;
         self.authorization(&account, command).await?;
         let action_id = if command.command.mutates() {
             let action_id = command.action_id.expect("validated action ID");
@@ -453,7 +457,7 @@ impl ConnectorManager {
             .execute(&account.config, &auth, &command.command)
             .await;
         if matches!(&result, Err(error) if error.code == AUTHENTICATION_FAILED) {
-            *rejected = Some(account.generation);
+            *rejected = Some((account.generation, AUTHENTICATION_FAILED));
         }
         let Some(action_id) = action_id else {
             return result;

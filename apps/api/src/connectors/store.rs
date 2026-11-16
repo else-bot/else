@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 use super::types::{
     AUTHENTICATION_FAILED, Account, Credential, Cursor, Health, MailCommand, MailConfig,
-    MailTrigger, Permissions, Provider, Scan,
+    MailTrigger, Permissions, Provider, REAUTHENTICATION_REQUIRED, Scan,
 };
 use crate::credentials::SecretKey;
 use crate::db::turns::TurnStatus;
@@ -496,8 +496,9 @@ pub async fn set_active(
 }
 
 /// Record the runtime's view of an account's health for this generation.
-/// A rejected credential stays rejected until the owner replaces it or a
-/// sign-in succeeds, so a network error cannot hide it. The account's
+/// A rejected credential or an expired OAuth grant stays recorded until the
+/// owner replaces it or a sign-in succeeds, so a network error cannot hide
+/// it. The account's
 /// worker stops a watch session before it records a rejection, so only a
 /// sign-in that began afterwards reports `connected`.
 pub async fn set_health(
@@ -513,12 +514,13 @@ pub async fn set_health(
     let done = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE connector_accounts SET health = ?3, updated_at = {NOW}
          WHERE id = ?1 AND generation = ?2 AND state <> 'removed'
-            AND (health <> ?4 OR ?3 = 'connected')"
+            AND (health NOT IN (?4, ?5) OR ?3 = 'connected')"
     )))
     .bind(id)
     .bind(generation)
     .bind(health)
     .bind(AUTHENTICATION_FAILED)
+    .bind(REAUTHENTICATION_REQUIRED)
     .execute(pool)
     .await?;
     Ok(done.rows_affected() == 1)
