@@ -12,6 +12,19 @@ pub fn is_tailscale_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Whether a URL host is an IP literal on a LAN or tailnet: RFC 1918,
+/// `100.64.0.0/10`, or `fc00::/7`. Hostnames never match, since their DNS
+/// answers can change after the check.
+pub fn is_private_host(host: &str) -> bool {
+    let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() else {
+        return false;
+    };
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => v4.is_private() || is_tailscale_ip(IpAddr::V4(v4)),
+        IpAddr::V6(v6) => v6.is_unique_local(),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Status {
@@ -99,6 +112,33 @@ impl Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_lan_and_tailnet_ip_literals_are_private_hosts() {
+        for (host, expected) in [
+            ("10.1.2.3", true),
+            ("172.20.0.5", true),
+            ("192.168.1.15", true),
+            ("100.88.191.63", true),
+            ("[fd7a:115c:a1e0::1]", true),
+            ("fd00::1", true),
+            ("[::ffff:192.168.1.15]", true),
+            ("93.184.216.34", false),
+            ("100.64.0.0", true),
+            ("100.63.255.255", false),
+            ("100.128.0.1", false),
+            ("[::ffff:8.8.8.8]", false),
+            ("172.32.0.1", false),
+            ("[2001:db8::1]", false),
+            ("127.0.0.1", false),
+            ("[::1]", false),
+            ("169.254.169.254", false),
+            ("example.ts.net", false),
+            ("localhost", false),
+        ] {
+            assert_eq!(is_private_host(host), expected, "{host}");
+        }
+    }
 
     fn fixture(state: &str, tun: bool) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({

@@ -111,25 +111,3 @@ async fn discovery_reaches_a_separate_authorization_server_on_the_same_private_n
     assert_eq!(found.metadata.issuer, Some(issuer));
     assert_eq!(found.scopes, ["orchestration:read"]);
 }
-
-#[test]
-fn only_mcps_at_private_ips_may_reach_private_metadata() {
-    for (host, expected) in [
-        ("10.1.2.3", true),
-        ("172.20.0.5", true),
-        ("192.168.1.15", true),
-        ("100.88.191.63", true),
-        ("fd7a:115c:a1e0::1", true),
-        ("fd00::1", true),
-        ("::ffff:192.168.1.15", true),
-        ("93.184.216.34", false),
-        ("100.128.0.1", false),
-        ("172.32.0.1", false),
-        ("2001:db8::1", false),
-        ("127.0.0.1", false),
-        ("::1", false),
-        ("169.254.169.254", false),
-    ] {
-        assert_eq!(is_private(host.parse().unwrap()), expected, "{host}");
-    }
-}
