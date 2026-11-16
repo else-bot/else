@@ -284,6 +284,44 @@ async fn a_choice_parks_the_turn_and_the_answer_continues_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_reply_turns_unread_when_its_turn_parks_on_a_question() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main).await;
+    let read_state = || async {
+        app.owner("GET", &format!("/v1/bots/{main}"), None)
+            .await
+            .body["bot"]["read_state"]
+            .clone()
+    };
+    tokio::time::timeout(common::SETTLE, async {
+        loop {
+            let snapshot = app
+                .owner("GET", &format!("/v1/bots/{main}/conversation"), None)
+                .await;
+            let items = snapshot.body["items"].as_array().unwrap().clone();
+            if items.iter().any(|i| i["kind"] == "assistant") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the reply started");
+    let working = read_state().await;
+    assert_eq!(working["latest"], Value::Null, "{working}");
+    assert_eq!(working["unread"], false);
+
+    let asked = tool(&app, &token, "ask_owner", choice_args()).await;
+    assert_eq!(tool_text(&asked)["parked"], true, "{}", asked.body);
+    wait(&app, turn, "waiting").await;
+    let parked = read_state().await;
+    assert_eq!(parked["latest"]["turn_id"], turn.to_string(), "{parked}");
+    assert_eq!(parked["unread"], true);
+    assert_eq!(parked["unread_replies"], 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn five_options_accept_exactly_one_answer_by_default_or_explicitly() {
     let Harness { app, synthetic } = harness().await;
     let main = app.main_bot().await;

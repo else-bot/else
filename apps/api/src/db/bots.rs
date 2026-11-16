@@ -92,7 +92,22 @@ impl BotRecord {
     }
 }
 
-const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status,
+/// SQL over a turn `t` of an owner conversation: it ended, or it is parked
+/// on a request to the owner. Replies of a turn still working are progress
+/// updates, so they are neither the latest reply nor unread.
+macro_rules! handed_back {
+    () => {
+        "(t.status IN ('completed', 'interrupted', 'failed', 'uncertain')
+            OR EXISTS (SELECT 1 FROM owner_questions p WHERE p.turn_id = t.id AND p.status = 'pending')
+            OR EXISTS (SELECT 1 FROM computer_handoffs p WHERE p.turn_id = t.id AND p.status = 'pending')
+            OR EXISTS (SELECT 1 FROM skill_installs p WHERE p.turn_id = t.id AND p.status = 'pending')
+            OR EXISTS (SELECT 1 FROM secret_requests p WHERE p.turn_id = t.id AND p.status = 'pending')
+            OR EXISTS (SELECT 1 FROM outgoing_drafts p WHERE p.turn_id = t.id AND p.status = 'pending'))"
+    };
+}
+
+const SELECT_BOT: &str = concat!(
+    "SELECT b.id, b.name, c.id AS conversation_id, b.status,
         b.created_at, b.deleted_at, b.selected_provider_id, b.cancel_pending, b.category_id, b.muted,
         b.avatar_shape, b.avatar_color,
         c.read_item_seq, c.read_text_bytes, c.marked_unread,
@@ -115,7 +130,12 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
                 SELECT t.id FROM turns t WHERE t.conversation_id = c.id
                 ORDER BY t.turn_no DESC LIMIT 1)
             ORDER BY i.seq DESC LIMIT 1), false) AS latest_turn_read,
-        (SELECT count(*) FROM items u WHERE u.conversation_id = c.id AND u.kind = 'assistant'
+        (SELECT count(*) FROM items u JOIN turns t ON t.id = u.turn_id
+            WHERE u.conversation_id = c.id AND u.kind = 'assistant' AND ",
+    handed_back!(),
+    "
+            AND NOT EXISTS (SELECT 1 FROM items v WHERE v.turn_id = u.turn_id
+                            AND v.kind = 'assistant' AND v.seq > u.seq)
             AND u.seq >= c.read_item_seq
             AND (u.seq > c.read_item_seq OR length(CAST(u.text AS BLOB)) > c.read_text_bytes))
             AS unread_count,
@@ -136,8 +156,11 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
         coalesce((SELECT e.seq FROM bot_events e WHERE e.bot_id = b.id
             AND e.kind = 'bot.updated' ORDER BY e.seq DESC LIMIT 1), 0) AS metadata_revision
     FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
-    LEFT JOIN items h ON h.id = (SELECT x.id FROM items x WHERE x.conversation_id = c.id
-                                 AND x.kind = 'assistant' ORDER BY x.seq DESC LIMIT 1)
+    LEFT JOIN items h ON h.id = (SELECT x.id FROM items x JOIN turns t ON t.id = x.turn_id
+                                 WHERE x.conversation_id = c.id AND x.kind = 'assistant'
+                                 AND ",
+    handed_back!(),
+    " ORDER BY x.seq DESC LIMIT 1)
     LEFT JOIN owner_questions question ON question.id = (
         SELECT p.id FROM owner_questions p
         WHERE p.bot_id = b.id AND p.status = 'pending'
@@ -164,7 +187,8 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
         AND a.status IN ('preparing', 'sending', 'running', 'cancelling', 'waiting')
         AND a.id = (SELECT w.id FROM turns w WHERE w.bot_id = b.id
                     AND w.status IN ('preparing', 'sending', 'running', 'cancelling', 'waiting')
-                    ORDER BY w.status = 'waiting', w.created_at LIMIT 1)";
+                    ORDER BY w.status = 'waiting', w.created_at LIMIT 1)"
+);
 
 #[derive(Debug)]
 pub enum Created {
