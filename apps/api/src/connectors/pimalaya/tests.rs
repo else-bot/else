@@ -669,3 +669,18 @@ fn attachments_round_trip_and_forward_preserves_the_original_message() {
         "mail_attachments_too_large"
     );
 }
+
+#[test]
+fn sender_date_keeps_offsets_and_falls_back_to_the_header_text() {
+    assert_eq!(
+        header_date(Some(" Mon, 16 Nov 2026 10:00:00 -0500\r\n")).as_deref(),
+        Some("2026-11-16T10:00:00-05:00")
+    );
+    assert_eq!(
+        header_date(Some("31 Feb 2026 10:00:00 +0100")).as_deref(),
+        Some("31 Feb 2026 10:00:00 +0100"),
+        "an impossible calendar date is not presented as a timestamp"
+    );
+    assert_eq!(header_date(Some("  ")), None);
+    assert_eq!(header_date(None), None);
+}

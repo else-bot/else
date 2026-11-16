@@ -661,16 +661,19 @@ fn mailbox_name(value: &Mailbox<'_>) -> String {
     }
 }
 
-/// The sender's `Date:` header as RFC 3339, or as written when it does not parse.
+/// The sender's `Date:` header as RFC 3339, or its trimmed text when it is not a real date.
 fn header_date(raw: Option<&str>) -> Option<String> {
     let raw = raw?.trim();
     if raw.is_empty() {
         return None;
     }
-    Some(match mail_parser::DateTime::parse_rfc822(raw) {
-        Some(date) if date.is_valid() => date.to_rfc3339(),
-        _ => raw.chars().take(256).collect(),
-    })
+    Some(
+        mail_parser::DateTime::parse_rfc822(raw)
+            .filter(mail_parser::DateTime::is_valid)
+            .map(|date| date.to_rfc3339())
+            .filter(|date| chrono::DateTime::parse_from_rfc3339(date).is_ok())
+            .unwrap_or_else(|| raw.chars().take(256).collect()),
+    )
 }
 fn internal_date(item: &MessageDataItem<'_>) -> Option<chrono::DateTime<chrono::FixedOffset>> {
     match item {
