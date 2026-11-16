@@ -1,6 +1,6 @@
 //! Sidebar layout: the main bot pinned on top, then the bots waiting on the
 //! owner, oldest request first, then categories with their bots, then the
-//! unassigned bots. Pure, so the order is tested without a window.
+//! unassigned bots. A waiting bot shows both in the tray and in its group. Pure, so the order is tested without a window.
 //!
 //! Categories keep the server's order: the owner's placed order, shared by
 //! every desktop, then unplaced ones by name. Muted bots go last in their group. Bots are
@@ -72,8 +72,8 @@ pub struct Group<'a> {
 pub struct Layout<'a> {
     /// The main bot, above every group and in none of them.
     pub pinned: Option<&'a Bot>,
-    /// Other bots waiting on the owner, muted ones included, lifted out of
-    /// their groups until the request closes.
+    /// Other bots waiting on the owner, muted ones included, until the
+    /// request closes. They also stay in their groups.
     pub waiting: Vec<&'a Bot>,
     pub groups: Vec<Group<'a>>,
 }
@@ -81,16 +81,15 @@ pub struct Layout<'a> {
 impl<'a> Layout<'a> {
     pub fn new(categories: &'a [Category], bots: &'a [Bot], main: Option<Uuid>) -> Self {
         let pinned = bots.iter().find(|b| Some(b.id) == main);
-        let lifted = move |b: &Bot| Some(b.id) != main && b.is_active() && b.waiting().is_some();
-        let mut waiting: Vec<&Bot> = bots.iter().filter(|b| lifted(b)).collect();
+        let mut waiting: Vec<&Bot> = bots
+            .iter()
+            .filter(|b| Some(b.id) != main && b.is_active() && b.waiting().is_some())
+            .collect();
         waiting.sort_by_key(|b| {
             let since = b.waiting().and_then(|w| w.since);
             (since.is_none(), since, fold(&b.name), b.id)
         });
-        let others = || {
-            bots.iter()
-                .filter(move |b| Some(b.id) != main && !lifted(b))
-        };
+        let others = || bots.iter().filter(move |b| Some(b.id) != main);
         let mut groups: Vec<Group> = categories
             .iter()
             .map(|category| Group {
@@ -142,7 +141,12 @@ impl<'a> Layout<'a> {
             )
             .filter(|b| b.is_active())
             .map(|b| b.id)
-            .collect()
+            .fold(Vec::new(), |mut ids, id| {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+                ids
+            })
     }
 }
 
@@ -243,11 +247,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Ledger", "Scout"]
         );
-        assert_eq!(shape(&layout), vec![(Some("Growth"), vec!["Atlas"])]);
+        assert_eq!(
+            shape(&layout),
+            vec![
+                (Some("Growth"), vec!["Atlas", "Scout"]),
+                (None, vec!["Ledger"])
+            ],
+            "a waiting bot stays in its category too"
+        );
         assert_eq!(
             layout.visible_order(&prefs.collapsed),
             [10, 13, 12].map(Uuid::from_u128),
             "a collapsed group does not hide a waiting bot"
+        );
+        prefs.collapsed.clear();
+        assert_eq!(
+            layout.visible_order(&prefs.collapsed),
+            [10, 13, 12, 11].map(Uuid::from_u128),
+            "navigation visits a waiting bot once"
         );
     }
 
