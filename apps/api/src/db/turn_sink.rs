@@ -459,8 +459,11 @@ impl SinkState {
         };
         crate::db::owner_notices::supersede_by_card(&mut tx, self.turn_id).await?;
         let finished = status.is_ended();
+        let keeps_reason = current == TurnStatus::Cancelling && status == TurnStatus::Interrupted;
         let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "UPDATE turns SET status = ?2, error_code = ?3, error_message = ?4,
+            "UPDATE turns SET status = ?2,
+                 error_code = CASE WHEN ?7 THEN error_code ELSE ?3 END,
+                 error_message = CASE WHEN ?7 THEN error_message ELSE ?4 END,
                  effect_uncertain = effect_uncertain OR ?5,
                  finished_at = CASE WHEN ?6 THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') END, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
              WHERE id = ?1 AND status IN {ACTIVE_STATUSES}"
@@ -471,6 +474,7 @@ impl SinkState {
         .bind(message)
         .bind(uncertain)
         .bind(finished)
+        .bind(keeps_reason)
         .execute(&mut *tx)
         .await?
         .rows_affected();
