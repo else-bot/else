@@ -205,13 +205,10 @@ impl ElseApp {
             for id in ids {
                 let item = conversation.item(*id)?;
                 let (name, reason, text) = match (&item.bot_task, me) {
-                    (Some(_), Some(me)) => (
-                        me.name.as_str(),
-                        conversation
-                            .turn(item.turn_id)
-                            .and_then(|turn| turn.error.as_ref()?.message.as_deref()),
-                        "",
-                    ),
+                    (Some(_), Some(me)) => {
+                        let (reason, text) = received_note(conversation, item);
+                        (me.name.as_str(), reason, text)
+                    }
                     _ => (
                         exchange_sender(item)?.1,
                         item.bot_reply.as_ref().and_then(|r| r.reason.as_deref()),
@@ -320,6 +317,18 @@ fn activity_status(activity: &BotActivity, last: &Item, c: &Conversation) -> Act
         Some("waiting") => ActivityStatus::Waiting,
         _ => ActivityStatus::Working,
     }
+}
+
+/// Why a received task's attempt ended, and the last message it wrote.
+fn received_note<'a>(conversation: &'a Conversation, task: &Item) -> (Option<&'a str>, &'a str) {
+    let reason = conversation
+        .turn(task.turn_id)
+        .and_then(|turn| turn.error.as_ref()?.message.as_deref());
+    let progress = conversation
+        .task_answers(task)
+        .last()
+        .map_or("", |answer| answer.text.as_str());
+    (reason, progress)
 }
 
 fn note_lines<'a>(reason: Option<&'a str>, text: &'a str) -> (Option<&'a str>, Option<&'a str>) {
@@ -432,9 +441,11 @@ impl ElseApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivityStatus, BotActivity, activity_status, note_lines, waits_on_owner};
+    use super::{
+        ActivityStatus, BotActivity, activity_status, note_lines, received_note, waits_on_owner,
+    };
     use crate::model::Conversation;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use uuid::Uuid;
 
     fn received_task(status: &str, notice: Option<&str>) -> Conversation {
@@ -509,6 +520,48 @@ mod tests {
             pending.owner_notice(response.id).unwrap().status,
             crate::model::OwnerNoticeStatus::Dismissed
         );
+    }
+
+    #[test]
+    fn a_task_stopped_by_an_update_says_why_and_shows_its_progress() {
+        let mut snapshot = json!({
+            "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+            "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+            "items": [
+                {"id": Uuid::from_u128(1), "seq": 1, "turn_id": Uuid::from_u128(10),
+                    "kind": "user", "text": "Task received", "bot_task": {
+                        "sender_bot_id": Uuid::from_u128(90), "sender_name": "Marketing", "prompt": "Draft"
+                    }},
+                {"id": Uuid::from_u128(2), "seq": 2, "turn_id": Uuid::from_u128(10),
+                    "kind": "assistant", "text": "Checking the cards."},
+                {"id": Uuid::from_u128(3), "seq": 3, "turn_id": Uuid::from_u128(10),
+                    "kind": "assistant", "text": "I'll add the reply step behind a dry-run lock."}
+            ],
+            "turns": [{
+                "id": Uuid::from_u128(10), "request_id": Uuid::from_u128(110), "turn_no": 1,
+                "provider_id": "grok", "status": "interrupted", "effect_uncertain": false,
+                "error": {"code": "superseded",
+                    "message": "Marketing updated the task. It continues in a new attempt."}
+            }],
+            "activity": {"phase": "idle", "active_turn_id": null, "queued_count": 0}
+        });
+        let c =
+            Conversation::from_snapshot(serde_json::from_value(snapshot.clone()).unwrap()).unwrap();
+        let task = c.item(Uuid::from_u128(1)).unwrap();
+        let (reason, progress) = received_note(&c, task);
+        assert_eq!(
+            note_lines(reason, progress),
+            (
+                Some("Marketing updated the task. It continues in a new attempt."),
+                Some("I'll add the reply step behind a dry-run lock.")
+            )
+        );
+
+        snapshot["items"].as_array_mut().unwrap().truncate(1);
+        snapshot["turns"][0]["error"] = Value::Null;
+        let c = Conversation::from_snapshot(serde_json::from_value(snapshot).unwrap()).unwrap();
+        let (reason, progress) = received_note(&c, c.item(Uuid::from_u128(1)).unwrap());
+        assert_eq!(note_lines(reason, progress), (None, Some("No reply text.")));
     }
 
     #[test]

@@ -297,7 +297,7 @@ pub async fn update(
         row.child_turn_id,
         row.target_bot_id,
         "superseded",
-        &format!("{sender} updated the task before this attempt finished."),
+        &format!("{sender} updated the task. It continues in a new attempt."),
     )
     .await?;
     announce_task_turn(
