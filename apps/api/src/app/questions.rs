@@ -220,13 +220,16 @@ pub enum Action {
     BotDeletion {
         bot_deletion: BotDeletion,
     },
+    EmailRemoval {
+        email_removal: EmailRemoval,
+    },
 }
 
 impl Action {
     /// Whether a saved permission may ever cover this action. Deleting a bot
-    /// always needs its own card.
+    /// or removing an inbox always needs its own card.
     pub fn standing_allowed(&self) -> bool {
-        !matches!(self, Self::BotDeletion { .. })
+        !matches!(self, Self::BotDeletion { .. } | Self::EmailRemoval { .. })
     }
 }
 
@@ -349,6 +352,14 @@ pub struct BotDeletion {
     pub avatar: crate::app::bots::Avatar,
     pub model: Option<String>,
     pub category: Option<String>,
+}
+
+/// The inbox a `mail_disconnect` card would remove.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmailRemoval {
+    pub account_id: Uuid,
+    pub address: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -626,6 +637,24 @@ impl Spec {
                 hash: hash(&[b"bot_deletion", deletion.bot_id.as_bytes()]),
                 action: Action::BotDeletion {
                     bot_deletion: deletion,
+                },
+            }),
+        }
+    }
+
+    /// A card approving one removal of an inbox. Like a bot deletion it
+    /// offers no standing grant and is identified by its target alone.
+    pub fn email_removal(removal: EmailRemoval, context: String) -> Self {
+        Self {
+            kind: Kind::Destructive,
+            title: format!("Remove {}", removal.address),
+            context: Some(context),
+            choices: approval_choices(Kind::Destructive, None),
+            multiple: false,
+            approval: Some(Approval {
+                hash: hash(&[b"email_removal", removal.account_id.as_bytes()]),
+                action: Action::EmailRemoval {
+                    email_removal: removal,
                 },
             }),
         }

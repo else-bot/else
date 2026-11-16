@@ -1346,6 +1346,20 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn remove_email_deletes_the_account() {
+        let (origin, server) = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"disconnected\":true}",
+        )
+        .await;
+        let account = Uuid::from_u128(7);
+        client(origin).remove_email(account).await.unwrap();
+        let request = server.await.unwrap();
+        assert!(request.starts_with(&format!(
+            "DELETE /v1/connectors/email/accounts/{account} HTTP/1.1\r\n"
+        )));
+    }
+
+    #[tokio::test]
     async fn owner_notice_dismiss_uses_the_notice_endpoint_and_reports_a_settled_conflict() {
         let (origin, server) = serve_once(
             "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":{\"code\":\"owner_notice_settled\",\"message\":\"You already replied\"}}",

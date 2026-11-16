@@ -926,6 +926,24 @@ pub async fn grants(
         .collect())
 }
 
+/// The active bots that can read a connected account, by name, and whether
+/// its new mail wakes each one.
+pub async fn readers(
+    pool: &SqlitePool,
+    account_id: Uuid,
+) -> Result<Vec<(String, bool)>, StoreError> {
+    Ok(sqlx::query_as(
+        "SELECT b.name, coalesce(g.can_wake, 0) FROM connector_accounts a CROSS JOIN bots b
+         LEFT JOIN connector_grants g ON g.account_id = a.id AND g.bot_id = b.id
+         WHERE a.id = ?1 AND a.state <> 'removed' AND b.status = 'active'
+            AND coalesce(g.can_read, 1)
+         ORDER BY b.name COLLATE NOCASE, b.id",
+    )
+    .bind(account_id)
+    .fetch_all(pool)
+    .await?)
+}
+
 /// Connected accounts and the active bot's effective access.
 pub async fn bot_accounts(
     pool: &SqlitePool,

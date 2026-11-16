@@ -4,8 +4,12 @@ pub(crate) mod oauth;
 use crate::controls::{Control as _, Scale, Tier};
 use std::sync::Arc;
 
-use gpui_kit::component::button::Button;
-use gpui_kit::component::{ActiveTheme as _, FocusableExt as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, FocusableExt as _, Sizable as _, StyledExt as _,
+    WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -28,10 +32,24 @@ pub struct EmailSettings {
     loaded: bool,
     error: Option<String>,
     feedback: Option<String>,
+    /// The account a confirmed removal is waiting on.
+    removing: Option<Uuid>,
     _request: Option<Task<()>>,
+    _removal: Option<Task<()>>,
 }
 
 pub struct OpenBot(pub Uuid);
+
+/// How a confirmed removal ended.
+enum Removal {
+    /// The server removed the account; the reloaded list, or why it failed.
+    Removed(Result<Vec<EmailAccount>, String>),
+    Failed(String),
+}
+
+const REMOVAL_NOTICE: &str = "Your bots lose access to this inbox, and their mail triggers \
+    for it stop. The saved sign-in is erased. Messages stay in the mailbox, and you can add \
+    the account again.";
 impl EventEmitter<OpenBot> for EmailSettings {}
 
 impl EmailSettings {
@@ -58,7 +76,9 @@ impl EmailSettings {
             loaded: false,
             error: None,
             feedback: None,
+            removing: None,
             _request: None,
+            _removal: None,
         };
         view.load(initial_bot, window, cx);
         view
@@ -206,6 +226,120 @@ impl EmailSettings {
         }
     }
 
+    fn confirm_remove(&mut self, account: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(address) = self
+            .accounts
+            .iter()
+            .find(|a| a.id == account)
+            .map(|a| a.config.address.clone())
+        else {
+            return;
+        };
+        let view = cx.weak_entity();
+        let cancel = cx.focus_handle();
+        let focus_once = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if focus_once.replace(false) {
+                cancel.focus(window, cx);
+            }
+            let view = view.clone();
+            dialog
+                .w(px(440.))
+                .title(format!("Remove {address}?"))
+                .close_button(false)
+                .on_ok(|_, _, _| false)
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(REMOVAL_NOTICE),
+                )
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("email-remove-cancel")
+                                .control(Tier::Secondary, Scale::Standard, false, cx)
+                                .label("Cancel")
+                                .track_focus(&cancel)
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("email-remove-confirm")
+                                .control(Tier::Danger, Scale::Standard, false, cx)
+                                .label("Remove account")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let _ = view.update(cx, |view, cx| {
+                                        view.remove(account, window, cx);
+                                    });
+                                }),
+                        ),
+                )
+        });
+    }
+
+    fn remove(&mut self, account: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.start_removal(account) {
+            return;
+        }
+        let client = self.client.clone();
+        self._removal = Some(cx.spawn_in(window, async move |this, cx| {
+            let outcome = match client.clone().remove_email(account).await {
+                Ok(()) => {
+                    Removal::Removed(client.email_accounts().await.map_err(|err| err.to_string()))
+                }
+                Err(err) => Removal::Failed(err.to_string()),
+            };
+            let _ = this.update(cx, |view, cx| {
+                view.settle_removal(account, outcome);
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// Marks `account` as being removed; false while another removal runs.
+    fn start_removal(&mut self, account: Uuid) -> bool {
+        if self.removing.is_some() {
+            return false;
+        }
+        self.removing = Some(account);
+        self.error = None;
+        self.feedback = None;
+        true
+    }
+
+    fn settle_removal(&mut self, account: Uuid, outcome: Removal) {
+        if self.removing != Some(account) {
+            return;
+        }
+        self.removing = None;
+        let address = self
+            .accounts
+            .iter()
+            .find(|a| a.id == account)
+            .map(|a| a.config.address.clone())
+            .unwrap_or_default();
+        match outcome {
+            Removal::Removed(Ok(accounts)) => {
+                self.accounts = accounts;
+                self.feedback = Some(format!(
+                    "{address} is removed. Add it again any time to reconnect."
+                ));
+            }
+            Removal::Removed(Err(error)) => {
+                self.accounts.retain(|a| a.id != account);
+                self.error = Some(format!(
+                    "{address} is removed, but the list could not reload. {error}"
+                ));
+            }
+            Removal::Failed(error) => self.error = Some(error),
+        }
+    }
+
     fn introduce(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(intro) = &self.introduction else {
             return;
@@ -261,16 +395,36 @@ impl Render for EmailSettings {
                             _ => "Check credentials and server settings",
                         }
                     };
+                    let id = account.id;
+                    let removing = self.removing == Some(id);
                     crate::panel_kit::list_row()
                         .child(crate::panel_kit::row_icon(
-                            gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Mail),
+                            gpui_kit::component::Icon::new(IconName::Mail),
                             cx,
                         ))
                         .child(crate::panel_kit::row_text(
                             account.config.address.clone(),
-                            format!("{} · {status}", account.config.provider.label()),
+                            if removing {
+                                "Removing…".to_owned()
+                            } else {
+                                format!("{} · {status}", account.config.provider.label())
+                            },
                             cx,
                         ))
+                        .child(
+                            Button::new(SharedString::from(format!("email-remove-{id}")))
+                                .focus_ring(false)
+                                .cursor_pointer()
+                                .ghost()
+                                .small()
+                                .icon(IconName::Trash)
+                                .text_color(theme.danger)
+                                .accessibility_label(format!("Remove {}", account.config.address))
+                                .disabled(self.removing.is_some())
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.confirm_remove(id, window, cx);
+                                })),
+                        )
                         .into_any_element()
                 })
                 .collect();
@@ -321,5 +475,98 @@ impl Render for EmailSettings {
             content = content.child("Loading email accounts…");
         }
         content
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn account(id: u128, address: &str) -> EmailAccount {
+        serde_json::from_value(serde_json::json!({
+            "id": Uuid::from_u128(id),
+            "config": {
+                "provider": "gmail", "address": address, "username": address,
+                "imap": { "host": "imap.gmail.com", "port": 993, "start_tls": false },
+                "smtp": { "host": "smtp.gmail.com", "port": 465, "start_tls": false },
+                "archive_folder": "Archive", "trash_folder": "Trash",
+                "drafts_folder": "Drafts", "sent_folder": "Sent",
+            },
+            "state": "active",
+            "health": "connected",
+        }))
+        .unwrap()
+    }
+
+    fn settings(accounts: Vec<EmailAccount>) -> EmailSettings {
+        let origin = crate::config::Origin::parse("http://127.0.0.1:1").unwrap();
+        let token = crate::config::OwnerToken::parse(&"T".repeat(43)).unwrap();
+        EmailSettings {
+            client: Arc::new(
+                Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap(),
+            ),
+            accounts,
+            presets: Vec::new(),
+            form: None,
+            introduction: None,
+            busy: false,
+            loaded: true,
+            error: None,
+            feedback: None,
+            removing: None,
+            _request: None,
+            _removal: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_removal_runs_once_and_drops_the_row() {
+        let gmail = account(1, "owner@gmail.com");
+        let work = account(2, "work@example.com");
+        let mut view = settings(vec![gmail.clone(), work.clone()]);
+        assert!(view.start_removal(gmail.id));
+        assert!(!view.start_removal(work.id), "one removal runs at a time");
+        view.settle_removal(work.id, Removal::Removed(Ok(Vec::new())));
+        assert_eq!(
+            view.accounts.len(),
+            2,
+            "another account's result is ignored"
+        );
+        view.settle_removal(gmail.id, Removal::Removed(Ok(vec![work.clone()])));
+        assert_eq!(view.removing, None);
+        assert_eq!(
+            view.accounts.iter().map(|a| a.id).collect::<Vec<_>>(),
+            [work.id]
+        );
+        assert!(
+            view.feedback
+                .as_deref()
+                .unwrap()
+                .starts_with("owner@gmail.com is removed"),
+            "{:?}",
+            view.feedback
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_removal_keeps_the_row_and_shows_why() {
+        let gmail = account(1, "owner@gmail.com");
+        let mut view = settings(vec![gmail.clone()]);
+        assert!(view.start_removal(gmail.id));
+        view.settle_removal(gmail.id, Removal::Failed("Server unavailable".into()));
+        assert_eq!(view.accounts.len(), 1);
+        assert_eq!(view.error.as_deref(), Some("Server unavailable"));
+        assert!(view.start_removal(gmail.id), "the owner can try again");
+
+        view.settle_removal(gmail.id, Removal::Removed(Err("timed out".into())));
+        assert!(
+            view.accounts.is_empty(),
+            "a removed account leaves the list"
+        );
+        assert!(
+            view.error.as_deref().unwrap().contains("could not reload"),
+            "{:?}",
+            view.error
+        );
     }
 }

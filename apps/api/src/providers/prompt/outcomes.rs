@@ -361,6 +361,9 @@ fn questions_block(input: &TurnInput) -> String {
                     Action::BotDeletion { bot_deletion } => {
                         format!("{}\nBot: {}", question.title, bot_deletion.bot_id)
                     }
+                    Action::EmailRemoval { email_removal } => {
+                        format!("{}\nInbox: {}", question.title, email_removal.account_id)
+                    }
                 };
                 let standing = match answer.as_str() {
                     APPROVE_FOREVER => {
@@ -424,6 +427,11 @@ fn questions_block(input: &TurnInput) -> String {
                     (APPROVE, Action::BotDeletion { .. }) => {
                         "Approved: call delete_bot again with the same target_bot_id, once, \
                          then report what it removed."
+                            .to_owned()
+                    }
+                    (APPROVE, Action::EmailRemoval { .. }) => {
+                        "Approved: call mail_disconnect again with the same account_id, once, \
+                         then report the result."
                             .to_owned()
                     }
                     (DENY, _) => format!(

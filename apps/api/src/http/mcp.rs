@@ -116,9 +116,10 @@ pub async fn endpoint(
                 Some(super::visual_tools::NAME) => Tool::Computer,
                 Some("request_secret") => Tool::RequestSecret,
                 Some("ask_permission") => Tool::AskPermission,
-                Some("ask_owner" | "confirm_permission" | "social_connect" | "mail_connect") => {
-                    Tool::AskOwner
-                }
+                Some(
+                    "ask_owner" | "confirm_permission" | "social_connect" | "mail_connect"
+                    | "mail_disconnect",
+                ) => Tool::AskOwner,
                 Some("draft_email" | "send_draft") => Tool::DraftEmail,
                 Some(name) if super::outgoing_tools::TOOL_NAMES.contains(&name) => Tool::AskOwner,
                 Some(name)
@@ -709,6 +710,7 @@ async fn dispatch(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
         "webhook_delete" => super::webhooks::delete(state, grant, args).await,
         "mail_accounts"
         | "mail_connect"
+        | "mail_disconnect"
         | "mail_action"
         | "mail_action_status"
         | "mail_trigger_set"
