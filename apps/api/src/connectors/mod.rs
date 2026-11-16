@@ -429,10 +429,7 @@ impl ConnectorManager {
                 store::ActionStart::Existing(receipt) => return Ok(receipt),
                 store::ActionStart::Dispatch => {}
             }
-            let result = self
-                .transport
-                .execute(&account.config, &auth, &command.command)
-                .await;
+            let result = self.execute_as(&account, &auth, &command.command).await;
             let (status, receipt) = match result {
                 Ok(value) => (
                     store::ActionStatus::Succeeded,
@@ -448,10 +445,27 @@ impl ConnectorManager {
                 .map_err(|_| MailError::new("mail_receipt_unavailable"))?;
             Ok(receipt)
         } else {
-            self.transport
-                .execute(&account.config, &auth, &command.command)
-                .await
+            self.execute_as(&account, &auth, &command.command).await
         }
+    }
+
+    /// Runs one command and records a rejected credential at once, so a bot
+    /// told to reconnect finds the inbox needing it even while an earlier
+    /// watch session stays signed in.
+    async fn execute_as(
+        &self,
+        account: &Account,
+        auth: &Auth,
+        command: &MailCommand,
+    ) -> Result<Value, MailError> {
+        let result = self.transport.execute(&account.config, auth, command).await;
+        if let Err(error) = &result
+            && error.code == AUTHENTICATION_FAILED
+        {
+            self.health(account.id, account.generation, AUTHENTICATION_FAILED)
+                .await;
+        }
+        result
     }
 
     async fn prepare_watch(&self, id: Uuid) -> Result<(Account, Auth), MailError> {

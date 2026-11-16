@@ -682,11 +682,12 @@ pub async fn answer(
             _ => {}
         }
     }
-    // An inbox card approves only the requested address, or an account of
-    // its provider connected since it was asked: Google may authorize a
-    // different mailbox than the bot named. An account whose server rejects
-    // its saved password does not count until the owner replaces it. The
-    // asking bot then wakes on that inbox's new mail.
+    // An inbox card approves only the requested address, or, for an OAuth
+    // provider, an account of that provider connected since it was asked:
+    // Google may authorize a different mailbox than the bot named. A card
+    // that takes a password names its mailbox exactly. An account whose
+    // server rejects its saved password does not count until the owner
+    // replaces it. The asking bot then wakes on that inbox's new mail.
     if choice == Some(APPROVE)
         && let Some(Action::EmailConnection { email_connection }) = &question.action
     {
@@ -694,7 +695,7 @@ pub async fn answer(
             "SELECT id, lower(json_extract(config, '$.address')) = ?1 FROM connector_accounts
              WHERE state <> 'removed' AND health <> ?4
                 AND (lower(json_extract(config, '$.address')) = ?1
-                     OR (json_extract(config, '$.provider') = ?3
+                     OR (?5 AND json_extract(config, '$.provider') = ?3
                          AND created_at >= (SELECT created_at FROM owner_questions WHERE id = ?2)))",
         )
         .bind(email_connection.address.to_lowercase())
@@ -707,6 +708,7 @@ pub async fn answer(
                 .to_owned(),
         )
         .bind(crate::connectors::types::AUTHENTICATION_FAILED)
+        .bind(email_connection.provider.oauth_endpoints().is_ok())
         .fetch_all(&mut *tx)
         .await?;
         if connected.is_empty() {

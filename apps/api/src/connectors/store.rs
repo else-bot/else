@@ -28,7 +28,8 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::types::{
-    Account, Credential, Cursor, MailCommand, MailConfig, MailTrigger, Permissions, Provider, Scan,
+    AUTHENTICATION_FAILED, Account, Credential, Cursor, MailCommand, MailConfig, MailTrigger,
+    Permissions, Provider, Scan,
 };
 use crate::credentials::SecretKey;
 use crate::db::turns::TurnStatus;
@@ -495,6 +496,8 @@ pub async fn set_active(
 }
 
 /// Record the runtime's view of an account's health for this generation.
+/// A rejected credential stays rejected until a sign-in succeeds or the
+/// owner replaces it, so a later network error cannot hide it.
 pub async fn set_health(
     pool: &SqlitePool,
     id: Uuid,
@@ -506,11 +509,13 @@ pub async fn set_health(
     }
     let done = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE connector_accounts SET health = ?3, updated_at = {NOW}
-         WHERE id = ?1 AND generation = ?2 AND state <> 'removed'"
+         WHERE id = ?1 AND generation = ?2 AND state <> 'removed'
+            AND (health <> ?4 OR ?3 = 'connected')"
     )))
     .bind(id)
     .bind(generation)
     .bind(health)
+    .bind(AUTHENTICATION_FAILED)
     .execute(pool)
     .await?;
     Ok(done.rows_affected() == 1)

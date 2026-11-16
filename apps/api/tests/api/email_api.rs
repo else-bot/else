@@ -1567,7 +1567,7 @@ async fn parked_card(app: &TestApp, token: &str, args: Value) -> (String, Value)
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_icloud_card_takes_an_app_password_and_reopens_when_apple_rejects_it() {
+async fn an_icloud_card_takes_an_app_password_and_reopens_in_the_same_turn_when_apple_rejects_it() {
     let inbox = Arc::new(QuietInbox::default());
     let h = recorder::harness_with(4, Some(inbox.clone())).await;
     let app = &h.app;
@@ -1597,6 +1597,21 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_when_apple_rejects_it(
     assert_eq!(
         approve(path.clone()).await.body["error"]["code"],
         "inbox_not_connected"
+    );
+    store::create(
+        &app.db.pool,
+        app.state.secret_key.as_ref().unwrap(),
+        &Provider::Icloud.config("other@icloud.com".into()).unwrap(),
+        &Credential::Password {
+            password: "other-app-password".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        approve(path.clone()).await.body["error"]["code"],
+        "inbox_not_connected",
+        "another iCloud inbox does not settle this card"
     );
 
     let config = Provider::Icloud.config("owner@icloud.com".into()).unwrap();
@@ -1667,8 +1682,6 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_when_apple_rejects_it(
         "{}",
         known.body
     );
-    h.release(turn).await;
-    app.wait_turn(&turn.to_string(), &["completed"]).await;
 
     tokio::time::timeout(common::SETTLE, inbox.ready.notified())
         .await
@@ -1678,14 +1691,8 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_when_apple_rejects_it(
         .unwrap()
         .unwrap()
         .generation;
-    assert!(
-        store::set_health(&app.db.pool, account, generation, AUTHENTICATION_FAILED)
-            .await
-            .unwrap()
-    );
-    let (turn, token) = h
-        .running(&bot, &format!("{GATE} Check my iCloud inbox"))
-        .await;
+    let health = |code: &'static str| store::set_health(&app.db.pool, account, generation, code);
+    assert!(health(AUTHENTICATION_FAILED).await.unwrap());
     let (path, card) = parked_card(
         app,
         &token,
@@ -1705,6 +1712,12 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_when_apple_rejects_it(
         "inbox_not_connected",
         "an inbox Apple rejects is not connected"
     );
+    assert!(!health("mail_transport_failed").await.unwrap());
+    assert_eq!(
+        approve(path.clone()).await.body["error"]["code"],
+        "inbox_not_connected",
+        "a network error does not clear a rejected password"
+    );
     let credentials = format!("/v1/connectors/email/accounts/{account}/credentials");
     let replace = |password: &str| {
         app.owner(
@@ -1721,7 +1734,8 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_when_apple_rejects_it(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rejected_inbox_password_tells_the_bot_to_reopen_the_card() {
-    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+    let inbox = Arc::new(QuietInbox::default());
+    let h = recorder::harness_with(4, Some(inbox.clone())).await;
     let bot = h.app.main_bot().await;
     let (_, token) = h.running(&bot, GATE).await;
     let account = store::create(
@@ -1760,6 +1774,31 @@ async fn a_rejected_inbox_password_tells_the_bot_to_reopen_the_card() {
         failed.body.to_string().contains("call mail_connect"),
         "{}",
         failed.body
+    );
+    // QuietInbox's watch stays signed in, like an IDLE session opened before
+    // Apple revoked the password, so only the failed command shows it.
+    tokio::time::timeout(common::SETTLE, inbox.ready.notified())
+        .await
+        .expect("the inbox is watched");
+    let failed = tool(
+        &h.app,
+        &token,
+        "mail_action",
+        json!({"account_id":account.id,"command":{"operation":"folders"}}),
+    )
+    .await;
+    assert!(failed.error, "{}", failed.body);
+    let reopened = tool(
+        &h.app,
+        &token,
+        "mail_connect",
+        json!({"provider":"icloud","address":"owner@icloud.com"}),
+    )
+    .await;
+    assert_eq!(
+        reopened.result["status"], "pending_owner_auth",
+        "{}",
+        reopened.body
     );
 }
 

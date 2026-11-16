@@ -522,10 +522,12 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
         .find(|a| a.config.address.eq_ignore_ascii_case(&request.address));
     // An iCloud inbox whose app-specific password Apple now rejects gets the
     // card again, so the owner can enter a new one.
-    let reconnect = existing.is_some_and(|account| {
-        account.config.provider == Provider::Icloud && account.credential_rejected()
-    });
-    if let Some(account) = existing.filter(|_| !reconnect) {
+    let replaces = existing
+        .filter(|account| {
+            account.config.provider == Provider::Icloud && account.credential_rejected()
+        })
+        .map(|account| account.generation);
+    if let Some(account) = existing.filter(|_| replaces.is_none()) {
         return (
             tool_result(json!({"status":"connected","account_id":account.id,
                 "next":"Use mail_accounts and mail_action with this account. If the owner \
@@ -535,7 +537,7 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
     }
     let address = &request.address;
     let sign_in = match request.provider {
-        Provider::Icloud if reconnect => format!(
+        Provider::Icloud if replaces.is_some() => format!(
             "Apple rejected the saved password for {address}. Enter a new app-specific \
              password from account.apple.com, Sign-In and Security."
         ),
@@ -558,6 +560,7 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
         EmailConnection {
             provider: request.provider,
             address: request.address.clone(),
+            replaces,
         },
         format!("Connect {}", request.address),
         context,

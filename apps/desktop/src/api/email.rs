@@ -131,6 +131,25 @@ impl Client {
             })
     }
 
+    /// A request that signs in to a mail server, which may take longer than
+    /// the usual request timeout.
+    async fn sign_in<T: serde::de::DeserializeOwned + Send + 'static>(
+        self: Arc<Self>,
+        method: Method,
+        path: String,
+        body: Value,
+    ) -> Result<T, ClientError> {
+        let this = self.clone();
+        self.run(async move {
+            let request = this
+                .request(method, &path)
+                .timeout(std::time::Duration::from_secs(60))
+                .json(&body);
+            this.send_json::<T>(request).await.map(|(_, body)| body)
+        })
+        .await
+    }
+
     pub async fn connect_email(
         self: Arc<Self>,
         config: EmailConfig,
@@ -140,13 +159,13 @@ impl Client {
         struct Connected {
             account: EmailAccount,
         }
-        self.call::<Connected>(
+        self.sign_in::<Connected>(
             Method::POST,
             "/v1/connectors/email/accounts".into(),
-            Some(json!({"config":config,"credential":{"kind":"password","password":password}})),
+            json!({"config":config,"credential":{"kind":"password","password":password}}),
         )
         .await
-        .map(|(_, body)| body.account)
+        .map(|body| body.account)
     }
 
     /// Replaces an inbox's password. The server signs in with it first.
@@ -155,10 +174,10 @@ impl Client {
         account: Uuid,
         password: String,
     ) -> Result<(), ClientError> {
-        self.call::<Value>(
+        self.sign_in::<Value>(
             Method::PUT,
             format!("/v1/connectors/email/accounts/{account}/credentials"),
-            Some(json!({"kind":"password","password":password})),
+            json!({"kind":"password","password":password}),
         )
         .await
         .map(|_| ())
@@ -187,17 +206,13 @@ impl Client {
         struct Connected {
             account: EmailAccount,
         }
-        let this = self.clone();
-        self.run(async move {
-            let request = this
-                .request(Method::POST, "/v1/connectors/email/oauth/complete")
-                .timeout(std::time::Duration::from_secs(60))
-                .json(&json!({"request_id":request_id,"state":state,"code":code}));
-            this.send_json::<Connected>(request)
-                .await
-                .map(|(_, body)| body.account)
-        })
+        self.sign_in::<Connected>(
+            Method::POST,
+            "/v1/connectors/email/oauth/complete".into(),
+            json!({"request_id":request_id,"state":state,"code":code}),
+        )
         .await
+        .map(|body| body.account)
     }
 
     pub async fn set_email_wake(

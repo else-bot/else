@@ -225,11 +225,11 @@ impl Imap {
 #[async_trait::async_trait]
 impl MailTransport for Pimalaya {
     async fn verify(&self, config: &MailConfig, auth: &Auth) -> Result<(), MailError> {
-        let (imap, smtp) = tokio::join!(
+        tokio::try_join!(
             Imap::open(&config.imap, auth),
             Smtp::open(&config.smtp, auth)
-        );
-        imap.and(smtp).map(|_| ())
+        )
+        .map(|_| ())
     }
     async fn execute(
         &self,
