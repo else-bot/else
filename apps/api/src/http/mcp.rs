@@ -1307,6 +1307,7 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 Refusal::NotRunning => "NOT_RUNNING",
                 Refusal::AttemptDelegated => "ATTEMPT_PARKED",
                 Refusal::OwnBot => "OWN_BOT",
+                Refusal::Upstream => "UPSTREAM_BOT",
             };
             reject(code, &refusal.to_string())
         }
@@ -1399,6 +1400,7 @@ fn edit_refusal(err: &crate::db::bots::BotError) -> Option<&'static str> {
         BotError::Refused(Refusal::NotRunning) => "NOT_RUNNING",
         BotError::Refused(Refusal::AttemptDelegated) => "ATTEMPT_PARKED",
         BotError::Refused(Refusal::OwnBot) => "OWN_BOT",
+        BotError::Refused(Refusal::Upstream) => "UPSTREAM_BOT",
         BotError::MainBot => "MAIN_BOT",
         _ => return None,
     })
@@ -1524,7 +1526,7 @@ struct DeleteBotArgs {
 
 async fn delete_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     use crate::app::questions::{BotDeletion, MAX_TITLE, Spec};
-    use crate::db::bots::{self, BotError};
+    use crate::db::bots::{self, Deletion};
     use crate::db::owner_questions::{self, Gate};
     let reject = |code: &str, message: &str| {
         (
@@ -1543,17 +1545,8 @@ async fn delete_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     };
     let target = parsed.target_bot_id;
     let (bot, impact) = match bots::deletion_for_turn(&state.db, grant.turn_id, target).await {
-        Ok(found) => found,
-        Err(BotError::Deleted) => {
-            return (
-                tool_result(json!({
-                    "bot_id": target,
-                    "status": "deleted",
-                    "next": "This bot is already deleted. Nothing changed.",
-                })),
-                Some(format!("{target} already deleted")),
-            );
-        }
+        Ok(Deletion::Active(bot, impact)) => (bot, impact),
+        Ok(Deletion::Ended(status)) => return already_deleted(target, status),
         Err(err) => {
             let Some(code) = edit_refusal(&err) else {
                 tracing::warn!(error = %err, "reading a bot to delete failed");
@@ -1618,8 +1611,7 @@ async fn delete_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                         "cancelled_tasks": impact.tasks.len(),
                         "memory_readers": impact.memory_readers,
                     },
-                    "next": "Tell the owner the bot is deleted and what stopped. Its history and \
-                        memory stay on this machine.",
+                    "next": deleted_next(deleted.status),
                 })),
                 Some(format!("deleted {} ({target})", deleted.name)),
             ),
@@ -1635,7 +1627,34 @@ async fn delete_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     }
 }
 
-/// The deletion card's text: why, and what stops, within the card's limit.
+fn deleted_next(status: crate::db::bots::BotStatus) -> &'static str {
+    match status {
+        crate::db::bots::BotStatus::Deleted => {
+            "Tell the owner the bot is deleted and what stopped. Its history and memory stay \
+             on this machine."
+        }
+        _ => {
+            "Tell the owner the bot is being deleted and what stopped: its running work is \
+             stopping and it finishes deleting on its own. Its history and memory stay on \
+             this machine."
+        }
+    }
+}
+
+fn already_deleted(target: Uuid, status: crate::db::bots::BotStatus) -> Outcome {
+    (
+        tool_result(json!({
+            "bot_id": target,
+            "status": status,
+            "next": match status {
+                crate::db::bots::BotStatus::Deleted => "This bot is already deleted. Nothing changed.",
+                _ => "This bot is already being deleted; its running work is stopping. Nothing changed.",
+            },
+        })),
+        Some(format!("{target} already {status:?}")),
+    )
+}
+
 fn deletion_context(reason: Option<&str>, impact: &crate::db::bots::Impact) -> String {
     const TASK_CHARS: usize = 120;
     const TAIL: &str = "Its chat history and memory stay on this machine. Its computer stops. \

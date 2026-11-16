@@ -51,7 +51,7 @@ pub async fn impact(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<Impact,
     .await?;
     let mail_triggers = sqlx::query_scalar(
         "SELECT a.address FROM connector_grants g JOIN connector_accounts a ON a.id = g.account_id
-         WHERE g.bot_id = ?1 AND g.can_read AND g.wake_instructions IS NOT NULL
+         WHERE g.bot_id = ?1 AND g.can_read AND g.can_wake AND g.wake_instructions IS NOT NULL
            AND a.state <> 'removed'
          ORDER BY a.address",
     )

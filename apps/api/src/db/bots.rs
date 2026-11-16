@@ -202,6 +202,8 @@ pub enum Refusal {
     AttemptDelegated,
     #[error("a bot cannot delete itself; the owner can delete it in the app")]
     OwnBot,
+    #[error("a bot cannot delete a bot whose task it is working on")]
+    Upstream,
 }
 
 pub struct NewBot<'a> {
@@ -603,13 +605,21 @@ pub async fn rename_for_turn(
     Ok(bot)
 }
 
-/// The active bot `turn_id` may ask the owner to delete, with what the
-/// deletion would stop. Refuses the calling bot and the main bot.
+/// What a deletion request from a turn finds: an active bot with what its
+/// deletion would stop, or one already being deleted or gone.
+pub enum Deletion {
+    Active(Box<BotRecord>, Impact),
+    Ended(BotStatus),
+}
+
+/// The bot `turn_id` may ask the owner to delete. Refuses the calling bot,
+/// the bots it is doing a task for (deleting one cancels this turn), and
+/// the main bot.
 pub async fn deletion_for_turn(
     pool: &SqlitePool,
     turn_id: Uuid,
     bot_id: Uuid,
-) -> Result<(BotRecord, Impact), BotError> {
+) -> Result<Deletion, BotError> {
     let mut conn = pool.acquire().await?;
     may_edit_bots(&mut conn, turn_id).await?;
     let caller = super::turns::asking_caller(&mut conn, turn_id)
@@ -617,6 +627,13 @@ pub async fn deletion_for_turn(
         .ok_or(Refusal::NotRunning)?;
     if caller.bot_id == bot_id {
         return Err(Refusal::OwnBot.into());
+    }
+    if super::delegations::chain(&mut conn, turn_id)
+        .await?
+        .upstream
+        .contains(&bot_id)
+    {
+        return Err(Refusal::Upstream.into());
     }
     let main: Option<Uuid> = sqlx::query_scalar("SELECT default_bot_id FROM installation")
         .fetch_optional(&mut *conn)
@@ -629,10 +646,10 @@ pub async fn deletion_for_turn(
         .await?
         .ok_or(BotError::NotFound)?;
     if bot.status != BotStatus::Active {
-        return Err(BotError::Deleted);
+        return Ok(Deletion::Ended(bot.status));
     }
     let impact = impact(&mut conn, bot_id).await?;
-    Ok((bot, impact))
+    Ok(Deletion::Active(Box::new(bot), impact))
 }
 
 /// Save an active bot's own model (already validated by its provider's

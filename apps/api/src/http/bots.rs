@@ -221,7 +221,6 @@ async fn delete(
     Ok((status, Json(json!({ "bot": bot_json(&bot) }))).into_response())
 }
 
-/// Tombstone the bot, revoke its grants, and interrupt its running turn.
 pub(super) async fn delete_bot(
     state: &AppState,
     bot_id: Uuid,

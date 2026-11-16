@@ -166,3 +166,89 @@ async fn refused_targets_and_a_denial_leave_the_bot_active() {
     assert_eq!(status(&h.app, &growth).await, "active");
     h.release(turn).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_cannot_delete_the_bot_that_delegated_it() {
+    let h = harness(4).await;
+    let growth = h.app.create_bot("Growth").await;
+    let worker = h.app.create_bot("Worker").await;
+    let spare = h.app.create_bot("Spare").await;
+    let (root, token) = h.running(&growth, GATE).await;
+    let delegated = tool(
+        &h.app,
+        &token,
+        "delegate",
+        json!({ "target_bot_id": worker, "task": format!("{GATE_EVERY_ATTEMPT} Retire bots.") }),
+    )
+    .await;
+    assert!(!delegated.error, "{}", delegated.body);
+    let child: Uuid =
+        sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
+            .bind(root)
+            .fetch_one(&h.app.db.pool)
+            .await
+            .unwrap();
+    let (_, child_token) = h.started(child).await;
+    let refused = tool(
+        &h.app,
+        &child_token,
+        "delete_bot",
+        json!({ "target_bot_id": growth }),
+    )
+    .await;
+    assert_eq!(refused.code(), "UPSTREAM_BOT", "{}", refused.body);
+    assert_eq!(status(&h.app, &growth).await, "active");
+    let task: String =
+        sqlx::query_scalar("SELECT status FROM delegations WHERE child_turn_id = ?1")
+            .bind(child)
+            .fetch_one(&h.app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(task, "running");
+    let other = tool(
+        &h.app,
+        &child_token,
+        "delete_bot",
+        json!({ "target_bot_id": spare }),
+    )
+    .await;
+    assert_eq!(other.result["status"], "pending", "{}", other.body);
+    h.release(child).await;
+    h.release(root).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_reports_shutdown_pending_until_the_bot_is_deleted() {
+    let h = harness(4).await;
+    let main = h.app.main_bot().await;
+    let growth = h.app.create_bot("Growth").await;
+    let (busy, _) = h.running(&growth, GATE).await;
+
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let args = json!({ "target_bot_id": growth });
+    let pending = tool(&h.app, &token, "delete_bot", args.clone()).await;
+    let question = pending.result["question_id"].as_str().unwrap().to_owned();
+    h.release(turn).await;
+    h.app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    answer(&h.app, &main, &question, "approve").await;
+    let token = h.continued(turn, &token).await;
+    let deleted = tool(&h.app, &token, "delete_bot", args.clone()).await;
+    assert_eq!(deleted.result["status"], "deleting", "{}", deleted.body);
+    let retry = tool(&h.app, &token, "delete_bot", args.clone()).await;
+    assert_eq!(retry.result["status"], "deleting", "{}", retry.body);
+
+    h.release(busy).await;
+    h.app
+        .wait_turn(&busy.to_string(), &["interrupted", "completed"])
+        .await;
+    tokio::time::timeout(common::SETTLE, async {
+        while status(&h.app, &growth).await != "deleted" {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the bot finished deleting");
+    let settled = tool(&h.app, &token, "delete_bot", args).await;
+    assert_eq!(settled.result["status"], "deleted", "{}", settled.body);
+    h.release(turn).await;
+}
