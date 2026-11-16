@@ -30,6 +30,8 @@ const CLEAN_COVERAGE: f64 = 0.5;
 const CLEAN_SIGNAL: f64 = 2.0;
 /// Readings with resets this close apart belong to the same window.
 const SAME_RESET: Duration = Duration::seconds(90);
+/// Readings of two window lengths this close together came from one report.
+const PAIRED: Duration = Duration::seconds(5);
 
 /// What started a turn, worked out from the tables that record each kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, sqlx::Type)]
@@ -237,18 +239,18 @@ struct Stretch {
     weight: f64,
     /// Share of the stretch at least one bot turn was running.
     coverage: f64,
-    /// The stretch from the window's start to its first reading, which may
-    /// hold use from before the readings' history.
-    opening: bool,
 }
 
+/// The window's stretches, measured from the start its latest reset gives,
+/// so they line up with the window the report shows.
 fn stretches(
     now: DateTime<Utc>,
     minutes: i64,
     window: &[&Reading],
     turns: &[&Turn],
 ) -> Vec<Stretch> {
-    let mut previous = (window[0].resets_at - Duration::minutes(minutes), 0.0);
+    let resets_at = window.last().expect("windows are never empty").resets_at;
+    let mut previous = (resets_at - Duration::minutes(minutes), 0.0);
     let mut stretches = Vec::new();
     for reading in window {
         let (from, to) = (previous.0, reading.observed_at);
@@ -264,7 +266,6 @@ fn stretches(
             rise,
             weight,
             coverage: covered.num_milliseconds() as f64 / (to - from).num_milliseconds() as f64,
-            opening: stretches.is_empty(),
         });
     }
     stretches
@@ -273,8 +274,8 @@ fn stretches(
 /// Percent of the cap per weight unit, by window length. A length learns its
 /// rate from stretches that bot turns mostly filled, where little else can
 /// have moved the total; one without enough of them borrows the shortest
-/// calibrated length's rate, scaled by how far each length's totals rose
-/// over the same history. A length with neither has no rate, so its use
+/// calibrated length's rate, scaled by how far the two totals rose between
+/// the same pairs of readings. A length with neither has no rate, so its use
 /// stays unattributed instead of being guessed.
 fn rates(
     now: DateTime<Utc>,
@@ -282,21 +283,16 @@ fn rates(
     turns: &[&Turn],
 ) -> BTreeMap<i64, f64> {
     let mut learned = BTreeMap::new();
-    let mut rises = BTreeMap::new();
     for (&minutes, windows) in series {
-        let (mut rise, mut clean_rise, mut clean_weight) = (0.0, 0.0, 0.0);
+        let (mut clean_rise, mut clean_weight) = (0.0, 0.0);
         for window in windows {
             for stretch in stretches(now, minutes, window, turns) {
-                if !stretch.opening {
-                    rise += stretch.rise;
-                }
                 if stretch.weight > 0.0 && stretch.coverage >= CLEAN_COVERAGE {
                     clean_rise += stretch.rise;
                     clean_weight += stretch.weight;
                 }
             }
         }
-        rises.insert(minutes, rise);
         if clean_rise >= CLEAN_SIGNAL && clean_weight > 0.0 {
             learned.insert(minutes, clean_rise / clean_weight);
         }
@@ -304,13 +300,42 @@ fn rates(
     let Some((&base, &base_rate)) = learned.iter().next() else {
         return learned;
     };
-    let base_rise = rises[&base];
-    for (&minutes, &rise) in &rises {
-        if !learned.contains_key(&minutes) && base_rise > 0.0 && rise > 0.0 {
-            learned.insert(minutes, base_rate * rise / base_rise);
+    for (&minutes, windows) in series {
+        if learned.contains_key(&minutes) {
+            continue;
+        }
+        if let Some(ratio) = rise_ratio(&series[&base], windows) {
+            learned.insert(minutes, base_rate * ratio);
         }
     }
     learned
+}
+
+/// How far `other` rose for each point `base` rose, over pairs of readings
+/// both lengths took together (a provider reports its windows at once) with
+/// no reset in either between them. `None` until `base` rose enough to tell.
+fn rise_ratio(base: &[Vec<&Reading>], other: &[Vec<&Reading>]) -> Option<f64> {
+    let partner = |reading: &Reading| {
+        base.iter().enumerate().find_map(|(group, window)| {
+            window
+                .iter()
+                .find(|b| (b.observed_at - reading.observed_at).abs() <= PAIRED)
+                .map(|b| (group, b.used_percent))
+        })
+    };
+    let (mut base_rise, mut other_rise) = (0.0, 0.0);
+    for window in other {
+        for pair in window.windows(2) {
+            let (Some((g0, b0)), Some((g1, b1))) = (partner(pair[0]), partner(pair[1])) else {
+                continue;
+            };
+            if g0 == g1 {
+                base_rise += (b1 - b0).max(0.0);
+                other_rise += (pair[1].used_percent - pair[0].used_percent).max(0.0);
+            }
+        }
+    }
+    (base_rise >= CLEAN_SIGNAL).then(|| other_rise / base_rise)
 }
 
 /// How a window prices else.bot's turns.

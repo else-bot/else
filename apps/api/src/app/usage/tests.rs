@@ -253,3 +253,35 @@ fn opus_turns_weigh_more_than_haiku_turns_of_the_same_size() {
     };
     assert!(opus.weight() > 10.0 * haiku.weight());
 }
+
+#[test]
+fn weekly_borrowing_ignores_rises_across_a_five_hour_reset() {
+    let day = |d: u32, h: u32, m: u32| Utc.with_ymd_and_hms(2026, 11, d, h, m, 0).unwrap();
+    let runs = [
+        turn(1, "claude", day(15, 10, 0), 4, 1000),
+        turn(1, "claude", day(16, 10, 0), 4, 1000),
+    ];
+    let week = day(19, 0, 0);
+    let readings = vec![
+        reading(300, 0.0, day(15, 10, 0), day(15, 14, 0)),
+        reading(300, 2.0, day(15, 10, 3), day(15, 14, 0)),
+        // The owner used 38% of a fresh window before the next run.
+        reading(300, 40.0, day(16, 10, 0), day(16, 14, 0)),
+        reading(300, 42.0, day(16, 10, 3), day(16, 14, 0)),
+        reading(10080, 0.0, day(15, 10, 0), week),
+        reading(10080, 0.2, day(15, 10, 3), week),
+        reading(10080, 4.2, day(16, 10, 0), week),
+        reading(10080, 4.4, day(16, 10, 3), week),
+    ];
+
+    let report = report(day(16, 10, 30), &runs, &readings);
+    let weekly = find(&report, "claude", 10080);
+
+    let bots = weekly.bots[0].percent.unwrap();
+    assert!(
+        (0.3..=0.7).contains(&bots),
+        "two runs at about 0.2% each: {bots}"
+    );
+    let outside = weekly.outside_percent.unwrap();
+    assert!(outside >= 3.5, "the owner's use stays outside: {outside}");
+}
