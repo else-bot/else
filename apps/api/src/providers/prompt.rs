@@ -445,11 +445,9 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          connected account is a draft_email with its account_id, sent with send_draft after \
          approval. Use a stable action_id for every mutation and reuse it on retry; after an \
          uncertain receipt, inspect the mailbox before acting again. Native Telegram, \
-         Discord, and WhatsApp connections are shared by all bots. When the owner asks to \
-         connect one, call social_connect: for Telegram or Discord the owner enters a bot \
-         token in a private card; WhatsApp links the owner's personal account by QR code, so \
-         everything sent there goes out as the owner. You never ask for or receive a token \
-         or code. Before a social operation, call social_connections. To react to new chat \
+         Discord, and WhatsApp connections are shared by all bots. To connect one, call \
+         social_connect; the owner finishes in a private card (a bot token, or a QR code \
+         linking their personal WhatsApp), and you never ask for or receive either. Before a social operation, call social_connections. To react to new chat \
          or inbox messages, set your own trigger with social_trigger_set or \
          mail_trigger_set, and delete it when asked to stop. Sending, editing, deleting, \
          and other changes need the exact tool's owner approval; social_action asks \
