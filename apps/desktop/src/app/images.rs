@@ -73,19 +73,19 @@ fn unavailable_image_label(node: &markdown::mdast::Node) -> Option<&str> {
 }
 
 /// The message without the files drawn outside its text: images in the
-/// gallery and visuals below it.
+/// gallery and visuals below it. A file that shares its line with prose
+/// stays as a chip, so the sentence that names it still reads.
 pub(super) fn without_images(source: &str, parts: &[MessagePart]) -> (String, Vec<MessagePart>) {
-    let drawn = |file: &Attachment| is_image(file) || super::visuals::is_visual(file);
-    if !parts
-        .iter()
-        .any(|part| matches!(part, MessagePart::File { file } if drawn(file)))
-    {
+    let drawn = |ix: usize| {
+        matches!(&parts[ix], MessagePart::File { file }
+            if (is_image(file) || super::visuals::is_visual(file)) && !in_prose(parts, ix))
+    };
+    if !(0..parts.len()).any(drawn) {
         return (source.to_owned(), parts.to_vec());
     }
-    let parts: Vec<_> = parts
-        .iter()
-        .filter(|part| !matches!(part, MessagePart::File { file } if drawn(file)))
-        .cloned()
+    let parts: Vec<_> = (0..parts.len())
+        .filter(|&ix| !drawn(ix))
+        .map(|ix| parts[ix].clone())
         .collect();
     let text = parts
         .iter()
@@ -95,6 +95,29 @@ pub(super) fn without_images(source: &str, parts: &[MessagePart]) -> (String, Ve
         })
         .collect();
     (text, parts)
+}
+
+/// Whether text other than files sits on the same line as the file at `ix`.
+fn in_prose(parts: &[MessagePart], ix: usize) -> bool {
+    fn side<'a>(parts: impl Iterator<Item = &'a MessagePart>, line: fn(&str) -> &str) -> bool {
+        for part in parts {
+            if let MessagePart::Text { text } = part {
+                let near = line(text);
+                if !near.trim().is_empty() {
+                    return true;
+                }
+                if near.len() < text.len() {
+                    return false;
+                }
+            }
+        }
+        false
+    }
+    side(parts[..ix].iter().rev(), |text| {
+        text.rsplit(['\n', '\r']).next().unwrap_or(text)
+    }) || side(parts[ix + 1..].iter(), |text| {
+        text.split(['\n', '\r']).next().unwrap_or(text)
+    })
 }
 
 enum ImageState {
@@ -527,11 +550,9 @@ mod tests {
             },
         ];
         assert_eq!(image_files(&parts), [first, second]);
-        let (text, remaining) = without_images("unused canonical source", &parts);
-        assert_eq!(
-            text,
-            "Before [File: one.png][File: report.pdf][File: two.jpg][File: one.png] after"
-        );
+        let source = "Before [File: one.png][File: report.pdf][File: two.jpg][File: one.png] after";
+        let (text, remaining) = without_images(source, &parts);
+        assert_eq!(text, source);
         assert_eq!(remaining, parts);
     }
 
