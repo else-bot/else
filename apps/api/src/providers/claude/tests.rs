@@ -114,12 +114,12 @@ fn a_rate_limit_event_reports_the_five_hour_and_weekly_windows() {
             LimitWindow {
                 minutes: 300,
                 used_basis_points: 900,
-                resets_at: 1794837600,
+                resets_at: chrono::DateTime::from_timestamp(1794837600, 0).unwrap(),
             },
             LimitWindow {
                 minutes: 10080,
                 used_basis_points: 1600,
-                resets_at: 1795233600,
+                resets_at: chrono::DateTime::from_timestamp(1795233600, 0).unwrap(),
             },
         ])])
     );

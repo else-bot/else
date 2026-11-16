@@ -4,37 +4,23 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-use crate::app::usage::{Reading, Source, Turn};
+use crate::app::providers::LimitWindow;
+use crate::app::usage::{Reading, Turn};
 
 /// The longest window the report covers, plus slack for readings taken
 /// shortly before it started.
 const HISTORY: Duration = Duration::days(8);
 
-#[derive(sqlx::FromRow)]
-struct TurnRow {
-    id: Uuid,
-    bot_id: Uuid,
-    bot_name: String,
-    provider_id: String,
-    model: Option<String>,
-    source: Source,
-    label: Option<String>,
-    routine_id: Option<Uuid>,
-    started_at: DateTime<Utc>,
-    finished_at: Option<DateTime<Utc>>,
-    input_tokens: i64,
-    cached_input_tokens: i64,
-    cache_write_tokens: i64,
-    output_tokens: i64,
-}
-
 /// Turns that reported tokens and started within the history, as the
 /// provider and model that ran them.
 pub async fn turns(db: &SqlitePool, now: DateTime<Utc>) -> sqlx::Result<Vec<Turn>> {
-    let rows: Vec<TurnRow> = sqlx::query_as(
-        "SELECT t.id, t.bot_id, b.name AS bot_name, t.provider_id,
+    sqlx::query_as(
+        "SELECT t.bot_id, b.name AS bot_name, t.provider_id,
                 coalesce(json_extract(t.reported_profile, '$.model'),
                          json_extract(t.profile, '$.model')) AS model,
+                -- What started the turn, most specific first. Origin in
+                -- db::delegations answers a different question (who may
+                -- see the turn), so the two are kept apart.
                 CASE
                     WHEN w.id IS NOT NULL THEN 'webhook'
                     WHEN rr.id IS NOT NULL THEN 'routine'
@@ -71,58 +57,47 @@ pub async fn turns(db: &SqlitePool, now: DateTime<Utc>) -> sqlx::Result<Vec<Turn
     )
     .bind(since(now))
     .fetch_all(db)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| Turn {
-            id: row.id,
-            bot_id: row.bot_id,
-            bot_name: row.bot_name,
-            provider_id: row.provider_id,
-            model: row.model,
-            source: row.source,
-            label: row.label,
-            routine_id: row.routine_id,
-            started_at: row.started_at,
-            finished_at: row.finished_at,
-            input_tokens: row.input_tokens,
-            cached_input_tokens: row.cached_input_tokens,
-            cache_write_tokens: row.cache_write_tokens,
-            output_tokens: row.output_tokens,
-        })
-        .collect())
-}
-
-#[derive(sqlx::FromRow)]
-struct ReadingRow {
-    provider_id: String,
-    window_minutes: i64,
-    used_percent: f64,
-    resets_at: DateTime<Utc>,
-    observed_at: DateTime<Utc>,
+    .await
 }
 
 pub async fn readings(db: &SqlitePool, now: DateTime<Utc>) -> sqlx::Result<Vec<Reading>> {
-    let rows: Vec<ReadingRow> = sqlx::query_as(
+    sqlx::query_as(
         "SELECT provider_id, window_minutes, used_percent, resets_at, observed_at
          FROM usage_readings WHERE observed_at >= ?1",
     )
     .bind(since(now))
     .fetch_all(db)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| Reading {
-            provider_id: row.provider_id,
-            window_minutes: row.window_minutes,
-            used_percent: row.used_percent,
-            resets_at: row.resets_at,
-            observed_at: row.observed_at,
-        })
-        .collect())
+    .await
 }
 
-/// Timestamps are stored as text, so the bound matches their format.
+/// Stores the windows one turn's provider reported, and prunes readings
+/// older than the history in the same transaction.
+pub async fn record(db: &SqlitePool, turn: Uuid, windows: &[LimitWindow]) -> sqlx::Result<()> {
+    let mut tx = db.begin().await?;
+    for window in windows {
+        sqlx::query(
+            "INSERT INTO usage_readings (provider_id, window_minutes, used_percent, resets_at)
+             SELECT provider_id, ?2, ?3, ?4 FROM turns WHERE id = ?1",
+        )
+        .bind(turn)
+        .bind(window.minutes)
+        .bind(window.used_percent())
+        .bind(text(window.resets_at))
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query("DELETE FROM usage_readings WHERE observed_at < ?1")
+        .bind(since(Utc::now()))
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
+}
+
+/// Timestamps are stored as text, so bounds and values match their format.
+fn text(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Millis, false)
+}
+
 fn since(now: DateTime<Utc>) -> String {
-    (now - HISTORY).to_rfc3339_opts(chrono::SecondsFormat::Millis, false)
+    text(now - HISTORY)
 }

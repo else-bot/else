@@ -1162,12 +1162,12 @@ fn account_rate_limit_updates_report_both_windows() {
         LimitWindow {
             minutes: 300,
             used_basis_points: 4200,
-            resets_at: 1794837600,
+            resets_at: chrono::DateTime::from_timestamp(1794837600, 0).unwrap(),
         },
         LimitWindow {
             minutes: 10080,
             used_basis_points: 700,
-            resets_at: 1795233600,
+            resets_at: chrono::DateTime::from_timestamp(1795233600, 0).unwrap(),
         },
     ];
     assert!(matches!(reported.as_slice(), [Event::Limits(w)] if *w == expected));

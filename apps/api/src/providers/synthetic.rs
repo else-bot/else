@@ -295,9 +295,9 @@ impl Provider for Synthetic {
                 })
                 .await;
             }
-            let resets_at = chrono::Utc::now().timestamp() + 2 * 3600;
+            let resets_at = chrono::Utc::now() + chrono::Duration::hours(2);
             sink.limits(vec![crate::app::providers::LimitWindow {
-                minutes: 300,
+                minutes: crate::app::providers::LimitWindow::FIVE_HOURS,
                 used_basis_points: 1200,
                 resets_at,
             }])

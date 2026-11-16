@@ -788,36 +788,9 @@ impl SinkState {
     }
 
     /// Recorded even after fencing: the readings describe the account, not
-    /// the turn. Pruned to the longest window plus a day.
+    /// the turn.
     async fn limits(&mut self, windows: Vec<crate::app::providers::LimitWindow>) {
-        let recorded = async {
-            let mut tx = self.pool.begin().await?;
-            for window in windows {
-                let Some(resets_at) = chrono::DateTime::from_timestamp(window.resets_at, 0) else {
-                    continue;
-                };
-                let resets_at = resets_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, false);
-                sqlx::query(
-                    "INSERT INTO usage_readings
-                         (provider_id, window_minutes, used_percent, resets_at)
-                     SELECT provider_id, ?2, ?3, ?4 FROM turns WHERE id = ?1",
-                )
-                .bind(self.turn_id)
-                .bind(window.minutes)
-                .bind(window.used_basis_points as f64 / 100.0)
-                .bind(resets_at)
-                .execute(&mut *tx)
-                .await?;
-            }
-            sqlx::query(
-                "DELETE FROM usage_readings
-                 WHERE observed_at < strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-8 days')",
-            )
-            .execute(&mut *tx)
-            .await?;
-            tx.commit().await
-        };
-        if let Err(err) = recorded.await {
+        if let Err(err) = super::usage::record(&self.pool, self.turn_id, &windows).await {
             tracing::warn!(turn = %self.turn_id, error = %err, "recording usage limits failed");
         }
     }

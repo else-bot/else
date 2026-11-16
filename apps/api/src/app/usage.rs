@@ -16,11 +16,13 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
+use super::providers::LimitWindow;
+
 /// The windows a provider reports nothing for are shown as rolling windows
 /// of these lengths, by share of else.bot's own use.
-const DEFAULT_WINDOWS: [i64; 2] = [5 * 60, 7 * 24 * 60];
+const DEFAULT_WINDOWS: [i64; 2] = [LimitWindow::FIVE_HOURS, LimitWindow::WEEK];
 /// Windows up to this long get a timeline of [`BUCKETS`] columns.
-const TIMELINE_MAX_MINUTES: i64 = 5 * 60;
+const TIMELINE_MAX_MINUTES: i64 = LimitWindow::FIVE_HOURS;
 const BUCKETS: i32 = 20;
 /// A stretch between two readings calibrates the rate only when bot turns
 /// ran for at least this share of it.
@@ -47,9 +49,8 @@ pub enum Source {
 }
 
 /// One turn that reported tokens, as the provider and model that ran it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Turn {
-    pub id: Uuid,
     pub bot_id: Uuid,
     pub bot_name: String,
     pub provider_id: String,
@@ -145,7 +146,7 @@ impl Turn {
 }
 
 /// One limit reading a provider reported during a turn.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Reading {
     pub provider_id: String,
     pub window_minutes: i64,

@@ -186,21 +186,25 @@ fn limit_windows(snapshot: &Value) -> Vec<LimitWindow> {
     if snapshot["limitId"].as_str().is_some_and(|id| id != "codex") {
         return Vec::new();
     }
-    [("primary", 5 * 60), ("secondary", 7 * 24 * 60)]
-        .into_iter()
-        .filter_map(|(key, fallback)| {
-            let window = &snapshot[key];
-            let used = window["usedPercent"].as_f64()?;
-            Some(LimitWindow {
-                minutes: window["windowDurationMins"].as_i64().unwrap_or(fallback),
-                used_basis_points: (used * 100.0).round() as i64,
-                // Seconds per the protocol; milliseconds are tolerated.
-                resets_at: window["resetsAt"]
-                    .as_i64()
-                    .map(|at| if at > 100_000_000_000 { at / 1000 } else { at })?,
-            })
+    [
+        ("primary", LimitWindow::FIVE_HOURS),
+        ("secondary", LimitWindow::WEEK),
+    ]
+    .into_iter()
+    .filter_map(|(key, fallback)| {
+        let window = &snapshot[key];
+        let used = window["usedPercent"].as_f64()?;
+        Some(LimitWindow {
+            minutes: window["windowDurationMins"].as_i64().unwrap_or(fallback),
+            used_basis_points: (used * 100.0).round() as i64,
+            // Seconds per the protocol; milliseconds are tolerated.
+            resets_at: window["resetsAt"]
+                .as_i64()
+                .map(|at| if at > 100_000_000_000 { at / 1000 } else { at })
+                .and_then(|at| chrono::DateTime::from_timestamp(at, 0))?,
         })
-        .collect()
+    })
+    .collect()
 }
 
 impl Protocol for TurnEvents<'_> {

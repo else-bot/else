@@ -266,18 +266,21 @@ fn result_info(event: &Value) -> ResultInfo {
 /// each window's utilization as a fraction and its reset in Unix seconds.
 fn limit_windows(event: &Value) -> Vec<LimitWindow> {
     let windows = &event["rate_limit_info"]["unifiedWindows"];
-    [("five_hour", 5 * 60), ("seven_day", 7 * 24 * 60)]
-        .into_iter()
-        .filter_map(|(key, minutes)| {
-            let window = &windows[key];
-            let used = window["utilization"].as_f64()?;
-            Some(LimitWindow {
-                minutes,
-                used_basis_points: (used * 10_000.0).round() as i64,
-                resets_at: window["resetsAt"].as_i64()?,
-            })
+    [
+        ("five_hour", LimitWindow::FIVE_HOURS),
+        ("seven_day", LimitWindow::WEEK),
+    ]
+    .into_iter()
+    .filter_map(|(key, minutes)| {
+        let window = &windows[key];
+        let used = window["utilization"].as_f64()?;
+        Some(LimitWindow {
+            minutes,
+            used_basis_points: (used * 10_000.0).round() as i64,
+            resets_at: chrono::DateTime::from_timestamp(window["resetsAt"].as_i64()?, 0)?,
         })
-        .collect()
+    })
+    .collect()
 }
 
 impl Protocol for Tracker {

@@ -8,7 +8,6 @@ fn at(hour: u32, minute: u32) -> DateTime<Utc> {
 
 fn turn(bot: u128, provider: &str, start: DateTime<Utc>, minutes: i64, output: i64) -> Turn {
     Turn {
-        id: Uuid::new_v4(),
         bot_id: Uuid::from_u128(bot),
         bot_name: format!("bot {bot}"),
         provider_id: provider.into(),

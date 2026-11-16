@@ -482,8 +482,16 @@ pub struct LimitWindow {
     pub minutes: i64,
     /// Hundredths of a percent, so 6200 is 62%.
     pub used_basis_points: i64,
-    /// Unix seconds.
-    pub resets_at: i64,
+    pub resets_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl LimitWindow {
+    pub const FIVE_HOURS: i64 = 5 * 60;
+    pub const WEEK: i64 = 7 * 24 * 60;
+
+    pub fn used_percent(&self) -> f64 {
+        self.used_basis_points as f64 / 100.0
+    }
 }
 
 /// Durable progress reporting for one turn. Lifecycle transitions persist
