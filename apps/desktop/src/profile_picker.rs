@@ -478,8 +478,6 @@ impl ProfilePicker {
             .iter()
             .position(|effort| *effort == choice.reasoning_effort)
             .unwrap_or(0);
-        // Equal segments fill each field: stacked under the provider tabs
-        // or side by side beside the catalog.
         let slider = segment_track(cx)
             .w_full()
             .children(efforts.iter().enumerate().map(|(i, effort)| {
@@ -501,65 +499,43 @@ impl ProfilePicker {
                     cx.notify();
                 }))
             }));
-        let speeds = [
-            ("default", "Standard", IconName::Clock),
-            (FAST, "Fast", IconName::Zap),
-        ]
-        .into_iter()
-        .map(|(tier, label, icon)| {
-            let selected = choice.service_tier == tier;
-            let enabled = !self.disabled && (tier != FAST || fast_offered);
-            segment(
-                SharedString::from(format!("speed-{tier}")),
-                label,
-                selected,
-                !enabled,
+        let speed = fast_offered.then(|| {
+            let speeds = [
+                ("default", "Standard", IconName::Clock),
+                (FAST, "Fast", IconName::Zap),
+            ]
+            .into_iter()
+            .map(|(tier, label, icon)| {
+                let selected = choice.service_tier == tier;
+                segment(
+                    SharedString::from(format!("speed-{tier}")),
+                    label,
+                    selected,
+                    self.disabled,
+                    cx,
+                )
+                .toggled(selected)
+                .icon(icon)
+                .accessibility_label(format!("{label} speed"))
+                .on_click(cx.listener(move |picker, _, _, cx| {
+                    if let Some(choice) = picker.choice.as_mut() {
+                        choice.service_tier = tier.to_owned();
+                    }
+                    cx.notify();
+                }))
+            });
+            field(
+                "Speed",
+                segment_track(cx)
+                    .w_full()
+                    .children(speeds)
+                    .into_any_element(),
                 cx,
             )
-            .toggled(selected)
-            .icon(icon)
-            .accessibility_label(if enabled || tier != FAST {
-                format!("{label} speed")
-            } else {
-                format!("{label} speed, not offered by {}", provider.label)
-            })
-            .on_click(cx.listener(move |picker, _, _, cx| {
-                if let Some(choice) = picker.choice.as_mut() {
-                    choice.service_tier = tier.to_owned();
-                }
-                cx.notify();
-            }))
         });
-        let field = |label: &'static str, control: AnyElement| {
-            v_flex()
-                .flex_1()
-                .flex_basis(px(0.))
-                .min_w_0()
-                .gap_2()
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.muted_foreground)
-                        .child(label),
-                )
-                .child(control)
-        };
-        let reasoning = field("Reasoning", slider.into_any_element()).flex_grow(3.);
-        let speed = field(
-            "Speed",
-            segment_track(cx)
-                .w_full()
-                .children(speeds)
-                .into_any_element(),
-        )
-        .flex_grow(2.);
-        let row = if self.tabs {
-            v_flex().gap_3()
-        } else {
-            h_flex().gap_6().items_start()
-        };
-        row.w_full()
+        v_flex()
+            .w_full()
+            .gap_3()
             .map(|row| {
                 if self.tabs {
                     row.pt_2()
@@ -567,8 +543,8 @@ impl ProfilePicker {
                     row.px_4().py_3().border_t_1().border_color(theme.border)
                 }
             })
-            .child(reasoning)
-            .child(speed)
+            .child(field("Reasoning", slider.into_any_element(), cx))
+            .children(speed)
             .into_any_element()
     }
 }
@@ -672,6 +648,21 @@ pub fn effort_label(id: &str) -> &str {
         "max" => "Max",
         other => other,
     }
+}
+
+/// A labeled settings row, such as "Reasoning" above its segments.
+fn field(label: &'static str, control: AnyElement, cx: &App) -> Div {
+    v_flex()
+        .w_full()
+        .gap_2()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(cx.theme().muted_foreground)
+                .child(label),
+        )
+        .child(control)
 }
 
 fn short_effort_label(id: &str) -> &str {
