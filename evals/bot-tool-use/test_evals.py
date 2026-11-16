@@ -169,6 +169,11 @@ def run(runner):
                     self.call("mail_connect", {"provider": "icloud", "address": "max@icloud.com"},
                               {"status": "pending_owner_auth", "parked": True})],
                     "Apple rejected the saved password. Enter a new one on the card."),
+                "connect-personal-whatsapp-by-qr": ([self.call("social_connect", {
+                    "provider": "whatsapp", "reason": "Read your chats and draft replies."},
+                    {"status": "pending", "parked": True})],
+                    "Scan the QR code to link your personal WhatsApp. WhatsApp may ban unofficial clients.",
+                    "Send me your WhatsApp Business API key."),
                 "watch-connected-inbox": ([self.call("mail_accounts", {}), self.call("mail_trigger_set", {
                     "account_id": inbox, "instructions": "Draft a reply asking for their W-9."},
                     {"status": "pending", "parked": True})], "Approve the card and new invoices wake me."),
