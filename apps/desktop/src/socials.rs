@@ -287,8 +287,13 @@ impl SocialsView {
     }
 
     fn add(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
+        let form = Form::token(provider, window, cx);
+        self.open(form, window, cx);
+    }
+
+    fn open(&mut self, form: Form, window: &mut Window, cx: &mut Context<Self>) {
         self.clear(window, cx);
-        self.form = Some(Form::token(provider, window, cx));
+        self.form = Some(form);
         self.error = None;
         self.notice = None;
         cx.notify();
@@ -303,18 +308,9 @@ impl SocialsView {
             }
             return;
         }
-        self.clear(window, cx);
-        self.error = None;
-        self.notice = None;
         let target = PairingTarget::Connection(connection.id);
-        self.form = Some(Form::pairing(
-            connection.provider,
-            target,
-            Some(connection),
-            window,
-            cx,
-        ));
-        cx.notify();
+        let form = Form::pairing(connection.provider, target, Some(connection), window, cx);
+        self.open(form, window, cx);
     }
 
     /// Follow a pairing until it finishes, showing each code as it rotates.
