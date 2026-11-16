@@ -311,7 +311,7 @@ impl Shell {
                 .into_any_element();
         }
         let provider_control = segment_track(cx)
-            .w(px(report.providers.len() as f32 * 88.))
+            .min_w(px(report.providers.len() as f32 * 88.))
             .children(report.providers.iter().map(|provider| {
                 let id = provider.provider_id.clone();
                 segment(
