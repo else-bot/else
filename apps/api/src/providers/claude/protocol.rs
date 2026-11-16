@@ -209,9 +209,14 @@ impl Tracker {
         Ok(matches!(self.calls.get(parent), Some(Call::Offered(name)) if name == tool))
     }
 
+    /// The CLI reports a failed API call, such as an expired login, as an
+    /// assistant message of its own with the placeholder model `<synthetic>`.
+    /// The result event that follows carries the same error.
     fn on_assistant(&mut self, event: &Value) -> Result<(), Violation> {
         self.activity = true;
-        self.check_model(text(&event["message"]["model"], "model")?)?;
+        if event["is_api_error_message"].as_bool() != Some(true) {
+            self.check_model(text(&event["message"]["model"], "model")?)?;
+        }
         for block in list(&event["message"]["content"], "assistant message")? {
             if block["type"] != "tool_use" {
                 continue;
