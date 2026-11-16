@@ -588,6 +588,7 @@ impl RowText {
         let preview_files = files.clone();
         let link_files = files.clone();
         let tooltip_files = files.clone();
+        let link_source = self.display.text.clone();
         let owner = self.owner.clone();
         let link_owner = owner.clone();
         let bot = self.bot;
@@ -765,6 +766,9 @@ impl RowText {
                         }
                     })
                     .link_tooltip(move |url, window, cx| {
+                        if shows_its_destination(&link_source, url) {
+                            return cx.new(|_| EmptyView).into();
+                        }
                         let destination = if quoted_passage(url).is_some() {
                             "Go to the original message".to_owned()
                         } else {
@@ -961,6 +965,41 @@ fn soft_line_breaks(source: &str) -> Vec<usize> {
     breaks
 }
 
+/// Whether every link to `url` in Markdown `source` displays `url` itself, so
+/// a destination tooltip would repeat the text under the pointer.
+fn shows_its_destination(source: &str, url: &str) -> bool {
+    use markdown::mdast::Node;
+    fn definitions<'a>(node: &'a Node, out: &mut HashMap<&'a str, &'a str>) {
+        if let Node::Definition(definition) = node {
+            out.entry(&definition.identifier).or_insert(&definition.url);
+        }
+        for child in node.children().into_iter().flatten() {
+            definitions(child, out);
+        }
+    }
+    fn labels(node: &Node, url: &str, defined: &HashMap<&str, &str>, out: &mut Vec<String>) {
+        let destination = match node {
+            Node::Link(link) => Some(link.url.as_str()),
+            Node::LinkReference(link) => defined.get(link.identifier.as_str()).copied(),
+            _ => None,
+        };
+        if destination == Some(url) {
+            out.push(node.to_string());
+        }
+        for child in node.children().into_iter().flatten() {
+            labels(child, url, defined, out);
+        }
+    }
+    let Ok(root) = markdown::to_mdast(source, &markdown::ParseOptions::gfm()) else {
+        return false;
+    };
+    let mut defined = HashMap::new();
+    definitions(&root, &mut defined);
+    let mut found = Vec::new();
+    labels(&root, url, &defined, &mut found);
+    !found.is_empty() && found.iter().all(|label| label == url)
+}
+
 fn activates_link(event: &ClickEvent) -> bool {
     match event {
         ClickEvent::Mouse(click) => {
@@ -1021,6 +1060,7 @@ fn list_blocks(source: &str) -> Vec<ListBlock<'_>> {
 mod tests {
     use super::{
         RowFormat, RowSource, file_links, file_map, linked_file, list_blocks, plain_content,
+        shows_its_destination,
     };
     use crate::api::Bot;
     use crate::app::bot_mention::MentionDisplay;
@@ -1029,6 +1069,37 @@ mod tests {
     use crate::attachments::{Attachment, MessagePart, file_id};
     use gpui_kit::component::input::InputContent;
     use uuid::Uuid;
+
+    #[test]
+    fn destination_tooltips_skip_links_that_show_their_url() {
+        let url = "https://example.com/a";
+        for (source, expected) in [
+            ("see https://example.com/a", true),
+            ("see <https://example.com/a>", true),
+            ("see [https://example.com/a](https://example.com/a)", true),
+            ("see [the docs](https://example.com/a)", false),
+            (
+                "https://example.com/a or [the docs](https://example.com/a)",
+                false,
+            ),
+            (
+                "see [**https://example.com/a**](https://example.com/a)",
+                true,
+            ),
+            ("see https://example.com/b", false),
+            ("`https://example.com/a`", false),
+            (
+                "https://example.com/a and [docs][r]\n\n[r]: https://example.com/a",
+                false,
+            ),
+            (
+                "[https://example.com/a][r]\n\n[r]: https://example.com/a",
+                true,
+            ),
+        ] {
+            assert_eq!(shows_its_destination(source, url), expected, "{source}");
+        }
+    }
 
     #[test]
     fn list_blocks_follow_the_markdown_parse() {
