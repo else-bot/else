@@ -551,7 +551,7 @@ async fn the_sidebar_preview_shows_link_text_when_the_url_is_long() {
     let bot = app.create_bot("Writer").await;
     let url = format!(
         "https://app.t3.codes/threads/mcp%3Alaunch%3A{}",
-        "ab".repeat(150)
+        "ab".repeat(2100)
     );
     reply(
         &app,

@@ -495,7 +495,7 @@ mod tests {
         }
         let done = finished(
             bot(1, Some((1, at(3, 12))), at(0, 0)),
-            "**Final** is live on\n[production](https://example.com/version.json)",
+            "Final is live on\nproduction",
         );
         assert!(
             inbox.observe(std::slice::from_ref(&done)),

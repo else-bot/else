@@ -23,7 +23,7 @@ pub fn one_line(markdown: &str) -> String {
 }
 
 /// `text` cut to at most `max_chars` characters, at a word when one ends in
-/// the second half, with an ellipsis after a cut.
+/// the second half, then followed by an ellipsis.
 pub fn cut(text: &str, max_chars: usize) -> String {
     let Some((end, _)) = text.char_indices().nth(max_chars) else {
         return text.to_owned();
@@ -45,6 +45,7 @@ fn visit(node: &Node, out: &mut String) {
         Node::Math(m) => out.push_str(&m.value),
         Node::Image(image) => out.push_str(&image.alt),
         Node::ImageReference(image) => out.push_str(&image.alt),
+        Node::Html(html) => push_html(&html.value, out),
         Node::Break(_) => out.push('\n'),
         _ => {}
     }
@@ -70,6 +71,27 @@ fn visit(node: &Node, out: &mut String) {
         | Node::MdxJsxTextElement(_) => {}
         _ => out.push('\n'),
     }
+}
+
+/// The text an HTML fragment shows: tags dropped, `<br>` as a line break.
+fn push_html(html: &str, out: &mut String) {
+    let mut rest = html;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let Some(close) = rest[open..].find('>') else {
+            rest = &rest[open..];
+            break;
+        };
+        let tag = rest[open + 1..open + close].trim_start_matches('/');
+        if tag
+            .get(..2)
+            .is_some_and(|name| name.eq_ignore_ascii_case("br"))
+        {
+            out.push('\n');
+        }
+        rest = &rest[open + close + 1..];
+    }
+    out.push_str(rest);
 }
 
 #[cfg(test)]
@@ -109,6 +131,9 @@ mod tests {
             ("2 * 3 = 6 and foo_bar", "2 * 3 = 6 and foo_bar"),
             ("| a | b |\n|---|---|\n| 1 | 2 |", "a b 1 2"),
             ("---", ""),
+            ("<div>Done</div>", "Done"),
+            ("A<br>B and <b>bold</b>", "A B and bold"),
+            ("`<path>` exists", "<path> exists"),
         ] {
             assert_eq!(one_line(source), expected, "{source}");
         }

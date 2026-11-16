@@ -336,10 +336,14 @@ pub struct LatestReply {
 }
 
 impl LatestReply {
-    /// The preview as one line of plain text, for surfaces that cannot
-    /// render markdown.
+    /// The preview as one line, for surfaces that cannot render markdown.
+    /// The server already strips the markdown, so parsing again would turn
+    /// literal `*stars*` into emphasis.
     pub fn plain_preview(&self) -> String {
-        else_plain_text::one_line(&self.preview)
+        self.preview
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 

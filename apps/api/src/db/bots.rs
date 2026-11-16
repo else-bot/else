@@ -112,7 +112,7 @@ const SELECT_BOT: &str = concat!(
         b.avatar_shape, b.avatar_color,
         c.read_item_seq, c.read_text_bytes, c.marked_unread,
         h.id AS head_item_id, h.turn_id AS head_turn_id, h.seq AS head_seq,
-        length(CAST(h.text AS BLOB)) AS head_bytes, substr(h.text, 1, 4000) AS head_preview,
+        length(CAST(h.text AS BLOB)) AS head_bytes, h.text AS head_preview,
         a.id AS active_turn_id, a.status AS active_turn_status,
         question.kind AS question_kind, question.title AS question_title,
         question.created_at AS question_at,
