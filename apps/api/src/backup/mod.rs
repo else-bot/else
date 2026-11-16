@@ -35,7 +35,8 @@ use sha2::{Digest, Sha256};
 
 use crate::credentials::SecretKey;
 
-pub const SCHEMA_VERSION: u32 = 3;
+/// 4: computer archives are chunked as their tar ([`chunks::Encoding`]).
+pub const SCHEMA_VERSION: u32 = 4;
 /// The oldest schema a restore still reads: 2 holds plain project tars and
 /// every computer archive with its image.
 pub const MIN_SCHEMA_VERSION: u32 = 2;

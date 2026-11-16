@@ -3,9 +3,10 @@
 //! A remote set is `sets/<set id>/complete.json` and `sets/<set id>/index.json.age`.
 //! The index, sealed with the set's own identity, holds the set's manifest
 //! and, for each artifact, the ordered chunks of its stored stream. The
-//! stored stream is the artifact's plaintext, except that a zstd project
-//! archive is stored as its tar: compressing the whole archive would change
-//! every byte after an edit, so no chunk would match the previous run.
+//! stored stream is the artifact's plaintext, except that a zstd project or
+//! computer archive is stored as its tar ([`Encoding::ZstdTar`]): its
+//! compressed bytes change after any edit, so no chunk would match the
+//! previous run.
 //!
 //! Cut points come from FastCDC, so an insertion changes only the chunks
 //! around it. A chunk is stored once at `chunks/<key id>/<id>` as
@@ -48,19 +49,23 @@ const CHUNK_ID_PURPOSE: &[u8] = b"else.bot/backups/chunk-id/v1";
 pub enum Encoding {
     /// The plaintext itself.
     Plain,
-    /// The tar inside a zstd project archive, compressed again on restore.
+    /// The tar inside a zstd archive, compressed again on restore: a project
+    /// archive, or from schema 4 a computer's `.msb`. Two exports of an
+    /// unchanged computer differ in almost every compressed byte but only in
+    /// a few tar headers.
     ZstdTar,
 }
 
 impl Encoding {
     pub fn of(artifact: &Artifact, schema_version: u32) -> Self {
-        if artifact.kind == "project"
-            && super::projects::Format::of(schema_version) == super::projects::Format::TarZstd
-        {
-            Self::ZstdTar
-        } else {
-            Self::Plain
-        }
+        let zstd_tar = match artifact.kind.as_str() {
+            "project" => {
+                super::projects::Format::of(schema_version) == super::projects::Format::TarZstd
+            }
+            "vm" => schema_version >= 4,
+            _ => false,
+        };
+        if zstd_tar { Self::ZstdTar } else { Self::Plain }
     }
 }
 
@@ -425,6 +430,59 @@ mod tests {
         let at = flipped.len() - 20;
         flipped[at] ^= 1;
         assert!(one.open(&id, &flipped).is_err(), "damaged");
+    }
+
+    #[test]
+    fn computer_archives_share_chunks_when_only_their_compression_differs() {
+        let artifact = |kind: &str| Artifact {
+            kind: kind.into(),
+            object: "a".into(),
+            bot_id: None,
+            ciphertext_bytes: 0,
+            ciphertext_sha256: String::new(),
+            plaintext_bytes: 0,
+            plaintext_sha256: String::new(),
+        };
+        assert_eq!(
+            Encoding::of(&artifact("vm"), 3),
+            Encoding::Plain,
+            "schema 3 indexes stay readable"
+        );
+        assert_eq!(Encoding::of(&artifact("vm"), 4), Encoding::ZstdTar);
+        assert_eq!(Encoding::of(&artifact("project"), 4), Encoding::ZstdTar);
+        assert_eq!(Encoding::of(&artifact("sqlite"), 4), Encoding::Plain);
+
+        let dir = tempfile::tempdir().unwrap();
+        let keys = ChunkKeys::derive(&key(1)).unwrap();
+        let identity = super::super::identity(&key(1), &[5; 32]).unwrap();
+        let tar = noise(12 << 20, 3);
+        let mut runs = Vec::new();
+        for level in [1, 3] {
+            let compressed = zstd::stream::encode_all(&tar[..], level).unwrap();
+            let object = format!("vm-{level}.msb.age");
+            let sealed = super::super::seal(
+                &dir.path().join(&object),
+                &identity,
+                &mut &compressed[..],
+                1 << 30,
+            )
+            .unwrap();
+            let vm = Artifact {
+                object,
+                ciphertext_bytes: sealed.ciphertext_bytes,
+                ciphertext_sha256: sealed.ciphertext_sha256,
+                plaintext_bytes: sealed.plaintext_bytes,
+                plaintext_sha256: sealed.plaintext_sha256,
+                ..artifact("vm")
+            };
+            let encoding = Encoding::of(&vm, 4);
+            let (chunks, ..) = read_stored(dir.path(), &vm, &identity, encoding, |input| {
+                split(&keys, input, |_, _| Ok(()))
+            })
+            .unwrap();
+            runs.push(chunks);
+        }
+        assert_eq!(runs[0], runs[1], "the same tar is the same chunks");
     }
 
     #[test]
