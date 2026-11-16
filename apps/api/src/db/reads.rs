@@ -1,14 +1,16 @@
 //! The owner's read position in each bot's owner conversation.
 //!
-//! Unread is derived from positions: the latest assistant item's position
-//! (its seq and the UTF-8 bytes of its text) is compared with the saved read
+//! Unread is derived from positions: the latest reply's position (its seq
+//! and the UTF-8 bytes of its text) is compared with the saved read
 //! position, so text appended to a reply after the owner read it is unread
-//! again. Reading only moves forward; marking unread sets a flag and keeps
-//! the position, so a delayed read can never undo it. Attaching a reply's
-//! linked files can rewrite its text shorter, so a position past the end of a
-//! reply reads it through its current end. `unread_replies` counts the
-//! assistant items past the read position for badges; it is at least one
-//! whenever the conversation is unread, so a flag or a grown reply counts.
+//! again. Only turns that ended or wait on the owner count: replies of a turn
+//! still working are progress updates and stay silent. Reading only moves
+//! forward; marking unread sets a flag and keeps the position, so a delayed
+//! read can never undo it. Attaching a reply's linked files can rewrite its
+//! text shorter, so a position past the end of a reply reads it through its
+//! current end. `unread_replies` counts, for badges, the counted turns whose
+//! last reply is past the read position; it is at least one whenever the
+//! conversation is unread, so a flag or a grown reply counts.
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -24,7 +26,8 @@ pub struct ReplyPosition {
     pub text_bytes: i64,
 }
 
-/// The newest assistant item of the owner conversation.
+/// The newest reply of a turn in the owner conversation that ended or
+/// waits on the owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LatestReply {
     pub turn_id: Uuid,
