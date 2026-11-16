@@ -73,19 +73,19 @@ fn unavailable_image_label(node: &markdown::mdast::Node) -> Option<&str> {
 }
 
 /// The message without the files drawn outside its text: images in the
-/// gallery and visuals below it.
+/// gallery and visuals below it. A file that shares its line with prose
+/// stays as a chip, so the sentence that names it still reads.
 pub(super) fn without_images(source: &str, parts: &[MessagePart]) -> (String, Vec<MessagePart>) {
-    let drawn = |file: &Attachment| is_image(file) || super::visuals::is_visual(file);
-    if !parts
-        .iter()
-        .any(|part| matches!(part, MessagePart::File { file } if drawn(file)))
-    {
+    let drawn = |ix: usize| {
+        matches!(&parts[ix], MessagePart::File { file }
+            if (is_image(file) || super::visuals::is_visual(file)) && !in_prose(parts, ix))
+    };
+    if !(0..parts.len()).any(drawn) {
         return (source.to_owned(), parts.to_vec());
     }
-    let parts: Vec<_> = parts
-        .iter()
-        .filter(|part| !matches!(part, MessagePart::File { file } if drawn(file)))
-        .cloned()
+    let parts: Vec<_> = (0..parts.len())
+        .filter(|&ix| !drawn(ix))
+        .map(|ix| parts[ix].clone())
         .collect();
     let text = parts
         .iter()
@@ -95,6 +95,29 @@ pub(super) fn without_images(source: &str, parts: &[MessagePart]) -> (String, Ve
         })
         .collect();
     (text, parts)
+}
+
+/// Whether text other than files sits on the same line as the file at `ix`.
+fn in_prose(parts: &[MessagePart], ix: usize) -> bool {
+    fn side<'a>(parts: impl Iterator<Item = &'a MessagePart>, line: fn(&str) -> &str) -> bool {
+        for part in parts {
+            if let MessagePart::Text { text } = part {
+                let near = line(text);
+                if !near.trim().is_empty() {
+                    return true;
+                }
+                if near.len() < text.len() {
+                    return false;
+                }
+            }
+        }
+        false
+    }
+    side(parts[..ix].iter().rev(), |text| {
+        text.rsplit(['\n', '\r']).next().unwrap_or(text)
+    }) || side(parts[ix + 1..].iter(), |text| {
+        text.split(['\n', '\r']).next().unwrap_or(text)
+    })
 }
 
 enum ImageState {
@@ -527,14 +550,52 @@ mod tests {
             },
         ];
         assert_eq!(image_files(&parts), [first, second]);
+        let source = "Before [File: one.png][File: report.pdf][File: two.jpg][File: one.png] after";
+        let (text, remaining) = without_images(source, &parts);
+        assert_eq!(text, source);
+        assert_eq!(remaining, parts);
+    }
+
+    #[test]
+    fn images_inside_prose_stay_in_the_text_and_images_on_their_own_line_leave_it() {
+        let file = |name: &str| Attachment {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            media_type: "image/png".into(),
+            size: 3,
+        };
+        let text = |text: &str| MessagePart::Text { text: text.into() };
+        let (card, chart, email, gallery) = (
+            file("card.png"),
+            file("chart.png"),
+            file("email.png"),
+            file("x.png"),
+        );
+        let parts = vec![
+            text("**Current draft** ("),
+            MessagePart::File { file: card },
+            text(", "),
+            MessagePart::File { file: chart },
+            text(", "),
+            MessagePart::File { file: email },
+            text("):\n\n- Subject\n\n"),
+            MessagePart::File {
+                file: gallery.clone(),
+            },
+            text(" "),
+            MessagePart::File { file: gallery },
+            text("\n"),
+        ];
         let (text, remaining) = without_images("unused canonical source", &parts);
-        assert_eq!(text, "Before [File: report.pdf] after");
-        assert_eq!(remaining.len(), 3);
+        assert_eq!(
+            text,
+            "**Current draft** ([File: card.png], [File: chart.png], [File: email.png]):\n\n- Subject\n\n \n"
+        );
         assert_eq!(
             crate::attachments::input_content(&text, &remaining)
                 .tokens()
                 .len(),
-            1
+            3
         );
     }
 
