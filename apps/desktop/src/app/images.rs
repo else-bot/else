@@ -528,13 +528,53 @@ mod tests {
         ];
         assert_eq!(image_files(&parts), [first, second]);
         let (text, remaining) = without_images("unused canonical source", &parts);
-        assert_eq!(text, "Before [File: report.pdf] after");
-        assert_eq!(remaining.len(), 3);
+        assert_eq!(
+            text,
+            "Before [File: one.png][File: report.pdf][File: two.jpg][File: one.png] after"
+        );
+        assert_eq!(remaining, parts);
+    }
+
+    #[test]
+    fn images_inside_prose_stay_in_the_text_and_images_on_their_own_line_leave_it() {
+        let file = |name: &str| Attachment {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            media_type: "image/png".into(),
+            size: 3,
+        };
+        let text = |text: &str| MessagePart::Text { text: text.into() };
+        let (card, chart, email, gallery) = (
+            file("card.png"),
+            file("chart.png"),
+            file("email.png"),
+            file("x.png"),
+        );
+        let parts = vec![
+            text("**Current draft** ("),
+            MessagePart::File { file: card },
+            text(", "),
+            MessagePart::File { file: chart },
+            text(", "),
+            MessagePart::File { file: email },
+            text("):\n\n- Subject\n\n"),
+            MessagePart::File {
+                file: gallery.clone(),
+            },
+            text(" "),
+            MessagePart::File { file: gallery },
+            text("\n"),
+        ];
+        let (text, remaining) = without_images("unused canonical source", &parts);
+        assert_eq!(
+            text,
+            "**Current draft** ([File: card.png], [File: chart.png], [File: email.png]):\n\n- Subject\n\n \n"
+        );
         assert_eq!(
             crate::attachments::input_content(&text, &remaining)
                 .tokens()
                 .len(),
-            1
+            3
         );
     }
 
