@@ -132,9 +132,9 @@ struct Active {
     profile: Profile,
     client: Arc<Client>,
     app: Entity<ElseApp>,
-    /// The app's last attention, so a background session redraws the
-    /// rail only when its badges change.
-    attention: crate::attention::Attention,
+    /// Cached so a background session redraws the rail only when its
+    /// badges change.
+    attention: Option<crate::attention::Attention>,
     _app: Subscription,
 }
 
@@ -403,7 +403,7 @@ impl Shell {
             profile,
             client,
             app,
-            attention: Default::default(),
+            attention: None,
             _app: observer,
         });
         cx.notify();

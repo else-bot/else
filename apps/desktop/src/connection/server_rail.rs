@@ -202,7 +202,7 @@ impl Shell {
         } else {
             fill
         };
-        let attention = self.server_attention(id, cx);
+        let attention = self.server_attention(id);
         let online = self
             .servers
             .entries
@@ -387,15 +387,14 @@ impl Shell {
         )
     }
 
-    /// A live session's attention once it is connected, else the last
-    /// background check's.
-    fn server_attention(&self, id: Uuid, cx: &App) -> Option<&Attention> {
+    /// A live session's attention once it holds a bot list from its
+    /// current connection, else the last background check's.
+    fn server_attention(&self, id: Uuid) -> Option<&Attention> {
         self.active
             .as_ref()
             .filter(|active| active.id == id)
             .or_else(|| self.inactive.get(&id))
-            .filter(|session| session.app.read(cx).connected())
-            .map(|session| &session.attention)
+            .and_then(|session| session.attention.as_ref())
             .or_else(|| self.servers.entries.get(&id)?.attention.as_ref())
     }
 
@@ -422,14 +421,12 @@ impl Shell {
     }
 }
 
-/// What the badges around a server's icon show.
 struct Badges<'a> {
     status: Hsla,
     update: bool,
     attention: Option<&'a Attention>,
     /// Counts from an unreachable server are its last known, so dimmed.
     online: bool,
-    /// The fill behind the icon, drawn around each badge.
     ring: Hsla,
 }
 
@@ -552,8 +549,6 @@ fn rail_face(id: Uuid, face: &Face, badges: Badges, cx: &App) -> Div {
         })
 }
 
-/// The hover card beside a rail icon: the full name, status, what the
-/// server's bots want from the owner, and its address.
 fn rail_card(
     name: String,
     color: Hsla,
