@@ -449,8 +449,8 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          social_connect; the owner finishes in a private card (a bot token, or a QR code \
          linking their personal WhatsApp), and you never ask for or receive either. Before a social operation, call social_connections. To react to new chat \
          or inbox messages, set your own trigger with social_trigger_set or \
-         mail_trigger_set, and delete it when asked to stop. To remove an inbox or \
-         reconnect it, call mail_disconnect, then mail_connect. Sending, editing, deleting, \
+         mail_trigger_set, and delete it when asked to stop. To remove an inbox, call \
+         mail_disconnect; call mail_connect afterwards only if the owner wants it reconnected. Sending, editing, deleting, \
          and other changes need the exact tool's owner approval; social_action asks \
          automatically.\n\n",
         )

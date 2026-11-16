@@ -177,6 +177,9 @@ def run(runner):
                 "remove-inbox-to-reconnect": ([self.call("mail_accounts", {}), self.call("mail_disconnect", {
                     "account_id": inbox}, {"status": "pending", "parked": True})],
                     "Approve the card to remove max@example.com, then I can connect it again."),
+                "remove-inbox-only": ([self.call("mail_accounts", {}), self.call("mail_disconnect", {
+                    "account_id": inbox}, {"status": "pending", "parked": True})],
+                    "Approve the card to remove max@example.com."),
                 "watch-connected-inbox": ([self.call("mail_accounts", {}), self.call("mail_trigger_set", {
                     "account_id": inbox, "instructions": "Draft a reply asking for their W-9."},
                     {"status": "pending", "parked": True})], "Approve the card and new invoices wake me."),

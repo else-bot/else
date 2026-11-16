@@ -824,32 +824,57 @@ async fn disconnect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outc
 }
 
 /// What the owner reads on a removal card: who loses the inbox and what is
-/// kept.
+/// kept. Each list of bot names stops at [`NAMES_BUDGET`] bytes so the card
+/// fits [`crate::app::questions::MAX_CONTEXT`] with any number of bots.
 fn removal_context(reason: Option<&str>, readers: &[(String, bool)]) -> String {
-    let names = |woken: bool| {
-        readers
-            .iter()
-            .filter(|(_, wakes)| *wakes || !woken)
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
     let mut lines: Vec<String> = reason
         .map(str::trim)
         .filter(|r| !r.is_empty())
         .map(str::to_owned)
         .into_iter()
         .collect();
-    lines.push(format!("Bots that lose access: {}.", names(false)));
-    let woken = names(true);
+    lines.push(format!(
+        "Bots that lose access: {}.",
+        name_list(readers.iter().map(|(name, _)| name.as_str()))
+    ));
+    let woken: Vec<&str> = readers
+        .iter()
+        .filter(|(_, wakes)| *wakes)
+        .map(|(name, _)| name.as_str())
+        .collect();
     if !woken.is_empty() {
-        lines.push(format!("Mail triggers that stop: {woken}."));
+        lines.push(format!(
+            "Mail triggers that stop: {}.",
+            name_list(woken.into_iter())
+        ));
     }
     lines.push(
         "The saved sign-in is erased. Messages stay in the mailbox, and you can connect it again."
             .to_owned(),
     );
     lines.join("\n")
+}
+
+const NAMES_BUDGET: usize = 1200;
+
+fn name_list<'a>(names: impl ExactSizeIterator<Item = &'a str>) -> String {
+    let total = names.len();
+    let mut shown = String::new();
+    let mut count = 0;
+    for name in names {
+        if !shown.is_empty() && shown.len() + name.len() + 2 > NAMES_BUDGET {
+            break;
+        }
+        if !shown.is_empty() {
+            shown.push_str(", ");
+        }
+        shown.push_str(name);
+        count += 1;
+    }
+    match total - count {
+        0 => shown,
+        more => format!("{shown} and {more} more"),
+    }
 }
 
 pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
@@ -954,4 +979,32 @@ async fn tool_call(
             request.command,
         )
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_removal_card_fits_its_context_with_many_long_bot_names() {
+        let readers: Vec<(String, bool)> = (0..200)
+            .map(|i| (format!("{i:03}{}", "x".repeat(77)), true))
+            .collect();
+        let context = removal_context(
+            Some(&"r".repeat(crate::app::questions::MAX_TITLE)),
+            &readers,
+        );
+        assert!(
+            context.len() <= crate::app::questions::MAX_CONTEXT,
+            "{} bytes",
+            context.len()
+        );
+        assert!(context.contains("more."), "{context}");
+        let few = removal_context(None, &[("Inbox".into(), true), ("Growth".into(), false)]);
+        assert_eq!(
+            few,
+            "Bots that lose access: Inbox, Growth.\nMail triggers that stop: Inbox.\nThe saved \
+             sign-in is erased. Messages stay in the mailbox, and you can connect it again."
+        );
+    }
 }

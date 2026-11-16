@@ -47,6 +47,24 @@ enum Removal {
     Failed(String),
 }
 
+impl Removal {
+    /// A failed request counts as removed when the reloaded list no longer
+    /// has the account: the server may have removed it and lost its reply.
+    fn reconcile(
+        account: Uuid,
+        removed: Result<(), String>,
+        listed: Result<Vec<EmailAccount>, String>,
+    ) -> Self {
+        match (removed, listed) {
+            (Ok(()), listed) => Self::Removed(listed),
+            (Err(_), Ok(listed)) if listed.iter().all(|a| a.id != account) => {
+                Self::Removed(Ok(listed))
+            }
+            (Err(err), _) => Self::Failed(err),
+        }
+    }
+}
+
 const REMOVAL_NOTICE: &str = "Your bots lose access to this inbox, and their mail triggers \
     for it stop. The saved sign-in is erased. Messages stay in the mailbox, and you can add \
     the account again.";
@@ -287,12 +305,13 @@ impl EmailSettings {
         }
         let client = self.client.clone();
         self._removal = Some(cx.spawn_in(window, async move |this, cx| {
-            let outcome = match client.clone().remove_email(account).await {
-                Ok(()) => {
-                    Removal::Removed(client.email_accounts().await.map_err(|err| err.to_string()))
-                }
-                Err(err) => Removal::Failed(err.to_string()),
-            };
+            let removed = client.clone().remove_email(account).await;
+            let listed = client.email_accounts().await;
+            let outcome = Removal::reconcile(
+                account,
+                removed.map_err(|err| err.to_string()),
+                listed.map_err(|err| err.to_string()),
+            );
             let _ = this.update(cx, |view, cx| {
                 view.settle_removal(account, outcome);
                 cx.notify();
@@ -323,6 +342,14 @@ impl EmailSettings {
             .find(|a| a.id == account)
             .map(|a| a.config.address.clone())
             .unwrap_or_default();
+        if matches!(outcome, Removal::Removed(_))
+            && self
+                .introduction
+                .as_ref()
+                .is_some_and(|i| i.account == account)
+        {
+            self.introduction = None;
+        }
         match outcome {
             Removal::Removed(Ok(accounts)) => {
                 self.accounts = accounts;
@@ -545,6 +572,42 @@ mod tests {
                 .starts_with("owner@gmail.com is removed"),
             "{:?}",
             view.feedback
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lost_reply_counts_as_removed_once_the_list_lacks_the_account() {
+        let gmail = account(1, "owner@gmail.com");
+        let work = account(2, "work@example.com");
+        let lost = || Err("timed out".to_owned());
+        assert!(matches!(
+            Removal::reconcile(gmail.id, lost(), Ok(vec![work.clone()])),
+            Removal::Removed(Ok(listed)) if listed.len() == 1
+        ));
+        assert!(matches!(
+            Removal::reconcile(gmail.id, lost(), Ok(vec![gmail.clone(), work])),
+            Removal::Failed(err) if err == "timed out"
+        ));
+        assert!(matches!(
+            Removal::reconcile(gmail.id, lost(), Err("offline".into())),
+            Removal::Failed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn removing_an_account_drops_its_pending_bot_introduction() {
+        let gmail = account(1, "owner@gmail.com");
+        let mut view = settings(vec![gmail.clone()]);
+        view.introduction = Some(Introduction {
+            account: gmail.id,
+            bot: Uuid::from_u128(9),
+            request: Uuid::from_u128(10),
+        });
+        assert!(view.start_removal(gmail.id));
+        view.settle_removal(gmail.id, Removal::Removed(Ok(Vec::new())));
+        assert!(
+            view.introduction.is_none(),
+            "Add email account shows again after the removal"
         );
     }
 
