@@ -217,6 +217,17 @@ pub enum Action {
     Permission {
         permission: PermissionTarget,
     },
+    BotDeletion {
+        bot_deletion: BotDeletion,
+    },
+}
+
+impl Action {
+    /// Whether a saved permission may ever cover this action. Deleting a bot
+    /// always needs its own card.
+    pub fn standing_allowed(&self) -> bool {
+        !matches!(self, Self::BotDeletion { .. })
+    }
 }
 
 /// The recurring work a host action or computer tool call belongs to, as
@@ -322,6 +333,18 @@ pub struct McpConnection {
 pub struct EmailConnection {
     pub provider: crate::connectors::types::Provider,
     pub address: String,
+}
+
+/// The bot a `delete_bot` card would delete, as it was when the card was
+/// made. The card's context lists the work that stops.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BotDeletion {
+    pub bot_id: Uuid,
+    pub name: String,
+    pub avatar: crate::app::bots::Avatar,
+    pub model: Option<String>,
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -580,6 +603,25 @@ impl Spec {
                 hash: hash(&[b"email_connection", &encoded]),
                 action: Action::EmailConnection {
                     email_connection: connection,
+                },
+            }),
+        }
+    }
+
+    /// A card approving one deletion of `deletion.bot_id`. It offers no
+    /// standing grant, and its identity is the target alone, so a retry in
+    /// the same request finds it even after the listed work changed.
+    pub fn bot_deletion(deletion: BotDeletion, context: String) -> Self {
+        Self {
+            kind: Kind::Destructive,
+            title: format!("Delete {}", deletion.name),
+            context: Some(context),
+            choices: approval_choices(Kind::Destructive, None),
+            multiple: false,
+            approval: Some(Approval {
+                hash: hash(&[b"bot_deletion", deletion.bot_id.as_bytes()]),
+                action: Action::BotDeletion {
+                    bot_deletion: deletion,
                 },
             }),
         }

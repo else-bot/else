@@ -171,7 +171,10 @@ async fn ran(
         Option<UseOutcome>,
     );
     let rows: Vec<RanRow> = sqlx::query_as(
-        "SELECT t.turn_no, t.status, json_extract(q.action, '$.tool'), q.title, q.used_at,
+        "SELECT t.turn_no, t.status,
+                coalesce(json_extract(q.action, '$.tool'),
+                         iif(json_type(q.action, '$.bot_deletion') IS NOT NULL, 'delete_bot', NULL)),
+                q.title, q.used_at,
                 q.use_outcome
          FROM owner_questions q JOIN turns t ON t.id = q.turn_id
          WHERE ((t.conversation_id = ?1 AND t.turn_no < ?2) OR t.id = ?3)
@@ -210,7 +213,10 @@ pub(super) async fn consume(
     question: &QuestionInfo,
     attempt: i32,
 ) -> Result<bool, sqlx::Error> {
-    let tool = matches!(question.action, Some(Action::Tool { .. }));
+    let tool = matches!(
+        question.action,
+        Some(Action::Tool { .. } | Action::BotDeletion { .. })
+    );
     let consumed = sqlx::query(
         "UPDATE owner_questions SET consumed_attempt = ?2,
              used_at = CASE WHEN ?3 THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') END

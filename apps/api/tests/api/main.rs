@@ -14,6 +14,7 @@ mod assistant_images;
 mod attachments;
 mod backup_settings;
 mod bot_councils;
+mod bot_deletion;
 mod bot_descriptions;
 mod bot_profiles;
 mod bot_renaming;

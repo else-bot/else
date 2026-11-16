@@ -17,7 +17,10 @@ use super::turns::TurnStatus;
 use crate::app::bots::{Avatar, AvatarColor, AvatarShape, BotName, BotPurpose};
 use crate::app::providers::Profile;
 
+mod impact;
 mod sidebar;
+
+pub use impact::{Impact, impact};
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::Type, serde::Serialize)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
@@ -197,6 +200,8 @@ pub enum Refusal {
     NotRunning,
     #[error("this attempt already delegated; end it and wait for the result")]
     AttemptDelegated,
+    #[error("a bot cannot delete itself; the owner can delete it in the app")]
+    OwnBot,
 }
 
 pub struct NewBot<'a> {
@@ -596,6 +601,38 @@ pub async fn rename_for_turn(
     .await?;
     tx.commit().await?;
     Ok(bot)
+}
+
+/// The active bot `turn_id` may ask the owner to delete, with what the
+/// deletion would stop. Refuses the calling bot and the main bot.
+pub async fn deletion_for_turn(
+    pool: &SqlitePool,
+    turn_id: Uuid,
+    bot_id: Uuid,
+) -> Result<(BotRecord, Impact), BotError> {
+    let mut conn = pool.acquire().await?;
+    may_edit_bots(&mut conn, turn_id).await?;
+    let caller = super::turns::asking_caller(&mut conn, turn_id)
+        .await?
+        .ok_or(Refusal::NotRunning)?;
+    if caller.bot_id == bot_id {
+        return Err(Refusal::OwnBot.into());
+    }
+    let main: Option<Uuid> = sqlx::query_scalar("SELECT default_bot_id FROM installation")
+        .fetch_optional(&mut *conn)
+        .await?
+        .flatten();
+    if main == Some(bot_id) {
+        return Err(BotError::MainBot);
+    }
+    let bot = find_in(&mut conn, bot_id)
+        .await?
+        .ok_or(BotError::NotFound)?;
+    if bot.status != BotStatus::Active {
+        return Err(BotError::Deleted);
+    }
+    let impact = impact(&mut conn, bot_id).await?;
+    Ok((bot, impact))
 }
 
 /// Save an active bot's own model (already validated by its provider's

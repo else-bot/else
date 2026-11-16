@@ -110,7 +110,7 @@ pub async fn endpoint(
                     | "mcp_connection_status",
                 ) => Tool::Mcp,
                 Some("create_bot") => Tool::CreateBot,
-                Some("rename_bot" | "set_bot_model") => Tool::EditBot,
+                Some("rename_bot" | "set_bot_model" | "delete_bot") => Tool::EditBot,
                 Some("rules_update") => Tool::Rules,
                 // Previews read the project, which only turns with the computer may do.
                 Some(super::visual_tools::NAME) => Tool::Computer,
@@ -440,6 +440,25 @@ fn tool_list() -> Value {
             "annotations": { "readOnlyHint": false, "destructiveHint": false,
                              "idempotentHint": true, "openWorldHint": false },
         },
+        {
+            "name": "delete_bot",
+            "description": "Ask the owner to delete another else.bot by exact target_bot_id, for an owner request. \
+                The owner always approves on a card listing its routines, triggers and tasks that \
+                stop; this parks. Once approved, call it again with the same target_bot_id. Never \
+                yourself or the main bot.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target_bot_id": { "type": "string", "format": "uuid" },
+                    "reason": { "type": "string", "maxLength": crate::app::questions::MAX_TITLE,
+                                "description": "Why, in the owner's words. Shown on the card." },
+                },
+                "required": ["target_bot_id"],
+                "additionalProperties": false,
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": true,
+                             "idempotentHint": true, "openWorldHint": false },
+        },
         super::rules::schema(),
         super::visual_tools::schema(),
         super::owner_tools::secret_schema(),
@@ -661,6 +680,7 @@ async fn dispatch(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
         "create_bot" => create_bot(state, grant, args).await,
         "rename_bot" => rename_bot(state, grant, args).await,
         "set_bot_model" => set_bot_model(state, grant, args).await,
+        "delete_bot" => delete_bot(state, grant, args).await,
         "request_secret" => super::owner_tools::request_secret(state, grant, args).await,
         "social_connect"
         | "social_connections"
@@ -1286,6 +1306,7 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 Refusal::PurposeRequired => "PURPOSE_REQUIRED",
                 Refusal::NotRunning => "NOT_RUNNING",
                 Refusal::AttemptDelegated => "ATTEMPT_PARKED",
+                Refusal::OwnBot => "OWN_BOT",
             };
             reject(code, &refusal.to_string())
         }
@@ -1377,6 +1398,8 @@ fn edit_refusal(err: &crate::db::bots::BotError) -> Option<&'static str> {
         ) => "NOT_ALLOWED",
         BotError::Refused(Refusal::NotRunning) => "NOT_RUNNING",
         BotError::Refused(Refusal::AttemptDelegated) => "ATTEMPT_PARKED",
+        BotError::Refused(Refusal::OwnBot) => "OWN_BOT",
+        BotError::MainBot => "MAIN_BOT",
         _ => return None,
     })
 }
@@ -1490,6 +1513,176 @@ async fn set_bot_model(state: &AppState, grant: &Grant, args: &Value) -> Outcome
             reject(code, &err.to_string())
         }
     }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteBotArgs {
+    target_bot_id: Uuid,
+    reason: Option<String>,
+}
+
+async fn delete_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    use crate::app::questions::{BotDeletion, MAX_TITLE, Spec};
+    use crate::db::bots::{self, BotError};
+    use crate::db::owner_questions::{self, Gate};
+    let reject = |code: &str, message: &str| {
+        (
+            tool_error(&format!("{code}: {message}")),
+            Some(format!("rejected {code}")),
+        )
+    };
+    let parsed = serde_json::from_value::<DeleteBotArgs>(args.clone())
+        .ok()
+        .filter(|parsed| parsed.reason.as_ref().is_none_or(|r| r.len() <= MAX_TITLE));
+    let Some(parsed) = parsed else {
+        return reject(
+            "INVALID_ARGUMENTS",
+            "pass a target_bot_id UUID and optionally a reason of at most 500 bytes.",
+        );
+    };
+    let target = parsed.target_bot_id;
+    let (bot, impact) = match bots::deletion_for_turn(&state.db, grant.turn_id, target).await {
+        Ok(found) => found,
+        Err(BotError::Deleted) => {
+            return (
+                tool_result(json!({
+                    "bot_id": target,
+                    "status": "deleted",
+                    "next": "This bot is already deleted. Nothing changed.",
+                })),
+                Some(format!("{target} already deleted")),
+            );
+        }
+        Err(err) => {
+            let Some(code) = edit_refusal(&err) else {
+                tracing::warn!(error = %err, "reading a bot to delete failed");
+                return reject(
+                    "UNAVAILABLE",
+                    "bots cannot be deleted right now; try again shortly.",
+                );
+            };
+            return reject(code, &err.to_string());
+        }
+    };
+    let model = match current_model(state, target).await {
+        Ok(model) => model.map(|(_, model)| model),
+        Err(err) => {
+            tracing::warn!(error = %err, "reading a bot's model for its deletion card failed");
+            None
+        }
+    };
+    let reason = parsed
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty());
+    let spec = Spec::bot_deletion(
+        BotDeletion {
+            bot_id: target,
+            name: bot.name.clone(),
+            avatar: bot.avatar(),
+            model,
+            category: impact.category.clone(),
+        },
+        deletion_context(reason, &impact),
+    );
+    match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
+        Ok(Gate::Pending(question)) => {
+            super::owner_tools::pending_approval(
+                state,
+                grant,
+                &question,
+                "Tell the owner briefly which bot this deletes and why, then end this attempt \
+                 now. Do not wait, poll, or call more tools. If they approve, call delete_bot \
+                 again with the same target_bot_id.",
+            )
+            .await
+        }
+        Ok(Gate::Denied(question)) => (
+            tool_result(json!({ "status": "denied", "question_id": question.id,
+                "next": "The owner denied deleting this bot. Do not delete it or ask again in this request." })),
+            Some(format!("denied {} by the owner", question.id)),
+        ),
+        Ok(Gate::Run { .. }) => match super::bots::delete_bot(state, target).await {
+            Ok(deleted) => (
+                tool_result(json!({
+                    "bot_id": target,
+                    "name": deleted.name,
+                    "status": deleted.status,
+                    "removed": {
+                        "routines": impact.routines,
+                        "webhooks": impact.webhooks,
+                        "mail_triggers": impact.mail_triggers,
+                        "social_triggers": impact.social_triggers,
+                        "cancelled_tasks": impact.tasks.len(),
+                        "memory_readers": impact.memory_readers,
+                    },
+                    "next": "Tell the owner the bot is deleted and what stopped. Its history and \
+                        memory stay on this machine.",
+                })),
+                Some(format!("deleted {} ({target})", deleted.name)),
+            ),
+            Err(err) => {
+                tracing::warn!(error = %err, "deleting a bot from a turn failed");
+                reject(
+                    "UNAVAILABLE",
+                    "the bot was not deleted; tell the owner they can delete it in the app.",
+                )
+            }
+        },
+        Err(err) => super::owner_tools::question_refused(err),
+    }
+}
+
+/// The deletion card's text: why, and what stops, within the card's limit.
+fn deletion_context(reason: Option<&str>, impact: &crate::db::bots::Impact) -> String {
+    const TASK_CHARS: usize = 120;
+    const TAIL: &str = "Its chat history and memory stay on this machine. Its computer stops. \
+                        It cannot be restored from the app.";
+    let mut text = String::new();
+    if let Some(reason) = reason {
+        text.push_str(reason);
+        text.push_str("\n\n");
+    }
+    let mut stops = Vec::new();
+    for (label, names) in [
+        ("Routine", &impact.routines),
+        ("Webhook", &impact.webhooks),
+        ("Mail trigger", &impact.mail_triggers),
+        ("Social trigger", &impact.social_triggers),
+    ] {
+        stops.extend(names.iter().map(|name| format!("- {label}: {name}")));
+    }
+    for task in &impact.tasks {
+        let direction = if task.incoming { "from" } else { "to" };
+        let line = task.task.split_whitespace().collect::<Vec<_>>().join(" ");
+        let short = match line.char_indices().nth(TASK_CHARS) {
+            Some((end, _)) => format!("{}…", &line[..end]),
+            None => line,
+        };
+        stops.push(format!("- Task {direction} {}: {short}", task.with));
+    }
+    if stops.is_empty() {
+        text.push_str("Nothing scheduled or in progress stops.\n");
+    } else {
+        text.push_str("Stops:\n");
+        text.push_str(&stops.join("\n"));
+        text.push('\n');
+    }
+    if !impact.memory_readers.is_empty() {
+        text.push_str(&format!(
+            "These bots lose access to its memory: {}\n",
+            impact.memory_readers.join(", ")
+        ));
+    }
+    let room = crate::app::questions::MAX_CONTEXT - TAIL.len() - "…\n".len();
+    if text.len() > room {
+        text.truncate(text.floor_char_boundary(room));
+        text.push_str("…\n");
+    }
+    text.push_str(TAIL);
+    text
 }
 
 #[cfg(test)]

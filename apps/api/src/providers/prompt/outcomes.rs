@@ -352,6 +352,9 @@ fn questions_block(input: &TurnInput) -> String {
                     Action::Permission { permission } => {
                         format!("{}\nStanding permission: {permission:?}", question.title)
                     }
+                    Action::BotDeletion { bot_deletion } => {
+                        format!("{}\nBot: {}", question.title, bot_deletion.bot_id)
+                    }
                 };
                 let standing = match answer.as_str() {
                     APPROVE_FOREVER => {
@@ -411,6 +414,11 @@ fn questions_block(input: &TurnInput) -> String {
                         format!(
                             "Standing permission was recorded from the owner's message.{standing}"
                         )
+                    }
+                    (APPROVE, Action::BotDeletion { .. }) => {
+                        "Approved: call delete_bot again with the same target_bot_id, once, \
+                         then report what it removed."
+                            .to_owned()
                     }
                     (DENY, _) => format!(
                         "Denied: do not do this {kind} action or an equivalent; continue without it or ask what the owner wants."

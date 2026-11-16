@@ -213,17 +213,25 @@ async fn delete(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
 ) -> Result<Response, ApiError> {
-    let deleted = bots::delete(&state.db, bot_id).await?;
-    state.scheduler.grants().revoke_bot(bot_id).await;
-    if let Some(turn_id) = deleted.interrupt {
-        state.scheduler.interrupt(turn_id).await;
-    }
-    let bot = deleted.bot;
+    let bot = delete_bot(&state, bot_id).await?;
     let status = match bot.status {
         BotStatus::Deleted => StatusCode::OK,
         _ => StatusCode::ACCEPTED,
     };
     Ok((status, Json(json!({ "bot": bot_json(&bot) }))).into_response())
+}
+
+/// Tombstone the bot, revoke its grants, and interrupt its running turn.
+pub(super) async fn delete_bot(
+    state: &AppState,
+    bot_id: Uuid,
+) -> Result<crate::db::bots::BotRecord, BotError> {
+    let deleted = bots::delete(&state.db, bot_id).await?;
+    state.scheduler.grants().revoke_bot(bot_id).await;
+    if let Some(turn_id) = deleted.interrupt {
+        state.scheduler.interrupt(turn_id).await;
+    }
+    Ok(deleted.bot)
 }
 
 impl From<crate::db::bot_profiles::BotProfileError> for ApiError {
