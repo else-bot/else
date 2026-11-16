@@ -415,7 +415,8 @@ fn mail_command_schema() -> Value {
                 create_folder, rename_folder, delete_folder." },
             "query": { "type": "string", "description": "search: optional words." },
             "limit": { "type": "integer", "minimum": 1, "maximum": 100,
-                       "description": "search: default 50." },
+                       "description": "search: default 50. Results run newest first by received_at, \
+                       the server's arrival time; date is the sender's Date header and may be wrong." },
             "message": message.clone(),
             "part": { "type": "integer", "description": "attachment: the part index from read." },
             "read": { "type": "boolean", "description": "set_read." },

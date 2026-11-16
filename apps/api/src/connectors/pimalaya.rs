@@ -90,6 +90,13 @@ impl Imap {
         Ok(())
     }
     async fn body(&mut self, message: &MessageRef) -> Result<Vec<u8>, MailError> {
+        self.fetch_message(message).await.map(|(bytes, _)| bytes)
+    }
+    /// The raw message and when the server received it.
+    async fn fetch_message(
+        &mut self,
+        message: &MessageRef,
+    ) -> Result<(Vec<u8>, Option<String>), MailError> {
         self.select_ref(message).await?;
         let opts = ImapMessageFetchOptions {
             uid: true,
@@ -101,14 +108,14 @@ impl Imap {
                 items(vec![
                     MessageDataItemName::Uid,
                     MessageDataItemName::Rfc822Size,
+                    MessageDataItemName::InternalDate,
                 ]),
                 opts.clone(),
             )
             .await
             .map_err(failure)?;
-        let size = meta
-            .values()
-            .flat_map(|row| row.as_ref().iter())
+        let meta_items = || meta.values().flat_map(|row| row.as_ref().iter());
+        let size = meta_items()
             .find_map(|i| {
                 if let MessageDataItem::Rfc822Size(n) = i {
                     Some(*n as usize)
@@ -117,6 +124,7 @@ impl Imap {
                 }
             })
             .ok_or_else(|| MailError::new("message_not_found"))?;
+        let received_at = meta_items().find_map(internal_date).map(rfc3339);
         if size > MESSAGE_LIMIT {
             return Err(MailError::new("mail_message_too_large"));
         }
@@ -154,7 +162,7 @@ impl Imap {
                     if bytes.len() > MESSAGE_LIMIT {
                         return Err(MailError::new("mail_message_too_large"));
                     }
-                    return Ok(bytes.to_vec());
+                    return Ok((bytes.to_vec(), received_at));
                 }
             }
         }
@@ -215,6 +223,7 @@ impl Imap {
                     MessageDataItemName::Uid,
                     MessageDataItemName::Envelope,
                     MessageDataItemName::Flags,
+                    MessageDataItemName::InternalDate,
                 ]),
                 ImapMessageFetchOptions {
                     uid: true,
@@ -225,6 +234,7 @@ impl Imap {
             .map_err(failure)?;
         let mut messages = Vec::new();
         for row in rows.values() {
+            let received = row.as_ref().iter().find_map(internal_date);
             let Some(uid) = row.as_ref().iter().find_map(|i| {
                 if let MessageDataItem::Uid(id) = i {
                     Some(id.get())
@@ -237,12 +247,12 @@ impl Imap {
             if !chosen.iter().any(|id| id.get() == uid) {
                 continue;
             }
-            let mut value =
-                json!({"message":MessageRef{folder:folder.to_owned(),uid_validity:validity,uid}});
+            let mut value = json!({"message":MessageRef{folder:folder.to_owned(),uid_validity:validity,uid},"date":null,"received_at":received.map(rfc3339)});
             for item in row.as_ref().iter() {
                 match item {
                     MessageDataItem::Envelope(e) => {
                         value["subject"] = json!(nstring(&e.subject));
+                        value["date"] = json!(header_date(nstring(&e.date).as_deref()));
                         value["from"] = json!(
                             e.from
                                 .iter()
@@ -268,19 +278,21 @@ impl Imap {
                     _ => (),
                 }
             }
-            messages.push(value);
+            messages.push((received, uid, value));
         }
+        messages.sort_unstable_by_key(|(received, uid, _)| std::cmp::Reverse((*received, *uid)));
+        let messages: Vec<_> = messages.into_iter().map(|(_, _, value)| value).collect();
         Ok(json!({"messages":messages,"truncated":truncated,"source":"external_email"}))
     }
     async fn read_message(&mut self, message: &MessageRef) -> Result<Value, MailError> {
-        let bytes = self.body(message).await?;
+        let (bytes, received_at) = self.fetch_message(message).await?;
         let parsed = MessageParser::default()
             .parse(&bytes)
             .ok_or_else(|| MailError::new("invalid_email_message"))?;
         let body = parsed.body_text(0).unwrap_or_default();
         let text: String = body.chars().take(32000).collect();
         Ok(
-            json!({"message":message,"source":"external_email","subject":parsed.subject(),"from":addresses(parsed.from()),"to":addresses(parsed.to()),"cc":addresses(parsed.cc()),"reply_to":addresses(parsed.reply_to()),"body":text,"truncated":body.chars().count()>32000,"attachments":parsed.attachments().enumerate().map(|(part,a)|json!({"part":part,"name":a.attachment_name(),"size":a.contents().len()})).collect::<Vec<_>>()}),
+            json!({"message":message,"source":"external_email","date":header_date(parsed.header_raw("Date")),"received_at":received_at,"subject":parsed.subject(),"from":addresses(parsed.from()),"to":addresses(parsed.to()),"cc":addresses(parsed.cc()),"reply_to":addresses(parsed.reply_to()),"body":text,"truncated":body.chars().count()>32000,"attachments":parsed.attachments().enumerate().map(|(part,a)|json!({"part":part,"name":a.attachment_name(),"size":a.contents().len()})).collect::<Vec<_>>()}),
         )
     }
     async fn flag(
@@ -647,6 +659,28 @@ fn mailbox_name(value: &Mailbox<'_>) -> String {
         Mailbox::Inbox => "INBOX".into(),
         Mailbox::Other(value) => String::from_utf8_lossy(value.inner().as_ref()).into_owned(),
     }
+}
+
+/// The sender's `Date:` header as RFC 3339, or as written when it does not parse.
+fn header_date(raw: Option<&str>) -> Option<String> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(match mail_parser::DateTime::parse_rfc822(raw) {
+        Some(date) if date.is_valid() => date.to_rfc3339(),
+        _ => raw.chars().take(256).collect(),
+    })
+}
+fn internal_date(item: &MessageDataItem<'_>) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    match item {
+        MessageDataItem::InternalDate(at) => Some(*at.as_ref()),
+        _ => None,
+    }
+}
+fn rfc3339(at: chrono::DateTime<chrono::FixedOffset>) -> String {
+    at.with_timezone(&chrono::Utc)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 fn nstring(value: &io_imap::types::core::NString<'_>) -> Option<String> {
