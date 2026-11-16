@@ -92,6 +92,8 @@ struct Worker {
 }
 /// How long a listener must stay up before its connection counts as connected.
 const LISTEN_SETTLE: Duration = Duration::from_secs(3);
+/// How long a cancelled listener may take to shut its client down.
+const LISTEN_SHUTDOWN: Duration = Duration::from_secs(10);
 
 pub struct Manager {
     pub db: SqlitePool,
@@ -650,39 +652,61 @@ impl Manager {
                 .fetch_one(&self.db)
                 .await?;
         let (tx, mut rx) = mpsc::channel::<Envelope>(16);
-        let listen = self.transport.listen(c, session, offset, tx, stop.clone());
+        let listening = stop.child_token();
+        let listen = self
+            .transport
+            .listen(c, session, offset, tx, listening.clone());
         tokio::pin!(listen);
         // A refused poll fails at once; one that stays open or delivers a
         // message is connected.
         let settled = tokio::time::sleep(LISTEN_SETTLE);
         tokio::pin!(settled);
         let mut connected = false;
-        loop {
+        let result = loop {
             let event = tokio::select! {
                 biased;
-                _ = stop.cancelled() => return Ok(()),
+                _ = stop.cancelled() => break Ok(()),
                 r = &mut listen => return r,
                 () = &mut settled, if !connected => None,
                 event = rx.recv() => match event {
                     Some(event) => Some(event),
-                    None => return Ok(()),
+                    None => break Ok(()),
                 },
             };
-            if !connected {
-                connected = true;
-                sqlx::query(
-                    "UPDATE social_connections SET health='connected' WHERE id=?1 AND generation=?2",
-                )
-                .bind(c.id)
-                .bind(c.generation)
-                .execute(&self.db)
-                .await?;
+            if let Err(error) = self.received(c, &mut connected, event).await {
+                break Err(error);
             }
-            if let Some(event) = event {
-                store::record(&self.db, c, &event.incoming, event.next_offset).await?;
-                let _ = event.ack.send(());
-            }
+        };
+        // The listener shuts its client down itself; dropping it mid-flight
+        // would abort the client without flushing its state.
+        listening.cancel();
+        drop(rx);
+        if tokio::time::timeout(LISTEN_SHUTDOWN, listen).await.is_err() {
+            tracing::warn!(connection = %c.id, "a social listener did not stop in time");
         }
+        result
+    }
+    async fn received(
+        &self,
+        c: &Connection,
+        connected: &mut bool,
+        event: Option<Envelope>,
+    ) -> Result<(), Error> {
+        if !*connected {
+            *connected = true;
+            sqlx::query(
+                "UPDATE social_connections SET health='connected' WHERE id=?1 AND generation=?2",
+            )
+            .bind(c.id)
+            .bind(c.generation)
+            .execute(&self.db)
+            .await?;
+        }
+        if let Some(event) = event {
+            store::record(&self.db, c, &event.incoming, event.next_offset).await?;
+            let _ = event.ack.send(());
+        }
+        Ok(())
     }
     pub async fn run(self: Arc<Self>, stop: CancellationToken) {
         if let Err(error) = store::sweep_devices(&self.db).await {

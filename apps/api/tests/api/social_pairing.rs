@@ -27,6 +27,8 @@ struct Phone {
     scanned: Notify,
     expire: std::sync::atomic::AtomicBool,
     listen: Mutex<Option<Error>>,
+    /// Set once a stopped listener finished shutting its client down.
+    closed: std::sync::atomic::AtomicBool,
 }
 impl Phone {
     fn new(number: &str) -> Arc<Self> {
@@ -35,6 +37,7 @@ impl Phone {
             scanned: Notify::new(),
             expire: Default::default(),
             listen: Mutex::new(None),
+            closed: Default::default(),
         })
     }
 }
@@ -97,6 +100,9 @@ impl Transport for Phone {
             return Err(error);
         }
         stop.cancelled().await;
+        // A real client flushes its device state here.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 }
@@ -544,4 +550,30 @@ async fn a_linked_result_survives_other_pairings_until_its_card_completes() {
         matches!(m.pairing(first, 0).await, Err(Error::NotFound)),
         "completing the card forgets the result"
     );
+}
+
+#[tokio::test]
+async fn pausing_a_connection_lets_its_listener_shut_down_its_client() {
+    let db = TestDb::migrated().await;
+    let phone = Phone::new("33612345678");
+    let m = manager(&db, &phone);
+    let (_, c) = paired(&db, &m, &phone).await;
+    tokio::time::timeout(common::SETTLE, async {
+        while store::connection(&db.pool, c.id).await.unwrap().health != "connected" {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the listener connected");
+    store::set_state(&db.pool, c.id, ConnectionState::Paused)
+        .await
+        .unwrap();
+    m.changed(c.id).await;
+    tokio::time::timeout(common::SETTLE, async {
+        while !phone.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the listener finished its shutdown instead of being dropped");
 }
