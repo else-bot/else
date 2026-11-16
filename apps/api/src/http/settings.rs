@@ -3,23 +3,40 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::routing::{get, put};
 use axum::{Json, Router};
+use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
 use crate::app::providers::Availability;
+use crate::app::server_icon::{Look, MAX_PICTURE_BYTES, ServerIcon};
 use crate::db::profiles::{self, ProfileError, ProfilePatch, ProfileRecord};
+
+/// Largest icon body: a picture in base64 plus its JSON envelope.
+pub const MAX_ICON_BODY_BYTES: usize = MAX_PICTURE_BYTES.div_ceil(3) * 4 + 4096;
+
+/// Whether a request sets the server's icon, which may exceed the usual
+/// body limit.
+pub fn is_icon_upload(method: &axum::http::Method, path: &str) -> bool {
+    method == axum::http::Method::PUT && path == "/v1/settings/server/icon"
+}
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/settings/providers/{provider_id}", get(show).patch(update))
         .route("/settings/defaults", get(show_defaults).put(set_defaults))
         .route("/settings/server", put(name_server))
+        .route(
+            "/settings/server/icon",
+            get(show_server_icon)
+                .put(set_server_icon)
+                .layer(DefaultBodyLimit::max(MAX_ICON_BODY_BYTES)),
+        )
 }
 
 /// A provider and a complete profile for it, as the owner's pickers send.
@@ -270,4 +287,44 @@ async fn name_server(
     let kept =
         crate::db::installation::set_server_name(&state.db, name, body.only_if_unnamed).await?;
     Ok(Json(json!({ "server": { "name": kept } })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IconBody {
+    icon: Look,
+    /// Standard base64 PNG, only for a picture.
+    #[serde(default)]
+    picture: Option<String>,
+    /// Keep an icon another desktop already chose.
+    #[serde(default)]
+    only_if_unset: bool,
+}
+
+/// Give this server its icon; every desktop shows the icon from its
+/// capabilities and fetches a picture here when its digest changes.
+async fn set_server_icon(
+    State(state): State<Arc<AppState>>,
+    ApiJson(body): ApiJson<IconBody>,
+) -> Result<Json<Value>, ApiError> {
+    let picture = body
+        .picture
+        .map(|data| base64::engine::general_purpose::STANDARD.decode(data.as_bytes()))
+        .transpose()
+        .map_err(|_| ApiError::bad_request("invalid_input", "The picture is not base64."))?;
+    let icon = ServerIcon::new(body.icon, picture)
+        .map_err(|reason| ApiError::bad_request("invalid_input", reason))?;
+    let kept =
+        crate::db::installation::set_server_icon(&state.db, &icon, body.only_if_unset).await?;
+    Ok(Json(json!({ "server": { "icon": kept } })))
+}
+
+async fn show_server_icon(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let (icon, picture) = crate::db::installation::server_icon_with_picture(&state.db)
+        .await?
+        .unzip();
+    let picture = picture
+        .flatten()
+        .map(|png| base64::engine::general_purpose::STANDARD.encode(png));
+    Ok(Json(json!({ "icon": icon, "picture": picture })))
 }

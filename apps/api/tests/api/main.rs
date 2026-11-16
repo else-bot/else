@@ -56,6 +56,7 @@ mod routines;
 mod runtime_lock;
 mod screens;
 mod secret_requests;
+mod server_icon;
 mod server_name;
 mod shared_mcp;
 mod skills;
