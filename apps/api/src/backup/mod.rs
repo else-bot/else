@@ -676,10 +676,12 @@ pub fn clean_incomplete(dir: &Path) -> Result<usize, BackupError> {
     Ok(removed)
 }
 
-/// Keep the newest `keep` completed sets (at least one), always `protect`
-/// (the set just published), and always the newest whole-assistant set. The completion record goes first, so
-/// a half-removed set is never taken for a backup. The caller holds the
-/// backup lock.
+/// Keep `keep` completed sets (at least one): always `protect` (the set just
+/// published) and the newest whole-assistant set, then the newest others
+/// until `keep` are left. The two pinned sets count toward `keep`, so a run
+/// of partial sets does not hold an extra copy. The completion record goes
+/// first, so a half-removed set is never taken for a backup. The caller
+/// holds the backup lock.
 pub fn apply_retention(dir: &Path, keep: usize, protect: &str) -> Result<Vec<String>, BackupError> {
     apply_retention_protecting(dir, keep, protect, &[])
 }
@@ -692,7 +694,7 @@ pub fn apply_retention_protecting(
     protect: &str,
     awaiting: &[String],
 ) -> Result<Vec<String>, BackupError> {
-    let mut sets = completed_sets(dir)?;
+    let sets = completed_sets(dir)?;
     let newest_whole = sets
         .iter()
         .rev()
@@ -703,14 +705,19 @@ pub fn apply_retention_protecting(
                 .is_some_and(|c| c.whole_assistant)
         })
         .cloned();
-    sets.retain(|s| s != protect && Some(s) != newest_whole.as_ref() && !awaiting.contains(s));
-    let keep = keep.max(1) - 1;
+    let pinned = |s: &String| s == protect || Some(s) == newest_whole.as_ref();
+    let budget = keep
+        .max(1)
+        .saturating_sub(sets.iter().filter(|s| pinned(s)).count());
+    let mut others: Vec<String> = sets.into_iter().filter(|s| !pinned(s)).collect();
+    let excess = others.len().saturating_sub(budget);
+    others.truncate(excess);
+    others.retain(|s| !awaiting.contains(s));
     let mut removed = Vec::new();
-    if sets.len() <= keep {
+    if others.is_empty() {
         return Ok(removed);
     }
-    let excess = sets.len() - keep;
-    for name in &sets[..excess] {
+    for name in &others {
         let path = dir.join(name);
         if !owned_dir(&path) {
             continue;
@@ -790,6 +797,66 @@ impl DatabaseParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn completed_set(dir: &Path, id: &str, whole: bool) {
+        let set = dir.join(id);
+        private_dir(&set).unwrap();
+        mark_owned(&set).unwrap();
+        let completion = Completion {
+            schema_version: SCHEMA_VERSION,
+            set_id: id.into(),
+            encryption: encryption_for(&test_key(), &[0; 32]),
+            manifest: ObjectRef {
+                object: MANIFEST.into(),
+                ciphertext_bytes: 0,
+                ciphertext_sha256: String::new(),
+            },
+            whole_assistant: whole,
+        };
+        fs::write(set.join(COMPLETE), serde_json::to_vec(&completion).unwrap()).unwrap();
+        let at = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(1_000 + id.as_bytes()[0] as u64);
+        File::open(set.join(COMPLETE))
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+
+    fn test_key() -> SecretKey {
+        use base64::Engine;
+        SecretKey::parse(&base64::engine::general_purpose::STANDARD.encode([7u8; 32])).unwrap()
+    }
+
+    #[test]
+    fn retention_counts_the_pinned_whole_set_within_keep() {
+        let dir = tempfile::tempdir().unwrap();
+        completed_set(dir.path(), "a", true);
+        for id in ["b", "c", "d"] {
+            completed_set(dir.path(), id, false);
+        }
+        let removed = apply_retention(dir.path(), 3, "d").unwrap();
+        assert_eq!(
+            removed,
+            ["b"],
+            "the oldest partial set goes, not a fourth copy"
+        );
+        assert_eq!(completed_sets(dir.path()).unwrap(), ["a", "c", "d"]);
+
+        let removed = apply_retention_protecting(dir.path(), 1, "d", &["c".into()]).unwrap();
+        assert!(
+            removed.is_empty(),
+            "a set awaiting replication is never removed"
+        );
+        assert_eq!(completed_sets(dir.path()).unwrap(), ["a", "c", "d"]);
+
+        let removed = apply_retention(dir.path(), 1, "d").unwrap();
+        assert_eq!(removed, ["c"]);
+        assert_eq!(
+            completed_sets(dir.path()).unwrap(),
+            ["a", "d"],
+            "keep 1 still keeps the last whole set beside the newest"
+        );
+    }
 
     #[test]
     fn a_rename_never_replaces_an_existing_destination() {
