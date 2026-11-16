@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use rmcp::transport::auth::{
@@ -262,21 +261,10 @@ async fn manager(
 /// server that then steers discovery to private addresses.
 async fn unregistered_manager(resource: &str) -> Result<AuthorizationManager, AuthError> {
     let url = reqwest::Url::parse(resource)?;
-    let private = url
-        .host_str()
-        .and_then(|host| host.trim_matches(['[', ']']).parse::<IpAddr>().ok())
-        .is_some_and(is_private);
-    if private {
+    if url.host_str().is_some_and(else_tailnet::is_private_host) {
         AuthorizationManager::new_allowing_private_addresses(url).await
     } else {
         AuthorizationManager::new(url).await
-    }
-}
-
-fn is_private(ip: IpAddr) -> bool {
-    match ip.to_canonical() {
-        IpAddr::V4(v4) => v4.is_private() || (v4.octets()[0] == 100 && v4.octets()[1] & 0xc0 == 64),
-        IpAddr::V6(v6) => v6.is_unique_local(),
     }
 }
 

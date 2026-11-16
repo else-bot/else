@@ -72,8 +72,10 @@ impl SignIn {
 
 fn authorization_state(value: &str, redirect: &str) -> Option<String> {
     let url = Url::parse(value).ok()?;
-    let loopback = matches!(url.host_str(), Some("127.0.0.1" | "[::1]"));
-    if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
+    let local = url.host_str().is_some_and(|host| {
+        matches!(host, "127.0.0.1" | "[::1]") || else_tailnet::is_private_host(host)
+    });
+    if !(url.scheme() == "https" || (url.scheme() == "http" && local))
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
