@@ -127,7 +127,7 @@ impl Shell {
                 .and_then(|shell| shell.read(cx).settings_section())
                 .unwrap_or(SettingsSection::Server);
             crate::appearance::modal_surface(dialog, cx)
-                .w(settings_size(section, viewport).width)
+                .w(sheet_size(section, viewport).width)
                 .centered()
                 .entrance(DialogEntrance::None)
                 .p_0()
@@ -386,7 +386,7 @@ impl Shell {
             .id("app-settings")
             .track_focus(&setup.focus)
             .w_full()
-            .h(settings_size(section, window.viewport_size()).height)
+            .h(sheet_size(section, window.viewport_size()).height)
             .overflow_hidden()
             .child(
                 // One header: the sheet's title over the server it edits.
@@ -821,18 +821,6 @@ fn settings_row(
         )
 }
 
-fn settings_size(section: SettingsSection, viewport: Size<Pixels>) -> Size<Pixels> {
-    if section == SettingsSection::Usage {
-        let room = |extent: Pixels| (extent - SHEET_CLEARANCE * 2.).max(px(0.));
-        size(
-            px(1120.).min(room(viewport.width)),
-            px(900.).min(room(viewport.height)),
-        )
-    } else {
-        sheet_size(viewport)
-    }
-}
-
 /// Width of the content column on standard Settings pages.
 pub(super) const SETTINGS_COLUMN: Pixels = px(560.);
 /// Least inset of that column from the edges of the Settings pane; a wider
@@ -843,16 +831,32 @@ const SHEET_SIZE: Size<Pixels> = Size {
     width: px(840.),
     height: px(620.),
 };
+/// The Usage page's gauges and ledger need a wider, taller sheet.
+const USAGE_SHEET_SIZE: Size<Pixels> = Size {
+    width: px(1120.),
+    height: px(900.),
+};
+
+impl SettingsSection {
+    /// The sheet this page asks for before it shrinks to fit the window.
+    fn sheet(self) -> Size<Pixels> {
+        match self {
+            Self::Usage => USAGE_SHEET_SIZE,
+            _ => SHEET_SIZE,
+        }
+    }
+}
 /// The least gap between the sheet and each window edge.
 const SHEET_CLEARANCE: Pixels = px(32.);
 
-/// The sheet's fixed size, shrunk only when the window cannot fit it with
+/// The section's sheet size, shrunk only when the window cannot fit it with
 /// [`SHEET_CLEARANCE`] on every side. The dialog centres it.
-fn sheet_size(viewport: Size<Pixels>) -> Size<Pixels> {
+fn sheet_size(section: SettingsSection, viewport: Size<Pixels>) -> Size<Pixels> {
+    let wanted = section.sheet();
     let room = |extent: Pixels| (extent - SHEET_CLEARANCE * 2.).max(px(0.));
     Size {
-        width: SHEET_SIZE.width.min(room(viewport.width)),
-        height: SHEET_SIZE.height.min(room(viewport.height)),
+        width: wanted.width.min(room(viewport.width)),
+        height: wanted.height.min(room(viewport.height)),
     }
 }
 
