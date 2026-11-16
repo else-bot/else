@@ -24,7 +24,10 @@ struct MoveHolder {
 
 impl ElseApp {
     pub(super) fn movable_bot(&self, bot: Uuid) -> Option<&Bot> {
-        if self.connection != Connection::Connected || self.moving.contains(&bot) {
+        if self.connection != Connection::Connected
+            || self.default_bot_id == Some(bot)
+            || self.moving.contains(&bot)
+        {
             return None;
         }
         self.bots.iter().find(|b| b.id == bot && b.is_active())
