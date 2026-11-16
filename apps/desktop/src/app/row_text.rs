@@ -120,6 +120,9 @@ impl RowFormat {
 }
 
 const PASSAGE_EXCERPT: usize = 110;
+const TABLE_CELL_GUTTER: Pixels = px(24.);
+/// The space the text view keeps on each side of inline code.
+const INLINE_CODE_PADDING: Pixels = px(4.);
 
 fn escape_markdown(text: &str) -> String {
     text.chars()
@@ -325,11 +328,10 @@ impl RowText {
         // Shape each line whole, as the text view does before it decides a
         // line fits. Summed glyph advances leave out the platform's shaping,
         // which on macOS draws wider and wrapped the last word.
-        let font = font(cx.theme().font_family.clone());
-        let measure = |line: &str| {
+        let measure_in = |line: &str, font: Font| {
             let run = TextRun {
                 len: line.len(),
-                font: font.clone(),
+                font,
                 color: Hsla::default(),
                 background_color: None,
                 underline: None,
@@ -340,6 +342,8 @@ impl RowText {
                 .layout_line(line, px(14.), &[run], None)
                 .width
         };
+        let body = font(cx.theme().font_family.clone());
+        let measure = |line: &str| measure_in(line, body.clone());
         // An attachment chip adds its icon, padding and size label to the file name.
         let chips = self
             .files
@@ -349,6 +353,46 @@ impl RowText {
         // later blocks by that column, and each nesting level shifts it by one
         // more; none of that is in the rendered text.
         let mut indents = vec![px(0.); text.lines().count()];
+        // A table lays its columns side by side, so the rendered text, which
+        // joins a row's cells with spaces, says nothing of its width. The text
+        // view gives each column its widest cell plus the 24 px gutter, at
+        // least 48 px, and a 1 px divider before the next; the table adds 2 px
+        // for its frame even without a border. Cells are measured at body size
+        // in the weight or mono face they draw in, which never falls short of
+        // the smaller semibold head or code.
+        let bold = Font {
+            weight: FontWeight::BOLD,
+            ..body.clone()
+        };
+        let mono = font(cx.theme().mono_font_family.clone());
+        let measure_cell = |cell: &[(CellRun, String)]| {
+            cell.iter()
+                .map(|(run, text)| match run {
+                    CellRun::Text => measure_in(text, body.clone()),
+                    CellRun::Strong => measure_in(text, bold.clone()),
+                    CellRun::Code => measure_in(text, mono.clone()) + INLINE_CODE_PADDING * 2.,
+                })
+                .sum::<Pixels>()
+        };
+        let tables: Vec<Pixels> = rendered
+            .as_ref()
+            .map(|rendered| table_columns(rendered.source()))
+            .unwrap_or_default()
+            .iter()
+            .map(|columns| {
+                let cells: Pixels = columns
+                    .iter()
+                    .map(|cells| {
+                        let widest = cells
+                            .iter()
+                            .map(|cell| measure_cell(cell))
+                            .fold(px(0.), Pixels::max);
+                        (widest + TABLE_CELL_GUTTER).max(px(48.))
+                    })
+                    .sum();
+                cells + px(columns.len().saturating_sub(1) as f32) + px(2.)
+            })
+            .collect();
         if let Some(rendered) = rendered {
             let column = px(14.) * 1.4;
             for block in list_blocks(rendered.source()) {
@@ -372,6 +416,7 @@ impl RowText {
             .zip(indents)
             .map(|(line, indent)| measure(line) + indent)
             .chain(chips)
+            .chain(tables)
             .fold(px(0.), Pixels::max);
         // Plain text also needs its own inset and the textarea's 10 px caret margin.
         let (inset_x, _) = self.inset();
@@ -692,7 +737,7 @@ impl RowText {
                                     .border_color(cx.theme().foreground.opacity(0.))
                                     .py_2()
                                     .pl_0()
-                                    .pr(px(24.)),
+                                    .pr(TABLE_CELL_GUTTER),
                             ),
                     )
                     .code_block_actions(|block, _, cx| {
@@ -1056,11 +1101,69 @@ fn list_blocks(source: &str) -> Vec<ListBlock<'_>> {
     out
 }
 
+/// How a run of table cell text is drawn, which sets the face it is measured in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CellRun {
+    Text,
+    Strong,
+    Code,
+}
+
+/// A table cell's text, run by run.
+type TableCell = Vec<(CellRun, String)>;
+
+/// The cells of every Markdown table in `source`, column by column. A header
+/// cell's runs are all [`CellRun::Strong`].
+fn table_columns(source: &str) -> Vec<Vec<Vec<TableCell>>> {
+    use markdown::mdast::Node;
+    fn runs(node: &Node, strong: bool, out: &mut TableCell) {
+        let text = if strong {
+            CellRun::Strong
+        } else {
+            CellRun::Text
+        };
+        match node {
+            Node::Text(node) => out.push((text, node.value.clone())),
+            Node::InlineCode(node) => out.push((CellRun::Code, node.value.clone())),
+            Node::Strong(node) => node.children.iter().for_each(|n| runs(n, true, out)),
+            _ => match node.children() {
+                Some(children) => children.iter().for_each(|n| runs(n, strong, out)),
+                None => out.push((text, node.to_string())),
+            },
+        }
+    }
+    fn visit(node: &Node, out: &mut Vec<Vec<Vec<TableCell>>>) {
+        let Node::Table(table) = node else {
+            for child in node.children().into_iter().flatten() {
+                visit(child, out);
+            }
+            return;
+        };
+        let mut columns: Vec<Vec<TableCell>> = Vec::new();
+        for (row_ix, row) in table.children.iter().enumerate() {
+            for (ix, cell) in row.children().into_iter().flatten().enumerate() {
+                if columns.len() <= ix {
+                    columns.push(Vec::new());
+                }
+                let mut cell_runs = Vec::new();
+                runs(cell, row_ix == 0, &mut cell_runs);
+                columns[ix].push(cell_runs);
+            }
+        }
+        out.push(columns);
+    }
+    let mut out = Vec::new();
+    if let Ok(root) = markdown::to_mdast(source, &markdown::ParseOptions::gfm()) {
+        visit(&root, &mut out);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        RowFormat, RowSource, file_links, file_map, linked_file, list_blocks, plain_content,
-        shows_its_destination,
+        CellRun, RowFormat, RowSource, file_links, file_map, linked_file, list_blocks,
+        plain_content, shows_its_destination, table_columns,
     };
     use crate::api::Bot;
     use crate::app::bot_mention::MentionDisplay;
@@ -1117,6 +1220,34 @@ mod tests {
                 ("tenth", 1, Some("10)")),
                 ("back", 0, Some("*")),
                 ("tab", 0, Some("-")),
+            ]
+        );
+    }
+
+    #[test]
+    fn table_columns_follow_the_markdown_parse() {
+        let source = "Intro | not a table\n\n| | **Wide** head |\n|---|---|\n| a | `code` cell |\n| longer label |\n\n- | x |\n  |---|\n  | y |";
+        let (text, strong, code) = (CellRun::Text, CellRun::Strong, CellRun::Code);
+        let cell = |runs: &[(CellRun, &str)]| {
+            runs.iter()
+                .map(|(run, text)| (*run, text.to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            table_columns(source),
+            [
+                vec![
+                    vec![
+                        cell(&[]),
+                        cell(&[(text, "a")]),
+                        cell(&[(text, "longer label")])
+                    ],
+                    vec![
+                        cell(&[(strong, "Wide"), (strong, " head")]),
+                        cell(&[(code, "code"), (text, " cell")]),
+                    ],
+                ],
+                vec![vec![cell(&[(strong, "x")]), cell(&[(text, "y")])]],
             ]
         );
     }
