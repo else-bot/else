@@ -96,17 +96,10 @@ impl ReadRow {
     }
 }
 
+/// The reply as one short line of plain text. Markdown is stripped before
+/// the cut, so a cut never lands inside a link.
 pub(super) fn preview(text: &str) -> String {
-    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if line.chars().count() <= PREVIEW_CHARS {
-        return line;
-    }
-    let cut: String = line.chars().take(PREVIEW_CHARS).collect();
-    let cut = match cut.rfind(' ') {
-        Some(space) if space > PREVIEW_CHARS / 2 => &cut[..space],
-        _ => &cut,
-    };
-    format!("{}…", cut.trim_end())
+    else_plain_text::cut(&else_plain_text::one_line(text), PREVIEW_CHARS)
 }
 
 /// An owner change to the read state.

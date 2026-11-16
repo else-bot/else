@@ -339,10 +339,7 @@ impl LatestReply {
     /// The preview as one line of plain text, for surfaces that cannot
     /// render markdown.
     pub fn plain_preview(&self) -> String {
-        let text = markdown::to_mdast(&self.preview, &markdown::ParseOptions::gfm())
-            .map(|root| root.to_string())
-            .unwrap_or_else(|_| self.preview.clone());
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
+        else_plain_text::one_line(&self.preview)
     }
 }
 

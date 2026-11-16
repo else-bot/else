@@ -8,6 +8,7 @@ rust-version.workspace = true
 serde_json = { workspace = true }
 
 [dependencies]
+else-plain-text = { workspace = true }
 else-tailnet = { workspace = true }
 else-visual = { workspace = true }
 age = { version = "=0.12.1", default-features = false }

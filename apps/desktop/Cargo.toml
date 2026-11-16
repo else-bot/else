@@ -9,6 +9,7 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 
 [dependencies]
+else-plain-text = { workspace = true }
 else-tailnet = { workspace = true }
 else-visual = { workspace = true }
 anyhow = { workspace = true }

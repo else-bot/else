@@ -544,3 +544,26 @@ async fn upgrading_counts_existing_history_as_read() {
     assert_eq!(state.read_through, position);
     assert_eq!(state.latest.unwrap().position, position);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_sidebar_preview_shows_link_text_when_the_url_is_long() {
+    let app = TestApp::installed().await;
+    let bot = app.create_bot("Writer").await;
+    let url = format!(
+        "https://app.t3.codes/threads/mcp%3Alaunch%3A{}",
+        "ab".repeat(150)
+    );
+    reply(
+        &app,
+        &bot,
+        &format!("Done. See [**the report**]({url}) now."),
+    )
+    .await;
+    let preview = read_state(&app, &bot).await["latest"]["preview"].clone();
+    let preview = preview.as_str().unwrap();
+    assert!(
+        preview.starts_with("Synthetic reply ✓ from Writer")
+            && preview.ends_with("Done. See the report now."),
+        "{preview}"
+    );
+}

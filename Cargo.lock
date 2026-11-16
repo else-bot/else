@@ -2442,6 +2442,7 @@ dependencies = [
  "croner",
  "des",
  "dotenvy",
+ "else-plain-text",
  "else-tailnet",
  "else-visual",
  "fastcdc",
@@ -2515,6 +2516,7 @@ dependencies = [
  "chrono-tz",
  "croner",
  "dotenvy",
+ "else-plain-text",
  "else-tailnet",
  "else-visual",
  "futures-util",
@@ -2546,6 +2548,13 @@ dependencies = [
  "vte",
  "wl-clipboard-rs",
  "xkeysym",
+]
+
+[[package]]
+name = "else-plain-text"
+version = "0.0.30"
+dependencies = [
+ "markdown",
 ]
 
 [[package]]
