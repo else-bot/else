@@ -350,6 +350,9 @@ pub struct ReadState {
     pub latest: Option<LatestReply>,
     pub read_through: ReplyPosition,
     pub marked_unread: bool,
+    /// Replies past `read_through`; absent from older servers.
+    #[serde(default)]
+    pub unread_replies: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

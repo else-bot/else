@@ -132,6 +132,9 @@ struct Active {
     profile: Profile,
     client: Arc<Client>,
     app: Entity<ElseApp>,
+    /// The app's last attention, so a background session redraws the
+    /// rail only when its badges change.
+    attention: crate::attention::Attention,
     _app: Subscription,
 }
 
@@ -373,6 +376,17 @@ impl Shell {
             app.update(cx, |app, cx| app.set_panel_widths(widths, cx));
         }
         let observer = cx.observe_in(&app, window, move |shell, app, window, cx| {
+            let attention = app.read(cx).attention();
+            let session = match shell.active.as_mut() {
+                Some(active) if active.id == id => Some(active),
+                _ => shell.inactive.get_mut(&id),
+            };
+            if let Some(session) = session
+                && session.attention != attention
+            {
+                session.attention = attention;
+                cx.notify();
+            }
             if shell.active.as_ref().is_some_and(|active| active.id == id) {
                 if !app.read(cx).connected() {
                     shell.clear_skill_keys(window, cx);
@@ -389,6 +403,7 @@ impl Shell {
             profile,
             client,
             app,
+            attention: Default::default(),
             _app: observer,
         });
         cx.notify();

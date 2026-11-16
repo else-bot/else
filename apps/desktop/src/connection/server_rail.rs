@@ -1,8 +1,9 @@
 //! The server rail on the window's edge: one icon per saved server with a
 //! short name under it, in the order the user drags them into.
 
-use super::servers::{Editor, ReleaseStatus};
+use super::servers::{Editor, Health, ReleaseStatus};
 use super::*;
+use crate::attention::Attention;
 use crate::config::ProfileStore;
 use crate::server_icon::{self, Icons, ServerIcon};
 use gpui_kit::assets::IconName;
@@ -201,14 +202,39 @@ impl Shell {
         } else {
             fill
         };
-        let badged = rail_face(&face, color, update, ring, cx);
+        let attention = self.server_attention(id, cx);
+        let online = self
+            .servers
+            .entries
+            .get(&id)
+            .is_some_and(|entry| entry.health == Health::Online);
+        let badges = Badges {
+            status: color,
+            update,
+            attention,
+            online,
+            ring,
+        };
+        let badged = rail_face(id, &face, badges, cx);
         let detail = if update {
             format!("{status} · Update available")
         } else {
             status.to_owned()
         };
-        let card = (self.rail.card == RailCard::Shown(id))
-            .then(|| rail_card(name.clone(), color, detail.clone(), host, &theme));
+        let label = match attention.and_then(Attention::summary) {
+            Some(summary) => format!("{name}. {detail}. {summary}"),
+            None => format!("{name}. {detail}"),
+        };
+        let card = (self.rail.card == RailCard::Shown(id)).then(|| {
+            rail_card(
+                name.clone(),
+                color,
+                detail.clone(),
+                attention.cloned(),
+                host,
+                &theme,
+            )
+        });
         let drag = ServerDrag { id, face };
         let order = order.to_vec();
         let owner = cx.weak_entity();
@@ -216,9 +242,9 @@ impl Shell {
             .id(SharedString::from(format!("server-rail-{id}")))
             .relative()
             .role(Role::ListItem)
-            .aria_label(format!("{name}. {detail}"))
+            .aria_label(label)
             .items_center()
-            .gap(px(5.))
+            .gap(px(8.))
             .pt_2()
             .pb(px(7.))
             .px(px(2.))
@@ -361,6 +387,18 @@ impl Shell {
         )
     }
 
+    /// A live session's attention once it is connected, else the last
+    /// background check's.
+    fn server_attention(&self, id: Uuid, cx: &App) -> Option<&Attention> {
+        self.active
+            .as_ref()
+            .filter(|active| active.id == id)
+            .or_else(|| self.inactive.get(&id))
+            .filter(|session| session.app.read(cx).connected())
+            .map(|session| &session.attention)
+            .or_else(|| self.servers.entries.get(&id)?.attention.as_ref())
+    }
+
     fn move_rail_card(
         &mut self,
         change: impl FnOnce(RailCard) -> RailCard,
@@ -384,12 +422,31 @@ impl Shell {
     }
 }
 
-/// A server's icon with its status badge, and an update badge when one is
-/// available. The badge's `ring` matches the fill behind it.
-fn rail_face(face: &Face, color: Hsla, update: bool, ring: Hsla, cx: &App) -> Div {
+/// What the badges around a server's icon show.
+struct Badges<'a> {
+    status: Hsla,
+    update: bool,
+    attention: Option<&'a Attention>,
+    /// Counts from an unreachable server are its last known, so dimmed.
+    online: bool,
+    /// The fill behind the icon, drawn around each badge.
+    ring: Hsla,
+}
+
+/// A server's icon with its status bottom-right, unread replies top-right,
+/// an update arrow top-left and, while bots wait on the owner, a pulsing
+/// ring with their count bottom-left.
+fn rail_face(id: Uuid, face: &Face, badges: Badges, cx: &App) -> Div {
     let theme = cx.theme();
-    let hollow = color == theme.muted_foreground;
-    let badge = div()
+    let Badges {
+        status,
+        update,
+        attention,
+        online,
+        ring,
+    } = badges;
+    let hollow = status == theme.muted_foreground;
+    let status_dot = div()
         .absolute()
         .right(px(-3.))
         .bottom(px(-3.))
@@ -401,45 +458,154 @@ fn rail_face(face: &Face, color: Hsla, update: bool, ring: Hsla, cx: &App) -> Di
         .justify_center()
         .child(div().size(px(8.)).rounded_full().map(|dot| {
             if hollow {
-                dot.border_2().border_color(color)
+                dot.border_2().border_color(status)
             } else {
-                dot.bg(color)
+                dot.bg(status)
             }
         }));
+    let unread = attention.map_or(0, |a| a.unread as usize);
+    let waiting = attention.map_or(0, |a| a.requests.len());
+    let opacity = if online { 1. } else { 0.5 };
+    let pill = |fill: Hsla, text: Hsla, content: Vec<AnyElement>| {
+        div().absolute().p(px(2.)).rounded_full().bg(ring).child(
+            h_flex()
+                .h(px(16.))
+                .min_w(px(16.))
+                .px(px(4.))
+                .gap(px(1.))
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(fill.opacity(opacity))
+                .text_color(text)
+                .text_size(px(10.))
+                .line_height(px(16.))
+                .font_weight(FontWeight::BOLD)
+                .children(content),
+        )
+    };
     div()
         .relative()
+        .when(waiting > 0, |face| {
+            face.child(
+                div()
+                    .absolute()
+                    .top(px(-4.))
+                    .left(px(-4.))
+                    .size(px(ICON_SIZE + 8.))
+                    .rounded(px(14.))
+                    .border_2()
+                    .border_color(theme.warning.opacity(opacity))
+                    .with_animation(
+                        SharedString::from(format!("rail-waiting-{id}")),
+                        Animation::new(std::time::Duration::from_millis(1800)).repeat(),
+                        |ring, t| {
+                            let wave = (std::f32::consts::TAU * t).cos();
+                            ring.opacity(0.675 + 0.325 * wave)
+                        },
+                    ),
+            )
+        })
         .child(face.render(cx))
-        .child(badge)
+        .child(status_dot)
         .when(update, |face| {
             face.child(
                 div()
                     .absolute()
-                    .right(px(-4.))
-                    .top(px(-4.))
-                    .size(px(16.))
+                    .left(px(-5.))
+                    .top(px(-5.))
+                    .p(px(2.))
                     .rounded_full()
-                    .bg(theme.primary)
-                    .flex()
-                    .items_center()
-                    .justify_center()
+                    .bg(ring)
                     .child(
-                        Icon::new(IconName::ArrowUp)
-                            .size(px(10.))
-                            .text_color(theme.primary_foreground),
+                        div()
+                            .size(px(14.))
+                            .rounded_full()
+                            .bg(theme.primary)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Icon::new(IconName::ArrowUp)
+                                    .size(px(9.))
+                                    .text_color(theme.primary_foreground),
+                            ),
                     ),
+            )
+        })
+        .when(unread > 0, |face| {
+            let count = Attention::badge(unread).into_any_element();
+            face.child(
+                pill(theme.danger, theme.danger_foreground, vec![count])
+                    .right(px(-9.))
+                    .top(px(-8.)),
+            )
+        })
+        .when(waiting > 0, |face| {
+            let hand = Icon::new(IconName::Hand).size(px(10.)).into_any_element();
+            let count = Attention::badge(waiting).into_any_element();
+            face.child(
+                pill(theme.warning, theme.warning_foreground, vec![hand, count])
+                    .left(px(-9.))
+                    .bottom(px(-8.)),
             )
         })
 }
 
-/// The hover card beside a rail icon: the full name, status and address.
+/// The hover card beside a rail icon: the full name, status, what the
+/// server's bots want from the owner, and its address.
 fn rail_card(
     name: String,
     color: Hsla,
     detail: String,
+    attention: Option<Attention>,
     host: String,
     theme: &gpui_kit::component::Theme,
 ) -> Div {
+    const SHOWN: usize = 3;
     let muted = theme.muted_foreground;
+    let line = |dot: Hsla, text: String| {
+        h_flex()
+            .gap(px(6.))
+            .items_center()
+            .text_xs()
+            .child(div().size(px(6.)).rounded_full().bg(dot))
+            .child(text)
+    };
+    let aside = |text: String| {
+        div()
+            .pl(px(12.))
+            .text_xs()
+            .text_color(muted)
+            .truncate()
+            .child(text)
+    };
+    let wants = attention.filter(|a| !a.is_empty()).map(|attention| {
+        let more = attention.requests.len().saturating_sub(SHOWN);
+        v_flex()
+            .gap_0p5()
+            .my_1()
+            .py_1()
+            .border_y_1()
+            .border_color(theme.border)
+            .children(attention.unread_line().map(|text| line(theme.danger, text)))
+            .children(
+                attention
+                    .waiting_line()
+                    .map(|text| line(theme.warning, text)),
+            )
+            .children(
+                attention
+                    .requests
+                    .iter()
+                    .take(SHOWN)
+                    .map(|request| aside(format!("{} {}", request.bot, request.ask.phrase()))),
+            )
+            .when(more > 0, |wants| {
+                wants.child(aside(format!("and {more} more")))
+            })
+    });
+
     div().absolute().left_full().top(px(10.)).child(deferred(
         anchored()
             .anchor(Anchor::TopLeft)
@@ -473,6 +639,7 @@ fn rail_card(
                             .child(div().size(px(6.)).rounded_full().bg(color))
                             .child(detail),
                     )
+                    .children(wants)
                     .child(div().text_xs().text_color(muted).child(host)),
             ),
     ))

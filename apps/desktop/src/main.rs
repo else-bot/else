@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod appearance;
 mod attachments;
+mod attention;
 mod avatar;
 mod config;
 mod connection;
@@ -33,6 +34,7 @@ gpui_kit::assets::icon_assets!(
     [
         FolderInput,
         Hourglass,
+        Hand,
         BellDot,
         Bell,
         BellOff,
