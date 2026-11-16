@@ -1100,6 +1100,14 @@ setup_service() {
 	step "API service"
 	local manager
 	manager="$(sed -n 's/^ELSEBOT_MANAGER=//p' "$CONFIG/elsebot.env")"
+	# A tool run with sudo can leave this directory owned by root, and launchd
+	# loads login agents only from here.
+	local agents="$HOME/Library/LaunchAgents"
+	if [ "$manager" = launchd ] && [ -e "$agents" ] && [ ! -O "$agents" ]; then
+		info "$agents belongs to $(stat -f %Su "$agents"), not $USER"
+		sudo_ready
+		$SUDO chown "$USER" "$agents" || die "could not take ownership of $agents"
+	fi
 	elsebot service-install >/dev/null || die "could not install the API's $manager service"
 	case "$manager" in
 	process)
