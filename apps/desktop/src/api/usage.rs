@@ -36,15 +36,19 @@ pub struct ProviderUsage {
     pub windows: Vec<UsageWindow>,
 }
 
-impl ProviderUsage {
-    pub fn label(&self) -> &str {
-        match self.provider_id.as_str() {
-            "claude" => "Claude",
-            "codex" => "Codex",
-            "grok" => "Grok",
-            other => other,
-        }
-    }
+/// The window lengths providers report, in minutes.
+pub const FIVE_HOURS: u64 = 5 * 60;
+pub const WEEK: u64 = 7 * 24 * 60;
+
+/// Where a window's name appears.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowName {
+    /// A card or section title: "Weekly limit".
+    Title,
+    /// A table column: "Week".
+    Column,
+    /// A line about the window now: "This week".
+    Current,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -121,14 +125,19 @@ impl Attribution {
 }
 
 impl UsageWindow {
-    pub fn label(&self) -> String {
-        match self.minutes {
-            300 => "5-hour window".into(),
-            10080 => "Weekly limit".into(),
-            m if m.is_multiple_of(1440) => format!("{}-day window", m / 1440),
-            m if m.is_multiple_of(60) => format!("{}-hour window", m / 60),
-            m => format!("{m}-minute window"),
-        }
+    pub fn name(&self, style: WindowName) -> String {
+        let named = match (self.minutes, style) {
+            (FIVE_HOURS, WindowName::Title) => "5-hour window",
+            (FIVE_HOURS, WindowName::Column) => "5-hour",
+            (FIVE_HOURS, WindowName::Current) => "This 5-hour window",
+            (WEEK, WindowName::Title) => "Weekly limit",
+            (WEEK, WindowName::Column) => "Week",
+            (WEEK, WindowName::Current) => "This week",
+            (m, _) if m.is_multiple_of(1440) => return format!("{}-day window", m / 1440),
+            (m, _) if m.is_multiple_of(60) => return format!("{}-hour window", m / 60),
+            (m, _) => return format!("{m}-minute window"),
+        };
+        named.into()
     }
 
     pub fn bot(&self, id: Uuid) -> Option<&BotUsage> {
@@ -270,6 +279,20 @@ mod tests {
             decode(serde_json::json!({ "state": "something_new" })),
             Attribution::Unreported
         );
+    }
+
+    #[test]
+    fn windows_are_named_for_where_they_appear() {
+        let report: UsageReport = serde_json::from_str(include_str!("usage_fixture.json")).unwrap();
+        let [five, week] = &report.providers[0].windows[..] else {
+            panic!("two windows")
+        };
+        assert_eq!(five.name(WindowName::Title), "5-hour window");
+        assert_eq!(week.name(WindowName::Column), "Week");
+        assert_eq!(week.name(WindowName::Current), "This week");
+        let mut daily = five.clone();
+        daily.minutes = 1440;
+        assert_eq!(daily.name(WindowName::Column), "1-day window");
     }
 
     #[test]

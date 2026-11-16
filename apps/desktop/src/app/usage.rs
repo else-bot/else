@@ -3,7 +3,7 @@
 
 use super::ElseApp;
 use super::settings::{item_name, meta, muted, note, section, section_frame};
-use crate::api::{Attribution, Bot, ProviderUsage, UsageReport};
+use crate::api::{Attribution, Bot, ProviderUsage, UsageReport, WindowName};
 use crate::controls::{Control as _, Scale, Tier};
 use crate::usage_ui::{Loaded, bar, color, percent, resets};
 use gpui_kit::component::button::Button;
@@ -100,19 +100,14 @@ impl ElseApp {
                 ),
         );
         for provider in providers {
-            let mut group = v_flex()
-                .gap_2()
-                .child(item_name(provider.label().to_owned()));
+            let name = self.provider_label(&provider.provider_id);
+            let mut group = v_flex().gap_2().child(item_name(name.clone()));
             for window in &provider.windows {
                 let entry = window.bot(bot.id);
                 let amount = entry.map(|bot| bot.percent).unwrap_or(0.);
                 let attribution = window.attribution;
                 let capped = attribution.is_priced();
-                let label = match window.minutes {
-                    300 => "This 5-hour window".into(),
-                    10080 => "This week".into(),
-                    _ => window.label(),
-                };
+                let label = window.name(WindowName::Current);
                 group = group
                     .child(
                         h_flex()
@@ -152,11 +147,11 @@ impl ElseApp {
                     ),
                     Attribution::Unattributed { used, .. } => format!(
                         "share of else.bot's {} use · {} of the cap used, not attributed yet",
-                        provider.label(),
+                        name,
                         percent(used)
                     ),
                     Attribution::Unreported => {
-                        format!("share of else.bot's {} use", provider.label())
+                        format!("share of else.bot's {} use", name)
                     }
                 };
                 group = group.child(meta(caption, cx));
