@@ -314,14 +314,54 @@ pub struct ComputerManager {
     upgrade_tasks: tokio_util::task::TaskTracker,
     upgrade_stop: tokio_util::sync::CancellationToken,
     browser_refs: Actor<HashMap<Uuid, HashMap<String, browser_refs::RefLabel>>>,
-    disks: Actor<Option<(std::time::Instant, Disks)>>,
+    disks: Actor<DiskScan>,
 }
 
-/// Every computer's disk, by runtime name.
-type Disks = Arc<HashMap<String, runtime::DiskUsage>>;
+/// The host bytes of every computer's disk, by runtime name.
+type Disks = Arc<HashMap<String, u64>>;
 
 /// How long a scan of the computers' disks is reused.
 const DISK_SCAN_TTL: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanState {
+    Stale,
+    Scanning,
+    /// The last scan ended then, whether or not it succeeded.
+    Ended(std::time::Instant),
+}
+
+/// The last disk scan's result; a failed scan keeps the previous one.
+struct DiskScan {
+    disks: Disks,
+    state: ScanState,
+}
+
+impl Default for DiskScan {
+    fn default() -> Self {
+        Self {
+            disks: Disks::default(),
+            state: ScanState::Stale,
+        }
+    }
+}
+
+impl DiskScan {
+    fn due(&self) -> bool {
+        match self.state {
+            ScanState::Stale => true,
+            ScanState::Scanning => false,
+            ScanState::Ended(at) => at.elapsed() >= DISK_SCAN_TTL,
+        }
+    }
+
+    fn scanned(&mut self, disks: Option<Disks>) {
+        if let Some(disks) = disks {
+            self.disks = disks;
+        }
+        self.state = ScanState::Ended(std::time::Instant::now());
+    }
+}
 
 impl ComputerManager {
     pub fn new(
@@ -357,38 +397,43 @@ impl ComputerManager {
         })
     }
 
-    /// Every computer's disk by runtime name, rescanned at most once per
-    /// [`DISK_SCAN_TTL`] (a failed scan too); concurrent callers share one
-    /// scan.
+    /// Every computer's disk by runtime name, from the last scan. A scan
+    /// older than [`DISK_SCAN_TTL`] starts one new scan in the background,
+    /// so a slow scan never delays the caller; until the first one ends,
+    /// disks are unknown.
     pub async fn disks(&self) -> Disks {
         let runtime = self.runtime.clone();
+        let actor = self.disks.clone();
         self.disks
-            .call_async(move |cache| {
-                Box::pin(async move {
-                    if let Some((at, disks)) = cache.as_ref()
-                        && at.elapsed() < DISK_SCAN_TTL
-                    {
-                        return disks.clone();
-                    }
-                    match runtime.disks().await {
-                        Ok(disks) => {
-                            let disks = Arc::new(disks);
-                            *cache = Some((std::time::Instant::now(), disks.clone()));
-                            disks
-                        }
-                        Err(err) => {
-                            tracing::debug!(error = %err, "scanning computer disks failed");
-                            let stale: Disks = cache
-                                .as_ref()
-                                .map(|(_, disks)| disks.clone())
-                                .unwrap_or_default();
-                            *cache = Some((std::time::Instant::now(), stale.clone()));
-                            stale
-                        }
-                    }
-                })
+            .call(move |scan| {
+                if scan.due() {
+                    scan.state = ScanState::Scanning;
+                    tokio::spawn(async move {
+                        let scanned = match runtime.disks().await {
+                            Ok(disks) => Some(Arc::new(disks)),
+                            Err(err) => {
+                                tracing::debug!(error = %err, "scanning computer disks failed");
+                                None
+                            }
+                        };
+                        actor.call(move |scan| scan.scanned(scanned)).await;
+                    });
+                }
+                scan.disks.clone()
             })
             .await
+    }
+
+    /// Scan again on the next read: an upgrade or rollback changed which
+    /// computers exist.
+    pub(super) async fn rescan_disks(&self) {
+        self.disks
+            .call(|scan| {
+                if scan.state != ScanState::Scanning {
+                    scan.state = ScanState::Stale;
+                }
+            })
+            .await;
     }
 
     /// Count one input batch for a turn; returns the count including it.

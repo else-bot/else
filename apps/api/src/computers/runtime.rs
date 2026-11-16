@@ -45,15 +45,8 @@ pub struct Usage {
     /// Memory the guest uses, when it reported it.
     pub memory_bytes: Option<u64>,
     pub memory_limit_bytes: u64,
-}
-
-/// What a computer's files take on the host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DiskUsage {
-    /// Blocks allocated on the host.
-    pub used_bytes: u64,
-    /// The files' lengths, which the sparse disk image's size dominates.
-    pub size_bytes: Option<u64>,
+    /// The guest's writable disk, used and in all, when it reported them.
+    pub disk: Option<(u64, u64)>,
 }
 
 /// Output of a command run in a computer.
@@ -221,9 +214,9 @@ pub trait ComputerRuntime: Send + Sync {
         Ok(HashMap::new())
     }
 
-    /// The disk of every computer, stopped ones included, by name. This
-    /// scans their files.
-    async fn disks(&self) -> Result<HashMap<String, DiskUsage>, RuntimeError> {
+    /// The host bytes allocated to each computer's files, stopped ones
+    /// included, by name. This scans their files.
+    async fn disks(&self) -> Result<HashMap<String, u64>, RuntimeError> {
         Ok(HashMap::new())
     }
 
@@ -245,6 +238,8 @@ pub struct Msb {
 }
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Metrics are read from shared memory; the list that shows them is polled.
+const METRICS_TIMEOUT: Duration = Duration::from_secs(10);
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// The network policy for a restored computer. `msb snapshot restore` does
@@ -488,6 +483,8 @@ fn parse_metrics(json: &str) -> Option<HashMap<String, Usage>> {
         cpu_percent: f32,
         memory_bytes: u64,
         memory_limit_bytes: u64,
+        upper_used_bytes: Option<u64>,
+        upper_free_bytes: Option<u64>,
     }
     let samples: Vec<Sample> = serde_json::from_str(json.trim()).ok()?;
     Some(
@@ -500,6 +497,10 @@ fn parse_metrics(json: &str) -> Option<HashMap<String, Usage>> {
                     cpus: sample.cpus,
                     memory_bytes: (sample.memory_bytes > 0).then_some(sample.memory_bytes),
                     memory_limit_bytes: sample.memory_limit_bytes,
+                    disk: sample
+                        .upper_used_bytes
+                        .zip(sample.upper_free_bytes)
+                        .map(|(used, free)| (used, used + free)),
                 };
                 (sample.name, usage)
             })
@@ -507,8 +508,8 @@ fn parse_metrics(json: &str) -> Option<HashMap<String, Usage>> {
     )
 }
 
-/// `msb df --format json`: each computer's directory, with its disk.
-fn parse_disks(json: &str) -> Option<HashMap<String, DiskUsage>> {
+/// `msb df --format json`: the blocks each computer's directory holds.
+fn parse_disks(json: &str) -> Option<HashMap<String, u64>> {
     #[derive(Deserialize)]
     struct Storage {
         sandboxes: Category,
@@ -529,14 +530,7 @@ fn parse_disks(json: &str) -> Option<HashMap<String, DiskUsage>> {
             .sandboxes
             .items
             .into_iter()
-            .filter_map(|item| {
-                let used_bytes = item.allocated_bytes.or(item.logical_bytes)?;
-                let disk = DiskUsage {
-                    used_bytes,
-                    size_bytes: item.logical_bytes,
-                };
-                Some((item.name, disk))
-            })
+            .filter_map(|item| Some((item.name, item.allocated_bytes.or(item.logical_bytes)?)))
             .collect(),
     )
 }
@@ -610,7 +604,7 @@ impl ComputerRuntime for Msb {
 
     async fn usage(&self) -> Result<HashMap<String, Usage>, RuntimeError> {
         let out = self
-            .run("metrics", &["metrics", "--format", "json"], CONTROL_TIMEOUT)
+            .run("metrics", &["metrics", "--format", "json"], METRICS_TIMEOUT)
             .await?;
         if out.status != Some(0) {
             return Err(RuntimeError::Failed {
@@ -624,7 +618,7 @@ impl ComputerRuntime for Msb {
         })
     }
 
-    async fn disks(&self) -> Result<HashMap<String, DiskUsage>, RuntimeError> {
+    async fn disks(&self) -> Result<HashMap<String, u64>, RuntimeError> {
         let out = self
             .run("df", &["df", "--format", "json"], CONTROL_TIMEOUT)
             .await?;
@@ -923,7 +917,7 @@ mod mount_tests {
             r#"[
               {"name": "a", "state": "running", "cpus": 2, "cpu_percent": 57.5,
                "memory_bytes": 1073741824, "memory_limit_bytes": 4294967296,
-               "upper_used_bytes": 10, "uptime_secs": 3.5},
+               "upper_used_bytes": 10, "upper_free_bytes": 30, "uptime_secs": 3.5},
               {"name": "b", "state": "running", "cpu_percent": 0.0,
                "memory_bytes": 0, "memory_limit_bytes": 2147483648},
               {"name": "c", "state": "exited", "cpu_percent": 0.0,
@@ -938,6 +932,7 @@ mod mount_tests {
                 cpus: Some(2),
                 memory_bytes: Some(1 << 30),
                 memory_limit_bytes: 4 << 30,
+                disk: Some((10, 40)),
             })
         );
         assert_eq!(metrics["b"].memory_bytes, None, "not reported");
@@ -956,14 +951,8 @@ mod mount_tests {
                 "notes": []}"#,
         )
         .unwrap();
-        assert_eq!(
-            disks.get("a"),
-            Some(&DiskUsage {
-                used_bytes: 1 << 20,
-                size_bytes: Some(32 << 30),
-            })
-        );
-        assert_eq!(disks["b"].used_bytes, 100);
+        assert_eq!(disks.get("a"), Some(&(1 << 20)), "allocated blocks");
+        assert_eq!(disks["b"], 100, "file lengths when blocks are unknown");
         assert!(!disks.contains_key("c"), "unknown size");
     }
 

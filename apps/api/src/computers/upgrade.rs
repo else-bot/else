@@ -484,13 +484,25 @@ impl ComputerManager {
         image: &str,
         network: Option<&str>,
     ) -> Result<UpgradeReport, ComputerError> {
+        let op = self.op(bot_id).await;
+        self.upgrade_image_holding(op, bot_id, image, network).await
+    }
+
+    /// [`Self::upgrade_image`] under the bot's operation lock `_op`, which
+    /// the caller acquired.
+    pub(super) async fn upgrade_image_holding(
+        &self,
+        _op: tokio::sync::OwnedSemaphorePermit,
+        bot_id: Uuid,
+        image: &str,
+        network: Option<&str>,
+    ) -> Result<UpgradeReport, ComputerError> {
         if !valid_image(image) {
             return Err(refused("the image reference is not valid"));
         }
         if network.is_some_and(|n| n.is_empty() || !valid_image(n)) {
             return Err(refused("the network profile is not valid"));
         }
-        let _op = self.op(bot_id).await;
         self.clear_interrupted_upgrades(bot_id).await?;
         let active: Option<bool> =
             sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = ?1")
@@ -626,6 +638,7 @@ impl ComputerManager {
         .await?;
         tx.commit().await?;
         tracing::info!(bot = %bot_id, from = %row.image, to = %image, "computer upgraded");
+        self.rescan_disks().await;
         Ok(UpgradeReport {
             id,
             from_runtime_name: row.runtime_name,
@@ -830,6 +843,7 @@ impl ComputerManager {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
+        self.rescan_disks().await;
         Ok(UpgradeReport {
             id,
             from_runtime_name: row.runtime_name,

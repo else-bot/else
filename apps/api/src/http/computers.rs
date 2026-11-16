@@ -210,9 +210,10 @@ fn upgrade_json(status: UpgradeStatus) -> Value {
 const MIB: u64 = 1024 * 1024;
 
 /// Every created computer of an active bot, oldest bot first, with its
-/// upgrade and its use: CPU and memory only while it runs, and disk from
-/// a scan at most a minute old. `rollback_bytes` is the disk still held by
-/// computers that upgrades replaced and kept for rollback.
+/// upgrade and its use: CPU, memory and the disk's size only while it runs,
+/// as the guest reports them; otherwise the disk's host blocks, from a scan
+/// at most a minute old. `rollback_bytes` is the disk still held by the
+/// computers that upgrades and rollbacks kept.
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let computers = manager(&state)?;
     #[derive(sqlx::FromRow)]
@@ -235,30 +236,30 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiErro
     )
     .fetch_all(&state.db);
     let replaced = sqlx::query_scalar::<_, String>(
-        "SELECT from_runtime_name FROM computer_upgrades WHERE state = 'completed'
-         UNION SELECT to_runtime_name FROM computer_upgrades WHERE state = 'completed'
+        "SELECT from_runtime_name FROM computer_upgrades WHERE state IN ('completed', 'rolled_back')
+         UNION SELECT to_runtime_name FROM computer_upgrades WHERE state IN ('completed', 'rolled_back')
          EXCEPT SELECT runtime_name FROM bot_computers",
     )
     .fetch_all(&state.db);
-    let (rows, replaced, usage, disks, statuses) = tokio::join!(
+    let (rows, replaced, recorded, usage, disks, statuses) = tokio::join!(
         rows,
         replaced,
+        recorded_upgrades(&state, None),
         computers.usage(),
         computers.disks(),
         computers.upgrade_statuses(),
     );
-    let (rows, replaced) = (rows?, replaced?);
+    let (rows, replaced, mut recorded) = (rows?, replaced?, recorded?);
     let latest = &computers.config().image;
     let rollback_bytes = replaced
         .iter()
-        .filter_map(|name| disks.get(name))
-        .map(|disk| disk.used_bytes)
+        .filter_map(|name| disks.get(name).copied())
         .reduce(|a, b| a + b);
     let mut listed = Vec::with_capacity(rows.len());
     for row in rows {
         let upgrade = match statuses.get(&row.bot_id) {
             Some(status) => upgrade_json(status.clone()),
-            None => last_upgrade(&state, row.bot_id).await?,
+            None => recorded.remove(&row.bot_id).unwrap_or(Value::Null),
         };
         let live = usage
             .get(&row.runtime_name)
@@ -266,7 +267,10 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiErro
         let cpus = live
             .and_then(|usage| usage.cpus)
             .unwrap_or(row.cpus.max(1) as u32);
-        let disk = disks.get(&row.runtime_name);
+        let (disk_used, disk_size) = match live.and_then(|usage| usage.disk) {
+            Some((used, size)) => (Some(used), Some(size)),
+            None => (disks.get(&row.runtime_name).copied(), None),
+        };
         listed.push(json!({
             "bot_id": row.bot_id,
             "state": row.observed_state,
@@ -274,8 +278,8 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiErro
             "image": row.image,
             "latest_image": latest,
             "upgrade": upgrade,
-            "disk_used_bytes": disk.map(|disk| disk.used_bytes),
-            "disk_size_bytes": disk.and_then(|disk| disk.size_bytes),
+            "disk_used_bytes": disk_used,
+            "disk_size_bytes": disk_size,
             "cpus": cpus,
             "cpu_percent": live.map(|usage| (usage.cpu_percent / cpus as f32).clamp(0.0, 100.0)),
             "memory_used_bytes": live.and_then(|usage| usage.memory_bytes),
@@ -311,26 +315,63 @@ async fn cancel_upgrade_all(State(state): State<Arc<AppState>>) -> Result<Json<V
 /// or one run offline), or when it made the current computer and left some
 /// of the bot's APT packages uninstalled.
 async fn last_upgrade(state: &AppState, bot_id: Uuid) -> Result<Value, ApiError> {
-    let last: Option<(String, Option<String>, Option<String>, bool)> = sqlx::query_as(
-        "SELECT u.state, u.error, u.unrestored_packages, u.to_runtime_name = c.runtime_name
-         FROM computer_upgrades u JOIN bot_computers c ON c.bot_id = u.bot_id
-         WHERE u.bot_id = ?1
-         ORDER BY u.created_at DESC, u.rowid DESC LIMIT 1",
+    Ok(recorded_upgrades(state, Some(bot_id))
+        .await?
+        .remove(&bot_id)
+        .unwrap_or(Value::Null))
+}
+
+/// [`last_upgrade`] of one bot, or of every bot that has one.
+async fn recorded_upgrades(
+    state: &AppState,
+    bot_id: Option<Uuid>,
+) -> Result<std::collections::HashMap<Uuid, Value>, ApiError> {
+    #[derive(sqlx::FromRow)]
+    struct Recorded {
+        bot_id: Uuid,
+        state: String,
+        error: Option<String>,
+        unrestored_packages: Option<String>,
+        current: bool,
+    }
+    let newest: Vec<Recorded> = sqlx::query_as(
+        "SELECT bot_id, state, error, unrestored_packages, current FROM (
+             SELECT u.bot_id, u.state, u.error, u.unrestored_packages,
+                    u.to_runtime_name = c.runtime_name AS current,
+                    row_number() OVER (
+                        PARTITION BY u.bot_id ORDER BY u.created_at DESC, u.rowid DESC
+                    ) AS newest
+             FROM computer_upgrades u JOIN bot_computers c ON c.bot_id = u.bot_id
+             WHERE ?1 IS NULL OR u.bot_id = ?1
+         ) WHERE newest = 1",
     )
     .bind(bot_id)
-    .fetch_optional(&state.db)
+    .fetch_all(&state.db)
     .await?;
-    Ok(match last {
-        Some((upgrade, error, _, _)) if upgrade == "failed" => json!({
-            "state": "failed",
-            "error": error.unwrap_or_else(|| "interrupted".into()),
-        }),
-        Some((upgrade, _, Some(packages), true)) if upgrade == "completed" => json!({
-            "state": "completed",
-            "unrestored_packages": serde_json::from_str::<Vec<String>>(&packages).unwrap_or_default(),
-        }),
-        _ => Value::Null,
-    })
+    Ok(newest
+        .into_iter()
+        .filter_map(|recorded| {
+            let Recorded {
+                bot_id,
+                state,
+                error,
+                unrestored_packages: packages,
+                current,
+            } = recorded;
+            let shown = match (state.as_str(), packages) {
+                ("failed", _) => json!({
+                    "state": "failed",
+                    "error": error.unwrap_or_else(|| "interrupted".into()),
+                }),
+                ("completed", Some(packages)) if current => json!({
+                    "state": "completed",
+                    "unrestored_packages": serde_json::from_str::<Vec<String>>(&packages).unwrap_or_default(),
+                }),
+                _ => return None,
+            };
+            Some((bot_id, shown))
+        })
+        .collect())
 }
 
 async fn upgrade(

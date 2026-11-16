@@ -74,13 +74,20 @@ enum Step {
     Finished,
 }
 
+/// The queue's single worker.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Worker {
+    #[default]
+    Idle,
+    Draining,
+}
+
 /// A bot is either in `queue` or has a `started` upgrade, never both.
 #[derive(Debug, Default)]
 pub(super) struct Upgrades {
     started: HashMap<Uuid, Started>,
     queue: VecDeque<Entry>,
-    /// A worker is draining the queue.
-    draining: bool,
+    worker: Worker,
     /// Counts cancellations, so an attempt that began before one is not
     /// queued again.
     round: u64,
@@ -163,8 +170,10 @@ impl Upgrades {
                 waiting: None,
             });
         }
-        let start = !self.draining && !self.queue.is_empty();
-        self.draining |= start;
+        let start = self.worker == Worker::Idle && !self.queue.is_empty();
+        if start {
+            self.worker = Worker::Draining;
+        }
         (self.queue.iter().map(|entry| entry.bot_id).collect(), start)
     }
 
@@ -178,7 +187,7 @@ impl Upgrades {
             };
         }
         if self.queue.is_empty() {
-            self.draining = false;
+            self.worker = Worker::Idle;
             return Step::Finished;
         }
         Step::Retry(self.queue.iter().map(|entry| entry.bot_id).collect())
@@ -204,7 +213,7 @@ impl Upgrades {
 }
 
 /// The owner-facing reason a computer was put off.
-fn deferred(error: &ComputerError) -> Option<String> {
+fn deferred_reason(error: &ComputerError) -> Option<String> {
     let reason = match error {
         ComputerError::Busy(reason) if reason == "in use" => {
             "The bot is using its computer.".to_owned()
@@ -214,6 +223,9 @@ fn deferred(error: &ComputerError) -> Option<String> {
         }
         ComputerError::Busy(reason) if reason == super::upgrade::ACTIVE_JOB => {
             "The bot is running a job on its computer.".to_owned()
+        }
+        ComputerError::Busy(reason) if reason == "state missing" || reason == "state absent" => {
+            return None;
         }
         ComputerError::Busy(reason) => format!("The computer is busy: {reason}."),
         _ => return None,
@@ -236,9 +248,9 @@ impl ComputerManager {
         self.upgrade_status(bot_id).await == Some(UpgradeStatus::Running)
     }
 
-    /// Queue every active bot whose computer is not on the configured
-    /// image, and start the worker unless one runs. Returns the bots now
-    /// in the queue, in order.
+    /// Queue every created computer of an active bot that is not on the
+    /// configured image, and start the worker unless one runs. Returns the
+    /// bots now in the queue, in order.
     pub async fn upgrade_all(
         self: &Arc<Self>,
         gate: Arc<Gate>,
@@ -246,22 +258,27 @@ impl ComputerManager {
         self.can_start_upgrade()?;
         let outdated: Vec<Uuid> = sqlx::query_scalar(
             "SELECT c.bot_id FROM bot_computers c JOIN bots b ON b.id = c.bot_id
-             WHERE b.status = 'active' AND c.image <> ?1
+             WHERE b.status = 'active' AND c.observed_state <> 'absent' AND c.image <> ?1
              ORDER BY b.created_at, b.id",
         )
         .bind(&self.config.image)
         .fetch_all(&self.pool)
         .await?;
-        let (queued, start) = self
+        // The worker starts inside the actor's operation, which finishes
+        // even if this request is cancelled, so a queue never lacks one.
+        let this = self.clone();
+        Ok(self
             .upgrades
-            .call(move |upgrades| upgrades.enqueue(outdated))
-            .await;
-        if start {
-            let this = self.clone();
-            self.upgrade_tasks
-                .spawn(async move { this.drain(gate).await });
-        }
-        Ok(queued)
+            .call(move |upgrades| {
+                let (queued, start) = upgrades.enqueue(outdated);
+                if start {
+                    let worker = this.clone();
+                    this.upgrade_tasks
+                        .spawn(async move { worker.drain(gate).await });
+                }
+                queued
+            })
+            .await)
     }
 
     /// Take the computers still queued or waiting out of the queue.
@@ -294,16 +311,19 @@ impl ComputerManager {
     }
 
     /// One queued upgrade. Unlike a single upgrade, it leaves an open
-    /// desktop alone: the owner may be using it, so the computer waits.
+    /// desktop alone (the owner may be using it) and does not wait for the
+    /// bot's operation lock: the computer waits instead.
     async fn run_queued(&self, bot_id: Uuid, round: u64, gate: &Arc<Gate>) {
-        let ended = match gate.enter() {
-            None => Ended::Deferred {
-                reason: "A backup or an update is running.".into(),
-                round,
-            },
-            Some(_admission) => {
+        let deferred = |reason: &str| Ended::Deferred {
+            reason: reason.into(),
+            round,
+        };
+        let ended = match (gate.enter(), self.try_op(bot_id).await) {
+            (None, _) => deferred("A backup or an update is running."),
+            (_, None) => deferred("The computer is busy with another operation."),
+            (Some(_admission), Some(op)) => {
                 let upgraded = tokio::select! {
-                    upgraded = self.upgrade_image(bot_id, &self.config.image, None) => upgraded,
+                    upgraded = self.upgrade_image_holding(op, bot_id, &self.config.image, None) => upgraded,
                     () = self.upgrade_stop.cancelled() => Err(ComputerError::Refused("the API stopped during the upgrade".into())),
                 };
                 match upgraded {
@@ -313,7 +333,7 @@ impl ComputerManager {
                     {
                         Ended::Upgraded
                     }
-                    Err(err) => match deferred(&err) {
+                    Err(err) => match deferred_reason(&err) {
                         Some(reason) => Ended::Deferred { reason, round },
                         None => {
                             tracing::warn!(bot = %bot_id, error = %err, "queued computer upgrade failed");
@@ -388,7 +408,7 @@ mod tests {
         assert_eq!(upgrades.retry(a), None, "a bot is retried once per round");
         upgrades.end(a, Ended::Upgraded);
         assert_eq!(upgrades.next(), Step::Finished);
-        assert!(!upgrades.draining);
+        assert_eq!(upgrades.worker, Worker::Idle);
     }
 
     #[test]

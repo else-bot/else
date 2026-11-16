@@ -175,26 +175,19 @@ impl ComputerRuntime for Fake {
                     cpus: Some(2),
                     memory_bytes: Some(1 << 30),
                     memory_limit_bytes: 2 << 30,
+                    disk: Some((3 << 20, 8 << 30)),
                 };
                 (name.clone(), usage)
             })
             .collect())
     }
-    async fn disks(
-        &self,
-    ) -> Result<HashMap<String, else_api::computers::runtime::DiskUsage>, RuntimeError> {
+    async fn disks(&self) -> Result<HashMap<String, u64>, RuntimeError> {
         Ok(self
             .computers
             .lock()
             .unwrap()
             .keys()
-            .map(|name| {
-                let disk = else_api::computers::runtime::DiskUsage {
-                    used_bytes: 1 << 20,
-                    size_bytes: Some(1 << 30),
-                };
-                (name.clone(), disk)
-            })
+            .map(|name| (name.clone(), 1 << 20))
             .collect())
     }
     async fn remove(&self, name: &str) -> Result<(), RuntimeError> {
@@ -1898,7 +1891,12 @@ fn upgrade_state(computer: &serde_json::Value) -> &str {
 #[tokio::test(flavor = "multi_thread")]
 async fn computers_list_every_created_computer_with_its_use() {
     let (app, _fake, manager, bots) = outdated_fleet(config(1)).await;
-    let (body, by_bot) = computers_when(&app, |_| true).await;
+    let (body, by_bot) = computers_when(&app, |by_bot| {
+        by_bot
+            .values()
+            .all(|computer| computer["disk_used_bytes"].is_u64())
+    })
+    .await;
     assert_eq!(body["latest_image"], "img:new");
     assert_eq!(body["rollback_bytes"], serde_json::Value::Null);
     let listed: Vec<&str> = body["computers"]
@@ -1931,8 +1929,8 @@ async fn computers_list_every_created_computer_with_its_use() {
         "{stopped}"
     );
     assert_eq!(stopped["memory_limit_bytes"], 1024 * 1024 * 1024u64);
-    assert_eq!(stopped["disk_used_bytes"], 1u64 << 20);
-    assert_eq!(stopped["disk_size_bytes"], 1u64 << 30);
+    assert_eq!(stopped["disk_used_bytes"], 1u64 << 20, "host blocks");
+    assert_eq!(stopped["disk_size_bytes"], serde_json::Value::Null);
     assert!(stopped["last_used_at"].is_string(), "{stopped}");
 
     let (_lease, _) = ready(&manager, bots[0], "cli:held").await;
@@ -1942,6 +1940,14 @@ async fn computers_list_every_created_computer_with_its_use() {
     assert_eq!(running["cpu_percent"], 75.0, "a share of its own vCPUs");
     assert_eq!(running["memory_used_bytes"], 1u64 << 30);
     assert_eq!(running["memory_limit_bytes"], 2u64 << 30);
+    assert_eq!(
+        (&running["disk_used_bytes"], &running["disk_size_bytes"]),
+        (
+            &serde_json::json!(3u64 << 20),
+            &serde_json::json!(8u64 << 30)
+        ),
+        "as the guest reports its disk"
+    );
 }
 
 /// Upgrade all puts off a computer in use and the ones the budget has no
@@ -2048,4 +2054,97 @@ async fn upgrade_all_goes_on_after_a_failure_and_cancels_what_is_left() {
         .owner("GET", &format!("/v1/bots/{}/computer", bots[0]), None)
         .await;
     assert_eq!(shown.body["upgrade"]["state"], "failed");
+}
+
+/// A backup or an update puts every queued computer off until it ends; a
+/// computer whose disk is missing fails instead of waiting; and the disk
+/// of the computers kept for rollback is counted after an upgrade and
+/// after rolling it back.
+#[tokio::test(flavor = "multi_thread")]
+async fn upgrade_all_waits_for_maintenance_fails_missing_disks_and_counts_kept_computers() {
+    let (app, _fake, manager, bots) = outdated_fleet(config(3)).await;
+    sqlx::query("UPDATE bot_computers SET observed_state = 'missing' WHERE bot_id = ?1")
+        .bind(bots[2])
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let closed = app
+        .scheduler
+        .gate()
+        .close(
+            Duration::from_secs(5),
+            else_api::maintenance::Pause::backup(None),
+        )
+        .await
+        .unwrap()
+        .expect("closed by this test");
+    // The API refuses owner requests while the gate is closed.
+    let queued = manager
+        .upgrade_all(app.scheduler.gate().clone())
+        .await
+        .unwrap();
+    assert_eq!(queued.len(), 3);
+    let deadline = tokio::time::Instant::now() + common::SETTLE;
+    loop {
+        let statuses = manager.upgrade_statuses().await;
+        let waiting = bots.iter().all(|bot| {
+            statuses.get(bot)
+                == Some(&else_api::computers::upgrade_queue::UpgradeStatus::Waiting(
+                    "A backup or an update is running.".into(),
+                ))
+        });
+        if waiting {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never waiting: {statuses:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    drop(closed);
+    let (body, by_bot) = computers_when(&app, |by_bot| {
+        upgrade_state(&by_bot[&bots[2]]) == "failed"
+            && bots[..2].iter().all(|bot| by_bot[bot]["upgrade"].is_null())
+    })
+    .await;
+    assert!(
+        by_bot[&bots[2]]["upgrade"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("missing")),
+        "{body}"
+    );
+    assert_eq!(by_bot[&bots[0]]["image"], "img:new");
+    let kept = |body: &serde_json::Value| body["rollback_bytes"].as_u64();
+    let (body, _) = computers_when_body(&app, |body| kept(body) == Some(2 << 20)).await;
+    assert_eq!(kept(&body), Some(2 << 20), "the two old computers");
+
+    manager.rollback_upgrade(bots[0]).await.unwrap();
+    let (body, _) =
+        computers_when_body(&app, |body| body["computers"][0]["image"] == "img:old").await;
+    assert_eq!(
+        kept(&body),
+        Some(2 << 20),
+        "the rolled-back replacement takes the old computer's place"
+    );
+}
+
+/// [`computers_when`] on the whole body.
+async fn computers_when_body(
+    app: &TestApp,
+    done: impl Fn(&serde_json::Value) -> bool,
+) -> (serde_json::Value, HashMap<Uuid, serde_json::Value>) {
+    let deadline = tokio::time::Instant::now() + common::SETTLE;
+    loop {
+        let (body, by_bot) = computers_when(app, |_| true).await;
+        if done(&body) {
+            return (body, by_bot);
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "computers never settled: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
