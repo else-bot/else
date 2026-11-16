@@ -19,6 +19,8 @@ use uuid::Uuid;
 mod attachments;
 mod backups;
 pub use backups::*;
+mod usage;
+pub use usage::*;
 mod skills;
 pub use skills::*;
 mod mcp;

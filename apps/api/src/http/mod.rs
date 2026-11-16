@@ -32,6 +32,7 @@ pub mod task_secrets;
 mod tool_search;
 pub mod tools;
 pub mod turns;
+mod usage;
 mod visual_tools;
 pub mod webhooks;
 pub mod ws;
@@ -190,6 +191,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(backups::routes())
         .merge(shared_mcp::routes())
         .merge(skills::routes())
+        .merge(usage::routes())
         .merge(task_secrets::routes())
         .merge(questions::routes())
         .merge(outgoing_drafts::routes())

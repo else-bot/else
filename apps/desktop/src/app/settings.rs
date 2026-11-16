@@ -299,6 +299,7 @@ impl TriggerSave {
 }
 
 pub(super) struct BotSettings {
+    pub(super) usage: super::usage::UsageState,
     details: Details,
     /// The bot's `metadata_revision` when its profile was last loaded: a
     /// bot can change another bot's model, which publishes `bot.updated`.
@@ -328,6 +329,11 @@ impl ElseApp {
             self._computer_layout = None;
         }
         self.ensure_settings(window, cx);
+        if self.settings_open
+            && let Some(bot) = self.selected
+        {
+            self.load_bot_usage(bot, window, cx);
+        }
         cx.notify();
     }
 
@@ -374,6 +380,7 @@ impl ElseApp {
             bot.id,
             BotSettings {
                 details,
+                usage: super::usage::UsageState::Loading(Uuid::nil()),
                 revision: bot.metadata_revision,
                 model: ModelState::Loading(Uuid::nil()),
                 routines: HashMap::new(),
@@ -1078,6 +1085,7 @@ impl ElseApp {
         if self.details_tab == super::computer::DetailsTab::Details {
             if let Some(entry) = self.settings.get(&bot.id) {
                 body = body
+                    .children(self.render_bot_usage(bot, &entry.usage, cx))
                     .child(self.render_model(bot.id, &entry.model, cx))
                     .child(self.render_rules_section(bot.id, cx))
                     .child(self.render_routines(bot.id, &entry.routines, cx))
@@ -2252,7 +2260,7 @@ pub(super) fn section_frame(cx: &App) -> Div {
 /// The gap from a section's label to its first row, and between rows.
 pub(super) const ROW_GAP: Pixels = px(12.);
 
-fn section(title: &'static str, cx: &App) -> Div {
+pub(super) fn section(title: &'static str, cx: &App) -> Div {
     section_frame(cx).child(crate::appearance::section_label(title, cx).pb(ROW_GAP))
 }
 
@@ -2263,7 +2271,7 @@ fn list_rows(rows: Vec<AnyElement>) -> Div {
 
 /// Secondary text in a row: a schedule, a model, a trigger's details. It
 /// wraps instead of truncating.
-fn meta(text: impl Into<SharedString>, cx: &App) -> Div {
+pub(super) fn meta(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .text_size(px(12.))
         .line_height(px(18.))
@@ -2335,14 +2343,14 @@ fn alert(text: impl Into<SharedString>, color: Hsla, _cx: &App) -> Div {
         )
 }
 
-fn muted(text: impl Into<SharedString>, cx: &App) -> Div {
+pub(super) fn muted(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .text_xs()
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
 }
 
-fn note(text: impl Into<SharedString>, error: bool, cx: &App) -> Div {
+pub(super) fn note(text: impl Into<SharedString>, error: bool, cx: &App) -> Div {
     let theme = cx.theme();
     div()
         .text_xs()

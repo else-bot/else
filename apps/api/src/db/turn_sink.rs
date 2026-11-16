@@ -787,6 +787,14 @@ impl SinkState {
         }
     }
 
+    /// Recorded even after fencing: the readings describe the account, not
+    /// the turn.
+    async fn limits(&mut self, windows: Vec<crate::app::providers::LimitWindow>) {
+        if let Err(err) = super::usage::record(&self.pool, self.turn_id, &windows).await {
+            tracing::warn!(turn = %self.turn_id, error = %err, "recording usage limits failed");
+        }
+    }
+
     async fn text(&mut self, chunk: &str) -> Result<(), Fenced> {
         if self.fenced {
             return Err(Fenced);
@@ -892,6 +900,11 @@ impl TurnSink for SqliteSink {
     async fn usage(&self, usage: crate::app::providers::Usage) {
         self.state
             .call_async(move |state| Box::pin(state.usage(usage)))
+            .await;
+    }
+    async fn limits(&self, windows: Vec<crate::app::providers::LimitWindow>) {
+        self.state
+            .call_async(move |state| Box::pin(state.limits(windows)))
             .await;
     }
     async fn text(&self, chunk: &str) -> Result<(), Fenced> {

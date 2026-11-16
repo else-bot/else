@@ -66,7 +66,7 @@ impl ElseApp {
         }
     }
 
-    pub(super) fn provider_label(&self, id: &str) -> String {
+    pub(crate) fn provider_label(&self, id: &str) -> String {
         self.caps
             .as_ref()
             .and_then(|caps| caps.providers.iter().find(|p| p.id == id))

@@ -25,6 +25,7 @@ mod socials;
 mod system_notifications;
 mod ui_font;
 mod updates;
+mod usage_ui;
 mod window_frame;
 
 use gpui_kit::*;
@@ -34,6 +35,7 @@ gpui_kit::assets::icon_assets!(
     [
         FolderInput,
         Hourglass,
+        Gauge,
         Hand,
         BellDot,
         Bell,
