@@ -21,14 +21,11 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use super::chunks::{self, CHUNKS, ChunkKeys, ChunkRef, Encoding, INDEX, Index, Stored};
 use super::{BackupError, Completion, ObjectRef};
 use crate::credentials::SecretKey;
-
-const TEMP_PREFIX: &str = ".tmp-";
 
 /// One key's chunks in a backup directory.
 pub struct Store {
@@ -64,26 +61,12 @@ impl Store {
             return Ok(false);
         }
         let sealed = keys.seal(bytes)?;
-        let mut suffix = [0u8; 4];
-        getrandom::fill(&mut suffix).map_err(|e| BackupError::Crypto(e.to_string()))?;
-        let temp = self
-            .root
-            .join(format!("{TEMP_PREFIX}{id}-{}", hex::encode(suffix)));
-        let written = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&temp)
-            .and_then(|mut file| {
-                file.write_all(&sealed)?;
-                file.sync_all()
-            })
-            .and_then(|()| fs::rename(&temp, &path));
-        if let Err(err) = written {
-            let _ = fs::remove_file(&temp);
-            return Err(BackupError::io(path.display(), err));
-        }
+        let fail = |e: std::io::Error| BackupError::io(path.display(), e);
+        let mut file = crate::private_file::staged(&self.root, &path).map_err(fail)?;
+        file.write_all(&sealed)
+            .and_then(|()| file.as_file().sync_all())
+            .map_err(fail)?;
+        file.persist(&path).map_err(|e| fail(e.error))?;
         Ok(true)
     }
 
@@ -289,7 +272,8 @@ pub fn sweep(backups: &Path, key: &SecretKey) -> Result<usize, BackupError> {
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let unused = chunks::valid_id(&name) && !referenced.contains(&name);
-        if name.starts_with(TEMP_PREFIX) || unused {
+        let staged = name.starts_with('.') && name.ends_with(".tmp");
+        if staged || unused {
             let path = entry.path();
             fs::remove_file(&path).map_err(|e| BackupError::io(path.display(), e))?;
             removed += 1;

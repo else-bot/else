@@ -1107,7 +1107,7 @@ async fn the_chunk_store_sweeps_only_chunks_no_readable_kept_set_uses() {
         .path();
     let orphan = "ab".repeat(32);
     std::fs::write(key_dir.join(&orphan), "from an interrupted capture").unwrap();
-    std::fs::write(key_dir.join(".tmp-partial"), "half written").unwrap();
+    std::fs::write(key_dir.join(format!(".{orphan}.x1y2.tmp")), "half written").unwrap();
     let index = second.path.join(backup::chunks::INDEX);
     let sealed = std::fs::read(&index).unwrap();
     let mut flipped = sealed.clone();
