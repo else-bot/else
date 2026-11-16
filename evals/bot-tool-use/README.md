@@ -54,6 +54,14 @@ Codex declares else.bot's tools only on launches without host tools. An owner tu
 python3 -I evals/bot-tool-use/codex.py --case correction-saves-rule,delegate-parks --samples 2 --out evals/bot-tool-use/runs/codex
 ```
 
+## Grok
+
+Grok reaches else.bot's tools only through its own `search_tool` and `use_tool`, which collide with else.bot's `find_tool` and `use_tool`. `grok.py` replays cases through `grok` headless print mode with the launch flags of `providers/grok.rs` without host tools, the exported `grok_tool_note` appended to the instructions, and the mock MCP over stdio. Grok refuses a tool name missing from its catalog before the mock sees it, so the runner grades each refused name as a call to an unknown tool. These runs spend Grok model calls on the host login (`~/.grok/auth.json`).
+
+```sh
+python3 -I evals/bot-tool-use/grok.py --case task-sends-standing-approved-telegram-draft,task-reports-computer-sent-x-post --samples 4 --out evals/bot-tool-use/runs/grok
+```
+
 ## Add a case
 
 Add one JSON object per line to `cases/*.ndjson`. Use a unique filesystem-safe `id`, a `kind` of `bad`, `guard`, or `control`, and an `experience` sentence explaining the mistake or behavior. `bad` reproduces a mistake, `guard` protects correct behavior, and `control` checks ordinary work. An optional `turn` of `delegated-task` exports `else-api context delegated-task` instead: Research working on a task at the delegation depth limit, delegated for an owner request, with no registry and the task as the latest message. `handing-task` is that task one hop deep, so it may hand part of its work to GitHub (bot_id `00000000-0000-0000-0000-000000000005`), the one bot in its registry. `delegated-routine-task` is the same task delegated during a routine run. `mail-event` is Research woken by new mail in an inbox it watches, under the incoming-mail instructions; its prompt carries the `[else.bot email event]` framing production adds. `delegated-answer-task` is a routine-run task delegated with the owner's answer on a card that run asked. The default is `owner`.

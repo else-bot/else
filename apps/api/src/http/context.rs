@@ -156,6 +156,7 @@ pub fn export(turn: Turn) -> Value {
         "context_blocks": blocks,
         "server_instructions": super::mcp::SERVER_INSTRUCTIONS,
         "codex_deferred_tools": crate::providers::codex::deferred_tools(),
+        "grok_tool_note": crate::providers::grok::tool_note(),
         "parked_next": super::mcp::PARKED_NEXT,
         "parking_tools": crate::app::tools::PARKING_TOOLS,
         "host_tools": crate::providers::claude_home::HOST_TOOLS,
