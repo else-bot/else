@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use rmcp::transport::auth::{
@@ -31,9 +32,7 @@ impl From<&Credential> for Discovery {
 
 pub(super) async fn discover(resource: &str, challenge: &str) -> Result<Discovery, Error> {
     let challenge = Some(challenge.to_owned()).filter(|value| !value.is_empty());
-    let mut manager = AuthorizationManager::new(resource)
-        .await
-        .map_err(auth_error)?;
+    let mut manager = unregistered_manager(resource).await.map_err(auth_error)?;
     let metadata = manager
         .resolve_metadata_from_challenge(challenge.as_deref())
         .await
@@ -247,13 +246,38 @@ async fn manager(
             )
             .await?
         }
-        None => AuthorizationManager::new(resource).await?,
+        None => unregistered_manager(resource).await?,
     };
     let tokens = InMemoryCredentialStore::new();
     let states = InMemoryStateStore::new();
     manager.set_credential_store(tokens.clone());
     manager.set_state_store(states.clone());
     Ok((manager, tokens, states))
+}
+
+/// rmcp lets discovered metadata name a private address only when asked to.
+/// A self-hosted MCP on a LAN or tailnet usually serves its authorization
+/// server there too, so an MCP at a private IP gets that policy. A hostname
+/// keeps the strict default, since its DNS answers could later name a public
+/// server that then steers discovery to private addresses.
+async fn unregistered_manager(resource: &str) -> Result<AuthorizationManager, AuthError> {
+    let url = reqwest::Url::parse(resource)?;
+    let private = url
+        .host_str()
+        .and_then(|host| host.trim_matches(['[', ']']).parse::<IpAddr>().ok())
+        .is_some_and(is_private);
+    if private {
+        AuthorizationManager::new_allowing_private_addresses(url).await
+    } else {
+        AuthorizationManager::new(url).await
+    }
+}
+
+fn is_private(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => v4.is_private() || (v4.octets()[0] == 100 && v4.octets()[1] & 0xc0 == 64),
+        IpAddr::V6(v6) => v6.is_unique_local(),
+    }
 }
 
 /// GitHub rejects a revoked refresh token with HTTP 200 and
