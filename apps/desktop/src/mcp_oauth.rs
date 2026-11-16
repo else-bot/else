@@ -107,6 +107,44 @@ mod tests {
     use serde_json::Value;
     use tokio::{net::TcpListener, sync::mpsc};
 
+    #[test]
+    fn plain_http_sign_in_urls_are_allowed_only_on_loopback_and_private_ips() {
+        let redirect = "http://127.0.0.1:4321/mcp/callback";
+        let state = |base: &str| {
+            let mut url = Url::parse(base).unwrap();
+            url.query_pairs_mut().extend_pairs([
+                ("redirect_uri", redirect),
+                ("state", "state"),
+                ("response_type", "code"),
+                ("code_challenge_method", "S256"),
+            ]);
+            authorization_state(url.as_str(), redirect)
+        };
+        for allowed in [
+            "https://issuer.test/authorize",
+            "http://127.0.0.1:3773/oauth/mcp/authorize",
+            "http://[::1]:3773/oauth/mcp/authorize",
+            "http://100.88.191.63:3773/oauth/mcp/authorize",
+            "http://[fd7a:115c:a1e0::e836:bf41]:3773/oauth/mcp/authorize",
+            "http://192.168.1.15:3773/oauth/mcp/authorize",
+            "http://10.0.0.2/oauth/mcp/authorize",
+            "http://172.16.0.2/oauth/mcp/authorize",
+        ] {
+            assert_eq!(state(allowed).as_deref(), Some("state"), "{allowed}");
+        }
+        for rejected in [
+            "http://issuer.test/authorize",
+            "http://example.ts.net:3773/oauth/mcp/authorize",
+            "http://8.8.8.8/authorize",
+            "http://100.128.0.1/authorize",
+            "http://172.32.0.1/authorize",
+            "http://169.254.169.254/authorize",
+            "http://[2001:4860:4860::8888]/authorize",
+        ] {
+            assert_eq!(state(rejected), None, "{rejected}");
+        }
+    }
+
     #[tokio::test]
     async fn browser_callback_completes_on_selected_api_and_rejects_changed_consent() {
         use crate::config::{Origin, OwnerToken};
