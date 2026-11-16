@@ -10,7 +10,7 @@
 //! rest of the reported total to use outside else.bot. Until a rate is known
 //! the total stays unattributed rather than guessed.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
@@ -32,8 +32,6 @@ const CLEAN_COVERAGE: f64 = 0.5;
 const CLEAN_SIGNAL: f64 = 2.0;
 /// Readings with resets this close apart belong to the same window.
 const SAME_RESET: Duration = Duration::seconds(90);
-/// Readings of two window lengths this close together came from one report.
-const PAIRED: Duration = Duration::seconds(5);
 
 /// What started a turn, worked out from the tables that record each kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, sqlx::Type)]
@@ -148,6 +146,8 @@ impl Turn {
 /// One limit reading a provider reported during a turn.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Reading {
+    /// Shared by the windows the provider reported together.
+    pub report_id: Uuid,
     pub provider_id: String,
     pub window_minutes: i64,
     pub used_percent: f64,
@@ -365,17 +365,19 @@ fn rates(
 }
 
 /// How far `other` rose for each point `base` rose, over pairs of readings
-/// both lengths took together (a provider reports its windows at once) with
-/// no reset in either between them. `None` until `base` rose enough to tell.
+/// both lengths took in the same reports with no reset in either between
+/// them. `None` until `base` rose enough to tell.
 fn rise_ratio(base: &[Vec<&Reading>], other: &[Vec<&Reading>]) -> Option<f64> {
-    let partner = |reading: &Reading| {
-        base.iter().enumerate().find_map(|(group, window)| {
+    let partners: HashMap<Uuid, (usize, f64)> = base
+        .iter()
+        .enumerate()
+        .flat_map(|(group, window)| {
             window
                 .iter()
-                .find(|b| (b.observed_at - reading.observed_at).abs() <= PAIRED)
-                .map(|b| (group, b.used_percent))
+                .map(move |b| (b.report_id, (group, b.used_percent)))
         })
-    };
+        .collect();
+    let partner = |reading: &Reading| partners.get(&reading.report_id).copied();
     let (mut base_rise, mut other_rise) = (0.0, 0.0);
     for window in other {
         for pair in window.windows(2) {

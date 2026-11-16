@@ -62,7 +62,7 @@ pub async fn turns(db: &SqlitePool, now: DateTime<Utc>) -> sqlx::Result<Vec<Turn
 
 pub async fn readings(db: &SqlitePool, now: DateTime<Utc>) -> sqlx::Result<Vec<Reading>> {
     sqlx::query_as(
-        "SELECT provider_id, window_minutes, used_percent, resets_at, observed_at
+        "SELECT report_id, provider_id, window_minutes, used_percent, resets_at, observed_at
          FROM usage_readings WHERE observed_at >= ?1",
     )
     .bind(since(now))
@@ -73,13 +73,16 @@ pub async fn readings(db: &SqlitePool, now: DateTime<Utc>) -> sqlx::Result<Vec<R
 /// Stores the windows one turn's provider reported, and prunes readings
 /// older than the history in the same transaction.
 pub async fn record(db: &SqlitePool, turn: Uuid, windows: &[LimitWindow]) -> sqlx::Result<()> {
+    let report = Uuid::new_v4();
     let mut tx = db.begin().await?;
     for window in windows {
         sqlx::query(
-            "INSERT INTO usage_readings (provider_id, window_minutes, used_percent, resets_at)
-             SELECT provider_id, ?2, ?3, ?4 FROM turns WHERE id = ?1",
+            "INSERT INTO usage_readings
+                 (report_id, provider_id, window_minutes, used_percent, resets_at)
+             SELECT ?2, provider_id, ?3, ?4, ?5 FROM turns WHERE id = ?1",
         )
         .bind(turn)
+        .bind(report)
         .bind(window.minutes)
         .bind(window.used_percent())
         .bind(text(window.resets_at))

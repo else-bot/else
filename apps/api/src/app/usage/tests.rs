@@ -26,6 +26,8 @@ fn turn(bot: u128, provider: &str, start: DateTime<Utc>, minutes: i64, output: i
 
 fn reading(minutes: i64, used: f64, observed: DateTime<Utc>, resets: DateTime<Utc>) -> Reading {
     Reading {
+        // Readings taken at the same instant came from one report.
+        report_id: Uuid::from_u128(observed.timestamp_millis() as u128),
         provider_id: "claude".into(),
         window_minutes: minutes,
         used_percent: used,
@@ -284,6 +286,24 @@ fn cached_input_costs_a_fraction_of_fresh_input() {
     let fresh = input(0, 0).weight();
     assert_eq!(input(1_000, 0).weight(), fresh / 20.0);
     assert_eq!(input(0, 1_000).weight(), fresh * 1.25);
+}
+
+#[test]
+fn weekly_borrowing_pairs_readings_by_report_not_by_time() {
+    let second = |s: u32| Utc.with_ymd_and_hms(2026, 11, 16, 10, 0, s).unwrap();
+    let runs = [turn(1, "claude", second(0) - Duration::seconds(1), 1, 1000)];
+    // Two reports three seconds apart: each weekly reading must pair with
+    // the 5-hour reading of its own report, not the nearest one in time.
+    let readings = vec![
+        reading(300, 0.0, second(0), at(14, 0)),
+        reading(300, 4.0, second(3), at(14, 0)),
+        reading(10080, 0.0, second(0), at(14, 0) + Duration::days(3)),
+        reading(10080, 1.0, second(3), at(14, 0) + Duration::days(3)),
+    ];
+
+    let report = report(second(10), &runs, &readings);
+
+    assert_eq!(find(&report, "claude", 10080).bots[0].percent, Some(1.0));
 }
 
 #[test]
