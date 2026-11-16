@@ -19,14 +19,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         self.cache_server_icon(id, icon.clone())?;
-        self.share_server_icon(
-            id,
-            super::shared_icons::IconWrite {
-                icon,
-                carried: false,
-            },
-            cx,
-        );
+        self.share_server_icon(id, icon, false, cx);
         Ok(())
     }
 

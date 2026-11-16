@@ -4,14 +4,17 @@
 //! server.
 
 use super::*;
-use crate::server_icon::{self, ServerIcon, Sync};
+use crate::server_icon::{self, ServerIcon, Shared, Stored, Sync};
 use std::time::Instant;
 
 pub(super) struct IconWrite {
-    pub icon: ServerIcon,
+    icon: ServerIcon,
     /// Offered to a server nobody gave an icon yet; a failure waits for
     /// the next check instead of being shown.
-    pub carried: bool,
+    carried: bool,
+    /// The connection the icon was chosen for; a write still waiting when
+    /// its address or token changes is dropped.
+    profile: Profile,
 }
 
 impl Shell {
@@ -36,17 +39,7 @@ impl Shell {
                 }
             }
             Sync::Fetch(digest) => self.fetch_server_picture(id, digest, cx),
-            Sync::Carry => {
-                let icon = cached.clone();
-                self.share_server_icon(
-                    id,
-                    IconWrite {
-                        icon,
-                        carried: true,
-                    },
-                    cx,
-                );
-            }
+            Sync::Carry => self.share_server_icon(id, cached.clone(), true, cx),
         }
     }
 
@@ -56,47 +49,78 @@ impl Shell {
         self.rail.icons.set(store, id, icon)
     }
 
-    fn server_client(&self, id: Uuid) -> Option<(Profile, Result<Arc<Client>, String>)> {
-        let profile = self.registry.find(id)?.profile.clone();
-        let client = Client::new(profile.origin.clone(), &profile.token, self.runtime.clone());
-        Some((profile, client.map(Arc::new)))
+    fn current_profile(&self, id: Uuid, profile: &Profile) -> bool {
+        self.registry
+            .find(id)
+            .is_some_and(|saved| saved.profile == *profile)
     }
 
     /// Save the icon on the server, which every desktop picks up on its
-    /// next check. Writes to one server go one at a time, and only the
-    /// latest waiting icon is sent next.
-    pub(super) fn share_server_icon(&mut self, id: Uuid, write: IconWrite, cx: &mut Context<Self>) {
-        let Some((_, client)) = self.server_client(id) else {
+    /// next check.
+    pub(super) fn share_server_icon(
+        &mut self,
+        id: Uuid,
+        icon: ServerIcon,
+        carried: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(saved) = self.registry.find(id) else {
             return;
         };
+        let profile = saved.profile.clone();
+        self.send_icon_write(
+            id,
+            IconWrite {
+                icon,
+                carried,
+                profile,
+            },
+            cx,
+        );
+    }
+
+    /// Writes to one server go one at a time, and only the latest waiting
+    /// icon is sent next.
+    fn send_icon_write(&mut self, id: Uuid, write: IconWrite, cx: &mut Context<Self>) {
+        let Some(write) = self.icon_writes.begin(id, write) else {
+            return;
+        };
+        let client = Client::new(
+            write.profile.origin.clone(),
+            &write.profile.token,
+            self.runtime.clone(),
+        );
         let client = match client {
-            Ok(client) => client,
-            Err(err) => {
-                if !write.carried {
+            Ok(client) if self.current_profile(id, &write.profile) => Arc::new(client),
+            outdated_or_failed => {
+                if let Err(err) = outdated_or_failed
+                    && !write.carried
+                {
                     self.connection_error = Some(err);
+                }
+                if let Some(next) = self.icon_writes.finish(id, false) {
+                    self.send_icon_write(id, next, cx);
                 }
                 return;
             }
         };
-        let Some(write) = self.icon_writes.begin(id, write) else {
-            return;
-        };
+        let carried = write.carried;
         cx.spawn(async move |this, cx| {
-            let result = client.set_server_icon(write.icon, write.carried).await;
+            let result = client.set_server_icon(write.icon, carried).await;
             let _ = this.update(cx, |shell, cx| {
                 let next = shell.icon_writes.finish(id, result.is_ok());
                 match result {
                     Ok(()) => shell.servers.recheck(id),
                     // A server from before shared icons keeps the icon on this desktop only.
                     Err(ClientError::Api { status: 404, .. }) => {}
-                    Err(err) if !write.carried => {
+                    Err(err) if !carried => {
                         shell.connection_error =
                             Some(format!("Could not save the icon on the server. {err}"));
                     }
                     Err(_) => {}
                 }
                 if let Some(next) = next {
-                    shell.share_server_icon(id, next, cx);
+                    shell.send_icon_write(id, next, cx);
                 }
                 cx.notify();
             });
@@ -107,26 +131,39 @@ impl Shell {
     /// Download the server's picture and draw it here, unless the icon
     /// changed meanwhile. A failure waits for the next check.
     fn fetch_server_picture(&mut self, id: Uuid, digest: String, cx: &mut Context<Self>) {
-        let Some((profile, Ok(client))) = self.server_client(id) else {
+        let Some(saved) = self.registry.find(id) else {
             return;
         };
+        let profile = saved.profile.clone();
+        let Ok(client) = Client::new(profile.origin.clone(), &profile.token, self.runtime.clone())
+        else {
+            return;
+        };
+        let client = Arc::new(client);
         self.icon_fetches.insert(id);
         let asked = Instant::now();
         cx.spawn(async move |this, cx| {
-            let result = client.server_picture(digest).await;
+            let result = client.server_picture(digest.clone()).await;
             let _ = this.update(cx, |shell, cx| {
                 shell.icon_fetches.remove(&id);
-                let current = shell
-                    .registry
-                    .find(id)
-                    .is_some_and(|saved| saved.profile == profile);
-                let Ok(Some(png)) = result else {
-                    return;
-                };
-                if !current || !shell.icon_writes.settled(id, Some(asked)) {
+                let observed = shell
+                    .servers
+                    .entries
+                    .get(&id)
+                    .and_then(|observed| observed.server.as_ref());
+                let latest = matches!(
+                    observed.map(|server| &server.icon),
+                    Some(Shared::Set(Stored::Picture { digest: Some(seen) })) if *seen == digest
+                );
+                if !latest {
+                    // A check while downloading saw another icon.
+                    shell.adopt_server_icon(id, cx);
                     return;
                 }
-                if let Some(image) = server_icon::picture(png)
+                let fresh = shell.current_profile(id, &profile)
+                    && shell.icon_writes.settled(id, Some(asked));
+                if let (true, Ok(Some(png))) = (fresh, result)
+                    && let Some(image) = server_icon::picture(png)
                     && let Err(err) = shell.cache_server_icon(id, ServerIcon::Picture(image))
                 {
                     shell.connection_error = Some(err);

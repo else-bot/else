@@ -23,6 +23,8 @@ use crate::config::{ProfileStore, ServerId, read_private_limited, replace_privat
 const PICTURE_SIDE: u32 = 128;
 const MAX_ICONS_BYTES: u64 = 64 * 1024;
 const MAX_PICTURE_BYTES: u64 = 1024 * 1024;
+/// The largest picture the server keeps.
+const MAX_SHARED_PICTURE_BYTES: usize = 128 * 1024;
 /// The largest image file the editor accepts before scaling it down.
 pub(crate) const MAX_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_LETTERS: usize = 2;
@@ -274,20 +276,36 @@ fn remove_if_present(path: &Path) -> std::io::Result<()> {
 /// Scale an image file to a square picture, cropping the longer side
 /// around its centre.
 pub(crate) fn square_picture(bytes: &[u8]) -> Result<Arc<Image>, String> {
-    let decoded = crate::app::decode_image(bytes)?;
-    let mut png = Cursor::new(Vec::new());
-    decoded
-        .resize_to_fill(
-            PICTURE_SIDE,
-            PICTURE_SIDE,
-            image::imageops::FilterType::Lanczos3,
-        )
-        .write_to(&mut png, image::ImageFormat::Png)
-        .map_err(|err| err.to_string())?;
+    let decoded = crate::app::decode_image(bytes)?.resize_to_fill(
+        PICTURE_SIDE,
+        PICTURE_SIDE,
+        image::imageops::FilterType::Lanczos3,
+    );
     Ok(Arc::new(Image::from_bytes(
         ImageFormat::Png,
-        png.into_inner(),
+        rgba8_png(decoded)?,
     )))
+}
+
+/// Eight bits a channel keeps any 128-pixel picture within the server's
+/// limit; sixteen-bit sources can exceed it.
+fn rgba8_png(image: image::DynamicImage) -> Result<Vec<u8>, String> {
+    let mut png = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image.into_rgba8())
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|err| err.to_string())?;
+    Ok(png.into_inner())
+}
+
+/// A cached picture as the server accepts it: re-encoded at eight bits a
+/// channel when a desktop from before shared icons stored a larger one.
+pub(crate) fn shareable_png(png: &[u8]) -> Vec<u8> {
+    if png.len() <= MAX_SHARED_PICTURE_BYTES {
+        return png.to_vec();
+    }
+    crate::app::decode_image(png)
+        .and_then(rgba8_png)
+        .unwrap_or_else(|_| png.to_vec())
 }
 
 /// The lowercase hex SHA-256 the server names a picture by.
@@ -575,6 +593,42 @@ mod tests {
         for (cached, shared, expected) in cases {
             assert_eq!(Sync::of(cached, shared), expected, "{cached:?} {shared:?}");
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn pictures_from_sixteen_bit_sources_fit_the_server() {
+        let mut seed = 0x2545_f491_u32;
+        let noise = image::ImageBuffer::from_fn(PICTURE_SIDE, PICTURE_SIDE, |_, _| {
+            image::Rgba(std::array::from_fn(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed as u16
+            }))
+        });
+        let mut wide = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba16(noise)
+            .write_to(&mut wide, image::ImageFormat::Png)
+            .unwrap();
+        let wide = wide.into_inner();
+        assert!(
+            wide.len() > MAX_SHARED_PICTURE_BYTES,
+            "the fixture is too large to share"
+        );
+        let picture = square_picture(&wide).unwrap();
+        assert!(picture.bytes.len() <= MAX_SHARED_PICTURE_BYTES);
+        let shared = shareable_png(&wide);
+        assert!(shared.len() <= MAX_SHARED_PICTURE_BYTES);
+        let decoded = image::load_from_memory(&shared).unwrap();
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (PICTURE_SIDE, PICTURE_SIDE)
+        );
+        let small = shareable_png(&picture.bytes);
+        assert_eq!(
+            small, picture.bytes,
+            "a picture that fits is sent as cached"
+        );
     }
 
     fn store() -> (tempfile::TempDir, ProfileStore) {

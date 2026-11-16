@@ -638,7 +638,8 @@ impl Client {
         use base64::Engine as _;
         let picture = match &icon {
             crate::server_icon::ServerIcon::Picture(image) => {
-                Some(base64::engine::general_purpose::STANDARD.encode(&image.bytes))
+                let png = crate::server_icon::shareable_png(&image.bytes);
+                Some(base64::engine::general_purpose::STANDARD.encode(png))
             }
             _ => None,
         };
