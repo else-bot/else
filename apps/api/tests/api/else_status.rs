@@ -115,6 +115,38 @@ async fn a_provider_a_bot_runs_on_its_own_model_is_available_without_a_saved_def
         "{codex}"
     );
 
+    let (bot, conversation, turn): (Uuid, Uuid, Uuid) =
+        sqlx::query_as("SELECT bot_id, conversation_id, id FROM turns LIMIT 1")
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO routines (id, bot_id, conversation_id, name, prompt, cron, timezone,
+             created_turn_id, created_name, request_hash, model, enabled)
+         VALUES (?1, ?2, ?3, 'Digest', 'Summarize.', '0 9 * * *', 'UTC', ?4, 'Digest',
+             zeroblob(32), ?5, false)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(bot)
+    .bind(conversation)
+    .bind(turn)
+    .bind(
+        json!({ "provider_id": "codex", "model": "gpt-6.1-sol",
+                "reasoning_effort": "medium", "service_tier": "priority" })
+        .to_string(),
+    )
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    let codex = provider(&status_of(&app, &token).await, "codex");
+    assert_eq!(codex["available"], true, "{codex}");
+    assert_eq!(codex["routines_with_own_model"], 1, "{codex}");
+    assert_eq!(codex["bots_with_own_model"], 0, "{codex}");
+
+    sqlx::query("DELETE FROM routines")
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
     let other: Uuid = app.create_bot("Scout").await.parse().unwrap();
     let own = else_api::app::providers::Profile {
         model: "gpt-6.1-sol".to_owned(),
@@ -130,4 +162,5 @@ async fn a_provider_a_bot_runs_on_its_own_model_is_available_without_a_saved_def
     assert_eq!(codex["unavailable_reason"], Value::Null, "{codex}");
     assert_eq!(codex["profile_configured"], false, "{codex}");
     assert_eq!(codex["bots_with_own_model"], 1, "{codex}");
+    assert_eq!(codex["routines_with_own_model"], 0, "{codex}");
 }
