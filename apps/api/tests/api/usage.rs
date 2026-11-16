@@ -28,15 +28,14 @@ async fn usage_reports_each_bot_against_the_window_its_provider_reported() {
     assert_eq!(attribution["state"], "unattributed");
     assert_eq!(attribution["used"], 12.0);
     assert!(attribution["observed_at"].is_string());
-    assert_eq!(window["buckets"].as_array().unwrap().len(), 20);
+    assert!(window.get("buckets").is_none());
     let entry = &window["bots"][0];
     assert_eq!(entry["bot_id"], bot.as_str());
-    assert_eq!(entry["turns"], 1);
-    assert_eq!(entry["input_tokens"], 2000);
-    assert_eq!(entry["output_tokens"], 30);
+    assert!(entry.get("input_tokens").is_none());
     assert_eq!(entry["share"], 1.0);
     assert_eq!(entry["sources"][0]["source"], "chat");
-    assert_eq!(entry["percent"], 100.0);
+    assert_eq!(entry["sources"][0]["share"], 1.0);
+    assert!(entry.get("percent").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]

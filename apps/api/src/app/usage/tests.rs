@@ -13,8 +13,6 @@ fn turn(bot: u128, provider: &str, start: DateTime<Utc>, minutes: i64, output: i
         provider_id: provider.into(),
         model: Some("claude-sonnet-5-5".into()),
         source: Source::Chat,
-        label: None,
-        routine_id: None,
         started_at: start,
         finished_at: Some(start + Duration::minutes(minutes)),
         input_tokens: 0,
@@ -70,8 +68,6 @@ fn hourly_runs(outside: f64) -> (Vec<Turn>, Vec<Reading>) {
     let runs: Vec<Turn> = (0..4)
         .map(|h| Turn {
             source: Source::Routine,
-            label: Some("Hourly check".into()),
-            routine_id: Some(Uuid::from_u128(9)),
             ..turn(1, "claude", at(10 + h, 55), 4, 1000)
         })
         .collect();
@@ -99,11 +95,10 @@ fn an_hourly_routine_is_charged_for_what_it_used() {
     assert_eq!(used(window), Some(8.0));
     assert_eq!(outside(window), Some(0.0), "idle owner uses nothing");
     let bot = &window.bots[0];
-    assert_eq!(bot.percent, 8.0);
-    assert_eq!(bot.turns, 4);
+    assert_eq!(bot.share, 1.0);
+    assert_eq!(used(window).unwrap() - outside(window).unwrap(), 8.0);
     assert_eq!(bot.sources[0].source, Source::Routine);
-    assert_eq!(bot.sources[0].label.as_deref(), Some("Hourly check"));
-    assert_eq!(bot.sources[0].routine_id, Some(Uuid::from_u128(9)));
+    assert_eq!(bot.sources[0].share, 1.0);
 }
 
 #[test]
@@ -114,7 +109,7 @@ fn owner_use_between_short_runs_stays_outside() {
     let window = find(&report, "claude", 300);
 
     assert_eq!(used(window), Some(44.0));
-    let bots = window.bots[0].percent;
+    let bots = used(window).unwrap() - outside(window).unwrap();
     assert!(
         (6.0..=11.0).contains(&bots),
         "runs keep about 2% each: {bots}"
@@ -124,9 +119,6 @@ fn owner_use_between_short_runs_stays_outside() {
         (33.0..=38.0).contains(&outside),
         "owner's 36% stays outside: {outside}"
     );
-    let timeline: f64 = window.buckets.iter().map(|b| b.outside).sum();
-    assert!((timeline - outside).abs() < 1.0);
-    assert_eq!(window.buckets.len(), 20);
 }
 
 #[test]
@@ -143,12 +135,12 @@ fn work_after_the_latest_reading_waits_instead_of_taking_earlier_use() {
     let report = report(at(10, 45), &[early, late], &readings);
     let window = find(&report, "claude", 300);
 
-    let percent = |bot: u128| {
-        let id = Uuid::from_u128(bot);
-        window.bots.iter().find(|b| b.bot_id == id).unwrap().percent
-    };
-    assert_eq!(percent(1), 10.0);
-    assert_eq!(percent(2), 0.0, "not in any reading yet");
+    assert_eq!(used(window), Some(10.0));
+    assert_eq!(window.bots[0].bot_id, Uuid::from_u128(2));
+    assert!(
+        window.bots[0].share > 0.98,
+        "shares include work since the reading"
+    );
     assert_eq!(outside(window), Some(0.0));
 }
 
@@ -165,7 +157,6 @@ fn without_a_learnable_rate_the_total_stays_unattributed() {
         window.attribution,
         Attribution::Unattributed { used, .. } if used == 20.0
     ));
-    assert_eq!(window.bots[0].percent, 100.0, "all of else.bot's use");
     assert_eq!(window.bots[0].share, 1.0);
 }
 
@@ -190,40 +181,38 @@ fn the_weekly_window_borrows_the_five_hour_rate() {
     let week = find(&report, "claude", 10080);
 
     assert_eq!(used(week), Some(32.0));
-    let bot = week.bots[0].percent;
+    let bot = used(week).unwrap() - outside(week).unwrap();
     assert!(
         (1.5..=3.0).contains(&bot),
         "about a quarter of the 5-hour 8%: {bot}"
     );
-    assert!(week.buckets.is_empty(), "no timeline for the week");
 }
 
 #[test]
-fn providers_without_limits_split_by_share_and_count_turns_crossing_the_start() {
-    let crossing = turn(1, "grok", at(7, 50), 20, 2_000);
+fn providers_without_limits_use_a_week_and_include_work_crossing_the_start() {
+    let crossing = turn(
+        1,
+        "grok",
+        at(13, 0) - Duration::days(7) - Duration::minutes(10),
+        20,
+        2_000,
+    );
     let inside = turn(2, "grok", at(12, 30), 1, 2_000);
 
     let report = report(at(13, 0), &[crossing, inside], &[]);
     let grok = &report.providers[0];
 
     let lengths: Vec<i64> = grok.windows.iter().map(|w| w.minutes).collect();
-    assert_eq!(lengths, [300, 10080]);
+    assert_eq!(lengths, [10080]);
     let window = &grok.windows[0];
     assert_eq!(window.attribution, Attribution::Unreported);
-    assert_eq!(window.bots[0].percent, 66.7);
     assert_eq!(window.bots[0].bot_id, Uuid::from_u128(2));
-    assert_eq!(window.bots[0].share, 0.667);
-    assert_eq!(
-        window.bots[1].share, 0.333,
+    assert!((window.bots[0].share - 2.0 / 3.0).abs() < 1e-9);
+    assert!(
+        (window.bots[1].share - 1.0 / 3.0).abs() < 1e-9,
         "half its span is in the window"
     );
-    let shares: f64 = window
-        .buckets
-        .iter()
-        .flat_map(|b| &b.bots)
-        .map(|b| b.percent)
-        .sum();
-    assert!((shares - 100.0).abs() < 0.5, "{shares}");
+    assert_eq!(window.bots.iter().map(|bot| bot.share).sum::<f64>(), 1.0);
 }
 
 #[test]
@@ -232,10 +221,15 @@ fn a_window_that_reset_after_its_last_reading_has_no_known_total() {
     let readings = vec![reading(300, 30.0, at(9, 0), at(10, 0))];
 
     let report = report(at(13, 0), &[run], &readings);
-    let window = find(&report, "claude", 300);
+    let window = find(&report, "claude", 10080);
 
     assert_eq!(window.attribution, Attribution::Unreported);
-    assert_eq!(window.starts_at, at(8, 0));
+    assert!(
+        window
+            .bots
+            .iter()
+            .any(|bot| bot.bot_id == Uuid::from_u128(1))
+    );
 }
 
 #[test]
@@ -251,7 +245,7 @@ fn a_bot_that_switched_provider_shows_under_both() {
         Uuid::from_u128(1)
     );
     assert_eq!(
-        find(&report, "codex", 300).bots[0].bot_id,
+        find(&report, "codex", 10080).bots[0].bot_id,
         Uuid::from_u128(1)
     );
 }
@@ -317,7 +311,8 @@ fn weekly_borrowing_pairs_readings_by_report_not_by_time() {
 
     let report = report(second(10), &runs, &readings);
 
-    assert_eq!(find(&report, "claude", 10080).bots[0].percent, 1.0);
+    let week = find(&report, "claude", 10080);
+    assert_eq!(used(week).unwrap() - outside(week).unwrap(), 1.0);
 }
 
 #[test]
@@ -343,11 +338,72 @@ fn weekly_borrowing_ignores_rises_across_a_five_hour_reset() {
     let report = report(day(16, 10, 30), &runs, &readings);
     let weekly = find(&report, "claude", 10080);
 
-    let bots = weekly.bots[0].percent;
+    let bots = used(weekly).unwrap() - outside(weekly).unwrap();
     assert!(
         (0.3..=0.7).contains(&bots),
         "two runs at about 0.2% each: {bots}"
     );
     let outside = outside(weekly).unwrap();
     assert!(outside >= 3.5, "the owner's use stays outside: {outside}");
+}
+
+#[test]
+fn shares_and_sources_follow_the_window_without_using_cap_percent() {
+    let mut old_chat = turn(1, "claude", at(12, 0) - Duration::days(1), 1, 1_000);
+    old_chat.model = Some("claude-opus-5-5".into());
+    let recent = Turn {
+        source: Source::Routine,
+        ..turn(1, "claude", at(12, 0), 1, 1_000)
+    };
+    let other = turn(2, "claude", at(12, 0), 1, 1_000);
+    let readings = [
+        reading(300, 16.0, at(12, 0), at(15, 0)),
+        reading(10080, 18.0, at(12, 0), at(15, 0) + Duration::days(4)),
+    ];
+    let report = report(at(13, 0), &[old_chat, recent, other], &readings);
+    let five = find(&report, "claude", 300);
+    let week = find(&report, "claude", 10080);
+    assert!(matches!(
+        five.attribution,
+        Attribution::Unattributed { used: 16.0, .. }
+    ));
+    assert!(matches!(
+        week.attribution,
+        Attribution::Unattributed { used: 18.0, .. }
+    ));
+    fn bot(window: &WindowUsage) -> &BotUsage {
+        window
+            .bots
+            .iter()
+            .find(|bot| bot.bot_id == Uuid::from_u128(1))
+            .unwrap()
+    }
+    assert_eq!(bot(five).share, 0.5);
+    assert_eq!(bot(five).sources[0].source, Source::Routine);
+    assert_eq!(bot(week).share, 0.75);
+    assert_eq!(bot(week).sources[0].source, Source::Chat);
+    assert!((bot(week).sources[0].share - 2.0 / 3.0).abs() < 1e-9);
+}
+
+#[test]
+fn small_shares_keep_their_weight_and_sources_combine_by_kind() {
+    let runs = [
+        turn(1, "grok", at(12, 0), 1, 1),
+        turn(2, "grok", at(12, 0), 1, 10_000),
+        Turn {
+            source: Source::Routine,
+            ..turn(2, "grok", at(12, 2), 1, 100)
+        },
+        Turn {
+            source: Source::Routine,
+            ..turn(2, "grok", at(12, 4), 1, 100)
+        },
+    ];
+    let report = report(at(13, 0), &runs, &[]);
+    let week = find(&report, "grok", 10080);
+    assert!(week.bots[1].share > 0.0 && week.bots[1].share < 0.0005);
+    let sources = &week.bots[0].sources;
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[1].source, Source::Routine);
+    assert!((sources[1].share - 200.0 / 10_200.0).abs() < 1e-9);
 }

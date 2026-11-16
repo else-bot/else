@@ -3,57 +3,21 @@
 
 mod gauge;
 mod table;
-mod timeline;
 
 use super::*;
 use crate::api::{Bot, UsageReport};
 use crate::avatar::Avatar;
-use crate::controls::{Control as _, Scale, Tier, field_style, segment, segment_track};
+use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
 use crate::usage_ui::{Loaded, color, local_time};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
-use gpui_kit::component::searchable_list::SearchableListItem;
-use gpui_kit::component::select::{Select, SelectState};
-use gpui_kit::component::{FocusableExt as _, IndexPath, h_flex};
-use std::collections::BTreeMap;
+use gpui_kit::component::h_flex;
 use std::time::Duration;
 
 const REFRESH: Duration = Duration::from_secs(10);
 
-#[derive(Clone, PartialEq, Eq)]
-struct BotChoice {
-    id: Option<Uuid>,
-    name: SharedString,
-}
-
-impl SearchableListItem for BotChoice {
-    type Value = Option<Uuid>;
-    fn title(&self) -> SharedString {
-        self.name.clone()
-    }
-    fn value(&self) -> &Self::Value {
-        &self.id
-    }
-}
-
-/// The filter's choices: every bot, then each named bot by name.
-fn choices(bots: impl IntoIterator<Item = (Uuid, String)>) -> Vec<BotChoice> {
-    let bots: BTreeMap<Uuid, String> = bots.into_iter().collect();
-    std::iter::once(BotChoice {
-        id: None,
-        name: "All bots".into(),
-    })
-    .chain(bots.into_iter().map(|(id, name)| BotChoice {
-        id: Some(id),
-        name: name.into(),
-    }))
-    .collect()
-}
-
-/// Bot colours, and the filter that fades every other bot.
 struct Palette {
     avatars: HashMap<Uuid, Avatar>,
-    filter: Option<Uuid>,
 }
 
 impl Palette {
@@ -64,30 +28,15 @@ impl Palette {
     fn color(&self, bot: Uuid) -> Hsla {
         color(bot, self.avatar(bot))
     }
-
-    fn shown(&self, bot: Uuid) -> bool {
-        self.filter.is_none_or(|id| id == bot)
-    }
-
-    /// A bot's bar fill, faded when another bot is filtered.
-    fn fill(&self, bot: Uuid) -> Hsla {
-        self.color(bot)
-            .opacity(if self.shown(bot) { 1. } else { 0.18 })
-    }
-
-    /// A bot's text opacity, dimmed when another bot is filtered.
-    fn emphasis(&self, bot: Uuid) -> f32 {
-        if self.shown(bot) { 1. } else { 0.4 }
-    }
 }
 
 pub(super) struct View {
     id: Uuid,
     state: Loaded<UsageReport>,
     provider: Option<String>,
-    filter: Entity<SelectState<Vec<BotChoice>>>,
+    window_minutes: Option<u64>,
+    show_more: bool,
     expanded: Option<Uuid>,
-    _filter: Subscription,
     _poll: Task<()>,
 }
 
@@ -110,15 +59,12 @@ impl Shell {
     pub(super) fn open_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(active) = &self.active else { return };
         let client = active.client.clone();
-        let filter =
-            cx.new(|cx| SelectState::new(choices([]), Some(IndexPath::new(0)), window, cx));
-        let subscription = cx.observe(&filter, |_, _, cx| cx.notify());
         let id = Uuid::new_v4();
         let poll = cx.spawn_in(window, async move |this, cx| {
             while let Ok(Some(attempt)) = this.update(cx, |shell, _| shell.begin_usage(id)) {
                 let result = client.clone().usage().await;
-                let open = this.update_in(cx, |shell, window, cx| {
-                    shell.apply_usage(id, attempt, result, window, cx)
+                let open = this.update_in(cx, |shell, _, cx| {
+                    shell.apply_usage(id, attempt, result, cx)
                 });
                 if !matches!(open, Ok(true)) {
                     break;
@@ -130,9 +76,9 @@ impl Shell {
             id,
             state: Loaded::Loading(Uuid::nil()),
             provider: None,
-            filter,
+            window_minutes: None,
+            show_more: false,
             expanded: None,
-            _filter: subscription,
             _poll: poll,
         });
         cx.notify();
@@ -152,48 +98,31 @@ impl Shell {
         id: Uuid,
         attempt: Uuid,
         result: Result<UsageReport, crate::api::ClientError>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let known: Vec<(Uuid, String)> = self
-            .known_bots(cx)
-            .iter()
-            .map(|bot| (bot.id, bot.name.clone()))
-            .collect();
         let Some(view) = self.usage.as_mut().filter(|view| view.id == id) else {
             return false;
         };
         if !view.state.awaits(attempt) {
             return true;
         }
-        if let Ok(report) = &result {
-            if !report
+        if let Ok(report) = &result
+            && !report
                 .providers
                 .iter()
                 .any(|provider| Some(&provider.provider_id) == view.provider.as_ref())
-            {
-                // Prefer a provider the filtered bot ran on.
-                let wanted = view.filter.read(cx).selected_value().copied().flatten();
-                view.provider = wanted
-                    .and_then(|bot| {
-                        report
-                            .providers
-                            .iter()
-                            .find(|provider| provider.windows.iter().any(|w| w.bot(bot).is_some()))
-                    })
-                    .or_else(|| report.default_provider())
-                    .map(|provider| provider.provider_id.clone());
-                view.expanded = None;
-            }
-            let reported = report
-                .providers
-                .iter()
-                .flat_map(|p| &p.windows)
-                .flat_map(|w| &w.bots)
-                .map(|bot| (bot.bot_id, bot.name.clone()));
-            let choices = choices(known.into_iter().chain(reported));
-            view.filter
-                .update(cx, |filter, cx| filter.set_items(choices, window, cx));
+        {
+            view.provider = view
+                .expanded
+                .and_then(|bot| {
+                    report
+                        .providers
+                        .iter()
+                        .find(|provider| provider.windows.iter().any(|w| w.bot(bot).is_some()))
+                })
+                .or_else(|| report.default_provider())
+                .map(|provider| provider.provider_id.clone());
+            view.window_minutes = None;
         }
         view.state
             .settle(attempt, result.map_err(|error| error.to_string()));
@@ -214,33 +143,19 @@ impl Shell {
         };
         cx.spawn_in(window, async move |this, cx| {
             let result = client.usage().await;
-            this.update_in(cx, |shell, window, cx| {
-                shell.apply_usage(id, attempt, result, window, cx);
+            this.update_in(cx, |shell, _, cx| {
+                shell.apply_usage(id, attempt, result, cx);
             })
             .ok();
         })
         .detach();
     }
 
-    pub(super) fn filter_usage(
-        &mut self,
-        bot: Option<Uuid>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let named = bot.and_then(|bot| {
-            self.known_bots(cx)
-                .iter()
-                .find(|entry| entry.id == bot)
-                .map(|entry| (entry.id, entry.name.clone()))
-        });
+    pub(super) fn focus_usage(&mut self, bot: Option<Uuid>, cx: &mut Context<Self>) {
         if let Some(view) = &mut self.usage {
-            view.filter.update(cx, |filter, cx| {
-                if let Some(named) = named {
-                    filter.set_items(choices([named]), window, cx);
-                }
-                filter.set_selected_value(&bot, window, cx);
-            });
+            view.expanded = bot;
+            view.show_more = bot.is_some();
+            cx.notify();
         }
     }
 
@@ -325,26 +240,13 @@ impl Shell {
                     if let Some(view) = &mut shell.usage {
                         view.provider = Some(id.clone());
                         view.expanded = None;
+                        view.window_minutes = None;
+                        view.show_more = false;
                         cx.notify();
                     }
                 }))
             }));
-        body = body.child(
-            h_flex()
-                .gap_3()
-                .justify_between()
-                .child(provider_control)
-                .child(
-                    div().w(px(200.)).child(
-                        field_style(Select::new(&view.filter).appearance(false), cx)
-                            .border_1()
-                            .rounded_md()
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .accessibility_label("Filter usage by bot"),
-                    ),
-                ),
-        );
+        body = body.child(provider_control);
         let Some(provider) = report
             .providers
             .iter()
@@ -359,44 +261,72 @@ impl Shell {
                 .iter()
                 .map(|bot| (bot.id, bot.avatar))
                 .collect(),
-            filter: view.filter.read(cx).selected_value().copied().flatten(),
         };
-        let reports_limits = provider
+        let selected = provider.selected_window(view.window_minutes);
+        let reported: Vec<_> = provider
             .windows
             .iter()
-            .any(|window| window.attribution.used().is_some());
-        body = body.child(
-            h_flex().w_full().items_stretch().gap_3().children(
-                provider
-                    .windows
-                    .iter()
-                    .map(|window| gauge::gauge(&name, reports_limits, window, &palette, cx)),
-            ),
-        );
-        if let Some(window) = provider
-            .windows
-            .first()
-            .filter(|window| !window.buckets.is_empty())
-        {
-            body = body.child(timeline::timeline(window, &palette, cx));
+            .filter(|window| window.attribution.used().is_some())
+            .collect();
+        if reported.is_empty() {
+            body = body.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("{name} doesn't report subscription limits.")),
+            );
+        } else {
+            body =
+                body.child(h_flex().w_full().items_stretch().gap_3().children(
+                    reported.iter().map(|window| {
+                        let minutes = window.minutes;
+                        let on = selected.is_some_and(|selected| selected.minutes == minutes);
+                        gauge::gauge(window, cx)
+                            .id(SharedString::from(format!("usage-limit-{minutes}")))
+                            .cursor_pointer()
+                            .role(Role::RadioButton)
+                            .aria_label(format!("Show bots {}", window.period()))
+                            .aria_toggled(if on { Toggled::True } else { Toggled::False })
+                            .tab_index(0)
+                            .border_1()
+                            .border_color(if on {
+                                theme.primary
+                            } else {
+                                gpui::transparent_black()
+                            })
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                if let Some(view) = &mut shell.usage {
+                                    view.window_minutes = Some(minutes);
+                                    view.expanded = None;
+                                    view.show_more = false;
+                                    cx.notify();
+                                }
+                            }))
+                    }),
+                ))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!(
+                            "Exact, from {name}. Includes your own {name} use outside else.bot."
+                        )),
+                );
         }
-        let source_note = format!(
-            "Figures come from {name} with each bot turn; usage outside else.bot updates on the next turn."
-        );
-        let updated = format!("Report updated {}", local_time(report.generated_at));
-        body.child(self.usage_table(provider, &palette, view.expanded, cx))
-            .child(
+        if let Some(window) = selected {
+            body = body.child(self.usage_table(window, &name, &palette, view, cx));
+        }
+        let updated_at = selected
+            .and_then(|window| window.attribution.observed_at())
+            .unwrap_or(report.generated_at);
+        if chrono::Utc::now() - updated_at > chrono::Duration::minutes(2) {
+            body = body.child(
                 div()
                     .text_xs()
-                    .text_color(theme.muted_foreground.opacity(0.8))
-                    .child(source_note),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground.opacity(0.65))
-                    .child(updated),
-            )
-            .into_any_element()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("Updated {}", local_time(updated_at))),
+            );
+        }
+        body.into_any_element()
     }
 }

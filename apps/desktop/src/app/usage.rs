@@ -3,11 +3,11 @@
 
 use super::ElseApp;
 use super::settings::{item_name, meta, muted, note, section, section_frame};
-use crate::api::{Attribution, Bot, ProviderUsage, UsageReport, WindowName};
+use crate::api::{Bot, FIVE_HOURS, ProviderUsage, UsageReport};
 use crate::controls::{Control as _, Scale, Tier};
-use crate::usage_ui::{Loaded, bar, color, percent, resets};
+use crate::usage_ui::{Loaded, bar, color, percent, reset_in, share, source_summary};
 use gpui_kit::component::button::Button;
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -80,7 +80,6 @@ impl ElseApp {
             Loaded::Ready { value, .. } if value.is_empty() => return None,
             Loaded::Ready { value, .. } => value,
         };
-        let theme = cx.theme().clone();
         let mut body = section_frame(cx).gap_3().child(
             h_flex()
                 .justify_between()
@@ -102,82 +101,50 @@ impl ElseApp {
         for provider in providers {
             let name = self.provider_label(&provider.provider_id);
             let mut group = v_flex().gap_2().child(item_name(name.clone()));
-            for window in &provider.windows {
-                let entry = window.bot(bot.id);
-                let amount = entry.map(|bot| bot.percent).unwrap_or(0.);
-                let attribution = window.attribution;
-                let capped = attribution.is_priced();
-                let label = window.name(WindowName::Current);
-                group = group
-                    .child(
-                        h_flex()
-                            .justify_between()
-                            .gap_2()
-                            .text_xs()
-                            .child(label)
-                            .child(if capped {
-                                format!("{} of cap", percent(amount))
-                            } else {
-                                percent(amount)
-                            }),
-                    )
-                    .child(bar(
-                        [
-                            (amount, color(bot.id, Some(bot.avatar))),
-                            (
-                                (match attribution {
-                                    Attribution::Priced { used, .. } => used,
-                                    _ => 100.,
-                                } - amount)
-                                    .max(0.),
-                                theme.muted_foreground.opacity(0.25),
-                            ),
-                        ],
-                        capped,
-                        cx,
-                    ));
-                let caption = match attribution {
-                    Attribution::Priced {
-                        used, resets_at, ..
-                    } => format!(
-                        "{} of the {} used so far · {}",
-                        percent(if used > 0. { amount / used * 100. } else { 0. }),
-                        percent(used),
-                        resets(Some(resets_at))
-                    ),
-                    Attribution::Unattributed { used, .. } => format!(
-                        "share of else.bot's {} use · {} of the cap used, not attributed yet",
-                        name,
-                        percent(used)
-                    ),
-                    Attribution::Unreported => {
-                        format!("share of else.bot's {} use", name)
-                    }
-                };
-                group = group.child(meta(caption, cx));
+            let Some(window) = provider.primary_window() else {
+                continue;
+            };
+            let entry = window.bot(bot.id);
+            let amount = entry.map(|entry| entry.share).unwrap_or(0.);
+            group = group
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(format!(
+                            "{} of your bots' {name} use {}",
+                            share(amount),
+                            window.period()
+                        )),
+                )
+                .child(bar([(amount * 100., color(bot.id, Some(bot.avatar)))], cx));
+            if let Some(entry) = entry {
+                group = group.child(meta(source_summary(entry, true), cx));
             }
-            if let Some(entry) = provider
-                .windows
-                .iter()
-                .find_map(|window| window.bot(bot.id))
+            if let (Some(used), Some(resets_at)) =
+                (window.attribution.used(), window.attribution.resets_at())
             {
-                let mut sources: Vec<(crate::api::UsageSourceKind, f64)> = Vec::new();
-                for source in &entry.sources {
-                    if let Some((_, share)) =
-                        sources.iter_mut().find(|(kind, _)| *kind == source.source)
-                    {
-                        *share += source.share;
-                    } else {
-                        sources.push((source.source, source.share));
-                    }
-                }
-                sources.sort_by(|a, b| b.1.total_cmp(&a.1));
                 group = group.child(meta(
-                    sources
-                        .iter()
-                        .map(|(kind, share)| format!("{} {}", kind.label(), percent(share * 100.)))
-                        .collect::<Vec<_>>()
-                        .join(" · "),
+                    format!(
+                        "{name} {}: {} used · resets {}",
+                        window.title().to_lowercase(),
+                        percent(used),
+                        reset_in(resets_at, chrono::Utc::now())
+                    ),
+                    cx,
+                ));
+            }
+            if window.minutes != FIVE_HOURS
+                && let Some(five) = provider
+                    .windows
+                    .iter()
+                    .find(|window| window.minutes == FIVE_HOURS)
+            {
+                group = group.child(meta(
+                    format!(
+                        "Last 5 hours: {} of your bots' {name} use",
+                        share(five.bot(bot.id).map(|entry| entry.share).unwrap_or(0.))
+                    ),
                     cx,
                 ));
             }
@@ -194,7 +161,6 @@ fn own_usage(report: UsageReport, bot: Uuid) -> Vec<ProviderUsage> {
         .filter_map(|mut provider| {
             for window in &mut provider.windows {
                 window.bots.retain(|entry| entry.bot_id == bot);
-                window.buckets.clear();
             }
             provider
                 .windows
@@ -203,4 +169,36 @@ fn own_usage(report: UsageReport, bot: Uuid) -> Vec<ProviderUsage> {
                 .then_some(provider)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::own_usage;
+    use crate::api::{FIVE_HOURS, UsageReport, UsageSourceKind, WEEK};
+    use crate::usage_ui::sources;
+
+    #[test]
+    fn bot_usage_keeps_shares_and_sources_in_their_own_period() {
+        let report: UsageReport =
+            serde_json::from_str(include_str!("../api/usage_fixture.json")).unwrap();
+        let bot = report.providers[0].windows[0].bots[0].bot_id;
+        let own = own_usage(report, bot);
+        assert_eq!(own.len(), 1);
+        let provider = &own[0];
+        let weekly = provider.primary_window().unwrap();
+        assert_eq!(weekly.minutes, WEEK);
+        assert_eq!(weekly.bot(bot).unwrap().share, 1.0);
+        assert_eq!(
+            sources(weekly.bot(bot).unwrap()),
+            [(UsageSourceKind::Chat, 1.0)]
+        );
+        let five = provider.selected_window(Some(FIVE_HOURS)).unwrap();
+        assert_eq!(five.bot(bot).unwrap().share, 0.51);
+        assert_eq!(
+            sources(five.bot(bot).unwrap())[0],
+            (UsageSourceKind::Routine, 0.88)
+        );
+        assert_eq!(five.attribution.used(), Some(62.0));
+        assert!(provider.windows.iter().all(|window| window.bots.len() == 1));
+    }
 }

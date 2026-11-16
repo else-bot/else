@@ -31,16 +31,6 @@ pub async fn turns(db: &SqlitePool, now: DateTime<Utc>) -> sqlx::Result<Vec<Turn
                     WHEN c.kind = 'task' THEN 'delegated'
                     ELSE 'chat'
                 END AS source,
-                CASE
-                    WHEN w.id IS NOT NULL THEN w.name
-                    WHEN rr.id IS NOT NULL THEN r.name
-                    WHEN c.kind = 'task' THEN (
-                        SELECT parent.name FROM delegations d
-                        JOIN bots parent ON parent.id = d.parent_bot_id
-                        WHERE d.conversation_id = t.conversation_id
-                        LIMIT 1)
-                END AS label,
-                CASE WHEN w.id IS NULL THEN r.id END AS routine_id,
                 coalesce(t.started_at, t.created_at) AS started_at, t.finished_at,
                 coalesce(t.input_tokens, 0) AS input_tokens,
                 coalesce(t.cached_input_tokens, 0) AS cached_input_tokens,
@@ -51,7 +41,6 @@ pub async fn turns(db: &SqlitePool, now: DateTime<Utc>) -> sqlx::Result<Vec<Turn
          JOIN conversations c ON c.id = t.conversation_id
          LEFT JOIN webhook_runs w ON w.turn_id = t.id
          LEFT JOIN routine_runs rr ON rr.turn_id = t.id
-         LEFT JOIN routines r ON r.id = rr.routine_id
          WHERE (t.input_tokens IS NOT NULL OR t.output_tokens IS NOT NULL)
            AND coalesce(t.started_at, t.created_at) >= ?1",
     )
