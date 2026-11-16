@@ -33,3 +33,35 @@ fn trigger_card_titles_prefer_the_chat_name_then_id_then_any_chat() {
     trigger.destination = None;
     assert_eq!(trigger.title(), "Any chat");
 }
+
+#[test]
+fn a_pairing_view_from_the_api_shows_its_code_until_linked() {
+    use crate::api::socials::{Pairing, PairingView, Provider};
+    let code: PairingView = serde_json::from_value(serde_json::json!({
+        "revision": 3, "state": "code", "code": "2@AbC,xyz==,def", "expires_in": 20
+    }))
+    .unwrap();
+    assert_eq!(code.revision, 3);
+    assert!(!code.pairing.finished());
+    let Pairing::Code { code, .. } = code.pairing else {
+        panic!("a code");
+    };
+    assert!(
+        super::qr_image(&code).is_some(),
+        "the code renders as a QR image"
+    );
+    let linked: PairingView = serde_json::from_value(serde_json::json!({
+        "revision": 5, "state": "paired", "connection": {
+            "id": Uuid::new_v4(), "provider": "whatsapp", "remote_id": "33612345678",
+            "display_name": "Ada", "username": "+33612345678", "state": "active",
+            "health": "connecting", "generation": 1, "instructions": ""
+        }
+    }))
+    .unwrap();
+    assert!(linked.pairing.finished());
+    assert!(matches!(
+        linked.pairing,
+        Pairing::Paired { connection } if connection.provider == Provider::WhatsApp
+    ));
+    assert!(Provider::WhatsApp.pairs() && !Provider::Telegram.pairs());
+}

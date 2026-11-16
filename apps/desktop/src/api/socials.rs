@@ -13,6 +13,8 @@ use super::{Client, ClientError};
 pub enum Provider {
     Telegram,
     Discord,
+    #[serde(rename = "whatsapp")]
+    WhatsApp,
 }
 
 impl Provider {
@@ -20,6 +22,27 @@ impl Provider {
         match self {
             Self::Telegram => "Telegram",
             Self::Discord => "Discord",
+            Self::WhatsApp => "WhatsApp",
+        }
+    }
+
+    pub fn portal(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Telegram => Some(("Open BotFather", "https://t.me/BotFather")),
+            Self::Discord => Some((
+                "Open Discord Developer Portal",
+                "https://discord.com/developers/applications",
+            )),
+            Self::WhatsApp => None,
+        }
+    }
+
+    /// Whether the owner links this provider by scanning a code instead of
+    /// pasting a bot token.
+    pub fn pairs(self) -> bool {
+        match self {
+            Self::Telegram | Self::Discord => false,
+            Self::WhatsApp => true,
         }
     }
 
@@ -30,6 +53,9 @@ impl Provider {
             }
             Self::Discord => {
                 "Create an application in the Discord Developer Portal and copy its bot token. This token lets the API act as that bot, within its server and channel permissions. It does not connect your personal account."
+            }
+            Self::WhatsApp => {
+                "This links your personal WhatsApp account as a device, like WhatsApp Web. Bots read your chats and groups, and anything they send goes out as you, only after you approve it. WhatsApp does not allow unofficial clients and may ban accounts that act like bots."
             }
         }
     }
@@ -42,6 +68,52 @@ pub struct SocialSetup {
     pub reason: String,
     pub status: String,
     pub connection_id: Option<Uuid>,
+}
+
+/// Where a device pairing links: a bot's setup card, or a connection the
+/// account signed out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairingTarget {
+    Setup(Uuid),
+    Connection(Uuid),
+}
+
+impl PairingTarget {
+    fn path(self) -> String {
+        match self {
+            Self::Setup(id) => format!("/v1/connectors/socials/setups/{id}/pairing"),
+            Self::Connection(id) => format!("/v1/connectors/socials/connections/{id}/pairing"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Pairing {
+    Starting,
+    Code { code: String, expires_in: u64 },
+    Paired { connection: Connection },
+    Expired,
+    Failed { message: String },
+    Cancelled,
+}
+
+impl Pairing {
+    pub fn finished(&self) -> bool {
+        !matches!(self, Self::Starting | Self::Code { .. })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PairingView {
+    pub revision: u64,
+    #[serde(flatten)]
+    pub pairing: Pairing,
+}
+
+#[derive(Deserialize)]
+struct PairingEnvelope {
+    pairing: PairingView,
 }
 
 impl SocialSetup {
@@ -250,11 +322,51 @@ impl Client {
         self: Arc<Self>,
         id: Uuid,
         connection: Uuid,
+        note: Option<String>,
     ) -> Result<(), ClientError> {
         self.call::<serde_json::Value>(
             Method::POST,
             format!("/v1/connectors/socials/setups/{id}/complete"),
-            Some(json!({"connection_id": connection})),
+            Some(match note {
+                Some(note) => json!({"connection_id": connection, "note": note}),
+                None => json!({"connection_id": connection}),
+            }),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Start pairing a device, or rejoin the pairing already running.
+    pub async fn start_social_pairing(
+        self: Arc<Self>,
+        target: PairingTarget,
+    ) -> Result<PairingView, ClientError> {
+        self.call::<PairingEnvelope>(Method::POST, target.path(), None)
+            .await
+            .map(|(_, body)| body.pairing)
+    }
+
+    /// The pairing once it changes past `after`, or as it is after the API's
+    /// wait runs out.
+    pub async fn social_pairing(
+        self: Arc<Self>,
+        target: PairingTarget,
+        after: u64,
+    ) -> Result<PairingView, ClientError> {
+        self.call::<PairingEnvelope>(
+            Method::GET,
+            format!("{}?after={after}", target.path()),
+            None,
+        )
+        .await
+        .map(|(_, body)| body.pairing)
+    }
+
+    pub async fn stop_social_pairing(self: Arc<Self>, connection: Uuid) -> Result<(), ClientError> {
+        self.call::<serde_json::Value>(
+            Method::DELETE,
+            PairingTarget::Connection(connection).path(),
+            None,
         )
         .await
         .map(|_| ())
@@ -317,7 +429,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn completing_setup_sends_only_the_connection_id() {
+    async fn completing_setup_sends_the_connection_and_the_owners_words() {
         let setup = Uuid::new_v4();
         let connection = Uuid::new_v4();
         let (origin, request) = crate::api::tests::serve_once(response(json!({"setup": {
@@ -329,7 +441,11 @@ mod tests {
         let client =
             Arc::new(Client::new(origin, &owner, tokio::runtime::Handle::current()).unwrap());
         client
-            .complete_social_setup(setup, connection)
+            .complete_social_setup(
+                setup,
+                connection,
+                Some("Only read the Family group.".into()),
+            )
             .await
             .unwrap();
         let request = request.await.unwrap();
@@ -339,7 +455,7 @@ mod tests {
         )));
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(body).unwrap(),
-            json!({"connection_id": connection})
+            json!({"connection_id": connection, "note": "Only read the Family group."})
         );
     }
 

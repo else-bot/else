@@ -285,6 +285,7 @@ pub async fn listen(
                 mentioned: m.mentions.iter().any(|u| u.id.to_string() == c.remote_id),
                 direct: m.guild_id.is_none(),
                 from_bot: m.author.bot,
+                replay: false,
             };
             let (ack, stored) = tokio::sync::oneshot::channel();
             tokio::select! {biased;_=stop.cancelled()=>return Ok(()),r=events.send(Envelope{incoming,next_offset:0,ack})=>r.map_err(|_|Error::Platform)?};

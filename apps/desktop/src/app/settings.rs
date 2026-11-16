@@ -2423,6 +2423,7 @@ fn trigger_cards(conversation: &Conversation) -> Vec<TriggerCard> {
             icon: match trigger.provider {
                 Provider::Telegram => Icon::new(gpui_kit::assets::IconName::Send),
                 Provider::Discord => Icon::empty().path(crate::DISCORD_ICON),
+                Provider::WhatsApp => Icon::new(gpui_kit::assets::IconName::MessageSquare),
             },
             title: trigger.title().to_owned(),
             delete_name: match trigger.destination {

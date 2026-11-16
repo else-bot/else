@@ -1,4 +1,5 @@
 pub mod delivery;
+pub mod pairing;
 pub mod providers;
 pub mod store;
 pub mod types;
@@ -91,6 +92,8 @@ struct Worker {
 }
 /// How long a listener must stay up before its connection counts as connected.
 const LISTEN_SETTLE: Duration = Duration::from_secs(3);
+/// How long a cancelled listener may take to shut its client down.
+const LISTEN_SHUTDOWN: Duration = Duration::from_secs(10);
 
 pub struct Manager {
     pub db: SqlitePool,
@@ -98,6 +101,7 @@ pub struct Manager {
     transport: Arc<dyn providers::Transport>,
     scheduler: Option<Arc<crate::scheduler::Scheduler>>,
     workers: Actor<HashMap<Uuid, Worker>>,
+    pairings: Actor<HashMap<pairing::Purpose, pairing::Live>>,
 }
 impl Manager {
     pub fn new(db: SqlitePool, key: Arc<SecretKey>) -> Self {
@@ -114,6 +118,7 @@ impl Manager {
             transport,
             scheduler: None,
             workers: Actor::default(),
+            pairings: Actor::default(),
         }
     }
     pub fn with_scheduler(mut self, scheduler: Arc<crate::scheduler::Scheduler>) -> Self {
@@ -193,7 +198,8 @@ impl Manager {
     /// The chat ID `destination` names. Tools resolve a public `@username`
     /// or share link when the bot first names a chat, so the owner approves,
     /// and triggers and receipts record, the ID incoming messages carry even
-    /// if the username later moves. Only work for the owner may look one up.
+    /// if the username later moves. A WhatsApp phone number becomes its chat
+    /// ID. Only work for the owner may look a username up.
     pub async fn resolve(
         self: &Arc<Self>,
         id: Uuid,
@@ -201,10 +207,11 @@ impl Manager {
         turn: Uuid,
         destination: &str,
     ) -> Result<String, Error> {
-        let Some(username) = public_username(destination)? else {
-            return Ok(destination.to_owned());
-        };
         let c = store::connection(&self.db, id).await?;
+        let username = match providers::Named::parse(c.provider, destination)? {
+            providers::Named::Id(id) => return Ok(id),
+            providers::Named::Username(username) => username,
+        };
         let access = store::authorize(
             &mut *self.db.acquire().await?,
             &c,
@@ -340,15 +347,16 @@ impl Manager {
             changed.borrow_and_update();
             let loaded = async {
                 let c = store::connection(&self.db, id).await?;
-                let token = store::credential(&self.db, &self.key, &c).await?;
-                Ok::<_, Error>((c, token))
+                let credential = store::credential(&self.db, &self.key, &c).await?;
+                let session = providers::Session::open(&self.db, &c, credential).await?;
+                Ok::<_, Error>((c, session))
             }
             .await;
-            let (c, token) = match loaded {
+            let (c, session) = match loaded {
                 Ok(pair) => pair,
                 Err(_) => break,
             };
-            let session = Arc::new(providers::Session::new(c.provider, token));
+            let session = Arc::new(session);
             let listener_session = session.clone();
             let inbox_stop = stop.child_token();
             let running = inbox_stop.clone();
@@ -493,7 +501,7 @@ impl Manager {
                     bot: r.bot,
                     turn: r.turn,
                     id,
-                    destination: r.operation.destination().ok_or(Error::Forbidden)?,
+                    destination: r.operation.destination(),
                     payload: &r.operation.payload(),
                     send: r.operation.sends(),
                 },
@@ -514,7 +522,7 @@ impl Manager {
                 destination,
                 before,
                 limit,
-            }) if c.provider == Provider::Telegram => {
+            }) if c.provider.local_history() => {
                 store::local_messages(&self.db, c.id, destination, before.as_deref(), None, *limit)
                     .await
             }
@@ -528,7 +536,7 @@ impl Manager {
             Operation::Command(Command::Message {
                 destination,
                 message_id,
-            }) if c.provider == Provider::Telegram => {
+            }) if c.provider.local_history() => {
                 let row:Option<(String,String)>=sqlx::query_as("SELECT author_id,body FROM social_messages WHERE connection_id=?1 AND destination=?2 AND message_id=?3").bind(c.id).bind(destination).bind(message_id).fetch_optional(&self.db).await?;
                 row.map(|(author, body)| json!({"id":message_id,"author_id":author,"body":body}))
                     .ok_or(Error::NotFound)
@@ -607,22 +615,14 @@ impl Manager {
             if stop.is_cancelled() {
                 return;
             }
-            let health = match &result {
-                Ok(()) => "connected",
-                Err(Error::ReceiverConflict) => "receiver_conflict",
-                Err(_) => "reconnecting",
-            };
+            let health = Health::after(&result);
             if let Err(error) = &result {
-                tracing::warn!(connection = %c.id, provider = c.provider.name(), %error, "social inbox stopped; retrying");
+                tracing::warn!(connection = %c.id, provider = c.provider.name(), %error, "social inbox stopped");
             }
-            let _ = sqlx::query(
-                "UPDATE social_connections SET health=?3 WHERE id=?1 AND generation=?2",
-            )
-            .bind(c.id)
-            .bind(c.generation)
-            .bind(health)
-            .execute(&self.db)
-            .await;
+            let _ = store::set_health(&self.db, &c, health).await;
+            if !health.retries() {
+                return;
+            }
             tokio::select! {_=stop.cancelled()=>return,_=tokio::time::sleep(Duration::from_secs(10))=>{}}
         }
     }
@@ -638,41 +638,60 @@ impl Manager {
                 .fetch_one(&self.db)
                 .await?;
         let (tx, mut rx) = mpsc::channel::<Envelope>(16);
-        let listen = self.transport.listen(c, session, offset, tx, stop.clone());
+        let listening = stop.child_token();
+        let listen = self
+            .transport
+            .listen(c, session, offset, tx, listening.clone());
         tokio::pin!(listen);
         // A refused poll fails at once; one that stays open or delivers a
         // message is connected.
         let settled = tokio::time::sleep(LISTEN_SETTLE);
         tokio::pin!(settled);
         let mut connected = false;
-        loop {
+        let result = loop {
             let event = tokio::select! {
                 biased;
-                _ = stop.cancelled() => return Ok(()),
+                _ = stop.cancelled() => break Ok(()),
                 r = &mut listen => return r,
                 () = &mut settled, if !connected => None,
                 event = rx.recv() => match event {
                     Some(event) => Some(event),
-                    None => return Ok(()),
+                    None => break Ok(()),
                 },
             };
-            if !connected {
-                connected = true;
-                sqlx::query(
-                    "UPDATE social_connections SET health='connected' WHERE id=?1 AND generation=?2",
-                )
-                .bind(c.id)
-                .bind(c.generation)
-                .execute(&self.db)
-                .await?;
+            if let Err(error) = self.received(c, &mut connected, event).await {
+                break Err(error);
             }
-            if let Some(event) = event {
-                store::record(&self.db, c, &event.incoming, event.next_offset).await?;
-                let _ = event.ack.send(());
-            }
+        };
+        // The listener shuts its client down itself; dropping it mid-flight
+        // would abort the client without flushing its state.
+        listening.cancel();
+        drop(rx);
+        if tokio::time::timeout(LISTEN_SHUTDOWN, listen).await.is_err() {
+            tracing::warn!(connection = %c.id, "a social listener did not stop in time");
         }
+        result
+    }
+    async fn received(
+        &self,
+        c: &Connection,
+        connected: &mut bool,
+        event: Option<Envelope>,
+    ) -> Result<(), Error> {
+        if !*connected {
+            *connected = true;
+            store::set_health(&self.db, c, Health::Connected).await?;
+        }
+        if let Some(event) = event {
+            store::record(&self.db, c, &event.incoming, event.next_offset).await?;
+            let _ = event.ack.send(());
+        }
+        Ok(())
     }
     pub async fn run(self: Arc<Self>, stop: CancellationToken) {
+        if let Err(error) = store::sweep_devices(&self.db).await {
+            tracing::warn!(%error, "could not delete abandoned device stores");
+        }
         if let Ok(list) = store::connections(&self.db).await {
             for c in list {
                 let _ = self.worker(c.id).await;
@@ -686,6 +705,9 @@ impl Manager {
         for w in &workers {
             w.stop.cancel()
         }
+        self.pairings
+            .call(|pairings| pairings.values().for_each(|live| live.stop.cancel()))
+            .await;
         futures_util::future::join_all(workers.into_iter().map(|mut w| async move {
             while !*w.done.borrow() {
                 if w.done.changed().await.is_err() {

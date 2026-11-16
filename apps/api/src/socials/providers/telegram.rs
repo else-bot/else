@@ -244,6 +244,7 @@ pub async fn listen(
                 mentioned,
                 direct,
                 from_bot: author.is_some_and(|a| a.is_bot),
+                replay: false,
             };
             let (ack, stored) = tokio::sync::oneshot::channel();
             tokio::select! {biased;_ = stop.cancelled()=>return Ok(()),r=events.send(Envelope{incoming,next_offset:next,ack})=>r.map_err(|_|Error::Platform)?};

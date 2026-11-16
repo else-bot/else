@@ -1,7 +1,7 @@
 use super::*;
 use crate::controls::{Control as _, Scale, Tier, text_field};
 use gpui_kit::component::button::Button;
-use gpui_kit::component::input::Input;
+use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 
@@ -35,6 +35,10 @@ impl SocialsView {
         let theme = cx.theme().clone();
         let provider = form.provider;
         let replacing = form.replacement.is_some();
+        let token = match &form.entry {
+            Entry::Token(token) => token,
+            Entry::Pairing(card) => return self.render_pairing(provider, replacing, card, cx),
+        };
         let mut card = v_flex().w_full().gap_3().p_4().rounded(theme.radius_lg).bg(theme.secondary)
             .child(h_flex().justify_between().items_center()
                 .child(div().font_semibold().child(format!("{} · {}", provider.label(), if replacing { "Replace token" } else { "Connect" })))
@@ -42,12 +46,11 @@ impl SocialsView {
                     .on_click(cx.listener(|view, _, window, cx| view.cancel(window, cx)))))
             .child(div().text_sm().child(provider.token_help()))
             .child(div().text_xs().text_color(theme.muted_foreground).child("The API stores the token encrypted and uses it to call the platform. The assistant never sees the token, and it stays out of chat history."))
-            .child(Button::new("social-token-help").control(Tier::Ghost, Scale::Standard, false, cx).label(if provider == Provider::Telegram { "Open BotFather" } else { "Open Discord Developer Portal" })
-                .on_click(move |_, _, cx| cx.open_url(match provider {
-                    Provider::Telegram => "https://t.me/BotFather",
-                    Provider::Discord => "https://discord.com/developers/applications",
-                })))
-            .child(text_field(Input::new(&form.token), cx).aria_label(format!("{} bot token", provider.label())).disabled(self.busy || !self.available))
+            .children(provider.portal().map(|(label, url)| {
+                Button::new("social-token-help").control(Tier::Ghost, Scale::Standard, false, cx).label(label)
+                    .on_click(move |_, _, cx| cx.open_url(url))
+            }))
+            .child(text_field(Input::new(token), cx).aria_label(format!("{} bot token", provider.label())).disabled(self.busy || !self.available))
             .child(h_flex().justify_end().child(Button::new("social-connect").control(Tier::Primary, Scale::Standard, self.busy || !self.available, cx).label(if replacing { "Validate replacement token" } else { "Validate and connect" })
                 .on_click(cx.listener(|view, _, window, cx| view.connect(window, cx)))));
         if self.setup.is_some() && !replacing {
@@ -76,13 +79,147 @@ impl SocialsView {
                             )
                             .label(connection.display_name.clone())
                             .on_click(cx.listener(move |view, _, window, cx| {
-                                view.complete(connection.clone(), window, cx)
+                                view.complete(connection.clone(), None, window, cx)
                             })),
                     );
                 }
             }
         }
         card.into_any_element()
+    }
+
+    fn render_pairing(
+        &self,
+        provider: Provider,
+        replacing: bool,
+        card: &PairingCard,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let blocked = self.busy || !self.available;
+        let pairing = card.view.as_ref().map(|v| &v.pairing);
+        let status: AnyElement = match pairing {
+            None | Some(Pairing::Starting) => div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("Preparing a code…")
+                .into_any_element(),
+            Some(Pairing::Code { .. }) => v_flex()
+                .gap_2()
+                .items_center()
+                .children(card.qr.as_ref().map(|(_, image)| {
+                    img(image.clone())
+                        .size(px(240.))
+                        .rounded(theme.radius)
+                        .bg(gpui_kit::white())
+                }))
+                .child(div().text_sm().child(
+                    "On your phone, open WhatsApp → Settings → Linked devices → Link a device, and scan this code. It refreshes on its own.",
+                ))
+                .into_any_element(),
+            Some(Pairing::Paired { connection }) => div()
+                .text_sm()
+                .child(format!(
+                    "Linked as {}{}.",
+                    connection.display_name,
+                    connection
+                        .username
+                        .as_ref()
+                        .map(|number| format!(" ({number})"))
+                        .unwrap_or_default()
+                ))
+                .into_any_element(),
+            Some(finished) => v_flex()
+                .gap_2()
+                .child(div().text_sm().child(match finished {
+                    Pairing::Expired => "No code was scanned in time.".to_owned(),
+                    Pairing::Failed { message } => message.clone(),
+                    _ => "Pairing stopped.".to_owned(),
+                }))
+                .child(
+                    Button::new("social-pairing-restart")
+                        .control(Tier::Secondary, Scale::Standard, blocked, cx)
+                        .label("Show a new code")
+                        .on_click(cx.listener(|view, _, window, cx| view.restart_pairing(window, cx))),
+                )
+                .into_any_element(),
+        };
+        let paired = matches!(pairing, Some(Pairing::Paired { .. }));
+        v_flex()
+            .w_full()
+            .gap_3()
+            .p_4()
+            .rounded(theme.radius_lg)
+            .bg(theme.secondary)
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(div().font_semibold().child(format!(
+                        "Your personal {} · {}",
+                        provider.label(),
+                        if replacing { "Pair again" } else { "Link" }
+                    )))
+                    .when(!paired, |row| {
+                        row.child(
+                            Button::new("social-cancel")
+                                .control(Tier::Ghost, Scale::Compact, blocked, cx)
+                                .label("Cancel")
+                                .on_click(
+                                    cx.listener(|view, _, window, cx| view.cancel(window, cx)),
+                                ),
+                        )
+                    }),
+            )
+            .child(div().text_sm().child(provider.token_help()))
+            .child(
+                div().text_xs().text_color(theme.muted_foreground).child(
+                    "The API keeps the device keys encrypted. The assistant never sees them.",
+                ),
+            )
+            .child(status)
+            .when(self.setup.is_some() && !paired, |mut c| {
+                for connection in self.connections.iter().filter(|c| c.provider == provider) {
+                    let chosen = connection.clone();
+                    c = c.child(
+                        Button::new(SharedString::from(format!(
+                            "social-existing-{}",
+                            connection.id
+                        )))
+                        .control(Tier::Secondary, Scale::Standard, blocked, cx)
+                        .label(format!("Use {} already linked", connection.display_name))
+                        .on_click(cx.listener(
+                            move |view, _, window, cx| {
+                                let note = view
+                                    .form
+                                    .as_mut()
+                                    .and_then(Form::pairing_card)
+                                    .and_then(|card| card.note(cx));
+                                view.complete(chosen.clone(), note, window, cx)
+                            },
+                        )),
+                    );
+                }
+                c
+            })
+            .when(self.setup.is_some(), |c| {
+                c.child(
+                    Textarea::new(&card.note)
+                        .aria_label("What the bot should do once connected")
+                        .disabled(blocked),
+                )
+                .child(
+                    h_flex().justify_end().child(
+                        Button::new("social-pairing-done")
+                            .control(Tier::Primary, Scale::Standard, blocked || !paired, cx)
+                            .label("Done")
+                            .on_click(
+                                cx.listener(|view, _, window, cx| view.finish_pairing(window, cx)),
+                            ),
+                    ),
+                )
+            })
+            .into_any_element()
     }
 
     fn render_connection(&self, connection: &Connection, cx: &mut Context<Self>) -> AnyElement {
@@ -139,7 +276,11 @@ impl SocialsView {
                                     self.busy || !self.available,
                                     cx,
                                 )
-                                .label("Replace token")
+                                .label(if replacement.provider.pairs() {
+                                    "Pair again"
+                                } else {
+                                    "Replace token"
+                                })
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     view.replace(replacement.clone(), window, cx)
                                 })),
@@ -167,6 +308,15 @@ impl SocialsView {
             notes = notes.child(div().text_sm().text_color(theme.danger).child(
                 "Another webhook, app, or server is receiving this bot's messages. Telegram delivers them to only one receiver. Remove the bot's webhook or stop the other app, then refresh.",
             ));
+        }
+        if connection.health == "signed_out" {
+            notes_shown = true;
+            notes = notes.child(
+                div()
+                    .text_sm()
+                    .text_color(theme.danger)
+                    .child("WhatsApp signed this device out. Pair again to keep using it."),
+            );
         }
         if self.confirm_disconnect == Some(id) {
             notes_shown = true;
@@ -219,6 +369,9 @@ fn provider_icon(provider: Provider) -> gpui_kit::component::Icon {
     match provider {
         Provider::Telegram => gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Send),
         Provider::Discord => gpui_kit::component::Icon::empty().path(crate::DISCORD_ICON),
+        Provider::WhatsApp => {
+            gpui_kit::component::Icon::new(gpui_kit::assets::IconName::MessageSquare)
+        }
     }
 }
 
@@ -229,7 +382,7 @@ impl Render for SocialsView {
         if self.setup.is_none() {
             root = root.child(crate::panel_kit::page_heading(
                 "Socials",
-                "Connect Telegram and Discord bots for any of your bots to use.",
+                "Connect Telegram and Discord bots, or your personal WhatsApp, for any of your bots to use.",
                 vec![
                     Button::new("social-refresh")
                         .control(
@@ -292,6 +445,16 @@ impl Render for SocialsView {
                         .into_any_element(),
                 );
             }
+            providers.push(
+                crate::panel_kit::list_row()
+                    .child(crate::panel_kit::row_icon(provider_icon(Provider::WhatsApp), cx))
+                    .child(crate::panel_kit::row_text(
+                        Provider::WhatsApp.label(),
+                        "Ask a bot to connect WhatsApp. It shows a QR code in chat to link your personal account.",
+                        cx,
+                    ))
+                    .into_any_element(),
+            );
             root = root.child(
                 div()
                     .mt_3()

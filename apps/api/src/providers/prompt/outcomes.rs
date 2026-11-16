@@ -17,7 +17,13 @@ pub fn outcomes_block(input: &TurnInput) -> String {
     if !input.social_setups.is_empty() {
         result.push_str("\n[else.bot social connection decisions]\n");
         for setup in &input.social_setups {
-            result.push_str(&format!("{} setup {} is {}. Connection: {:?}. Discover social_connections to see its chats.\n",setup.provider.label(),setup.id,setup.status,setup.connection_id));
+            result.push_str(&format!("{} setup {} is {}. Connection: {:?}. Discover social_connections to see its chats.\n",setup.provider.label(),setup.id,setup.status.name(),setup.connection_id));
+            if let Some(note) = &setup.note {
+                result.push_str(&format!(
+                    "The owner wrote on the connection card, in their own words:\n> {}\n",
+                    note.replace('\n', "\n> ")
+                ));
+            }
         }
     }
     result

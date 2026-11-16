@@ -41,6 +41,15 @@ impl Transport for ObserveSessions {
     async fn identity(&self, _: Provider, _: &Token) -> Result<Identity, Error> {
         unreachable!("Fixture creates an already validated connection")
     }
+    async fn pair(
+        &self,
+        _: &sqlx::SqlitePool,
+        _: else_api::socials::providers::whatsapp::Vault,
+        _: &else_api::socials::pairing::Progress,
+        _: CancellationToken,
+    ) -> Result<Identity, Error> {
+        unreachable!("Telegram and Discord fixtures never pair a device")
+    }
     async fn destinations(&self, session: &Session) -> Result<Vec<Destination>, Error> {
         self.observe("discover", session).await;
         Ok(vec![Destination {
@@ -122,7 +131,8 @@ async fn discovery_commands_and_listener_share_sdk_until_credential_rotation() {
             display_name: "SDK session".into(),
             username: None,
         },
-        &token,
+        &Secret::Token(token),
+        None,
         "",
     )
     .await
@@ -217,7 +227,7 @@ async fn discovery_commands_and_listener_share_sdk_until_credential_rotation() {
 
     let current = store::connection(&db.pool, c.id).await.unwrap();
     let replacement = Token::parse("rotated-session-test-token".into()).unwrap();
-    store::replace(&db.pool, &key, &current, &replacement)
+    store::replace(&db.pool, &key, &current, &Secret::Token(replacement))
         .await
         .unwrap();
     manager.changed(c.id).await;

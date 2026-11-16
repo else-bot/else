@@ -60,6 +60,7 @@ mod server_icon;
 mod server_name;
 mod shared_mcp;
 mod skills;
+mod social_pairing;
 mod social_sessions;
 mod social_triggers;
 mod socials;

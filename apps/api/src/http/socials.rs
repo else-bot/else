@@ -2,10 +2,10 @@ use super::{
     AppState,
     error::{ApiError, ApiJson, ApiPath, SecretJson},
 };
-use crate::socials::{Manager, store, types::*};
+use crate::socials::{Manager, pairing::Purpose, store, types::*};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     routing::{get, post, put},
 };
@@ -38,6 +38,17 @@ pub fn routes() -> Router<Arc<AppState>> {
             axum::routing::patch(toggle_trigger).delete(delete_trigger),
         )
         .route("/connectors/socials/setups/{id}/complete", post(complete))
+        .route(
+            "/connectors/socials/setups/{id}/pairing",
+            get(|s, id, after| pairing(s, id, after, Purpose::Setup))
+                .post(|s, id| start_pairing(s, id, Purpose::Setup)),
+        )
+        .route(
+            "/connectors/socials/connections/{id}/pairing",
+            get(|s, id, after| pairing(s, id, after, Purpose::Repair))
+                .post(|s, id| start_pairing(s, id, Purpose::Repair))
+                .delete(stop_repair_pairing),
+        )
         .route(
             "/connectors/socials/setups/{id}",
             axum::routing::delete(cancel),
@@ -91,6 +102,11 @@ async fn connect(
     SecretJson(request): SecretJson<Connect>,
 ) -> Result<Json<Value>, ApiError> {
     let m = manager(&s)?;
+    if request.provider.setup() != SetupKind::Token {
+        return Err(error(Error::Invalid(
+            "Pair this provider from its connection card instead of submitting a token.",
+        )));
+    }
     let token = Token::parse(request.token).map_err(error)?;
     let identity = m.validate(request.provider, &token).await.map_err(error)?;
     let c = store::create(
@@ -98,7 +114,8 @@ async fn connect(
         &m.key,
         request.provider,
         &identity,
-        &token,
+        &Secret::Token(token),
+        None,
         &request.instructions,
     )
     .await
@@ -144,16 +161,21 @@ async fn remove(
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Credential {
+struct Replacement {
     token: String,
 }
 async fn credential(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
-    SecretJson(request): SecretJson<Credential>,
+    SecretJson(request): SecretJson<Replacement>,
 ) -> Result<Json<Value>, ApiError> {
     let m = manager(&s)?;
     let c = store::connection(&s.db, id).await.map_err(error)?;
+    if c.provider.setup() != SetupKind::Token {
+        return Err(error(Error::Invalid(
+            "Pair this connection again from Settings instead of submitting a token.",
+        )));
+    }
     let token = Token::parse(request.token).map_err(error)?;
     let identity = m.validate(c.provider, &token).await.map_err(error)?;
     if identity.id != c.remote_id {
@@ -161,7 +183,7 @@ async fn credential(
             "The replacement token belongs to a different bot. Add it as a separate connection.",
         )));
     }
-    store::replace(&s.db, &m.key, &c, &token)
+    store::replace(&s.db, &m.key, &c, &Secret::Token(token))
         .await
         .map_err(error)?;
     m.changed(id).await;
@@ -204,16 +226,20 @@ async fn delete_trigger(
 #[serde(deny_unknown_fields)]
 struct Complete {
     connection_id: Uuid,
+    /// The owner's words for the bot, written on the card.
+    #[serde(default)]
+    note: Option<String>,
 }
 async fn complete(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<Complete>,
 ) -> Result<Json<Value>, ApiError> {
-    manager(&s)?;
-    let setup = store::settle_setup(&s.db, id, Some(input.connection_id))
+    let m = manager(&s)?;
+    let setup = store::settle_setup(&s.db, id, Some(input.connection_id), input.note.as_deref())
         .await
         .map_err(error)?;
+    m.stop_pairing(Purpose::Setup(id)).await;
     s.scheduler.wake();
     Ok(Json(json!({"setup":setup})))
 }
@@ -221,7 +247,51 @@ async fn cancel(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let setup = store::settle_setup(&s.db, id, None).await.map_err(error)?;
+    let setup = store::settle_setup(&s.db, id, None, None)
+        .await
+        .map_err(error)?;
+    if let Some(m) = s.socials.as_ref() {
+        m.stop_pairing(Purpose::Setup(id)).await;
+    }
     s.scheduler.wake();
     Ok(Json(json!({"setup":setup})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct After {
+    #[serde(default)]
+    after: u64,
+}
+/// Start pairing for the setup or connection at the path, as `purpose`
+/// names it.
+async fn start_pairing(
+    State(s): State<Arc<AppState>>,
+    ApiPath(id): ApiPath<Uuid>,
+    purpose: fn(Uuid) -> Purpose,
+) -> Result<Json<Value>, ApiError> {
+    let view = manager(&s)?
+        .start_pairing(purpose(id))
+        .await
+        .map_err(error)?;
+    Ok(Json(json!({ "pairing": view })))
+}
+async fn pairing(
+    State(s): State<Arc<AppState>>,
+    ApiPath(id): ApiPath<Uuid>,
+    Query(after): Query<After>,
+    purpose: fn(Uuid) -> Purpose,
+) -> Result<Json<Value>, ApiError> {
+    let view = manager(&s)?
+        .pairing(purpose(id), after.after)
+        .await
+        .map_err(error)?;
+    Ok(Json(json!({ "pairing": view })))
+}
+async fn stop_repair_pairing(
+    State(s): State<Arc<AppState>>,
+    ApiPath(id): ApiPath<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    manager(&s)?.stop_pairing(Purpose::Repair(id)).await;
+    Ok(StatusCode::NO_CONTENT)
 }
