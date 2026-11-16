@@ -40,6 +40,19 @@ async fn assistant_items(app: &TestApp, bot: &str) -> Vec<Value> {
         .collect()
 }
 
+/// The first reply of a running turn, once it has some text.
+async fn streaming_reply(app: &TestApp, bot: &str, turn: &str) -> Value {
+    let deadline = tokio::time::Instant::now() + common::SETTLE;
+    loop {
+        let items = assistant_items(app, bot).await;
+        if let Some(item) = items.into_iter().find(|item| item["turn_id"] == turn) {
+            return item;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the reply started");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reply_is_unread_until_read_and_the_read_survives_a_restart() {
     let app = TestApp::installed().await;
@@ -220,16 +233,11 @@ async fn text_appended_after_a_partial_read_is_unread_again() {
         )
         .await;
     let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
-    let mut partial = Value::Null;
-    for _ in 0..200 {
-        let state = read_state(&app, &bot).await;
-        if state["latest"].is_object() {
-            partial = state["latest"]["position"].clone();
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert!(partial.is_object(), "the reply started");
+    let started = streaming_reply(&app, &bot, &turn).await;
+    let partial = json!({
+        "item_seq": started["seq"],
+        "text_bytes": started["text"].as_str().unwrap().len(),
+    });
     let read = mark(
         &app,
         &bot,
@@ -274,6 +282,56 @@ async fn unread_replies_counts_the_replies_past_the_read_position() {
     );
     let cleared = mark(&app, &bot, json!({ "action": "mark_read" })).await;
     assert_eq!(cleared.body["bot"]["read_state"]["unread_replies"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_is_unread_only_once_it_finishes_and_counts_once() {
+    let app = TestApp::installed().await;
+    let bot = app.create_bot("Releaser").await;
+    let earlier = reply(&app, &bot, "earlier").await;
+    let position = read_state(&app, &bot).await["latest"]["position"].clone();
+    let read = mark(
+        &app,
+        &bot,
+        json!({ "action": "through", "position": position }),
+    )
+    .await;
+    assert_eq!(read.status, StatusCode::OK, "{:?}", read.body);
+    let settled = read_state(&app, &bot).await;
+    assert_eq!(settled["latest"]["turn_id"], earlier.as_str());
+    assert_eq!(settled["unread"], false);
+
+    let sent = app
+        .send(
+            &bot,
+            Uuid::new_v4(),
+            "[synthetic:slow] [synthetic:messages] release",
+            Some("synthetic"),
+        )
+        .await;
+    let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
+    streaming_reply(&app, &bot, &turn).await;
+    let running = read_state(&app, &bot).await;
+    assert_eq!(
+        assistant_items(&app, &bot).await.len(),
+        2,
+        "still on the first message"
+    );
+    assert_eq!(
+        running, settled,
+        "progress updates are not unread: {running}"
+    );
+
+    app.wait_turn(&turn, &["completed"]).await;
+    let done = read_state(&app, &bot).await;
+    let last = assistant_items(&app, &bot).await.pop().unwrap();
+    assert_eq!(last["text"], else_api::providers::synthetic::SECOND_MESSAGE);
+    assert_eq!(done["latest"]["item_id"], last["id"], "{done}");
+    assert_eq!(done["unread"], true);
+    assert_eq!(
+        done["unread_replies"], 1,
+        "one finished task, not each message"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
