@@ -44,6 +44,26 @@ pub struct Row<'a> {
     pub flag: bool,
 }
 
+impl<'a> Row<'a> {
+    /// A row with no stamp and a clear flag.
+    pub fn new(key: &'a str, value: &'a [u8]) -> Self {
+        Self {
+            key,
+            value,
+            stamp: 0,
+            flag: false,
+        }
+    }
+
+    pub fn stamped(self, stamp: i64) -> Self {
+        Self { stamp, ..self }
+    }
+
+    pub fn flagged(self, flag: bool) -> Self {
+        Self { flag, ..self }
+    }
+}
+
 /// What [`Vault::update`] does to the row it read.
 pub enum Change {
     Keep,
@@ -124,16 +144,19 @@ impl Vault {
     }
 
     pub async fn put(&self, space: &str, key: &str, value: &[u8]) -> Result<(), Error> {
-        self.put_rows(
-            space,
-            &[Row {
-                key,
-                value,
-                stamp: 0,
-                flag: false,
-            }],
-        )
-        .await
+        self.put_stamped(space, key, value, 0).await
+    }
+
+    /// Write one row with the plaintext `stamp` the client sweeps on.
+    pub async fn put_stamped(
+        &self,
+        space: &str,
+        key: &str,
+        value: &[u8],
+        stamp: i64,
+    ) -> Result<(), Error> {
+        self.put_rows(space, &[Row::new(key, value).stamped(stamp)])
+            .await
     }
 
     /// Write `rows` in one transaction, replacing any with the same key.
@@ -350,12 +373,7 @@ impl Vault {
         let op = match &change {
             Change::Keep => None,
             Change::Put { value, stamp } => {
-                row = Row {
-                    key,
-                    value,
-                    stamp: *stamp,
-                    flag: false,
-                };
+                row = Row::new(key, value).stamped(*stamp);
                 Some(Op::Put(space, &row))
             }
             Change::Delete => Some(Op::Delete(space, key)),

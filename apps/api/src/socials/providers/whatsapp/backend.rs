@@ -80,6 +80,14 @@ fn join(parts: &[&str]) -> String {
     parts.join("\0")
 }
 
+/// The key prefix every key built by [`join`] from `parts` and one more
+/// part starts with.
+fn prefix(parts: &[&str]) -> String {
+    let mut prefix = join(parts);
+    prefix.push('\0');
+    prefix
+}
+
 fn id(id: u32) -> String {
     format!("{id:010}")
 }
@@ -129,17 +137,7 @@ impl Backend {
         id: &str,
         compressed: &[u8],
     ) -> std::result::Result<(), Error> {
-        self.vault
-            .put_rows(
-                HISTORY,
-                &[Row {
-                    key: id,
-                    value: compressed,
-                    stamp: now(),
-                    flag: false,
-                }],
-            )
-            .await
+        self.vault.put_stamped(HISTORY, id, compressed, now()).await
     }
 
     /// Captured history chunks, oldest key first.
@@ -178,16 +176,8 @@ impl Backend {
             .map(|bytes| decode(&bytes))
             .transpose()?;
         let value = encode(&merge(current))?;
-        tx.write(&[Op::Put(
-            TC_TOKEN,
-            &Row {
-                key: jid,
-                value: &value,
-                stamp: 0,
-                flag: false,
-            },
-        )])
-        .await?;
+        tx.write(&[Op::Put(TC_TOKEN, &Row::new(jid, &value))])
+            .await?;
         Ok(tx.commit().await?)
     }
 
@@ -250,12 +240,7 @@ impl SignalStore for Backend {
     async fn put_sessions_batch(&self, sessions: &[(Arc<str>, Bytes)]) -> Result<()> {
         let rows: Vec<Row<'_>> = sessions
             .iter()
-            .map(|(address, session)| Row {
-                key: address,
-                value: session,
-                stamp: 0,
-                flag: false,
-            })
+            .map(|(address, session)| Row::new(address, session))
             .collect();
         Ok(self.vault.put_rows(SESSION, &rows).await?)
     }
@@ -299,15 +284,7 @@ impl SignalStore for Backend {
         let key = id(prekey);
         Ok(self
             .vault
-            .put_rows(
-                PREKEY,
-                &[Row {
-                    key: &key,
-                    value: record,
-                    stamp: 0,
-                    flag: uploaded,
-                }],
-            )
+            .put_rows(PREKEY, &[Row::new(&key, record).flagged(uploaded)])
             .await?)
     }
 
@@ -316,12 +293,7 @@ impl SignalStore for Backend {
         let rows: Vec<Row<'_>> = keys
             .iter()
             .zip(&ids)
-            .map(|((_, record), key)| Row {
-                key,
-                value: record,
-                stamp: 0,
-                flag: uploaded,
-            })
+            .map(|((_, record), key)| Row::new(key, record).flagged(uploaded))
             .collect();
         Ok(self.vault.put_rows(PREKEY, &rows).await?)
     }
@@ -374,12 +346,7 @@ impl SignalStore for Backend {
     async fn put_sender_keys_batch(&self, sender_keys: &[(Arc<str>, Bytes)]) -> Result<()> {
         let rows: Vec<Row<'_>> = sender_keys
             .iter()
-            .map(|(address, record)| Row {
-                key: address,
-                value: record,
-                stamp: 0,
-                flag: false,
-            })
+            .map(|(address, record)| Row::new(address, record))
             .collect();
         Ok(self.vault.put_rows(SENDER_KEY, &rows).await?)
     }
@@ -402,18 +369,8 @@ impl AppSyncStore for Backend {
     async fn set_sync_key(&self, key_id: &[u8], key: AppStateSyncKey) -> Result<()> {
         let name = hex::encode(key_id);
         let value = encode(&key)?;
-        let key_row = Row {
-            key: &name,
-            value: &value,
-            stamp: 0,
-            flag: false,
-        };
-        let latest = Row {
-            key: LATEST_SYNC_KEY,
-            value: key_id,
-            stamp: 0,
-            flag: false,
-        };
+        let key_row = Row::new(&name, &value);
+        let latest = Row::new(LATEST_SYNC_KEY, key_id);
         Ok(self
             .vault
             .write(&[Op::Put(SYNC_KEY, &key_row), Op::Put(META, &latest)])
@@ -439,15 +396,7 @@ impl AppSyncStore for Backend {
         mutations: &[AppStateMutationMAC],
     ) -> Result<()> {
         let (_, added) = Self::mutation_mac_ops(name, &[], mutations);
-        let rows: Vec<Row<'_>> = added
-            .iter()
-            .map(|(key, mac)| Row {
-                key,
-                value: mac,
-                stamp: 0,
-                flag: false,
-            })
-            .collect();
+        let rows: Vec<Row<'_>> = added.iter().map(|(key, mac)| Row::new(key, mac)).collect();
         Ok(self.vault.put_rows(MUTATION_MAC, &rows).await?)
     }
 
@@ -471,22 +420,9 @@ impl AppSyncStore for Backend {
         added: &[AppStateMutationMAC],
     ) -> Result<()> {
         let version = encode(&state)?;
-        let version_row = Row {
-            key: name,
-            value: &version,
-            stamp: 0,
-            flag: false,
-        };
+        let version_row = Row::new(name, &version);
         let (removed, added) = Self::mutation_mac_ops(name, removed_index_macs, added);
-        let added: Vec<Row<'_>> = added
-            .iter()
-            .map(|(key, mac)| Row {
-                key,
-                value: mac,
-                stamp: 0,
-                flag: false,
-            })
-            .collect();
+        let added: Vec<Row<'_>> = added.iter().map(|(key, mac)| Row::new(key, mac)).collect();
         let mut ops = vec![Op::Put(APP_VERSION, &version_row)];
         ops.extend(removed.iter().map(|key| Op::Delete(MUTATION_MAC, key)));
         ops.extend(added.iter().map(|row| Op::Put(MUTATION_MAC, row)));
@@ -494,7 +430,7 @@ impl AppSyncStore for Backend {
     }
 
     async fn clear_mutation_macs(&self, name: &str) -> Result<()> {
-        let prefix = format!("{name}\0");
+        let prefix = prefix(&[name]);
         Ok(self
             .vault
             .write(&[Op::DeletePrefix(MUTATION_MAC, &prefix)])
@@ -509,7 +445,7 @@ impl AppSyncStore for Backend {
 #[async_trait]
 impl ProtocolStore for Backend {
     async fn get_sender_key_devices(&self, group_jid: &str) -> Result<Vec<(String, bool)>> {
-        let prefix = format!("{group_jid}\0");
+        let prefix = prefix(&[group_jid]);
         Ok(self
             .vault
             .scan(SK_DEVICE, &prefix)
@@ -532,18 +468,13 @@ impl ProtocolStore for Backend {
         let rows: Vec<Row<'_>> = entries
             .iter()
             .zip(&keys)
-            .map(|((_, has_key), key)| Row {
-                key,
-                value: if *has_key { &[1] } else { &[0] },
-                stamp: 0,
-                flag: false,
-            })
+            .map(|((_, has_key), key)| Row::new(key, if *has_key { &[1] } else { &[0] }))
             .collect();
         Ok(self.vault.put_rows(SK_DEVICE, &rows).await?)
     }
 
     async fn clear_sender_key_devices(&self, group_jid: &str) -> Result<()> {
-        let prefix = format!("{group_jid}\0");
+        let prefix = prefix(&[group_jid]);
         Ok(self
             .vault
             .write(&[Op::DeletePrefix(SK_DEVICE, &prefix)])
@@ -594,18 +525,8 @@ impl ProtocolStore for Backend {
             .map(|old| old.phone_number)
             .filter(|phone| *phone != entry.phone_number);
         let value = encode(entry)?;
-        let lid_row = Row {
-            key: &entry.lid,
-            value: &value,
-            stamp: 0,
-            flag: false,
-        };
-        let pn_row = Row {
-            key: &entry.phone_number,
-            value: entry.lid.as_bytes(),
-            stamp: 0,
-            flag: false,
-        };
+        let lid_row = Row::new(&entry.lid, &value);
+        let pn_row = Row::new(&entry.phone_number, entry.lid.as_bytes());
         let mut ops = Vec::new();
         if let Some(phone) = &old_phone {
             ops.push(Op::Delete(PN, phone));
@@ -629,15 +550,7 @@ impl ProtocolStore for Backend {
         let key = join(&[address, message_id]);
         Ok(self
             .vault
-            .put_rows(
-                BASE_KEY,
-                &[Row {
-                    key: &key,
-                    value: base_key,
-                    stamp: now(),
-                    flag: false,
-                }],
-            )
+            .put_stamped(BASE_KEY, &key, base_key, now())
             .await?)
     }
 
@@ -776,15 +689,7 @@ impl ProtocolStore for Backend {
         let key = join(&[chat_jid, message_id]);
         Ok(self
             .vault
-            .put_rows(
-                SENT_MSG,
-                &[Row {
-                    key: &key,
-                    value: payload,
-                    stamp: now(),
-                    flag: false,
-                }],
-            )
+            .put_stamped(SENT_MSG, &key, payload, now())
             .await?)
     }
 
@@ -831,12 +736,7 @@ impl ProtocolStore for Backend {
         let rows: Vec<Row<'_>> = rows
             .iter()
             .zip(&keys)
-            .map(|(r, key)| Row {
-                key,
-                value: r.message,
-                stamp,
-                flag: false,
-            })
+            .map(|(r, key)| Row::new(key, r.message).stamped(stamp))
             .collect();
         Ok(self.vault.put_rows(PENDING, &rows).await?)
     }
@@ -893,7 +793,7 @@ impl ProtocolStore for Backend {
         max_bytes: usize,
         lease: PendingInboundLease,
     ) -> Result<Option<(String, PendingInboundRecord)>> {
-        let prefix = format!("{}\0", join(&[key.chat, key.id]));
+        let prefix = prefix(&[key.chat, key.id]);
         let mut refused = None;
         let picked = self
             .vault
@@ -1029,12 +929,7 @@ impl MsgSecretStore for Backend {
         }
         let rows: Vec<Row<'_>> = merged
             .iter()
-            .map(|(key, (expires_at, value))| Row {
-                key,
-                value,
-                stamp: *expires_at,
-                flag: false,
-            })
+            .map(|(key, (expires_at, value))| Row::new(key, value).stamped(*expires_at))
             .collect();
         let ops: Vec<Op<'_>> = rows.iter().map(|row| Op::Put(MSG_SECRET, row)).collect();
         tx.write(&ops).await?;
@@ -1088,16 +983,8 @@ impl DeviceStore for Backend {
         let mut tx = self.vault.begin().await?;
         if !tx.exists(DEVICE, DEVICE).await? {
             let value = encode(&Device::new())?;
-            tx.write(&[Op::Put(
-                DEVICE,
-                &Row {
-                    key: DEVICE,
-                    value: &value,
-                    stamp: 0,
-                    flag: false,
-                },
-            )])
-            .await?;
+            tx.write(&[Op::Put(DEVICE, &Row::new(DEVICE, &value))])
+                .await?;
         }
         tx.commit().await?;
         Ok(1)
