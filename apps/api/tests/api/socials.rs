@@ -45,7 +45,7 @@ async fn account(db: &TestDb, name: &str) -> Connection {
             display_name: name.into(),
             username: Some(name.into()),
         },
-        &Credential::Token(token()),
+        &Secret::Token(token()),
         None,
         "Use this bot only for team support.",
     )
@@ -125,13 +125,10 @@ async fn tokens_are_encrypted_identity_bound_and_never_public() {
     let db = TestDb::migrated().await;
     let c = account(&db, "first").await;
     let other = account(&db, "second").await;
-    assert_eq!(
-        store::credential(&db.pool, &key(), &c)
-            .await
-            .unwrap()
-            .bytes(),
-        token().0.as_bytes()
-    );
+    let Credential::Token(stored) = store::credential(&db.pool, &key(), &c).await.unwrap() else {
+        panic!("a bot connection holds a token");
+    };
+    assert_eq!(stored.0.as_bytes(), token().0.as_bytes());
     let cipher: Vec<u8> =
         sqlx::query_scalar("SELECT credential FROM social_connections WHERE id=?1")
             .bind(c.id)
@@ -159,7 +156,7 @@ async fn tokens_are_encrypted_identity_bound_and_never_public() {
                 display_name: "x".into(),
                 username: None
             },
-            &Credential::Token(token()),
+            &Secret::Token(token()),
             None,
             ""
         )

@@ -226,7 +226,7 @@ impl Manager {
             let key = DeviceKey::generate()?;
             let vault = Vault::new(self.db.clone(), device, &key);
             let identity = self.transport.pair(&self.db, vault, progress, stop).await?;
-            let credential = Credential::Device(key);
+            let secret = Secret::Device { key, store: device };
             let connection = match purpose {
                 Purpose::Setup(setup) => {
                     store::create(
@@ -234,8 +234,8 @@ impl Manager {
                         &self.key,
                         provider,
                         &identity,
-                        &credential,
-                        Some(store::Paired { device, setup }),
+                        &secret,
+                        Some(setup),
                         "",
                     )
                     .await?
@@ -247,7 +247,7 @@ impl Manager {
                             "A different WhatsApp account was linked. Pair the account this connection belongs to, or add it as a new connection.",
                         ));
                     }
-                    store::replace(&self.db, &self.key, &c, &credential, Some(device)).await?;
+                    store::replace(&self.db, &self.key, &c, &secret).await?;
                     store::connection(&self.db, id).await?
                 }
             };

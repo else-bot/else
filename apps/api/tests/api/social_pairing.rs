@@ -571,3 +571,50 @@ async fn pausing_a_connection_lets_its_listener_shut_down_its_client() {
     .await
     .expect("the listener finished its shutdown instead of being dropped");
 }
+
+#[tokio::test]
+async fn a_secret_must_match_how_its_provider_connects() {
+    let db = TestDb::migrated().await;
+    let device = store::new_device(&db.pool).await.unwrap();
+    let who = Identity {
+        id: "33612345678".into(),
+        display_name: "Ada".into(),
+        username: None,
+    };
+    let device_for_a_bot = Secret::Device {
+        key: DeviceKey::generate().unwrap(),
+        store: device,
+    };
+    assert!(matches!(
+        store::create(
+            &db.pool,
+            &key(),
+            Provider::Telegram,
+            &who,
+            &device_for_a_bot,
+            None,
+            ""
+        )
+        .await,
+        Err(Error::Unsupported)
+    ));
+    let token_for_a_device = Secret::Token(Token::parse(common::TOKEN.into()).unwrap());
+    assert!(matches!(
+        store::create(
+            &db.pool,
+            &key(),
+            Provider::WhatsApp,
+            &who,
+            &token_for_a_device,
+            None,
+            ""
+        )
+        .await,
+        Err(Error::Unsupported)
+    ));
+    let connections: i64 = sqlx::query_scalar("SELECT count(*) FROM social_connections")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(connections, 0);
+}

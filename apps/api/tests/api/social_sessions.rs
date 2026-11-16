@@ -131,7 +131,7 @@ async fn discovery_commands_and_listener_share_sdk_until_credential_rotation() {
             display_name: "SDK session".into(),
             username: None,
         },
-        &Credential::Token(token),
+        &Secret::Token(token),
         None,
         "",
     )
@@ -227,15 +227,9 @@ async fn discovery_commands_and_listener_share_sdk_until_credential_rotation() {
 
     let current = store::connection(&db.pool, c.id).await.unwrap();
     let replacement = Token::parse("rotated-session-test-token".into()).unwrap();
-    store::replace(
-        &db.pool,
-        &key,
-        &current,
-        &Credential::Token(replacement),
-        None,
-    )
-    .await
-    .unwrap();
+    store::replace(&db.pool, &key, &current, &Secret::Token(replacement))
+        .await
+        .unwrap();
     manager.changed(c.id).await;
     manager.discover(c.id).await.unwrap();
     let rotated = observed(&mut rx, "discover").await;

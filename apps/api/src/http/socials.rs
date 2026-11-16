@@ -117,7 +117,7 @@ async fn connect(
         &m.key,
         request.provider,
         &identity,
-        &Credential::Token(token),
+        &Secret::Token(token),
         None,
         &request.instructions,
     )
@@ -186,7 +186,7 @@ async fn credential(
             "The replacement token belongs to a different bot. Add it as a separate connection.",
         )));
     }
-    store::replace(&s.db, &m.key, &c, &Credential::Token(token), None)
+    store::replace(&s.db, &m.key, &c, &Secret::Token(token))
         .await
         .map_err(error)?;
     m.changed(id).await;

@@ -30,8 +30,11 @@ fn seal(
     id: Uuid,
     provider: Provider,
     version: i64,
-    credential: &Credential,
+    secret: &Secret,
 ) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    if secret.kind() != provider.setup() {
+        return Err(Error::Unsupported);
+    }
     let mut salt = [0; 32];
     getrandom::fill(&mut salt).map_err(|_| Error::Crypto)?;
     let recipient = identity(key, id, provider, version, &salt)?.to_public();
@@ -43,7 +46,7 @@ fn seal(
         .wrap_output(&mut cipher)
         .map_err(|_| Error::Crypto)?;
     writer
-        .write_all(credential.bytes())
+        .write_all(secret.bytes())
         .map_err(|_| Error::Crypto)?;
     writer.finish().map_err(|_| Error::Crypto)?;
     Ok((salt.to_vec(), cipher))
@@ -76,28 +79,23 @@ pub async fn connection(pool: &SqlitePool, id: Uuid) -> Result<Connection, Error
     .await?
     .ok_or(Error::NotFound)
 }
-/// A device a setup's pairing linked. It becomes a connection only while
-/// that setup is still pending, so a cancelled setup or ended turn never
-/// activates an account.
-#[derive(Debug, Clone, Copy)]
-pub struct Paired {
-    pub device: Uuid,
-    pub setup: Uuid,
-}
+/// Create a connection holding `secret`. With `setup`, the connection is
+/// created only while that setup is still pending, so a cancelled setup or
+/// ended turn never activates an account.
 pub async fn create(
     pool: &SqlitePool,
     key: &SecretKey,
     provider: Provider,
     remote: &Identity,
-    credential: &Credential,
-    paired: Option<Paired>,
+    secret: &Secret,
+    setup: Option<Uuid>,
     instructions: &str,
 ) -> Result<Connection, Error> {
     if instructions.len() > 8000 || instructions.contains('\0') {
         return Err(Error::Invalid("Instructions must be at most 8000 bytes."));
     }
     let id = Uuid::new_v4();
-    let (salt, cipher) = seal(key, id, provider, 1, credential)?;
+    let (salt, cipher) = seal(key, id, provider, 1, secret)?;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let total: i64 =
         sqlx::query_scalar("SELECT count(*) FROM social_connections WHERE state<>'removed'")
@@ -110,11 +108,11 @@ pub async fn create(
     if existing {
         return Err(Error::Duplicate);
     }
-    if let Some(paired) = paired {
+    if let Some(setup) = setup {
         let pending: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM social_setups WHERE id=?1 AND status='pending')",
         )
-        .bind(paired.setup)
+        .bind(setup)
         .fetch_one(&mut *tx)
         .await?;
         if !pending {
@@ -122,8 +120,8 @@ pub async fn create(
         }
     }
     sqlx::query("INSERT INTO social_connections(id,provider,remote_id,display_name,username,instructions,credential_salt,credential) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)").bind(id).bind(provider).bind(&remote.id).bind(&remote.display_name).bind(&remote.username).bind(instructions).bind(salt).bind(cipher).execute(&mut *tx).await?;
-    if let Some(paired) = paired {
-        attach_device(&mut tx, paired.device, id).await?;
+    if let Some(store) = secret.store() {
+        attach_device(&mut tx, store, id).await?;
     }
     tx.commit().await?;
     connection(pool, id).await
@@ -132,19 +130,18 @@ pub async fn replace(
     pool: &SqlitePool,
     key: &SecretKey,
     c: &Connection,
-    credential: &Credential,
-    device: Option<Uuid>,
+    secret: &Secret,
 ) -> Result<(), Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let version:i64=sqlx::query_scalar("SELECT credential_version+1 FROM social_connections WHERE id=?1 AND generation=?2 AND state<>'removed'").bind(c.id).bind(c.generation).fetch_optional(&mut *tx).await?.ok_or(Error::Inactive)?;
-    let (salt, cipher) = seal(key, c.id, c.provider, version, credential)?;
+    let (salt, cipher) = seal(key, c.id, c.provider, version, secret)?;
     sqlx::query("UPDATE social_connections SET credential_version=?2,credential_salt=?3,credential=?4,generation=generation+1,health='connecting' WHERE id=?1").bind(c.id).bind(version).bind(salt).bind(cipher).execute(&mut *tx).await?;
-    if let Some(device) = device {
+    if let Some(store) = secret.store() {
         sqlx::query("DELETE FROM social_device_stores WHERE connection_id=?1")
             .bind(c.id)
             .execute(&mut *tx)
             .await?;
-        attach_device(&mut tx, device, c.id).await?;
+        attach_device(&mut tx, store, c.id).await?;
     }
     tx.commit().await?;
     Ok(())

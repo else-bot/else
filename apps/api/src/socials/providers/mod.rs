@@ -53,7 +53,7 @@ impl Session {
 pub trait Transport: Send + Sync {
     /// The bot identity a submitted token authenticates.
     async fn identity(&self, provider: Provider, token: &Token) -> Result<Identity, Error>;
-    /// Link a new device into `vault`, reporting each code on `view`, and
+    /// Link a new device into `vault`, reporting each code on `progress`, and
     /// return the account it linked.
     async fn pair(
         &self,

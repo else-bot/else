@@ -101,13 +101,33 @@ pub enum Credential {
     /// The data key that seals a linked device's store.
     Device(DeviceKey),
 }
-impl Credential {
-    pub fn bytes(&self) -> &[u8] {
+/// What a connection is created or re-keyed with. A linked device's key
+/// travels with the store it seals, so neither can be attached alone.
+pub enum Secret {
+    Token(Token),
+    Device { key: DeviceKey, store: uuid::Uuid },
+}
+impl Secret {
+    pub(crate) fn bytes(&self) -> &[u8] {
         match self {
             Self::Token(token) => token.0.as_bytes(),
-            Self::Device(key) => key.0.as_slice(),
+            Self::Device { key, .. } => key.0.as_slice(),
         }
     }
+    pub(crate) fn kind(&self) -> SetupKind {
+        match self {
+            Self::Token(_) => SetupKind::Token,
+            Self::Device { .. } => SetupKind::Pairing,
+        }
+    }
+    pub(crate) fn store(&self) -> Option<uuid::Uuid> {
+        match self {
+            Self::Token(_) => None,
+            Self::Device { store, .. } => Some(*store),
+        }
+    }
+}
+impl Credential {
     pub(crate) fn open(
         provider: Provider,
         bytes: zeroize::Zeroizing<Vec<u8>>,
