@@ -266,6 +266,17 @@ impl Client {
         .map(|_| ())
     }
 
+    /// Remove an inbox for every bot. Its messages stay in the mailbox.
+    pub async fn remove_email(self: Arc<Self>, account: Uuid) -> Result<(), ClientError> {
+        self.call::<Value>(
+            Method::DELETE,
+            format!("/v1/connectors/email/accounts/{account}"),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Delete a bot's trigger on an inbox. The bot still reads the inbox.
     pub async fn delete_email_trigger(
         self: Arc<Self>,

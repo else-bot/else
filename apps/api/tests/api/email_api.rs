@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod app_passwords;
+mod removal;
 
 fn config() -> MailConfig {
     MailConfig {

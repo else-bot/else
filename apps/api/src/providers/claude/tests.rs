@@ -942,8 +942,8 @@ pub(crate) fn pinned_fingerprints() -> [(crate::app::providers::Origin, &'static
     };
     let ready = claude.ready.as_ref().unwrap();
     [
-        (Origin::OwnerRequest, "0bd2f89ce740da2cea8631da865d1fa0"),
-        (Origin::ConnectorEvent, "ef1144cbe43dcf0329601eda568243ff"),
+        (Origin::OwnerRequest, "d6433a98a2a19e368ee2d2b77b4fe0c5"),
+        (Origin::ConnectorEvent, "84c83f8c94faae912deae5e24c37fcbb"),
     ]
     .map(|(origin, expected)| {
         input.delegation.origin = origin;

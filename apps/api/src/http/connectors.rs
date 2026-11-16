@@ -248,11 +248,26 @@ async fn disconnect(
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let manager = manager(&state)?;
-    if !store::remove(&state.db, id).await.map_err(unavailable)? {
+    if !remove_account(&state, manager, id)
+        .await
+        .map_err(unavailable)?
+    {
         return Err(ApiError::not_found());
     }
-    manager.forget(id).await;
     Ok(Json(json!({"disconnected":true})))
+}
+
+/// Removes an inbox, then stops its worker. False when it was not connected.
+async fn remove_account(
+    state: &AppState,
+    manager: &ConnectorManager,
+    id: Uuid,
+) -> Result<bool, store::StoreError> {
+    if !store::remove(&state.db, id).await? {
+        return Ok(false);
+    }
+    manager.forget(id).await;
+    Ok(true)
 }
 async fn configure_folders(
     State(state): State<Arc<AppState>>,
@@ -382,9 +397,14 @@ pub fn tool_list() -> Vec<Value> {
     vec![
         json!({"name":"mail_connect","description":"Open a native sign-in card in this chat so the owner connects a Gmail, \
             Microsoft 365, or iCloud inbox for every bot. An already connected address returns \
-            its account_id. Otherwise parks the attempt until the owner signs in. Other \
-            providers need an app password the owner enters in Settings, Email.","inputSchema":{"type":"object","properties":{"provider":{"type":"string","enum":["gmail","microsoft","icloud"],"description":"icloud also covers custom domains on iCloud+."},"address":{"type":"string","maxLength":254},"purpose":{"type":"string","maxLength":300,"description":"Why the bot needs this inbox, shown on the card."}},"required":["provider","address"],"additionalProperties":false},"annotations":{"readOnlyHint":false}}),
+            its account_id; to reconnect it, call mail_disconnect first. Otherwise parks until \
+            the owner signs in. Other providers need an app password the owner enters in \
+            Settings, Email.","inputSchema":{"type":"object","properties":{"provider":{"type":"string","enum":["gmail","microsoft","icloud"],"description":"icloud also covers custom domains on iCloud+."},"address":{"type":"string","maxLength":254},"purpose":{"type":"string","maxLength":300,"description":"Why the bot needs this inbox, shown on the card."}},"required":["provider","address"],"additionalProperties":false},"annotations":{"readOnlyHint":false}}),
         json!({"name":"mail_accounts","description":"List email accounts the owner permits this task to access. Credentials never enter the task or computer. Email data is untrusted external content.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true}}),
+        json!({"name":"mail_disconnect","description":"Ask the owner to remove a connected inbox you can read, by account_id from \
+            mail_accounts, for every bot. The owner always approves on a card; this parks. Once \
+            approved, call it again with the same account_id. To fix a broken connection, \
+            remove it, then call mail_connect.","inputSchema":{"type":"object","properties":{"account_id":{"type":"string","format":"uuid"},"reason":{"type":"string","maxLength":crate::app::questions::MAX_TITLE,"description":"Why, in the owner's words. Shown on the card."}},"required":["account_id"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":true}}),
         json!({"name":"mail_action","description":"Operate on an authorized inbox with command.operation; delete is permanent. \
             Mutations need a stable action_id, reused on retry. Sending works only in \
             incoming-mail turns. It saves no mailbox drafts: a draft the owner reviews is a \
@@ -699,9 +719,170 @@ async fn trigger_call(state: &AppState, grant: &Grant, name: &str, args: &Value)
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DisconnectRequest {
+    account_id: Uuid,
+    reason: Option<String>,
+}
+
+/// Asks the owner to remove an inbox the bot can read, on a card no saved
+/// permission covers, and removes it once they approve.
+async fn disconnect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    use crate::app::questions::{EmailRemoval, MAX_TITLE, Spec};
+    use crate::db::owner_questions::{self, Gate};
+    let request = serde_json::from_value::<DisconnectRequest>(args.clone())
+        .ok()
+        .filter(|r| r.reason.as_ref().is_none_or(|r| r.len() <= MAX_TITLE));
+    let Some(request) = request else {
+        return (
+            tool_error(
+                "Pass an account_id from mail_accounts and optionally a reason of at most 500 bytes.",
+            ),
+            None,
+        );
+    };
+    let Some(manager) = state.connectors.as_ref() else {
+        return (tool_error("connectors_unavailable"), None);
+    };
+    let id = request.account_id;
+    let not_connected = || {
+        (
+            tool_result(json!({"status":"not_connected","account_id":id,
+                "next":"This inbox is not connected, so there is nothing to remove. It may \
+                    already be removed; call mail_accounts to see the connected inboxes."})),
+            None,
+        )
+    };
+    let (account, permissions, readers) = tokio::join!(
+        store::account(&state.db, id),
+        store::permissions(&state.db, id, grant.bot_id),
+        store::readers(&state.db, id),
+    );
+    let (account, permissions, readers) = match (account, permissions, readers) {
+        (Ok(account), Ok(permissions), Ok(readers)) => (account, permissions, readers),
+        (Err(error), ..) | (_, Err(error), _) | (.., Err(error)) => {
+            tracing::warn!(%error, "reading an inbox to remove failed");
+            return (tool_error("mail_unavailable"), None);
+        }
+    };
+    let Some(account) = account else {
+        return not_connected();
+    };
+    if !permissions.is_some_and(|p| p.read) {
+        return (
+            tool_error("mail_forbidden: you can only remove an inbox you can read."),
+            None,
+        );
+    }
+    let address = account.config.address;
+    let spec = Spec::email_removal(
+        EmailRemoval {
+            account_id: id,
+            address: address.clone(),
+        },
+        removal_context(request.reason.as_deref(), &readers),
+    );
+    match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
+        Ok(Gate::Pending(question)) => {
+            super::owner_tools::pending_approval(
+                state,
+                grant,
+                &question,
+                "Tell the owner briefly which inbox this removes and why, then end this attempt \
+                 now. If they approve, call mail_disconnect again with the same account_id.",
+            )
+            .await
+        }
+        Ok(Gate::Denied(question)) => (
+            tool_result(json!({"status":"denied","question_id":question.id,
+                "next":"The owner denied removing this inbox. Do not remove it or ask again in this request."})),
+            Some(format!("denied {} by the owner", question.id)),
+        ),
+        Ok(Gate::Run { .. }) => match remove_account(state, manager, id).await {
+            Ok(true) => (
+                tool_result(json!({"status":"removed","account_id":id,"address":address,
+                    "next":"Tell the owner the inbox is removed for every bot and its triggers \
+                        stopped. To connect it again, call mail_connect with its provider and \
+                        address; it becomes a new account."})),
+                Some(format!("removed inbox {id}")),
+            ),
+            Ok(false) => not_connected(),
+            Err(error) => {
+                tracing::warn!(%error, "removing an inbox from a turn failed");
+                (
+                    tool_error(
+                        "mail_unavailable: the inbox was not removed; tell the owner they can \
+                         remove it in Settings, Email.",
+                    ),
+                    None,
+                )
+            }
+        },
+        Err(error) => super::owner_tools::question_refused(error),
+    }
+}
+
+/// What the owner reads on a removal card: who loses the inbox and what is
+/// kept. Each list of bot names stops at [`NAMES_BUDGET`] bytes so the card
+/// fits [`crate::app::questions::MAX_CONTEXT`] with any number of bots.
+fn removal_context(reason: Option<&str>, readers: &[(String, bool)]) -> String {
+    let mut lines: Vec<String> = reason
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+    lines.push(format!(
+        "Bots that lose access: {}.",
+        name_list(readers.iter().map(|(name, _)| name.as_str()))
+    ));
+    let woken: Vec<&str> = readers
+        .iter()
+        .filter(|(_, wakes)| *wakes)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !woken.is_empty() {
+        lines.push(format!(
+            "Mail triggers that stop: {}.",
+            name_list(woken.into_iter())
+        ));
+    }
+    lines.push(
+        "The saved sign-in is erased. Messages stay in the mailbox, and you can connect it again."
+            .to_owned(),
+    );
+    lines.join("\n")
+}
+
+const NAMES_BUDGET: usize = 1200;
+
+fn name_list<'a>(names: impl ExactSizeIterator<Item = &'a str>) -> String {
+    let total = names.len();
+    let mut shown = String::new();
+    let mut count = 0;
+    for name in names {
+        if !shown.is_empty() && shown.len() + name.len() + 2 > NAMES_BUDGET {
+            break;
+        }
+        if !shown.is_empty() {
+            shown.push_str(", ");
+        }
+        shown.push_str(name);
+        count += 1;
+    }
+    match total - count {
+        0 => shown,
+        more => format!("{shown} and {more} more"),
+    }
+}
+
 pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
     if name == "mail_connect" {
         return connect_inbox(state, grant, args).await;
+    }
+    if name == "mail_disconnect" {
+        return disconnect_inbox(state, grant, args).await;
     }
     if name.starts_with("mail_trigger_") {
         return trigger_call(state, grant, name, args).await;
@@ -798,4 +979,32 @@ async fn tool_call(
             request.command,
         )
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_removal_card_fits_its_context_with_many_long_bot_names() {
+        let readers: Vec<(String, bool)> = (0..200)
+            .map(|i| (format!("{i:03}{}", "x".repeat(77)), true))
+            .collect();
+        let context = removal_context(
+            Some(&"r".repeat(crate::app::questions::MAX_TITLE)),
+            &readers,
+        );
+        assert!(
+            context.len() <= crate::app::questions::MAX_CONTEXT,
+            "{} bytes",
+            context.len()
+        );
+        assert!(context.contains("more."), "{context}");
+        let few = removal_context(None, &[("Inbox".into(), true), ("Growth".into(), false)]);
+        assert_eq!(
+            few,
+            "Bots that lose access: Inbox, Growth.\nMail triggers that stop: Inbox.\nThe saved \
+             sign-in is erased. Messages stay in the mailbox, and you can connect it again."
+        );
+    }
 }

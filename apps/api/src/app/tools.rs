@@ -43,6 +43,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "notify_owner",
     "mail_accounts",
     "mail_connect",
+    "mail_disconnect",
     "mail_action",
     "mail_action_status",
     "social_connections",
@@ -98,6 +99,7 @@ pub const PARKING_TOOLS: &[&str] = &[
     "social_connect",
     "social_action",
     "mail_connect",
+    "mail_disconnect",
     "delegate",
     "council",
     "request_secret",
@@ -165,6 +167,7 @@ pub fn loggable_args(name: &str, args: &serde_json::Value) -> serde_json::Value 
         "mail_accounts" | "social_connections" => json!({}),
         "social_connect" => json!({"provider":args["provider"],"reason":args["reason"]}),
         "mail_connect" => json!({"provider":args["provider"]}),
+        "mail_disconnect" => json!({"account_id":args["account_id"]}),
         "social_action" | "social_action_status" => {
             json!({"connection_id":args["connection_id"],"action_id":args["action_id"],"operation":args["command"]["operation"]})
         }
