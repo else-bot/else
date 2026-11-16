@@ -334,9 +334,7 @@ impl SocialsView {
                         let finished = view.pairing.finished();
                         let revision = view.revision;
                         let alive = this
-                            .update_in(cx, |socials, window, cx| {
-                                socials.show_pairing(target, view, window, cx)
-                            })
+                            .update_in(cx, |socials, _, cx| socials.show_pairing(target, view, cx))
                             .is_ok();
                         (!finished && alive).then_some(revision)
                     }
@@ -363,13 +361,7 @@ impl SocialsView {
         })
     }
 
-    fn show_pairing(
-        &mut self,
-        target: PairingTarget,
-        view: PairingView,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn show_pairing(&mut self, target: PairingTarget, view: PairingView, cx: &mut Context<Self>) {
         let Some(card) = self.form.as_mut().and_then(Form::pairing_card) else {
             return;
         };
@@ -398,7 +390,6 @@ impl SocialsView {
                 ));
             }
         }
-        let _ = window;
         cx.notify();
     }
 
@@ -428,14 +419,15 @@ impl SocialsView {
     }
 
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Form {
-            entry: Entry::Token(token),
-            ..
-        }) = &self.form
+        let Some(
+            form @ Form {
+                entry: Entry::Token(token),
+                ..
+            },
+        ) = &self.form
         else {
             return;
         };
-        let form = self.form.as_ref().expect("token form");
         let token = token.read(cx).value().trim().to_string();
         if token.is_empty() {
             self.error = Some("Paste the bot token first.".into());
