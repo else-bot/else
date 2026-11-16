@@ -252,19 +252,6 @@ pub enum Connection {
     InvalidCredentials(String),
 }
 
-/// How the app's link to its server stands, as the server label shows it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Link {
-    Connecting,
-    Connected,
-    Failed,
-}
-
-/// Draws the current server's name in the sidebar header. The shell owns
-/// the server list; the sidebar passes its own link, which the shell cannot
-/// read while the sidebar draws.
-pub(crate) type ServerLabel = std::rc::Rc<dyn Fn(Link, &mut App) -> AnyElement>;
-
 pub struct ElseApp {
     client: Arc<Client>,
     connection: Connection,
@@ -315,7 +302,6 @@ pub struct ElseApp {
     rules: rules::RulesState,
     rules_dialog: Option<rules::RulesDialog>,
     sidebar_focus: FocusHandle,
-    server_label: Option<ServerLabel>,
     pause: pause::PauseStrip,
     live: Option<crate::api::LiveCommands>,
     _live: Option<Task<()>>,
@@ -416,7 +402,6 @@ impl ElseApp {
             rules: HashMap::new(),
             rules_dialog: None,
             sidebar_focus,
-            server_label: None,
             pause: Default::default(),
             live: None,
             _live: None,
