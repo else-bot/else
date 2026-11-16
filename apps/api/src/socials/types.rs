@@ -14,24 +14,42 @@ pub struct SendMessage {
 pub enum Provider {
     Telegram,
     Discord,
+    WhatsApp,
 }
 impl Provider {
     pub fn name(self) -> &'static str {
         match self {
             Self::Telegram => "telegram",
             Self::Discord => "discord",
+            Self::WhatsApp => "whatsapp",
         }
     }
     pub fn label(self) -> &'static str {
         match self {
             Self::Telegram => "Telegram",
             Self::Discord => "Discord",
+            Self::WhatsApp => "WhatsApp",
+        }
+    }
+    /// Whether history and single messages come from what the connection
+    /// observed rather than from the platform.
+    pub fn local_history(self) -> bool {
+        matches!(self, Self::Telegram | Self::WhatsApp)
+    }
+    /// How the owner connects this provider.
+    pub fn setup(self) -> SetupKind {
+        match self {
+            Self::Telegram | Self::Discord => SetupKind::Token,
+            Self::WhatsApp => SetupKind::Pairing,
         }
     }
     pub fn supports(self, operation: CommandKind) -> bool {
         match operation {
             CommandKind::CreateThread => self == Self::Discord,
-            CommandKind::Poll | CommandKind::Members => self == Self::Telegram,
+            CommandKind::Poll => self == Self::Telegram,
+            CommandKind::Members => matches!(self, Self::Telegram | Self::WhatsApp),
+            CommandKind::CreateGroup => self == Self::WhatsApp,
+            CommandKind::Pin | CommandKind::Unpin => self != Self::WhatsApp,
             CommandKind::Conversations
             | CommandKind::History
             | CommandKind::Search
@@ -39,9 +57,7 @@ impl Provider {
             | CommandKind::Chat
             | CommandKind::Edit
             | CommandKind::Delete
-            | CommandKind::React
-            | CommandKind::Pin
-            | CommandKind::Unpin => true,
+            | CommandKind::React => true,
         }
     }
     pub fn limitations(self) -> &'static [&'static str] {
@@ -58,7 +74,61 @@ impl Provider {
                 "Gateway notifications use mentions and DMs. Wake All requests Message Content Intent, which must be enabled in the Developer Portal.",
                 "Search covers at most 5000 observed messages per connection. History uses accessible channel history.",
             ],
+            Self::WhatsApp => &[
+                "This links your personal WhatsApp account as a device. Everything the bot sends goes out as you, after you approve it.",
+                "History, search, and conversations cover chats seen since pairing plus the history WhatsApp syncs on first link, at most 5000 messages.",
+                "WhatsApp does not allow unofficial clients and may ban accounts that act like bots. Sends stay human-paced and need your approval.",
+                "Never message someone the owner has not talked to without the owner's explicit approval of that recipient.",
+            ],
         }
+    }
+}
+
+/// How an owner connects a provider: by submitting a bot token, or by
+/// pairing a device from a live card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SetupKind {
+    Token,
+    Pairing,
+}
+
+/// What the API holds to act on a connection. It is sealed at rest and never
+/// leaves the API.
+pub enum Credential {
+    /// A Telegram or Discord bot token.
+    Token(Token),
+    /// The data key that seals a linked device's store.
+    Device(DeviceKey),
+}
+impl Credential {
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Token(token) => token.0.as_bytes(),
+            Self::Device(key) => key.0.as_slice(),
+        }
+    }
+    pub(crate) fn open(
+        provider: Provider,
+        bytes: zeroize::Zeroizing<Vec<u8>>,
+    ) -> Result<Self, Error> {
+        match provider.setup() {
+            SetupKind::Token => Ok(Self::Token(Token::parse(
+                String::from_utf8(bytes.to_vec()).map_err(|_| Error::Crypto)?,
+            )?)),
+            SetupKind::Pairing => Ok(Self::Device(DeviceKey(zeroize::Zeroizing::new(
+                bytes.as_slice().try_into().map_err(|_| Error::Crypto)?,
+            )))),
+        }
+    }
+}
+
+pub struct DeviceKey(pub zeroize::Zeroizing<[u8; 32]>);
+impl DeviceKey {
+    pub fn generate() -> Result<Self, Error> {
+        let mut key = zeroize::Zeroizing::new([0; 32]);
+        getrandom::fill(key.as_mut()).map_err(|_| Error::Crypto)?;
+        Ok(Self(key))
     }
 }
 
@@ -334,6 +404,11 @@ pub enum Command {
         question: String,
         options: Vec<String>,
     },
+    /// A new group with the owner and `participants`, named `name`.
+    CreateGroup {
+        name: String,
+        participants: Vec<String>,
+    },
 }
 fn default_limit() -> u16 {
     50
@@ -354,11 +429,12 @@ impl Command {
             Self::Unpin { .. } => CommandKind::Unpin,
             Self::CreateThread { .. } => CommandKind::CreateThread,
             Self::Poll { .. } => CommandKind::Poll,
+            Self::CreateGroup { .. } => CommandKind::CreateGroup,
         }
     }
     pub fn destination(&self) -> Option<&str> {
         match self {
-            Self::Conversations => None,
+            Self::Conversations | Self::CreateGroup { .. } => None,
             Self::History { destination, .. }
             | Self::Search { destination, .. }
             | Self::Message { destination, .. }
@@ -375,7 +451,7 @@ impl Command {
     }
     pub fn destination_mut(&mut self) -> Option<&mut String> {
         match self {
-            Self::Conversations => None,
+            Self::Conversations | Self::CreateGroup { .. } => None,
             Self::History { destination, .. }
             | Self::Search { destination, .. }
             | Self::Message { destination, .. }
@@ -420,6 +496,14 @@ impl Command {
                         .iter()
                         .all(|s| !s.trim().is_empty() && s.len() <= 100)
             }
+            Self::CreateGroup { name, participants } => {
+                !name.trim().is_empty()
+                    && name.len() <= 100
+                    && (1..=50).contains(&participants.len())
+                    && participants.iter().all(|p| {
+                        !p.is_empty() && p.len() <= 100 && !p.chars().any(char::is_control)
+                    })
+            }
             _ => true,
         };
         if valid {
@@ -440,6 +524,9 @@ pub struct Incoming {
     pub mentioned: bool,
     pub direct: bool,
     pub from_bot: bool,
+    /// Synced history from before it arrived: stored for reads, never wakes
+    /// a trigger.
+    pub replay: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -472,6 +559,10 @@ pub enum Error {
     ReceiverConflict,
     #[error("Encrypted credentials are unavailable.")]
     Crypto,
+    #[error("The account signed this device out. Pair it again from Settings → Socials.")]
+    SignedOut,
+    #[error("No code was scanned in time. Start pairing again for a new code.")]
+    Expired,
     #[error("The connector database operation failed.")]
     Db(#[from] sqlx::Error),
 }
@@ -492,6 +583,7 @@ pub enum CommandKind {
     Unpin,
     CreateThread,
     Poll,
+    CreateGroup,
 }
 impl CommandKind {
     pub fn mutates(self) -> bool {
@@ -508,11 +600,14 @@ impl CommandKind {
             | Self::Pin
             | Self::Unpin
             | Self::CreateThread
-            | Self::Poll => true,
+            | Self::Poll
+            | Self::CreateGroup => true,
         }
     }
+    /// Whether the operation posts something new that others read, so it
+    /// needs the same standing as sending a message.
     pub fn sends(self) -> bool {
-        self == Self::Poll
+        matches!(self, Self::Poll | Self::CreateGroup)
     }
 }
 pub const OPERATIONS: &[CommandKind] = &[
@@ -529,9 +624,30 @@ pub const OPERATIONS: &[CommandKind] = &[
     CommandKind::Unpin,
     CommandKind::CreateThread,
     CommandKind::Poll,
+    CommandKind::CreateGroup,
 ];
 pub fn definitions() -> Value {
-    serde_json::json!({"providers":([Provider::Telegram,Provider::Discord].map(|p|serde_json::json!({"provider":p,"label":p.label(),"token_help":format!("Connect the {} bot identity. The API stores the token encrypted and uses it for native tools; the assistant never receives the token.",p.label()),"capabilities":OPERATIONS.iter().filter(|op|p.supports(**op)).collect::<Vec<_>>(),"limitations":p.limitations()})))})
+    let providers = [Provider::Telegram, Provider::Discord, Provider::WhatsApp].map(|p| {
+        let help = match p.setup() {
+            SetupKind::Token => format!(
+                "Connect the {} bot identity. The API stores the token encrypted and uses it for native tools; the assistant never receives the token.",
+                p.label()
+            ),
+            SetupKind::Pairing => format!(
+                "Link your personal {} account as a device by scanning a QR code. The API keeps the device keys encrypted; the assistant never receives them.",
+                p.label()
+            ),
+        };
+        serde_json::json!({
+            "provider": p,
+            "label": p.label(),
+            "setup": p.setup(),
+            "token_help": help,
+            "capabilities": OPERATIONS.iter().filter(|op| p.supports(**op)).collect::<Vec<_>>(),
+            "limitations": p.limitations(),
+        })
+    });
+    serde_json::json!({ "providers": providers })
 }
 
 pub struct Envelope {

@@ -2,10 +2,10 @@ use super::{
     AppState,
     error::{ApiError, ApiJson, ApiPath, SecretJson},
 };
-use crate::socials::{Manager, store, types::*};
+use crate::socials::{Manager, pairing::Purpose, store, types::*};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     routing::{get, post, put},
 };
@@ -39,6 +39,16 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
         .route("/connectors/socials/setups/{id}/complete", post(complete))
         .route(
+            "/connectors/socials/setups/{id}/pairing",
+            get(setup_pairing).post(start_setup_pairing),
+        )
+        .route(
+            "/connectors/socials/connections/{id}/pairing",
+            get(repair_pairing)
+                .post(start_repair_pairing)
+                .delete(stop_repair_pairing),
+        )
+        .route(
             "/connectors/socials/setups/{id}",
             axum::routing::delete(cancel),
         )
@@ -51,6 +61,10 @@ pub(super) fn error(e: Error) -> ApiError {
             ApiError::new(StatusCode::CONFLICT, "social_conflict", e.to_string())
         }
         Error::Invalid(text) => ApiError::bad_request("invalid_social_request", text),
+        Error::Unsupported => ApiError::bad_request(
+            "invalid_social_request",
+            "This provider does not pair a device.",
+        ),
         Error::Busy => {
             ApiError::new(StatusCode::TOO_MANY_REQUESTS, "social_busy", e.to_string()).retryable()
         }
@@ -91,6 +105,11 @@ async fn connect(
     SecretJson(request): SecretJson<Connect>,
 ) -> Result<Json<Value>, ApiError> {
     let m = manager(&s)?;
+    if request.provider.setup() != SetupKind::Token {
+        return Err(error(Error::Invalid(
+            "Pair this provider from its connection card instead of submitting a token.",
+        )));
+    }
     let token = Token::parse(request.token).map_err(error)?;
     let identity = m.validate(request.provider, &token).await.map_err(error)?;
     let c = store::create(
@@ -98,7 +117,8 @@ async fn connect(
         &m.key,
         request.provider,
         &identity,
-        &token,
+        &Credential::Token(token),
+        None,
         &request.instructions,
     )
     .await
@@ -144,16 +164,21 @@ async fn remove(
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Credential {
+struct Replacement {
     token: String,
 }
 async fn credential(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
-    SecretJson(request): SecretJson<Credential>,
+    SecretJson(request): SecretJson<Replacement>,
 ) -> Result<Json<Value>, ApiError> {
     let m = manager(&s)?;
     let c = store::connection(&s.db, id).await.map_err(error)?;
+    if c.provider.setup() != SetupKind::Token {
+        return Err(error(Error::Invalid(
+            "Pair this connection again from Settings instead of submitting a token.",
+        )));
+    }
     let token = Token::parse(request.token).map_err(error)?;
     let identity = m.validate(c.provider, &token).await.map_err(error)?;
     if identity.id != c.remote_id {
@@ -161,7 +186,7 @@ async fn credential(
             "The replacement token belongs to a different bot. Add it as a separate connection.",
         )));
     }
-    store::replace(&s.db, &m.key, &c, &token)
+    store::replace(&s.db, &m.key, &c, &Credential::Token(token), None)
         .await
         .map_err(error)?;
     m.changed(id).await;
@@ -204,6 +229,9 @@ async fn delete_trigger(
 #[serde(deny_unknown_fields)]
 struct Complete {
     connection_id: Uuid,
+    /// The owner's words for the bot, written on the card.
+    #[serde(default)]
+    note: Option<String>,
 }
 async fn complete(
     State(s): State<Arc<AppState>>,
@@ -211,7 +239,7 @@ async fn complete(
     ApiJson(input): ApiJson<Complete>,
 ) -> Result<Json<Value>, ApiError> {
     manager(&s)?;
-    let setup = store::settle_setup(&s.db, id, Some(input.connection_id))
+    let setup = store::settle_setup(&s.db, id, Some(input.connection_id), input.note.as_deref())
         .await
         .map_err(error)?;
     s.scheduler.wake();
@@ -221,7 +249,68 @@ async fn cancel(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let setup = store::settle_setup(&s.db, id, None).await.map_err(error)?;
+    if let Some(m) = s.socials.as_ref() {
+        m.stop_pairing(Purpose::Setup(id)).await;
+    }
+    let setup = store::settle_setup(&s.db, id, None, None)
+        .await
+        .map_err(error)?;
     s.scheduler.wake();
     Ok(Json(json!({"setup":setup})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct After {
+    #[serde(default)]
+    after: u64,
+}
+async fn start_setup_pairing(
+    State(s): State<Arc<AppState>>,
+    ApiPath(id): ApiPath<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let view = manager(&s)?
+        .start_pairing(Purpose::Setup(id))
+        .await
+        .map_err(error)?;
+    Ok(Json(json!({ "pairing": view })))
+}
+async fn setup_pairing(
+    State(s): State<Arc<AppState>>,
+    ApiPath(id): ApiPath<Uuid>,
+    Query(after): Query<After>,
+) -> Result<Json<Value>, ApiError> {
+    let view = manager(&s)?
+        .pairing(Purpose::Setup(id), after.after)
+        .await
+        .map_err(error)?;
+    Ok(Json(json!({ "pairing": view })))
+}
+async fn start_repair_pairing(
+    State(s): State<Arc<AppState>>,
+    ApiPath(id): ApiPath<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let view = manager(&s)?
+        .start_pairing(Purpose::Repair(id))
+        .await
+        .map_err(error)?;
+    Ok(Json(json!({ "pairing": view })))
+}
+async fn repair_pairing(
+    State(s): State<Arc<AppState>>,
+    ApiPath(id): ApiPath<Uuid>,
+    Query(after): Query<After>,
+) -> Result<Json<Value>, ApiError> {
+    let view = manager(&s)?
+        .pairing(Purpose::Repair(id), after.after)
+        .await
+        .map_err(error)?;
+    Ok(Json(json!({ "pairing": view })))
+}
+async fn stop_repair_pairing(
+    State(s): State<Arc<AppState>>,
+    ApiPath(id): ApiPath<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    manager(&s)?.stop_pairing(Purpose::Repair(id)).await;
+    Ok(StatusCode::NO_CONTENT)
 }

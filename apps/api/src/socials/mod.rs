@@ -1,4 +1,5 @@
 pub mod delivery;
+pub mod pairing;
 pub mod providers;
 pub mod store;
 pub mod types;
@@ -98,6 +99,7 @@ pub struct Manager {
     transport: Arc<dyn providers::Transport>,
     scheduler: Option<Arc<crate::scheduler::Scheduler>>,
     workers: Actor<HashMap<Uuid, Worker>>,
+    pairings: Actor<HashMap<pairing::Purpose, pairing::Live>>,
 }
 impl Manager {
     pub fn new(db: SqlitePool, key: Arc<SecretKey>) -> Self {
@@ -114,6 +116,7 @@ impl Manager {
             transport,
             scheduler: None,
             workers: Actor::default(),
+            pairings: Actor::default(),
         }
     }
     pub fn with_scheduler(mut self, scheduler: Arc<crate::scheduler::Scheduler>) -> Self {
@@ -193,7 +196,8 @@ impl Manager {
     /// The chat ID `destination` names. Tools resolve a public `@username`
     /// or share link when the bot first names a chat, so the owner approves,
     /// and triggers and receipts record, the ID incoming messages carry even
-    /// if the username later moves. Only work for the owner may look one up.
+    /// if the username later moves. A WhatsApp phone number becomes its chat
+    /// ID. Only work for the owner may look a username up.
     pub async fn resolve(
         self: &Arc<Self>,
         id: Uuid,
@@ -201,10 +205,13 @@ impl Manager {
         turn: Uuid,
         destination: &str,
     ) -> Result<String, Error> {
+        let c = store::connection(&self.db, id).await?;
+        if c.provider == Provider::WhatsApp {
+            return Ok(providers::whatsapp::jid(destination)?.to_string());
+        }
         let Some(username) = public_username(destination)? else {
             return Ok(destination.to_owned());
         };
-        let c = store::connection(&self.db, id).await?;
         let access = store::authorize(
             &mut *self.db.acquire().await?,
             &c,
@@ -340,15 +347,16 @@ impl Manager {
             changed.borrow_and_update();
             let loaded = async {
                 let c = store::connection(&self.db, id).await?;
-                let token = store::credential(&self.db, &self.key, &c).await?;
-                Ok::<_, Error>((c, token))
+                let credential = store::credential(&self.db, &self.key, &c).await?;
+                let session = providers::Session::open(&self.db, &c, credential).await?;
+                Ok::<_, Error>((c, session))
             }
             .await;
-            let (c, token) = match loaded {
+            let (c, session) = match loaded {
                 Ok(pair) => pair,
                 Err(_) => break,
             };
-            let session = Arc::new(providers::Session::new(c.provider, token));
+            let session = Arc::new(session);
             let listener_session = session.clone();
             let inbox_stop = stop.child_token();
             let running = inbox_stop.clone();
@@ -493,7 +501,7 @@ impl Manager {
                     bot: r.bot,
                     turn: r.turn,
                     id,
-                    destination: r.operation.destination().ok_or(Error::Forbidden)?,
+                    destination: r.operation.destination(),
                     payload: &r.operation.payload(),
                     send: r.operation.sends(),
                 },
@@ -514,7 +522,7 @@ impl Manager {
                 destination,
                 before,
                 limit,
-            }) if c.provider == Provider::Telegram => {
+            }) if c.provider.local_history() => {
                 store::local_messages(&self.db, c.id, destination, before.as_deref(), None, *limit)
                     .await
             }
@@ -528,7 +536,7 @@ impl Manager {
             Operation::Command(Command::Message {
                 destination,
                 message_id,
-            }) if c.provider == Provider::Telegram => {
+            }) if c.provider.local_history() => {
                 let row:Option<(String,String)>=sqlx::query_as("SELECT author_id,body FROM social_messages WHERE connection_id=?1 AND destination=?2 AND message_id=?3").bind(c.id).bind(destination).bind(message_id).fetch_optional(&self.db).await?;
                 row.map(|(author, body)| json!({"id":message_id,"author_id":author,"body":body}))
                     .ok_or(Error::NotFound)
@@ -610,6 +618,7 @@ impl Manager {
             let health = match &result {
                 Ok(()) => "connected",
                 Err(Error::ReceiverConflict) => "receiver_conflict",
+                Err(Error::SignedOut) => "signed_out",
                 Err(_) => "reconnecting",
             };
             if let Err(error) = &result {
@@ -623,6 +632,9 @@ impl Manager {
             .bind(health)
             .execute(&self.db)
             .await;
+            if matches!(result, Err(Error::SignedOut)) {
+                return;
+            }
             tokio::select! {_=stop.cancelled()=>return,_=tokio::time::sleep(Duration::from_secs(10))=>{}}
         }
     }
@@ -673,6 +685,9 @@ impl Manager {
         }
     }
     pub async fn run(self: Arc<Self>, stop: CancellationToken) {
+        if let Err(error) = store::sweep_devices(&self.db).await {
+            tracing::warn!(%error, "could not delete abandoned device stores");
+        }
         if let Ok(list) = store::connections(&self.db).await {
             for c in list {
                 let _ = self.worker(c.id).await;
@@ -686,6 +701,9 @@ impl Manager {
         for w in &workers {
             w.stop.cancel()
         }
+        self.pairings
+            .call(|pairings| pairings.values().for_each(|live| live.stop.cancel()))
+            .await;
         futures_util::future::join_all(workers.into_iter().map(|mut w| async move {
             while !*w.done.borrow() {
                 if w.done.changed().await.is_err() {

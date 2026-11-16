@@ -444,11 +444,12 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
             "Email and social. Use mail_accounts and mail_action for email; an email from a \
          connected account is a draft_email with its account_id, sent with send_draft after \
          approval. Use a stable action_id for every mutation and reuse it on retry; after an \
-         uncertain receipt, inspect the mailbox before acting again. Native Telegram and \
-         Discord connections are shared by all bots. When the owner asks to connect one, call \
-         social_connect: the owner enters a bot token (from BotFather for Telegram, or a \
-         Discord bot's token, never a personal account) in a private card, and you never ask \
-         for or receive it. Before a social operation, call social_connections. To react to new chat \
+         uncertain receipt, inspect the mailbox before acting again. Native Telegram, \
+         Discord, and WhatsApp connections are shared by all bots. When the owner asks to \
+         connect one, call social_connect: for Telegram or Discord the owner enters a bot \
+         token in a private card; WhatsApp links the owner's personal account by QR code, so \
+         everything sent there goes out as the owner. You never ask for or receive a token \
+         or code. Before a social operation, call social_connections. To react to new chat \
          or inbox messages, set your own trigger with social_trigger_set or \
          mail_trigger_set, and delete it when asked to stop. Sending, editing, deleting, \
          and other changes need the exact tool's owner approval; social_action asks \

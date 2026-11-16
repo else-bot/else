@@ -80,7 +80,8 @@ pub struct OutgoingDraft {
 /// definition both granting and matching use.
 macro_rules! kind {
     () => {
-        "CASE WHEN json_extract(d.content, '$.channel') = 'message'
+        "CASE WHEN json_extract(d.content, '$.platform') = 'whatsapp' THEN NULL
+        WHEN json_extract(d.content, '$.channel') = 'message'
             AND json_extract(d.content, '$.task') IS NOT NULL
         THEN json_object('platform', json_extract(d.content, '$.platform'),
             'account_id', json_extract(d.content, '$.account_id'),

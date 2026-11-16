@@ -21,7 +21,7 @@ use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-fn key() -> SecretKey {
+pub(crate) fn key() -> SecretKey {
     SecretKey::parse("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=").unwrap()
 }
 fn token() -> Token {
@@ -45,13 +45,14 @@ async fn account(db: &TestDb, name: &str) -> Connection {
             display_name: name.into(),
             username: Some(name.into()),
         },
-        &token(),
+        &Credential::Token(token()),
+        None,
         "Use this bot only for team support.",
     )
     .await
     .unwrap()
 }
-async fn bot(db: &TestDb) -> Uuid {
+pub(crate) async fn bot(db: &TestDb) -> Uuid {
     let bot = Uuid::new_v4();
     sqlx::query("INSERT INTO bots(id,name) VALUES(?1,'Social test')")
         .bind(bot)
@@ -66,7 +67,7 @@ async fn bot(db: &TestDb) -> Uuid {
         .unwrap();
     bot
 }
-async fn turn(db: &TestDb, bot: Uuid, kind: &str) -> Uuid {
+pub(crate) async fn turn(db: &TestDb, bot: Uuid, kind: &str) -> Uuid {
     let (conversation, last, seq): (Uuid, i64, i64) =
         sqlx::query_as("SELECT id,last_turn_no,last_item_seq FROM conversations WHERE bot_id=?1")
             .bind(bot)
@@ -128,9 +129,8 @@ async fn tokens_are_encrypted_identity_bound_and_never_public() {
         store::credential(&db.pool, &key(), &c)
             .await
             .unwrap()
-            .0
-            .as_str(),
-        token().0.as_str()
+            .bytes(),
+        token().0.as_bytes()
     );
     let cipher: Vec<u8> =
         sqlx::query_scalar("SELECT credential FROM social_connections WHERE id=?1")
@@ -159,7 +159,8 @@ async fn tokens_are_encrypted_identity_bound_and_never_public() {
                 display_name: "x".into(),
                 username: None
             },
-            &token(),
+            &Credential::Token(token()),
+            None,
             ""
         )
         .await,
@@ -273,7 +274,7 @@ async fn setup_needs_only_its_provider_connection_and_requeues() {
         .execute(&db.pool)
         .await
         .unwrap();
-    let done = store::settle_setup(&db.pool, request.id, Some(c.id))
+    let done = store::settle_setup(&db.pool, request.id, Some(c.id), None)
         .await
         .unwrap();
     assert_eq!(done.status, "connected");
@@ -284,7 +285,7 @@ async fn setup_needs_only_its_provider_connection_and_requeues() {
         .unwrap();
     assert_eq!(status, "queued");
     assert_eq!(
-        store::settle_setup(&db.pool, request.id, Some(c.id))
+        store::settle_setup(&db.pool, request.id, Some(c.id), None)
             .await
             .unwrap()
             .status,
@@ -292,7 +293,7 @@ async fn setup_needs_only_its_provider_connection_and_requeues() {
         "a retry of the same completion changes nothing"
     );
     assert!(
-        store::settle_setup(&db.pool, request.id, None)
+        store::settle_setup(&db.pool, request.id, None, None)
             .await
             .is_err(),
         "a settled setup cannot be cancelled"
@@ -441,7 +442,7 @@ async fn action_receipts_reject_changed_retries_and_survive_crash_as_uncertain()
                 bot,
                 turn,
                 id,
-                destination: "100",
+                destination: Some("100"),
                 payload: &payload,
                 send: false
             }
@@ -458,7 +459,7 @@ async fn action_receipts_reject_changed_retries_and_survive_crash_as_uncertain()
                 bot,
                 turn,
                 id,
-                destination: "100",
+                destination: Some("100"),
                 payload: &payload,
                 send: false
             }
@@ -476,7 +477,7 @@ async fn action_receipts_reject_changed_retries_and_survive_crash_as_uncertain()
                 bot,
                 turn,
                 id,
-                destination: "100",
+                destination: Some("100"),
                 payload: &json!({"different":true}),
                 send: false,
             }
@@ -493,7 +494,7 @@ async fn action_receipts_reject_changed_retries_and_survive_crash_as_uncertain()
                 bot,
                 turn,
                 id,
-                destination: "100",
+                destination: Some("100"),
                 payload: &payload,
                 send: false
             }
@@ -528,6 +529,7 @@ async fn incoming_delivery_is_deduplicated_and_telegram_history_pages_numericall
             mentioned: true,
             direct: false,
             from_bot: false,
+            replay: false,
         };
         store::record(&db.pool, &c, &event, id + 1).await.unwrap();
         store::record(&db.pool, &c, &event, id + 1).await.unwrap();
@@ -582,6 +584,15 @@ impl Transport for Fake {
             display_name: "Fake bot".into(),
             username: None,
         })
+    }
+    async fn pair(
+        &self,
+        _: &sqlx::SqlitePool,
+        _: else_api::socials::providers::whatsapp::Vault,
+        _: &tokio::sync::watch::Sender<else_api::socials::providers::whatsapp::Pairing>,
+        _: CancellationToken,
+    ) -> Result<Identity, Error> {
+        unreachable!("Telegram and Discord fixtures never pair a device")
     }
     async fn destinations(&self, _: &Session) -> Result<Vec<Destination>, Error> {
         Ok(vec![])
@@ -1095,11 +1106,11 @@ async fn cancelled_setup_cannot_complete_or_touch_pending_deliveries() {
     let request = store::request_setup(&db.pool, turn, Provider::Telegram, "Connect again")
         .await
         .unwrap();
-    store::settle_setup(&db.pool, request.id, None)
+    store::settle_setup(&db.pool, request.id, None, None)
         .await
         .unwrap();
     assert!(
-        store::settle_setup(&db.pool, request.id, Some(c.id))
+        store::settle_setup(&db.pool, request.id, Some(c.id), None)
             .await
             .is_err()
     );
@@ -1148,6 +1159,7 @@ async fn retention_expires_pending_deliveries_and_recovery_admits_remaining_mess
         mentioned: true,
         direct: false,
         from_bot: false,
+        replay: false,
     };
     store::record(&db.pool, &c, &event, 5002).await.unwrap();
     let orphan_pending: i64 = sqlx::query_scalar("SELECT count(*) FROM social_deliveries d WHERE d.status='pending' AND NOT EXISTS(SELECT 1 FROM social_messages m WHERE m.connection_id=d.connection_id AND m.event_id=d.event_id)")
@@ -1186,6 +1198,7 @@ fn incoming(event: &str, chat: &str, mentioned: bool, from_bot: bool) -> Incomin
         mentioned,
         direct: false,
         from_bot,
+        replay: false,
     }
 }
 
@@ -1457,7 +1470,7 @@ async fn finishing_an_action_after_recovery_returns_the_stored_receipt() {
             bot,
             turn,
             id,
-            destination: "100",
+            destination: Some("100"),
             payload: &payload,
             send: false,
         },

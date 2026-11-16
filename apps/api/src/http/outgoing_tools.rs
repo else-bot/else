@@ -86,7 +86,7 @@ pub(super) fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "draft_message",
-            "description": "Draft a message or post (x, telegram, discord) for the owner to review, edit, and \
+            "description": "Draft a message or post (x, telegram, discord, whatsapp) for the owner to review, edit, and \
                 approve in a card; use it, not ask_permission, for anything you would send. With a \
                 native connection, pass account_id and the destination from social_connections or a \
                 public Telegram @username or t.me link; send_draft sends it once approved. To \
@@ -100,7 +100,7 @@ pub(super) fn schemas() -> Vec<Value> {
                     "account": handle("The account you will send from, as the platform shows \
                         it (for example @handle). Optional."),
                     "destination": handle("Where it goes, as the platform knows it: the \
-                        Telegram chat, group, channel, or user (required for telegram), or for x \
+                        chat, group, channel, or user (required except for x), or for x \
                         the user to DM or the post it replies to. Omit for a new public X post."),
                     "task": handle("The recurring job of a message to a chat or user (never a \
                         public post), such as \"Initial lead DMs\", so Approve always covers it to \
@@ -562,6 +562,7 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
                     let platform = match connection.provider {
                         crate::socials::types::Provider::Telegram => Platform::Telegram,
                         crate::socials::types::Provider::Discord => Platform::Discord,
+                        crate::socials::types::Provider::WhatsApp => Platform::WhatsApp,
                     };
                     if message.platform != platform {
                         return Err(crate::socials::types::Error::Invalid(

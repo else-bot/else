@@ -30,7 +30,7 @@ async fn a_public_channel_link_resolves_and_receives_a_post() {
         instructions: String::new(),
         message_content: false,
     };
-    let session = Session::new(Provider::Telegram, token);
+    let session = Session::token(Provider::Telegram, token).unwrap();
     let username = public_username(&chat).unwrap().expect("a public chat");
     let found = Native.resolve(&c, &session, &username).await.unwrap();
     println!("{chat} -> {found:?}");

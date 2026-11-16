@@ -1,0 +1,213 @@
+//! Live device pairing for providers set up by scanning a code. A pairing
+//! writes into a new device store, so a failed or abandoned one never
+//! touches the connection it may replace. Success seals the store's key into
+//! a new connection, or into the connection being paired again, in one
+//! transaction.
+
+use super::{
+    Manager,
+    providers::whatsapp::{Pairing, Vault},
+    store,
+    types::*,
+};
+use serde::Serialize;
+use std::{sync::Arc, time::Duration};
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+/// What a pairing links the device to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Purpose {
+    /// A bot's pending setup card: success creates a connection.
+    Setup(Uuid),
+    /// An existing connection the account signed out: success replaces its
+    /// device, if the same account linked.
+    Repair(Uuid),
+}
+
+/// A pairing as the card sees it. `revision` advances on every change.
+#[derive(Debug, Clone, Serialize)]
+pub struct View {
+    pub revision: u64,
+    #[serde(flatten)]
+    pub pairing: Pairing,
+}
+
+pub(super) struct Live {
+    pub(super) view: watch::Receiver<View>,
+    pub(super) stop: CancellationToken,
+}
+
+const MAX_PAIRINGS: usize = 4;
+/// How long a card waits for the next change before asking again.
+pub const POLL: Duration = Duration::from_secs(25);
+
+impl Manager {
+    /// Start pairing for `purpose`, or return the one already running. A
+    /// finished pairing is replaced, which is how the owner gets a new code.
+    pub async fn start_pairing(self: &Arc<Self>, purpose: Purpose) -> Result<View, Error> {
+        match purpose {
+            Purpose::Setup(id) => {
+                let setup = store::setup(&self.db, id).await?;
+                if setup.status != "pending" {
+                    return Err(Error::Inactive);
+                }
+                if setup.provider.setup() != SetupKind::Pairing {
+                    return Err(Error::Unsupported);
+                }
+            }
+            Purpose::Repair(id) => {
+                let c = store::connection(&self.db, id).await?;
+                if c.provider.setup() != SetupKind::Pairing {
+                    return Err(Error::Unsupported);
+                }
+            }
+        }
+        let manager = self.clone();
+        self.pairings
+            .call(move |pairings| {
+                if let Some(live) = pairings.get(&purpose)
+                    && !live.view.borrow().pairing.finished()
+                {
+                    return Ok(live.view.borrow().clone());
+                }
+                pairings.retain(|_, live| !live.view.borrow().pairing.finished());
+                if pairings.len() >= MAX_PAIRINGS {
+                    return Err(Error::Busy);
+                }
+                let first = View {
+                    revision: 1,
+                    pairing: Pairing::Starting,
+                };
+                let (view, watched) = watch::channel(first.clone());
+                let stop = CancellationToken::new();
+                pairings.insert(
+                    purpose,
+                    Live {
+                        view: watched,
+                        stop: stop.clone(),
+                    },
+                );
+                tokio::spawn(manager.pair(purpose, view, stop));
+                Ok(first)
+            })
+            .await
+    }
+
+    /// The pairing's view once its revision passes `after`, or the current
+    /// one when [`POLL`] runs out.
+    pub async fn pairing(&self, purpose: Purpose, after: u64) -> Result<View, Error> {
+        let mut view = self
+            .pairings
+            .call(move |pairings| pairings.get(&purpose).map(|live| live.view.clone()))
+            .await
+            .ok_or(Error::NotFound)?;
+        let _ = tokio::time::timeout(POLL, view.wait_for(|v| v.revision > after)).await;
+        Ok(view.borrow().clone())
+    }
+
+    /// Stop a running pairing. Its device store is deleted unless it
+    /// already linked.
+    pub async fn stop_pairing(&self, purpose: Purpose) {
+        self.pairings
+            .call(move |pairings| {
+                if let Some(live) = pairings.get(&purpose) {
+                    live.stop.cancel();
+                }
+            })
+            .await;
+    }
+
+    async fn pair(
+        self: Arc<Self>,
+        purpose: Purpose,
+        view: watch::Sender<View>,
+        stop: CancellationToken,
+    ) {
+        let (codes, mut seen) = watch::channel(Pairing::Starting);
+        let relay = async {
+            while seen.changed().await.is_ok() {
+                let pairing = seen.borrow_and_update().clone();
+                view.send_modify(|v| {
+                    v.revision += 1;
+                    v.pairing = pairing;
+                });
+            }
+        };
+        let linked = async {
+            let result = self.link(purpose, &codes, stop.clone()).await;
+            drop(codes);
+            result
+        };
+        let (result, ()) = tokio::join!(linked, relay);
+        let last = match result {
+            Ok(connection) => Pairing::Paired {
+                connection: Box::new(connection),
+            },
+            Err(_) if stop.is_cancelled() => Pairing::Cancelled,
+            Err(Error::Expired) => Pairing::Expired,
+            Err(error) => {
+                tracing::warn!(%error, "social pairing failed");
+                Pairing::Failed {
+                    message: error.to_string(),
+                }
+            }
+        };
+        view.send_modify(|v| {
+            v.revision += 1;
+            v.pairing = last;
+        });
+    }
+
+    async fn link(
+        self: &Arc<Self>,
+        purpose: Purpose,
+        codes: &watch::Sender<Pairing>,
+        stop: CancellationToken,
+    ) -> Result<Connection, Error> {
+        let device = store::new_device(&self.db).await?;
+        let linked = async {
+            let key = DeviceKey::generate()?;
+            let vault = Vault::new(self.db.clone(), device, &key);
+            let identity = self.transport.pair(&self.db, vault, codes, stop).await?;
+            let credential = Credential::Device(key);
+            let connection = match purpose {
+                Purpose::Setup(_) => {
+                    store::create(
+                        &self.db,
+                        &self.key,
+                        Provider::WhatsApp,
+                        &identity,
+                        &credential,
+                        Some(device),
+                        "",
+                    )
+                    .await?
+                }
+                Purpose::Repair(id) => {
+                    let c = store::connection(&self.db, id).await?;
+                    if identity.id != c.remote_id {
+                        return Err(Error::Invalid(
+                            "A different WhatsApp account was linked. Pair the account this connection belongs to, or add it as a new connection.",
+                        ));
+                    }
+                    store::replace(&self.db, &self.key, &c, &credential, Some(device)).await?;
+                    store::connection(&self.db, id).await?
+                }
+            };
+            Ok(connection)
+        }
+        .await;
+        match linked {
+            Ok(connection) => {
+                self.changed(connection.id).await;
+                Ok(connection)
+            }
+            Err(error) => {
+                let _ = store::drop_device(&self.db, device).await;
+                Err(error)
+            }
+        }
+    }
+}

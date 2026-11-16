@@ -27,6 +27,7 @@ flate2 = "1.1.10"
 futures-util = { workspace = true }
 getrandom = "0.4.3"
 hkdf = "=0.12.4"
+chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
 hex = "0.4.3"
 hmac = "=0.12.1"
 iana-time-zone = { workspace = true }
@@ -71,6 +72,7 @@ twilight-http = "0.18.0"
 twilight-gateway = "0.18.0"
 twilight-model = "0.18.0"
 twilight-util = { version = "0.18.0", features = ["permission-calculator"] }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "3f21778971e36f796b41b1180ef04da075968750", default-features = false, features = ["tokio-runtime", "tokio-transport"] }
 tower-http = { version = "0.7.1", features = ["limit", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

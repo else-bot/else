@@ -64,7 +64,9 @@ pub enum ApprovalSource {
 /// files under a recurring task, every message of that task from that
 /// account, to any destination. Emails have no kind (each goes to its own
 /// recipients), nor do X replies without a task (each answers its own
-/// post). `kind!` in `db::outgoing_drafts` derives it from stored content.
+/// post), nor does WhatsApp, which sends as the owner's own account, so each
+/// message there needs its own approval. `kind!` in `db::outgoing_drafts`
+/// derives it from stored content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftKind {
     pub platform: Platform,
@@ -148,10 +150,11 @@ pub enum Platform {
     X,
     Telegram,
     Discord,
+    WhatsApp,
 }
 
 impl Platform {
-    pub const ALL: [Self; 3] = [Self::X, Self::Telegram, Self::Discord];
+    pub const ALL: [Self; 4] = [Self::X, Self::Telegram, Self::Discord, Self::WhatsApp];
 
     pub fn as_str(self) -> &'static str {
         self.into()
@@ -163,13 +166,14 @@ impl Platform {
             Self::X => "X post",
             Self::Telegram => "Telegram message",
             Self::Discord => "Discord message",
+            Self::WhatsApp => "WhatsApp message",
         }
     }
 
     fn needs_destination(self) -> bool {
         match self {
             Self::X => false,
-            Self::Telegram | Self::Discord => true,
+            Self::Telegram | Self::Discord | Self::WhatsApp => true,
         }
     }
 }
@@ -508,7 +512,7 @@ impl Message {
         let platform = args["platform"]
             .as_str()
             .and_then(|p| p.parse::<Platform>().ok())
-            .ok_or("platform is x, telegram or discord")?;
+            .ok_or("platform is x, telegram, discord or whatsapp")?;
         let destination = handle(args, "destination")?;
         if platform.needs_destination() && destination.is_none() {
             return Err("a social message needs its destination chat or channel");
@@ -532,6 +536,11 @@ impl Message {
         let task = handle(args, "task")?
             .filter(|_| destination.is_some() || reply_to.is_some())
             .map(|task| task.split_whitespace().collect::<Vec<_>>().join(" "));
+        if task.is_some() && platform == Platform::WhatsApp {
+            return Err(
+                "a WhatsApp message goes out as the owner and is approved one at a time; omit task",
+            );
+        }
         if task.is_some() && account.is_none() && account_id.is_none() {
             return Err("a task needs the account it sends from: account or account_id");
         }

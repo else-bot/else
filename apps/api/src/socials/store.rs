@@ -30,7 +30,7 @@ fn seal(
     id: Uuid,
     provider: Provider,
     version: i64,
-    token: &Token,
+    credential: &Credential,
 ) -> Result<(Vec<u8>, Vec<u8>), Error> {
     let mut salt = [0; 32];
     getrandom::fill(&mut salt).map_err(|_| Error::Crypto)?;
@@ -43,7 +43,7 @@ fn seal(
         .wrap_output(&mut cipher)
         .map_err(|_| Error::Crypto)?;
     writer
-        .write_all(token.0.as_bytes())
+        .write_all(credential.bytes())
         .map_err(|_| Error::Crypto)?;
     writer.finish().map_err(|_| Error::Crypto)?;
     Ok((salt.to_vec(), cipher))
@@ -52,7 +52,7 @@ pub async fn credential(
     pool: &SqlitePool,
     key: &SecretKey,
     c: &Connection,
-) -> Result<Token, Error> {
+) -> Result<Credential, Error> {
     let (version,salt,cipher):(i64,Vec<u8>,Vec<u8>)=sqlx::query_as("SELECT credential_version,credential_salt,credential FROM social_connections WHERE id=?1 AND state<>'removed'").bind(c.id).fetch_one(pool).await?;
     let salt: [u8; 32] = salt.try_into().map_err(|_| Error::Crypto)?;
     let identity = identity(key, c.id, c.provider, version, &salt)?;
@@ -62,7 +62,7 @@ pub async fn credential(
         .map_err(|_| Error::Crypto)?;
     let mut bytes = zeroize::Zeroizing::new(Vec::new());
     reader.read_to_end(&mut bytes).map_err(|_| Error::Crypto)?;
-    Token::parse(String::from_utf8(bytes.to_vec()).map_err(|_| Error::Crypto)?)
+    Credential::open(c.provider, bytes)
 }
 pub async fn connections(pool: &SqlitePool) -> Result<Vec<Connection>, Error> {
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {COLUMNS} FROM social_connections WHERE state<>'removed' ORDER BY provider,display_name"))).fetch_all(pool).await?)
@@ -81,14 +81,15 @@ pub async fn create(
     key: &SecretKey,
     provider: Provider,
     remote: &Identity,
-    token: &Token,
+    credential: &Credential,
+    device: Option<Uuid>,
     instructions: &str,
 ) -> Result<Connection, Error> {
     if instructions.len() > 8000 || instructions.contains('\0') {
         return Err(Error::Invalid("Instructions must be at most 8000 bytes."));
     }
     let id = Uuid::new_v4();
-    let (salt, cipher) = seal(key, id, provider, 1, token)?;
+    let (salt, cipher) = seal(key, id, provider, 1, credential)?;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let total: i64 =
         sqlx::query_scalar("SELECT count(*) FROM social_connections WHERE state<>'removed'")
@@ -102,6 +103,9 @@ pub async fn create(
         return Err(Error::Duplicate);
     }
     sqlx::query("INSERT INTO social_connections(id,provider,remote_id,display_name,username,instructions,credential_salt,credential) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)").bind(id).bind(provider).bind(&remote.id).bind(&remote.display_name).bind(&remote.username).bind(instructions).bind(salt).bind(cipher).execute(&mut *tx).await?;
+    if let Some(device) = device {
+        attach_device(&mut tx, device, id).await?;
+    }
     tx.commit().await?;
     connection(pool, id).await
 }
@@ -109,12 +113,20 @@ pub async fn replace(
     pool: &SqlitePool,
     key: &SecretKey,
     c: &Connection,
-    token: &Token,
+    credential: &Credential,
+    device: Option<Uuid>,
 ) -> Result<(), Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let version:i64=sqlx::query_scalar("SELECT credential_version+1 FROM social_connections WHERE id=?1 AND generation=?2 AND state<>'removed'").bind(c.id).bind(c.generation).fetch_optional(&mut *tx).await?.ok_or(Error::Inactive)?;
-    let (salt, cipher) = seal(key, c.id, c.provider, version, token)?;
+    let (salt, cipher) = seal(key, c.id, c.provider, version, credential)?;
     sqlx::query("UPDATE social_connections SET credential_version=?2,credential_salt=?3,credential=?4,generation=generation+1,health='connecting' WHERE id=?1").bind(c.id).bind(version).bind(salt).bind(cipher).execute(&mut *tx).await?;
+    if let Some(device) = device {
+        sqlx::query("DELETE FROM social_device_stores WHERE connection_id=?1")
+            .bind(c.id)
+            .execute(&mut *tx)
+            .await?;
+        attach_device(&mut tx, device, c.id).await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -151,6 +163,10 @@ pub async fn set_state(
     .execute(&mut *tx)
     .await?;
     if removed {
+        sqlx::query("DELETE FROM social_device_stores WHERE connection_id=?1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         let bots: Vec<Uuid> = sqlx::query_scalar(
             "DELETE FROM social_triggers WHERE connection_id=?1 RETURNING bot_id",
         )
@@ -172,6 +188,68 @@ async fn stored(conn: &mut SqliteConnection, id: Uuid) -> Result<Connection, sql
     .bind(id)
     .fetch_one(conn)
     .await
+}
+/// A new device store for a pairing. It holds no connection until the
+/// pairing succeeds; [`sweep_devices`] deletes it if that never happens.
+pub async fn new_device(pool: &SqlitePool) -> Result<Uuid, Error> {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO social_device_stores(id) VALUES(?1)")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(id)
+}
+async fn attach_device(
+    conn: &mut SqliteConnection,
+    device: Uuid,
+    connection: Uuid,
+) -> Result<(), Error> {
+    let attached = sqlx::query(
+        "UPDATE social_device_stores SET connection_id=?2 WHERE id=?1 AND connection_id IS NULL",
+    )
+    .bind(device)
+    .bind(connection)
+    .execute(conn)
+    .await?;
+    if attached.rows_affected() == 0 {
+        return Err(Error::Inactive);
+    }
+    Ok(())
+}
+/// The device store holding connection `c`'s linked-device keys.
+pub async fn device(pool: &SqlitePool, connection: Uuid) -> Result<Uuid, Error> {
+    sqlx::query_scalar("SELECT id FROM social_device_stores WHERE connection_id=?1")
+        .bind(connection)
+        .fetch_optional(pool)
+        .await?
+        .ok_or(Error::Crypto)
+}
+/// Delete a pairing's device store unless a connection holds it.
+pub async fn drop_device(pool: &SqlitePool, device: Uuid) -> Result<(), Error> {
+    sqlx::query("DELETE FROM social_device_stores WHERE id=?1 AND connection_id IS NULL")
+        .bind(device)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+/// Delete device stores no connection holds. Their data keys lived only in
+/// a pairing that ended, so nothing can read them.
+pub async fn sweep_devices(pool: &SqlitePool) -> Result<(), Error> {
+    sqlx::query("DELETE FROM social_device_stores WHERE connection_id IS NULL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+/// Record that the platform signed this device out, so the owner pairs again.
+pub async fn signed_out(pool: &SqlitePool, c: &Connection) -> Result<(), Error> {
+    sqlx::query(
+        "UPDATE social_connections SET health='signed_out' WHERE id=?1 AND generation=?2 AND state<>'removed'",
+    )
+    .bind(c.id)
+    .bind(c.generation)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 const TRIGGER_COLUMNS: &str = "t.id,t.connection_id,t.bot_id,c.provider,c.display_name AS connection_name,c.username,t.destination,json_extract(d.info,'$.name') AS destination_name,t.wake,t.instructions,t.enabled,t.created_at,t.updated_at,(SELECT max(x.settled_at) FROM social_deliveries x WHERE x.trigger_id=t.id AND x.turn_id IS NOT NULL) AS last_woke_at FROM social_triggers t JOIN social_connections c ON c.id=t.connection_id AND c.state<>'removed' LEFT JOIN social_destinations d ON d.connection_id=t.connection_id AND d.id=t.destination";
 
@@ -448,7 +526,7 @@ pub struct Action<'a> {
     pub bot: Uuid,
     pub turn: Uuid,
     pub id: Uuid,
-    pub destination: &'a str,
+    pub destination: Option<&'a str>,
     pub payload: &'a Value,
     pub send: bool,
 }
@@ -471,7 +549,7 @@ pub async fn begin_action(
     h.update(serde_json::to_vec(payload).map_err(|_| Error::Conflict)?);
     let hash = h.finalize().to_vec();
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    authorize(&mut tx, c, bot, turn, Some(destination), true, send).await?;
+    authorize(&mut tx, c, bot, turn, destination, true, send).await?;
     let old:Option<(Vec<u8>,ActionStatus,Option<Json<Value>>)>=sqlx::query_as("SELECT fingerprint,status,result FROM social_actions WHERE connection_id=?1 AND action_id=?2").bind(c.id).bind(id).fetch_optional(&mut *tx).await?;
     if let Some((old, status, result)) = old {
         if old != hash {
@@ -525,7 +603,7 @@ pub async fn record(
     }
     sqlx::query("INSERT INTO social_destinations(connection_id,id,info) VALUES(?1,?2,?3) ON CONFLICT(connection_id,id) DO UPDATE SET info=CASE WHEN ?4='telegram' THEN excluded.info ELSE social_destinations.info END").bind(c.id).bind(&event.destination.id).bind(Json(&event.destination)).bind(c.provider).execute(&mut *tx).await?;
     let inserted=sqlx::query("INSERT OR IGNORE INTO social_messages(connection_id,destination,message_id,author_id,body,event_id) VALUES(?1,?2,?3,?4,?5,?6)").bind(c.id).bind(&event.destination.id).bind(&event.message_id).bind(&event.author_id).bind(&event.body).bind(&event.event_id).execute(&mut *tx).await?.rows_affected();
-    if inserted > 0 && !event.from_bot {
+    if inserted > 0 && !event.from_bot && !event.replay {
         sqlx::query(
             "INSERT OR IGNORE INTO social_deliveries(connection_id,event_id,bot_id,trigger_id,destination,message_id)
              SELECT ?1,?2,t.bot_id,t.id,?3,?4 FROM social_triggers t JOIN bots b ON b.id=t.bot_id AND b.status='active'
@@ -594,8 +672,10 @@ pub struct Setup {
     pub reason: String,
     pub status: String,
     pub connection_id: Option<Uuid>,
+    /// What the owner wrote on the card for the bot, in their own words.
+    pub note: Option<String>,
 }
-const SETUP_COLUMNS: &str = "id,bot_id,turn_id,provider,reason,status,connection_id";
+const SETUP_COLUMNS: &str = "id,bot_id,turn_id,provider,reason,status,connection_id,note";
 pub async fn setups(
     conn: &mut SqliteConnection,
     ids: &[Uuid],
@@ -606,6 +686,15 @@ pub async fn setups(
         map.entry(row.turn_id).or_default().push(row);
     }
     Ok(map)
+}
+pub async fn setup(pool: &SqlitePool, id: Uuid) -> Result<Setup, Error> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {SETUP_COLUMNS} FROM social_setups WHERE id=?1"
+    )))
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(Error::NotFound)
 }
 pub async fn request_setup(
     pool: &SqlitePool,
@@ -655,7 +744,15 @@ pub async fn settle_setup(
     pool: &SqlitePool,
     id: Uuid,
     connection: Option<Uuid>,
+    note: Option<&str>,
 ) -> Result<Setup, Error> {
+    let note = note.map(str::trim).filter(|n| !n.is_empty());
+    if note.is_some_and(|n| n.len() > 4000 || n.contains('\0')) {
+        return Err(Error::Invalid(
+            "Keep the note for the bot under 4000 bytes.",
+        ));
+    }
+    let note = note.filter(|_| connection.is_some());
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let setup: Setup = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {SETUP_COLUMNS} FROM social_setups WHERE id=?1"
@@ -670,7 +767,10 @@ pub async fn settle_setup(
         "cancelled"
     };
     if setup.status != "pending" {
-        return if setup.status == wanted && setup.connection_id == connection {
+        return if setup.status == wanted
+            && setup.connection_id == connection
+            && setup.note.as_deref() == note
+        {
             Ok(setup)
         } else {
             Err(Error::Conflict)
@@ -685,11 +785,12 @@ pub async fn settle_setup(
         }
     }
     let next = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "UPDATE social_setups SET status=?2,connection_id=?3 WHERE id=?1 RETURNING {SETUP_COLUMNS}"
+        "UPDATE social_setups SET status=?2,connection_id=?3,note=?4 WHERE id=?1 AND status='pending' RETURNING {SETUP_COLUMNS}"
     )))
     .bind(id)
     .bind(wanted)
     .bind(connection)
+    .bind(note)
     .fetch_one(&mut *tx)
     .await?;
     crate::db::turns::continue_waiting(&mut tx, setup.turn_id).await?;
