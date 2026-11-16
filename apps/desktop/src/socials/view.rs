@@ -181,7 +181,6 @@ impl SocialsView {
             .when(self.setup.is_some() && !paired, |mut c| {
                 for connection in self.connections.iter().filter(|c| c.provider == provider) {
                     let chosen = connection.clone();
-                    let note = card.note.clone();
                     c = c.child(
                         Button::new(SharedString::from(format!(
                             "social-existing-{}",
@@ -191,13 +190,12 @@ impl SocialsView {
                         .label(format!("Use {} already linked", connection.display_name))
                         .on_click(cx.listener(
                             move |view, _, window, cx| {
-                                let words = note.read(cx).value().trim().to_string();
-                                view.complete(
-                                    chosen.clone(),
-                                    (!words.is_empty()).then_some(words),
-                                    window,
-                                    cx,
-                                )
+                                let note = view
+                                    .form
+                                    .as_mut()
+                                    .and_then(Form::pairing_card)
+                                    .and_then(|card| card.note(cx));
+                                view.complete(chosen.clone(), note, window, cx)
                             },
                         )),
                     );

@@ -62,6 +62,13 @@ struct PairingCard {
     _poll: Task<()>,
 }
 
+impl PairingCard {
+    fn note(&self, cx: &App) -> Option<String> {
+        let note = self.note.read(cx).value().trim().to_string();
+        (!note.is_empty()).then_some(note)
+    }
+}
+
 impl Form {
     fn token(provider: Provider, window: &mut Window, cx: &mut Context<SocialsView>) -> Self {
         Self {
@@ -410,8 +417,8 @@ impl SocialsView {
             return;
         };
         let connection = connection.clone();
-        let note = card.note.read(cx).value().trim().to_string();
-        self.complete(connection, (!note.is_empty()).then_some(note), window, cx);
+        let note = card.note(cx);
+        self.complete(connection, note, window, cx);
     }
 
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
