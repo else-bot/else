@@ -535,6 +535,26 @@ status)
 	;;
 version) installed else-api || installed else-desktop || die "not installed" ;;
 update)
+	# Servers up to 0.0.70 launched update workers as KeepAlive jobs, which launchd
+	# reran after they finished: each rerun reinstalled its version, even an older one.
+	# Stop a rerun of a finished or superseded job (its worker, our parent, records
+	# its pid first). SIGKILL keeps the worker from overwriting its result on the way
+	# out. launchd then kills the job's process group, so the kill and the unload run
+	# from a new session.
+	if [ "$ELSEBOT_MANAGER" = launchd ]; then
+		for job in "$RUN"/server-updates/*/; do
+			job="${job%/}"
+			[ "$(cat "$job/pid" 2>/dev/null)" = "$PPID" ] || continue
+			case "$(ps -o args= -p "$PPID")" in *"$job/worker.sh"*) ;; *) continue ;; esac
+			if [ -f "$job/result" ] || [ "$(cat "$RUN/server-updates/latest" 2>/dev/null)" != "${job##*/}" ]; then
+				nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' /bin/bash -c \
+					'kill -KILL "$1"; while kill -0 "$1" 2>/dev/null; do sleep 0.1; done; launchctl remove "$2"' \
+					_ "$PPID" "bot.else.update.${job##*/}" >/dev/null 2>&1 </dev/null &
+				wait
+				exit 0
+			fi
+		done
+	fi
 	[ -f "$ELSE_HOME/src/install.sh" ] || die "no source in $ELSE_HOME/src; run the curl installer again"
 	tmp="$(mktemp)"
 	trap 'rm -f "$tmp"' EXIT
@@ -553,7 +573,30 @@ update-background)
 			-- /bin/bash "$job/worker.sh" "$ELSE_HOME" "$2" "$job"
 		;;
 	launchd)
-		launchctl submit -l "bot.else.update.$request_id" -- /bin/bash "$job/worker.sh" "$ELSE_HOME" "$2" "$job"
+		# One run, never restarted: `launchctl submit` would keep the worker alive and rerun the update forever.
+		cat >"$job/launchd.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>bot.else.update.$request_id</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>$(xml "$job/worker.sh")</string>
+		<string>$(xml "$ELSE_HOME")</string>
+		<string>$(xml "$2")</string>
+		<string>$(xml "$job")</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<false/>
+</dict>
+</plist>
+EOF
+		launchctl bootstrap "$(launchd_domain)" "$job/launchd.plist"
 		;;
 	process)
 		if command -v setsid >/dev/null 2>&1; then
