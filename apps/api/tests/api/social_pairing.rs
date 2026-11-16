@@ -1,5 +1,5 @@
 use crate::common::{self, TestDb};
-use crate::socials::{bot, key, turn};
+use crate::socials::{TestEnv, bot, http, key, turn};
 
 use async_trait::async_trait;
 use else_api::socials::{
@@ -617,4 +617,78 @@ async fn a_secret_must_match_how_its_provider_connects() {
         .await
         .unwrap();
     assert_eq!(connections, 0);
+}
+
+#[tokio::test]
+async fn the_card_pairs_a_setup_and_a_connection_through_one_pairing_route_each() {
+    use else_api::{
+        credentials::OwnerToken, http::AppState, providers::Registry, scheduler::Scheduler,
+    };
+    let db = TestDb::migrated().await;
+    let phone = Phone::new("33612345678");
+    let m = manager(&db, &phone);
+    let state = Arc::new(
+        AppState::new(
+            OwnerToken::parse(common::TOKEN).unwrap(),
+            db.pool.clone(),
+            Scheduler::new(db.pool.clone(), Registry::new(vec![]), 1),
+            else_api::events::EventHub::start(db.pool.clone(), CancellationToken::new()),
+        )
+        .with_secret_key(Arc::new(key()))
+        .with_socials(m.clone()),
+    );
+    let router = else_api::http::router(&else_api::config::Config::load(&TestEnv).unwrap(), state);
+    let (_, setup) = whatsapp_setup(&db).await;
+    let path = format!("/v1/connectors/socials/setups/{}/pairing", setup.id);
+    let (status, started) = http(&router, "POST", &path, common::TOKEN, Value::Null).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{started}");
+    let (_, code) = http(
+        &router,
+        "GET",
+        &format!("{path}?after=1"),
+        common::TOKEN,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(code["pairing"]["state"], "code", "{code}");
+    phone.scanned.notify_one();
+    let after = code["pairing"]["revision"].as_u64().unwrap();
+    let (_, done) = http(
+        &router,
+        "GET",
+        &format!("{path}?after={after}"),
+        common::TOKEN,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(done["pairing"]["state"], "paired", "{done}");
+    let connection = done["pairing"]["connection"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let path = format!("/v1/connectors/socials/connections/{connection}/pairing");
+    let (status, started) = http(&router, "POST", &path, common::TOKEN, Value::Null).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{started}");
+    let (status, _) = http(&router, "DELETE", &path, common::TOKEN, Value::Null).await;
+    assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
+
+    let bot = bot(&db).await;
+    let turn = turn(&db, bot, "user").await;
+    let telegram = store::request_setup(&db.pool, turn, Provider::Telegram, "Team support")
+        .await
+        .unwrap();
+    let (status, refused) = http(
+        &router,
+        "POST",
+        &format!("/v1/connectors/socials/setups/{}/pairing", telegram.id),
+        common::TOKEN,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        refused["error"]["message"], "This provider does not pair a device.",
+        "{refused}"
+    );
 }

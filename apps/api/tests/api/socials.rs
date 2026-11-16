@@ -792,14 +792,14 @@ async fn restored_connections_are_passive_and_credentials_are_removed_on_disconn
     assert!(secret.is_none());
 }
 
-struct TestEnv;
+pub(crate) struct TestEnv;
 impl else_api::config::Source for TestEnv {
     fn get(&self, name: &str) -> Option<String> {
         (name == "HOME").then(|| "/tmp".into())
     }
 }
 
-async fn http(
+pub(crate) async fn http(
     router: &axum::Router,
     method: &str,
     path: &str,

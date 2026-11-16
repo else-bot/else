@@ -40,12 +40,13 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/connectors/socials/setups/{id}/complete", post(complete))
         .route(
             "/connectors/socials/setups/{id}/pairing",
-            get(setup_pairing).post(start_setup_pairing),
+            get(|s, id, after| pairing(s, id, after, Purpose::Setup))
+                .post(|s, id| start_pairing(s, id, Purpose::Setup)),
         )
         .route(
             "/connectors/socials/connections/{id}/pairing",
-            get(repair_pairing)
-                .post(start_repair_pairing)
+            get(|s, id, after| pairing(s, id, after, Purpose::Repair))
+                .post(|s, id| start_pairing(s, id, Purpose::Repair))
                 .delete(stop_repair_pairing),
         )
         .route(
@@ -262,44 +263,27 @@ struct After {
     #[serde(default)]
     after: u64,
 }
-async fn start_setup_pairing(
+/// Start pairing for the setup or connection at the path, as `purpose`
+/// names it.
+async fn start_pairing(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
+    purpose: fn(Uuid) -> Purpose,
 ) -> Result<Json<Value>, ApiError> {
     let view = manager(&s)?
-        .start_pairing(Purpose::Setup(id))
+        .start_pairing(purpose(id))
         .await
         .map_err(error)?;
     Ok(Json(json!({ "pairing": view })))
 }
-async fn setup_pairing(
+async fn pairing(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
     Query(after): Query<After>,
+    purpose: fn(Uuid) -> Purpose,
 ) -> Result<Json<Value>, ApiError> {
     let view = manager(&s)?
-        .pairing(Purpose::Setup(id), after.after)
-        .await
-        .map_err(error)?;
-    Ok(Json(json!({ "pairing": view })))
-}
-async fn start_repair_pairing(
-    State(s): State<Arc<AppState>>,
-    ApiPath(id): ApiPath<Uuid>,
-) -> Result<Json<Value>, ApiError> {
-    let view = manager(&s)?
-        .start_pairing(Purpose::Repair(id))
-        .await
-        .map_err(error)?;
-    Ok(Json(json!({ "pairing": view })))
-}
-async fn repair_pairing(
-    State(s): State<Arc<AppState>>,
-    ApiPath(id): ApiPath<Uuid>,
-    Query(after): Query<After>,
-) -> Result<Json<Value>, ApiError> {
-    let view = manager(&s)?
-        .pairing(Purpose::Repair(id), after.after)
+        .pairing(purpose(id), after.after)
         .await
         .map_err(error)?;
     Ok(Json(json!({ "pairing": view })))
