@@ -378,19 +378,28 @@ impl InboundDurabilityHook for Inbound {
         client: Arc<Client>,
         batch: &[InboundMessage],
     ) -> whatsapp_rust::anyhow::Result<()> {
-        let own = own_ids(&client);
+        let seen = self.seen(&client, batch).await;
+        self.deliver(seen)
+            .await
+            .map_err(whatsapp_rust::anyhow::Error::new)
+    }
+}
+
+impl Inbound {
+    async fn seen(&self, client: &Client, batch: &[InboundMessage]) -> Vec<Incoming> {
+        let own = own_ids(client);
         let mut seen = Vec::new();
         for m in batch {
             let source = &m.info.source;
             let name = if source.chat.is_group() {
-                self.group_name(&client, &source.chat).await
+                self.group_name(client, &source.chat).await
             } else if source.is_from_me {
                 None
             } else {
                 Some(m.info.push_name.to_string())
             };
-            let chat = canonical(&client, &source.chat).await;
-            let sender = canonical(&client, &source.sender).await;
+            let chat = canonical(client, &source.chat, &Known::new()).await;
+            let sender = canonical(client, &source.sender, &Known::new()).await;
             seen.extend(incoming(
                 &own,
                 Seen {
@@ -405,20 +414,29 @@ impl InboundDurabilityHook for Inbound {
                 },
             ));
         }
-        self.deliver(seen)
-            .await
-            .map_err(whatsapp_rust::anyhow::Error::new)
+        seen
     }
 }
 
 /// The messages of one history chunk, oldest first in each chat.
 async fn history(own: &[String], client: &Client, history: &wa::HistorySync) -> Vec<Incoming> {
+    // The client learns this chunk's mappings only after capture, so read
+    // them from the chunk itself.
+    let known: Known = history
+        .phone_number_to_lid_mappings
+        .iter()
+        .filter_map(|m| {
+            let lid = m.lid_jid.as_deref()?.parse::<Jid>().ok()?;
+            let pn = m.pn_jid.as_deref()?.parse::<Jid>().ok()?;
+            Some((lid.user.to_string(), pn.user.to_string()))
+        })
+        .collect();
     let mut batch = Vec::new();
     for conversation in &history.conversations {
         let Ok(wire) = conversation.id.parse::<Jid>() else {
             continue;
         };
-        let chat = canonical(client, &wire).await;
+        let chat = canonical(client, &wire, &known).await;
         let name = conversation
             .name
             .as_deref()
@@ -442,7 +460,7 @@ async fn history(own: &[String], client: &Client, history: &wa::HistorySync) -> 
                 .and_then(|p| p.parse::<Jid>().ok())
                 .or_else(|| from_me.then(|| client.pn()).flatten())
                 .unwrap_or_else(|| wire.clone());
-            let sender = canonical(client, &sender).await;
+            let sender = canonical(client, &sender, &known).await;
             batch.extend(incoming(
                 own,
                 Seen {
@@ -760,12 +778,18 @@ struct Seen<'a> {
     replay: bool,
 }
 
+/// LID users mapped to phone-number users.
+type Known = std::collections::HashMap<String, String>;
+
 /// A person's phone-number JID when the device knows their LID, so their
 /// chat has one ID whichever form WhatsApp addressed it by.
-async fn canonical(client: &Client, jid: &Jid) -> Jid {
+async fn canonical(client: &Client, jid: &Jid, known: &Known) -> Jid {
     let jid = jid.to_non_ad();
     if !jid.server.is_lid_family() {
         return jid;
+    }
+    if let Some(pn) = known.get(jid.user.as_str()) {
+        return Jid::pn(pn.as_str());
     }
     match client.get_lid_pn_entry(&jid).await {
         Ok(Some(entry)) => Jid::pn(entry.phone_number.as_ref()),
@@ -849,6 +873,18 @@ pub async fn listen(
             }
             Event::PairingQrCode(_) | Event::LoggedOut(_) => break Err(Error::SignedOut),
             Event::StreamReplaced(_) => break Err(Error::ReceiverConflict),
+            // Messages the phone recovered skip the durability hook; this
+            // event is their only delivery.
+            Event::Messages(batch) if !batch.hook_committed => {
+                let seen = inbound.seen(&client, &batch.messages).await;
+                if let Err(error) = inbound.deliver(seen).await {
+                    break if stop.is_cancelled() {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    };
+                }
+            }
             _ => {}
         }
     };

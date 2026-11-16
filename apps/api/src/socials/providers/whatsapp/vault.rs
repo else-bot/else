@@ -220,30 +220,26 @@ impl Vault {
         key: &str,
         max: usize,
     ) -> Result<Option<Vec<u8>>, Error> {
-        let length: Option<i64> = sqlx::query_scalar(
-            "SELECT length(value) FROM social_device_state WHERE store_id=?1 AND space=?2 AND key=?3",
+        // The value is selected only within its bound, in the same statement
+        // that measures it. The table is STRICT, so a value is always a BLOB.
+        let bound = i64::try_from(max.saturating_add(OVERHEAD)).unwrap_or(i64::MAX);
+        let row: Option<(i64, Option<Vec<u8>>)> = sqlx::query_as(
+            "SELECT length(value), CASE WHEN length(value)<=?4 THEN value END FROM social_device_state WHERE store_id=?1 AND space=?2 AND key=?3",
         )
         .bind(self.store)
         .bind(space)
         .bind(key)
+        .bind(bound)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(length) = length else {
+        let Some((_, sealed)) = row else {
             return Ok(None);
         };
-        if usize::try_from(length).map_or(true, |l| l > max.saturating_add(OVERHEAD)) {
+        let Some(sealed) = sealed else {
             return Err(Error::Invalid(
                 "A stored WhatsApp row is larger than its bound.",
             ));
-        }
-        let sealed: Vec<u8> = sqlx::query_scalar(
-            "SELECT value FROM social_device_state WHERE store_id=?1 AND space=?2 AND key=?3",
-        )
-        .bind(self.store)
-        .bind(space)
-        .bind(key)
-        .fetch_one(&mut *tx)
-        .await?;
+        };
         let value = self.open(space, key, &sealed)?;
         if value.len() > max {
             return Err(Error::Invalid(
@@ -310,24 +306,34 @@ impl Vault {
 
     /// In one snapshot, list up to `limit` keys starting with `prefix`, let
     /// `choose` pick one by its suffix, and read that row bounded by `max`.
+    /// A suffix longer than `max_suffix` bytes is refused before it is read.
     pub async fn pick_bounded(
         &self,
         space: &str,
         prefix: &str,
         limit: i64,
+        max_suffix: usize,
         max: usize,
         choose: impl FnOnce(&[&str]) -> Result<Option<String>, Error>,
     ) -> Result<Option<(String, Vec<u8>)>, Error> {
         let mut tx = self.pool.begin().await?;
-        let keys: Vec<String> = sqlx::query_scalar(
-            "SELECT key FROM social_device_state WHERE store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB) ORDER BY key LIMIT ?4",
+        let longest = i64::try_from(prefix.len().saturating_add(max_suffix)).unwrap_or(i64::MAX);
+        let keys: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT CASE WHEN length(CAST(key AS BLOB))<=?5 THEN key END FROM social_device_state WHERE store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB) ORDER BY key LIMIT ?4",
         )
         .bind(self.store)
         .bind(space)
         .bind(prefix)
         .bind(limit)
+        .bind(longest)
         .fetch_all(&mut *tx)
         .await?;
+        let keys: Vec<String> = keys
+            .into_iter()
+            .collect::<Option<_>>()
+            .ok_or(Error::Invalid(
+                "A stored WhatsApp key is longer than its bound.",
+            ))?;
         let suffixes: Vec<&str> = keys
             .iter()
             .filter_map(|key| key.strip_prefix(prefix))

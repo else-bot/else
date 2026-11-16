@@ -53,6 +53,8 @@ const PENDING: &str = "pending";
 const HISTORY: &str = "history";
 /// Group senders the client may list for one pending message.
 const GROUP_SENDERS: i64 = 401;
+/// The longest sender spelling a pending group row may carry.
+const SENDER_BYTES: usize = 128;
 
 pub struct Backend {
     vault: Vault,
@@ -860,13 +862,20 @@ impl ProtocolStore for Backend {
         let mut refused = None;
         let picked = self
             .vault
-            .pick_bounded(PENDING, &prefix, GROUP_SENDERS, max_bytes, |senders| {
-                let mut spellings = senders.iter().map(|s| Some(*s));
-                pending_group_sender(&mut spellings, key.sender).map_err(|error| {
-                    refused = Some(error);
-                    Error::Invalid("pending group sender")
-                })
-            })
+            .pick_bounded(
+                PENDING,
+                &prefix,
+                GROUP_SENDERS,
+                SENDER_BYTES,
+                max_bytes,
+                |senders| {
+                    let mut spellings = senders.iter().map(|s| Some(*s));
+                    pending_group_sender(&mut spellings, key.sender).map_err(|error| {
+                        refused = Some(error);
+                        Error::Invalid("pending group sender")
+                    })
+                },
+            )
             .await;
         match (picked, refused) {
             (Err(_), Some(error)) => Err(error),
@@ -1483,5 +1492,30 @@ mod tests {
         );
         b.forget_history("H1").await.unwrap();
         assert!(b.history().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_group_sender_longer_than_its_bound_is_refused_unread() {
+        let db = pool().await;
+        let device = store::new_device(&db).await.unwrap();
+        let b = backend(&db, device, 7).await;
+        let long = format!("{}@s.whatsapp.net", "2".repeat(SENDER_BYTES));
+        b.replace_pending_inbound_if(
+            PendingInboundKey {
+                sender: &long,
+                ..KEY
+            },
+            PendingInboundRevision::missing(),
+            payload(b"hi"),
+            16,
+        )
+        .await
+        .unwrap();
+        assert!(
+            b.read_pending_inbound_group_bounded(KEY, 16, lease())
+                .await
+                .is_err(),
+            "an oversized sender is an error, never absence"
+        );
     }
 }
