@@ -12,6 +12,20 @@ pub enum Provider {
     Imap,
 }
 
+/// How an inbox card in chat signs the owner in to a provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardSignIn {
+    /// A browser sign-in with this company. It may authorize another
+    /// mailbox than the bot named.
+    Browser(&'static str),
+    /// An app-specific password typed into the card, for exactly the named
+    /// mailbox. `help` says where the owner makes one.
+    AppPassword {
+        issuer: &'static str,
+        help: &'static str,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {

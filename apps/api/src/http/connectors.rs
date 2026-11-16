@@ -489,11 +489,7 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
             ..r
         })
         .filter(|r| {
-            matches!(
-                r.provider,
-                Provider::Gmail | Provider::Microsoft | Provider::Icloud
-            ) && r
-                .purpose
+            r.purpose
                 .as_ref()
                 .is_none_or(|p| p.len() <= 300 && !p.contains('\0'))
                 && r.provider
@@ -501,7 +497,9 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
                     .and_then(|config| config.validate())
                     .is_ok()
         });
-    let Some(request) = request else {
+    let Some((request, sign_in)) =
+        request.and_then(|r| r.provider.card_sign_in().map(|sign_in| (r, sign_in)))
+    else {
         return (
             tool_error(
                 "Use provider gmail, microsoft, or icloud with a valid inbox address. The \
@@ -520,11 +518,11 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
     let existing = accounts
         .iter()
         .find(|a| a.config.address.eq_ignore_ascii_case(&request.address));
-    // An iCloud inbox whose app-specific password Apple now rejects gets the
-    // card again, so the owner can enter a new one.
+    // An inbox whose app password the server now rejects gets the card
+    // again, so the owner can enter a new one.
     let replaces = existing
         .filter(|account| {
-            account.config.provider == Provider::Icloud
+            matches!(sign_in, CardSignIn::AppPassword { .. })
                 && account.health == Health::CredentialRejected
         })
         .map(|account| account.generation);
@@ -537,17 +535,15 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
         );
     }
     let address = &request.address;
-    let sign_in = match request.provider {
-        Provider::Icloud if replaces.is_some() => format!(
-            "Apple rejected the saved password for {address}. Enter a new app-specific \
-             password from account.apple.com, Sign-In and Security."
+    let sign_in = match (sign_in, replaces) {
+        (CardSignIn::Browser(company), _) => format!("Sign in with {company} as {address}."),
+        (CardSignIn::AppPassword { issuer, help }, Some(_)) => format!(
+            "{issuer} rejected the saved password for {address}. Enter a new app-specific \
+             password. Make one at {help}."
         ),
-        Provider::Icloud => format!(
-            "Enter an app-specific password for {address}. Make one at account.apple.com, \
-             Sign-In and Security, App-Specific Passwords."
-        ),
-        Provider::Microsoft => format!("Sign in with Microsoft as {address}."),
-        _ => format!("Sign in with Google as {address}."),
+        (CardSignIn::AppPassword { help, .. }, None) => {
+            format!("Enter an app-specific password for {address}. Make one at {help}.")
+        }
     };
     let context = format!(
         "{}\n{sign_in} Every bot can use the connected inbox when you ask. Credentials stay \

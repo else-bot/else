@@ -682,8 +682,8 @@ pub async fn answer(
             _ => {}
         }
     }
-    // An inbox card approves only the requested address, or, for an OAuth
-    // provider, an account of that provider connected since it was asked:
+    // An inbox card approves only the requested address, or, for a browser
+    // sign-in, an account of its provider connected since it was asked:
     // Google may authorize a different mailbox than the bot named. A card
     // that takes a password names its mailbox exactly. An account whose
     // server rejects its saved password does not count until the owner
@@ -708,7 +708,10 @@ pub async fn answer(
                 .to_owned(),
         )
         .bind(crate::connectors::types::AUTHENTICATION_FAILED)
-        .bind(email_connection.provider.oauth_endpoints().is_ok())
+        .bind(matches!(
+            email_connection.provider.card_sign_in(),
+            Some(crate::connectors::types::CardSignIn::Browser(_))
+        ))
         .fetch_all(&mut *tx)
         .await?;
         if connected.is_empty() {
