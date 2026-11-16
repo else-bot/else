@@ -55,24 +55,13 @@ pub(crate) fn sources(bot: &crate::api::BotUsage) -> Vec<(crate::api::UsageSourc
     groups
 }
 
-pub(crate) fn source_summary(bot: &crate::api::BotUsage, mostly: bool) -> String {
-    let summary = sources(bot)
+/// "Chat 44% · Routines 33% · Other bots' tasks 22%", largest first.
+pub(crate) fn source_summary(bot: &crate::api::BotUsage) -> String {
+    sources(bot)
         .iter()
-        .map(|(kind, amount)| {
-            let label = if mostly {
-                kind.label().to_lowercase()
-            } else {
-                kind.label().into()
-            };
-            format!("{label} {}", share(*amount))
-        })
+        .map(|(kind, amount)| format!("{} {}", kind.label(), share(*amount)))
         .collect::<Vec<_>>()
-        .join(" · ");
-    if mostly && !summary.is_empty() {
-        format!("Mostly {summary}")
-    } else {
-        summary
-    }
+        .join(" · ")
 }
 
 pub(crate) fn local_time(value: DateTime<Utc>) -> String {
@@ -260,12 +249,8 @@ mod tests {
             .collect(),
         };
         assert_eq!(
-            super::source_summary(&bot, false),
-            "Chat 44% · Routines 33% · Delegated 22%"
-        );
-        assert_eq!(
-            super::source_summary(&bot, true),
-            "Mostly chat 44% · routines 33% · delegated 22%"
+            super::source_summary(&bot),
+            "Chat 44% · Routines 33% · Other bots' tasks 22%"
         );
     }
 

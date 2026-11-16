@@ -141,12 +141,12 @@ impl UsageWindow {
 
     pub fn period(&self) -> String {
         match self.minutes {
-            WEEK if self.attribution.used().is_none() => "in the last 7 days".into(),
+            WEEK if self.attribution.used().is_none() => "the last 7 days".into(),
             WEEK => "this week".into(),
-            FIVE_HOURS => "in this 5-hour window".into(),
-            m if m.is_multiple_of(1440) => format!("in this {}-day window", m / 1440),
-            m if m.is_multiple_of(60) => format!("in this {}-hour window", m / 60),
-            m => format!("in this {m}-minute window"),
+            FIVE_HOURS => "this 5-hour window".into(),
+            m if m.is_multiple_of(1440) => format!("this {}-day window", m / 1440),
+            m if m.is_multiple_of(60) => format!("this {}-hour window", m / 60),
+            m => format!("this {m}-minute window"),
         }
     }
 
@@ -189,7 +189,7 @@ impl UsageSourceKind {
         match self {
             Self::Chat => "Chat",
             Self::Routine => "Routines",
-            Self::Delegated => "Delegated",
+            Self::Delegated => "Other bots' tasks",
             Self::Webhook => "Webhooks",
             Self::Mail => "Mail",
             Self::Social => "Social",
@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(week.period(), "this week");
         let mut daily = five.clone();
         daily.minutes = 1440;
-        assert_eq!(daily.period(), "in this 1-day window");
+        assert_eq!(daily.period(), "this 1-day window");
     }
 
     #[test]

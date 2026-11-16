@@ -276,56 +276,26 @@ impl Shell {
                     .child(format!("{name} doesn't report subscription limits.")),
             );
         } else {
-            body =
-                body.child(h_flex().w_full().items_stretch().gap_3().children(
-                    reported.iter().map(|window| {
-                        let minutes = window.minutes;
-                        let on = selected.is_some_and(|selected| selected.minutes == minutes);
-                        gauge::gauge(window, cx)
-                            .id(SharedString::from(format!("usage-limit-{minutes}")))
-                            .cursor_pointer()
-                            .role(Role::RadioButton)
-                            .aria_label(format!("Show bots {}", window.period()))
-                            .aria_toggled(if on { Toggled::True } else { Toggled::False })
-                            .tab_index(0)
-                            .border_1()
-                            .border_color(if on {
-                                theme.primary
-                            } else {
-                                gpui::transparent_black()
-                            })
-                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                if let Some(view) = &mut shell.usage {
-                                    view.window_minutes = Some(minutes);
-                                    view.expanded = None;
-                                    view.show_more = false;
-                                    cx.notify();
-                                }
-                            }))
-                    }),
-                ))
+            let updated = reported
+                .iter()
+                .filter_map(|window| window.attribution.observed_at())
+                .max()
+                .unwrap_or(report.generated_at);
+            body = body
                 .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(format!(
-                            "Exact, from {name}. Includes your own {name} use outside else.bot."
-                        )),
-                );
+                    h_flex()
+                        .w_full()
+                        .items_stretch()
+                        .gap_3()
+                        .children(reported.iter().map(|window| gauge::gauge(window, cx))),
+                )
+                .child(div().text_xs().text_color(theme.muted_foreground).child(format!(
+                    "Exact, from {name}, as of {}. Includes your own {name} use outside else.bot.",
+                    local_time(updated)
+                )));
         }
         if let Some(window) = selected {
-            body = body.child(self.usage_table(window, &name, &palette, view, cx));
-        }
-        let updated_at = selected
-            .and_then(|window| window.attribution.observed_at())
-            .unwrap_or(report.generated_at);
-        if chrono::Utc::now() - updated_at > chrono::Duration::minutes(2) {
-            body = body.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(format!("Updated {}", local_time(updated_at))),
-            );
+            body = body.child(self.usage_table(provider, window, &name, &palette, view, cx));
         }
         body.into_any_element()
     }

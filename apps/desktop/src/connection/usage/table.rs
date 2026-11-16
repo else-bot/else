@@ -1,16 +1,23 @@
 use super::{Palette, View};
-use crate::api::{BotUsage, UsageWindow};
+use crate::api::{BotUsage, ProviderUsage, UsageWindow};
 use crate::avatar::bot_avatar;
 use crate::connection::Shell;
+use crate::controls::{hugging_segment, segment_track};
 use crate::usage_ui::{bar, dot, share, source_summary, sources};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 
+const AVATAR: f32 = 24.;
+const NAME: f32 = 180.;
+const SHARE: f32 = 150.;
+const SOURCE: f32 = 170.;
+
 impl Shell {
     pub(super) fn usage_table(
         &self,
+        provider: &ProviderUsage,
         window: &UsageWindow,
-        provider: &str,
+        name: &str,
         palette: &Palette,
         view: &View,
         cx: &mut Context<Self>,
@@ -19,18 +26,80 @@ impl Shell {
         let mut bots: Vec<&BotUsage> = window.bots.iter().collect();
         bots.sort_by(|a, b| b.share.total_cmp(&a.share));
         let (small_count, small_share) = folded(&bots);
-        let mut table = v_flex().gap_1()
-            .child(crate::appearance::section_label(format!("Bots {}", window.period()), cx))
+        let periods: Vec<&UsageWindow> = provider
+            .windows
+            .iter()
+            .filter(|w| w.attribution.used().is_some())
+            .collect();
+        let mut heading = h_flex()
+            .w_full()
+            .justify_between()
+            .items_center()
+            .gap_3()
+            .child(crate::appearance::section_label(
+                if periods.len() > 1 {
+                    format!("How your bots split their {name} use")
+                } else {
+                    format!("How your bots split their {name} use {}", window.period())
+                },
+                cx,
+            ));
+        if periods.len() > 1 {
+            heading = heading.child(segment_track(cx).children(periods.iter().map(|period| {
+                let minutes = period.minutes;
+                hugging_segment(
+                    SharedString::from(format!("usage-period-{minutes}")),
+                    sentence(&period.period()),
+                    minutes == window.minutes,
+                    false,
+                    cx,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    if let Some(view) = &mut shell.usage {
+                        view.window_minutes = Some(minutes);
+                        view.expanded = None;
+                        view.show_more = false;
+                        cx.notify();
+                    }
+                }))
+            })));
+        }
+        let column = |text: &'static str, width: Option<f32>, right: bool| {
+            let cell = div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(text);
+            let cell = match width {
+                Some(width) => cell.w(px(width)).flex_none(),
+                None => cell.flex_1().min_w_0(),
+            };
+            if right { cell.text_right() } else { cell }
+        };
+        let mut table = v_flex()
+            .gap_1()
+            .child(heading)
+            .child(div().text_xs().mb_2().text_color(theme.muted_foreground).child(
+                "Estimated from each turn's tokens. Your own use outside else.bot isn't included.",
+            ))
             .child(
-                div().text_xs().mb_2().text_color(theme.muted_foreground)
-                    .child(format!("Estimated share of your bots' {provider} use. Based on tokens at each model's price; your own use isn't counted.")),
+                h_flex()
+                    .w_full()
+                    .gap_3()
+                    .pb_1()
+                    .border_b_1()
+                    .border_color(theme.border.opacity(0.5))
+                    .child(div().w(px(AVATAR)).flex_none())
+                    .child(column("Bot", Some(NAME), false))
+                    .child(column("", None, false))
+                    .child(column("Share of your bots' use", Some(SHARE), true))
+                    .child(column("Main source", Some(SOURCE), false)),
             );
         if bots.is_empty() {
             table = table.child(
                 div()
                     .py_4()
                     .text_color(theme.muted_foreground)
-                    .child("No bot use in this window."),
+                    .child("No bot use in this period."),
             );
         }
         for bot in bots
@@ -38,80 +107,84 @@ impl Shell {
             .filter(|bot| view.show_more || bot.share >= 0.01)
         {
             let id = bot.bot_id;
-            let row =
-                h_flex()
-                    .id(SharedString::from(format!("usage-bot-{id}")))
-                    .w_full()
-                    .py_3()
-                    .gap_3()
-                    .items_center()
-                    .cursor_pointer()
-                    .role(Role::Button)
-                    .tab_index(0)
-                    .aria_label(format!("Show sources for {}", bot.name))
-                    .aria_expanded(view.expanded == Some(id))
-                    .border_b_1()
-                    .border_color(theme.border.opacity(0.5))
-                    .hover(|row| row.bg(theme.muted_foreground.opacity(0.06)))
-                    .on_click(cx.listener(move |shell, _, _, cx| {
-                        if let Some(view) = &mut shell.usage {
-                            view.expanded = (view.expanded != Some(id)).then_some(id);
-                            cx.notify();
-                        }
-                    }))
-                    .child(
+            let main = sources(bot)
+                .first()
+                .map(|(kind, amount)| format!("{} {}", kind.label(), share(*amount)));
+            let row = h_flex()
+                .id(SharedString::from(format!("usage-bot-{id}")))
+                .w_full()
+                .py_3()
+                .gap_3()
+                .items_center()
+                .cursor_pointer()
+                .role(Role::Button)
+                .tab_index(0)
+                .aria_label(format!("Show sources for {}", bot.name))
+                .aria_expanded(view.expanded == Some(id))
+                .border_b_1()
+                .border_color(theme.border.opacity(0.5))
+                .hover(|row| row.bg(theme.muted_foreground.opacity(0.06)))
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    if let Some(view) = &mut shell.usage {
+                        view.expanded = (view.expanded != Some(id)).then_some(id);
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    h_flex().w(px(AVATAR)).flex_none().justify_center().child(
                         palette
                             .avatar(id)
                             .map(|avatar| {
                                 bot_avatar(
                                     SharedString::from(format!("usage-avatar-{id}")),
                                     avatar,
-                                    px(24.),
+                                    px(AVATAR),
                                 )
                                 .still()
                                 .into_any_element()
                             })
                             .unwrap_or_else(|| dot(palette.color(id)).into_any_element()),
-                    )
-                    .child(
-                        div()
-                            .w(px(180.))
-                            .flex_none()
-                            .truncate()
-                            .child(bot.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(bar([(bot.share * 100., palette.color(id))], cx)),
-                    )
-                    .child(
-                        div()
-                            .w(px(44.))
-                            .flex_none()
-                            .text_right()
-                            .child(share(bot.share)),
-                    )
-                    .child(
-                        div()
-                            .w(px(105.))
-                            .flex_none()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .children(sources(bot).first().map(|(kind, _)| {
-                                format!("mostly {}", kind.label().to_lowercase())
-                            })),
-                    );
+                    ),
+                )
+                .child(
+                    div()
+                        .w(px(NAME))
+                        .flex_none()
+                        .truncate()
+                        .child(bot.name.clone()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(bar([(bot.share * 100., palette.color(id))], cx)),
+                )
+                .child(
+                    div()
+                        .w(px(SHARE))
+                        .flex_none()
+                        .text_right()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(share(bot.share)),
+                )
+                .child(
+                    div()
+                        .w(px(SOURCE))
+                        .flex_none()
+                        .truncate()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .children(main),
+                );
             table = table.child(row);
             if view.expanded == Some(id) {
                 table = table.child(
                     div()
-                        .pl_9()
+                        .pl(px(AVATAR + 12.))
                         .pb_3()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(source_summary(bot, false)),
+                        .child(format!("{}: {}", bot.name, source_summary(bot))),
                 );
             }
         }
@@ -134,7 +207,10 @@ impl Shell {
                     .child(if view.show_more {
                         "Show fewer bots".into()
                     } else {
-                        format!("{small_count} more bots · {}", share(small_share))
+                        format!(
+                            "{small_count} more bots, {} together. Show them",
+                            share(small_share)
+                        )
                     })
                     .on_click(cx.listener(|shell, _, _, cx| {
                         if let Some(view) = &mut shell.usage {
@@ -146,6 +222,16 @@ impl Shell {
         }
         table.into_any_element()
     }
+}
+
+/// "this week" → "This week".
+fn sentence(text: &str) -> SharedString {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+        .unwrap_or_default()
+        .into()
 }
 
 fn folded(bots: &[&BotUsage]) -> (usize, f64) {

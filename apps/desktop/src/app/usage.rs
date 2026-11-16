@@ -3,9 +3,9 @@
 
 use super::ElseApp;
 use super::settings::{item_name, meta, muted, note, section, section_frame};
-use crate::api::{Bot, FIVE_HOURS, ProviderUsage, UsageReport};
+use crate::api::{Attribution, Bot, ProviderUsage, UsageReport};
 use crate::controls::{Control as _, Scale, Tier};
-use crate::usage_ui::{Loaded, bar, color, percent, reset_in, share, source_summary};
+use crate::usage_ui::{Loaded, percent, reset_in, share};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::*;
@@ -104,50 +104,36 @@ impl ElseApp {
             let Some(window) = provider.primary_window() else {
                 continue;
             };
-            let entry = window.bot(bot.id);
-            let amount = entry.map(|entry| entry.share).unwrap_or(0.);
-            group = group
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(format!(
-                            "{} of your bots' {name} use {}",
-                            share(amount),
-                            window.period()
-                        )),
-                )
-                .child(bar([(amount * 100., color(bot.id, Some(bot.avatar)))], cx));
-            if let Some(entry) = entry {
-                group = group.child(meta(source_summary(entry, true), cx));
-            }
-            if let (Some(used), Some(resets_at)) =
-                (window.attribution.used(), window.attribution.resets_at())
-            {
-                group = group.child(meta(
-                    format!(
-                        "{name} {}: {} used · resets {}",
-                        window.title().to_lowercase(),
-                        percent(used),
-                        reset_in(resets_at, chrono::Utc::now())
-                    ),
-                    cx,
-                ));
-            }
-            if window.minutes != FIVE_HOURS
-                && let Some(five) = provider
-                    .windows
-                    .iter()
-                    .find(|window| window.minutes == FIVE_HOURS)
-            {
-                group = group.child(meta(
-                    format!(
-                        "Last 5 hours: {} of your bots' {name} use",
-                        share(five.bot(bot.id).map(|entry| entry.share).unwrap_or(0.))
-                    ),
-                    cx,
-                ));
-            }
+            let amount = window.bot(bot.id).map(|entry| entry.share).unwrap_or(0.);
+            let headline = match window.attribution {
+                Attribution::Priced { used, outside, .. } => format!(
+                    "About {} of your {name} {} {}",
+                    percent(amount * (used - outside).max(0.)),
+                    window.title().to_lowercase(),
+                    window.period()
+                ),
+                _ => format!(
+                    "About {} of your bots' {name} use {}",
+                    share(amount),
+                    window.period()
+                ),
+            };
+            group = group.child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(headline),
+            );
+            let limit = match (window.attribution.used(), window.attribution.resets_at()) {
+                (Some(used), Some(resets_at)) => format!(
+                    " {name} {} {} used, resets {}.",
+                    window.title().to_lowercase(),
+                    percent(used),
+                    reset_in(resets_at, chrono::Utc::now())
+                ),
+                _ => String::new(),
+            };
+            group = group.child(meta(format!("Estimated from tokens.{limit}"), cx));
             body = body.child(group);
         }
         Some(body.into_any_element())
