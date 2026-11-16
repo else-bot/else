@@ -524,7 +524,8 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
     // card again, so the owner can enter a new one.
     let replaces = existing
         .filter(|account| {
-            account.config.provider == Provider::Icloud && account.credential_rejected()
+            account.config.provider == Provider::Icloud
+                && account.health == Health::CredentialRejected
         })
         .map(|account| account.generation);
     if let Some(account) = existing.filter(|_| replaces.is_none()) {

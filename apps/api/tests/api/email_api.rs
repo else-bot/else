@@ -1691,8 +1691,17 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_in_the_same_turn_when_
         .unwrap()
         .unwrap()
         .generation;
-    let health = |code: &'static str| store::set_health(&app.db.pool, account, generation, code);
-    assert!(health(AUTHENTICATION_FAILED).await.unwrap());
+    let health = |health: Health, since: String| async move {
+        store::set_health(&app.db.pool, account, generation, &health, &since)
+            .await
+            .unwrap()
+    };
+    let signed_in_before = store::timestamp();
+    assert!(health(Health::CredentialRejected, store::timestamp()).await);
+    assert!(
+        !health(Health::Connected, signed_in_before).await,
+        "a session that signed in before the rejection does not clear it"
+    );
     let (path, card) = parked_card(
         app,
         &token,
@@ -1712,7 +1721,13 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_in_the_same_turn_when_
         "inbox_not_connected",
         "an inbox Apple rejects is not connected"
     );
-    assert!(!health("mail_transport_failed").await.unwrap());
+    assert!(
+        !health(
+            Health::Failing("mail_transport_failed".into()),
+            store::timestamp()
+        )
+        .await
+    );
     assert_eq!(
         approve(path.clone()).await.body["error"]["code"],
         "inbox_not_connected",
@@ -1730,6 +1745,30 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_in_the_same_turn_when_
     assert_eq!(replace("qrst-uvwx-yzab-cdef").await.status, StatusCode::OK);
     let answered = approve(path).await;
     assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
+
+    let generation = store::account(&app.db.pool, account)
+        .await
+        .unwrap()
+        .unwrap()
+        .generation;
+    let set = |health: Health| async move {
+        store::set_health(
+            &app.db.pool,
+            account,
+            generation,
+            &health,
+            &store::timestamp(),
+        )
+        .await
+        .unwrap()
+    };
+    assert!(set(Health::CredentialRejected).await);
+    // Timestamps have millisecond precision: the sign-in must begin later.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    assert!(
+        set(Health::Connected).await,
+        "a sign-in that began after a rejection clears it"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -458,11 +458,12 @@ impl ConnectorManager {
         auth: &Auth,
         command: &MailCommand,
     ) -> Result<Value, MailError> {
+        let since = store::timestamp();
         let result = self.transport.execute(&account.config, auth, command).await;
         if let Err(error) = &result
             && error.code == AUTHENTICATION_FAILED
         {
-            self.health(account.id, account.generation, AUTHENTICATION_FAILED)
+            self.health(account.id, account.generation, error.code, &since)
                 .await;
         }
         result
@@ -487,6 +488,7 @@ impl ConnectorManager {
         stop: CancellationToken,
     ) -> Result<(), MailError> {
         let id = account.id;
+        let since = store::timestamp();
         let cursor = loop {
             let old = store::cursor(&self.db, id)
                 .await
@@ -514,18 +516,20 @@ impl ConnectorManager {
                 break scan.cursor;
             }
         };
-        self.health(id, account.generation, "connected").await;
+        self.health(id, account.generation, "connected", &since)
+            .await;
         self.transport
             .wait(&account.config, auth, &cursor, stop)
             .await
     }
 
-    async fn health(&self, id: Uuid, generation: i64, code: &str) {
+    async fn health(&self, id: Uuid, generation: i64, code: &str, since: &str) {
         if code == "mail_account_paused" {
             return;
         }
         if let Some(_admission) = self.scheduler.gate().enter() {
-            let _ = store::set_health(&self.db, id, generation, code).await;
+            let health = Health::from(code.to_owned());
+            let _ = store::set_health(&self.db, id, generation, &health, since).await;
         }
     }
 
@@ -562,7 +566,8 @@ impl ConnectorManager {
                         if let Ok(Some(account)) = store::account(&self.db, id).await
                             && account.state == "active"
                         {
-                            self.health(id, account.generation, error.code).await;
+                            self.health(id, account.generation, error.code, &store::timestamp())
+                                .await;
                         }
                         failures = failures.saturating_add(1);
                         retry_at = tokio::time::Instant::now() + retry_delay(failures);
@@ -596,7 +601,7 @@ impl ConnectorManager {
                         Ok(Ok(())) => { failures = 0; retry_at = tokio::time::Instant::now(); }
                         result => {
                             let code = match result { Ok(Err(error)) => error.code, _ => "mail_watch_failed" };
-                            self.health(id,completed.generation,code).await;
+                            self.health(id,completed.generation,code,&store::timestamp()).await;
                             failures = failures.saturating_add(1);
                             retry_at = tokio::time::Instant::now() + retry_delay(failures);
                         }

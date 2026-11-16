@@ -28,8 +28,8 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::types::{
-    AUTHENTICATION_FAILED, Account, Credential, Cursor, MailCommand, MailConfig, MailTrigger,
-    Permissions, Provider, Scan,
+    AUTHENTICATION_FAILED, Account, Credential, Cursor, Health, MailCommand, MailConfig,
+    MailTrigger, Permissions, Provider, Scan,
 };
 use crate::credentials::SecretKey;
 use crate::db::turns::TurnStatus;
@@ -201,6 +201,14 @@ struct AccountRow {
     health: String,
 }
 
+/// The current time in the format of the `updated_at` columns, so the two
+/// compare in order.
+pub fn timestamp() -> String {
+    chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3f+00:00")
+        .to_string()
+}
+
 impl From<AccountRow> for Account {
     fn from(row: AccountRow) -> Self {
         Self {
@@ -208,7 +216,7 @@ impl From<AccountRow> for Account {
             config: row.config.0,
             generation: row.generation,
             state: row.state,
-            health: row.health,
+            health: row.health.into(),
         }
     }
 }
@@ -275,7 +283,7 @@ pub async fn create(
         config: config.clone(),
         generation: 1,
         state: "active".into(),
-        health: "unknown".into(),
+        health: Health::Unknown,
     })
 }
 
@@ -495,27 +503,32 @@ pub async fn set_active(
     account(pool, id).await
 }
 
-/// Record the runtime's view of an account's health for this generation.
-/// A rejected credential stays rejected until a sign-in succeeds or the
-/// owner replaces it, so a later network error cannot hide it.
+/// Record the runtime's view of an account's health for this generation,
+/// from a check that began at `checked_since` (a `timestamp`). A rejected
+/// credential stays rejected until the owner replaces it or a sign-in that
+/// began after the rejection succeeds, so neither a network error nor an
+/// older session hides it.
 pub async fn set_health(
     pool: &SqlitePool,
     id: Uuid,
     generation: i64,
-    health: &str,
+    health: &Health,
+    checked_since: &str,
 ) -> Result<bool, StoreError> {
+    let health = health.code();
     if !field(health) || health.len() > 64 {
         return Err(StoreError::Invalid("a health code needs 1 to 64 bytes"));
     }
     let done = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE connector_accounts SET health = ?3, updated_at = {NOW}
          WHERE id = ?1 AND generation = ?2 AND state <> 'removed'
-            AND (health <> ?4 OR ?3 = 'connected')"
+            AND (health <> ?4 OR (?3 = 'connected' AND updated_at < ?5))"
     )))
     .bind(id)
     .bind(generation)
     .bind(health)
     .bind(AUTHENTICATION_FAILED)
+    .bind(checked_since)
     .execute(pool)
     .await?;
     Ok(done.rows_affected() == 1)
