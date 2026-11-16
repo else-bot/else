@@ -149,6 +149,21 @@ impl Client {
         .map(|(_, body)| body.account)
     }
 
+    /// Replaces an inbox's password. The server signs in with it first.
+    pub async fn replace_email_password(
+        self: Arc<Self>,
+        account: Uuid,
+        password: String,
+    ) -> Result<(), ClientError> {
+        self.call::<Value>(
+            Method::PUT,
+            format!("/v1/connectors/email/accounts/{account}/credentials"),
+            Some(json!({"kind":"password","password":password})),
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub async fn authorize_email(
         self: Arc<Self>,
         provider: EmailProvider,

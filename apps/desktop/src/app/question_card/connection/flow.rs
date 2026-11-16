@@ -112,14 +112,64 @@ impl Flow {
         }
     }
 
+    /// Whether the owner types a password into the card instead of signing
+    /// in through a browser: providers without OAuth, such as iCloud.
+    pub fn takes_password(&self) -> bool {
+        matches!(&self.consent, Consent::Email(consent)
+            if oauth::Provider::for_email(consent.provider).is_none())
+    }
+
     pub fn ready_label(&self) -> &'static str {
         match &self.consent {
             Consent::Mcp(_) => "Connect in browser",
             Consent::Email(consent) => match oauth::Provider::for_email(consent.provider) {
                 Some(oauth::Provider::Microsoft) => "Sign in with Microsoft",
-                _ => "Sign in with Google",
+                Some(oauth::Provider::Google) => "Sign in with Google",
+                None => "Connect",
             },
         }
+    }
+
+    /// Saves the card's inbox with the owner's password, or replaces the
+    /// password of an inbox already connected. The server signs in first
+    /// and refuses a password the mail server rejects.
+    pub async fn save_password(&self, password: String) -> Result<(), ClientError> {
+        let Consent::Email(consent) = &self.consent else {
+            return Err(ClientError::Protocol(
+                "This card does not take a password.".into(),
+            ));
+        };
+        let client = self.client.clone();
+        let existing = client
+            .clone()
+            .email_accounts()
+            .await?
+            .into_iter()
+            .find(|account| {
+                account
+                    .config
+                    .address
+                    .eq_ignore_ascii_case(&consent.address)
+            });
+        if let Some(account) = existing {
+            return client.replace_email_password(account.id, password).await;
+        }
+        let mut config = client
+            .clone()
+            .email_presets()
+            .await?
+            .into_iter()
+            .find(|preset| preset.provider == consent.provider)
+            .and_then(|preset| preset.preset)
+            .ok_or_else(|| {
+                ClientError::Protocol(format!(
+                    "This server has no preset for {}.",
+                    consent.provider.label()
+                ))
+            })?;
+        config.address = consent.address.clone();
+        config.username = consent.address.clone();
+        client.connect_email(config, password).await.map(|_| ())
     }
 
     fn account(
