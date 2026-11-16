@@ -13,6 +13,14 @@ use uuid::Uuid;
 
 const NONCE: usize = 24;
 
+/// The rows of one store and space whose key starts with the prefix bound
+/// to `?3`, compared as bytes so `LIKE` wildcards and collation never apply.
+macro_rules! under_prefix {
+    () => {
+        "store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB)"
+    };
+}
+
 pub struct Vault {
     pool: SqlitePool,
     store: Uuid,
@@ -190,9 +198,10 @@ impl Vault {
                 .await?;
             }
             Op::DeletePrefix(space, prefix) => {
-                sqlx::query(
-                    "DELETE FROM social_device_state WHERE store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB)",
-                )
+                sqlx::query(concat!(
+                    "DELETE FROM social_device_state WHERE ",
+                    under_prefix!()
+                ))
                 .bind(self.store)
                 .bind(*space)
                 .bind(*prefix)
@@ -238,9 +247,11 @@ impl Vault {
         space: &str,
         prefix: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, Error> {
-        let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
-            "SELECT key,value FROM social_device_state WHERE store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB) ORDER BY key",
-        )
+        let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(concat!(
+            "SELECT key,value FROM social_device_state WHERE ",
+            under_prefix!(),
+            " ORDER BY key"
+        ))
         .bind(self.store)
         .bind(space)
         .bind(prefix)
@@ -260,9 +271,11 @@ impl Vault {
         space: &str,
         prefix: &str,
     ) -> Result<bool, Error> {
-        Ok(sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM social_device_state WHERE store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB))",
-        )
+        Ok(sqlx::query_scalar(concat!(
+            "SELECT EXISTS(SELECT 1 FROM social_device_state WHERE ",
+            under_prefix!(),
+            ")"
+        ))
         .bind(self.store)
         .bind(space)
         .bind(prefix)
@@ -333,31 +346,22 @@ impl Vault {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let current = self.read_bounded(&mut tx, space, key, max).await?;
         let (change, out) = decide(current.as_deref());
-        match change {
-            Change::Keep => {}
+        let row;
+        let op = match &change {
+            Change::Keep => None,
             Change::Put { value, stamp } => {
-                sqlx::query(
-                    "INSERT INTO social_device_state(store_id,space,key,stamp,flag,value) VALUES(?1,?2,?3,?4,0,?5)
-                     ON CONFLICT(store_id,space,key) DO UPDATE SET stamp=excluded.stamp,flag=0,value=excluded.value",
-                )
-                .bind(self.store)
-                .bind(space)
-                .bind(key)
-                .bind(stamp)
-                .bind(self.seal(space, key, &value)?)
-                .execute(&mut *tx)
-                .await?;
+                row = Row {
+                    key,
+                    value,
+                    stamp: *stamp,
+                    flag: false,
+                };
+                Some(Op::Put(space, &row))
             }
-            Change::Delete => {
-                sqlx::query(
-                    "DELETE FROM social_device_state WHERE store_id=?1 AND space=?2 AND key=?3",
-                )
-                .bind(self.store)
-                .bind(space)
-                .bind(key)
-                .execute(&mut *tx)
-                .await?;
-            }
+            Change::Delete => Some(Op::Delete(space, key)),
+        };
+        if let Some(op) = op {
+            self.apply(&mut tx, &op).await?;
         }
         tx.commit().await?;
         Ok(out)
@@ -377,9 +381,12 @@ impl Vault {
     ) -> Result<Option<(String, Vec<u8>)>, Error> {
         let mut tx = self.pool.begin().await?;
         let longest = i64::try_from(prefix.len().saturating_add(max_suffix)).unwrap_or(i64::MAX);
-        let keys: Vec<Option<String>> = sqlx::query_scalar(
-            "SELECT CASE WHEN length(CAST(key AS BLOB))<=?5 THEN key END FROM social_device_state WHERE store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB) ORDER BY key LIMIT ?4",
-        )
+        let keys: Vec<Option<String>> = sqlx::query_scalar(concat!(
+            "SELECT CASE WHEN length(CAST(key AS BLOB))<=?5 THEN key END",
+            " FROM social_device_state WHERE ",
+            under_prefix!(),
+            " ORDER BY key LIMIT ?4"
+        ))
         .bind(self.store)
         .bind(space)
         .bind(prefix)
@@ -424,19 +431,6 @@ impl Vault {
         sealed.map(|s| self.open(space, key, &s)).transpose()
     }
 
-    /// Delete every row whose key starts with `prefix`.
-    pub async fn delete_prefix(&self, space: &str, prefix: &str) -> Result<u64, Error> {
-        Ok(sqlx::query(
-            "DELETE FROM social_device_state WHERE store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB)",
-        )
-        .bind(self.store)
-        .bind(space)
-        .bind(prefix)
-        .execute(&self.pool)
-        .await?
-        .rows_affected())
-    }
-
     /// Delete rows stamped before `cutoff`.
     pub async fn expire(&self, space: &str, cutoff: i64) -> Result<u32, Error> {
         let gone = sqlx::query(
@@ -479,9 +473,11 @@ impl Vault {
 
     /// Keys starting with `prefix`, in key order.
     pub async fn keys(&self, space: &str, prefix: &str) -> Result<Vec<String>, Error> {
-        Ok(sqlx::query_scalar(
-            "SELECT key FROM social_device_state WHERE store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB) ORDER BY key",
-        )
+        Ok(sqlx::query_scalar(concat!(
+            "SELECT key FROM social_device_state WHERE ",
+            under_prefix!(),
+            " ORDER BY key"
+        ))
         .bind(self.store)
         .bind(space)
         .bind(prefix)
