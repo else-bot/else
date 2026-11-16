@@ -72,3 +72,62 @@ async fn a_bot_reads_the_reason_a_provider_is_unavailable() {
     let reply = else_status(&app, &token).await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
 }
+
+fn provider(status: &Value, id: &str) -> Value {
+    status["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == id)
+        .cloned()
+        .unwrap_or_else(|| panic!("{id} missing from {status}"))
+}
+
+async fn status_of(app: &TestApp, token: &str) -> Value {
+    let reply = else_status(app, token).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    serde_json::from_str(reply.body["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_a_bot_runs_on_its_own_model_is_available_without_a_saved_default() {
+    let db = TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    sqlx::query("DELETE FROM provider_profiles WHERE provider_id = 'codex'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let registry = else_api::providers::Registry::new(vec![
+        Arc::new(else_api::providers::synthetic::Synthetic::new(
+            std::time::Duration::from_millis(5),
+        )),
+        Arc::new(common::ProfiledFake),
+    ]);
+    let app = TestApp::with_registry(Arc::new(db), 4, registry);
+    let token = grant(&app, vec![Tool::Diagnose]).await;
+
+    let codex = provider(&status_of(&app, &token).await, "codex");
+    assert_eq!(codex["available"], false, "{codex}");
+    assert!(
+        codex["unavailable_reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("model")),
+        "{codex}"
+    );
+
+    let other: Uuid = app.create_bot("Scout").await.parse().unwrap();
+    let own = else_api::app::providers::Profile {
+        model: "gpt-6.1-sol".to_owned(),
+        reasoning_effort: "medium".to_owned(),
+        service_tier: "priority".to_owned(),
+    };
+    else_api::db::bot_profiles::put(&app.db.pool, other, "codex", &own)
+        .await
+        .unwrap();
+
+    let codex = provider(&status_of(&app, &token).await, "codex");
+    assert_eq!(codex["available"], true, "{codex}");
+    assert_eq!(codex["unavailable_reason"], Value::Null, "{codex}");
+    assert_eq!(codex["profile_configured"], false, "{codex}");
+    assert_eq!(codex["bots_with_own_model"], 1, "{codex}");
+}
