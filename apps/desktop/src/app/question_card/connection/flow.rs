@@ -154,21 +154,14 @@ impl Flow {
         if let Some(account) = existing {
             return client.replace_email_password(account.id, password).await;
         }
-        let mut config = client
-            .clone()
-            .email_presets()
-            .await?
-            .into_iter()
-            .find(|preset| preset.provider == consent.provider)
-            .and_then(|preset| preset.preset)
+        let presets = client.clone().email_presets().await?;
+        let config = crate::api::preset_config(&presets, consent.provider, &consent.address)
             .ok_or_else(|| {
                 ClientError::Protocol(format!(
                     "This server has no preset for {}.",
                     consent.provider.label()
                 ))
             })?;
-        config.address = consent.address.clone();
-        config.username = consent.address.clone();
         client.connect_email(config, password).await.map(|_| ())
     }
 

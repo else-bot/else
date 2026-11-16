@@ -75,6 +75,22 @@ pub struct EmailPreset {
     pub preset: Option<EmailConfig>,
 }
 
+/// The server's settings for `provider`, signing in as `address`.
+pub fn preset_config(
+    presets: &[EmailPreset],
+    provider: EmailProvider,
+    address: &str,
+) -> Option<EmailConfig> {
+    let mut config = presets
+        .iter()
+        .find(|p| p.provider == provider)?
+        .preset
+        .clone()?;
+    config.address = address.to_owned();
+    config.username = address.to_owned();
+    Some(config)
+}
+
 /// The inbox a bot asked the owner to sign in to from a chat card.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct EmailConsent {

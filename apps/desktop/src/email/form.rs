@@ -219,14 +219,8 @@ impl Form {
                 sent_folder: "Sent".into(),
             }
         } else {
-            let mut config = presets
-                .iter()
-                .find(|p| p.provider == self.provider)
-                .and_then(|p| p.preset.clone())
-                .ok_or("This server has no preset for that provider.")?;
-            config.address = address.clone();
-            config.username = address;
-            config
+            crate::api::preset_config(presets, self.provider, &address)
+                .ok_or("This server has no preset for that provider.")?
         };
         Ok(Request::Password(Box::new(config), password))
     }
