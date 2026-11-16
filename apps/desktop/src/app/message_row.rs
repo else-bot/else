@@ -19,6 +19,10 @@ use gpui_kit::*;
 /// Bot-side cards use the full shared reading column.
 pub(super) const BOT_GUTTER: Pixels = px(0.);
 
+/// A bot message's text stops short of its hover actions (two small buttons
+/// and the gap between them), so the actions sit beside the words.
+const BOT_ACTIONS_GUTTER: Pixels = px(60.);
+
 /// Timestamps and other trailing metadata sit at this share of the foreground
 /// in dark themes.
 pub(super) const META_OPACITY: f32 = 0.55;
@@ -397,14 +401,14 @@ impl ElseApp {
                         .child(if user {
                             card
                         } else {
-                            side(card).into_any_element()
+                            side(card).pr(BOT_ACTIONS_GUTTER).into_any_element()
                         })
                         .child(
                             div()
                                 .absolute()
                                 .top_1()
                                 .when(user, |this| this.left(px(-28.)))
-                                .when(!user, |this| this.right(px(4.)))
+                                .when(!user, |this| this.right_0())
                                 .invisible()
                                 .group_hover("message-bubble", |this| this.visible())
                                 .child(self.message_actions(view.bot_id, id, author, cx)),
