@@ -424,11 +424,14 @@ impl SinkState {
         .bind(self.turn_id)
         .fetch_one(&mut *tx)
         .await?;
-        let (tasks_pending, carried, ready): (i64, i64, i64) =
+        let (tasks_pending, carried, tasks_unseen, ready): (i64, i64, i64, i64) =
             sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "SELECT (SELECT count(*) FROM delegations
                      WHERE root_turn_id = ?1 AND status IN ('queued', 'running')),
                     (SELECT count(*) FROM carried_waits WHERE turn_id = ?1),
+                    (SELECT count(*) FROM delegations
+                     WHERE root_turn_id = ?1 AND delivered_attempt IS NULL
+                       AND status IN ('completed', 'failed', 'cancelled')),
                     (SELECT count(*) FROM delegations d
                      WHERE d.root_turn_id = ?1 AND {})",
                 crate::db::delegations::READY
@@ -438,9 +441,10 @@ impl SinkState {
             .await?;
         let parks = current != TurnStatus::Cancelling
             && matches!(status, TurnStatus::Completed | TurnStatus::Interrupted);
-        // Carried tasks and waits hold the turn without blocking an outcome
-        // of its own, as `turns_continuable` decides for a waiting turn.
-        let own_outcome = ready > 0 || (tasks_pending == 0 && carried > 0 && unseen > 0);
+        // Pending tasks and carried waits hold the turn without blocking a
+        // ready batch or any other unseen outcome, as `turns_continuable`
+        // decides for a waiting turn.
+        let own_outcome = ready > 0 || unseen > tasks_unseen;
         let status = if parks && pending == tasks_pending + carried && own_outcome {
             TurnStatus::Queued
         } else if parks && pending > 0 {

@@ -63,8 +63,11 @@ CREATE UNIQUE INDEX computer_job_waits_attempt ON computer_job_waits (turn_id, a
 CREATE INDEX computer_job_waits_job ON computer_job_waits (job_id) WHERE status = 'pending';
 
 -- A carried wait holds its new turn like a carried task: it keeps the turn
--- waiting, but an outcome of the turn's own, such as an answered question or
--- a shorter job that ended, still continues it.
+-- waiting without blocking anything else. The turn continues once nothing
+-- else is pending and either nothing is pending at all, a batch of tasks is
+-- ready (the `delegations::READY` rule), or an outcome that is not a task's
+-- awaits delivery, such as an answered question or a wait that settled.
+-- Before, such an outcome waited for every pending task to end.
 CREATE VIEW carried_waits AS
     SELECT turn_id FROM mcp_waits WHERE attempt = 0 AND status = 'pending'
     UNION ALL
@@ -80,8 +83,11 @@ CREATE VIEW turns_continuable AS
             + (SELECT count(*) FROM carried_waits c WHERE c.turn_id = t.id)
       AND ((NOT EXISTS (SELECT 1 FROM delegations p
                         WHERE p.root_turn_id = t.id AND p.status IN ('queued', 'running'))
-            AND (NOT EXISTS (SELECT 1 FROM carried_waits c WHERE c.turn_id = t.id)
-                 OR EXISTS (SELECT 1 FROM turn_holds h WHERE h.turn_id = t.id AND h.unseen)))
+            AND NOT EXISTS (SELECT 1 FROM carried_waits c WHERE c.turn_id = t.id))
+           OR (SELECT coalesce(sum(h.unseen), 0) FROM turn_holds h WHERE h.turn_id = t.id)
+              > (SELECT count(*) FROM delegations u
+                 WHERE u.root_turn_id = t.id AND u.delivered_attempt IS NULL
+                   AND u.status IN ('completed', 'failed', 'cancelled'))
            OR EXISTS (SELECT 1 FROM delegations d
                       WHERE d.root_turn_id = t.id AND d.delivered_attempt IS NULL
                         AND d.status IN ('completed', 'failed', 'cancelled')

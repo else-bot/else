@@ -661,3 +661,49 @@ fn error_code(result: &Value) -> String {
         .unwrap_or_default()
         .to_owned()
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_settled_wait_continues_a_request_whose_carried_task_still_runs() {
+    let (app, synthetic) = harness().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("job");
+    std::fs::write(&state, "working").unwrap();
+    let main = app.main_bot().await;
+    let dev = app.create_bot("Dev").await;
+    sqlx::query("UPDATE bots SET selected_provider_id = 'synthetic' WHERE id = ?1")
+        .bind(dev.parse::<Uuid>().unwrap())
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let (root, token) = running(&app, &main).await;
+    text(&tool(&app, &token, "mcp_install", install(&state)).await);
+    let delegator = grant(&app, root, vec![Tool::Delegate]).await;
+    let task = json!({ "target_bot_id": dev, "task": "[synthetic:hang] Audit the billing code." });
+    text(&tool(&app, &delegator, "delegate", task).await);
+    settle(&app, root, "waiting").await;
+
+    let (latest, token) = running_follow_up(&app, &main, root).await;
+    let carried_task: Uuid =
+        sqlx::query_scalar("SELECT root_turn_id FROM delegations WHERE status = 'running'")
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(carried_task, latest, "the task moved to the latest request");
+    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
+    settle(&app, latest, "waiting").await;
+
+    std::fs::write(&state, "result_available").unwrap();
+    check_now(&app).await;
+    let deadline = std::time::Instant::now() + common::SETTLE;
+    while attempts(&app, latest).await < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the settled wait continues the request while its task still runs"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    settle(&app, latest, "waiting").await;
+    assert_eq!(wait_row(&app, latest).await.1, Some(2));
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(packet.contains("Opened PR #775"), "{packet}");
+}
