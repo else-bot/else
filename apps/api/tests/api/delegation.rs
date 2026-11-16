@@ -3241,6 +3241,24 @@ async fn a_delegating_bot_updates_a_running_task_and_gets_the_updated_reply() {
         "{updated}"
     );
     wait_status(&app, first, "interrupted").await;
+    let stopped: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT error_code, error_message FROM turns WHERE id = ?1")
+            .bind(first)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stopped.0.as_deref(),
+        Some("superseded"),
+        "the stopped attempt says why it stopped: {stopped:?}"
+    );
+    assert!(
+        stopped
+            .1
+            .as_deref()
+            .is_some_and(|m| m.contains("continues")),
+        "the stopped attempt says the task continues: {stopped:?}"
+    );
     let second = child_of(&app, task).await;
     assert_ne!(second, first, "the update runs in a new turn");
     let conversations: Vec<Uuid> = sqlx::query_scalar(
