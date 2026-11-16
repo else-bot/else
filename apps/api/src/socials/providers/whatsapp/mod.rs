@@ -60,6 +60,17 @@ impl Pairing {
 const SEND_SPACING: Duration = Duration::from_secs(3);
 /// How long a scanned code may take to finish linking.
 const LINK_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long to wait for WhatsApp to send a code, or the next one.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const UNREACHABLE: &str = "WhatsApp could not be reached. Check this computer's internet connection, then show a new code.";
+
+/// Where a pairing is: waiting for WhatsApp, showing a code, or linking the
+/// phone that scanned it.
+enum Stage {
+    Connecting,
+    Showing,
+    Linking(Jid),
+}
 
 /// One connection's linked device: its key store and, while the listener
 /// runs, the live client every operation goes through.
@@ -265,38 +276,47 @@ pub async fn pair(
 ) -> Result<Identity, Error> {
     let link = Link::new(db, Uuid::nil(), vault);
     let (handle, mut events) = start(link.backend.clone()).await?;
-    let mut paired: Option<Jid> = None;
-    let deadline = tokio::time::sleep(Duration::from_secs(24 * 3600));
+    let mut stage = Stage::Connecting;
+    let deadline = tokio::time::sleep(CONNECT_TIMEOUT);
     tokio::pin!(deadline);
     let result = loop {
         let event = tokio::select! {
             _ = stop.cancelled() => break Err(Error::Inactive),
-            () = &mut deadline => break Err(Error::Platform),
+            () = &mut deadline => break Err(match stage {
+                Stage::Connecting => Error::Invalid(UNREACHABLE),
+                Stage::Showing => Error::Expired,
+                Stage::Linking(_) => Error::Platform,
+            }),
             event = events.recv() => match event {
                 Some(event) => event,
                 None => break Err(Error::Platform),
             },
         };
         match &*event {
-            Event::PairingQrCode(qr) if paired.is_none() => {
+            Event::PairingQrCode(qr) if !matches!(stage, Stage::Linking(_)) => {
+                stage = Stage::Showing;
                 view.send_replace(Pairing::Code {
                     code: qr.code.clone(),
                     expires_in: qr.timeout.as_secs(),
                 });
+                deadline
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + qr.timeout + CONNECT_TIMEOUT);
             }
             Event::PairingQrCodesExhausted(_) => break Err(Error::Expired),
             Event::PairSuccess(success) => {
-                paired = Some(success.id.to_non_ad());
+                stage = Stage::Linking(success.id.to_non_ad());
                 view.send_replace(Pairing::Starting);
                 deadline
                     .as_mut()
                     .reset(tokio::time::Instant::now() + LINK_TIMEOUT);
             }
             Event::PairError(_) => break Err(Error::Platform),
-            Event::Connected(_) if paired.is_some() => {
-                let client = handle.client();
-                let number = paired.take().expect("paired");
-                let name = client.push_name();
+            Event::Connected(_) => {
+                let Stage::Linking(number) = &stage else {
+                    continue;
+                };
+                let name = handle.client().push_name();
                 break Ok(Identity {
                     id: number.user.to_string(),
                     display_name: if name.is_empty() {
