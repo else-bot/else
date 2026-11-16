@@ -219,9 +219,6 @@ impl Shell {
             }
         };
         if snapshot.output != view.snapshot.output {
-            if view.snapshot.output.is_empty() {
-                view.page_scroll.scroll_to_bottom();
-            }
             let follow = view.at_bottom() && view.logs.read(cx).selected_range().is_empty();
             let selection = view.logs.read(cx).selected_range();
             let appended = snapshot.output.starts_with(&view.snapshot.output);
@@ -534,28 +531,24 @@ impl Shell {
         if output_visible {
             content = content.child(self.render_update_output(theme, cx));
         }
-        let mut panel = v_flex()
-            .w_full()
-            .when(output_visible, |panel| panel.h_full())
-            .min_h_0()
-            .gap_4()
-            .child(
+        // Open output fills the panel and scrolls inside itself; the page
+        // scrolls only when the output is closed.
+        let mut panel = v_flex().w_full().min_h_0().gap_4();
+        panel = if output_visible {
+            panel.h_full().child(content.w_full().flex_1().min_h_0())
+        } else {
+            panel.child(
                 div()
                     .id("updates-status-scroll")
-                    .when(output_visible, |area| area.flex_1())
                     .min_h_0()
                     .flex()
                     .flex_col()
                     .overflow_y_scroll()
                     .track_scroll(&view.page_scroll)
                     .vertical_scrollbar(&view.page_scroll)
-                    .child(
-                        content
-                            .w_full()
-                            .when(output_visible, |content| content.flex_1())
-                            .when(!output_visible, |content| content.flex_none()),
-                    ),
-            );
+                    .child(content.w_full().flex_none()),
+            )
+        };
         if view.confirm_restart {
             panel = panel.child(
                 v_flex()
