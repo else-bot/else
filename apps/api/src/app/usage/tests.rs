@@ -242,16 +242,49 @@ fn a_bot_that_switched_provider_shows_under_both() {
 }
 
 #[test]
-fn opus_turns_weigh_more_than_haiku_turns_of_the_same_size() {
-    let opus = Turn {
-        model: Some("claude-opus-5-5".into()),
-        ..turn(1, "grok", at(12, 0), 1, 1_000)
+fn turns_weigh_by_their_model_price() {
+    let sized = |provider: &str, model: Option<&str>| Turn {
+        model: model.map(Into::into),
+        ..turn(1, provider, at(12, 0), 1, 1_000)
     };
-    let haiku = Turn {
-        model: Some("claude-haiku-5-5".into()),
-        ..turn(2, "grok", at(12, 0), 1, 1_000)
+    let weight = |provider, model| sized(provider, model).weight();
+    let opus = weight("claude", Some("claude-opus-5-5"));
+    let haiku = weight("claude", Some("claude-haiku-5-5"));
+    assert_eq!(opus, 40.0 * haiku);
+    assert_eq!(
+        weight("claude", Some("opus")),
+        opus,
+        "CLI aliases match too"
+    );
+    assert_eq!(
+        weight("codex", Some("gpt-6.1-sol")),
+        2.0 * weight("codex", Some("gpt-6.1-terra"))
+    );
+    assert!(
+        weight("claude", Some("claude-fable-5-1")) > weight("claude", Some("claude-fable-5-2"))
+    );
+    // A model newer than the table costs like its provider's mid model.
+    assert_eq!(
+        weight("codex", Some("gpt-7-nova")),
+        weight("codex", Some("gpt-6.1-sol"))
+    );
+    assert_eq!(
+        weight("claude", None),
+        weight("claude", Some("claude-sonnet-5-5"))
+    );
+}
+
+#[test]
+fn cached_input_costs_a_fraction_of_fresh_input() {
+    let input = |cached: i64, written: i64| Turn {
+        input_tokens: 1_000,
+        cached_input_tokens: cached,
+        cache_write_tokens: written,
+        ..turn(1, "claude", at(12, 0), 1, 0)
     };
-    assert!(opus.weight() > 10.0 * haiku.weight());
+    let fresh = input(0, 0).weight();
+    assert_eq!(input(1_000, 0).weight(), fresh / 20.0);
+    assert_eq!(input(0, 1_000).weight(), fresh * 1.25);
 }
 
 #[test]

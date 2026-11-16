@@ -66,24 +66,76 @@ pub struct Turn {
     pub output_tokens: i64,
 }
 
+/// API list prices in USD per million tokens, used only as relative
+/// weights. Long-context and batch rates are ignored; a cache write is
+/// priced at the 5-minute rate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Price {
+    input: f64,
+    cache_write: f64,
+    cache_read: f64,
+    output: f64,
+}
+
+const fn price(input: f64, cache_write: f64, cache_read: f64, output: f64) -> Price {
+    Price {
+        input,
+        cache_write,
+        cache_read,
+        output,
+    }
+}
+
+const SONNET: Price = price(2.0, 2.5, 0.1, 10.0);
+const GPT_SOL: Price = price(2.0, 2.0, 0.1, 10.0);
+const GROK: Price = price(2.0, 2.0, 0.5, 6.0);
+
+/// Matched in order against the lowercased model id, so a more specific
+/// name comes before the family it belongs to. Prices as of November 2026.
+const PRICES: &[(&str, Price)] = &[
+    ("fable-5-1", price(10.0, 12.5, 0.25, 50.0)),
+    ("fable", price(8.0, 10.0, 0.2, 40.0)),
+    ("opus", price(4.0, 5.0, 0.2, 20.0)),
+    ("sonnet", SONNET),
+    ("haiku", price(0.1, 0.125, 0.01, 0.5)),
+    ("terra", price(1.0, 1.0, 0.05, 5.0)),
+    ("luna", price(0.1, 0.1, 0.01, 0.5)),
+    ("sol", GPT_SOL),
+    ("grok-build", price(1.0, 1.0, 1.0, 2.0)),
+    ("grok", GROK),
+];
+
+impl Price {
+    /// The model's price, or its provider's mid model when the model is
+    /// missing or newer than this table.
+    fn of(provider: &str, model: Option<&str>) -> Self {
+        let model = model.unwrap_or_default().to_ascii_lowercase();
+        PRICES
+            .iter()
+            .find(|(name, _)| model.contains(name))
+            .map(|(_, price)| *price)
+            .unwrap_or(match provider {
+                "codex" => GPT_SOL,
+                "grok" => GROK,
+                _ => SONNET,
+            })
+    }
+}
+
 impl Turn {
-    /// Rough relative cost: token kinds weighted like API prices, scaled by
-    /// model tier. Only ratios between turns of one provider matter.
+    /// Relative cost: each token kind at the model's API list price. Only
+    /// ratios between turns of one provider matter, so a subscription that
+    /// counts differently from API prices still splits close to right.
     fn weight(&self) -> f64 {
+        let price = Price::of(&self.provider_id, self.model.as_deref());
         let cached = self.cached_input_tokens.max(0) as f64;
         let written = self.cache_write_tokens.max(0) as f64;
         let fresh =
             (self.input_tokens - self.cached_input_tokens - self.cache_write_tokens).max(0) as f64;
-        let tokens = fresh + written * 1.25 + cached * 0.1 + self.output_tokens.max(0) as f64 * 5.0;
-        let model = self.model.as_deref().unwrap_or_default();
-        let tier = if model.contains("opus") {
-            5.0
-        } else if model.contains("haiku") {
-            1.0 / 3.0
-        } else {
-            1.0
-        };
-        tokens * tier
+        fresh * price.input
+            + written * price.cache_write
+            + cached * price.cache_read
+            + self.output_tokens.max(0) as f64 * price.output
     }
 
     fn span(&self, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
