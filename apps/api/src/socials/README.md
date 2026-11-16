@@ -11,6 +11,8 @@ Social connections belong to the API host. An owner connects a platform bot, and
 5. Initialize TLS explicitly. Both Rustls crypto backends are present in the dependency graph, so SDK construction must not rely on an implicit backend choice or on an unrelated mail connection initializing it first.
 6. Store the SDK client in `providers::Session`. The connection worker shares one session across discovery, commands, sending, and listening for its credential generation, preserving SDK rate limits and connection pools. Replacing credentials retires that session.
 
+A provider linked by scanning a code, like WhatsApp, returns `SetupKind::Pairing` from `Provider::setup` and implements `Transport::pair`. Each pairing writes into a new device store sealed with a fresh `DeviceKey`, and `pairing.rs` attaches that store to a connection only once the account links, so an abandoned or failed pairing never touches an existing connection. Bound every wait in `pair`, including the wait for the first code, because the SDK may retry an unreachable server forever. A pairing provider has no token step: the owner scans the code on the bot's setup card and may leave instructions that return to the bot as the owner's words. An account that signs the device out sets the connection's health to `signed_out` until the owner pairs it again.
+
 The transport is injectable for tests. A fake transport verifies API policy and lifecycle, while a disposable platform account verifies the SDK integration. Keep those results distinct.
 
 ## Keep authority in the social domain
