@@ -5,15 +5,12 @@
 //! ELSE_WHATSAPP_LIVE=1 cargo test -p else-api --test whatsapp_live -- --ignored --nocapture
 
 use else_api::socials::{
-    providers::{
-        Native, Transport,
-        whatsapp::{Pairing, Vault},
-    },
+    pairing::{Pairing, Progress},
+    providers::{Native, Transport, whatsapp::Vault},
     store,
     types::*,
 };
 use std::time::Duration;
-use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
@@ -31,13 +28,14 @@ async fn pairing_shows_a_code_from_whatsapp() {
     else_api::db::migrate(&pool).await.unwrap();
     let device = store::new_device(&pool).await.unwrap();
     let vault = Vault::new(pool.clone(), device, &DeviceKey::generate().unwrap());
-    let (view, mut seen) = watch::channel(Pairing::Starting);
+    let (progress, mut seen) = Progress::new();
     let stop = CancellationToken::new();
     let watcher = async {
         let code = tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 seen.changed().await.expect("pairing ended before a code");
-                if let Pairing::Code { code, expires_in } = seen.borrow_and_update().clone() {
+                if let Pairing::Code { code, expires_in } = seen.borrow_and_update().pairing.clone()
+                {
                     return (code, expires_in);
                 }
             }
@@ -46,7 +44,7 @@ async fn pairing_shows_a_code_from_whatsapp() {
         stop.cancel();
         code
     };
-    let (result, code) = tokio::join!(Native.pair(&pool, vault, &view, stop.clone()), watcher);
+    let (result, code) = tokio::join!(Native.pair(&pool, vault, &progress, stop.clone()), watcher);
     let (code, expires_in) = code.expect("a QR code within a minute");
     println!(
         "code {}… expires in {expires_in}s",

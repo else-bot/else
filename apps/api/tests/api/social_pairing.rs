@@ -4,17 +4,14 @@ use crate::socials::{bot, key, turn};
 use async_trait::async_trait;
 use else_api::socials::{
     Manager,
-    pairing::{Purpose, View},
-    providers::{
-        Session, Transport,
-        whatsapp::{Pairing, Vault},
-    },
+    pairing::{Pairing, Progress, Purpose, View},
+    providers::{Session, Transport, whatsapp::Vault},
     store,
     types::*,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -50,14 +47,11 @@ impl Transport for Phone {
         &self,
         _: &sqlx::SqlitePool,
         vault: Vault,
-        view: &watch::Sender<Pairing>,
+        progress: &Progress,
         stop: CancellationToken,
     ) -> Result<Identity, Error> {
         vault.put("device", "self", DEVICE_SECRET).await?;
-        view.send_replace(Pairing::Code {
-            code: "2@scan-me".into(),
-            expires_in: 60,
-        });
+        progress.code("2@scan-me".into(), 60);
         if self.expire.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(Error::Expired);
         }

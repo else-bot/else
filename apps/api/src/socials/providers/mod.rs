@@ -59,7 +59,7 @@ pub trait Transport: Send + Sync {
         &self,
         db: &sqlx::SqlitePool,
         vault: whatsapp::Vault,
-        view: &tokio::sync::watch::Sender<whatsapp::Pairing>,
+        progress: &crate::socials::pairing::Progress,
         stop: CancellationToken,
     ) -> Result<Identity, Error>;
     async fn destinations(&self, session: &Session) -> Result<Vec<Destination>, Error>;
@@ -101,10 +101,10 @@ impl Transport for Native {
         &self,
         db: &sqlx::SqlitePool,
         vault: whatsapp::Vault,
-        view: &tokio::sync::watch::Sender<whatsapp::Pairing>,
+        progress: &crate::socials::pairing::Progress,
         stop: CancellationToken,
     ) -> Result<Identity, Error> {
-        whatsapp::pair(db.clone(), vault, view, stop).await
+        whatsapp::pair(db.clone(), vault, progress, stop).await
     }
     async fn destinations(&self, session: &Session) -> Result<Vec<Destination>, Error> {
         match session {

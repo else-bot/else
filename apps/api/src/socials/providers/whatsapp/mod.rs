@@ -7,8 +7,7 @@ mod vault;
 
 pub use vault::Vault;
 
-use crate::socials::types::*;
-use serde::Serialize;
+use crate::socials::{pairing::Progress, types::*};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use std::{
@@ -29,34 +28,6 @@ use whatsapp_rust::{
     waproto::whatsapp as wa,
 };
 
-/// What the pairing card shows. `revision` advances on every change, so a
-/// card can wait for the next one.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum Pairing {
-    Starting,
-    /// Scan `code` with WhatsApp → Linked devices before `expires_in` seconds.
-    Code {
-        code: String,
-        expires_in: u64,
-    },
-    /// Linked; the connection now holds the device.
-    Paired {
-        connection: Box<Connection>,
-    },
-    /// No code was scanned in time. Start again for a new one.
-    Expired,
-    Failed {
-        message: String,
-    },
-    Cancelled,
-}
-impl Pairing {
-    pub fn finished(&self) -> bool {
-        !matches!(self, Self::Starting | Self::Code { .. })
-    }
-}
-
 /// Sends from the owner's account stay human-paced.
 const SEND_SPACING: Duration = Duration::from_secs(3);
 /// How long a scanned code may take to finish linking.
@@ -65,12 +36,29 @@ const LINK_TIMEOUT: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const UNREACHABLE: &str = "WhatsApp could not be reached. Check this computer's internet connection, then show a new code.";
 
-/// Where a pairing is: waiting for WhatsApp, showing a code, or linking the
-/// phone that scanned it.
+/// Where a pairing is: waiting for WhatsApp, showing a code that expires
+/// after its timeout, or linking the phone that scanned it.
 enum Stage {
     Connecting,
-    Showing,
+    Showing(Duration),
     Linking(Jid),
+}
+impl Stage {
+    /// How long the stage may last before the pairing gives up.
+    fn limit(&self) -> Duration {
+        match self {
+            Self::Connecting => CONNECT_TIMEOUT,
+            Self::Showing(code) => *code + CONNECT_TIMEOUT,
+            Self::Linking(_) => LINK_TIMEOUT,
+        }
+    }
+    fn timed_out(&self) -> Error {
+        match self {
+            Self::Connecting => Error::Invalid(UNREACHABLE),
+            Self::Showing(_) => Error::Expired,
+            Self::Linking(_) => Error::Platform,
+        }
+    }
 }
 
 /// One connection's linked device: its key store and, while the listener
@@ -511,11 +499,11 @@ async fn replay_history(
     Ok(())
 }
 
-/// Link a new device into `vault`, reporting codes on `view`.
+/// Link a new device into `vault`, reporting codes on `progress`.
 pub async fn pair(
     db: SqlitePool,
     vault: Vault,
-    view: &watch::Sender<Pairing>,
+    progress: &Progress,
     stop: CancellationToken,
 ) -> Result<Identity, Error> {
     let link = Link::new(db, Uuid::nil(), vault);
@@ -526,16 +514,12 @@ pub async fn pair(
     )
     .await?;
     let mut stage = Stage::Connecting;
-    let deadline = tokio::time::sleep(CONNECT_TIMEOUT);
+    let deadline = tokio::time::sleep(stage.limit());
     tokio::pin!(deadline);
     let result = loop {
         let event = tokio::select! {
             _ = stop.cancelled() => break Err(Error::Inactive),
-            () = &mut deadline => break Err(match stage {
-                Stage::Connecting => Error::Invalid(UNREACHABLE),
-                Stage::Showing => Error::Expired,
-                Stage::Linking(_) => Error::Platform,
-            }),
+            () = &mut deadline => break Err(stage.timed_out()),
             event = events.recv() => match event {
                 Some(event) => event,
                 None => break Err(Error::Platform),
@@ -543,22 +527,19 @@ pub async fn pair(
         };
         match &*event {
             Event::PairingQrCode(qr) if !matches!(stage, Stage::Linking(_)) => {
-                stage = Stage::Showing;
-                view.send_replace(Pairing::Code {
-                    code: qr.code.clone(),
-                    expires_in: qr.timeout.as_secs(),
-                });
+                stage = Stage::Showing(qr.timeout);
+                progress.code(qr.code.clone(), qr.timeout.as_secs());
                 deadline
                     .as_mut()
-                    .reset(tokio::time::Instant::now() + qr.timeout + CONNECT_TIMEOUT);
+                    .reset(tokio::time::Instant::now() + stage.limit());
             }
             Event::PairingQrCodesExhausted(_) => break Err(Error::Expired),
             Event::PairSuccess(success) => {
                 stage = Stage::Linking(success.id.to_non_ad());
-                view.send_replace(Pairing::Starting);
+                progress.linking();
                 deadline
                     .as_mut()
-                    .reset(tokio::time::Instant::now() + LINK_TIMEOUT);
+                    .reset(tokio::time::Instant::now() + stage.limit());
             }
             Event::PairError(_) => break Err(Error::Platform),
             Event::Connected(_) => {

@@ -589,7 +589,7 @@ impl Transport for Fake {
         &self,
         _: &sqlx::SqlitePool,
         _: else_api::socials::providers::whatsapp::Vault,
-        _: &tokio::sync::watch::Sender<else_api::socials::providers::whatsapp::Pairing>,
+        _: &else_api::socials::pairing::Progress,
         _: CancellationToken,
     ) -> Result<Identity, Error> {
         unreachable!("Telegram and Discord fixtures never pair a device")
