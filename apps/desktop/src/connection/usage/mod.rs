@@ -42,7 +42,7 @@ pub(super) struct View {
 
 impl Shell {
     /// The connected server's bots, as the sidebar lists them.
-    fn known_bots<'a>(&self, cx: &'a App) -> &'a [Bot] {
+    pub(super) fn known_bots<'a>(&self, cx: &'a App) -> &'a [Bot] {
         self.active
             .as_ref()
             .map(|active| active.app.read(cx).bots())

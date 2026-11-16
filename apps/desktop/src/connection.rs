@@ -3,6 +3,7 @@
 //! Switching selects a session without rebinding requests or discarding drafts.
 
 mod backups;
+mod computers;
 mod icon_editor;
 mod mcp;
 mod server_rail;
@@ -163,7 +164,7 @@ struct Setup {
     name: Entity<InputState>,
     error: Option<String>,
     focus: FocusHandle,
-    navigation_focus: [FocusHandle; 8],
+    navigation_focus: [FocusHandle; 9],
     _attempt: Option<Task<()>>,
 }
 
@@ -197,6 +198,7 @@ pub struct Shell {
     mcp: Option<mcp::View>,
     skills: Option<skills::View>,
     usage: Option<usage::View>,
+    computers: Option<computers::View>,
     socials: Option<Entity<crate::socials::SocialsView>>,
     email: Option<(Entity<crate::email::EmailSettings>, Subscription)>,
 }
@@ -271,6 +273,7 @@ impl Shell {
             mcp: None,
             skills: None,
             usage: None,
+            computers: None,
             socials: None,
             email: None,
         };
@@ -345,6 +348,7 @@ impl Shell {
             .map(|active| active.app.read(cx).panel_widths());
         self.clear_skills(window, cx);
         self.usage = None;
+        self.computers = None;
         self.clear_socials(window, cx);
         self.backups = None;
         self.mcp = None;
@@ -786,6 +790,7 @@ impl Shell {
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_skills(window, cx);
         self.usage = None;
+        self.computers = None;
         self.clear_socials(window, cx);
         if let Some(active) = &self.active {
             self.updates.dismiss();

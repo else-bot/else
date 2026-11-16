@@ -17,6 +17,7 @@ pub(super) enum SettingsSection {
     Mcp,
     Skills,
     Usage,
+    Computers,
     Backups,
     Updates,
 }
@@ -181,6 +182,7 @@ impl Shell {
                 SettingsSection::Usage => 5,
                 SettingsSection::Backups => 6,
                 SettingsSection::Updates => 7,
+                SettingsSection::Computers => 8,
             }]
             .focus(window, cx);
             cx.notify();
@@ -198,6 +200,13 @@ impl Shell {
             }
         } else {
             self.usage = None;
+        }
+        if section == SettingsSection::Computers {
+            if self.computers.is_none() {
+                self.open_computers(window, cx);
+            }
+        } else {
+            self.computers = None;
         }
         if section == SettingsSection::Mcp {
             if self.mcp.is_none() {
@@ -332,6 +341,13 @@ impl Shell {
                 &setup.navigation_focus[5],
             ))
             .child(nav_item(
+                "settings-computers",
+                "Computers",
+                IconName::Monitor,
+                SettingsSection::Computers,
+                &setup.navigation_focus[8],
+            ))
+            .child(nav_item(
                 "settings-backups",
                 "Backups",
                 IconName::CloudUpload,
@@ -347,6 +363,7 @@ impl Shell {
             SettingsSection::Mcp => self.render_mcp(window, cx),
             SettingsSection::Skills => self.render_skills(cx),
             SettingsSection::Usage => self.render_usage(cx),
+            SettingsSection::Computers => self.render_computers(cx),
             SettingsSection::Backups => self.render_backups(window, cx),
             SettingsSection::Updates => self.render_updates(cx),
         };
@@ -453,6 +470,7 @@ impl Shell {
                                 SettingsSection::Mcp => "settings-mcp-content",
                                 SettingsSection::Skills => "settings-skills-content",
                                 SettingsSection::Usage => "settings-usage-content",
+                                SettingsSection::Computers => "settings-computers-content",
                                 SettingsSection::Backups => "settings-backups-content",
                                 SettingsSection::Updates => "settings-updates-content",
                             })

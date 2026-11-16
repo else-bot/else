@@ -49,6 +49,8 @@ impl ComputerState {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ComputerUpgrade {
+    Queued { position: u32 },
+    Waiting { reason: String },
     Running,
     Failed { error: String },
     Completed { unrestored_packages: Vec<String> },
@@ -584,6 +586,17 @@ mod tests {
     fn client(origin: Origin) -> Arc<Client> {
         let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
         Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap())
+    }
+
+    #[test]
+    fn computers_queued_and_waiting_are_not_running_upgrades() {
+        for raw in [
+            serde_json::json!({ "state": "queued", "position": 2 }),
+            serde_json::json!({ "state": "waiting", "reason": "The bot is using its computer." }),
+        ] {
+            let upgrade: ComputerUpgrade = serde_json::from_value(raw).unwrap();
+            assert_ne!(upgrade, ComputerUpgrade::Running);
+        }
     }
 
     #[test]
