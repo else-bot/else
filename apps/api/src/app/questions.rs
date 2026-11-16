@@ -333,6 +333,10 @@ pub struct McpConnection {
 pub struct EmailConnection {
     pub provider: crate::connectors::types::Provider,
     pub address: String,
+    /// The generation of a connected inbox's rejected credential that this
+    /// card replaces, so an earlier card's approval cannot settle it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<i64>,
 }
 
 /// The bot a `delete_bot` card would delete, as it was when the card was

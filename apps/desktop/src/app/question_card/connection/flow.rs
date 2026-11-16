@@ -71,6 +71,15 @@ impl SignIn {
     }
 }
 
+/// What a card waiting for the owner offers, by how it signs in.
+pub(super) struct ReadyCopy {
+    pub action: &'static str,
+    /// The action after a failed attempt.
+    pub retry: &'static str,
+    pub hint: &'static str,
+    pub opens_browser: bool,
+}
+
 #[derive(Debug, PartialEq)]
 pub(super) enum Resolution {
     Disconnected,
@@ -112,14 +121,68 @@ impl Flow {
         }
     }
 
-    pub fn ready_label(&self) -> &'static str {
+    /// Whether the owner types a password into the card instead of signing
+    /// in through a browser: providers without OAuth, such as iCloud.
+    pub fn takes_password(&self) -> bool {
+        matches!(&self.consent, Consent::Email(consent)
+            if oauth::Provider::for_email(consent.provider).is_none())
+    }
+
+    pub fn ready_copy(&self) -> ReadyCopy {
+        let browser = |action| ReadyCopy {
+            action,
+            retry: "Sign in again",
+            hint: "Opens your browser",
+            opens_browser: true,
+        };
         match &self.consent {
-            Consent::Mcp(_) => "Connect in browser",
+            Consent::Mcp(_) => browser("Connect in browser"),
             Consent::Email(consent) => match oauth::Provider::for_email(consent.provider) {
-                Some(oauth::Provider::Microsoft) => "Sign in with Microsoft",
-                _ => "Sign in with Google",
+                Some(oauth::Provider::Microsoft) => browser("Sign in with Microsoft"),
+                Some(oauth::Provider::Google) => browser("Sign in with Google"),
+                None => ReadyCopy {
+                    action: "Connect",
+                    retry: "Try again",
+                    hint: "Encrypted on this server",
+                    opens_browser: false,
+                },
             },
         }
+    }
+
+    /// Saves the card's inbox with the owner's password, or replaces the
+    /// password of an inbox already connected. The server signs in first
+    /// and refuses a password the mail server rejects.
+    pub async fn save_password(&self, password: String) -> Result<(), ClientError> {
+        let Consent::Email(consent) = &self.consent else {
+            return Err(ClientError::Protocol(
+                "This card does not take a password.".into(),
+            ));
+        };
+        let client = self.client.clone();
+        let existing = client
+            .clone()
+            .email_accounts()
+            .await?
+            .into_iter()
+            .find(|account| {
+                account
+                    .config
+                    .address
+                    .eq_ignore_ascii_case(&consent.address)
+            });
+        if let Some(account) = existing {
+            return client.replace_email_password(account.id, password).await;
+        }
+        let presets = client.clone().email_presets().await?;
+        let config = crate::api::preset_config(&presets, consent.provider, &consent.address)
+            .ok_or_else(|| {
+                ClientError::Protocol(format!(
+                    "This server has no preset for {}.",
+                    consent.provider.label()
+                ))
+            })?;
+        client.connect_email(config, password).await.map(|_| ())
     }
 
     fn account(

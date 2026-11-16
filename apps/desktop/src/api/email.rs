@@ -25,6 +25,26 @@ impl EmailProvider {
             Self::Imap => "Other email",
         }
     }
+
+    /// Where the owner makes an app password for this provider, shown on a
+    /// card that asks for one.
+    pub fn app_password_help(self) -> Option<AppPasswordHelp> {
+        match self {
+            Self::Icloud => Some(AppPasswordHelp {
+                note: "Use an app-specific password, not your Apple Account password. \
+                       Two-factor authentication must be on.",
+                link: "Open account.apple.com",
+                url: "https://account.apple.com/",
+            }),
+            _ => None,
+        }
+    }
+}
+
+pub struct AppPasswordHelp {
+    pub note: &'static str,
+    pub link: &'static str,
+    pub url: &'static str,
 }
 
 /// A bot's trigger on an inbox: whether new mail wakes it, and what to do
@@ -73,6 +93,22 @@ pub struct EmailAccount {
 pub struct EmailPreset {
     pub provider: EmailProvider,
     pub preset: Option<EmailConfig>,
+}
+
+/// The server's settings for `provider`, signing in as `address`.
+pub fn preset_config(
+    presets: &[EmailPreset],
+    provider: EmailProvider,
+    address: &str,
+) -> Option<EmailConfig> {
+    let mut config = presets
+        .iter()
+        .find(|p| p.provider == provider)?
+        .preset
+        .clone()?;
+    config.address = address.to_owned();
+    config.username = address.to_owned();
+    Some(config)
 }
 
 /// The inbox a bot asked the owner to sign in to from a chat card.
@@ -131,6 +167,25 @@ impl Client {
             })
     }
 
+    /// A request that signs in to a mail server, which may take longer than
+    /// the usual request timeout.
+    async fn sign_in<T: serde::de::DeserializeOwned + Send + 'static>(
+        self: Arc<Self>,
+        method: Method,
+        path: String,
+        body: Value,
+    ) -> Result<T, ClientError> {
+        let this = self.clone();
+        self.run(async move {
+            let request = this
+                .request(method, &path)
+                .timeout(std::time::Duration::from_secs(60))
+                .json(&body);
+            this.send_json::<T>(request).await.map(|(_, body)| body)
+        })
+        .await
+    }
+
     pub async fn connect_email(
         self: Arc<Self>,
         config: EmailConfig,
@@ -140,13 +195,28 @@ impl Client {
         struct Connected {
             account: EmailAccount,
         }
-        self.call::<Connected>(
+        self.sign_in::<Connected>(
             Method::POST,
             "/v1/connectors/email/accounts".into(),
-            Some(json!({"config":config,"credential":{"kind":"password","password":password}})),
+            json!({"config":config,"credential":{"kind":"password","password":password}}),
         )
         .await
-        .map(|(_, body)| body.account)
+        .map(|body| body.account)
+    }
+
+    /// Replaces an inbox's password. The server signs in with it first.
+    pub async fn replace_email_password(
+        self: Arc<Self>,
+        account: Uuid,
+        password: String,
+    ) -> Result<(), ClientError> {
+        self.sign_in::<Value>(
+            Method::PUT,
+            format!("/v1/connectors/email/accounts/{account}/credentials"),
+            json!({"kind":"password","password":password}),
+        )
+        .await
+        .map(|_| ())
     }
 
     pub async fn authorize_email(
@@ -172,17 +242,13 @@ impl Client {
         struct Connected {
             account: EmailAccount,
         }
-        let this = self.clone();
-        self.run(async move {
-            let request = this
-                .request(Method::POST, "/v1/connectors/email/oauth/complete")
-                .timeout(std::time::Duration::from_secs(60))
-                .json(&json!({"request_id":request_id,"state":state,"code":code}));
-            this.send_json::<Connected>(request)
-                .await
-                .map(|(_, body)| body.account)
-        })
+        self.sign_in::<Connected>(
+            Method::POST,
+            "/v1/connectors/email/oauth/complete".into(),
+            json!({"request_id":request_id,"state":state,"code":code}),
+        )
         .await
+        .map(|body| body.account)
     }
 
     pub async fn set_email_wake(

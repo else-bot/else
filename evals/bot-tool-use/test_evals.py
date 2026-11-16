@@ -158,6 +158,16 @@ def run(runner):
                     {"status": "waiting", "parked": True})], ""),
                 "connect-gmail-from-chat": ([self.call("mail_connect", {"provider": "gmail", "address": "max@example.com"},
                                                        {"status": "pending_owner_auth", "parked": True})], "Sign in on the card above."),
+                "connect-icloud-from-chat": ([self.call("mail_connect", {"provider": "icloud", "address": "max@icloud.com"},
+                                                        {"status": "pending_owner_auth", "parked": True})],
+                                             "Enter an app-specific password on the card above."),
+                "icloud-rejected-password-reopens-card": ([
+                    self.call("mail_action", {"account_id": "50000000-0000-0000-0000-000000000003",
+                                              "command": {"operation": "search", "folder": "INBOX", "query": "bank"}},
+                              "mail_authentication_failed: rejected", True),
+                    self.call("mail_connect", {"provider": "icloud", "address": "max@icloud.com"},
+                              {"status": "pending_owner_auth", "parked": True})],
+                    "Apple rejected the saved password. Enter a new one on the card."),
                 "watch-connected-inbox": ([self.call("mail_accounts", {}), self.call("mail_trigger_set", {
                     "account_id": inbox, "instructions": "Draft a reply asking for their W-9."},
                     {"status": "pending", "parked": True})], "Approve the card and new invoices wake me."),

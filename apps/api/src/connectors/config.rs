@@ -62,6 +62,20 @@ impl Provider {
         })
     }
 
+    /// How an inbox card in chat signs the owner in, for the providers it
+    /// supports.
+    pub fn card_sign_in(self) -> Option<CardSignIn> {
+        match self {
+            Self::Gmail => Some(CardSignIn::Browser("Google")),
+            Self::Microsoft => Some(CardSignIn::Browser("Microsoft")),
+            Self::Icloud => Some(CardSignIn::AppPassword {
+                issuer: "Apple",
+                help: "account.apple.com, Sign-In and Security, App-Specific Passwords",
+            }),
+            Self::Yahoo | Self::Imap => None,
+        }
+    }
+
     pub fn oauth_endpoints(self) -> Result<(&'static str, &'static str, &'static str), MailError> {
         match self {
             Self::Gmail => Ok((

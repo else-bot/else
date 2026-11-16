@@ -213,6 +213,39 @@ impl ConnectorManager {
             .map_err(|_| MailError::new("mail_account_unavailable"))?
     }
 
+    /// Signs in with an owner's new password before it is saved. An OAuth
+    /// credential comes from a completed sign-in and needs no check.
+    pub async fn verify(
+        &self,
+        config: &MailConfig,
+        credential: &Credential,
+    ) -> Result<(), MailError> {
+        let Credential::Password { password } = credential else {
+            return Ok(());
+        };
+        let auth = Auth {
+            username: config.username.clone(),
+            secret: zeroize::Zeroizing::new(password.clone()),
+            oauth: false,
+        };
+        self.transport.verify(config, &auth).await.map_err(|error| {
+            match (error.code, config.provider) {
+                (AUTHENTICATION_FAILED, Provider::Icloud) => error.detail(
+                    "Apple rejected the password. Use an app-specific password, not your Apple \
+                     Account password.",
+                ),
+                (AUTHENTICATION_FAILED, _) => error.detail(
+                    "The mail server rejected the username or password. Check them, or use an \
+                     app password from your provider.",
+                ),
+                _ => MailError::new("mail_sign_in_failed").detail(
+                    "Could not sign in to the mail server. Check your connection and the server \
+                     settings, then try again.",
+                ),
+            }
+        })
+    }
+
     async fn save_owner_credential(
         &self,
         id: Uuid,
@@ -358,12 +391,28 @@ impl ConnectorManager {
         })
     }
 
-    async fn dispatch(&self, id: Uuid, command: Command) {
-        let result = self.perform(id, &command).await;
+    /// Runs one command. When the server rejects the credential, it stops
+    /// the watch session and records the rejection before it replies, so a
+    /// session that signed in before the password was revoked cannot
+    /// report the inbox connected, and the bot's next call sees it. It
+    /// returns whether the watch must sign in again.
+    async fn dispatch(&self, id: Uuid, command: Command, watching: &mut Option<Watching>) -> bool {
+        let mut rejected = None;
+        let result = self.perform(id, &command, &mut rejected).await;
+        if let Some(generation) = rejected {
+            stop_watch(watching).await;
+            self.health(id, generation, AUTHENTICATION_FAILED).await;
+        }
         let _ = command.reply.send(result);
+        rejected.is_some()
     }
 
-    async fn perform(&self, id: Uuid, command: &Command) -> Result<Value, MailError> {
+    async fn perform(
+        &self,
+        id: Uuid,
+        command: &Command,
+        rejected: &mut Option<i64>,
+    ) -> Result<Value, MailError> {
         if tokio::time::Instant::now() >= command.deadline {
             return Err(MailError::new("mail_queue_expired"));
         }
@@ -379,7 +428,7 @@ impl ConnectorManager {
         self.authorization(&account, command).await?;
         let auth = self.auth(&account).await?;
         self.authorization(&account, command).await?;
-        if command.command.mutates() {
+        let action_id = if command.command.mutates() {
             let action_id = command.action_id.expect("validated action ID");
             match store::begin_action(
                 &self.db,
@@ -394,31 +443,35 @@ impl ConnectorManager {
             .map_err(|_| MailError::new("mail_action_conflict"))?
             {
                 store::ActionStart::Existing(receipt) => return Ok(receipt),
-                store::ActionStart::Dispatch => {}
+                store::ActionStart::Dispatch => Some(action_id),
             }
-            let result = self
-                .transport
-                .execute(&account.config, &auth, &command.command)
-                .await;
-            let (status, receipt) = match result {
-                Ok(value) => (
-                    store::ActionStatus::Succeeded,
-                    json!({"action_id":action_id,"status":"succeeded","result":value}),
-                ),
-                Err(error) => (
-                    store::ActionStatus::Uncertain,
-                    json!({"action_id":action_id,"status":"uncertain","error":error.code,"instruction":"Inspect the mailbox before starting a different action. This action will not be retried."}),
-                ),
-            };
-            store::finish_action(&self.db, id, action_id, status, &receipt)
-                .await
-                .map_err(|_| MailError::new("mail_receipt_unavailable"))?;
-            Ok(receipt)
         } else {
-            self.transport
-                .execute(&account.config, &auth, &command.command)
-                .await
+            None
+        };
+        let result = self
+            .transport
+            .execute(&account.config, &auth, &command.command)
+            .await;
+        if matches!(&result, Err(error) if error.code == AUTHENTICATION_FAILED) {
+            *rejected = Some(account.generation);
         }
+        let Some(action_id) = action_id else {
+            return result;
+        };
+        let (status, receipt) = match result {
+            Ok(value) => (
+                store::ActionStatus::Succeeded,
+                json!({"action_id":action_id,"status":"succeeded","result":value}),
+            ),
+            Err(error) => (
+                store::ActionStatus::Uncertain,
+                json!({"action_id":action_id,"status":"uncertain","error":error.code,"instruction":"Inspect the mailbox before starting a different action. This action will not be retried."}),
+            ),
+        };
+        store::finish_action(&self.db, id, action_id, status, &receipt)
+            .await
+            .map_err(|_| MailError::new("mail_receipt_unavailable"))?;
+        Ok(receipt)
     }
 
     async fn prepare_watch(&self, id: Uuid) -> Result<(Account, Auth), MailError> {
@@ -444,10 +497,12 @@ impl ConnectorManager {
             let old = store::cursor(&self.db, id)
                 .await
                 .map_err(|_| MailError::new("mail_unavailable"))?;
-            let scan = self
-                .transport
-                .scan(&account.config, auth, old.as_ref())
-                .await?;
+            // Only the server waits stop early. A database write that began
+            // finishes, so a stopped watch leaves no late health behind.
+            let scan = tokio::select! {
+                _ = stop.cancelled() => return Ok(()),
+                scan = self.transport.scan(&account.config, auth, old.as_ref()) => scan?,
+            };
             let more = scan.more || scan.arrivals.len() > store::MAX_ARRIVALS;
             {
                 let _admission = self
@@ -478,7 +533,8 @@ impl ConnectorManager {
             return;
         }
         if let Some(_admission) = self.scheduler.gate().enter() {
-            let _ = store::set_health(&self.db, id, generation, code).await;
+            let health = Health::from(code.to_owned());
+            let _ = store::set_health(&self.db, id, generation, &health).await;
         }
     }
 
@@ -503,7 +559,7 @@ impl ConnectorManager {
                         let watch_stop = stop.clone();
                         let generation = account.generation;
                         let task = tokio::spawn(async move {
-                            tokio::select! { _ = watch_stop.cancelled() => Ok(()), result = manager.watch(&account,&auth,watch_stop.clone()) => result }
+                            manager.watch(&account, &auth, watch_stop).await
                         });
                         watching = Some(Watching {
                             task,
@@ -528,7 +584,11 @@ impl ConnectorManager {
                 command = commands.recv() => {
                     let Some(command) = command else { break; };
                     match command {
-                        Request::Mail(command) => self.dispatch(id,command).await,
+                        Request::Mail(command) => {
+                            if self.dispatch(id,command,&mut watching).await {
+                                retry_at = tokio::time::Instant::now();
+                            }
+                        }
                         Request::Credential { credential,reply } => {
                             stop_watch(&mut watching).await;
                             let result = self.save_owner_credential(id,credential).await;

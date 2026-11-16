@@ -229,3 +229,109 @@ async fn a_missing_inbox_waits_for_sign_in_and_cancels_without_mcp_calls() {
     assert_eq!(server.answers.recv().await.unwrap()["choice"], DENY);
     assert_eq!(server.cancellations.load(Ordering::SeqCst), 0);
 }
+
+/// An owner API with the iCloud preset and the email account routes,
+/// reporting each saved password as `(method, path, body)`.
+async fn mail_server(
+    sent: mpsc::Sender<(String, String, Value)>,
+) -> (Flow, tokio::task::JoinHandle<()>) {
+    use axum::extract::Path;
+    use axum::routing::put;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = Origin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let accounts = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let listed = accounts.clone();
+    let created = sent.clone();
+    let preset = json!({"provider":"icloud","address":"you@example.com","username":"you@example.com",
+        "imap":{"host":"imap.mail.me.com","port":993,"start_tls":false},
+        "smtp":{"host":"smtp.mail.me.com","port":587,"start_tls":true},
+        "archive_folder":"Archive","trash_folder":"Deleted Messages",
+        "drafts_folder":"Drafts","sent_folder":"Sent Messages"});
+    let router = Router::new()
+        .route(
+            "/v1/connectors",
+            get(move || {
+                let preset = preset.clone();
+                async move {
+                    Json(json!({"connectors":[{"providers":[{"provider":"icloud","preset":preset}]}]}))
+                }
+            }),
+        )
+        .route(
+            "/v1/connectors/email/accounts",
+            get(move || {
+                let accounts = listed.lock().unwrap().clone();
+                async move { Json(json!({ "accounts": accounts })) }
+            })
+            .post(move |Json(body): Json<Value>| {
+                let account = json!({"id":Uuid::new_v4(),"config":body["config"],
+                    "state":"active","health":"unknown"});
+                accounts.lock().unwrap().push(account.clone());
+                let sent = created.clone();
+                async move {
+                    sent.send(("POST".into(), "accounts".into(), body)).await.unwrap();
+                    Json(json!({ "account": account }))
+                }
+            }),
+        )
+        .route(
+            "/v1/connectors/email/accounts/{id}/credentials",
+            put(move |Path(id): Path<String>, Json(body): Json<Value>| {
+                let sent = sent.clone();
+                async move {
+                    sent.send(("PUT".into(), id, body)).await.unwrap();
+                    Json(json!({"updated":true}))
+                }
+            }),
+        );
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
+    let client = Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap());
+    let flow = Flow {
+        client,
+        bot: Uuid::new_v4(),
+        question: Uuid::new_v4(),
+        consent: Consent::Email(crate::api::EmailConsent {
+            provider: crate::api::EmailProvider::Icloud,
+            address: "owner@icloud.com".into(),
+        }),
+    };
+    (flow, task)
+}
+
+#[tokio::test]
+async fn an_icloud_card_saves_its_inbox_then_replaces_the_password() {
+    let (sent, mut saved) = mpsc::channel(4);
+    let (flow, task) = mail_server(sent).await;
+    assert!(flow.takes_password());
+    assert_eq!(flow.ready_copy().action, "Connect");
+    let mut gmail = flow.clone();
+    gmail.consent = inbox("owner@gmail.com");
+    assert!(!gmail.takes_password());
+
+    flow.save_password("abcd-efgh-ijkl-mnop".into())
+        .await
+        .unwrap();
+    let (method, _, body) = saved.recv().await.unwrap();
+    assert_eq!(method, "POST");
+    assert_eq!(body["config"]["address"], "owner@icloud.com");
+    assert_eq!(body["config"]["username"], "owner@icloud.com");
+    assert_eq!(body["config"]["imap"]["host"], "imap.mail.me.com");
+    assert_eq!(
+        body["credential"],
+        json!({"kind":"password","password":"abcd-efgh-ijkl-mnop"})
+    );
+
+    flow.save_password("qrst-uvwx-yzab-cdef".into())
+        .await
+        .unwrap();
+    let (method, _, body) = saved.recv().await.unwrap();
+    assert_eq!(method, "PUT", "a connected inbox gets a new password");
+    assert_eq!(
+        body,
+        json!({"kind":"password","password":"qrst-uvwx-yzab-cdef"})
+    );
+    task.abort();
+}

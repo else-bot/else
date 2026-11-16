@@ -28,7 +28,8 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::types::{
-    Account, Credential, Cursor, MailCommand, MailConfig, MailTrigger, Permissions, Provider, Scan,
+    AUTHENTICATION_FAILED, Account, Credential, Cursor, Health, MailCommand, MailConfig,
+    MailTrigger, Permissions, Provider, Scan,
 };
 use crate::credentials::SecretKey;
 use crate::db::turns::TurnStatus;
@@ -207,7 +208,7 @@ impl From<AccountRow> for Account {
             config: row.config.0,
             generation: row.generation,
             state: row.state,
-            health: row.health,
+            health: row.health.into(),
         }
     }
 }
@@ -274,7 +275,7 @@ pub async fn create(
         config: config.clone(),
         generation: 1,
         state: "active".into(),
-        health: "unknown".into(),
+        health: Health::Unknown,
     })
 }
 
@@ -495,22 +496,29 @@ pub async fn set_active(
 }
 
 /// Record the runtime's view of an account's health for this generation.
+/// A rejected credential stays rejected until the owner replaces it or a
+/// sign-in succeeds, so a network error cannot hide it. The account's
+/// worker stops a watch session before it records a rejection, so only a
+/// sign-in that began afterwards reports `connected`.
 pub async fn set_health(
     pool: &SqlitePool,
     id: Uuid,
     generation: i64,
-    health: &str,
+    health: &Health,
 ) -> Result<bool, StoreError> {
+    let health = health.code();
     if !field(health) || health.len() > 64 {
         return Err(StoreError::Invalid("a health code needs 1 to 64 bytes"));
     }
     let done = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE connector_accounts SET health = ?3, updated_at = {NOW}
-         WHERE id = ?1 AND generation = ?2 AND state <> 'removed'"
+         WHERE id = ?1 AND generation = ?2 AND state <> 'removed'
+            AND (health <> ?4 OR ?3 = 'connected')"
     )))
     .bind(id)
     .bind(generation)
     .bind(health)
+    .bind(AUTHENTICATION_FAILED)
     .execute(pool)
     .await?;
     Ok(done.rows_affected() == 1)

@@ -12,6 +12,20 @@ pub enum Provider {
     Imap,
 }
 
+/// How an inbox card in chat signs the owner in to a provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardSignIn {
+    /// A browser sign-in with this company. It may authorize another
+    /// mailbox than the bot named.
+    Browser(&'static str),
+    /// An app-specific password typed into the card, for exactly the named
+    /// mailbox. `help` says where the owner makes one.
+    AppPassword {
+        issuer: &'static str,
+        help: &'static str,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
@@ -81,8 +95,55 @@ pub struct Account {
     pub config: MailConfig,
     pub generation: i64,
     pub state: String,
-    pub health: String,
+    pub health: Health,
 }
+
+/// What the runtime last saw of an account's mail server. It is stored and
+/// sent as its code: `unknown`, `connected`, or a `MailError` code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum Health {
+    /// Not checked since the account or its credential changed.
+    Unknown,
+    Connected,
+    /// The server rejected the saved credential. Only a later sign-in or a
+    /// new credential clears it.
+    CredentialRejected,
+    /// Any other failure, by its error code.
+    Failing(String),
+}
+
+impl Health {
+    pub fn code(&self) -> &str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Connected => "connected",
+            Self::CredentialRejected => AUTHENTICATION_FAILED,
+            Self::Failing(code) => code,
+        }
+    }
+}
+
+impl From<String> for Health {
+    fn from(code: String) -> Self {
+        match code.as_str() {
+            "unknown" => Self::Unknown,
+            "connected" => Self::Connected,
+            AUTHENTICATION_FAILED => Self::CredentialRejected,
+            _ => Self::Failing(code),
+        }
+    }
+}
+
+impl From<Health> for String {
+    fn from(health: Health) -> Self {
+        health.code().to_owned()
+    }
+}
+
+/// The error code of a server rejecting the saved credential, stored as
+/// `Health::CredentialRejected`.
+pub const AUTHENTICATION_FAILED: &str = "mail_authentication_failed";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -289,6 +350,9 @@ pub struct Auth {
 
 #[async_trait::async_trait]
 pub trait MailTransport: Send + Sync {
+    /// Signs in to IMAP and SMTP once, so a rejected password fails before
+    /// it is saved.
+    async fn verify(&self, config: &MailConfig, auth: &Auth) -> Result<(), MailError>;
     async fn execute(
         &self,
         config: &MailConfig,

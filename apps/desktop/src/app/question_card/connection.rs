@@ -1,7 +1,8 @@
 use super::*;
 use crate::api::EmailProvider;
-use crate::controls::{Scale, Tier};
+use crate::controls::{Scale, Tier, text_field};
 use flow::{Consent, Flow, Resolution};
+use gpui_kit::component::input::{Input, InputState};
 
 mod flow;
 
@@ -11,6 +12,9 @@ pub(in crate::app) struct Form {
     request: Option<Task<()>>,
     /// The sign-in page opened for this card, so the owner can reopen it.
     signin_url: Option<String>,
+    /// The masked field of a card that takes a password instead of a
+    /// browser sign-in. Its value goes only to the owner API.
+    password: Option<Entity<InputState>>,
 }
 
 enum Phase {
@@ -28,7 +32,7 @@ enum Phase {
 }
 
 impl ElseApp {
-    pub(in crate::app) fn sync_connections(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::app) fn sync_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = self.view.as_mut() else {
             return;
         };
@@ -59,6 +63,13 @@ impl ElseApp {
                 question,
                 consent,
             };
+            let password = flow.takes_password().then(|| {
+                cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .masked(true)
+                        .placeholder("App-specific password")
+                })
+            });
             view.connections.insert(
                 question,
                 Form {
@@ -66,6 +77,7 @@ impl ElseApp {
                     phase: Phase::Checking,
                     request: None,
                     signin_url: None,
+                    password,
                 },
             );
         }
@@ -126,7 +138,7 @@ impl ElseApp {
         self.remeasure_row(RowKey::Question(question), cx);
     }
 
-    fn activate_connection(&mut self, question: Uuid, cx: &mut Context<Self>) {
+    fn activate_connection(&mut self, question: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = self
             .view
             .as_mut()
@@ -135,6 +147,7 @@ impl ElseApp {
             return;
         };
         match form.phase {
+            Phase::Ready(_) if form.password.is_some() => self.save_password(question, window, cx),
             Phase::Ready(_) => self.sign_in(question, cx),
             Phase::CheckFailed(_) => self.check_connection(question, cx),
             Phase::ConfirmationRequired(_) => {
@@ -221,6 +234,49 @@ impl ElseApp {
             let (result, hint) = match signin {
                 Ok(()) => {
                     let _ = this.update(cx, |app, cx| {
+                        if let Some(form) = app
+                            .view
+                            .as_mut()
+                            .filter(|v| v.bot_id == flow.bot)
+                            .and_then(|v| v.connections.get_mut(&question))
+                        {
+                            form.phase = Phase::Confirming;
+                        }
+                        app.remeasure_row(RowKey::Question(question), cx);
+                    });
+                    (flow.confirm().await, None)
+                }
+                Err(error) => (flow.recover().await, Some(error.to_string())),
+            };
+            let _ = this.update(cx, |app, cx| app.resolved(&flow, result, hint, cx));
+        }));
+        self.remeasure_row(RowKey::Question(question), cx);
+    }
+
+    fn save_password(&mut self, question: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = self
+            .view
+            .as_mut()
+            .and_then(|v| v.connections.get_mut(&question))
+        else {
+            return;
+        };
+        let Some(input) = form.password.clone() else {
+            return;
+        };
+        let password = input.read(cx).value().trim().to_owned();
+        if password.is_empty() {
+            form.phase = Phase::Ready(Some("Paste the app-specific password first.".into()));
+            self.remeasure_row(RowKey::Question(question), cx);
+            return;
+        }
+        form.phase = Phase::Exchanging;
+        let flow = form.flow.clone();
+        form.request = Some(cx.spawn_in(window, async move |this, cx| {
+            let (result, hint) = match flow.save_password(password).await {
+                Ok(()) => {
+                    let _ = this.update_in(cx, |app, window, cx| {
+                        input.update(cx, |state, cx| state.set_value("", window, cx));
                         if let Some(form) = app
                             .view
                             .as_mut()
@@ -371,7 +427,9 @@ impl ElseApp {
             Phase::Cancelling => pill(id, "Cancelling", theme.muted_foreground, true, still),
             _ => pill(id, "Checking", theme.muted_foreground, true, still),
         };
-        let ready_label = form.map_or("Connect in browser", |f| f.flow.ready_label());
+        let copy = form.map(|f| f.flow.ready_copy());
+        let ready_label = copy.as_ref().map_or("Connect in browser", |c| c.action);
+        let password = form.and_then(|f| f.password.as_ref());
         let mut card = super::super::action_card::surface(v_flex(), &theme)
             .w_full()
             .gap_3()
@@ -411,6 +469,7 @@ impl ElseApp {
             card = card.child(callout(error, &theme));
         } else {
             let now = match phase {
+                _ if password.is_some() => None,
                 Phase::Ready(_) => Some(0),
                 Phase::SigningIn => Some(1),
                 Phase::Exchanging | Phase::Confirming | Phase::Recorded => Some(2),
@@ -514,20 +573,36 @@ impl ElseApp {
             );
         }
         let locked = self.connection != Connection::Connected;
+        if let Some(input) = password {
+            let editable = !locked && matches!(phase, Phase::Ready(_));
+            let help = question
+                .email_connection()
+                .and_then(|email| email.provider.app_password_help());
+            card = card.child(password_field(id, input, editable, help, cx));
+        }
         let can_cancel = matches!(
             phase,
             Phase::Ready(_) | Phase::SigningIn | Phase::CheckFailed(_)
         );
-        let hint: Option<(Option<IconName>, &'static str)> = match phase {
-            Phase::Ready(None) => Some((Some(IconName::Lock), "Opens your browser")),
-            Phase::SigningIn => {
+        let hint: Option<(Option<IconName>, &'static str)> = match (phase, &copy) {
+            (Phase::Ready(None), Some(copy)) => Some((Some(IconName::Lock), copy.hint)),
+            (Phase::SigningIn, _) => {
                 Some((None, "Finish in your browser. This card updates by itself."))
             }
             _ => None,
         };
+        let browser_icon = |copy: &Option<flow::ReadyCopy>| {
+            copy.as_ref()
+                .is_none_or(|c| c.opens_browser)
+                .then_some(IconName::ExternalLink)
+        };
         let action = match phase {
-            Phase::Ready(None) => Some((ready_label, Some(IconName::ExternalLink), true)),
-            Phase::Ready(Some(_)) => Some(("Sign in again", Some(IconName::ExternalLink), true)),
+            Phase::Ready(None) => Some((ready_label, browser_icon(&copy), true)),
+            Phase::Ready(Some(_)) => Some((
+                copy.as_ref().map_or("Sign in again", |c| c.retry),
+                browser_icon(&copy),
+                true,
+            )),
             Phase::CheckFailed(_) => Some(("Check again", Some(IconName::RefreshCw), true)),
             Phase::ConfirmationRequired(_) => {
                 Some(("Retry confirmation", Some(IconName::RefreshCw), true))
@@ -578,11 +653,55 @@ impl ElseApp {
                     .control(Tier::Primary, Scale::Compact, locked || !active, cx)
                     .when_some(icon, |button, icon| button.icon(icon))
                     .label(label)
-                    .on_click(cx.listener(move |app, _, _, cx| app.activate_connection(id, cx))),
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.activate_connection(id, window, cx)
+                    })),
             );
         }
         card.child(footer).into_any_element()
     }
+}
+
+/// The masked password field of a card that takes one, with the provider's
+/// help for making it.
+fn password_field(
+    id: Uuid,
+    input: &Entity<InputState>,
+    editable: bool,
+    help: Option<crate::api::AppPasswordHelp>,
+    cx: &mut Context<ElseApp>,
+) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    v_flex()
+        .w_full()
+        .gap_1p5()
+        .child(
+            text_field(Input::new(input).aria_label("App-specific password"), cx)
+                .disabled(!editable),
+        )
+        .when_some(help, |field, help| {
+            field.child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(
+                        div()
+                            .text_xs()
+                            .whitespace_normal()
+                            .text_color(muted)
+                            .child(help.note),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("connection-help-{id}")))
+                            .control(Tier::Ghost, Scale::Compact, false, cx)
+                            .icon(IconName::ExternalLink)
+                            .label(help.link)
+                            .on_click(move |_, _, cx| cx.open_url(help.url)),
+                    ),
+            )
+        })
+        .into_any_element()
 }
 
 /// What a connection card signs in to, as its header and facts show it.

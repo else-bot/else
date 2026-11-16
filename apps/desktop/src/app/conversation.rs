@@ -1145,7 +1145,7 @@ impl ElseApp {
         self.sync_secret_forms(window, cx);
         self.sync_question_submits();
         self.sync_write_ins(window, cx);
-        self.sync_connections(cx);
+        self.sync_connections(window, cx);
         self.sync_draft_forms(window, cx);
         self.sync_social_forms(window, cx);
         self.check_reading(window, cx);
