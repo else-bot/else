@@ -17,7 +17,7 @@ impl UsageReport {
             provider
                 .windows
                 .iter()
-                .filter_map(|window| window.used_percent)
+                .filter_map(|window| window.attribution.used())
                 .reduce(f64::max)
         };
         self.providers.iter().reduce(|selected, next| {
@@ -51,35 +51,76 @@ impl ProviderUsage {
 pub struct UsageWindow {
     pub minutes: u64,
     pub starts_at: DateTime<Utc>,
-    pub resets_at: Option<DateTime<Utc>>,
-    pub observed_at: Option<DateTime<Utc>>,
-    pub used_percent: Option<f64>,
-    pub outside_percent: Option<f64>,
+    pub attribution: Attribution,
     pub bots: Vec<BotUsage>,
     pub buckets: Vec<UsageBucket>,
 }
 
-/// How a window's figures read.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// What a window's total is, and so what every bot, source and bucket
+/// `percent` in it measures.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum Attribution {
-    /// Bot and outside figures are percents of the provider's cap.
-    Priced { used: f64 },
-    /// The provider reported its total, but else.bot hasn't learned what a
-    /// turn costs yet, so bots are shown by share of else.bot's use.
-    Unattributed { used: f64 },
-    /// The provider reports no total; bots are shown by share.
+    /// Percents are points of the provider's cap; `outside` is the part of
+    /// `used` that came from outside else.bot.
+    Priced {
+        used: f64,
+        outside: f64,
+        resets_at: DateTime<Utc>,
+        observed_at: DateTime<Utc>,
+    },
+    /// The provider reported `used`, but else.bot hasn't learned what a turn
+    /// costs yet: percents are of else.bot's own use.
+    Unattributed {
+        used: f64,
+        resets_at: DateTime<Utc>,
+        observed_at: DateTime<Utc>,
+    },
+    /// No current total: percents are of else.bot's own use.
+    #[serde(other)]
     Unreported,
 }
 
-impl UsageWindow {
-    pub fn attribution(&self) -> Attribution {
-        match (self.used_percent, self.outside_percent) {
-            (Some(used), Some(_)) => Attribution::Priced { used },
-            (Some(used), None) => Attribution::Unattributed { used },
-            (None, _) => Attribution::Unreported,
+impl Attribution {
+    pub fn is_priced(&self) -> bool {
+        matches!(self, Self::Priced { .. })
+    }
+
+    /// The provider's reported total, priced or not.
+    pub fn used(&self) -> Option<f64> {
+        match self {
+            Self::Priced { used, .. } | Self::Unattributed { used, .. } => Some(*used),
+            Self::Unreported => None,
         }
     }
 
+    pub fn outside(&self) -> Option<f64> {
+        match self {
+            Self::Priced { outside, .. } => Some(*outside),
+            Self::Unattributed { .. } | Self::Unreported => None,
+        }
+    }
+
+    pub fn resets_at(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Priced { resets_at, .. } | Self::Unattributed { resets_at, .. } => {
+                Some(*resets_at)
+            }
+            Self::Unreported => None,
+        }
+    }
+
+    pub fn observed_at(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Priced { observed_at, .. } | Self::Unattributed { observed_at, .. } => {
+                Some(*observed_at)
+            }
+            Self::Unreported => None,
+        }
+    }
+}
+
+impl UsageWindow {
     pub fn label(&self) -> String {
         match self.minutes {
             300 => "5-hour window".into(),
@@ -99,8 +140,8 @@ impl UsageWindow {
 pub struct BotUsage {
     pub bot_id: Uuid,
     pub name: String,
-    pub percent: Option<f64>,
-    pub share: f64,
+    /// In the unit the window's [`Attribution`] gives.
+    pub percent: f64,
     pub turns: u64,
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
@@ -110,19 +151,14 @@ pub struct BotUsage {
     pub sources: Vec<UsageSource>,
 }
 
-impl BotUsage {
-    pub fn display_percent(&self) -> f64 {
-        self.percent.unwrap_or(self.share * 100.)
-    }
-}
-
 #[derive(Clone, Debug, Deserialize)]
 pub struct UsageSource {
     pub source: UsageSourceKind,
     pub label: Option<String>,
     pub routine_id: Option<Uuid>,
     pub turns: u64,
-    pub percent: Option<f64>,
+    pub percent: f64,
+    /// Fraction of the bot's own use.
     pub share: f64,
 }
 
@@ -163,7 +199,7 @@ pub struct UsageBucket {
 #[derive(Clone, Debug, Deserialize)]
 pub struct BucketBotUsage {
     pub bot_id: Uuid,
-    pub amount: f64,
+    pub percent: f64,
 }
 
 impl Client {
@@ -183,30 +219,33 @@ mod tests {
         let report: UsageReport = serde_json::from_str(include_str!("usage_fixture.json")).unwrap();
         let claude = &report.providers[0];
         assert_eq!(report.default_provider().unwrap().provider_id, "claude");
-        assert_eq!(claude.windows[0].used_percent, Some(62.));
-        assert_eq!(claude.windows[0].outside_percent, Some(11.));
+        assert_eq!(claude.windows[0].attribution.used(), Some(62.));
+        assert_eq!(claude.windows[0].attribution.outside(), Some(11.));
         let bot = &claude.windows[0].bots[0];
         assert_eq!(bot.sources[0].source, UsageSourceKind::Routine);
-        assert_eq!(bot.display_percent(), 26.);
+        assert_eq!(bot.percent, 26.);
         assert_eq!(claude.windows[0].buckets[0].bots[0].bot_id, bot.bot_id);
         let grok = &report.providers[1];
-        assert_eq!(grok.windows[0].used_percent, None);
-        assert_eq!(grok.windows[0].bots[0].display_percent(), 100.);
-        assert_eq!(grok.windows[0].resets_at, None);
+        assert_eq!(grok.windows[0].attribution, Attribution::Unreported);
+        assert_eq!(grok.windows[0].bots[0].percent, 100.);
     }
 
     #[test]
     fn usage_defaults_to_highest_limit_then_first_provider_without_limits() {
         let mut report: UsageReport =
             serde_json::from_str(include_str!("usage_fixture.json")).unwrap();
-        report.providers[1].windows[0].used_percent = Some(83.);
+        report.providers[1].windows[0].attribution = Attribution::Unattributed {
+            used: 83.,
+            resets_at: report.generated_at,
+            observed_at: report.generated_at,
+        };
         assert_eq!(report.default_provider().unwrap().provider_id, "grok");
         for window in report
             .providers
             .iter_mut()
             .flat_map(|provider| &mut provider.windows)
         {
-            window.used_percent = None;
+            window.attribution = Attribution::Unreported;
         }
         assert_eq!(report.default_provider().unwrap().provider_id, "claude");
         report.providers.clear();
@@ -214,18 +253,21 @@ mod tests {
     }
 
     #[test]
-    fn windows_tell_priced_unattributed_and_unreported_apart() {
-        let mut report: UsageReport =
-            serde_json::from_str(include_str!("usage_fixture.json")).unwrap();
-        let claude = &mut report.providers[0].windows[0];
-        assert_eq!(claude.attribution(), Attribution::Priced { used: 62. });
-        claude.outside_percent = None;
+    fn attribution_decodes_each_state() {
+        let decode = |value| serde_json::from_value::<Attribution>(value).unwrap();
+        let unattributed = decode(serde_json::json!({
+            "state": "unattributed", "used": 12.0,
+            "resets_at": "2026-11-16T15:40:00Z", "observed_at": "2026-11-16T15:12:00Z"
+        }));
+        assert_eq!(unattributed.used(), Some(12.));
+        assert_eq!(unattributed.outside(), None);
+        assert!(!unattributed.is_priced());
         assert_eq!(
-            claude.attribution(),
-            Attribution::Unattributed { used: 62. }
+            decode(serde_json::json!({ "state": "unreported" })),
+            Attribution::Unreported
         );
         assert_eq!(
-            report.providers[1].windows[0].attribution(),
+            decode(serde_json::json!({ "state": "something_new" })),
             Attribution::Unreported
         );
     }
@@ -234,7 +276,7 @@ mod tests {
     fn usage_tolerates_new_sources() {
         let source: UsageSource = serde_json::from_value(serde_json::json!({
             "source": "future_source", "label": "New trigger", "turns": 1,
-            "percent": null, "share": 1.0
+            "percent": 100.0, "share": 1.0
         }))
         .unwrap();
         assert_eq!(source.source, UsageSourceKind::Unknown);

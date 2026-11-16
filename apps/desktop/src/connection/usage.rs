@@ -503,7 +503,7 @@ impl Shell {
                     cell(
                         window
                             .bot(id)
-                            .map(|bot| percent(bot.display_percent()))
+                            .map(|bot| percent(bot.percent))
                             .unwrap_or_else(|| "—".into()),
                         64.,
                     )
@@ -536,7 +536,6 @@ impl Shell {
             if expanded == Some(id)
                 && let Some(window) = ledger.filter(|window| window.bot(id).is_some())
             {
-                let priced = matches!(window.attribution(), Attribution::Priced { .. });
                 for (index, source) in bot.sources.iter().enumerate() {
                     table = table.child(
                         h_flex()
@@ -566,13 +565,7 @@ impl Shell {
                                     .child(source.label.clone().unwrap_or_default()),
                             )
                             .child(cell(turns(source.turns), 65.))
-                            .child(cell(
-                                percent(match source.percent {
-                                    Some(percent) if priced => percent,
-                                    _ => source.share * bot.share * 100.,
-                                }),
-                                55.,
-                            )),
+                            .child(cell(percent(source.percent), 55.)),
                     );
                 }
             }
@@ -581,7 +574,7 @@ impl Shell {
             && provider
                 .windows
                 .iter()
-                .any(|window| window.outside_percent.is_some())
+                .any(|window| window.attribution.outside().is_some())
         {
             table = table.child(
                 h_flex()
@@ -591,7 +584,8 @@ impl Shell {
                     .children(provider.windows.iter().map(|window| {
                         cell(
                             window
-                                .outside_percent
+                                .attribution
+                                .outside()
                                 .map(percent)
                                 .unwrap_or_else(|| "—".into()),
                             64.,
@@ -602,7 +596,7 @@ impl Shell {
         let priced = provider
             .windows
             .iter()
-            .filter(|window| matches!(window.attribution(), Attribution::Priced { .. }))
+            .filter(|window| window.attribution.is_priced())
             .count();
         let unit = if priced == provider.windows.len() {
             "Share of your cap"
@@ -675,7 +669,7 @@ fn gauge(
                 .text_color(theme.muted_foreground)
                 .child(window.label()),
         );
-    card = if let Some(used) = window.used_percent {
+    card = if let Some(used) = window.attribution.used() {
         card.child(
             div()
                 .text_size(px(30.))
@@ -686,13 +680,13 @@ fn gauge(
             div()
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child(format!("used · {}", resets(window.resets_at))),
+                .child(format!("used · {}", resets(window.attribution.resets_at()))),
         )
     } else {
         let reports_limits = provider
             .windows
             .iter()
-            .any(|window| window.used_percent.is_some());
+            .any(|window| window.attribution.used().is_some());
         card.child(div().text_sm().child(if reports_limits {
             "No reading since this window reset".to_owned()
         } else {
@@ -711,15 +705,15 @@ fn gauge(
             .text_color(theme.muted_foreground.opacity(0.75))
             .child(
                 window
-                    .observed_at
+                    .attribution
+                    .observed_at()
                     .map(|time| format!("As of {}", local_time(time)))
                     .unwrap_or_else(|| format!("Window starts {}", local_time(window.starts_at))),
             ),
     );
-    let attribution = window.attribution();
-    let unattributed = match attribution {
-        Attribution::Unattributed { used } => Some(used),
-        _ => None,
+    let unattributed = match window.attribution {
+        Attribution::Unattributed { used, .. } => Some(used),
+        Attribution::Priced { .. } | Attribution::Unreported => None,
     };
     let segments = window
         .bots
@@ -727,7 +721,7 @@ fn gauge(
         .filter(|_| unattributed.is_none())
         .map(|bot| {
             (
-                bot.display_percent(),
+                bot.percent,
                 color(bot.bot_id, avatars.get(&bot.bot_id).copied()).opacity(
                     if filter.is_none_or(|id| id == bot.bot_id) {
                         1.
@@ -739,12 +733,14 @@ fn gauge(
         })
         .chain(
             window
-                .outside_percent
+                .attribution
+                .outside()
                 .or(unattributed)
                 .map(|amount| (amount, theme.muted_foreground.opacity(0.4))),
         );
-    card = card.child(bar(segments, window.used_percent.is_some(), cx));
-    if window.used_percent.is_some() {
+    let capped = window.attribution.used().is_some();
+    card = card.child(bar(segments, capped, cx));
+    if capped {
         card = card.child(
             div()
                 .relative()
@@ -779,16 +775,12 @@ fn gauge(
                     })
                     .child(dot(color(bot.bot_id, avatars.get(&bot.bot_id).copied())))
                     .child(if unattributed.is_some() {
-                        format!(
-                            "{} {} of else.bot use",
-                            bot.name,
-                            percent(bot.display_percent())
-                        )
+                        format!("{} {} of else.bot use", bot.name, percent(bot.percent))
                     } else {
-                        format!("{} {}", bot.name, percent(bot.display_percent()))
+                        format!("{} {}", bot.name, percent(bot.percent))
                     })
             }))
-            .children(window.outside_percent.map(|amount| {
+            .children(window.attribution.outside().map(|amount| {
                 h_flex()
                     .gap_1()
                     .child(dot(theme.muted_foreground.opacity(0.4)))
@@ -813,7 +805,7 @@ fn timeline(
     let peak = window
         .buckets
         .iter()
-        .map(|bucket| bucket.bots.iter().map(|bot| bot.amount).sum::<f64>() + bucket.outside)
+        .map(|bucket| bucket.bots.iter().map(|bot| bot.percent).sum::<f64>() + bucket.outside)
         .fold(0f64, f64::max)
         .max(f64::EPSILON);
     v_flex()
@@ -841,7 +833,7 @@ fn timeline(
                     .children(bucket.bots.iter().rev().map(|bot| {
                         div()
                             .w_full()
-                            .h(px((bot.amount / peak * 105.) as f32))
+                            .h(px((bot.percent / peak * 105.) as f32))
                             .bg(
                                 color(bot.bot_id, avatars.get(&bot.bot_id).copied()).opacity(
                                     if filter.is_none_or(|id| id == bot.bot_id) {
@@ -865,14 +857,7 @@ fn timeline(
                         .first()
                         .map(|bucket| local_time(bucket.starts_at)),
                 )
-                .child(format!(
-                    "Peak {} / 15 min",
-                    if matches!(window.attribution(), Attribution::Priced { .. }) {
-                        percent(peak)
-                    } else {
-                        percent(peak * 100.)
-                    }
-                ))
+                .child(format!("Peak {} / 15 min", percent(peak)))
                 .children(
                     window
                         .buckets

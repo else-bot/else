@@ -36,6 +36,20 @@ fn reading(minutes: i64, used: f64, observed: DateTime<Utc>, resets: DateTime<Ut
     }
 }
 
+fn used(window: &WindowUsage) -> Option<f64> {
+    match window.attribution {
+        Attribution::Priced { used, .. } => Some(used),
+        _ => None,
+    }
+}
+
+fn outside(window: &WindowUsage) -> Option<f64> {
+    match window.attribution {
+        Attribution::Priced { outside, .. } => Some(outside),
+        _ => None,
+    }
+}
+
 fn find<'a>(report: &'a Report, provider: &str, minutes: i64) -> &'a WindowUsage {
     report
         .providers
@@ -82,10 +96,10 @@ fn an_hourly_routine_is_charged_for_what_it_used() {
     let report = report(at(14, 0), &runs, &readings);
     let window = find(&report, "claude", 300);
 
-    assert_eq!(window.used_percent, Some(8.0));
-    assert_eq!(window.outside_percent, Some(0.0), "idle owner uses nothing");
+    assert_eq!(used(window), Some(8.0));
+    assert_eq!(outside(window), Some(0.0), "idle owner uses nothing");
     let bot = &window.bots[0];
-    assert_eq!(bot.percent, Some(8.0));
+    assert_eq!(bot.percent, 8.0);
     assert_eq!(bot.turns, 4);
     assert_eq!(bot.sources[0].source, Source::Routine);
     assert_eq!(bot.sources[0].label.as_deref(), Some("Hourly check"));
@@ -99,13 +113,13 @@ fn owner_use_between_short_runs_stays_outside() {
     let report = report(at(14, 0), &runs, &readings);
     let window = find(&report, "claude", 300);
 
-    assert_eq!(window.used_percent, Some(44.0));
-    let bots = window.bots[0].percent.unwrap();
+    assert_eq!(used(window), Some(44.0));
+    let bots = window.bots[0].percent;
     assert!(
         (6.0..=11.0).contains(&bots),
         "runs keep about 2% each: {bots}"
     );
-    let outside = window.outside_percent.unwrap();
+    let outside = outside(window).unwrap();
     assert!(
         (33.0..=38.0).contains(&outside),
         "owner's 36% stays outside: {outside}"
@@ -133,9 +147,9 @@ fn work_after_the_latest_reading_waits_instead_of_taking_earlier_use() {
         let id = Uuid::from_u128(bot);
         window.bots.iter().find(|b| b.bot_id == id).unwrap().percent
     };
-    assert_eq!(percent(1), Some(10.0));
-    assert_eq!(percent(2), Some(0.0), "not in any reading yet");
-    assert_eq!(window.outside_percent, Some(0.0));
+    assert_eq!(percent(1), 10.0);
+    assert_eq!(percent(2), 0.0, "not in any reading yet");
+    assert_eq!(outside(window), Some(0.0));
 }
 
 #[test]
@@ -147,9 +161,11 @@ fn without_a_learnable_rate_the_total_stays_unattributed() {
     let report = report(at(12, 0), &[run], &readings);
     let window = find(&report, "claude", 300);
 
-    assert_eq!(window.used_percent, Some(20.0));
-    assert_eq!(window.outside_percent, None);
-    assert_eq!(window.bots[0].percent, None);
+    assert!(matches!(
+        window.attribution,
+        Attribution::Unattributed { used, .. } if used == 20.0
+    ));
+    assert_eq!(window.bots[0].percent, 100.0, "all of else.bot's use");
     assert_eq!(window.bots[0].share, 1.0);
 }
 
@@ -173,8 +189,8 @@ fn the_weekly_window_borrows_the_five_hour_rate() {
     let report = report(at(14, 0), &runs, &readings);
     let week = find(&report, "claude", 10080);
 
-    assert_eq!(week.used_percent, Some(32.0));
-    let bot = week.bots[0].percent.unwrap();
+    assert_eq!(used(week), Some(32.0));
+    let bot = week.bots[0].percent;
     assert!(
         (1.5..=3.0).contains(&bot),
         "about a quarter of the 5-hour 8%: {bot}"
@@ -193,9 +209,8 @@ fn providers_without_limits_split_by_share_and_count_turns_crossing_the_start() 
     let lengths: Vec<i64> = grok.windows.iter().map(|w| w.minutes).collect();
     assert_eq!(lengths, [300, 10080]);
     let window = &grok.windows[0];
-    assert_eq!(window.used_percent, None);
-    assert_eq!(window.outside_percent, None);
-    assert_eq!(window.bots[0].percent, None);
+    assert_eq!(window.attribution, Attribution::Unreported);
+    assert_eq!(window.bots[0].percent, 66.7);
     assert_eq!(window.bots[0].bot_id, Uuid::from_u128(2));
     assert_eq!(window.bots[0].share, 0.667);
     assert_eq!(
@@ -206,9 +221,9 @@ fn providers_without_limits_split_by_share_and_count_turns_crossing_the_start() 
         .buckets
         .iter()
         .flat_map(|b| &b.bots)
-        .map(|b| b.amount)
+        .map(|b| b.percent)
         .sum();
-    assert!((shares - 1.0).abs() < 0.05);
+    assert!((shares - 100.0).abs() < 0.5, "{shares}");
 }
 
 #[test]
@@ -219,8 +234,7 @@ fn a_window_that_reset_after_its_last_reading_has_no_known_total() {
     let report = report(at(13, 0), &[run], &readings);
     let window = find(&report, "claude", 300);
 
-    assert_eq!(window.used_percent, None);
-    assert_eq!(window.resets_at, None);
+    assert_eq!(window.attribution, Attribution::Unreported);
     assert_eq!(window.starts_at, at(8, 0));
 }
 
@@ -303,7 +317,7 @@ fn weekly_borrowing_pairs_readings_by_report_not_by_time() {
 
     let report = report(second(10), &runs, &readings);
 
-    assert_eq!(find(&report, "claude", 10080).bots[0].percent, Some(1.0));
+    assert_eq!(find(&report, "claude", 10080).bots[0].percent, 1.0);
 }
 
 #[test]
@@ -329,11 +343,11 @@ fn weekly_borrowing_ignores_rises_across_a_five_hour_reset() {
     let report = report(day(16, 10, 30), &runs, &readings);
     let weekly = find(&report, "claude", 10080);
 
-    let bots = weekly.bots[0].percent.unwrap();
+    let bots = weekly.bots[0].percent;
     assert!(
         (0.3..=0.7).contains(&bots),
         "two runs at about 0.2% each: {bots}"
     );
-    let outside = weekly.outside_percent.unwrap();
+    let outside = outside(weekly).unwrap();
     assert!(outside >= 3.5, "the owner's use stays outside: {outside}");
 }

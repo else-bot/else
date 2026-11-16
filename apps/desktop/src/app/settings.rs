@@ -634,9 +634,9 @@ impl ElseApp {
                 .child(item_name(provider.label().to_owned()));
             for window in &provider.windows {
                 let entry = window.bot(bot.id);
-                let amount = entry.map(|bot| bot.display_percent()).unwrap_or(0.);
-                let attribution = window.attribution();
-                let capped = matches!(attribution, crate::api::Attribution::Priced { .. });
+                let amount = entry.map(|bot| bot.percent).unwrap_or(0.);
+                let attribution = window.attribution;
+                let capped = attribution.is_priced();
                 let label = match window.minutes {
                     300 => "This 5-hour window".into(),
                     10080 => "This week".into(),
@@ -660,7 +660,7 @@ impl ElseApp {
                             (amount, color(bot.id, Some(bot.avatar))),
                             (
                                 (match attribution {
-                                    crate::api::Attribution::Priced { used } => used,
+                                    crate::api::Attribution::Priced { used, .. } => used,
                                     _ => 100.,
                                 } - amount)
                                     .max(0.),
@@ -671,13 +671,15 @@ impl ElseApp {
                         cx,
                     ));
                 let caption = match attribution {
-                    crate::api::Attribution::Priced { used } => format!(
+                    crate::api::Attribution::Priced {
+                        used, resets_at, ..
+                    } => format!(
                         "{} of the {} used so far · {}",
                         percent(if used > 0. { amount / used * 100. } else { 0. }),
                         percent(used),
-                        resets(window.resets_at)
+                        resets(Some(resets_at))
                     ),
-                    crate::api::Attribution::Unattributed { used } => format!(
+                    crate::api::Attribution::Unattributed { used, .. } => format!(
                         "share of else.bot's {} use · {} of the cap used, not attributed yet",
                         provider.label(),
                         percent(used)

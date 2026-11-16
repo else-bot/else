@@ -22,8 +22,12 @@ async fn usage_reports_each_bot_against_the_window_its_provider_reported() {
         .expect("the provider that ran the turn is listed");
     let window = &provider["windows"][0];
     assert_eq!(window["minutes"], 300);
-    assert_eq!(window["used_percent"], 12.0);
-    assert!(window["observed_at"].is_string());
+    let attribution = &window["attribution"];
+    // One reading can't teach what a token costs, so the total stays
+    // unattributed and bots are shown by share of else.bot's use.
+    assert_eq!(attribution["state"], "unattributed");
+    assert_eq!(attribution["used"], 12.0);
+    assert!(attribution["observed_at"].is_string());
     assert_eq!(window["buckets"].as_array().unwrap().len(), 20);
     let entry = &window["bots"][0];
     assert_eq!(entry["bot_id"], bot.as_str());
@@ -32,10 +36,7 @@ async fn usage_reports_each_bot_against_the_window_its_provider_reported() {
     assert_eq!(entry["output_tokens"], 30);
     assert_eq!(entry["share"], 1.0);
     assert_eq!(entry["sources"][0]["source"], "chat");
-    // One reading can't teach what a token costs, so the total stays
-    // unattributed until a turn moves it.
-    assert_eq!(entry["percent"], serde_json::Value::Null);
-    assert_eq!(window["outside_percent"], serde_json::Value::Null);
+    assert_eq!(entry["percent"], 100.0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

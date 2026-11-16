@@ -171,19 +171,43 @@ pub struct ProviderUsage {
 pub struct WindowUsage {
     pub minutes: i64,
     pub starts_at: DateTime<Utc>,
-    pub resets_at: Option<DateTime<Utc>>,
-    pub observed_at: Option<DateTime<Utc>>,
-    pub used_percent: Option<f64>,
-    pub outside_percent: Option<f64>,
+    pub attribution: Attribution,
     pub bots: Vec<BotUsage>,
     pub buckets: Vec<Bucket>,
+}
+
+/// What the window's total is, and so what every bot, source and bucket
+/// `percent` in it measures.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Attribution {
+    /// Percents are points of the provider's cap; `outside` is the part of
+    /// `used` that came from outside else.bot.
+    Priced {
+        used: f64,
+        outside: f64,
+        resets_at: DateTime<Utc>,
+        observed_at: DateTime<Utc>,
+    },
+    /// The provider reported `used`, but what a turn costs isn't known yet:
+    /// percents are of else.bot's own use in the window.
+    Unattributed {
+        used: f64,
+        resets_at: DateTime<Utc>,
+        observed_at: DateTime<Utc>,
+    },
+    /// No current total (the provider reports none, or the window reset
+    /// after its last reading): percents are of else.bot's own use.
+    Unreported,
 }
 
 #[derive(Debug, Serialize)]
 pub struct BotUsage {
     pub bot_id: Uuid,
     pub name: String,
-    pub percent: Option<f64>,
+    /// In the unit the window's [`Attribution`] gives.
+    pub percent: f64,
+    /// Fraction of else.bot's weighted use in the window.
     pub share: f64,
     pub turns: u32,
     pub input_tokens: i64,
@@ -200,7 +224,8 @@ pub struct SourceUsage {
     pub label: Option<String>,
     pub routine_id: Option<Uuid>,
     pub turns: u32,
-    pub percent: Option<f64>,
+    pub percent: f64,
+    /// Fraction of the bot's own weighted use.
     pub share: f64,
 }
 
@@ -214,7 +239,7 @@ pub struct Bucket {
 #[derive(Debug, Serialize)]
 pub struct BucketBot {
     pub bot_id: Uuid,
-    pub amount: f64,
+    pub percent: f64,
 }
 
 /// Builds the report from turns and readings of the last week or so.
@@ -395,20 +420,47 @@ fn rise_ratio(base: &[Vec<&Reading>], other: &[Vec<&Reading>]) -> Option<f64> {
 
 /// How a window prices else.bot's turns.
 enum Pricing<'a> {
-    /// The provider reported the window's total and the rate is known.
-    /// Turns count up to the latest reading, so work done after it waits
-    /// for the reading that includes it.
+    /// The provider reported the total and the rate is known. Turns count
+    /// up to the latest reading at `unit` percent of the cap per weight,
+    /// so work done after it waits for the reading that includes it.
     Priced {
-        used: f64,
-        rate: f64,
         latest: &'a Reading,
+        unit: f64,
+        outside: f64,
         stretches: Vec<Stretch>,
     },
     /// The provider reported the total, but no rate is known yet.
     Unattributed { latest: &'a Reading },
-    /// No current total: the provider reports none, or the window reset
-    /// after its last reading.
+    /// No current total.
     Unreported,
+}
+
+impl Pricing<'_> {
+    fn attribution(&self) -> Attribution {
+        match self {
+            Self::Priced {
+                latest, outside, ..
+            } => Attribution::Priced {
+                used: round(latest.used_percent),
+                outside: round(outside.max(0.0)),
+                resets_at: latest.resets_at,
+                observed_at: latest.observed_at,
+            },
+            Self::Unattributed { latest } => Attribution::Unattributed {
+                used: round(latest.used_percent),
+                resets_at: latest.resets_at,
+                observed_at: latest.observed_at,
+            },
+            Self::Unreported => Attribution::Unreported,
+        }
+    }
+}
+
+/// Turns weight inside the window into the percent the report shows:
+/// `factor` per weight unit, counting work up to `until`.
+struct Scale {
+    factor: f64,
+    until: DateTime<Utc>,
 }
 
 fn window(
@@ -423,23 +475,8 @@ fn window(
         .iter()
         .filter(|w| w[0].resets_at > now)
         .max_by_key(|w| w[0].resets_at);
-    let (starts_at, pricing) = match current {
-        Some(window) => {
-            let latest = *window.last().expect("windows are never empty");
-            let used = latest.used_percent;
-            let pricing = match rate {
-                Some(rate) => Pricing::Priced {
-                    used,
-                    rate,
-                    latest,
-                    stretches: stretches(now, minutes, window, turns),
-                },
-                None => Pricing::Unattributed { latest },
-            };
-            (latest.resets_at - length, pricing)
-        }
-        None => (now - length, Pricing::Unreported),
-    };
+    let latest = current.map(|w| *w.last().expect("windows are never empty"));
+    let starts_at = latest.map_or(now - length, |r| r.resets_at - length);
     let members: Vec<&Turn> = turns
         .iter()
         .copied()
@@ -448,100 +485,119 @@ fn window(
     let in_window = |turn: &Turn, from: DateTime<Utc>, to: DateTime<Utc>| {
         turn.weight() * overlap(turn.span(now), (from.max(starts_at), to.min(now)))
     };
-    let share_total: f64 = members.iter().map(|t| in_window(t, starts_at, now)).sum();
-    // Percent of the cap per weight unit up to `priced_until`, and the part
-    // of the total left to use outside else.bot.
-    let (unit, priced_until, outside) = match &pricing {
-        Pricing::Priced {
-            used, rate, latest, ..
-        } => {
-            let measured: f64 = members
-                .iter()
-                .map(|t| in_window(t, starts_at, latest.observed_at))
-                .sum::<f64>()
-                * rate;
-            let scale = if measured > *used {
-                used / measured
+    let weight_until =
+        |until| -> f64 { members.iter().map(|t| in_window(t, starts_at, until)).sum() };
+    let pricing = match (current, latest, rate) {
+        (Some(window), Some(latest), Some(rate)) => {
+            // Bots never take more than the reported total.
+            let priced = weight_until(latest.observed_at);
+            let unit = if priced > 0.0 {
+                rate.min(latest.used_percent / priced)
             } else {
-                1.0
+                rate
             };
-            (
-                Some(rate * scale),
-                latest.observed_at,
-                Some(used - measured * scale),
-            )
+            Pricing::Priced {
+                latest,
+                unit,
+                outside: latest.used_percent - priced * unit,
+                stretches: stretches(now, minutes, window, turns),
+            }
         }
-        _ => (None, now, None),
+        (_, Some(latest), None) => Pricing::Unattributed { latest },
+        _ => Pricing::Unreported,
     };
-    let amount = |turn: &Turn, from: DateTime<Utc>, to: DateTime<Utc>| match unit {
-        Some(unit) => in_window(turn, from, to.min(priced_until)) * unit,
-        None if share_total > 0.0 => in_window(turn, from, to) / share_total,
-        None => 0.0,
+    let scale = match &pricing {
+        Pricing::Priced { latest, unit, .. } => Scale {
+            factor: *unit,
+            until: latest.observed_at,
+        },
+        Pricing::Unattributed { .. } | Pricing::Unreported => {
+            let total = weight_until(now);
+            Scale {
+                factor: if total > 0.0 { 100.0 / total } else { 0.0 },
+                until: now,
+            }
+        }
     };
-    let bots = bots(
-        &members,
-        |t| amount(t, starts_at, now),
-        unit.is_some(),
-        |t| in_window(t, starts_at, now),
-    );
+    let percent = |turn: &Turn, from: DateTime<Utc>, to: DateTime<Utc>| {
+        in_window(turn, from, to.min(scale.until)) * scale.factor
+    };
     let buckets = if minutes <= TIMELINE_MAX_MINUTES {
-        let step = length / BUCKETS;
-        let leftovers: Vec<(DateTime<Utc>, DateTime<Utc>, f64)> = match (&pricing, unit) {
-            (Pricing::Priced { stretches, .. }, Some(unit)) => stretches
-                .iter()
-                .map(|s| (s.from, s.to, (s.rise - s.weight * unit).max(0.0)))
-                .collect(),
-            _ => Vec::new(),
-        };
-        let leftover: f64 = leftovers.iter().map(|l| l.2).sum();
-        let outside_scale = match outside {
-            Some(outside) if leftover > 0.0 => outside / leftover,
-            _ => 0.0,
-        };
-        (0..BUCKETS)
-            .map(|i| {
-                let from = starts_at + step * i;
-                let to = from + step;
-                let mut by_bot: BTreeMap<Uuid, f64> = BTreeMap::new();
-                for turn in &members {
-                    *by_bot.entry(turn.bot_id).or_default() += amount(turn, from, to);
-                }
-                let outside: f64 = leftovers
-                    .iter()
-                    .map(|&(a, b, rise)| rise * overlap((a, b), (from, to)))
-                    .sum::<f64>()
-                    * outside_scale;
-                Bucket {
-                    starts_at: from,
-                    bots: by_bot
-                        .into_iter()
-                        .map(|(bot_id, amount)| BucketBot {
-                            bot_id,
-                            amount: fine(amount),
-                        })
-                        .filter(|b| b.amount > 0.0)
-                        .collect(),
-                    outside: fine(outside),
-                }
-            })
-            .collect()
+        timeline(starts_at, length, &members, percent, &pricing)
     } else {
         Vec::new()
-    };
-    let latest = match &pricing {
-        Pricing::Priced { latest, .. } | Pricing::Unattributed { latest, .. } => Some(*latest),
-        Pricing::Unreported => None,
     };
     WindowUsage {
         minutes,
         starts_at,
-        resets_at: latest.map(|r| r.resets_at),
-        observed_at: latest.map(|r| r.observed_at),
-        used_percent: latest.map(|r| round(r.used_percent)),
-        outside_percent: outside.map(|o| round(o.max(0.0))),
-        bots,
+        attribution: pricing.attribution(),
+        bots: bots(
+            &members,
+            |t| percent(t, starts_at, now),
+            |t| in_window(t, starts_at, now),
+        ),
         buckets,
     }
+}
+
+/// [`BUCKETS`] columns across the window: each bot's percent, and the use
+/// outside else.bot spread over the stretches where the total rose beyond
+/// what the bots' work explains.
+fn timeline(
+    starts_at: DateTime<Utc>,
+    length: Duration,
+    members: &[&Turn],
+    percent: impl Fn(&Turn, DateTime<Utc>, DateTime<Utc>) -> f64,
+    pricing: &Pricing,
+) -> Vec<Bucket> {
+    let leftovers: Vec<(DateTime<Utc>, DateTime<Utc>, f64)> = match pricing {
+        Pricing::Priced {
+            unit,
+            outside,
+            stretches,
+            ..
+        } => {
+            let raw: Vec<_> = stretches
+                .iter()
+                .map(|s| (s.from, s.to, (s.rise - s.weight * unit).max(0.0)))
+                .collect();
+            let total: f64 = raw.iter().map(|l| l.2).sum();
+            if total > 0.0 {
+                let scale = outside.max(0.0) / total;
+                raw.into_iter().map(|(a, b, r)| (a, b, r * scale)).collect()
+            } else {
+                Vec::new()
+            }
+        }
+        Pricing::Unattributed { .. } | Pricing::Unreported => Vec::new(),
+    };
+    let step = length / BUCKETS;
+    (0..BUCKETS)
+        .map(|i| {
+            let from = starts_at + step * i;
+            let to = from + step;
+            let mut by_bot: BTreeMap<Uuid, f64> = BTreeMap::new();
+            for turn in members {
+                *by_bot.entry(turn.bot_id).or_default() += percent(turn, from, to);
+            }
+            let outside: f64 = leftovers
+                .iter()
+                .map(|&(a, b, rise)| rise * overlap((a, b), (from, to)))
+                .sum();
+            Bucket {
+                starts_at: from,
+                bots: by_bot
+                    .into_iter()
+                    .map(|(bot_id, percent)| BucketBot {
+                        bot_id,
+                        percent: fine(percent),
+                    })
+                    .filter(|b| b.percent > 0.0)
+                    .collect(),
+                outside: fine(outside),
+            }
+        })
+        .collect()
 }
 
 /// The weight of the turns' work inside `from..to`, spread evenly over each
@@ -598,13 +654,11 @@ fn overlap(
 /// A bot's usage grouped by what started it: kind, label, and routine.
 type SourceKey<'a> = (Source, Option<&'a str>, Option<Uuid>);
 
-/// Groups the window's turns by bot. `amount` is a turn's percent of the cap
-/// when `priced`, else its share of else.bot's use; `weight` is its weight
-/// inside the window.
+/// Groups the window's turns by bot. `percent` is a turn's percent in the
+/// window's unit; `weight` is its weight inside the window.
 fn bots(
     turns: &[&Turn],
-    amount: impl Fn(&Turn) -> f64,
-    priced: bool,
+    percent: impl Fn(&Turn) -> f64,
     weight: impl Fn(&Turn) -> f64,
 ) -> Vec<BotUsage> {
     let total: f64 = turns.iter().map(|t| weight(t)).sum();
@@ -627,7 +681,7 @@ fn bots(
                     .or_default();
                 entry.0 += 1;
                 entry.1 += weight(turn);
-                entry.2 += amount(turn);
+                entry.2 += percent(turn);
             }
             let mut models: Vec<(&str, f64)> = models.into_iter().collect();
             models.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -639,7 +693,7 @@ fn bots(
                         label: label.map(str::to_owned),
                         routine_id,
                         turns: count,
-                        percent: priced.then(|| round(amount)),
+                        percent: round(amount),
                         share: ratio(w, bot_weight),
                     },
                 )
@@ -649,7 +703,7 @@ fn bots(
             BotUsage {
                 bot_id: turns[0].bot_id,
                 name: turns[0].bot_name.clone(),
-                percent: priced.then(|| round(turns.iter().map(|t| amount(t)).sum())),
+                percent: round(turns.iter().map(|t| percent(t)).sum()),
                 share: ratio(bot_weight, total),
                 turns: turns.len() as u32,
                 input_tokens: sum(|t| t.input_tokens),
