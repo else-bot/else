@@ -201,11 +201,14 @@ fn other_tools_models_and_permission_prompts_are_refused() {
         )
         .is_ok()
     );
-    let violation = t
-        .on(
-            &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
+    t.on(
+        &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
             {"type":"tool_use","id":"t2","name":"WebFetch","input":{}}]}}),
-        )
+    )
+    .unwrap();
+    let violation = t
+        .on(&json!({"type":"user","message":{"content":[
+            {"type":"tool_result","tool_use_id":"t2","content":"fetched"}]}}))
         .unwrap_err();
     assert!(violation.message.contains("WebFetch"));
     let violation = tracker()
@@ -221,6 +224,39 @@ fn other_tools_models_and_permission_prompts_are_refused() {
             .on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":7}]}}))
             .is_err()
     );
+}
+
+#[test]
+fn a_call_to_an_unoffered_name_that_the_cli_refuses_keeps_the_turn() {
+    let mut t = tracker();
+    t.on(&init(claude_home::tool_names(), connected())).unwrap();
+    t.on(
+        &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
+            {"type":"tool_use","id":"b1","name":"delegate","input":{"task":"x"}}]}}),
+    )
+    .unwrap();
+    assert!(
+        t.on(&heartbeat("b1", "delegate")).is_err(),
+        "an unoffered call has no heartbeat"
+    );
+    let mut t = tracker();
+    t.on(
+        &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
+            {"type":"tool_use","id":"b1","name":"delegate","input":{"task":"x"}}]}}),
+    )
+    .unwrap();
+    let refused = t.on(&json!({"type":"user","message":{"content":[
+        {"type":"tool_result","tool_use_id":"b1","is_error":true,
+         "content":"<tool_use_error>Error: No such tool available: delegate</tool_use_error>"}]}}));
+    assert_eq!(refused, Ok(Emitted::new()));
+    t.on(
+        &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
+            {"type":"tool_use","id":"d1","name":"mcp__elsebot__delegate","input":{}}]}}),
+    )
+    .unwrap();
+    let parked = t.on(&json!({"type":"user","message":{"content":[
+        {"type":"tool_result","tool_use_id":"d1","content":[{"type":"text","text":"{\"status\":\"pending\",\"parked\":true}"}]}]}}));
+    assert_eq!(parked, Ok(vec![Event::Parked]));
 }
 
 #[test]

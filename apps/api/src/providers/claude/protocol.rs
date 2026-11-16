@@ -16,12 +16,19 @@ pub(super) struct ResultInfo {
     pub(super) num_turns: Option<i64>,
 }
 
+/// A tool call the model made. The CLI answers a name outside its verified
+/// inventory itself, with an error result and without running anything.
+enum Call {
+    Offered(String),
+    Unoffered(String),
+}
+
 pub(super) struct Tracker {
     expected_tools: Vec<String>,
     model: String,
     message_uuid: String,
     pub(super) init_seen: bool,
-    tools_by_id: HashMap<String, String>,
+    calls: HashMap<String, Call>,
     wrote_text: bool,
     separate: bool,
     pub(super) text: String,
@@ -68,7 +75,7 @@ impl Tracker {
             model: model.to_owned(),
             message_uuid: message_uuid.to_owned(),
             init_seen: false,
-            tools_by_id: HashMap::new(),
+            calls: HashMap::new(),
             wrote_text: false,
             separate: false,
             text: String::new(),
@@ -144,12 +151,20 @@ impl Tracker {
                 continue;
             }
             let id = required(&block["tool_use_id"], "tool result")?;
-            let parks = self.tools_by_id.get(id).is_some_and(|name| {
-                name.strip_prefix(&prefix)
-                    .is_some_and(|t| crate::app::tools::parks(t, &block["content"]))
-            });
-            if parks {
-                events.push(Event::Parked);
+            match self.calls.get(id) {
+                Some(Call::Offered(name))
+                    if name
+                        .strip_prefix(&prefix)
+                        .is_some_and(|t| crate::app::tools::parks(t, &block["content"])) =>
+                {
+                    events.push(Event::Parked);
+                }
+                Some(Call::Unoffered(name)) if block["is_error"].as_bool() != Some(true) => {
+                    return Err(Violation::policy(format!(
+                        "Claude ran a tool outside else.bot's allowlist: {name}"
+                    )));
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -184,17 +199,14 @@ impl Tracker {
     }
 
     /// The CLI's progress heartbeat for a slow tool call is parented to that
-    /// call. A sub-agent's events are parented to its `Agent` call, which
-    /// never reaches `tools_by_id`.
+    /// call. A sub-agent's events are parented to its `Agent` call, which is
+    /// never offered.
     fn is_heartbeat(&self, event: &Value, parent: &str) -> Result<bool, Violation> {
         if event["type"] != "tool_progress" {
             return Ok(false);
         }
         let tool = required(&event["tool_name"], "tool progress")?;
-        Ok(self
-            .tools_by_id
-            .get(parent)
-            .is_some_and(|name| name == tool))
+        Ok(matches!(self.calls.get(parent), Some(Call::Offered(name)) if name == tool))
     }
 
     fn on_assistant(&mut self, event: &Value) -> Result<(), Violation> {
@@ -204,14 +216,14 @@ impl Tracker {
             if block["type"] != "tool_use" {
                 continue;
             }
-            let name = required(&block["name"], "tool call")?;
-            if !self.expected_tools.iter().any(|t| t == name) {
-                return Err(Violation::policy(format!(
-                    "Claude called a tool outside else.bot's allowlist: {name}"
-                )));
-            }
+            let name = required(&block["name"], "tool call")?.to_owned();
             let id = required(&block["id"], "tool call")?;
-            self.tools_by_id.insert(id.to_owned(), name.to_owned());
+            let call = if self.expected_tools.contains(&name) {
+                Call::Offered(name)
+            } else {
+                Call::Unoffered(name)
+            };
+            self.calls.insert(id.to_owned(), call);
         }
         Ok(())
     }
