@@ -389,11 +389,14 @@ impl InboundDurabilityHook for Inbound {
             } else {
                 Some(m.info.push_name.to_string())
             };
+            let chat = canonical(&client, &source.chat).await;
+            let sender = canonical(&client, &source.sender).await;
             seen.extend(incoming(
                 &own,
                 Seen {
-                    chat: &source.chat,
-                    sender: &source.sender,
+                    wire: &source.chat,
+                    chat: &chat,
+                    sender: &sender,
                     id: m.info.id.as_str(),
                     name: name.as_deref(),
                     message: &m.message,
@@ -409,12 +412,13 @@ impl InboundDurabilityHook for Inbound {
 }
 
 /// The messages of one history chunk, oldest first in each chat.
-fn history(own: &[String], client: &Client, history: &wa::HistorySync) -> Vec<Incoming> {
+async fn history(own: &[String], client: &Client, history: &wa::HistorySync) -> Vec<Incoming> {
     let mut batch = Vec::new();
     for conversation in &history.conversations {
-        let Ok(chat) = conversation.id.parse::<Jid>() else {
+        let Ok(wire) = conversation.id.parse::<Jid>() else {
             continue;
         };
+        let chat = canonical(client, &wire).await;
         let name = conversation
             .name
             .as_deref()
@@ -437,10 +441,12 @@ fn history(own: &[String], client: &Client, history: &wa::HistorySync) -> Vec<In
                 .and_then(|k| k.participant.as_deref())
                 .and_then(|p| p.parse::<Jid>().ok())
                 .or_else(|| from_me.then(|| client.pn()).flatten())
-                .unwrap_or_else(|| chat.clone());
+                .unwrap_or_else(|| wire.clone());
+            let sender = canonical(client, &sender).await;
             batch.extend(incoming(
                 own,
                 Seen {
+                    wire: &wire,
                     chat: &chat,
                     sender: &sender,
                     id,
@@ -477,7 +483,7 @@ async fn replay_history(
         match decoded {
             Some(chunk) => {
                 inbound
-                    .deliver(history(&own_ids(client), client, &chunk))
+                    .deliver(history(&own_ids(client), client, &chunk).await)
                     .await?
             }
             None => tracing::warn!("dropped a WhatsApp history chunk that did not decode"),
@@ -743,6 +749,8 @@ fn text(message: &wa::Message) -> Option<String> {
 
 /// One message as the client reported it, live or from synced history.
 struct Seen<'a> {
+    /// The chat as WhatsApp addressed it, which keys deduplication.
+    wire: &'a Jid,
     chat: &'a Jid,
     sender: &'a Jid,
     id: &'a str,
@@ -752,9 +760,23 @@ struct Seen<'a> {
     replay: bool,
 }
 
+/// A person's phone-number JID when the device knows their LID, so their
+/// chat has one ID whichever form WhatsApp addressed it by.
+async fn canonical(client: &Client, jid: &Jid) -> Jid {
+    let jid = jid.to_non_ad();
+    if !jid.server.is_lid_family() {
+        return jid;
+    }
+    match client.get_lid_pn_entry(&jid).await {
+        Ok(Some(entry)) => Jid::pn(entry.phone_number.as_ref()),
+        _ => jid,
+    }
+}
+
 fn incoming(
     own: &[String],
     Seen {
+        wire,
         chat,
         sender,
         id,
@@ -772,7 +794,7 @@ fn incoming(
         .is_some_and(|ctx| ctx.mentioned_jid.iter().any(|j| own.iter().any(|o| o == j)));
     let chat_id = chat.to_string();
     Some(Incoming {
-        event_id: format!("{chat_id}/{id}"),
+        event_id: format!("{}/{id}", wire.to_non_ad()),
         destination: Destination {
             name: name
                 .filter(|n| !n.is_empty())
@@ -861,5 +883,30 @@ mod tests {
         for refused in ["", "12345", "+33 6 12 AB", "not a chat"] {
             assert!(jid(refused).is_err(), "{refused}");
         }
+    }
+
+    #[test]
+    fn a_lid_chat_is_recorded_under_the_persons_number_but_deduplicated_by_its_wire_id() {
+        let wire: Jid = "100000012345678@lid".parse().unwrap();
+        let person = jid("33612345678").unwrap();
+        let message = wa::Message::text("hi");
+        let seen = incoming(
+            &[],
+            Seen {
+                wire: &wire,
+                chat: &person,
+                sender: &person,
+                id: "3EB0ABC",
+                name: Some("Ada"),
+                message: &message,
+                from_me: false,
+                replay: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(seen.destination.id, "33612345678@s.whatsapp.net");
+        assert_eq!(seen.author_id, "33612345678@s.whatsapp.net");
+        assert_eq!(seen.event_id, "100000012345678@lid/3EB0ABC");
+        assert!(seen.direct);
     }
 }
