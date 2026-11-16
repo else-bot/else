@@ -351,6 +351,42 @@ pub struct QuestionAction {
     pub permission: Option<QuestionPermission>,
     #[serde(default)]
     pub bot_deletion: Option<BotDeletion>,
+    #[serde(default)]
+    pub mail_attachments: Option<MailAttachments>,
+}
+
+/// Email attachments a bot asks to read, as the card lists them.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct MailAttachments {
+    pub address: String,
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub from: Vec<String>,
+    pub files: Vec<MailFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct MailFile {
+    pub name: String,
+    pub media_type: String,
+    pub size: u64,
+}
+
+impl MailFile {
+    /// The file's kind as people name it: PDF, HTML, or its subtype.
+    pub fn kind(&self) -> String {
+        match self.media_type.as_str() {
+            "application/pdf" => "PDF".into(),
+            "text/html" | "application/xhtml+xml" => "HTML".into(),
+            "text/plain" => "Text".into(),
+            other => other
+                .rsplit('/')
+                .next()
+                .unwrap_or(other)
+                .to_ascii_uppercase(),
+        }
+    }
 }
 
 /// The bot a deletion card would delete, as it was when the card was made.
@@ -406,6 +442,10 @@ impl Question {
 
     pub fn mcp_connection(&self) -> Option<&crate::api::McpConsent> {
         self.action.as_ref()?.mcp_connection.as_ref()
+    }
+
+    pub fn mail_attachments(&self) -> Option<&MailAttachments> {
+        self.action.as_ref()?.mail_attachments.as_ref()
     }
 
     pub fn bot_deletion(&self) -> Option<&BotDeletion> {

@@ -38,6 +38,7 @@ mod guest_scripts;
 mod handoff;
 mod host;
 mod installation;
+mod mail_attachments;
 mod mcp_oauth;
 mod mcp_waits;
 mod memory;

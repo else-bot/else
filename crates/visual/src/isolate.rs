@@ -319,8 +319,9 @@ pub fn run_worker() -> ! {
     std::process::exit(if flushed.is_some() { 0 } else { 1 })
 }
 
+/// A process's resident memory, where the platform reports it.
 #[cfg(target_os = "macos")]
-fn resident_bytes(pid: u32) -> Option<u64> {
+pub fn resident_bytes(pid: u32) -> Option<u64> {
     let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
     let read = unsafe {
@@ -335,14 +336,15 @@ fn resident_bytes(pid: u32) -> Option<u64> {
     (read == size).then_some(info.pti_resident_size)
 }
 
+/// A process's resident memory, where the platform reports it.
 #[cfg(target_os = "linux")]
-fn resident_bytes(pid: u32) -> Option<u64> {
+pub fn resident_bytes(pid: u32) -> Option<u64> {
     let statm = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
     let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
     Some(pages * u64::try_from(rustix::param::page_size()).ok()?)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn resident_bytes(_: u32) -> Option<u64> {
+pub fn resident_bytes(_: u32) -> Option<u64> {
     None
 }

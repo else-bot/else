@@ -53,7 +53,15 @@ use tokio_util::sync::CancellationToken;
 
 use super::types::*;
 
-const MESSAGE_LIMIT: usize = 2 * 1024 * 1024;
+/// The largest whole message read. Larger ones still list in search.
+const MESSAGE_LIMIT: usize = 64 * 1024 * 1024;
+/// The largest IMAP literal one response may carry, which bounds a fetch chunk.
+const LITERAL_LIMIT: usize = 2 * 1024 * 1024;
+/// Bytes of a message fetched per command, so each response stays under
+/// `LITERAL_LIMIT` and `RESPONSE_LIMIT`.
+const FETCH_CHUNK: u32 = 1024 * 1024;
+/// The largest decoded attachment handed out after the owner approves it.
+const ATTACHMENT_LIMIT: usize = 32 * 1024 * 1024;
 const RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(29 * 60);
@@ -126,47 +134,47 @@ impl Imap {
             .ok_or_else(|| MailError::new("message_not_found"))?;
         let received_at = meta_items().find_map(internal_date).map(rfc3339);
         if size > MESSAGE_LIMIT {
-            return Err(MailError::new("mail_message_too_large"));
+            return Err(MailError::new("mail_message_too_large").detail(
+                "the message is over 64 MiB, so neither its body nor its attachments can be read",
+            ));
         }
-        let data = self
-            .fetch(
-                sequence(message.uid)?,
-                items(vec![
-                    MessageDataItemName::Uid,
-                    MessageDataItemName::BodyExt {
-                        section: None,
-                        partial: None,
-                        peek: true,
-                    },
-                ]),
-                opts,
-            )
-            .await
-            .map_err(failure)?;
-        for row in data.values() {
-            let uid = row.as_ref().iter().find_map(|i| {
-                if let MessageDataItem::Uid(uid) = i {
-                    Some(uid.get())
-                } else {
-                    None
-                }
-            });
-            if uid != Some(message.uid) {
-                continue;
+        let mut bytes = Vec::with_capacity(size);
+        loop {
+            let data = self
+                .fetch(
+                    sequence(message.uid)?,
+                    items(vec![
+                        MessageDataItemName::Uid,
+                        MessageDataItemName::BodyExt {
+                            section: None,
+                            partial: Some((
+                                u32::try_from(bytes.len()).map_err(invalid)?,
+                                NonZeroU32::new(FETCH_CHUNK).expect("nonzero chunk"),
+                            )),
+                            peek: true,
+                        },
+                    ]),
+                    opts.clone(),
+                )
+                .await
+                .map_err(failure)?;
+            let chunk = body_chunk(&data, message.uid)
+                .ok_or_else(|| MailError::new("message_not_found"))?;
+            // Servers may count RFC822.SIZE slightly differently, so only a
+            // chunk that stops dead short of it is treated as a cut-off read.
+            if chunk.is_empty() && bytes.len() < size {
+                return Err(MailError::new("mail_message_incomplete")
+                    .detail("the server stopped sending the message; try again"));
             }
-            for item in row.as_ref().iter() {
-                if let MessageDataItem::BodyExt { data, .. } = item
-                    && let Some(data) = &data.0
-                {
-                    let bytes = data.as_ref();
-                    if bytes.len() > MESSAGE_LIMIT {
-                        return Err(MailError::new("mail_message_too_large"));
-                    }
-                    return Ok((bytes.to_vec(), received_at));
-                }
+            if bytes.len() + chunk.len() > MESSAGE_LIMIT {
+                return Err(MailError::new("mail_message_too_large")
+                    .detail("the message is over 64 MiB, so neither its body nor its attachments can be read"));
+            }
+            bytes.extend_from_slice(chunk);
+            if chunk.len() < FETCH_CHUNK as usize {
+                return Ok((bytes, received_at));
             }
         }
-        Err(MailError::new("message_not_found"))
     }
     async fn search_messages(
         &mut self,
@@ -292,8 +300,39 @@ impl Imap {
         let body = parsed.body_text(0).unwrap_or_default();
         let text: String = body.chars().take(32000).collect();
         Ok(
-            json!({"message":message,"source":"external_email","date":header_date(parsed.header_raw("Date")),"received_at":received_at,"subject":parsed.subject(),"from":addresses(parsed.from()),"to":addresses(parsed.to()),"cc":addresses(parsed.cc()),"reply_to":addresses(parsed.reply_to()),"body":text,"truncated":body.chars().count()>32000,"attachments":parsed.attachments().enumerate().map(|(part,a)|json!({"part":part,"name":a.attachment_name(),"size":a.contents().len()})).collect::<Vec<_>>()}),
+            json!({"message":message,"source":"external_email","date":header_date(parsed.header_raw("Date")),"received_at":received_at,"subject":parsed.subject(),"from":addresses(parsed.from()),"to":addresses(parsed.to()),"cc":addresses(parsed.cc()),"reply_to":addresses(parsed.reply_to()),"body":text,"truncated":body.chars().count()>32000,"attachments":parsed.attachments().enumerate().map(|(part,a)|json!({"part":part,"name":a.attachment_name(),"media_type":media_type(a),"size":a.contents().len()})).collect::<Vec<_>>()}),
         )
+    }
+    /// Each requested attachment's name, type and size, with its bytes
+    /// unless it is missing or over `ATTACHMENT_LIMIT`.
+    async fn open_attachments(
+        &mut self,
+        message: &MessageRef,
+        parts: &[usize],
+    ) -> Result<Value, MailError> {
+        let bytes = self.body(message).await?;
+        let parsed = MessageParser::default()
+            .parse(&bytes)
+            .ok_or_else(|| MailError::new("invalid_email_message"))?;
+        let found: Vec<_> = parsed.attachments().collect();
+        let files = parts
+            .iter()
+            .map(|&part| {
+                let Some(file) = found.get(part) else {
+                    return json!({"part":part,"error":"attachment_not_found"});
+                };
+                let mut value = json!({"part":part,"name":file.attachment_name(),
+                    "media_type":media_type(file),"size":file.contents().len()});
+                if file.contents().len() > ATTACHMENT_LIMIT {
+                    value["error"] = json!("mail_attachment_too_large");
+                } else {
+                    value["data_base64"] = json!(STANDARD.encode(file.contents()));
+                }
+                value
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({"attachments":files,"subject":parsed.subject(),
+            "from":addresses(parsed.from()),"source":"external_email"}))
     }
     async fn flag(
         &mut self,
@@ -547,21 +586,8 @@ async fn execute(
                 .await
         }
         MailCommand::Read { message } => client.read_message(message).await,
-        MailCommand::Attachment { message, part } => {
-            let bytes = client.body(message).await?;
-            let parsed = MessageParser::default()
-                .parse(&bytes)
-                .ok_or_else(|| MailError::new("invalid_email_message"))?;
-            let attachment = parsed
-                .attachments()
-                .nth(*part)
-                .ok_or_else(|| MailError::new("attachment_not_found"))?;
-            if attachment.contents().len() > 256 * 1024 {
-                return Err(MailError::new("mail_attachment_too_large"));
-            }
-            Ok(
-                json!({"name":attachment.attachment_name(),"data_base64":STANDARD.encode(attachment.contents()),"source":"external_email"}),
-            )
+        MailCommand::OpenAttachments { message, parts } => {
+            client.open_attachments(message, parts).await
         }
         MailCommand::SetRead { message, read } => client.flag(message, Flag::Seen, *read).await,
         MailCommand::SetFlagged { message, flagged } => {
@@ -654,11 +680,41 @@ async fn execute(
     }
 }
 
+/// The body bytes one partial fetch returned for `uid`. A part the server
+/// returns as NIL, or past the end of the message, is empty.
+fn body_chunk<'a>(
+    rows: &'a std::collections::BTreeMap<NonZeroU32, Vec1<MessageDataItem<'static>>>,
+    uid: u32,
+) -> Option<&'a [u8]> {
+    let row = rows.values().find(|row| {
+        row.as_ref()
+            .iter()
+            .any(|i| matches!(i, MessageDataItem::Uid(id) if id.get() == uid))
+    })?;
+    row.as_ref().iter().find_map(|item| match item {
+        MessageDataItem::BodyExt { data, .. } => {
+            Some(data.0.as_ref().map_or(&[][..], |data| data.as_ref()))
+        }
+        _ => None,
+    })
+}
+
 fn mailbox_name(value: &Mailbox<'_>) -> String {
     match value {
         Mailbox::Inbox => "INBOX".into(),
         Mailbox::Other(value) => String::from_utf8_lossy(value.inner().as_ref()).into_owned(),
     }
+}
+
+/// A part's `type/subtype`, lowercased; `application/octet-stream` when unstated.
+fn media_type(part: &mail_parser::MessagePart<'_>) -> String {
+    part.content_type().map_or_else(
+        || "application/octet-stream".to_owned(),
+        |ct| match ct.subtype() {
+            Some(sub) => format!("{}/{}", ct.ctype(), sub).to_ascii_lowercase(),
+            None => ct.ctype().to_ascii_lowercase(),
+        },
+    )
 }
 
 /// The sender's `Date:` header as RFC 3339, or its trimmed text when it is not a real date.

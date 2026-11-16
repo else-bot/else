@@ -11,6 +11,7 @@ mod delegation_tools;
 mod desktop_stream;
 pub mod error;
 pub mod guest_tools;
+mod mail_attachments;
 pub mod maintenance;
 pub mod mcp;
 mod mcp_result;

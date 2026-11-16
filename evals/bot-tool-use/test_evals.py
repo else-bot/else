@@ -190,6 +190,17 @@ def run(runner):
                                               "body": "Which pair?", "reply_to": {"folder": "INBOX", "uid_validity": 1, "uid": 42}},
                               {"status": "pending", "parked": True})],
                     "Kim's reply is ready to review."),
+                "open-only-the-relevant-attachment": ([
+                    self.call("mail_accounts", {}),
+                    self.call("mail_action", {"account_id": inbox, "command": {"operation": "search",
+                                                                              "folder": "INBOX", "query": "Q3"}}),
+                    self.call("mail_action", {"account_id": inbox, "command": {"operation": "read", "message": {
+                        "folder": "INBOX", "uid_validity": 1, "uid": 42}}}),
+                    self.call("mail_action", {"account_id": inbox, "command": {
+                        "operation": "open_attachments", "parts": [0],
+                        "message": {"folder": "INBOX", "uid_validity": 1, "uid": 42}}},
+                              {"status": "pending", "parked": True})],
+                    "Approve the card to let me read the Q3 report."),
                 "connect-inbox-then-watch": ([self.call("mail_connect", {"provider": "gmail", "address": "max@example.com"}),
                                               self.call("mail_trigger_set", {"account_id": inbox,
                                                                              "instructions": "Triage new mail into folders."},

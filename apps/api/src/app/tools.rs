@@ -100,6 +100,7 @@ pub const PARKING_TOOLS: &[&str] = &[
     "social_action",
     "mail_connect",
     "mail_disconnect",
+    "mail_action",
     "delegate",
     "council",
     "request_secret",

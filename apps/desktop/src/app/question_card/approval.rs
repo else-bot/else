@@ -141,8 +141,11 @@ impl ElseApp {
         let locked =
             submit.is_some_and(QuestionForm::locks) || self.connection != Connection::Connected;
         let destructive = question.kind == "destructive";
+        let attachments = question.mail_attachments();
         let icon = if destructive {
             IconName::TriangleAlert
+        } else if attachments.is_some() {
+            IconName::FileText
         } else {
             IconName::Send
         };
@@ -191,7 +194,50 @@ impl ElseApp {
                     ),
             );
         }
-        if let Some(context) = &question.context {
+        if let Some(mail) = attachments {
+            let mut origin = mail.address.clone();
+            if let Some(subject) = &mail.subject {
+                origin = format!("{subject} · {origin}");
+            }
+            if !mail.from.is_empty() {
+                origin = format!("{origin} · from {}", mail.from.join(", "));
+            }
+            let mut files = v_flex().w_full().gap_1p5().child(note(origin));
+            for file in &mail.files {
+                let detail = format!(
+                    "{} · {}",
+                    file.kind(),
+                    crate::attachments::byte_size(file.size)
+                );
+                files = files.child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap_2p5()
+                        .px_3()
+                        .py_2()
+                        .rounded(theme.radius)
+                        .border_1()
+                        .border_color(theme.border)
+                        .child(
+                            Icon::new(IconName::FileText)
+                                .size_4()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_sm()
+                                .truncate()
+                                .child(file.name.clone()),
+                        )
+                        .child(note(detail)),
+                );
+            }
+            card = card.child(files);
+        }
+        if let Some(context) = question.context.as_ref().filter(|_| attachments.is_none()) {
             let short = preview(context);
             let shown = match (&short, expanded) {
                 (Some(short), false) => short.clone(),
@@ -306,6 +352,8 @@ impl ElseApp {
             "Sending a new message skips this."
         } else if deletion.is_some() {
             "Deletes only this bot, once. Sending a new message skips this."
+        } else if attachments.is_some() {
+            "Lets the bot read and search only these files. Sending a new message skips this."
         } else {
             "Covers exactly this action, once. Sending a new message skips this."
         });

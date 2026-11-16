@@ -100,7 +100,7 @@ impl Imap {
                 ..Default::default()
             },
         );
-        let mut parser = Fragmentizer::new((MESSAGE_LIMIT + 16384) as u32);
+        let mut parser = Fragmentizer::new((LITERAL_LIMIT + 16384) as u32);
         let mut tags = TagGenerator::new();
         let mut socket: Option<Socket> = None;
         let mut arg: Option<Vec<u8>> = None;

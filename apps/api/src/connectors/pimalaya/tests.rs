@@ -47,6 +47,25 @@ async fn imap_fixture() -> ImapFixture {
 }
 
 async fn imap_fixture_options(start_tls: bool, uid_next: u32) -> ImapFixture {
+    imap_fixture_serving(start_tls, uid_next, RAW.to_vec()).await
+}
+
+/// The window `<origin.length>` of a `BODY.PEEK[]` fetch, or the whole.
+fn partial(command: &str, len: usize) -> (usize, usize) {
+    let Some((_, window)) = command.split_once("BODY.PEEK[]<") else {
+        return (0, len);
+    };
+    let (origin, length) = window
+        .trim_end_matches(')')
+        .trim_end_matches('>')
+        .split_once('.')
+        .unwrap();
+    let origin: usize = origin.parse().unwrap();
+    let start = origin.min(len);
+    (start, (start + length.parse::<usize>().unwrap()).min(len))
+}
+
+async fn imap_fixture_serving(start_tls: bool, uid_next: u32, raw: Vec<u8>) -> ImapFixture {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = Endpoint {
         host: "localhost".into(),
@@ -133,16 +152,23 @@ async fn imap_fixture_options(start_tls: bool, uid_next: u32) -> ImapFixture {
                     };
                     format!(
                         "* 1 FETCH (UID 11 RFC822.SIZE {}{received})\r\n{tag} OK size\r\n",
-                        RAW.len()
+                        raw.len()
                     )
                 } else if upper.starts_with("UID FETCH ") && upper.contains("BODY.PEEK[]") {
+                    let (start, end) = partial(&upper, raw.len());
+                    let origin = if upper.contains("BODY.PEEK[]<") {
+                        format!("<{start}>")
+                    } else {
+                        String::new()
+                    };
                     write
                         .write_all(
-                            format!("* 1 FETCH (UID 11 BODY[] {{{}}}\r\n", RAW.len()).as_bytes(),
+                            format!("* 1 FETCH (UID 11 BODY[]{origin} {{{}}}\r\n", end - start)
+                                .as_bytes(),
                         )
                         .await
                         .unwrap();
-                    write.write_all(RAW).await.unwrap();
+                    write.write_all(&raw[start..end]).await.unwrap();
                     format!(")\r\n{tag} OK body\r\n")
                 } else if upper.starts_with("UID STORE ") {
                     format!("* 1 FETCH (UID 11 FLAGS (\\Seen))\r\n{tag} OK store\r\n")
@@ -288,6 +314,75 @@ async fn search_and_read_return_sender_date_and_received_time_newest_first() {
         .unwrap();
     assert_eq!(read["date"], "2026-11-16T10:00:00+01:00");
     assert_eq!(read["received_at"], "2026-11-16T09:00:00Z");
+    fixture.task.abort();
+}
+
+/// A message with a PDF and an image attachment, over the old 2 MiB limit.
+fn large_message() -> Vec<u8> {
+    let raw = MessageBuilder::new()
+        .from("sender@example.org")
+        .to("owner@example.org")
+        .subject("Shareholder documents")
+        .text_body("The annual report is attached.")
+        .attachment("application/pdf", "report.pdf", &b"%PDF-1.4 report"[..])
+        .attachment("image/png", "scan.png", vec![7u8; 2_400_000])
+        .write_to_vec()
+        .unwrap();
+    assert!(raw.len() > 3 * 1024 * 1024, "{}", raw.len());
+    raw
+}
+
+#[tokio::test]
+async fn an_email_over_the_old_limit_reads_in_chunks_and_lists_its_attachments() {
+    let fixture = imap_fixture_serving(false, 14, large_message()).await;
+    let mut client = Imap::connect(&fixture.endpoint, &auth(), &fixture.connector)
+        .await
+        .unwrap();
+    let message = MessageRef {
+        folder: "INBOX".into(),
+        uid_validity: 77,
+        uid: 11,
+    };
+    let read = client.read_message(&message).await.unwrap();
+    assert!(read["body"].as_str().unwrap().contains("annual report"));
+    let listed: Vec<_> = read["attachments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            (
+                a["part"].clone(),
+                a["name"].clone(),
+                a["media_type"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            (json!(0), json!("report.pdf"), json!("application/pdf")),
+            (json!(1), json!("scan.png"), json!("image/png")),
+        ]
+    );
+    let fetches: Vec<String> = fixture
+        .commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.contains("BODY.PEEK[]<"))
+        .cloned()
+        .collect();
+    assert!(fetches.len() >= 4, "fetched in 1 MiB chunks: {fetches:?}");
+    assert!(fetches[0].contains("BODY.PEEK[]<0.1048576>"), "{fetches:?}");
+    let opened = client.open_attachments(&message, &[0, 5]).await.unwrap();
+    assert_eq!(opened["subject"], "Shareholder documents");
+    assert_eq!(
+        STANDARD
+            .decode(opened["attachments"][0]["data_base64"].as_str().unwrap())
+            .unwrap(),
+        b"%PDF-1.4 report"
+    );
+    assert_eq!(opened["attachments"][1]["error"], "attachment_not_found");
     fixture.task.abort();
 }
 

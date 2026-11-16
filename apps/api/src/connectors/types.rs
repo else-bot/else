@@ -231,9 +231,11 @@ pub enum MailCommand {
     Read {
         message: MessageRef,
     },
-    Attachment {
+    /// The bytes of these attachments, by their part index from `read`.
+    /// Only the server calls it, after the owner approves the files.
+    OpenAttachments {
         message: MessageRef,
-        part: usize,
+        parts: Vec<usize>,
     },
     SetRead {
         message: MessageRef,
@@ -302,6 +304,9 @@ impl From<SendNow> for bool {
     }
 }
 
+/// Attachments one `open_attachments` call or approval card may cover.
+pub const MAX_OPEN_ATTACHMENTS: usize = 10;
+
 fn default_limit() -> usize {
     50
 }
@@ -309,7 +314,7 @@ impl MailCommand {
     pub fn mutates(&self) -> bool {
         !matches!(
             self,
-            Self::Folders | Self::Search { .. } | Self::Read { .. } | Self::Attachment { .. }
+            Self::Folders | Self::Search { .. } | Self::Read { .. } | Self::OpenAttachments { .. }
         )
     }
     pub fn sends(&self) -> bool {
