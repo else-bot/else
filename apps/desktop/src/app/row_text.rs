@@ -120,6 +120,7 @@ impl RowFormat {
 }
 
 const PASSAGE_EXCERPT: usize = 110;
+const TABLE_CELL_GUTTER: Pixels = px(24.);
 
 fn escape_markdown(text: &str) -> String {
     text.chars()
@@ -349,6 +350,30 @@ impl RowText {
         // later blocks by that column, and each nesting level shifts it by one
         // more; none of that is in the rendered text.
         let mut indents = vec![px(0.); text.lines().count()];
+        // A table lays its columns side by side, so the rendered text, which
+        // joins a row's cells with spaces, says nothing of its width. The text
+        // view gives each column its widest cell plus the 24 px gutter, at
+        // least 48 px, and a 1 px divider before the next; the table adds 2 px
+        // for its frame even without a border.
+        let tables: Vec<Pixels> = rendered
+            .as_ref()
+            .map(|rendered| table_columns(rendered.source()))
+            .unwrap_or_default()
+            .iter()
+            .map(|columns| {
+                let cells: Pixels = columns
+                    .iter()
+                    .map(|cells| {
+                        let widest = cells
+                            .iter()
+                            .map(|cell| measure(cell))
+                            .fold(px(0.), Pixels::max);
+                        (widest + TABLE_CELL_GUTTER).max(px(48.))
+                    })
+                    .sum();
+                cells + px(columns.len().saturating_sub(1) as f32) + px(2.)
+            })
+            .collect();
         if let Some(rendered) = rendered {
             let column = px(14.) * 1.4;
             for block in list_blocks(rendered.source()) {
@@ -372,6 +397,7 @@ impl RowText {
             .zip(indents)
             .map(|(line, indent)| measure(line) + indent)
             .chain(chips)
+            .chain(tables)
             .fold(px(0.), Pixels::max);
         // Plain text also needs its own inset and the textarea's 10 px caret margin.
         let (inset_x, _) = self.inset();
@@ -692,7 +718,7 @@ impl RowText {
                                     .border_color(cx.theme().foreground.opacity(0.))
                                     .py_2()
                                     .pl_0()
-                                    .pr(px(24.)),
+                                    .pr(TABLE_CELL_GUTTER),
                             ),
                     )
                     .code_block_actions(|block, _, cx| {
@@ -1056,11 +1082,39 @@ fn list_blocks(source: &str) -> Vec<ListBlock<'_>> {
     out
 }
 
+/// The cell text of every Markdown table in `source`, column by column.
+fn table_columns(source: &str) -> Vec<Vec<Vec<String>>> {
+    use markdown::mdast::Node;
+    fn visit(node: &Node, out: &mut Vec<Vec<Vec<String>>>) {
+        let Node::Table(table) = node else {
+            for child in node.children().into_iter().flatten() {
+                visit(child, out);
+            }
+            return;
+        };
+        let mut columns: Vec<Vec<String>> = Vec::new();
+        for row in &table.children {
+            for (ix, cell) in row.children().into_iter().flatten().enumerate() {
+                if columns.len() <= ix {
+                    columns.push(Vec::new());
+                }
+                columns[ix].push(cell.to_string());
+            }
+        }
+        out.push(columns);
+    }
+    let mut out = Vec::new();
+    if let Ok(root) = markdown::to_mdast(source, &markdown::ParseOptions::gfm()) {
+        visit(&root, &mut out);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         RowFormat, RowSource, file_links, file_map, linked_file, list_blocks, plain_content,
-        shows_its_destination,
+        shows_its_destination, table_columns,
     };
     use crate::api::Bot;
     use crate::app::bot_mention::MentionDisplay;
@@ -1117,6 +1171,21 @@ mod tests {
                 ("tenth", 1, Some("10)")),
                 ("back", 0, Some("*")),
                 ("tab", 0, Some("-")),
+            ]
+        );
+    }
+
+    #[test]
+    fn table_columns_follow_the_markdown_parse() {
+        let source = "Intro | not a table\n\n| | **Wide** head |\n|---|---|\n| a | `code` cell |\n| longer label |\n\n- | x |\n  |---|\n  | y |";
+        assert_eq!(
+            table_columns(source),
+            [
+                vec![
+                    vec!["", "a", "longer label"],
+                    vec!["Wide head", "code cell"],
+                ],
+                vec![vec!["x", "y"]],
             ]
         );
     }

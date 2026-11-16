@@ -43,3 +43,6 @@ unused_dependencies = "warn"
 [profile.dev]
 debug = 0
 
+# Table scrollbar (#460), pinned until it lands upstream.
+[patch.crates-io]
+gpui-base = { git = "https://github.com/else-bot/gpui-kit", rev = "1c7c4ad1db757f2586c729d4a9fdba0f1f98fda7" }
