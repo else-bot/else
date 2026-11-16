@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import importlib.util
 import unittest
 from unittest.mock import patch
 
@@ -355,6 +356,15 @@ def run(runner):
                     "#updates with the follow-up: More reliable handling when moving Hyperliquid orders.",
                     "v0.94.30 is live. Posted More reliable handling when moving Hyperliquid orders to "
                     "@proliquid_updates and #updates."),
+                "task-sends-standing-approved-telegram-draft": (
+                    [self.call("draft_message", {"platform": "telegram", "body": "Proliquid v0.94.35"}),
+                     self.call("use_tool", {"name": "send_draft", "arguments": {
+                         "draft_id": "62eae6f1-1fbe-4313-8817-c1d1406abf13"}})],
+                    "Sent the v0.94.35 note to @proliquid_updates."),
+                "task-reports-computer-sent-x-post": (
+                    [self.call("use_tool", {"name": "report_draft_send", "arguments": {
+                        "draft_id": "8ef560c9-cd32-46a6-96b5-5f20240a104c", "status": "sent"}})],
+                    "Recorded https://x.com/proliquid_xyz/status/2122328244607173102 as sent."),
                 "task-blocked-on-owner-flags-it": (
                     [self.call("notify_owner", {"kind": "blocked",
                                                 "summary": "Dev is signed out of its provider, so it can't make the fix. Sign Dev back in from Settings."},
@@ -642,6 +652,26 @@ def run(runner):
             self.assertEqual((final, rejected), ("ok", ["delegate"]))
             self.assertFalse(all(c["pass"] for c in runner.grade({}, [], "ok", rejected)))
             self.assertTrue(all(c["pass"] for c in runner.grade({}, [], "ok", [])))
+
+        def test_grok_transcript_needs_end_turn_and_reports_refused_names(self):
+            spec = importlib.util.spec_from_file_location(
+                "grok", Path(__file__).resolve().parent / "grok.py")
+            grok = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(grok)
+            use = {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1",
+                   "name": "use_tool", "input": {"tool_name": "elsebot__send_draft", "tool_input": {}}}]}}
+            refused = {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1",
+                       "is_error": True, "content": "Tool not found: elsebot__send_draft"}]}}
+            done = {"type": "result", "subtype": "success", "is_error": False,
+                    "stop_reason": "end_turn", "result": "Sent."}
+            lines = lambda *events: "\n".join(json.dumps(e) for e in events)
+            _, names, final, completed = grok.transcript(lines(use, refused, done))
+            self.assertEqual((names, final, completed), (["elsebot__send_draft"], "Sent.", True))
+            for stop in ({"stop_reason": "max_tokens"}, {"stop_reason": "refusal"},
+                         {"subtype": "cancelled"}, {"is_error": True}):
+                with self.subTest(stop=stop):
+                    self.assertFalse(grok.transcript(lines({**done, **stop}))[3])
+            self.assertFalse(grok.transcript(lines(use))[3])
 
         def test_a_string_over_its_max_length_is_a_tool_error(self):
             context = self.context()

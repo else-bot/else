@@ -31,7 +31,7 @@ use crate::app::providers::{
 use protocol::Tracker;
 
 pub const ID: &str = "grok";
-const PROMPT_VERSION: &str = "else-grok-v3";
+const PROMPT_VERSION: &str = "else-grok-v4";
 
 pub static DEFINITION: Definition = Definition {
     id: ID,
@@ -185,9 +185,9 @@ impl Grok {
     ) -> LaunchSpec {
         let host_tools = input.delegation.host_tools();
         let system = format!(
-            "{}\nUse inline use_tool calls with tool_name and tool_input. else.bot MCP tool names start with {}__. Do not use invocation files that hide tool_name. End this attempt when an else.bot tool returns parked or pending; the app will continue it after the outcome.",
+            "{}\n{}",
             prompt::instructions(input, &dirs.project.to_string_lossy()),
-            crate::app::tools::SERVER_NAME,
+            tool_note(),
         );
         let mut tools = grok_home::MCP_TOOLS.to_vec();
         if host_tools {
@@ -338,6 +338,14 @@ impl Provider for Grok {
         let ended = attempt.drive(&mut tracker, &mut turn, sink, &stop).await;
         attempt.conclude(ended, sink).await
     }
+}
+
+/// How Grok reaches else.bot's tools, appended to the shared instructions.
+pub(crate) fn tool_note() -> String {
+    format!(
+        "Use inline use_tool calls with tool_name and tool_input. else.bot MCP tool names start with {0}__. A tool that {0}__find_tool returns, such as send_draft or report_draft_send, has no {0}__ name of its own: run it with tool_name {0}__use_tool and tool_input {{\"name\": \"send_draft\", \"arguments\": {{...}}}}. Do not use invocation files that hide tool_name. End this attempt when an else.bot tool returns parked or pending; the app will continue it after the outcome.",
+        crate::app::tools::SERVER_NAME,
+    )
 }
 
 fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
