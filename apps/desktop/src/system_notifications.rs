@@ -32,12 +32,19 @@ mod linux {
     use super::{APP_ID, APP_NAME};
     use gpui_kit::{App, Global, SharedString, SystemNotification, SystemNotificationResponse};
     use notify_rust::{Hint, Notification};
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use tokio::sync::mpsc;
 
     const OPEN: &str = "default";
+    /// Opens are clicks; a full queue drops the extra ones.
+    const PENDING_OPENS: usize = 16;
+
+    type Callback = Box<dyn FnMut(SystemNotificationResponse, &mut App)>;
 
     struct Responses {
-        opened: mpsc::UnboundedSender<SharedString>,
+        opened: mpsc::Sender<SharedString>,
+        callback: Rc<RefCell<Option<Callback>>>,
         _deliver: gpui_kit::Task<()>,
     }
 
@@ -61,7 +68,7 @@ mod linux {
             .spawn(move || match built.show() {
                 Ok(handle) => handle.wait_for_action(|action| {
                     if let (OPEN, Some(opened)) = (action, &opened) {
-                        let _ = opened.send(tag.clone());
+                        let _ = opened.try_send(tag.clone());
                     }
                 }),
                 Err(error) => eprintln!("failed to show system notification: {error}"),
@@ -73,21 +80,32 @@ mod linux {
 
     pub(super) fn on_response(
         cx: &mut App,
-        mut callback: impl FnMut(SystemNotificationResponse, &mut App) + 'static,
+        callback: impl FnMut(SystemNotificationResponse, &mut App) + 'static,
     ) {
-        let (opened, mut tags) = mpsc::unbounded_channel();
-        let deliver = cx.spawn(async move |cx| {
-            while let Some(tag) = tags.recv().await {
-                let response = SystemNotificationResponse {
-                    tag,
-                    action_id: None,
-                };
-                cx.update(|cx| callback(response, cx));
-            }
-        });
-        cx.set_global(Responses {
-            opened,
-            _deliver: deliver,
-        });
+        if !cx.has_global::<Responses>() {
+            let (opened, mut tags) = mpsc::channel(PENDING_OPENS);
+            let callback: Rc<RefCell<Option<Callback>>> = Rc::default();
+            let current = callback.clone();
+            let deliver = cx.spawn(async move |cx| {
+                while let Some(tag) = tags.recv().await {
+                    let response = SystemNotificationResponse {
+                        tag,
+                        action_id: None,
+                    };
+                    // Taken out for the call, which may register a new handler.
+                    let taken = current.borrow_mut().take();
+                    if let Some(mut taken) = taken {
+                        cx.update(|cx| taken(response, cx));
+                        current.borrow_mut().get_or_insert(taken);
+                    }
+                }
+            });
+            cx.set_global(Responses {
+                opened,
+                callback,
+                _deliver: deliver,
+            });
+        }
+        *cx.global::<Responses>().callback.borrow_mut() = Some(Box::new(callback));
     }
 }
