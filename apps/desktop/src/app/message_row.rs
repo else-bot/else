@@ -21,7 +21,7 @@ pub(super) const BOT_GUTTER: Pixels = px(0.);
 
 /// A bot message's text stops short of its hover actions (two small buttons
 /// and the gap between them), so the actions sit beside the words.
-const BOT_ACTIONS_GUTTER: Pixels = px(60.);
+pub(super) const BOT_ACTIONS_GUTTER: Pixels = px(64.);
 
 /// Timestamps and other trailing metadata sit at this share of the foreground
 /// in dark themes.
@@ -391,28 +391,26 @@ impl ElseApp {
                     None => card,
                 };
                 let card = match Author::of(&item.kind) {
-                    Some(author) => div()
+                    Some(Author::Bot) => div()
                         .relative()
                         .group("message-bubble")
-                        .when(!user, |bubble| bubble.w_full())
-                        .when(user, |bubble| {
-                            bubble.flex().justify_end().max_w(relative(0.75))
-                        })
-                        .child(if user {
-                            card
-                        } else {
-                            side(card).pr(BOT_ACTIONS_GUTTER).into_any_element()
-                        })
+                        .w_full()
+                        .child(side(card).pr(BOT_ACTIONS_GUTTER))
                         .child(
                             div()
                                 .absolute()
                                 .top_1()
-                                .when(user, |this| this.left(px(-28.)))
-                                .when(!user, |this| this.right_0())
+                                .right_0()
                                 .invisible()
                                 .group_hover("message-bubble", |this| this.visible())
-                                .child(self.message_actions(view.bot_id, id, author, cx)),
+                                .child(self.message_actions(view.bot_id, id, cx)),
                         )
+                        .into_any_element(),
+                    Some(Author::Owner) => div()
+                        .flex()
+                        .justify_end()
+                        .max_w(relative(0.75))
+                        .child(card)
                         .into_any_element(),
                     None => side(card).into_any_element(),
                 };
