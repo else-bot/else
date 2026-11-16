@@ -26,6 +26,17 @@ impl Provider {
         }
     }
 
+    pub fn portal(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Telegram => Some(("Open BotFather", "https://t.me/BotFather")),
+            Self::Discord => Some((
+                "Open Discord Developer Portal",
+                "https://discord.com/developers/applications",
+            )),
+            Self::WhatsApp => None,
+        }
+    }
+
     /// Whether the owner links this provider by scanning a code instead of
     /// pasting a bot token.
     pub fn pairs(self) -> bool {

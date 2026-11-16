@@ -46,11 +46,10 @@ impl SocialsView {
                     .on_click(cx.listener(|view, _, window, cx| view.cancel(window, cx)))))
             .child(div().text_sm().child(provider.token_help()))
             .child(div().text_xs().text_color(theme.muted_foreground).child("The API stores the token encrypted and uses it to call the platform. The assistant never sees the token, and it stays out of chat history."))
-            .child(Button::new("social-token-help").control(Tier::Ghost, Scale::Standard, false, cx).label(if provider == Provider::Telegram { "Open BotFather" } else { "Open Discord Developer Portal" })
-                .on_click(move |_, _, cx| cx.open_url(match provider {
-                    Provider::Telegram => "https://t.me/BotFather",
-                    _ => "https://discord.com/developers/applications",
-                })))
+            .children(provider.portal().map(|(label, url)| {
+                Button::new("social-token-help").control(Tier::Ghost, Scale::Standard, false, cx).label(label)
+                    .on_click(move |_, _, cx| cx.open_url(url))
+            }))
             .child(text_field(Input::new(token), cx).aria_label(format!("{} bot token", provider.label())).disabled(self.busy || !self.available))
             .child(h_flex().justify_end().child(Button::new("social-connect").control(Tier::Primary, Scale::Standard, self.busy || !self.available, cx).label(if replacing { "Validate replacement token" } else { "Validate and connect" })
                 .on_click(cx.listener(|view, _, window, cx| view.connect(window, cx)))));
