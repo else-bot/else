@@ -770,7 +770,17 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
     match turn.status.as_str() {
         "queued" => ("Queued".into(), false),
         "preparing" | "sending" | "running" => ("Working".into(), false),
-        "waiting" if turn.waits_on_job() => ("Working".into(), false),
+        "waiting" if turn.waits_on_job() => {
+            let jobs = turn.mcp_waits.len() + turn.computer_job_waits.len();
+            (
+                if jobs == 1 {
+                    "Waiting on a job".into()
+                } else {
+                    format!("Waiting on {jobs} jobs")
+                },
+                false,
+            )
+        }
         "cancelling" => ("Stopping…".into(), false),
         "waiting"
             if turn

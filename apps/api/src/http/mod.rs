@@ -34,6 +34,7 @@ pub mod tools;
 pub mod turns;
 mod usage;
 mod visual_tools;
+mod waits;
 pub mod webhooks;
 pub mod ws;
 
@@ -200,6 +201,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(rules::routes())
         .merge(maintenance::routes())
         .merge(onboarding::routes())
+        .merge(waits::routes())
         .fallback(|| async { ApiError::not_found() })
         .method_not_allowed_fallback(|| async { method_not_allowed() })
         .layer(middleware::from_fn_with_state(

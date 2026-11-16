@@ -416,15 +416,17 @@ impl SinkState {
             .bind(self.turn_id)
             .execute(&mut *tx)
             .await?;
-        let (current, pending, unseen): (TurnStatus, i64, i64) = sqlx::query_as(
-            "SELECT t.status, coalesce(sum(h.pending), 0), coalesce(sum(h.unseen), 0)
-             FROM turns t LEFT JOIN turn_holds h ON h.turn_id = t.id
-             WHERE t.id = ?1 GROUP BY t.id",
-        )
-        .bind(self.turn_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        let (tasks_pending, carried, tasks_unseen, ready): (i64, i64, i64, i64) =
+        let (current, error_code, pending, unseen): (TurnStatus, Option<String>, i64, i64) =
+            sqlx::query_as(
+                "SELECT t.status, t.error_code, coalesce(sum(h.pending), 0),
+                     coalesce(sum(h.unseen), 0)
+                 FROM turns t LEFT JOIN turn_holds h ON h.turn_id = t.id
+                 WHERE t.id = ?1 GROUP BY t.id",
+            )
+            .bind(self.turn_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let (tasks_pending, carried, tasks_unseen, ready, jobs_unseen): (i64, i64, i64, i64, i64) =
             sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "SELECT (SELECT count(*) FROM delegations
                      WHERE root_turn_id = ?1 AND status IN ('queued', 'running')),
@@ -433,13 +435,38 @@ impl SinkState {
                      WHERE root_turn_id = ?1 AND delivered_attempt IS NULL
                        AND status IN ('completed', 'failed', 'cancelled')),
                     (SELECT count(*) FROM delegations d
-                     WHERE d.root_turn_id = ?1 AND {})",
+                     WHERE d.root_turn_id = ?1 AND {}),
+                    (SELECT count(*) FROM mcp_waits WHERE turn_id = ?1
+                       AND delivered_attempt IS NULL
+                       AND status IN ('finished', 'failed', 'expired', 'stopped'))
+                    + (SELECT count(*) FROM computer_job_waits WHERE turn_id = ?1
+                       AND delivered_attempt IS NULL AND status IN ('settled', 'stopped'))",
                 crate::db::delegations::READY
             )))
             .bind(self.turn_id)
             .fetch_one(&mut *tx)
             .await?;
-        let parks = current != TurnStatus::Cancelling
+        // The owner stopped only this attempt: the turn parks on its jobs
+        // and tasks, or continues with their outcomes. What the attempt
+        // itself left unseen (a withdrawn question) restarts nothing. With
+        // nothing to park on, the attempt's own outcome stands.
+        let kept = current == TurnStatus::Cancelling
+            && crate::db::stop::Unwind::of(error_code.as_deref())
+                == crate::db::stop::Unwind::KeepWaits
+            && (matches!(status, TurnStatus::Completed | TurnStatus::Interrupted)
+                || pending > 0
+                || jobs_unseen + tasks_unseen > 0);
+        let (status, code, message, unseen) = if kept {
+            (
+                TurnStatus::Interrupted,
+                None,
+                None,
+                jobs_unseen + tasks_unseen,
+            )
+        } else {
+            (status, code, message, unseen)
+        };
+        let parks = (kept || current != TurnStatus::Cancelling)
             && matches!(status, TurnStatus::Completed | TurnStatus::Interrupted);
         // Pending tasks and carried waits hold the turn without blocking a
         // ready batch or any other unseen outcome, as `turns_continuable`

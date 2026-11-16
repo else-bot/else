@@ -301,23 +301,58 @@ fn interleaved_tasks_and_handoffs_keep_their_own_replies() {
 }
 
 #[test]
-fn a_turn_parked_on_a_job_is_working_not_waiting_for_a_bot() {
+fn a_turn_parked_on_a_job_waits_and_says_on_how_many() {
     let mut mcp = turn(11, "waiting");
     mcp["mcp_waits"] = json!([{ "id": id(30), "mcp_id": "t3-code" }]);
     let mut computer = turn(13, "waiting");
-    computer["computer_job_waits"] = json!([{ "id": id(31), "job_id": id(32) }]);
+    computer["computer_job_waits"] = json!([{ "id": id(31), "job_id": id(32) },
+                                            { "id": id(33), "job_id": id(34) }]);
     let c = conversation(
         vec![item(1, 11, "assistant"), item(2, 13, "assistant")],
         vec![mcp, turn(12, "waiting"), computer],
     );
     let replies = task_replies(&c);
-    assert_eq!(replies[&id(11)].state, ReplyState::Working);
-    assert_eq!(replies[&id(13)].state, ReplyState::Working);
+    assert_eq!(replies[&id(11)].state, ReplyState::Waiting);
+    assert_eq!(replies[&id(13)].state, ReplyState::Waiting);
     assert_eq!(replies[&id(12)].state, ReplyState::Waiting);
     let label = |n| crate::app::message_row::turn_label(c.turn(id(n)).unwrap()).0;
-    assert_eq!(label(11), "Working");
-    assert_eq!(label(13), "Working");
+    assert_eq!(label(11), "Waiting on a job");
+    assert_eq!(label(13), "Waiting on 2 jobs");
     assert_eq!(label(12), "Waiting for another bot…");
+}
+
+#[test]
+fn a_reply_to_a_newer_message_reads_as_a_reply_beside_the_waits_it_carried() {
+    let mut answer = item(4, 11, "assistant");
+    answer["text"] = json!("I filed it as https://github.com/else-bot/else/issues/468.");
+    answer["attempt"] = json!(1);
+    let items = vec![
+        item(1, 10, "user"),
+        item(2, 10, "assistant"),
+        item(3, 11, "user"),
+        answer,
+    ];
+    let mut waiting = turn(11, "waiting");
+    waiting["attempt"] = json!(1);
+    waiting["mcp_waits"] = json!([{ "id": id(30), "mcp_id": "t3-code",
+        "purpose": "T3 thread for #465", "created_at": "2026-11-05T10:02:00Z" }]);
+    let mut running = waiting.clone();
+    running["status"] = json!("running");
+
+    let generating = conversation(items.clone(), vec![turn(10, "interrupted"), running]);
+    let reply = &task_replies(&generating)[&id(11)];
+    assert!(
+        !reply.shows_latest(),
+        "a reply still being written is an update"
+    );
+
+    let parked = conversation(items, vec![turn(10, "interrupted"), waiting]);
+    let reply = &task_replies(&parked)[&id(11)];
+    assert_eq!(reply.latest, Some(id(4)));
+    assert!(reply.shows_latest(), "the finished reply is not folded");
+    assert!(reply.history.is_empty(), "{:?}", reply.history);
+    let waits: Vec<_> = parked.waiting_on().iter().map(|w| w.id()).collect();
+    assert_eq!(waits, [id(30)], "the carried wait is its own row");
 }
 
 #[test]

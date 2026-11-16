@@ -6,8 +6,11 @@
 //! that receives the job's outcome: an exit, a cancel, the job deadline, or
 //! a lost computer. Both transitions are triggers on `guest_jobs.status`,
 //! so no code path that ends a job can miss one. A new owner message
-//! carries the wait to its own turn ([`carry_forward`]); any other end of
-//! the turn first withdraws a pending wait (also a trigger).
+//! carries the wait to its own turn ([`carry_forward`]). The owner may stop
+//! the wait, which also cancels its job ([`stop_by_owner`]); the bot
+//! receives that like an outcome. Any other end of the turn first withdraws
+//! a pending wait (also a trigger), except the owner's Stop of the attempt
+//! alone.
 
 use std::collections::HashMap;
 
@@ -18,6 +21,19 @@ use uuid::Uuid;
 
 use super::events;
 use crate::computers::jobs::JobStatus;
+
+/// A wait's lifecycle, as stored in `computer_job_waits.status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+pub enum Status {
+    Pending,
+    /// Its job ended.
+    Settled,
+    /// Withdrawn with its turn; never delivered.
+    Cancelled,
+    /// The owner stopped it; delivered like an outcome.
+    Stopped,
+}
 
 /// What [`create`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +143,10 @@ pub struct Pending {
     #[serde(skip)]
     pub turn_id: Uuid,
     pub job_id: Uuid,
+    /// The start of the job's command.
+    pub command: String,
+    pub job_status: JobStatus,
+    pub created_at: String,
 }
 
 /// The owner's new message `turn_id` takes the waits of the earlier active
@@ -138,12 +158,14 @@ pub async fn carry_forward(
     turn_no: i64,
     turn_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE computer_job_waits SET turn_id = ?3, attempt = 0
          WHERE turn_id IN (SELECT id FROM turns WHERE conversation_id = ?1 AND turn_no < ?2
-                           AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running'))
-           AND (status = 'pending' OR (delivered_attempt IS NULL AND status = 'settled'))",
-    )
+                           AND {})
+           AND (status = 'pending'
+                OR (delivered_attempt IS NULL AND status IN ('settled', 'stopped')))",
+        super::turns::HOLDS_CARRY
+    )))
     .bind(conversation_id)
     .bind(turn_no)
     .bind(turn_id)
@@ -158,10 +180,12 @@ pub async fn pending_for_turns(
     turn_ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Vec<Pending>>, sqlx::Error> {
     let rows: Vec<Pending> = sqlx::query_as(
-        "SELECT id, turn_id, job_id FROM computer_job_waits
-         WHERE status = 'pending'
-           AND lower(hex(turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))
-         ORDER BY created_at, id",
+        "SELECT w.id, w.turn_id, w.job_id, substr(j.command, 1, 500) AS command,
+             j.status AS job_status, w.created_at
+         FROM computer_job_waits w JOIN guest_jobs j ON j.id = w.job_id
+         WHERE w.status = 'pending'
+           AND lower(hex(w.turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))
+         ORDER BY w.created_at, w.id",
     )
     .bind(Json(turn_ids))
     .fetch_all(&mut *conn)
@@ -184,6 +208,9 @@ pub struct Outcome {
     pub output_tail: String,
     /// Why else.bot ended it, such as `deadline exceeded`.
     pub error: Option<String>,
+    /// `Settled` when the job ended, `Stopped` when the owner stopped the
+    /// wait and cancelled the job.
+    pub wait: Status,
 }
 
 /// Settled waits of `turn_id` that no attempt has received yet.
@@ -193,14 +220,70 @@ pub async fn undelivered(
 ) -> Result<Vec<Outcome>, sqlx::Error> {
     sqlx::query_as(
         "SELECT w.id, w.job_id, j.command, j.status, j.exit_code,
-             coalesce(j.output_tail, '') AS output_tail, j.error
+             coalesce(j.output_tail, '') AS output_tail, j.error, w.status AS wait
          FROM computer_job_waits w JOIN guest_jobs j ON j.id = w.job_id
-         WHERE w.turn_id = ?1 AND w.delivered_attempt IS NULL AND w.status = 'settled'
+         WHERE w.turn_id = ?1 AND w.delivered_attempt IS NULL
+           AND w.status IN ('settled', 'stopped')
          ORDER BY w.created_at, w.id",
     )
     .bind(turn_id)
     .fetch_all(&mut *conn)
     .await
+}
+
+/// The owner stops wait `id` of `bot_id`. A pending wait becomes
+/// `stopped`, an outcome its turn receives, and its job is asked to stop;
+/// the turn continues if nothing else holds it. `None` when the bot has no
+/// such wait.
+pub async fn stop_by_owner(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+    id: Uuid,
+) -> Result<Option<super::waits::Stop>, sqlx::Error> {
+    use super::waits::Stop;
+    let found: Option<(Status, Uuid, Uuid)> = sqlx::query_as(
+        "SELECT status, turn_id, job_id FROM computer_job_waits WHERE id = ?1 AND bot_id = ?2",
+    )
+    .bind(id)
+    .bind(bot_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((status, turn_id, job_id)) = found else {
+        return Ok(None);
+    };
+    Ok(Some(match status {
+        Status::Stopped => Stop::Repeated { turn_id },
+        Status::Pending => {
+            sqlx::query(
+                "UPDATE computer_job_waits SET status = 'stopped',
+                     settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                 WHERE id = ?1 AND status = 'pending'",
+            )
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+            crate::computers::jobs::request_cancel(&mut *conn, bot_id, Some(job_id)).await?;
+            Stop::Stopped { turn_id }
+        }
+        Status::Settled | Status::Cancelled => Stop::Ended,
+    }))
+}
+
+/// Withdraw the pending waits of `turn_id`, whose turn ends without a
+/// status change that the trigger would see.
+pub async fn withdraw_for_turn(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE computer_job_waits SET status = 'cancelled',
+             settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE turn_id = ?1 AND status = 'pending'",
+    )
+    .bind(turn_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 /// Record that `attempt` received these outcomes.

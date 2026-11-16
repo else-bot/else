@@ -1,11 +1,15 @@
 //! Bot-wide Stop work and deletion while work is in progress.
 //!
-//! Both halt everything accepted up to a boundary inside the immediate transaction:
-//! queued turns end as interrupted without running, and the active turn moves
-//! to `cancelling` so the scheduler interrupts its provider. The bot stays
-//! blocked (`cancel_pending` or `deleting`) until the active turn records a
-//! terminal outcome; [`settle`] then completes receipts and tombstones in the
-//! same transaction. Nothing claims that a stopped action was undone.
+//! Both halt the work accepted up to a boundary inside the immediate
+//! transaction: queued turns do not run, and the active turn moves to
+//! `cancelling` so the scheduler interrupts its provider. The bot stays
+//! blocked (`cancel_pending` or `deleting`) until no turn is active; [`settle`]
+//! then completes receipts and tombstones in the same transaction. Nothing
+//! claims that a stopped action was undone.
+//!
+//! Stop ends generation only. The jobs and tasks a turn waits on keep
+//! running, and the turn parks on them; the owner stops each one on its own
+//! ([`super::waits::stop`]). Deletion ends them all.
 
 use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool};
@@ -48,40 +52,204 @@ fn stop_hash(bot_id: Uuid) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-/// End queued turns with `turn_no <= boundary` and move the active one to
-/// `cancelling`. Returns the active turn, if any. The caller holds the bot
-/// immediate transaction.
+/// The error code of a turn the owner's Stop moved to `cancelling`. Its
+/// pending waits stay (the `turns_end_*_waits` triggers skip it), and once
+/// the attempt ends the turn parks on what it still waits for.
+pub const KEEPS_WAITS: &str = "stopped";
+
+/// How a `cancelling` turn ends once its provider stops, decoded from its
+/// error code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unwind {
+    /// The owner's Stop of the attempt alone: the turn parks on its jobs
+    /// and tasks, or continues with their outcomes.
+    KeepWaits,
+    /// Any other cancel: the turn ends and its waits were withdrawn.
+    EndAll,
+}
+
+impl Unwind {
+    pub fn of(error_code: Option<&str>) -> Self {
+        if error_code == Some(KEEPS_WAITS) {
+            Self::KeepWaits
+        } else {
+            Self::EndAll
+        }
+    }
+}
+
+/// Turn a Stop of `turn`'s attempt into a full cancel with `code` and
+/// `message`: its pending waits are withdrawn now. False when `turn` is not
+/// a turn the owner's Stop left `cancelling`.
+pub async fn end_all(
+    conn: &mut SqliteConnection,
+    turn: Uuid,
+    code: &str,
+    message: &str,
+) -> Result<bool, sqlx::Error> {
+    let changed = sqlx::query(
+        "UPDATE turns SET error_code = ?2, error_message = ?3,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE id = ?1 AND status = 'cancelling' AND error_code IS ?4",
+    )
+    .bind(turn)
+    .bind(code)
+    .bind(message)
+    .bind(KEEPS_WAITS)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if changed == 0 {
+        return Ok(false);
+    }
+    crate::db::mcp_waits::withdraw_for_turn(conn, turn).await?;
+    crate::db::computer_job_waits::withdraw_for_turn(conn, turn).await?;
+    Ok(true)
+}
+
+/// Park each turn the owner's Stop left `cancelling` whose provider is
+/// gone (a restart or an orphan): it keeps waiting on its jobs and tasks,
+/// or continues with their outcomes, and is never replayed. `turn` limits
+/// it to one turn. Returns the parked turns with their bots.
+pub async fn park_unwound(
+    conn: &mut SqliteConnection,
+    turn: Option<Uuid>,
+) -> Result<Vec<(Uuid, Uuid)>, sqlx::Error> {
+    let parked: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "UPDATE turns SET status = 'waiting', error_code = NULL, error_message = NULL,
+             effect_uncertain = true,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE status = 'cancelling' AND error_code IS ?1 AND (?2 IS NULL OR id = ?2)
+           AND ((SELECT coalesce(sum(h.pending), 0) FROM turn_holds h
+                 WHERE h.turn_id = turns.id) > 0
+                OR EXISTS (SELECT 1 FROM mcp_waits w WHERE w.turn_id = turns.id
+                           AND w.delivered_attempt IS NULL
+                           AND w.status IN ('finished', 'failed', 'expired', 'stopped'))
+                OR EXISTS (SELECT 1 FROM computer_job_waits w WHERE w.turn_id = turns.id
+                           AND w.delivered_attempt IS NULL AND w.status IN ('settled', 'stopped'))
+                OR EXISTS (SELECT 1 FROM delegations d WHERE d.root_turn_id = turns.id
+                           AND d.delivered_attempt IS NULL
+                           AND d.status IN ('completed', 'failed', 'cancelled')))
+         RETURNING id, bot_id",
+    )
+    .bind(KEEPS_WAITS)
+    .bind(turn)
+    .fetch_all(&mut *conn)
+    .await?;
+    for &(turn_id, bot_id) in &parked {
+        crate::db::turns::continue_waiting(conn, turn_id).await?;
+        events::turn_changed(conn, bot_id, turn_id).await?;
+    }
+    Ok(parked)
+}
+
+/// What halts the accepted work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Halt {
+    /// The owner's Stop: generation ends, waits and tasks stay.
+    Stop,
+    /// Bot deletion: everything ends.
+    Delete,
+}
+
+impl Halt {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Stop => "Stopped by the owner.",
+            Self::Delete => "The bot was deleted.",
+        }
+    }
+}
+
+/// Halt the turns with `turn_no <= boundary`: queued ones never run, and
+/// the active one moves to `cancelling`. On [`Halt::Stop`] a turn that
+/// waits only on jobs or tasks parks on them instead of ending, and those
+/// jobs and tasks keep running; a turn that also waits on the owner ends
+/// with its tasks, as before. Returns the active turn, if any. The caller
+/// holds the bot immediate transaction.
 pub async fn halt_accepted(
     conn: &mut SqliteConnection,
     bot_id: Uuid,
     boundary: i64,
-    message: &str,
+    halt: Halt,
 ) -> Result<Option<Uuid>, sqlx::Error> {
     crate::db::delegations::lock_targets_of_bot(conn, bot_id).await?;
-    let queued: Vec<Uuid> = sqlx::query_scalar(
+    let stop = halt == Halt::Stop;
+    // A turn whose every pending hold is a job or a task: Stop leaves it
+    // parked on them. One that also waits on the owner ends as before.
+    const ONLY_JOBS_AND_TASKS: &str = "(SELECT coalesce(sum(h.pending), 0) FROM turn_holds h
+             WHERE h.turn_id = turns.id)
+         = (SELECT count(*) FROM delegations d
+            WHERE d.root_turn_id = turns.id AND d.status IN ('queued', 'running'))
+           + (SELECT count(*) FROM mcp_waits w WHERE w.turn_id = turns.id AND w.status = 'pending')
+           + (SELECT count(*) FROM computer_job_waits w
+              WHERE w.turn_id = turns.id AND w.status = 'pending')";
+    let parked: Vec<Uuid> = if stop {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "UPDATE turns SET status = 'waiting', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE bot_id = ?1 AND turn_no <= ?2 AND status = 'queued'
+               AND (SELECT coalesce(sum(h.pending), 0) FROM turn_holds h
+                    WHERE h.turn_id = turns.id) > 0
+               AND {ONLY_JOBS_AND_TASKS}
+             RETURNING id"
+        )))
+        .bind(bot_id)
+        .bind(boundary)
+        .fetch_all(&mut *conn)
+        .await?
+    } else {
+        Vec::new()
+    };
+    let ended: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "UPDATE turns SET status = 'interrupted', error_code = 'cancelled', error_message = ?3,
              finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE bot_id = ?1 AND status IN ('queued', 'waiting') AND turn_no <= ?2
-         RETURNING id",
-    )
+         WHERE bot_id = ?1 AND turn_no <= ?2
+           AND (status = 'queued' OR (status = 'waiting' AND NOT (?4 AND {ONLY_JOBS_AND_TASKS})))
+         RETURNING id"
+    )))
     .bind(bot_id)
     .bind(boundary)
-    .bind(message)
+    .bind(halt.message())
+    .bind(stop)
     .fetch_all(&mut *conn)
     .await?;
-    for turn_id in &queued {
+    if stop {
+        for turn_id in &ended {
+            crate::db::delegations::cancel_for_root(conn, *turn_id).await?;
+        }
+    }
+    let halted = parked.iter().chain(&ended);
+    for turn_id in halted {
         events::turn_changed(conn, bot_id, *turn_id).await?;
     }
-    crate::db::delegations::cancel_for_bot(conn, bot_id, boundary).await?;
     crate::db::routines::stop_checks(conn, bot_id).await?;
-    crate::computers::jobs::request_cancel(&mut *conn, bot_id, None).await?;
+    match halt {
+        Halt::Stop => crate::computers::jobs::request_cancel_unwaited(&mut *conn, bot_id).await?,
+        Halt::Delete => {
+            crate::db::delegations::cancel_for_bot(conn, bot_id, boundary).await?;
+            // A turn an earlier Stop left `cancelling` ends with the bot.
+            let stopped: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM turns WHERE bot_id = ?1 AND status = 'cancelling'",
+            )
+            .bind(bot_id)
+            .fetch_all(&mut *conn)
+            .await?;
+            for turn in stopped {
+                end_all(conn, turn, "cancelled", halt.message()).await?;
+            }
+            crate::computers::jobs::request_cancel(&mut *conn, bot_id, None).await?
+        }
+    };
     let active: Option<Uuid> = sqlx::query_scalar(
-        "UPDATE turns SET status = 'cancelling', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+        "UPDATE turns SET status = 'cancelling', error_code = CASE WHEN ?3 THEN ?4 END,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE bot_id = ?1 AND turn_no <= ?2 AND status IN ('preparing', 'sending', 'running')
          RETURNING id",
     )
     .bind(bot_id)
     .bind(boundary)
+    .bind(stop)
+    .bind(KEEPS_WAITS)
     .fetch_optional(&mut *conn)
     .await?;
     if let Some(turn_id) = active {
@@ -138,7 +306,7 @@ pub async fn settle(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<bool, s
     Ok(changed)
 }
 
-/// Stop all work accepted for this bot so far. A retry with the same request
+/// Stop the generation accepted for this bot so far. A retry with the same request
 /// ID returns the original receipt and never affects later work.
 pub async fn stop_work(
     pool: &SqlitePool,
@@ -199,7 +367,7 @@ pub async fn stop_work(
         .bind(bot_id)
         .execute(&mut *tx)
         .await?;
-    let interrupt = halt_accepted(&mut tx, bot_id, last_turn_no, "Stopped by the owner.").await?;
+    let interrupt = halt_accepted(&mut tx, bot_id, last_turn_no, Halt::Stop).await?;
     let settled = settle(&mut tx, bot_id).await?;
     if !settled {
         events::bot_updated(&mut tx, bot_id).await?;

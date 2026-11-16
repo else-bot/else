@@ -232,7 +232,7 @@ async fn a_status_that_cannot_be_read_never_counts_as_the_job_finishing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_wait_survives_a_restart_and_only_a_stop_withdraws_it() {
+async fn a_wait_survives_a_restart_during_and_after_the_owners_stop() {
     let (app, _) = harness().await;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
@@ -242,36 +242,135 @@ async fn a_wait_survives_a_restart_and_only_a_stop_withdraws_it() {
     text(&tool(&app, &token, "mcp_install", install(&state)).await);
     text(&tool(&app, &token, "mcp_wait", wait_args()).await);
     settle(&app, turn, "waiting").await;
+    // A restart lands while the owner's Stop unwinds a reply that carries
+    // this wait: recovery parks the turn on it instead of cancelling it.
+    sqlx::query("UPDATE turns SET status = 'cancelling', error_code = 'stopped' WHERE id = ?1")
+        .bind(turn)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(wait_row(&app, turn).await.0, "pending");
 
     let app = app.restart().await;
     assert_eq!(
         app.wait_turn(&turn.to_string(), &["waiting"]).await,
         "waiting"
     );
+    assert_eq!(wait_row(&app, turn).await.0, "pending");
+    let stopped = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/cancel"),
+            Some(json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        app.wait_turn(&turn.to_string(), &["waiting"]).await,
+        "waiting",
+        "Stop ends generation only; the turn keeps waiting"
+    );
+    assert_eq!(wait_row(&app, turn).await.0, "pending");
     std::fs::write(&state, "result_available").unwrap();
     check_now(&app).await;
     settle(&app, turn, "completed").await;
     assert_eq!(wait_row(&app, turn).await.0, "finished");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_stops_one_wait_and_the_bot_learns_it_was_cancelled() {
+    let (app, synthetic) = harness().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("job");
+    std::fs::write(&state, "working").unwrap();
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main).await;
+    text(&tool(&app, &token, "mcp_install", install(&state)).await);
+    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
+    settle(&app, turn, "waiting").await;
+    std::fs::write(&state, "result_available").unwrap();
+    check_now(&app).await;
+    settle(&app, turn, "completed").await;
+    let finished: Uuid = sqlx::query_scalar("SELECT id FROM mcp_waits WHERE turn_id = ?1")
+        .bind(turn)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
 
     std::fs::write(&state, "working").unwrap();
     let (turn, token) = running(&app, &main).await;
     text(&tool(&app, &token, "mcp_wait", wait_args()).await);
     settle(&app, turn, "waiting").await;
-    let request: Uuid = sqlx::query_scalar("SELECT request_id FROM turns WHERE id = ?1")
-        .bind(turn)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
+    let shown = shown_waits(&app, &main, turn).await;
+    assert_eq!(
+        shown[0]["purpose"], "Review the WEB-284 PR once T3 finishes.",
+        "{shown}"
+    );
+    assert_eq!(shown[0]["last_status"], "working", "{shown}");
+    let wait = shown[0]["id"].as_str().unwrap().to_owned();
+    let cancel = |bot: String, id: String| {
+        let app = &app;
+        async move {
+            app.owner("POST", &format!("/v1/bots/{bot}/waits/{id}/cancel"), None)
+                .await
+        }
+    };
+    let first = cancel(main.clone(), wait.clone()).await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    assert_eq!(
+        (&first.body["kind"], &first.body["created"]),
+        (&json!("mcp"), &json!(true))
+    );
+    settle(&app, turn, "completed").await;
+    let (status, delivered, _) = wait_row(&app, turn).await;
+    assert_eq!((status.as_str(), delivered), ("stopped", Some(2)));
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(packet.contains("status=\"stopped\""), "{packet}");
+    assert!(packet.contains("cancelled by owner"), "{packet}");
+
+    let again = cancel(main.clone(), wait).await;
+    assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+    assert_eq!(again.body["created"], false, "a retry returns the stop");
+    let ended = cancel(main.clone(), finished.to_string()).await;
+    assert_eq!(ended.status, StatusCode::CONFLICT, "{}", ended.body);
+    assert_eq!(ended.body["error"]["code"], "wait_ended", "{}", ended.body);
+    let other = app.create_bot("Scout").await;
+    let foreign = cancel(other, finished.to_string()).await;
+    assert_eq!(foreign.status, StatusCode::NOT_FOUND, "{}", foreign.body);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_a_reply_in_progress_keeps_the_waits_it_carried() {
+    let (app, synthetic) = harness().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("job");
+    std::fs::write(&state, "working").unwrap();
+    let main = app.main_bot().await;
+    let (first, token) = running(&app, &main).await;
+    text(&tool(&app, &token, "mcp_install", install(&state)).await);
+    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
+    settle(&app, first, "waiting").await;
+
+    let (second, _) = running_follow_up(&app, &main, first).await;
     let stopped = app
         .owner(
             "POST",
             &format!("/v1/bots/{main}/cancel"),
-            Some(json!({ "request_id": request })),
+            Some(json!({ "request_id": Uuid::new_v4() })),
         )
         .await;
-    assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);
-    settle(&app, turn, "interrupted").await;
-    assert_eq!(wait_row(&app, turn).await.0, "cancelled");
+    assert!(stopped.status.is_success(), "{}", stopped.body);
+    settle(&app, second, "waiting").await;
+    assert_eq!(carried(&app, second).await, vec![(0, "pending".into())]);
+    let attempt = attempts(&app, second).await;
+
+    std::fs::write(&state, "result_available").unwrap();
+    check_now(&app).await;
+    settle(&app, second, "completed").await;
+    assert_eq!(attempts(&app, second).await, attempt + 1);
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(packet.contains("Opened PR #775"), "{packet}");
 }
 
 async fn running_follow_up(app: &TestApp, bot: &str, before: Uuid) -> (Uuid, String) {

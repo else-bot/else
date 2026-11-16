@@ -341,3 +341,74 @@ pub async fn cancel(pool: &SqlitePool, caller: Uuid, task: Uuid) -> Result<Task,
     tx.commit().await?;
     Ok(task)
 }
+
+/// How the owner's stop of a task went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerStop {
+    /// The task's turn now ends with `cancelled`.
+    Stopped { root_turn_id: Uuid },
+    /// It was already cancelled or ending, so a retry changes nothing.
+    Repeated,
+    /// It completed or failed first.
+    Ended,
+}
+
+#[derive(sqlx::FromRow)]
+struct OwnedTask {
+    root_turn_id: Uuid,
+    child_turn_id: Uuid,
+    target_bot_id: Uuid,
+    takeover_turn_id: Option<Uuid>,
+    status: Status,
+    child_status: TurnStatus,
+    error_code: Option<String>,
+}
+
+/// The owner stops task `task` that `bot_id` delegated, as its sender's
+/// `delegation_cancel` would. The sender learns the task was cancelled by
+/// the owner when its turn continues. `None` when `bot_id` sent no such task.
+pub async fn stop_by_owner(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+    task: Uuid,
+) -> Result<Option<OwnerStop>, sqlx::Error> {
+    let found: Option<OwnedTask> = sqlx::query_as(
+        "SELECT d.root_turn_id, d.child_turn_id, d.target_bot_id, d.takeover_turn_id,
+                 d.status, t.status AS child_status, t.error_code
+             FROM delegations d JOIN turns t ON t.id = d.child_turn_id
+             WHERE d.id = ?1 AND d.parent_bot_id = ?2",
+    )
+    .bind(task)
+    .bind(bot_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(OwnedTask {
+        root_turn_id: root,
+        child_turn_id: child,
+        target_bot_id: target,
+        takeover_turn_id: takeover,
+        status,
+        child_status,
+        error_code: code,
+    }) = found
+    else {
+        return Ok(None);
+    };
+    let ending = takeover.is_none()
+        && child_status == TurnStatus::Cancelling
+        && crate::db::stop::Unwind::of(code.as_deref()) == crate::db::stop::Unwind::EndAll;
+    match status {
+        Status::Cancelled => return Ok(Some(OwnerStop::Repeated)),
+        Status::Completed | Status::Failed => return Ok(Some(OwnerStop::Ended)),
+        Status::Queued | Status::Running if ending => return Ok(Some(OwnerStop::Repeated)),
+        Status::Queued | Status::Running => {}
+    }
+    lock_targets_of_root(conn, root).await?;
+    stop_children(
+        conn,
+        vec![(child, target, takeover)],
+        "The owner cancelled the task.",
+    )
+    .await?;
+    Ok(Some(OwnerStop::Stopped { root_turn_id: root }))
+}
