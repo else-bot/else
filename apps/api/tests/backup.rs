@@ -964,6 +964,19 @@ async fn a_database_only_backup_restores_without_touching_the_schedule() {
         serde_json::from_slice(&std::fs::read(set.join("complete.json")).unwrap()).unwrap();
     assert!(!complete.whole_assistant);
     assert!(out.contains("Database only"), "{out}");
+    for _ in 0..backup::BEFORE_UPDATE_KEEP {
+        let (ok, out) = run(&["backup", "--database-only"]);
+        assert!(ok, "{out}");
+    }
+    let before_update = backups.join(backup::BEFORE_UPDATE_DIR);
+    let kept = backup::completed_sets(&before_update).unwrap();
+    assert_eq!(
+        kept.len(),
+        backup::BEFORE_UPDATE_KEEP,
+        "before-update sets keep their own small retention"
+    );
+    assert!(!set.exists(), "the oldest before-update set is removed");
+    let set = before_update.join(kept.last().unwrap());
 
     let (ok, out) = run(&["backup", "--whole"]);
     assert!(!ok && out.contains("Usage:"), "{out}");

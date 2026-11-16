@@ -49,6 +49,9 @@ pub const DATABASE: &str = "database.dump.age";
 /// Database-only sets the installer takes before migrations, kept under the
 /// backup directory but outside its schedule, retention, and replication.
 pub const BEFORE_UPDATE_DIR: &str = "before-update";
+/// Before-update sets kept: the one taken before the latest update and the
+/// one before it, whatever the owner's retention for scheduled sets.
+pub const BEFORE_UPDATE_KEEP: usize = 2;
 const STAGING_PREFIX: &str = ".staging-";
 /// Bootstrap and manifest size caps: anything larger is not ours.
 pub const MAX_COMPLETE_BYTES: u64 = 16 * 1024;

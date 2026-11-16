@@ -232,6 +232,7 @@ fn run_backup(database_only: bool) -> anyhow::Result<()> {
         if database_only {
             let mut backup = config.backup.clone();
             backup.dir = backup.dir.join(else_api::backup::BEFORE_UPDATE_DIR);
+            backup.keep = else_api::backup::BEFORE_UPDATE_KEEP;
             let summary = else_api::backup::worker::BackupWorker::new(pool, params, key, backup)
                 .with_coordinator(else_api::backup::capture::Coordinator {
                     exclusive: true,
