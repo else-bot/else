@@ -76,7 +76,7 @@ async fn connect(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> 
     let input: Connect = serde_json::from_value(args.clone())
         .map_err(|_| Error::Invalid("Use provider and reason only. Never pass a token."))?;
     let setup = store::request_setup(&s.db, g.turn_id, input.provider, &input.reason).await?;
-    let pending = setup.status == "pending";
+    let pending = setup.status == store::SetupStatus::Pending;
     if pending {
         s.scheduler.grants().park(g.turn_id).await;
     }

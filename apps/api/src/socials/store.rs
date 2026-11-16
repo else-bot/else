@@ -256,15 +256,15 @@ pub async fn sweep_devices(pool: &SqlitePool) -> Result<(), Error> {
         .await?;
     Ok(())
 }
-/// Record that the platform signed this device out, so the owner pairs again.
-pub async fn signed_out(pool: &SqlitePool, c: &Connection) -> Result<(), Error> {
-    sqlx::query(
-        "UPDATE social_connections SET health='signed_out' WHERE id=?1 AND generation=?2 AND state<>'removed'",
-    )
-    .bind(c.id)
-    .bind(c.generation)
-    .execute(pool)
-    .await?;
+/// Record how connection `c`'s listener is doing, unless the connection
+/// changed since.
+pub async fn set_health(pool: &SqlitePool, c: &Connection, health: Health) -> Result<(), Error> {
+    sqlx::query("UPDATE social_connections SET health=?3 WHERE id=?1 AND generation=?2")
+        .bind(c.id)
+        .bind(c.generation)
+        .bind(health)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 const TRIGGER_COLUMNS: &str = "t.id,t.connection_id,t.bot_id,c.provider,c.display_name AS connection_name,c.username,t.destination,json_extract(d.info,'$.name') AS destination_name,t.wake,t.instructions,t.enabled,t.created_at,t.updated_at,(SELECT max(x.settled_at) FROM social_deliveries x WHERE x.trigger_id=t.id AND x.turn_id IS NOT NULL) AS last_woke_at FROM social_triggers t JOIN social_connections c ON c.id=t.connection_id AND c.state<>'removed' LEFT JOIN social_destinations d ON d.connection_id=t.connection_id AND d.id=t.destination";
@@ -679,6 +679,24 @@ pub async fn restore_passive(conn: &mut SqliteConnection) -> Result<(), sqlx::Er
     Ok(())
 }
 
+/// Where a bot's setup card is, as stored in `social_setups.status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+pub enum SetupStatus {
+    Pending,
+    Connected,
+    Cancelled,
+}
+impl SetupStatus {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Connected => "connected",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Setup {
     pub id: Uuid,
@@ -686,7 +704,7 @@ pub struct Setup {
     pub turn_id: Uuid,
     pub provider: Provider,
     pub reason: String,
-    pub status: String,
+    pub status: SetupStatus,
     pub connection_id: Option<Uuid>,
     /// What the owner wrote on the card for the bot, in their own words.
     pub note: Option<String>,
@@ -778,11 +796,11 @@ pub async fn settle_setup(
     .await?
     .ok_or(Error::NotFound)?;
     let wanted = if connection.is_some() {
-        "connected"
+        SetupStatus::Connected
     } else {
-        "cancelled"
+        SetupStatus::Cancelled
     };
-    if setup.status != "pending" {
+    if setup.status != SetupStatus::Pending {
         return if setup.status == wanted
             && setup.connection_id == connection
             && setup.note.as_deref() == note

@@ -103,7 +103,7 @@ impl Manager {
         let provider = match purpose {
             Purpose::Setup(id) => {
                 let setup = store::setup(&self.db, id).await?;
-                if setup.status != "pending" {
+                if setup.status != store::SetupStatus::Pending {
                     return Err(Error::Inactive);
                 }
                 setup.provider
@@ -157,7 +157,7 @@ impl Manager {
     /// one when [`POLL`] runs out.
     pub async fn pairing(&self, purpose: Purpose, after: u64) -> Result<View, Error> {
         if let Purpose::Setup(id) = purpose
-            && store::setup(&self.db, id).await?.status != "pending"
+            && store::setup(&self.db, id).await?.status != store::SetupStatus::Pending
         {
             self.pairings
                 .call(move |pairings| {

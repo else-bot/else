@@ -25,7 +25,7 @@ async fn a_public_channel_link_resolves_and_receives_a_post() {
         display_name: identity.display_name,
         username: identity.username,
         state: ConnectionState::Active,
-        health: "connected".into(),
+        health: Health::Connected,
         generation: 1,
         instructions: String::new(),
         message_content: false,

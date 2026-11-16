@@ -190,12 +190,44 @@ impl ConnectionState {
         }
     }
     /// The health a connection reports on entering this state.
-    pub fn health(self) -> &'static str {
+    pub fn health(self) -> Health {
         match self {
-            Self::Active => "connecting",
-            Self::Paused => "paused",
-            Self::Removed => "removed",
+            Self::Active => Health::Connecting,
+            Self::Paused => Health::Paused,
+            Self::Removed => Health::Removed,
         }
+    }
+}
+/// How a connection's listener is doing, as stored in `health`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum Health {
+    Connecting,
+    Connected,
+    Reconnecting,
+    /// Another receiver took the platform's single listener slot.
+    ReceiverConflict,
+    /// The account signed this device out; the owner must pair it again.
+    SignedOut,
+    Paused,
+    Removed,
+    /// Restored from a backup, paused until the owner resumes it.
+    Restored,
+}
+impl Health {
+    /// The health an inbox reports once its listener stopped with `result`.
+    pub fn after(result: &Result<(), Error>) -> Self {
+        match result {
+            Ok(()) => Self::Connected,
+            Err(Error::ReceiverConflict) => Self::ReceiverConflict,
+            Err(Error::SignedOut) => Self::SignedOut,
+            Err(_) => Self::Reconnecting,
+        }
+    }
+    /// Whether the inbox listens again by itself.
+    pub fn retries(self) -> bool {
+        self != Self::SignedOut
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
@@ -225,7 +257,7 @@ pub struct Connection {
     pub display_name: String,
     pub username: Option<String>,
     pub state: ConnectionState,
-    pub health: String,
+    pub health: Health,
     pub generation: i64,
     pub instructions: String,
     #[sqlx(default)]

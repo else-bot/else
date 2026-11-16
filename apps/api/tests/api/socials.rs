@@ -274,7 +274,7 @@ async fn setup_needs_only_its_provider_connection_and_requeues() {
     let done = store::settle_setup(&db.pool, request.id, Some(c.id), None)
         .await
         .unwrap();
-    assert_eq!(done.status, "connected");
+    assert_eq!(done.status, store::SetupStatus::Connected);
     let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?1")
         .bind(turn)
         .fetch_one(&db.pool)
@@ -286,7 +286,7 @@ async fn setup_needs_only_its_provider_connection_and_requeues() {
             .await
             .unwrap()
             .status,
-        "connected",
+        store::SetupStatus::Connected,
         "a retry of the same completion changes nothing"
     );
     assert!(
@@ -639,7 +639,7 @@ impl Transport for Fake {
     }
 }
 
-async fn health_after_listening(refused: bool) -> String {
+async fn health_after_listening(refused: bool) -> Health {
     let db = TestDb::migrated().await;
     let c = account(&db, "listener").await;
     let fake = Arc::new(Fake::default());
@@ -656,12 +656,12 @@ async fn health_after_listening(refused: bool) -> String {
 
 #[tokio::test]
 async fn a_bot_whose_updates_go_elsewhere_shows_the_conflict_instead_of_connected() {
-    assert_eq!(health_after_listening(true).await, "receiver_conflict");
+    assert_eq!(health_after_listening(true).await, Health::ReceiverConflict);
 }
 
 #[tokio::test]
 async fn a_listener_that_stays_open_is_connected() {
-    assert_eq!(health_after_listening(false).await, "connected");
+    assert_eq!(health_after_listening(false).await, Health::Connected);
 }
 
 #[tokio::test]
@@ -1419,8 +1419,8 @@ async fn repeating_the_current_state_keeps_pending_deliveries_and_generation() {
     let stored = store::connection(&db.pool, c.id).await.unwrap();
     assert_eq!(stored.generation, before.generation);
     assert_eq!(
-        (returned.generation, returned.health.as_str()),
-        (stored.generation, stored.health.as_str())
+        (returned.generation, returned.health),
+        (stored.generation, stored.health)
     );
     let status: String =
         sqlx::query_scalar("SELECT status FROM social_deliveries WHERE event_id='pending'")

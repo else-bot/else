@@ -355,7 +355,7 @@ async fn a_device_the_account_signed_out_asks_to_pair_again_and_stops_retrying()
     *phone.listen.lock().unwrap() = Some(Error::SignedOut);
     m.changed(c.id).await;
     tokio::time::timeout(common::SETTLE, async {
-        while store::connection(&db.pool, c.id).await.unwrap().health != "signed_out" {
+        while store::connection(&db.pool, c.id).await.unwrap().health != Health::SignedOut {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     })
@@ -363,7 +363,7 @@ async fn a_device_the_account_signed_out_asks_to_pair_again_and_stops_retrying()
     .expect("health shows the sign-out");
     m.changed(c.id).await;
     tokio::time::timeout(common::SETTLE, async {
-        while store::connection(&db.pool, c.id).await.unwrap().health != "connected" {
+        while store::connection(&db.pool, c.id).await.unwrap().health != Health::Connected {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     })
@@ -553,7 +553,7 @@ async fn pausing_a_connection_lets_its_listener_shut_down_its_client() {
     let m = manager(&db, &phone);
     let (_, c) = paired(&db, &m, &phone).await;
     tokio::time::timeout(common::SETTLE, async {
-        while store::connection(&db.pool, c.id).await.unwrap().health != "connected" {
+        while store::connection(&db.pool, c.id).await.unwrap().health != Health::Connected {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })

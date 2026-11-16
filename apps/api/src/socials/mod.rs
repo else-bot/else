@@ -617,24 +617,12 @@ impl Manager {
             if stop.is_cancelled() {
                 return;
             }
-            let health = match &result {
-                Ok(()) => "connected",
-                Err(Error::ReceiverConflict) => "receiver_conflict",
-                Err(Error::SignedOut) => "signed_out",
-                Err(_) => "reconnecting",
-            };
+            let health = Health::after(&result);
             if let Err(error) = &result {
-                tracing::warn!(connection = %c.id, provider = c.provider.name(), %error, "social inbox stopped; retrying");
+                tracing::warn!(connection = %c.id, provider = c.provider.name(), %error, "social inbox stopped");
             }
-            let _ = sqlx::query(
-                "UPDATE social_connections SET health=?3 WHERE id=?1 AND generation=?2",
-            )
-            .bind(c.id)
-            .bind(c.generation)
-            .bind(health)
-            .execute(&self.db)
-            .await;
-            if matches!(result, Err(Error::SignedOut)) {
+            let _ = store::set_health(&self.db, &c, health).await;
+            if !health.retries() {
                 return;
             }
             tokio::select! {_=stop.cancelled()=>return,_=tokio::time::sleep(Duration::from_secs(10))=>{}}
@@ -694,13 +682,7 @@ impl Manager {
     ) -> Result<(), Error> {
         if !*connected {
             *connected = true;
-            sqlx::query(
-                "UPDATE social_connections SET health='connected' WHERE id=?1 AND generation=?2",
-            )
-            .bind(c.id)
-            .bind(c.generation)
-            .execute(&self.db)
-            .await?;
+            store::set_health(&self.db, c, Health::Connected).await?;
         }
         if let Some(event) = event {
             store::record(&self.db, c, &event.incoming, event.next_offset).await?;
