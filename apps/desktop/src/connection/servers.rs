@@ -74,6 +74,8 @@ pub(super) struct Observation {
     pub server: Option<crate::api::ServerInfo>,
     /// When the last answered check started.
     pub asked: Option<Instant>,
+    /// From the last answered check; `None` when the bot list failed.
+    pub attention: Option<crate::attention::Attention>,
 }
 
 impl Default for Observation {
@@ -86,6 +88,7 @@ impl Default for Observation {
             working: None,
             server: None,
             asked: None,
+            attention: None,
         }
     }
 }
@@ -188,18 +191,20 @@ struct Observed {
     version: Option<String>,
     working: Option<u64>,
     server: Option<crate::api::ServerInfo>,
+    attention: Option<crate::attention::Attention>,
 }
 
 async fn observe(client: Arc<Client>) -> Result<Observed, (Health, String)> {
     let this = client.clone();
     client
         .run(async move {
-            let (caps, readiness, report) = tokio::join!(
+            let (caps, readiness, report, bots) = tokio::join!(
                 this.send_json::<crate::api::Capabilities>(
                     this.request(Method::GET, "/v1/capabilities")
                 ),
                 this.send_json::<serde_json::Value>(this.request(Method::GET, "/readyz")),
                 this.send_json::<Report>(this.request(Method::GET, "/v1/maintenance/update")),
+                this.send_json::<crate::api::BotList>(this.request(Method::GET, "/v1/bots")),
             );
             let (_, caps) = caps.map_err(|err| match err {
                 ClientError::Unauthorized => (
@@ -233,10 +238,14 @@ async fn observe(client: Arc<Client>) -> Result<Observed, (Health, String)> {
                 ),
                 Err(_) => (None, None),
             };
+            let attention = bots.ok().map(|(_, list)| {
+                crate::attention::Attention::of(&list.bots, crate::inbox::saved_unread)
+            });
             Ok(Observed {
                 version,
                 working,
                 server: caps.server,
+                attention,
             })
         })
         .await
@@ -269,6 +278,7 @@ fn monitor(
                     state.version = observed.version;
                     state.working = observed.working;
                     state.server = observed.server;
+                    state.attention = observed.attention;
                     state.asked = Some(asked);
                     state.seen = Some(Utc::now());
                     state.error = None;

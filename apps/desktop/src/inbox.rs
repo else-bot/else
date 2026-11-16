@@ -361,6 +361,12 @@ fn handed_back(bot: &Bot) -> bool {
         )
 }
 
+/// Unread by the server's saved read state alone, for a server this
+/// desktop has no live inbox for.
+pub fn saved_unread(bot: &Bot) -> bool {
+    unread(None, bot)
+}
+
 fn unread(sync: Option<&ReadSync>, bot: &Bot) -> bool {
     if bot.silenced() {
         return false;
@@ -423,6 +429,7 @@ mod tests {
                 }),
                 read_through: read,
                 marked_unread: false,
+                unread_replies: None,
             });
             bot
         })

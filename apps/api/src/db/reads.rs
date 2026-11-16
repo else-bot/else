@@ -1,12 +1,14 @@
 //! The owner's read position in each bot's owner conversation.
 //!
-//! Unread is derived, never counted: the latest assistant item's position
+//! Unread is derived from positions: the latest assistant item's position
 //! (its seq and the UTF-8 bytes of its text) is compared with the saved read
 //! position, so text appended to a reply after the owner read it is unread
 //! again. Reading only moves forward; marking unread sets a flag and keeps
 //! the position, so a delayed read can never undo it. Attaching a reply's
 //! linked files can rewrite its text shorter, so a position past the end of a
-//! reply reads it through its current end.
+//! reply reads it through its current end. `unread_replies` counts the
+//! assistant items past the read position for badges; it is at least one
+//! whenever the conversation is unread, so a flag or a grown reply counts.
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -37,6 +39,7 @@ pub struct ReadState {
     pub read_through: ReplyPosition,
     pub marked_unread: bool,
     pub unread: bool,
+    pub unread_replies: i64,
 }
 
 /// The read columns of a bot's row, as selected with it.
@@ -50,6 +53,7 @@ pub struct ReadRow {
     head_seq: Option<i64>,
     head_bytes: Option<i64>,
     head_preview: Option<String>,
+    unread_count: i64,
 }
 
 const PREVIEW_CHARS: usize = 160;
@@ -84,6 +88,7 @@ impl ReadRow {
             read_through,
             marked_unread: self.marked_unread,
             unread,
+            unread_replies: if unread { self.unread_count.max(1) } else { 0 },
         }
     }
 }

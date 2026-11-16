@@ -246,6 +246,34 @@ async fn text_appended_after_a_partial_read_is_unread_again() {
         "the same item grew: {state}"
     );
     assert_eq!(state["unread"], true, "the rest of the reply is unread");
+    assert_eq!(state["unread_replies"], 1, "a grown reply counts once");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unread_replies_counts_the_replies_past_the_read_position() {
+    let app = TestApp::installed().await;
+    let bot = app.create_bot("Counter").await;
+    assert_eq!(read_state(&app, &bot).await["unread_replies"], 0);
+    reply(&app, &bot, "first").await;
+    let first = read_state(&app, &bot).await["latest"]["position"].clone();
+    reply(&app, &bot, "second").await;
+    reply(&app, &bot, "third").await;
+    let state = read_state(&app, &bot).await;
+    assert_eq!(state["unread_replies"], 3, "{state}");
+
+    let through = |position: &Value| json!({ "action": "through", "position": position });
+    let read = mark(&app, &bot, through(&first)).await;
+    assert_eq!(read.body["bot"]["read_state"]["unread_replies"], 2);
+    let read = mark(&app, &bot, through(&state["latest"]["position"])).await;
+    assert_eq!(read.body["bot"]["read_state"]["unread_replies"], 0);
+
+    let marked = mark(&app, &bot, json!({ "action": "mark_unread" })).await;
+    assert_eq!(
+        marked.body["bot"]["read_state"]["unread_replies"], 1,
+        "a conversation marked unread counts as one reply"
+    );
+    let cleared = mark(&app, &bot, json!({ "action": "mark_read" })).await;
+    assert_eq!(cleared.body["bot"]["read_state"]["unread_replies"], 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

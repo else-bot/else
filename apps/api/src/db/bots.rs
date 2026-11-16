@@ -115,6 +115,10 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
                 SELECT t.id FROM turns t WHERE t.conversation_id = c.id
                 ORDER BY t.turn_no DESC LIMIT 1)
             ORDER BY i.seq DESC LIMIT 1), false) AS latest_turn_read,
+        (SELECT count(*) FROM items u WHERE u.conversation_id = c.id AND u.kind = 'assistant'
+            AND u.seq >= c.read_item_seq
+            AND (u.seq > c.read_item_seq OR length(CAST(u.text AS BLOB)) > c.read_text_bytes))
+            AS unread_count,
         (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued') AS queued_count,
         (SELECT m.created_at FROM items m WHERE m.conversation_id = c.id
             AND m.kind IN ('user', 'assistant') AND NOT m.hidden ORDER BY m.seq DESC LIMIT 1) AS last_message_at,

@@ -257,6 +257,9 @@ pub struct ElseApp {
     connection: Connection,
     caps: Option<Capabilities>,
     bots: Vec<Bot>,
+    /// A bot list arrived since the last connection event. The live stream
+    /// reports a connection before its first list, so `bots` can be stale.
+    listed: bool,
     mention_bots: Arc<bot_mention::MentionRegistry>,
     categories: Vec<Category>,
     default_bot_id: Option<Uuid>,
@@ -359,6 +362,7 @@ impl ElseApp {
             connection: Connection::Connecting,
             caps: None,
             bots: Vec::new(),
+            listed: false,
             mention_bots: Default::default(),
             categories: Vec::new(),
             default_bot_id: None,
@@ -448,6 +452,12 @@ impl ElseApp {
     }
 
     fn apply_live(&mut self, event: LiveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(
+            event,
+            LiveEvent::Connected | LiveEvent::Disconnected(_) | LiveEvent::Unauthorized
+        ) {
+            self.listed = false;
+        }
         match event {
             LiveEvent::Connected => {
                 self.connection = Connection::Connected;
@@ -525,6 +535,7 @@ impl ElseApp {
     fn apply_bots(&mut self, list: BotList, window: &mut Window, cx: &mut Context<Self>) {
         self.default_bot_id = list.default_bot_id;
         self.bots = list.bots;
+        self.listed = true;
         let mention_bots = bot_mention::MentionRegistry::new(&self.bots);
         if *self.mention_bots != mention_bots {
             self.mention_bots = Arc::new(mention_bots);

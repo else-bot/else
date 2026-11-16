@@ -273,6 +273,12 @@ impl ElseApp {
         }
     }
 
+    /// `None` until this connection has listed the bots.
+    pub(crate) fn attention(&self) -> Option<crate::attention::Attention> {
+        (self.listed && self.connected())
+            .then(|| crate::attention::Attention::of(&self.bots, |bot| self.inbox.is_unread(bot)))
+    }
+
     pub(crate) fn notification_scope(&self) -> Uuid {
         self.scope
     }
