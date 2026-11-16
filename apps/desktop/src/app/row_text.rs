@@ -969,23 +969,35 @@ fn soft_line_breaks(source: &str) -> Vec<usize> {
 /// a destination tooltip would repeat the text under the pointer.
 fn shows_its_destination(source: &str, url: &str) -> bool {
     use markdown::mdast::Node;
-    fn visit(node: &Node, url: &str, links: &mut usize, labelled: &mut bool) {
-        if let Node::Link(link) = node
-            && link.url == url
-        {
-            *links += 1;
-            *labelled |= node.to_string() != url;
+    fn definitions<'a>(node: &'a Node, out: &mut HashMap<&'a str, &'a str>) {
+        if let Node::Definition(definition) = node {
+            out.entry(&definition.identifier).or_insert(&definition.url);
         }
         for child in node.children().into_iter().flatten() {
-            visit(child, url, links, labelled);
+            definitions(child, out);
+        }
+    }
+    fn labels(node: &Node, url: &str, defined: &HashMap<&str, &str>, out: &mut Vec<String>) {
+        let destination = match node {
+            Node::Link(link) => Some(link.url.as_str()),
+            Node::LinkReference(link) => defined.get(link.identifier.as_str()).copied(),
+            _ => None,
+        };
+        if destination == Some(url) {
+            out.push(node.to_string());
+        }
+        for child in node.children().into_iter().flatten() {
+            labels(child, url, defined, out);
         }
     }
     let Ok(root) = markdown::to_mdast(source, &markdown::ParseOptions::gfm()) else {
         return false;
     };
-    let (mut links, mut labelled) = (0, false);
-    visit(&root, url, &mut links, &mut labelled);
-    links > 0 && !labelled
+    let mut defined = HashMap::new();
+    definitions(&root, &mut defined);
+    let mut found = Vec::new();
+    labels(&root, url, &defined, &mut found);
+    !found.is_empty() && found.iter().all(|label| label == url)
 }
 
 fn activates_link(event: &ClickEvent) -> bool {
@@ -1076,6 +1088,14 @@ mod tests {
             ),
             ("see https://example.com/b", false),
             ("`https://example.com/a`", false),
+            (
+                "https://example.com/a and [docs][r]\n\n[r]: https://example.com/a",
+                false,
+            ),
+            (
+                "[https://example.com/a][r]\n\n[r]: https://example.com/a",
+                true,
+            ),
         ] {
             assert_eq!(shows_its_destination(source, url), expected, "{source}");
         }

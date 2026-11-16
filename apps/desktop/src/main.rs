@@ -208,6 +208,9 @@ fn main() {
         .with_assets(AppAssets)
         .run(move |cx| {
             cx.set_app_identity(system_notifications::APP_ID, system_notifications::APP_NAME);
+            // The interface is English only, so an RTL system locale must not
+            // mirror arrow keys and submenus around left-to-right text.
+            gpui_kit::base::LayoutDirection::Ltr.set_global(cx);
             gpui_kit::init(cx);
             ui_font::init(cx);
             appearance::init(cx);
