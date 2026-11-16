@@ -479,3 +479,69 @@ async fn creating_a_group_is_a_whatsapp_mutation_with_a_durable_receipt() {
         "a group needs someone besides the owner"
     );
 }
+
+#[tokio::test]
+async fn a_code_scanned_after_its_setup_ended_links_no_account() {
+    let db = TestDb::migrated().await;
+    let phone = Phone::new("33612345678");
+    let m = manager(&db, &phone);
+    let (_, setup) = whatsapp_setup(&db).await;
+    let purpose = Purpose::Setup(setup.id);
+    m.start_pairing(purpose).await.unwrap();
+    until(&m, purpose, |p| matches!(p, Pairing::Code { .. })).await;
+    sqlx::query("UPDATE social_setups SET status='cancelled' WHERE id=?1")
+        .bind(setup.id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    phone.scanned.notify_one();
+    tokio::time::timeout(common::SETTLE, async {
+        while !stores(&db).await.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the rejected device store is deleted");
+    let done = until(&m, purpose, Pairing::finished).await;
+    assert!(
+        matches!(done.pairing, Pairing::Failed { .. }),
+        "linking an ended setup is rejected, got {:?}",
+        done.pairing
+    );
+    let connections: i64 = sqlx::query_scalar("SELECT count(*) FROM social_connections")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(connections, 0, "an ended setup activates nothing");
+    assert!(
+        matches!(m.start_pairing(purpose).await, Err(Error::Inactive)),
+        "an ended setup cannot pair again"
+    );
+}
+
+#[tokio::test]
+async fn a_linked_result_survives_other_pairings_until_its_card_completes() {
+    let db = TestDb::migrated().await;
+    let phone = Phone::new("33612345678");
+    let m = manager(&db, &phone);
+    let (setup, c) = paired(&db, &m, &phone).await;
+    let first = Purpose::Setup(setup.id);
+    let (_, other) = whatsapp_setup(&db).await;
+    m.start_pairing(Purpose::Setup(other.id)).await.unwrap();
+    let read = m.pairing(first, 0).await.unwrap();
+    assert!(
+        matches!(&read.pairing, Pairing::Paired { connection } if connection.id == c.id),
+        "another card starting keeps this card's result, got {:?}",
+        read.pairing
+    );
+    let again = m.start_pairing(first).await.unwrap();
+    assert!(
+        matches!(&again.pairing, Pairing::Paired { connection } if connection.id == c.id),
+        "restarting a linked setup returns its connection, not a new code"
+    );
+    m.stop_pairing(first).await;
+    assert!(
+        matches!(m.pairing(first, 0).await, Err(Error::NotFound)),
+        "completing the card forgets the result"
+    );
+}

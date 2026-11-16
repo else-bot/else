@@ -250,12 +250,12 @@ async fn cancel(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    if let Some(m) = s.socials.as_ref() {
-        m.stop_pairing(Purpose::Setup(id)).await;
-    }
     let setup = store::settle_setup(&s.db, id, None, None)
         .await
         .map_err(error)?;
+    if let Some(m) = s.socials.as_ref() {
+        m.stop_pairing(Purpose::Setup(id)).await;
+    }
     s.scheduler.wake();
     Ok(Json(json!({"setup":setup})))
 }

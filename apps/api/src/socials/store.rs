@@ -76,13 +76,21 @@ pub async fn connection(pool: &SqlitePool, id: Uuid) -> Result<Connection, Error
     .await?
     .ok_or(Error::NotFound)
 }
+/// A device a setup's pairing linked. It becomes a connection only while
+/// that setup is still pending, so a cancelled setup or ended turn never
+/// activates an account.
+#[derive(Debug, Clone, Copy)]
+pub struct Paired {
+    pub device: Uuid,
+    pub setup: Uuid,
+}
 pub async fn create(
     pool: &SqlitePool,
     key: &SecretKey,
     provider: Provider,
     remote: &Identity,
     credential: &Credential,
-    device: Option<Uuid>,
+    paired: Option<Paired>,
     instructions: &str,
 ) -> Result<Connection, Error> {
     if instructions.len() > 8000 || instructions.contains('\0') {
@@ -102,9 +110,20 @@ pub async fn create(
     if existing {
         return Err(Error::Duplicate);
     }
+    if let Some(paired) = paired {
+        let pending: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM social_setups WHERE id=?1 AND status='pending')",
+        )
+        .bind(paired.setup)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !pending {
+            return Err(Error::Inactive);
+        }
+    }
     sqlx::query("INSERT INTO social_connections(id,provider,remote_id,display_name,username,instructions,credential_salt,credential) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)").bind(id).bind(provider).bind(&remote.id).bind(&remote.display_name).bind(&remote.username).bind(instructions).bind(salt).bind(cipher).execute(&mut *tx).await?;
-    if let Some(device) = device {
-        attach_device(&mut tx, device, id).await?;
+    if let Some(paired) = paired {
+        attach_device(&mut tx, paired.device, id).await?;
     }
     tx.commit().await?;
     connection(pool, id).await

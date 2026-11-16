@@ -40,12 +40,16 @@ pub(super) struct Live {
 }
 
 const MAX_PAIRINGS: usize = 4;
+/// Finished pairings are kept for their cards to read; past this many, all
+/// but linked ones are forgotten.
+const MAX_KEPT: usize = 64;
 /// How long a card waits for the next change before asking again.
 pub const POLL: Duration = Duration::from_secs(10);
 
 impl Manager {
-    /// Start pairing for `purpose`, or return the one already running. A
-    /// finished pairing is replaced, which is how the owner gets a new code.
+    /// Start pairing for `purpose`, or return the one already running, or a
+    /// setup's that already linked. Any other finished pairing is replaced,
+    /// which is how the owner gets a new code.
     pub async fn start_pairing(self: &Arc<Self>, purpose: Purpose) -> Result<View, Error> {
         match purpose {
             Purpose::Setup(id) => {
@@ -67,14 +71,26 @@ impl Manager {
         let manager = self.clone();
         self.pairings
             .call(move |pairings| {
-                if let Some(live) = pairings.get(&purpose)
-                    && !live.view.borrow().pairing.finished()
-                {
-                    return Ok(live.view.borrow().clone());
+                if let Some(live) = pairings.get(&purpose) {
+                    let view = live.view.borrow();
+                    let linked = matches!(view.pairing, Pairing::Paired { .. })
+                        && matches!(purpose, Purpose::Setup(_));
+                    if !view.pairing.finished() || linked {
+                        return Ok(view.clone());
+                    }
                 }
-                pairings.retain(|_, live| !live.view.borrow().pairing.finished());
-                if pairings.len() >= MAX_PAIRINGS {
+                let running = pairings
+                    .values()
+                    .filter(|live| !live.view.borrow().pairing.finished())
+                    .count();
+                if running >= MAX_PAIRINGS {
                     return Err(Error::Busy);
+                }
+                if pairings.len() >= MAX_KEPT {
+                    pairings.retain(|_, live| {
+                        let view = live.view.borrow();
+                        !view.pairing.finished() || matches!(view.pairing, Pairing::Paired { .. })
+                    });
                 }
                 let first = View {
                     revision: 1,
@@ -98,6 +114,17 @@ impl Manager {
     /// The pairing's view once its revision passes `after`, or the current
     /// one when [`POLL`] runs out.
     pub async fn pairing(&self, purpose: Purpose, after: u64) -> Result<View, Error> {
+        if let Purpose::Setup(id) = purpose
+            && store::setup(&self.db, id).await?.status != "pending"
+        {
+            self.pairings
+                .call(move |pairings| {
+                    if let Some(live) = pairings.get(&purpose) {
+                        live.stop.cancel();
+                    }
+                })
+                .await;
+        }
         let mut view = self
             .pairings
             .call(move |pairings| pairings.get(&purpose).map(|live| live.view.clone()))
@@ -107,13 +134,16 @@ impl Manager {
         Ok(view.borrow().clone())
     }
 
-    /// Stop a running pairing. Its device store is deleted unless it
-    /// already linked.
+    /// Stop a running pairing, or forget a finished one. A stopped pairing's
+    /// device store is deleted unless it already linked.
     pub async fn stop_pairing(&self, purpose: Purpose) {
         self.pairings
             .call(move |pairings| {
                 if let Some(live) = pairings.get(&purpose) {
                     live.stop.cancel();
+                    if live.view.borrow().pairing.finished() {
+                        pairings.remove(&purpose);
+                    }
                 }
             })
             .await;
@@ -173,14 +203,14 @@ impl Manager {
             let identity = self.transport.pair(&self.db, vault, codes, stop).await?;
             let credential = Credential::Device(key);
             let connection = match purpose {
-                Purpose::Setup(_) => {
+                Purpose::Setup(setup) => {
                     store::create(
                         &self.db,
                         &self.key,
                         Provider::WhatsApp,
                         &identity,
                         &credential,
-                        Some(device),
+                        Some(store::Paired { device, setup }),
                         "",
                     )
                     .await?
