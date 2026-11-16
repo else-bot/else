@@ -3,7 +3,7 @@
 //! store table is one vault space; behaviour mirrors the library's in-memory
 //! reference backend.
 
-use super::vault::{Op, Row, Vault};
+use super::vault::{Change, Op, Row, Vault};
 use crate::socials::types::Error;
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
@@ -17,9 +17,11 @@ use whatsapp_rust::wacore::{
         error::{Result, StoreError},
         traits::{
             AppStateSyncKey, AppSyncStore, DeviceListRecord, DeviceStore, LidPnMappingEntry,
-            MessageSecret, MsgSecretEntry, MsgSecretStore, ProtocolStore, SignalStore,
+            MessageSecret, MsgSecretEntry, MsgSecretStore, PendingInboundKey, PendingInboundLease,
+            PendingInboundMutation, PendingInboundPayload, PendingInboundRecord,
+            PendingInboundRevision, PendingInboundRow, ProtocolStore, SignalStore,
             StoredMessageSecret, TcTokenEntry, merge_msg_secret_expiry,
-            merge_msg_secret_message_ts,
+            merge_msg_secret_message_ts, pending_group_sender,
         },
     },
 };
@@ -44,6 +46,13 @@ const MSG_SECRET: &str = "msg_secret";
 const META: &str = "meta";
 const LATEST_SYNC_KEY: &str = "latest_sync_key";
 const DEVICE: &str = "device";
+/// Decrypted messages the client holds until the receiver records them.
+const PENDING: &str = "pending";
+/// History chunks captured before their receipt, until the receiver
+/// records their messages.
+const HISTORY: &str = "history";
+/// Group senders the client may list for one pending message.
+const GROUP_SENDERS: i64 = 401;
 
 pub struct Backend {
     vault: Vault,
@@ -59,6 +68,7 @@ impl From<Error> for StoreError {
     fn from(error: Error) -> Self {
         match error {
             Error::Crypto => Self::Validation("sealed device state could not be opened".into()),
+            Error::Invalid(message) => Self::Validation(message.into()),
             other => Self::Database(Box::new(other)),
         }
     }
@@ -96,7 +106,49 @@ fn now() -> i64 {
     whatsapp_rust::wacore::time::now_secs()
 }
 
+/// A pending message's key: chat and id first, so a group's sender aliases
+/// for one message share a prefix.
+fn pending_key(chat: &str, sender: &str, id: &str) -> String {
+    join(&[chat, id, sender])
+}
+
+fn revision(value: Option<&[u8]>) -> PendingInboundRevision {
+    value.map_or(
+        PendingInboundRevision::missing(),
+        PendingInboundRevision::for_bytes,
+    )
+}
+
 impl Backend {
+    /// Keep a compressed history chunk until [`Self::history`] hands it to
+    /// the receiver. Capturing the same `id` again replaces it.
+    pub async fn capture_history(
+        &self,
+        id: &str,
+        compressed: &[u8],
+    ) -> std::result::Result<(), Error> {
+        self.vault
+            .put_rows(
+                HISTORY,
+                &[Row {
+                    key: id,
+                    value: compressed,
+                    stamp: now(),
+                    flag: false,
+                }],
+            )
+            .await
+    }
+
+    /// Captured history chunks, oldest key first.
+    pub async fn history(&self) -> std::result::Result<Vec<(String, Vec<u8>)>, Error> {
+        self.vault.scan(HISTORY, "").await
+    }
+
+    pub async fn forget_history(&self, id: &str) -> std::result::Result<(), Error> {
+        self.vault.delete(HISTORY, &[id.to_owned()]).await
+    }
+
     async fn get_json<T: DeserializeOwned>(&self, space: &str, key: &str) -> Result<Option<T>> {
         self.vault
             .get(space, key)
@@ -716,6 +768,178 @@ impl ProtocolStore for Backend {
     async fn delete_expired_sent_messages(&self, cutoff_timestamp: i64) -> Result<u32> {
         Ok(self.vault.expire(SENT_MSG, cutoff_timestamp).await?)
     }
+
+    async fn store_pending_inbound(
+        &self,
+        chat: &str,
+        sender: &str,
+        id: &str,
+        message: &[u8],
+    ) -> Result<()> {
+        self.store_pending_inbound_batch(&[PendingInboundRow {
+            chat,
+            sender,
+            id,
+            message,
+        }])
+        .await
+    }
+
+    async fn store_pending_inbound_batch(&self, rows: &[PendingInboundRow<'_>]) -> Result<()> {
+        let keys: Vec<String> = rows
+            .iter()
+            .map(|r| pending_key(r.chat, r.sender, r.id))
+            .collect();
+        let stamp = now();
+        let rows: Vec<Row<'_>> = rows
+            .iter()
+            .zip(&keys)
+            .map(|(r, key)| Row {
+                key,
+                value: r.message,
+                stamp,
+                flag: false,
+            })
+            .collect();
+        Ok(self.vault.put_rows(PENDING, &rows).await?)
+    }
+
+    async fn get_pending_inbound(
+        &self,
+        chat: &str,
+        sender: &str,
+        id: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .vault
+            .get(PENDING, &pending_key(chat, sender, id))
+            .await?)
+    }
+
+    async fn delete_pending_inbound(&self, chat: &str, sender: &str, id: &str) -> Result<()> {
+        self.delete_one(PENDING, &pending_key(chat, sender, id))
+            .await
+    }
+
+    async fn delete_pending_inbound_batch(&self, keys: &[PendingInboundKey<'_>]) -> Result<()> {
+        let keys: Vec<String> = keys
+            .iter()
+            .map(|k| pending_key(k.chat, k.sender, k.id))
+            .collect();
+        Ok(self.vault.delete(PENDING, &keys).await?)
+    }
+
+    async fn delete_expired_pending_inbound(&self, cutoff_timestamp: i64) -> Result<u32> {
+        Ok(self.vault.expire(PENDING, cutoff_timestamp).await?)
+    }
+
+    async fn read_pending_inbound_bounded(
+        &self,
+        key: PendingInboundKey<'_>,
+        max_bytes: usize,
+        lease: PendingInboundLease,
+    ) -> Result<Option<PendingInboundRecord>> {
+        let value = self
+            .vault
+            .get_bounded(
+                PENDING,
+                &pending_key(key.chat, key.sender, key.id),
+                max_bytes,
+            )
+            .await?;
+        Ok(value.map(|bytes| PendingInboundRecord::new(bytes, lease)))
+    }
+
+    async fn read_pending_inbound_group_bounded(
+        &self,
+        key: PendingInboundKey<'_>,
+        max_bytes: usize,
+        lease: PendingInboundLease,
+    ) -> Result<Option<(String, PendingInboundRecord)>> {
+        let prefix = format!("{}\0", join(&[key.chat, key.id]));
+        let mut refused = None;
+        let picked = self
+            .vault
+            .pick_bounded(PENDING, &prefix, GROUP_SENDERS, max_bytes, |senders| {
+                let mut spellings = senders.iter().map(|s| Some(*s));
+                pending_group_sender(&mut spellings, key.sender).map_err(|error| {
+                    refused = Some(error);
+                    Error::Invalid("pending group sender")
+                })
+            })
+            .await;
+        match (picked, refused) {
+            (Err(_), Some(error)) => Err(error),
+            (picked, _) => Ok(
+                picked?.map(|(sender, bytes)| (sender, PendingInboundRecord::new(bytes, lease)))
+            ),
+        }
+    }
+
+    async fn replace_pending_inbound_if(
+        &self,
+        key: PendingInboundKey<'_>,
+        expected: PendingInboundRevision,
+        replacement: PendingInboundPayload,
+        max_bytes: usize,
+    ) -> Result<PendingInboundMutation> {
+        if replacement.bytes().len() > max_bytes {
+            return Err(StoreError::Validation(format!(
+                "pending inbound length {} exceeds limit {max_bytes}",
+                replacement.bytes().len()
+            )));
+        }
+        let installed = replacement.revision();
+        let stamp = now();
+        Ok(self
+            .vault
+            .update(
+                PENDING,
+                &pending_key(key.chat, key.sender, key.id),
+                max_bytes,
+                |current| {
+                    let current = revision(current);
+                    if current == installed {
+                        (Change::Keep, PendingInboundMutation::Applied)
+                    } else if current != expected {
+                        (Change::Keep, PendingInboundMutation::Conflict)
+                    } else {
+                        let value = replacement.bytes().to_vec();
+                        (
+                            Change::Put { value, stamp },
+                            PendingInboundMutation::Applied,
+                        )
+                    }
+                },
+            )
+            .await?)
+    }
+
+    async fn delete_pending_inbound_if(
+        &self,
+        key: PendingInboundKey<'_>,
+        expected: PendingInboundRevision,
+        max_bytes: usize,
+        _lease: PendingInboundLease,
+    ) -> Result<PendingInboundMutation> {
+        Ok(self
+            .vault
+            .update(
+                PENDING,
+                &pending_key(key.chat, key.sender, key.id),
+                max_bytes,
+                |current| {
+                    if revision(current) != expected {
+                        (Change::Keep, PendingInboundMutation::Conflict)
+                    } else if current.is_none() {
+                        (Change::Keep, PendingInboundMutation::Applied)
+                    } else {
+                        (Change::Delete, PendingInboundMutation::Applied)
+                    }
+                },
+            )
+            .await?)
+    }
 }
 
 /// A message secret row: the secret, then the parent message time.
@@ -1073,5 +1297,191 @@ mod tests {
         for value in values {
             assert!(!value.windows(marker.len()).any(|w| w == marker));
         }
+    }
+
+    fn lease() -> PendingInboundLease {
+        PendingInboundLease::new(Arc::new(()))
+    }
+
+    fn payload(bytes: &'static [u8]) -> PendingInboundPayload {
+        PendingInboundPayload::new(Bytes::from_static(bytes), lease())
+    }
+
+    const KEY: PendingInboundKey<'static> = PendingInboundKey {
+        chat: "1@g.us",
+        sender: "2:3@s.whatsapp.net",
+        id: "M1",
+    };
+
+    #[tokio::test]
+    async fn a_pending_message_is_kept_until_deleted_and_expires_by_age() {
+        let db = pool().await;
+        let device = store::new_device(&db).await.unwrap();
+        let b = backend(&db, device, 7).await;
+        b.store_pending_inbound("1@g.us", "2@s.whatsapp.net", "M1", b"one")
+            .await
+            .unwrap();
+        b.store_pending_inbound("1@g.us", "2@s.whatsapp.net", "M2", b"two")
+            .await
+            .unwrap();
+        assert_eq!(
+            b.get_pending_inbound("1@g.us", "2@s.whatsapp.net", "M1")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(&b"one"[..])
+        );
+        b.delete_pending_inbound("1@g.us", "2@s.whatsapp.net", "M1")
+            .await
+            .unwrap();
+        assert!(
+            b.get_pending_inbound("1@g.us", "2@s.whatsapp.net", "M1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            b.delete_expired_pending_inbound(now() - 60).await.unwrap(),
+            0
+        );
+        assert_eq!(
+            b.delete_expired_pending_inbound(now() + 60).await.unwrap(),
+            1
+        );
+        assert!(
+            b.get_pending_inbound("1@g.us", "2@s.whatsapp.net", "M2")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pending_row_changes_only_from_the_revision_its_owner_saw() {
+        let db = pool().await;
+        let device = store::new_device(&db).await.unwrap();
+        let b = backend(&db, device, 7).await;
+        let missing = PendingInboundRevision::missing();
+        assert_eq!(
+            b.delete_pending_inbound_if(KEY, missing, 16, lease())
+                .await
+                .unwrap(),
+            PendingInboundMutation::Applied,
+            "deleting an absent row that was expected absent is a no-op"
+        );
+        assert_eq!(
+            b.replace_pending_inbound_if(KEY, missing, payload(b"first"), 16)
+                .await
+                .unwrap(),
+            PendingInboundMutation::Applied
+        );
+        assert_eq!(
+            b.replace_pending_inbound_if(KEY, missing, payload(b"first"), 16)
+                .await
+                .unwrap(),
+            PendingInboundMutation::Applied,
+            "installing the same bytes again is idempotent"
+        );
+        assert_eq!(
+            b.replace_pending_inbound_if(KEY, missing, payload(b"other"), 16)
+                .await
+                .unwrap(),
+            PendingInboundMutation::Conflict,
+            "a stale expected revision is refused"
+        );
+        let stored = b
+            .read_pending_inbound_bounded(KEY, 16, lease())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.bytes(), b"first");
+        assert!(
+            b.read_pending_inbound_bounded(KEY, 2, lease())
+                .await
+                .is_err(),
+            "a row over the bound is an error, not absence"
+        );
+        assert_eq!(
+            b.delete_pending_inbound_if(KEY, missing, 16, lease())
+                .await
+                .unwrap(),
+            PendingInboundMutation::Conflict,
+            "a present row is not deleted as if absent"
+        );
+        assert_eq!(
+            b.delete_pending_inbound_if(KEY, stored.revision(), 16, lease())
+                .await
+                .unwrap(),
+            PendingInboundMutation::Applied
+        );
+        assert!(
+            b.read_pending_inbound_bounded(KEY, 16, lease())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_group_message_is_found_by_its_senders_device_alias() {
+        let db = pool().await;
+        let device = store::new_device(&db).await.unwrap();
+        let b = backend(&db, device, 7).await;
+        b.replace_pending_inbound_if(KEY, PendingInboundRevision::missing(), payload(b"hi"), 16)
+            .await
+            .unwrap();
+        let alias = PendingInboundKey {
+            sender: "2@s.whatsapp.net",
+            ..KEY
+        };
+        let (sender, record) = b
+            .read_pending_inbound_group_bounded(alias, 16, lease())
+            .await
+            .unwrap()
+            .expect("the device spelling matches its user");
+        assert_eq!(sender, KEY.sender);
+        assert_eq!(record.bytes(), b"hi");
+        let other = PendingInboundKey {
+            sender: "9@s.whatsapp.net",
+            ..KEY
+        };
+        assert!(
+            b.read_pending_inbound_group_bounded(other, 16, lease())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        b.replace_pending_inbound_if(
+            PendingInboundKey {
+                sender: "2:4@s.whatsapp.net",
+                ..KEY
+            },
+            PendingInboundRevision::missing(),
+            payload(b"again"),
+            16,
+        )
+        .await
+        .unwrap();
+        assert!(
+            b.read_pending_inbound_group_bounded(alias, 16, lease())
+                .await
+                .is_err(),
+            "two device spellings of one sender are ambiguous"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_captured_history_chunk_stays_until_forgotten() {
+        let db = pool().await;
+        let device = store::new_device(&db).await.unwrap();
+        let b = backend(&db, device, 7).await;
+        b.capture_history("H1", b"zlib").await.unwrap();
+        b.capture_history("H1", b"zlib").await.unwrap();
+        assert_eq!(
+            b.history().await.unwrap(),
+            vec![("H1".into(), b"zlib".to_vec())]
+        );
+        b.forget_history("H1").await.unwrap();
+        assert!(b.history().await.unwrap().is_empty());
     }
 }

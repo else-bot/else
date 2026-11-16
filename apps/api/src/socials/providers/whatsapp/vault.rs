@@ -19,8 +19,6 @@ pub struct Vault {
     cipher: XChaCha20Poly1305,
 }
 
-/// One row to write: its key, value, and the plaintext `stamp` and `flag`
-/// the client sweeps and filters on.
 /// One step of an atomic [`Vault::write`].
 pub enum Op<'a> {
     Put(&'a str, &'a Row<'a>),
@@ -29,12 +27,24 @@ pub enum Op<'a> {
     Flag(&'a str, &'a str, bool),
 }
 
+/// One row to write: its key, value, and the plaintext `stamp` and `flag`
+/// the client sweeps and filters on.
 pub struct Row<'a> {
     pub key: &'a str,
     pub value: &'a [u8],
     pub stamp: i64,
     pub flag: bool,
 }
+
+/// What [`Vault::update`] does to the row it read.
+pub enum Change {
+    Keep,
+    Put { value: Vec<u8>, stamp: i64 },
+    Delete,
+}
+
+/// Sealing adds the nonce and the authentication tag to every value.
+const OVERHEAD: usize = NONCE + 16;
 
 impl Vault {
     pub fn new(pool: SqlitePool, store: Uuid, key: &DeviceKey) -> Self {
@@ -199,6 +209,141 @@ impl Vault {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// The value at `key` in an open transaction, refusing one longer than
+    /// `max` bytes before reading it.
+    async fn read_bounded(
+        &self,
+        tx: &mut sqlx::SqliteConnection,
+        space: &str,
+        key: &str,
+        max: usize,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let length: Option<i64> = sqlx::query_scalar(
+            "SELECT length(value) FROM social_device_state WHERE store_id=?1 AND space=?2 AND key=?3",
+        )
+        .bind(self.store)
+        .bind(space)
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(length) = length else {
+            return Ok(None);
+        };
+        if usize::try_from(length).map_or(true, |l| l > max.saturating_add(OVERHEAD)) {
+            return Err(Error::Invalid(
+                "A stored WhatsApp row is larger than its bound.",
+            ));
+        }
+        let sealed: Vec<u8> = sqlx::query_scalar(
+            "SELECT value FROM social_device_state WHERE store_id=?1 AND space=?2 AND key=?3",
+        )
+        .bind(self.store)
+        .bind(space)
+        .bind(key)
+        .fetch_one(&mut *tx)
+        .await?;
+        let value = self.open(space, key, &sealed)?;
+        if value.len() > max {
+            return Err(Error::Invalid(
+                "A stored WhatsApp row is larger than its bound.",
+            ));
+        }
+        Ok(Some(value))
+    }
+
+    /// The value at `key`, refusing one longer than `max` bytes.
+    pub async fn get_bounded(
+        &self,
+        space: &str,
+        key: &str,
+        max: usize,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let mut tx = self.pool.begin().await?;
+        let value = self.read_bounded(&mut tx, space, key, max).await?;
+        tx.commit().await?;
+        Ok(value)
+    }
+
+    /// Read the row at `key`, refusing one longer than `max` bytes, and apply
+    /// the change `decide` picks for it in the same transaction.
+    pub async fn update<T>(
+        &self,
+        space: &str,
+        key: &str,
+        max: usize,
+        decide: impl FnOnce(Option<&[u8]>) -> (Change, T),
+    ) -> Result<T, Error> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let current = self.read_bounded(&mut tx, space, key, max).await?;
+        let (change, out) = decide(current.as_deref());
+        match change {
+            Change::Keep => {}
+            Change::Put { value, stamp } => {
+                sqlx::query(
+                    "INSERT INTO social_device_state(store_id,space,key,stamp,flag,value) VALUES(?1,?2,?3,?4,0,?5)
+                     ON CONFLICT(store_id,space,key) DO UPDATE SET stamp=excluded.stamp,flag=0,value=excluded.value",
+                )
+                .bind(self.store)
+                .bind(space)
+                .bind(key)
+                .bind(stamp)
+                .bind(self.seal(space, key, &value)?)
+                .execute(&mut *tx)
+                .await?;
+            }
+            Change::Delete => {
+                sqlx::query(
+                    "DELETE FROM social_device_state WHERE store_id=?1 AND space=?2 AND key=?3",
+                )
+                .bind(self.store)
+                .bind(space)
+                .bind(key)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(out)
+    }
+
+    /// In one snapshot, list up to `limit` keys starting with `prefix`, let
+    /// `choose` pick one by its suffix, and read that row bounded by `max`.
+    pub async fn pick_bounded(
+        &self,
+        space: &str,
+        prefix: &str,
+        limit: i64,
+        max: usize,
+        choose: impl FnOnce(&[&str]) -> Result<Option<String>, Error>,
+    ) -> Result<Option<(String, Vec<u8>)>, Error> {
+        let mut tx = self.pool.begin().await?;
+        let keys: Vec<String> = sqlx::query_scalar(
+            "SELECT key FROM social_device_state WHERE store_id=?1 AND space=?2 AND substr(CAST(key AS BLOB),1,length(CAST(?3 AS BLOB)))=CAST(?3 AS BLOB) ORDER BY key LIMIT ?4",
+        )
+        .bind(self.store)
+        .bind(space)
+        .bind(prefix)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+        let suffixes: Vec<&str> = keys
+            .iter()
+            .filter_map(|key| key.strip_prefix(prefix))
+            .collect();
+        let Some(suffix) = choose(&suffixes)? else {
+            return Ok(None);
+        };
+        let key = format!("{prefix}{suffix}");
+        let value = self
+            .read_bounded(&mut tx, space, &key, max)
+            .await?
+            .ok_or(Error::Invalid(
+                "A stored WhatsApp row disappeared while it was read.",
+            ))?;
+        tx.commit().await?;
+        Ok(Some((suffix, value)))
     }
 
     /// Delete and return the row at `key`, so only one caller takes it.

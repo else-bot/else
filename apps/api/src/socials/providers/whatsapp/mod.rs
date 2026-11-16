@@ -15,15 +15,16 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, Notify, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use whatsapp_rust::{
-    Jid, MessageId, MessageRef,
+    HistorySyncCaptureHook, InboundDurabilityHook, Jid, MessageId, MessageRef,
     http::{HttpClient, HttpRequest, HttpResponse},
     prelude::{Bot, BotHandle, Client, EditRequest, Event, TokioRuntime},
     transport::{Connector, TokioWebSocketTransportFactory},
     wacore::proto_helpers::{MessageBuilderExt, MessageExt, build_quote_context},
+    wacore::types::events::InboundMessage,
     wacore_binary::JidExt,
     waproto::whatsapp as wa,
 };
@@ -241,17 +242,30 @@ fn http() -> Result<Http, Error> {
         .map_err(|_| Error::Platform)
 }
 
-/// Start a client on `backend`. Its events arrive on the returned channel;
-/// a full channel holds the client back rather than dropping events.
+/// The largest history chunk the receiver inflates.
+const MAX_HISTORY: u64 = 128 << 20;
+
+/// Start a client on `backend`. Messages reach `inbound` before WhatsApp
+/// hears they arrived, and history chunks are kept in the device store
+/// before their receipt, waking `captured`. The returned events are
+/// observations only: the client may drop them under load.
 async fn start(
     backend: Arc<backend::Backend>,
+    inbound: Arc<dyn InboundDurabilityHook>,
+    captured: Arc<Notify>,
 ) -> Result<(BotHandle, mpsc::Receiver<Arc<Event>>), Error> {
     let (tx, rx) = mpsc::channel(64);
+    let capture = Arc::new(Capture {
+        backend: backend.clone(),
+        captured,
+    });
     let bot = Bot::builder()
         .with_backend_arc(backend)
         .with_http_client(http()?)
         .with_transport_factory(TokioWebSocketTransportFactory::new().with_connector(connector()?))
         .with_runtime(TokioRuntime)
+        .with_inbound_durability_hook_arc(inbound)
+        .with_history_sync_capture_hook_arc(capture)
         .on_event(move |event, _client| {
             let tx = tx.clone();
             async move {
@@ -267,6 +281,212 @@ async fn start(
     Ok((bot.spawn(), rx))
 }
 
+/// Keeps each history chunk in the device store before its receipt; the
+/// listener records and then forgets it.
+struct Capture {
+    backend: Arc<backend::Backend>,
+    captured: Arc<Notify>,
+}
+
+#[whatsapp_rust::async_trait]
+impl HistorySyncCaptureHook for Capture {
+    async fn on_history_sync(
+        &self,
+        _client: Arc<Client>,
+        message_id: &str,
+        _sync_type: Option<wa::message::HistorySyncType>,
+        compressed: &[u8],
+    ) -> whatsapp_rust::anyhow::Result<()> {
+        self.backend
+            .capture_history(message_id, compressed)
+            .await
+            .map_err(whatsapp_rust::anyhow::Error::new)?;
+        self.captured.notify_one();
+        Ok(())
+    }
+}
+
+/// Refuses messages while a device links, so WhatsApp keeps them unacked
+/// and the client redelivers them to the connection's listener.
+struct Refuse;
+
+#[whatsapp_rust::async_trait]
+impl InboundDurabilityHook for Refuse {
+    async fn on_messages(
+        &self,
+        _client: Arc<Client>,
+        _batch: &[InboundMessage],
+    ) -> whatsapp_rust::anyhow::Result<()> {
+        Err(whatsapp_rust::anyhow::anyhow!(
+            "the device is still linking"
+        ))
+    }
+}
+
+/// Hands messages to the connection's receiver and returns once each is
+/// recorded, so WhatsApp hears a message arrived only after it is stored.
+struct Inbound {
+    events: mpsc::Sender<Envelope>,
+    stop: CancellationToken,
+    names: Mutex<std::collections::HashMap<String, String>>,
+}
+
+impl Inbound {
+    async fn deliver(&self, batch: Vec<Incoming>) -> Result<(), Error> {
+        for incoming in batch {
+            let (ack, acked) = tokio::sync::oneshot::channel();
+            let envelope = Envelope {
+                incoming,
+                next_offset: 0,
+                ack,
+            };
+            tokio::select! {
+                _ = self.stop.cancelled() => return Err(Error::Inactive),
+                sent = self.events.send(envelope) => sent.map_err(|_| Error::Inactive)?,
+            }
+            tokio::select! {
+                _ = self.stop.cancelled() => return Err(Error::Inactive),
+                acked = acked => acked.map_err(|_| Error::Inactive)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// A group's subject, looked up once per chat.
+    async fn group_name(&self, client: &Client, chat: &Jid) -> Option<String> {
+        let key = chat.to_non_ad().to_string();
+        if let Some(name) = self.names.lock().await.get(&key) {
+            return Some(name.clone());
+        }
+        let meta = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.groups().fetch_metadata(chat),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        let name = meta.subject.unwrap_or_default();
+        self.names.lock().await.insert(key, name.clone());
+        Some(name)
+    }
+}
+
+#[whatsapp_rust::async_trait]
+impl InboundDurabilityHook for Inbound {
+    async fn on_messages(
+        &self,
+        client: Arc<Client>,
+        batch: &[InboundMessage],
+    ) -> whatsapp_rust::anyhow::Result<()> {
+        let own = own_ids(&client);
+        let mut seen = Vec::new();
+        for m in batch {
+            let source = &m.info.source;
+            let name = if source.chat.is_group() {
+                self.group_name(&client, &source.chat).await
+            } else if source.is_from_me {
+                None
+            } else {
+                Some(m.info.push_name.to_string())
+            };
+            seen.extend(incoming(
+                &own,
+                Seen {
+                    chat: &source.chat,
+                    sender: &source.sender,
+                    id: m.info.id.as_str(),
+                    name: name.as_deref(),
+                    message: &m.message,
+                    from_me: source.is_from_me,
+                    replay: false,
+                },
+            ));
+        }
+        self.deliver(seen)
+            .await
+            .map_err(whatsapp_rust::anyhow::Error::new)
+    }
+}
+
+/// The messages of one history chunk, oldest first in each chat.
+fn history(own: &[String], client: &Client, history: &wa::HistorySync) -> Vec<Incoming> {
+    let mut batch = Vec::new();
+    for conversation in &history.conversations {
+        let Ok(chat) = conversation.id.parse::<Jid>() else {
+            continue;
+        };
+        let name = conversation
+            .name
+            .as_deref()
+            .or(conversation.display_name.as_deref());
+        let mut messages: Vec<_> = conversation
+            .messages
+            .iter()
+            .filter_map(|m| m.message.as_option())
+            .collect();
+        messages.sort_by_key(|m| m.message_timestamp.unwrap_or_default());
+        for info in messages {
+            let key = info.key.as_option();
+            let (Some(id), Some(message)) =
+                (key.and_then(|k| k.id.as_deref()), info.message.as_option())
+            else {
+                continue;
+            };
+            let from_me = key.and_then(|k| k.from_me).unwrap_or(false);
+            let sender = key
+                .and_then(|k| k.participant.as_deref())
+                .and_then(|p| p.parse::<Jid>().ok())
+                .or_else(|| from_me.then(|| client.pn()).flatten())
+                .unwrap_or_else(|| chat.clone());
+            batch.extend(incoming(
+                own,
+                Seen {
+                    chat: &chat,
+                    sender: &sender,
+                    id,
+                    name,
+                    message,
+                    from_me,
+                    replay: true,
+                },
+            ));
+        }
+    }
+    batch
+}
+
+/// Record every captured history chunk, then forget it. A chunk that does
+/// not decode is dropped, since it never will.
+async fn replay_history(
+    backend: &backend::Backend,
+    client: &Client,
+    inbound: &Inbound,
+) -> Result<(), Error> {
+    for (id, compressed) in backend.history().await? {
+        let decoded = tokio::task::spawn_blocking(move || {
+            whatsapp_rust::wacore_binary::zlib_pool::decompress_zlib_pooled(
+                &compressed,
+                MAX_HISTORY,
+            )
+            .ok()
+            .and_then(|raw| whatsapp_rust::waproto::codec::history_sync_decode(&raw).ok())
+        })
+        .await
+        .ok()
+        .flatten();
+        match decoded {
+            Some(chunk) => {
+                inbound
+                    .deliver(history(&own_ids(client), client, &chunk))
+                    .await?
+            }
+            None => tracing::warn!("dropped a WhatsApp history chunk that did not decode"),
+        }
+        backend.forget_history(&id).await?;
+    }
+    Ok(())
+}
+
 /// Link a new device into `vault`, reporting codes on `view`.
 pub async fn pair(
     db: SqlitePool,
@@ -275,7 +495,12 @@ pub async fn pair(
     stop: CancellationToken,
 ) -> Result<Identity, Error> {
     let link = Link::new(db, Uuid::nil(), vault);
-    let (handle, mut events) = start(link.backend.clone()).await?;
+    let (handle, mut events) = start(
+        link.backend.clone(),
+        Arc::new(Refuse),
+        Arc::new(Notify::new()),
+    )
+    .await?;
     let mut stage = Stage::Connecting;
     let deadline = tokio::time::sleep(CONNECT_TIMEOUT);
     tokio::pin!(deadline);
@@ -571,124 +796,41 @@ pub async fn listen(
     events: mpsc::Sender<Envelope>,
     stop: CancellationToken,
 ) -> Result<(), Error> {
-    let (handle, mut inbox) = start(link.backend.clone()).await?;
+    let inbound = Arc::new(Inbound {
+        events,
+        stop: stop.child_token(),
+        names: Mutex::default(),
+    });
+    let captured = Arc::new(Notify::new());
+    let (handle, mut observed) =
+        start(link.backend.clone(), inbound.clone(), captured.clone()).await?;
     let client = handle.client();
-    let mut names: std::collections::HashMap<String, String> = Default::default();
+    // History captured before a restart, or while the device linked.
+    captured.notify_one();
     let result = loop {
         let event = tokio::select! {
             _ = stop.cancelled() => break Ok(()),
-            event = inbox.recv() => match event {
+            () = captured.notified() => {
+                if let Err(error) = replay_history(&link.backend, &client, &inbound).await {
+                    break if stop.is_cancelled() { Ok(()) } else { Err(error) };
+                }
+                continue;
+            }
+            event = observed.recv() => match event {
                 Some(event) => event,
                 None => break Err(Error::Platform),
             },
         };
-        let mut batch = Vec::new();
         match &*event {
             Event::Connected(_) => {
                 link.client.send_replace(Some(client.clone()));
             }
             Event::PairingQrCode(_) | Event::LoggedOut(_) => break Err(Error::SignedOut),
             Event::StreamReplaced(_) => break Err(Error::ReceiverConflict),
-            Event::Messages(messages) => {
-                let own = own_ids(&client);
-                for m in messages.messages.iter() {
-                    let source = &m.info.source;
-                    let chat = source.chat.to_non_ad().to_string();
-                    let name = if source.chat.is_group() {
-                        if !names.contains_key(&chat)
-                            && let Ok(Ok(meta)) = tokio::time::timeout(
-                                Duration::from_secs(10),
-                                client.groups().fetch_metadata(&source.chat),
-                            )
-                            .await
-                        {
-                            names.insert(chat.clone(), meta.subject.unwrap_or_default());
-                        }
-                        names.get(&chat).cloned()
-                    } else if source.is_from_me {
-                        None
-                    } else {
-                        Some(m.info.push_name.to_string())
-                    };
-                    batch.extend(incoming(
-                        &own,
-                        Seen {
-                            chat: &source.chat,
-                            sender: &source.sender,
-                            id: m.info.id.as_str(),
-                            name: name.as_deref(),
-                            message: &m.message,
-                            from_me: source.is_from_me,
-                            replay: false,
-                        },
-                    ));
-                }
-            }
-            Event::HistorySync(sync) => {
-                let own = own_ids(&client);
-                if let Some(history) = sync.get() {
-                    for conversation in &history.conversations {
-                        let Ok(chat) = conversation.id.parse::<Jid>() else {
-                            continue;
-                        };
-                        let name = conversation
-                            .name
-                            .as_deref()
-                            .or(conversation.display_name.as_deref());
-                        let mut messages: Vec<_> = conversation
-                            .messages
-                            .iter()
-                            .filter_map(|m| m.message.as_option())
-                            .collect();
-                        messages.sort_by_key(|m| m.message_timestamp.unwrap_or_default());
-                        for info in messages {
-                            let key = info.key.as_option();
-                            let (Some(id), Some(message)) =
-                                (key.and_then(|k| k.id.as_deref()), info.message.as_option())
-                            else {
-                                continue;
-                            };
-                            let from_me = key.and_then(|k| k.from_me).unwrap_or(false);
-                            let sender = key
-                                .and_then(|k| k.participant.as_deref())
-                                .and_then(|p| p.parse::<Jid>().ok())
-                                .or_else(|| from_me.then(|| client.pn()).flatten())
-                                .unwrap_or_else(|| chat.clone());
-                            batch.extend(incoming(
-                                &own,
-                                Seen {
-                                    chat: &chat,
-                                    sender: &sender,
-                                    id,
-                                    name,
-                                    message,
-                                    from_me,
-                                    replay: true,
-                                },
-                            ));
-                        }
-                    }
-                }
-            }
             _ => {}
         }
-        for incoming in batch {
-            let (ack, acked) = tokio::sync::oneshot::channel();
-            let envelope = Envelope {
-                incoming,
-                next_offset: 0,
-                ack,
-            };
-            tokio::select! {
-                _ = stop.cancelled() => break,
-                sent = events.send(envelope) => if sent.is_err() { break },
-            }
-            tokio::select! {
-                _ = stop.cancelled() => break,
-                _ = acked => {},
-            }
-        }
     };
+    inbound.stop.cancel();
     link.client.send_replace(None);
     let _ = handle.shutdown().await;
     result
