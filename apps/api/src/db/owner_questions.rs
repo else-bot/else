@@ -439,6 +439,10 @@ pub async fn gate_host(
         .ok_or(RequestError::NotRunning)?;
     let scope = scope(&mut tx, turn_id).await?;
     let reach = reach(&mut tx, turn_id, scope).await?;
+    let standing_allowed = spec
+        .approval
+        .as_ref()
+        .is_none_or(|a| a.action.standing_allowed());
     let target = spec
         .approval
         .as_ref()
@@ -453,7 +457,7 @@ pub async fn gate_host(
             }
         }
     }
-    if spec.kind == Kind::Destructive {
+    if spec.kind == Kind::Destructive && standing_allowed {
         let standing = match scope {
             Scope::Bot if has_permission(&mut tx, caller.bot_id, DESTRUCTIVE_SCOPE).await? => {
                 Some(Standing::Bot)
@@ -506,6 +510,7 @@ pub async fn gate_host(
         return Ok(Gate::Run { standing: None });
     }
     let offer = match (scope, &target) {
+        _ if !standing_allowed => None,
         (_, Some(target)) => Some(target.standing()),
         (Scope::Bot, None) if host => None,
         _ => scope.offer(),
