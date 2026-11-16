@@ -1316,6 +1316,7 @@ pub async fn recover_after_restart(pool: &SqlitePool) -> Result<(u64, u64), sqlx
     )
     .fetch_all(&mut *tx)
     .await?;
+    crate::db::stop::park_unwound(&mut tx, None).await?;
     let uncertain: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "UPDATE turns SET status = 'uncertain', effect_uncertain = true,
              error_code = 'api_restarted',
@@ -1367,6 +1368,15 @@ pub async fn settle_orphans(pool: &SqlitePool, live: &[Uuid]) -> Result<u64, sql
             .execute(&mut *tx)
             .await?;
         crate::db::delegations::lock_targets_of_root(&mut tx, turn_id).await?;
+        if !crate::db::stop::park_unwound(&mut tx, Some(turn_id))
+            .await?
+            .is_empty()
+        {
+            crate::db::stop::settle(&mut tx, bot_id).await?;
+            tx.commit().await?;
+            settled += 1;
+            continue;
+        }
         let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE turns SET
                  status = CASE WHEN status = 'preparing' THEN 'failed' ELSE 'uncertain' END,

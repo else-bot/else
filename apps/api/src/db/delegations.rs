@@ -709,7 +709,8 @@ async fn end_child_turn(
     .bind(message)
     .fetch_optional(&mut *conn)
     .await?;
-    if ended.is_none() {
+    // An owner's Stop of its attempt alone becomes a full cancel.
+    if ended.is_none() && !crate::db::stop::end_all(conn, turn, code, message).await? {
         return Ok(false);
     }
     events::turn_changed(conn, target, turn).await?;

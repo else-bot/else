@@ -232,7 +232,7 @@ async fn a_status_that_cannot_be_read_never_counts_as_the_job_finishing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_wait_survives_a_restart_and_the_owners_stop() {
+async fn a_wait_survives_a_restart_during_and_after_the_owners_stop() {
     let (app, _) = harness().await;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
@@ -242,12 +242,21 @@ async fn a_wait_survives_a_restart_and_the_owners_stop() {
     text(&tool(&app, &token, "mcp_install", install(&state)).await);
     text(&tool(&app, &token, "mcp_wait", wait_args()).await);
     settle(&app, turn, "waiting").await;
+    // A restart lands while the owner's Stop unwinds a reply that carries
+    // this wait: recovery parks the turn on it instead of cancelling it.
+    sqlx::query("UPDATE turns SET status = 'cancelling', error_code = 'stopped' WHERE id = ?1")
+        .bind(turn)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(wait_row(&app, turn).await.0, "pending");
 
     let app = app.restart().await;
     assert_eq!(
         app.wait_turn(&turn.to_string(), &["waiting"]).await,
         "waiting"
     );
+    assert_eq!(wait_row(&app, turn).await.0, "pending");
     let stopped = app
         .owner(
             "POST",

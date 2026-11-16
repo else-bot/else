@@ -269,17 +269,18 @@ pub async fn stop_by_owner(
     }))
 }
 
-/// Withdraw every pending wait of `bot_id`, as its deletion does.
-pub async fn withdraw_for_bot(
+/// Withdraw the pending waits of `turn_id`, whose turn ends without a
+/// status change that the trigger would see.
+pub async fn withdraw_for_turn(
     conn: &mut SqliteConnection,
-    bot_id: Uuid,
+    turn_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE computer_job_waits SET status = 'cancelled',
              settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE bot_id = ?1 AND status = 'pending'",
+         WHERE turn_id = ?1 AND status = 'pending'",
     )
-    .bind(bot_id)
+    .bind(turn_id)
     .execute(&mut *conn)
     .await?;
     Ok(())

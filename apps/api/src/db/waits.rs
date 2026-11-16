@@ -49,7 +49,8 @@ pub enum StopError {
 
 /// The owner stops `wait_id` of `bot_id`. The bot receives the stop as that
 /// wait's outcome; a delegated task's sender reads it as cancelled by the
-/// owner. Stopping a stopped wait returns it again.
+/// owner. Stopping a stopped wait, or a task already cancelled or ending,
+/// returns `created: false`.
 pub async fn stop(pool: &SqlitePool, bot_id: Uuid, wait_id: Uuid) -> Result<Stopped, StopError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let active: Option<bool> =
@@ -73,6 +74,11 @@ pub async fn stop(pool: &SqlitePool, bot_id: Uuid, wait_id: Uuid) -> Result<Stop
         match super::delegations::stop_by_owner(&mut tx, bot_id, wait_id).await? {
             None => return Err(StopError::NotFound),
             Some(OwnerStop::Ended) => return Err(StopError::Ended),
+            Some(OwnerStop::Repeated) => Stopped {
+                kind: Kind::Task,
+                created: false,
+                requeued: false,
+            },
             // The task's turn ending requeues its sender (a trigger).
             Some(OwnerStop::Stopped { root_turn_id }) => Stopped {
                 kind: Kind::Task,

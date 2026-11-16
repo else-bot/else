@@ -937,7 +937,8 @@ async fn stop_keeps_a_task_the_owner_stops_on_its_own_and_deletion_resolves_it()
             None,
         )
         .await;
-    assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.body);
+    assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+    assert_eq!(again.body["created"], false, "a retry returns the stop");
 
     let (_, root, token) = running_main(&app).await;
     let reply = delegate(&app, &token, &work, "[synthetic:hang] another long task").await;
