@@ -209,7 +209,7 @@ impl Shell {
         // The platform keeps one handler for the whole process.
         let this = cx.weak_entity();
         let handle = window.window_handle();
-        cx.on_system_notification_response(move |response, cx| {
+        crate::system_notifications::on_response(cx, move |response, cx| {
             let this = this.clone();
             let _ = handle.update(cx, |_, window, cx| {
                 let Some((scope, bot)) = crate::inbox::parse_tag(&response.tag) else {

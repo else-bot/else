@@ -255,12 +255,15 @@ impl ElseApp {
             )
             .flatten();
         for alert in self.inbox.alerts(&self.bots, |id| viewing == Some(id)) {
-            cx.show_system_notification(SystemNotification {
-                tag: crate::inbox::tag(self.scope, alert.bot).into(),
-                title: alert.title.into(),
-                body: alert.body.into(),
-                actions: Vec::new(),
-            });
+            crate::system_notifications::show(
+                cx,
+                SystemNotification {
+                    tag: crate::inbox::tag(self.scope, alert.bot).into(),
+                    title: alert.title.into(),
+                    body: alert.body.into(),
+                    actions: Vec::new(),
+                },
+            );
         }
     }
 

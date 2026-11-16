@@ -301,7 +301,7 @@ impl Inbox {
             alerts.push(Alert {
                 bot: bot.id,
                 title: bot.name.clone(),
-                body: latest.preview.clone(),
+                body: latest.plain_preview(),
             });
         }
         alerts.sort_by_key(|a| a.bot);

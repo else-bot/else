@@ -21,6 +21,7 @@ mod server_icon;
 mod sidebar;
 mod skill_ui;
 mod socials;
+mod system_notifications;
 mod ui_font;
 mod updates;
 mod window_frame;
@@ -206,7 +207,7 @@ fn main() {
     gpui_kit::application()
         .with_assets(AppAssets)
         .run(move |cx| {
-            cx.set_app_identity("else-bot", "else.bot");
+            cx.set_app_identity(system_notifications::APP_ID, system_notifications::APP_NAME);
             gpui_kit::init(cx);
             ui_font::init(cx);
             appearance::init(cx);

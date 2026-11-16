@@ -2336,6 +2336,7 @@ dependencies = [
  "markdown",
  "mime_guess",
  "notify",
+ "notify-rust",
  "proc-macro2",
  "rand 0.10.3",
  "reqwest 0.13.5",

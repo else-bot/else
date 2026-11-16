@@ -311,6 +311,17 @@ pub struct LatestReply {
     pub preview: String,
 }
 
+impl LatestReply {
+    /// The preview as one line of plain text, for surfaces that cannot
+    /// render markdown.
+    pub fn plain_preview(&self) -> String {
+        let text = markdown::to_mdast(&self.preview, &markdown::ParseOptions::gfm())
+            .map(|root| root.to_string())
+            .unwrap_or_else(|_| self.preview.clone());
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+}
+
 /// The owner's saved read state for a bot's owner conversation.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ReadState {
