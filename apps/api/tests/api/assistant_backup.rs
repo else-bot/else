@@ -165,7 +165,8 @@ impl ComputerRuntime for Fake {
             true => self.images.lock().unwrap()[name].clone(),
             false => String::new(),
         };
-        std::fs::write(archive, format!("MSB:{image}\n{disk}")).unwrap();
+        let msb = zstd::encode_all(format!("MSB:{image}\n{disk}").as_bytes(), 3).unwrap();
+        std::fs::write(archive, msb).unwrap();
         Ok(())
     }
     async fn restore_disk(&self, archive: &Path, spec: &Spec) -> Result<(), RuntimeError> {
@@ -179,7 +180,8 @@ impl ComputerRuntime for Fake {
                 message: "agent did not answer".into(),
             });
         }
-        let bytes = std::fs::read_to_string(archive).unwrap();
+        let bytes = String::from_utf8(zstd::decode_all(&*std::fs::read(archive).unwrap()).unwrap())
+            .unwrap();
         let (image, disk) = bytes
             .strip_prefix("MSB:")
             .unwrap()
@@ -406,8 +408,7 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
             .await
             .unwrap();
     assert!(observed.iter().all(|o| o == "stopped"));
-    for artifact in &manifest.artifacts {
-        let bytes = std::fs::read(summary.path.join(&artifact.object)).unwrap();
+    for bytes in stored_chunks(&summary.path) {
         assert!(bytes.starts_with(b"age-encryption.org/v1"));
     }
     assert!(
@@ -722,12 +723,28 @@ async fn retention_keeps_every_artifact_a_kept_set_needs() {
     let first = w.run_once().await.unwrap();
     let second = w.run_once().await.unwrap();
     assert!(!first.path.exists(), "the older set is removed whole");
-    let (_, manifest, _) = else_api::backup::restore::open_set(&second.path, &key()).unwrap();
-    for artifact in &manifest.artifacts {
-        let meta = std::fs::metadata(second.path.join(&artifact.object)).unwrap();
-        assert_eq!(meta.len(), artifact.ciphertext_bytes, "{}", artifact.object);
+    let (_, index) = backup::store::open_index(&second.path, &key()).unwrap();
+    let keys = backup::chunks::ChunkKeys::derive(&key()).unwrap();
+    let store = backup::store::Store::open(second.path.parent().unwrap(), &keys);
+    let named: std::collections::HashSet<&str> = index.chunk_ids().collect();
+    for chunk in index.artifacts.iter().flat_map(|a| &a.chunks) {
+        store.get(&keys, chunk).unwrap();
     }
-    assert_eq!(manifest.artifacts.len(), 3);
+    assert_eq!(
+        stored_chunks(&second.path).len(),
+        named.len(),
+        "chunks only the removed set used are swept"
+    );
+    assert_eq!(index.manifest.artifacts.len(), 3);
+}
+
+/// The sealed chunk files of the store a local set shares.
+fn stored_chunks(set: &Path) -> Vec<Vec<u8>> {
+    std::fs::read_dir(set.parent().unwrap().join("chunks"))
+        .unwrap()
+        .flat_map(|key| std::fs::read_dir(key.unwrap().path()).unwrap())
+        .map(|chunk| std::fs::read(chunk.unwrap().path()).unwrap())
+        .collect()
 }
 
 async fn used(s: &Setup, bot: Uuid) -> String {
@@ -966,7 +983,8 @@ async fn project_directories_are_backed_up_and_restored_with_their_mounts() {
                 .iter()
                 .any(|x| x.object == object && x.kind == "project")
         );
-        let bytes = std::fs::read(summary.path.join(&object)).unwrap();
+    }
+    for bytes in stored_chunks(&summary.path) {
         assert!(bytes.starts_with(b"age-encryption.org/v1"));
         assert!(!bytes.windows(11).any(|w| w == b"alpha notes"));
     }
@@ -1079,13 +1097,14 @@ async fn shared_mcp_packages_survive_backup_restore_and_removal() {
         artifact.bot_id.is_none(),
         "the library is shared by all bots"
     );
-    let ciphertext = std::fs::read(summary.path.join(&artifact.object)).unwrap();
-    assert!(ciphertext.starts_with(b"age-encryption.org/v1"));
-    assert!(
-        !ciphertext
-            .windows(b"shared-secret".len())
-            .any(|s| s == b"shared-secret")
-    );
+    for ciphertext in stored_chunks(&summary.path) {
+        assert!(ciphertext.starts_with(b"age-encryption.org/v1"));
+        assert!(
+            !ciphertext
+                .windows(b"shared-secret".len())
+                .any(|s| s == b"shared-secret")
+        );
+    }
     std::fs::rename(&package, library.join(".removed-t3-code")).unwrap();
     let after_removal = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
     for (set, populated) in [(&summary, true), (&after_removal, false)] {
@@ -1147,15 +1166,15 @@ async fn backups_from_before_shared_mcp_support_still_restore() {
         .run_once()
         .await
         .unwrap();
-    let (mut completion, manifest, identity) =
-        backup::restore::open_set(&summary.path, &key()).unwrap();
+    let (_whole, whole) = common::rebuilt_set(&summary.path, &key());
+    let (mut completion, manifest, identity) = backup::restore::open_set(&whole, &key()).unwrap();
     let mut old_manifest = serde_json::to_value(manifest).unwrap();
     old_manifest["coverage"]
         .as_object_mut()
         .unwrap()
         .remove("mcp");
     let bytes = serde_json::to_vec(&old_manifest).unwrap();
-    let manifest_path = summary.path.join(backup::MANIFEST);
+    let manifest_path = whole.join(backup::MANIFEST);
     std::fs::remove_file(&manifest_path).unwrap();
     let sealed = backup::seal(
         &manifest_path,
@@ -1167,13 +1186,13 @@ async fn backups_from_before_shared_mcp_support_still_restore() {
     completion.manifest.ciphertext_bytes = sealed.ciphertext_bytes;
     completion.manifest.ciphertext_sha256 = sealed.ciphertext_sha256;
     std::fs::write(
-        summary.path.join(backup::COMPLETE),
+        whole.join(backup::COMPLETE),
         serde_json::to_vec(&completion).unwrap(),
     )
     .unwrap();
     let target = Target::new(&s.app);
     let report = restore(RestoreRequest {
-        set_dir: &summary.path,
+        set_dir: &whole,
         key: &key(),
         server: &target.params,
         target_database: &target.name,
@@ -1259,7 +1278,8 @@ async fn schema_2_sets_with_plain_project_tars_still_restore() {
     let s = setup_with(true).await;
     let (a, b) = computers_with_projects(&s).await;
     let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
-    rewrite_manifest(&summary.path, |manifest, identity| {
+    let (_whole, whole) = common::rebuilt_set(&summary.path, &key());
+    rewrite_manifest(&whole, |manifest, identity| {
         manifest["schema_version"] = json!(2);
         for bot in manifest["bots"].as_array_mut().unwrap() {
             if let Some(computer) = bot["computer"].as_object_mut() {
@@ -1271,14 +1291,14 @@ async fn schema_2_sets_with_plain_project_tars_still_restore() {
                 continue;
             }
             let object = artifact["object"].as_str().unwrap().to_owned();
-            let cipher = std::fs::read(summary.path.join(&object)).unwrap();
+            let cipher = std::fs::read(whole.join(&object)).unwrap();
             let compressed = backup::open_small(&cipher, identity, 1 << 20).unwrap();
             let plain = zstd::stream::decode_all(compressed.as_slice()).unwrap();
-            std::fs::remove_file(summary.path.join(&object)).unwrap();
+            std::fs::remove_file(whole.join(&object)).unwrap();
             let bot: Uuid = artifact["bot_id"].as_str().unwrap().parse().unwrap();
             let legacy = backup::projects::Format::Tar.object(bot);
             let sealed = backup::seal(
-                &summary.path.join(&legacy),
+                &whole.join(&legacy),
                 identity,
                 &mut plain.as_slice(),
                 1 << 20,
@@ -1291,7 +1311,7 @@ async fn schema_2_sets_with_plain_project_tars_still_restore() {
             artifact["plaintext_sha256"] = json!(sealed.plaintext_sha256);
         }
     });
-    let (fresh, new_dir) = restore_fresh(&s, &summary.path, "restored-v2").await;
+    let (fresh, new_dir) = restore_fresh(&s, &whole, "restored-v2").await;
     let projects = else_api::backup::restore::projects_dir(&new_dir);
     for (bot, disk) in [(a, "alpha disk"), (b, "beta disk")] {
         assert_eq!(
@@ -1310,14 +1330,15 @@ async fn a_computer_archive_without_its_image_must_follow_one_that_has_it() {
     let s = setup_with(true).await;
     computers_with_projects(&s).await;
     let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
-    rewrite_manifest(&summary.path, |manifest, _| {
+    let (_whole, whole) = common::rebuilt_set(&summary.path, &key());
+    rewrite_manifest(&whole, |manifest, _| {
         for bot in manifest["bots"].as_array_mut().unwrap() {
             if let Some(computer) = bot["computer"].as_object_mut() {
                 computer.insert("carries_image".into(), json!(false));
             }
         }
     });
-    let Err(err) = backup::restore::open_set(&summary.path, &key()) else {
+    let Err(err) = backup::restore::open_set(&whole, &key()) else {
         panic!("a set whose archives all lack their image opened");
     };
     assert!(err.to_string().contains("without its image"), "{err}");

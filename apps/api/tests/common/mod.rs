@@ -6,6 +6,18 @@ pub mod recorder;
 /// hang: a passing wait returns as soon as the state appears, and several
 /// suites sharing one machine can slow a step tenfold.
 pub const SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
+/// A chunked local backup set rebuilt whole in a new directory, as a remote
+/// download leaves it, for tests that read or damage its files.
+pub fn rebuilt_set(
+    set: &std::path::Path,
+    key: &else_api::credentials::SecretKey,
+) -> (tempfile::TempDir, std::path::PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let out = root.path().join(set.file_name().unwrap());
+    let opened = else_api::backup::store::open(set, key).unwrap();
+    else_api::backup::store::rebuild(set, &out, opened, u64::MAX).unwrap();
+    (root, out)
+}
 use else_api::config::{Config, DatabaseUrl};
 use sqlx::SqlitePool;
 pub struct TestDb {

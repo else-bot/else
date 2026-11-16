@@ -367,6 +367,67 @@ pub fn rebuild(
     Ok(sealed)
 }
 
+/// The manifest entry of an artifact rebuilt from `stored`. A plain stream
+/// must come back with the plaintext its manifest recorded; a recompressed
+/// one is checked against the index by [`rebuild`].
+pub fn rebuilt(
+    artifact: &Artifact,
+    stored: &Stored,
+    sealed: Sealed,
+) -> Result<Artifact, BackupError> {
+    let rebuilt = Artifact {
+        ciphertext_bytes: sealed.ciphertext_bytes,
+        ciphertext_sha256: sealed.ciphertext_sha256,
+        plaintext_bytes: sealed.plaintext_bytes,
+        plaintext_sha256: sealed.plaintext_sha256,
+        ..artifact.clone()
+    };
+    if stored.encoding == Encoding::Plain
+        && (rebuilt.plaintext_bytes, &rebuilt.plaintext_sha256)
+            != (artifact.plaintext_bytes, &artifact.plaintext_sha256)
+    {
+        return Err(BackupError::Invalid(format!(
+            "the rebuilt {} does not match the set's manifest",
+            artifact.object
+        )));
+    }
+    Ok(rebuilt)
+}
+
+/// Seal a new manifest naming the rebuilt `artifacts` into `dir` and write
+/// its completion record, making `dir` a whole set a restore reads.
+pub fn publish_rebuilt(
+    dir: &Path,
+    manifest: Manifest,
+    artifacts: Vec<Artifact>,
+    completion: &super::Completion,
+    identity: &age::x25519::Identity,
+) -> Result<(), BackupError> {
+    let manifest = Manifest {
+        artifacts,
+        ..manifest
+    };
+    let json = serde_json::to_vec(&manifest).expect("serializable");
+    let sealed = super::seal(
+        &dir.join(super::MANIFEST),
+        identity,
+        &mut json.as_slice(),
+        super::MAX_MANIFEST_BYTES,
+    )?;
+    let local = super::Completion {
+        manifest: super::ObjectRef {
+            object: super::MANIFEST.into(),
+            ciphertext_bytes: sealed.ciphertext_bytes,
+            ciphertext_sha256: sealed.ciphertext_sha256,
+        },
+        ..completion.clone()
+    };
+    super::write_new(
+        &dir.join(super::COMPLETE),
+        &serde_json::to_vec_pretty(&local).expect("serializable"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

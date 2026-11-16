@@ -2,7 +2,9 @@
 //!
 //! Table digests and the database image share one SQLite snapshot. The image
 //! is size-checked before allocation and encrypted from memory, never staged
-//! as plaintext. Completion is published only after every object is synced.
+//! as plaintext. The staged set then moves into the local chunk store
+//! ([`super::store`]). Completion is published only after every object is
+//! synced.
 
 use std::path::{Path, PathBuf};
 
@@ -200,6 +202,21 @@ pub async fn create_set(
     .await;
     let (manifest, completion) = match captured {
         Ok(captured) => captured,
+        Err(err) => return Err(staged.discard(err)),
+    };
+    let chunked = async {
+        let keys = super::chunks::ChunkKeys::derive(key)?;
+        let identity = super::identity_for(key, &completion.encryption)?;
+        let (staging, dir, manifest) = (staged.0.clone(), config.dir.clone(), manifest.clone());
+        tokio::task::spawn_blocking(move || {
+            super::store::chunk_set(&staging, &dir, &keys, &identity, &manifest, &completion)
+        })
+        .await
+        .map_err(|e| BackupError::Io(e.to_string()))?
+    }
+    .await;
+    let completion = match chunked {
+        Ok(completion) => completion,
         Err(err) => return Err(staged.discard(err)),
     };
     let path = staged

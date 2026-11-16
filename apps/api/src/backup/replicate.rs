@@ -311,7 +311,8 @@ impl Replicator {
     /// Whether `set_id` is published: by the record this installation
     /// published whole, or by one naming an index that opens with `key`.
     /// Another record is a conflict. A record of ours whose index is damaged
-    /// is withdrawn, so the set uploads again.
+    /// is withdrawn, so the set uploads again. A chunked local set publishes
+    /// its own record, so a matching record still needs its index checked.
     async fn published(
         &self,
         set_id: &str,
@@ -326,7 +327,9 @@ impl Replicator {
             .s3
             .get_bytes(&complete_key, super::MAX_COMPLETE_BYTES)
             .await?;
-        if remote == local_complete {
+        let whole = serde_json::from_slice::<Completion>(local_complete)
+            .is_ok_and(|c| c.manifest.object == MANIFEST);
+        if remote == local_complete && whole {
             return Ok(true);
         }
         match self.read_index(set_id, &remote, key).await {
@@ -391,29 +394,46 @@ impl Replicator {
             self.s3.delete(&object.key).await?;
         }
         let before = run.known.clone();
-        let stored = match self
-            .upload_verified(&set_id, set_dir, &manifest, &identity, run)
-            .await
-        {
+        let uploaded = if completion.manifest.object == INDEX {
+            self.upload_stored(&set_id, set_dir, key, run).await
+        } else {
+            self.upload_verified(&set_id, set_dir, &manifest, &identity, run)
+                .await
+        };
+        let stored = match uploaded {
             Ok(stored) => stored,
             Err(err) => {
                 run.known = before;
                 return Err(err);
             }
         };
-        let index = Index {
-            index_version: chunks::INDEX_VERSION,
-            manifest,
-            artifacts: stored,
-        };
-        let sealed_index = chunks::encrypt(
-            &identity,
-            &serde_json::to_vec(&index).expect("serializable"),
-        )?;
-        let index_ref = ObjectRef {
-            object: INDEX.into(),
-            ciphertext_bytes: sealed_index.len() as u64,
-            ciphertext_sha256: super::sha256_hex(&sealed_index),
+        let (sealed_index, remote_complete) = match stored {
+            None => (
+                super::read_regular(&set_dir.join(INDEX), chunks::MAX_INDEX_BYTES + 64 * 1024)?,
+                local_complete,
+            ),
+            Some(stored) => {
+                let index = Index {
+                    index_version: chunks::INDEX_VERSION,
+                    manifest,
+                    artifacts: stored,
+                };
+                let sealed_index = chunks::encrypt(
+                    &identity,
+                    &serde_json::to_vec(&index).expect("serializable"),
+                )?;
+                let index_ref = ObjectRef {
+                    object: INDEX.into(),
+                    ciphertext_bytes: sealed_index.len() as u64,
+                    ciphertext_sha256: super::sha256_hex(&sealed_index),
+                };
+                let remote_complete = serde_json::to_vec_pretty(&Completion {
+                    manifest: index_ref,
+                    ..completion
+                })
+                .expect("serializable");
+                (sealed_index, remote_complete)
+            }
         };
         let index_key = self.set_key(&set_id, INDEX);
         run.stats.uploaded_bytes += sealed_index.len() as u64;
@@ -428,11 +448,6 @@ impl Replicator {
                 "the remote chunk index does not match; the set is not complete".into(),
             ));
         }
-        let remote_complete = serde_json::to_vec_pretty(&Completion {
-            manifest: index_ref,
-            ..completion
-        })
-        .expect("serializable");
         let complete_key = self.set_key(&set_id, COMPLETE);
         run.stats.uploaded_bytes += remote_complete.len() as u64;
         if self
@@ -466,7 +481,7 @@ impl Replicator {
         manifest: &super::Manifest,
         identity: &age::x25519::Identity,
         run: &mut Upload<'_>,
-    ) -> Result<Vec<Stored>, BackupError> {
+    ) -> Result<Option<Vec<Stored>>, BackupError> {
         let mut stored = Vec::new();
         let mut fresh = Vec::new();
         for artifact in &manifest.artifacts {
@@ -477,6 +492,18 @@ impl Replicator {
             stored.push(entry);
             fresh.extend(uploaded);
         }
+        self.verify_fresh(set_id, fresh, run).await?;
+        Ok(Some(stored))
+    }
+
+    /// Check the chunks this set uploaded by readback before it publishes.
+    /// A chunk that fails is deleted, so the next run uploads it again.
+    async fn verify_fresh(
+        &self,
+        set_id: &str,
+        fresh: Vec<String>,
+        run: &mut Upload<'_>,
+    ) -> Result<(), BackupError> {
         if let Some(hook) = &self.before_publish {
             hook(set_id.to_owned()).await;
         }
@@ -489,7 +516,62 @@ impl Replicator {
                 "the remote copy of chunk {id} does not match; the set is not complete"
             )));
         }
-        Ok(stored)
+        Ok(())
+    }
+
+    /// Upload the chunks of a set kept in the local chunk store that the
+    /// bucket does not hold yet, as the store holds them. The set's own
+    /// index and completion record are then published as they are.
+    async fn upload_stored(
+        &self,
+        set_id: &str,
+        set_dir: &Path,
+        key: &SecretKey,
+        run: &mut Upload<'_>,
+    ) -> Result<Option<Vec<Stored>>, BackupError> {
+        let backups = set_dir
+            .parent()
+            .ok_or_else(|| BackupError::Invalid("the set has no backup directory".into()))?;
+        let (_, index) = super::store::open_index(set_dir, key)?;
+        let store = Arc::new(super::store::Store::open(backups, run.keys));
+        let mut wanted = Vec::new();
+        let mut reused = 0;
+        for id in index.chunk_ids() {
+            if run.known.insert(id.to_owned()) {
+                wanted.push(id.to_owned());
+            } else {
+                reused += 1;
+            }
+        }
+        let keys = run.keys;
+        let uploaded: Vec<(String, u64)> = futures_util::stream::iter(wanted)
+            .map(|id| {
+                let store = store.clone();
+                async move {
+                    let read = {
+                        let id = id.clone();
+                        tokio::task::spawn_blocking(move || store.sealed(&id))
+                    };
+                    let sealed = read.await.map_err(|e| BackupError::Io(e.to_string()))??;
+                    let bytes = sealed.len() as u64;
+                    self.s3
+                        .put(&self.chunk_key(keys, &id), sealed, true)
+                        .await?;
+                    if crate::faults::hit("replication.after_chunk") {
+                        return Err(BackupError::Interrupted);
+                    }
+                    Ok::<_, BackupError>((id, bytes))
+                }
+            })
+            .buffer_unordered(PARALLEL)
+            .try_collect()
+            .await?;
+        run.stats.uploaded += uploaded.len();
+        run.stats.reused += reused;
+        run.stats.uploaded_bytes += uploaded.iter().map(|(_, b)| b).sum::<u64>();
+        let fresh = uploaded.into_iter().map(|(id, _)| id).collect();
+        self.verify_fresh(set_id, fresh, run).await?;
+        Ok(None)
     }
 
     /// Cut one local artifact into chunks and upload those the bucket does
@@ -723,7 +805,8 @@ impl Replicator {
         )))
     }
 
-    /// Upload missing chunks again from local sets that still hold them.
+    /// Upload missing chunks again from the local chunk store, or from
+    /// whole local sets that still hold them.
     async fn repair(
         &self,
         dir: &Path,
@@ -734,8 +817,23 @@ impl Replicator {
     ) -> Result<HashSet<String>, BackupError> {
         let local = super::completed_sets(dir)?;
         let mut restored = HashSet::new();
+        let store = super::store::Store::open(dir, run.keys);
+        for id in missing {
+            let Ok(sealed) = store.sealed(id) else {
+                continue;
+            };
+            run.stats.uploaded_bytes += sealed.len() as u64;
+            self.s3
+                .put(&self.chunk_key(run.keys, id), sealed, false)
+                .await?;
+            if self.fetch_chunk(run.keys, id).await?.is_some() {
+                run.known.insert(id.clone());
+                restored.insert(id.clone());
+                run.stats.repaired += 1;
+            }
+        }
         for (set_id, index) in indexes {
-            if !local.contains(set_id) {
+            if !local.contains(set_id) || dir.join(set_id).join(INDEX).exists() {
                 continue;
             }
             for stored in &index.artifacts {
@@ -971,47 +1069,9 @@ async fn download_chunked(
             return Err(err);
         }
         let sealed = sealed.map_err(|e| BackupError::Io(e.to_string()))??;
-        let rebuilt = super::Artifact {
-            ciphertext_bytes: sealed.ciphertext_bytes,
-            ciphertext_sha256: sealed.ciphertext_sha256,
-            plaintext_bytes: sealed.plaintext_bytes,
-            plaintext_sha256: sealed.plaintext_sha256,
-            ..artifact.clone()
-        };
-        if stored.encoding == Encoding::Plain
-            && (rebuilt.plaintext_bytes, &rebuilt.plaintext_sha256)
-                != (artifact.plaintext_bytes, &artifact.plaintext_sha256)
-        {
-            return Err(BackupError::Invalid(format!(
-                "the rebuilt {} does not match the set's manifest",
-                artifact.object
-            )));
-        }
-        artifacts.push(rebuilt);
+        artifacts.push(chunks::rebuilt(artifact, stored, sealed)?);
     }
-    let manifest = super::Manifest {
-        artifacts,
-        ..index.manifest
-    };
-    let json = serde_json::to_vec(&manifest).expect("serializable");
-    let sealed = super::seal(
-        &dir.join(MANIFEST),
-        &identity,
-        &mut json.as_slice(),
-        super::MAX_MANIFEST_BYTES,
-    )?;
-    let local = Completion {
-        manifest: ObjectRef {
-            object: MANIFEST.into(),
-            ciphertext_bytes: sealed.ciphertext_bytes,
-            ciphertext_sha256: sealed.ciphertext_sha256,
-        },
-        ..completion.clone()
-    };
-    write_new(
-        &dir.join(COMPLETE),
-        &serde_json::to_vec_pretty(&local).expect("serializable"),
-    )
+    chunks::publish_rebuilt(dir, index.manifest, artifacts, completion, &identity)
 }
 
 async fn fetch_for_restore(
@@ -1054,7 +1114,7 @@ async fn download_whole(
             "the remote manifest is too large".into(),
         ));
     }
-    write_new(&dir.join(COMPLETE), complete)?;
+    super::write_new(&dir.join(COMPLETE), complete)?;
     fetch(
         s3,
         &set_key(MANIFEST),
@@ -1095,19 +1155,5 @@ async fn fetch(s3: &S3, key: &str, bytes: u64, path: &Path) -> Result<(), Backup
     })
     .await?;
     file.sync_all()
-        .map_err(|e| BackupError::io(path.display(), e))
-}
-
-fn write_new(path: &Path, bytes: &[u8]) -> Result<(), BackupError> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| BackupError::io(path.display(), e))?;
-    file.write_all(bytes)
-        .and_then(|_| file.sync_all())
         .map_err(|e| BackupError::io(path.display(), e))
 }

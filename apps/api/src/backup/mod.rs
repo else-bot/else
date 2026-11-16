@@ -1,9 +1,12 @@
 //! Encrypted database backups and non-destructive restore.
 //!
-//! A backup set is a directory `<backup dir>/<set id>/` holding separately
-//! age-encrypted objects (`database.dump.age`, a SQLite image, and
+//! A whole backup set is a directory `<backup dir>/<set id>/` holding
+//! separately age-encrypted objects (`database.dump.age`, a SQLite image, and
 //! `manifest.json.age`) and, published last, the unencrypted bootstrap
-//! `complete.json`. A set without `complete.json` is not a backup. Every set
+//! `complete.json`. A set without `complete.json` is not a backup. A local
+//! set is captured whole and then kept as a chunk index over the backup
+//! directory's shared chunk store ([`store`]), as a remote set is kept over
+//! its bucket's chunks ([`chunks`]); a restore rebuilds it whole. Every set
 //! has a fresh public salt; its age identity is derived from `SECRET_KEY`
 //! with HKDF-SHA-256 and the purpose `else.bot/backups/v1`, so neither the
 //! raw master key nor the database-secret key encrypts anything here. The
@@ -22,6 +25,7 @@ pub mod restore;
 pub mod s3;
 pub mod service;
 pub mod settings;
+pub mod store;
 pub mod worker;
 
 use std::fs::{self, File, OpenOptions};
@@ -526,6 +530,20 @@ pub fn read_regular(path: &Path, max: u64) -> Result<Vec<u8>, BackupError> {
         )));
     }
     Ok(bytes)
+}
+
+/// Write a new private file (never replacing one) and sync it.
+pub fn write_new(path: &Path, bytes: &[u8]) -> Result<(), BackupError> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| BackupError::io(path.display(), e))?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|e| BackupError::io(path.display(), e))
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
