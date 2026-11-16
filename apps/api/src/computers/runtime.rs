@@ -9,6 +9,7 @@
 //! `msb exec` starts a stopped computer as a side effect, so callers run
 //! commands only after the manager has established the computer is running.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -32,6 +33,20 @@ pub enum RuntimeError {
     Unavailable(String),
     #[error("{operation} failed: {message}")]
     Failed { operation: String, message: String },
+}
+
+/// A running computer's live use, as the runtime last sampled it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Usage {
+    /// Percent of one vCPU: 200 is two busy vCPUs.
+    pub cpu_percent: f32,
+    /// The vCPUs it runs with now, when the runtime knows.
+    pub cpus: Option<u32>,
+    /// Memory the guest uses, when it reported it.
+    pub memory_bytes: Option<u64>,
+    pub memory_limit_bytes: u64,
+    /// The guest's writable disk, used and in all, when it reported them.
+    pub disk: Option<(u64, u64)>,
 }
 
 /// Output of a command run in a computer.
@@ -193,6 +208,18 @@ pub trait ComputerRuntime: Send + Sync {
         Err(RuntimeError::Unavailable("remove is not supported".into()))
     }
 
+    /// Live use of each running computer, by name. The runtime samples it
+    /// continuously, so reading it is cheap.
+    async fn usage(&self) -> Result<HashMap<String, Usage>, RuntimeError> {
+        Ok(HashMap::new())
+    }
+
+    /// The host bytes allocated to each computer's files, stopped ones
+    /// included, by name. This scans their files.
+    async fn disks(&self) -> Result<HashMap<String, u64>, RuntimeError> {
+        Ok(HashMap::new())
+    }
+
     async fn state(&self, name: &str) -> Result<Option<RuntimeState>, RuntimeError> {
         Ok(self
             .list()
@@ -211,6 +238,8 @@ pub struct Msb {
 }
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Metrics are read from shared memory; the list that shows them is polled.
+const METRICS_TIMEOUT: Duration = Duration::from_secs(10);
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// The network policy for a restored computer. `msb snapshot restore` does
@@ -444,6 +473,68 @@ struct Listed {
     status: String,
 }
 
+/// `msb metrics --format json`: running computers only.
+fn parse_metrics(json: &str) -> Option<HashMap<String, Usage>> {
+    #[derive(Deserialize)]
+    struct Sample {
+        name: String,
+        state: String,
+        cpus: Option<u32>,
+        cpu_percent: f32,
+        memory_bytes: u64,
+        memory_limit_bytes: u64,
+        upper_used_bytes: Option<u64>,
+        upper_free_bytes: Option<u64>,
+    }
+    let samples: Vec<Sample> = serde_json::from_str(json.trim()).ok()?;
+    Some(
+        samples
+            .into_iter()
+            .filter(|sample| sample.state == "running")
+            .map(|sample| {
+                let usage = Usage {
+                    cpu_percent: sample.cpu_percent,
+                    cpus: sample.cpus,
+                    memory_bytes: (sample.memory_bytes > 0).then_some(sample.memory_bytes),
+                    memory_limit_bytes: sample.memory_limit_bytes,
+                    disk: sample
+                        .upper_used_bytes
+                        .zip(sample.upper_free_bytes)
+                        .map(|(used, free)| (used, used + free)),
+                };
+                (sample.name, usage)
+            })
+            .collect(),
+    )
+}
+
+/// `msb df --format json`: the blocks each computer's directory holds.
+fn parse_disks(json: &str) -> Option<HashMap<String, u64>> {
+    #[derive(Deserialize)]
+    struct Storage {
+        sandboxes: Category,
+    }
+    #[derive(Deserialize)]
+    struct Category {
+        items: Vec<Item>,
+    }
+    #[derive(Deserialize)]
+    struct Item {
+        name: String,
+        logical_bytes: Option<u64>,
+        allocated_bytes: Option<u64>,
+    }
+    let storage: Storage = serde_json::from_str(json.trim()).ok()?;
+    Some(
+        storage
+            .sandboxes
+            .items
+            .into_iter()
+            .filter_map(|item| Some((item.name, item.allocated_bytes.or(item.logical_bytes)?)))
+            .collect(),
+    )
+}
+
 pub fn parse_state(status: &str) -> RuntimeState {
     match status {
         "Running" => RuntimeState::Running,
@@ -509,6 +600,38 @@ impl ComputerRuntime for Msb {
             .into_iter()
             .map(|l| (l.name, parse_state(&l.status)))
             .collect())
+    }
+
+    async fn usage(&self) -> Result<HashMap<String, Usage>, RuntimeError> {
+        let out = self
+            .run("metrics", &["metrics", "--format", "json"], METRICS_TIMEOUT)
+            .await?;
+        if out.status != Some(0) {
+            return Err(RuntimeError::Failed {
+                operation: "metrics".into(),
+                message: last_line(&out.stderr, &out.stdout),
+            });
+        }
+        parse_metrics(&out.stdout).ok_or_else(|| RuntimeError::Failed {
+            operation: "metrics".into(),
+            message: "unreadable output".into(),
+        })
+    }
+
+    async fn disks(&self) -> Result<HashMap<String, u64>, RuntimeError> {
+        let out = self
+            .run("df", &["df", "--format", "json"], CONTROL_TIMEOUT)
+            .await?;
+        if out.status != Some(0) {
+            return Err(RuntimeError::Failed {
+                operation: "df".into(),
+                message: last_line(&out.stderr, &out.stdout),
+            });
+        }
+        parse_disks(&out.stdout).ok_or_else(|| RuntimeError::Failed {
+            operation: "df".into(),
+            message: "unreadable output".into(),
+        })
     }
 
     async fn create(&self, spec: &Spec) -> Result<(), RuntimeError> {
@@ -787,6 +910,51 @@ impl ComputerRuntime for Msb {
 #[cfg(test)]
 mod mount_tests {
     use super::*;
+
+    #[test]
+    fn metrics_and_disks_are_read_from_msb_json() {
+        let metrics = parse_metrics(
+            r#"[
+              {"name": "a", "state": "running", "cpus": 2, "cpu_percent": 57.5,
+               "memory_bytes": 1073741824, "memory_limit_bytes": 4294967296,
+               "upper_used_bytes": 10, "upper_free_bytes": 30, "uptime_secs": 3.5},
+              {"name": "b", "state": "running", "cpu_percent": 0.0,
+               "memory_bytes": 0, "memory_limit_bytes": 2147483648},
+              {"name": "c", "state": "exited", "cpu_percent": 0.0,
+               "memory_bytes": 5, "memory_limit_bytes": 5}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            metrics.get("a"),
+            Some(&Usage {
+                cpu_percent: 57.5,
+                cpus: Some(2),
+                memory_bytes: Some(1 << 30),
+                memory_limit_bytes: 4 << 30,
+                disk: Some((10, 40)),
+            })
+        );
+        assert_eq!(metrics["b"].memory_bytes, None, "not reported");
+        assert!(!metrics.contains_key("c"), "only running computers");
+        assert_eq!(parse_metrics("[]"), Some(HashMap::new()));
+        assert_eq!(parse_metrics("No running sandboxes."), None);
+
+        let disks = parse_disks(
+            r#"{"images": {"items": []},
+                "sandboxes": {"count": 2, "items": [
+                  {"name": "a", "path": "/x/a", "logical_bytes": 34359738368,
+                   "allocated_bytes": 1048576, "in_use": true, "reclaimable": false, "reasons": []},
+                  {"name": "b", "path": "/x/b", "logical_bytes": 100, "allocated_bytes": null},
+                  {"name": "c", "path": "/x/c", "logical_bytes": null, "allocated_bytes": null}
+                ], "notes": []},
+                "notes": []}"#,
+        )
+        .unwrap();
+        assert_eq!(disks.get("a"), Some(&(1 << 20)), "allocated blocks");
+        assert_eq!(disks["b"], 100, "file lengths when blocks are unknown");
+        assert!(!disks.contains_key("c"), "unknown size");
+    }
 
     #[test]
     fn bind_mounts_are_read_from_inspect() {

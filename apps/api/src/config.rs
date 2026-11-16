@@ -287,6 +287,7 @@ impl Config {
             desktop: parse_bool(source, "ELSE_VM_DESKTOP")?,
             state_dir: data_dir.clone(),
             projects_dir: Some(bots_dir.clone()),
+            upgrade_retry: defaults.upgrade_retry,
         };
         Ok(Self {
             msb_bin,

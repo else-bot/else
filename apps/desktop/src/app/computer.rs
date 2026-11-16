@@ -373,6 +373,24 @@ impl ComputerView {
         let computer = self.computer.as_ref()?;
         let theme = cx.theme();
         let (message, failed) = match (&computer.upgrade, &self.upgrade_refused) {
+            (Some(ComputerUpgrade::Queued { position }), _) => {
+                return Some(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("Computer upgrade queued at position {position}."))
+                        .into_any_element(),
+                );
+            }
+            (Some(ComputerUpgrade::Waiting { reason }), _) => {
+                return Some(
+                    div()
+                        .text_xs()
+                        .text_color(theme.warning)
+                        .child(format!("Waiting to upgrade: {reason}"))
+                        .into_any_element(),
+                );
+            }
             (Some(ComputerUpgrade::Running), _) => {
                 return Some(
                     div()

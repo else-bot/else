@@ -26,6 +26,7 @@ pub mod runtime;
 pub mod screens;
 mod snapshot;
 pub mod upgrade;
+pub mod upgrade_queue;
 pub mod viewer;
 
 pub use desktop::{ViewerLease, ViewerRefusal, ViewerTarget};
@@ -79,6 +80,9 @@ pub struct ComputerConfig {
     /// Root of the bots' host project directories; each computer created
     /// here mounts `<projects_dir>/<bot id>` at the guest user's `~/work`.
     pub projects_dir: Option<std::path::PathBuf>,
+    /// How long Upgrade all waits before it retries the computers that
+    /// were busy.
+    pub upgrade_retry: Duration,
 }
 
 /// Where a bot's host project directory appears in a desktop computer: the
@@ -120,6 +124,7 @@ impl Default for ComputerConfig {
             desktop: false,
             state_dir: std::env::temp_dir().join("else-computers"),
             projects_dir: None,
+            upgrade_retry: Duration::from_secs(30),
         }
     }
 }
@@ -305,10 +310,71 @@ pub struct ComputerManager {
     secret_key: Option<Arc<crate::credentials::SecretKey>>,
     input_batches: Actor<HashMap<Uuid, u32>>,
     controllers: Actor<HashMap<Uuid, Uuid>>,
-    upgrades: Actor<HashMap<Uuid, upgrade::UpgradeStatus>>,
+    upgrades: Actor<upgrade_queue::Upgrades>,
     upgrade_tasks: tokio_util::task::TaskTracker,
     upgrade_stop: tokio_util::sync::CancellationToken,
     browser_refs: Actor<HashMap<Uuid, HashMap<String, browser_refs::RefLabel>>>,
+    disks: Actor<DiskScan>,
+}
+
+/// The host bytes of every computer's disk, by runtime name.
+type Disks = Arc<HashMap<String, u64>>;
+
+/// How long a scan of the computers' disks is reused.
+const DISK_SCAN_TTL: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanState {
+    Stale,
+    /// `stale` once the computers changed after this scan began, so its
+    /// result is out of date when it ends.
+    Scanning {
+        stale: bool,
+    },
+    /// The last scan ended then, whether or not it succeeded.
+    Ended(std::time::Instant),
+}
+
+/// The last disk scan's result; a failed scan keeps the previous one.
+struct DiskScan {
+    disks: Disks,
+    state: ScanState,
+}
+
+impl Default for DiskScan {
+    fn default() -> Self {
+        Self {
+            disks: Disks::default(),
+            state: ScanState::Stale,
+        }
+    }
+}
+
+impl DiskScan {
+    fn due(&self) -> bool {
+        match self.state {
+            ScanState::Stale => true,
+            ScanState::Scanning { .. } => false,
+            ScanState::Ended(at) => at.elapsed() >= DISK_SCAN_TTL,
+        }
+    }
+
+    fn scanned(&mut self, disks: Option<Disks>) {
+        if let Some(disks) = disks {
+            self.disks = disks;
+        }
+        self.state = match self.state {
+            ScanState::Scanning { stale: true } => ScanState::Stale,
+            _ => ScanState::Ended(std::time::Instant::now()),
+        };
+    }
+
+    fn invalidate(&mut self) {
+        self.state = match self.state {
+            ScanState::Scanning { .. } => ScanState::Scanning { stale: true },
+            _ => ScanState::Stale,
+        };
+    }
 }
 
 impl ComputerManager {
@@ -332,7 +398,50 @@ impl ComputerManager {
             upgrade_tasks: tokio_util::task::TaskTracker::new(),
             upgrade_stop: tokio_util::sync::CancellationToken::new(),
             browser_refs: Actor::default(),
+            disks: Actor::default(),
         }
+    }
+
+    /// Live use of each running computer, by runtime name; empty when the
+    /// runtime cannot say.
+    pub async fn usage(&self) -> HashMap<String, runtime::Usage> {
+        self.runtime.usage().await.unwrap_or_else(|err| {
+            tracing::debug!(error = %err, "reading computer usage failed");
+            HashMap::new()
+        })
+    }
+
+    /// Every computer's disk by runtime name, from the last scan. A scan
+    /// older than [`DISK_SCAN_TTL`] starts one new scan in the background,
+    /// so a slow scan never delays the caller; until the first one ends,
+    /// disks are unknown.
+    pub async fn disks(&self) -> Disks {
+        let runtime = self.runtime.clone();
+        let actor = self.disks.clone();
+        self.disks
+            .call(move |scan| {
+                if scan.due() {
+                    scan.state = ScanState::Scanning { stale: false };
+                    tokio::spawn(async move {
+                        let scanned = match runtime.disks().await {
+                            Ok(disks) => Some(Arc::new(disks)),
+                            Err(err) => {
+                                tracing::debug!(error = %err, "scanning computer disks failed");
+                                None
+                            }
+                        };
+                        actor.call(move |scan| scan.scanned(scanned)).await;
+                    });
+                }
+                scan.disks.clone()
+            })
+            .await
+    }
+
+    /// Scan again on the next read: an upgrade or rollback changed which
+    /// computers exist.
+    pub(super) async fn rescan_disks(&self) {
+        self.disks.call(|scan| scan.invalidate()).await;
     }
 
     /// Count one input batch for a turn; returns the count including it.
@@ -789,6 +898,26 @@ impl ComputerManager {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_change_during_a_disk_scan_makes_its_result_stale() {
+        let mut scan = DiskScan::default();
+        assert!(scan.due());
+        scan.state = ScanState::Scanning { stale: false };
+        assert!(!scan.due(), "one scan at a time");
+        scan.invalidate();
+        scan.scanned(Some(Arc::new(HashMap::from([("a".to_owned(), 1)]))));
+        assert_eq!(scan.disks.get("a"), Some(&1), "the result is still shown");
+        assert!(scan.due(), "and scanned again");
+        scan.state = ScanState::Scanning { stale: false };
+        scan.scanned(None);
+        assert!(!scan.due(), "a failed scan waits like a successful one");
+        assert_eq!(scan.disks.get("a"), Some(&1));
+        scan.invalidate();
+        assert!(scan.due());
+    }
+
     #[test]
     fn only_digest_references_pin_an_image() {
         let digest = "a".repeat(64);

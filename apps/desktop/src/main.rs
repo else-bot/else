@@ -58,6 +58,7 @@ gpui_kit::assets::icon_assets!(
         SquarePen,
         FolderPlus,
         Laptop,
+        Monitor,
         Eye,
         EyeOff,
         Cpu,
