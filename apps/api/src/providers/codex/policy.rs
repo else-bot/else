@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use super::super::codex_rpc::{AppServer, Incoming};
 use super::{Codex, RPC_TIMEOUT, failed};
-use crate::app::providers::{Profile, TurnOutcome};
+use crate::app::providers::{LimitWindow, Profile, TurnOutcome};
 use crate::app::tools::{SERVER_NAME, TOOL_NAMES};
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 
@@ -178,6 +178,31 @@ impl TurnEvents<'_> {
     }
 }
 
+/// The windows of a Codex rate-limit snapshot. Updates are sparse, so a
+/// missing duration falls back to Codex's usual 5-hour primary and weekly
+/// secondary windows. Snapshots of other quotas (another model's limit ID)
+/// are skipped so they don't interleave with the account's own.
+fn limit_windows(snapshot: &Value) -> Vec<LimitWindow> {
+    if snapshot["limitId"].as_str().is_some_and(|id| id != "codex") {
+        return Vec::new();
+    }
+    [("primary", 5 * 60), ("secondary", 7 * 24 * 60)]
+        .into_iter()
+        .filter_map(|(key, fallback)| {
+            let window = &snapshot[key];
+            let used = window["usedPercent"].as_f64()?;
+            Some(LimitWindow {
+                minutes: window["windowDurationMins"].as_i64().unwrap_or(fallback),
+                used_basis_points: (used * 100.0).round() as i64,
+                // Seconds per the protocol; milliseconds are tolerated.
+                resets_at: window["resetsAt"]
+                    .as_i64()
+                    .map(|at| if at > 100_000_000_000 { at / 1000 } else { at })?,
+            })
+        })
+        .collect()
+}
+
 impl Protocol for TurnEvents<'_> {
     type Message = Incoming;
     type Terminal = Completed;
@@ -254,6 +279,12 @@ impl Protocol for TurnEvents<'_> {
                     cache_write: count("cacheWriteInputTokens"),
                     output: count("outputTokens"),
                 }));
+            }
+            "account/rateLimits/updated" => {
+                let windows = limit_windows(&params["rateLimits"]);
+                if !windows.is_empty() {
+                    events.push(Event::Limits(windows));
+                }
             }
             "turn/completed" => {
                 let turn = &params["turn"];

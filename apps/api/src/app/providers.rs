@@ -475,6 +475,17 @@ impl Usage {
     }
 }
 
+/// One rolling subscription window a provider reported: how much of its cap
+/// the owner's account has used, from else.bot and every other client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LimitWindow {
+    pub minutes: i64,
+    /// Hundredths of a percent, so 6200 is 62%.
+    pub used_basis_points: i64,
+    /// Unix seconds.
+    pub resets_at: i64,
+}
+
 /// Durable progress reporting for one turn. Lifecycle transitions persist
 /// before returning; assistant text is batched in a bounded buffer.
 /// Adapters must await each call to completion and never race it in a
@@ -504,6 +515,11 @@ pub trait TurnSink: Send + Sync {
     /// Add the tokens a provider reported for this turn. Bookkeeping only.
     async fn usage(&self, usage: Usage) {
         let _ = usage;
+    }
+    /// Record the subscription windows the provider reported. Bookkeeping
+    /// only.
+    async fn limits(&self, windows: Vec<LimitWindow>) {
+        let _ = windows;
     }
     /// Record the native session this turn uses (new or resumed). Replaces
     /// any other active session of this provider for the conversation.

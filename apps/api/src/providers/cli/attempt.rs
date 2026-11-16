@@ -191,6 +191,8 @@ pub enum Event<T> {
     Parked,
     /// Tokens the provider reported, added to the turn's totals.
     Usage(crate::app::providers::Usage),
+    /// Subscription windows the provider reported for the owner's account.
+    Limits(Vec<crate::app::providers::LimitWindow>),
     /// The provider compacted the native session's context, which may drop
     /// the memory, skills, and context blocks it was given.
     Compacted,
@@ -312,6 +314,10 @@ where
                 }
                 Event::Usage(usage) => {
                     sink.usage(usage).await;
+                    Ok(())
+                }
+                Event::Limits(windows) => {
+                    sink.limits(windows).await;
                     Ok(())
                 }
                 Event::Compacted => turn.compacted(sink).await,

@@ -295,6 +295,13 @@ impl Provider for Synthetic {
                 })
                 .await;
             }
+            let resets_at = chrono::Utc::now().timestamp() + 2 * 3600;
+            sink.limits(vec![crate::app::providers::LimitWindow {
+                minutes: 300,
+                used_basis_points: 1200,
+                resets_at,
+            }])
+            .await;
         }
         if input.text.contains("[synthetic:messages]")
             && (sink.end_message().await.is_err() || sink.text(SECOND_MESSAGE).await.is_err())

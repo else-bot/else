@@ -69,6 +69,7 @@ mod task_secrets;
 mod tool_permissions;
 mod turns;
 mod update_gate;
+mod usage;
 mod visual_preview;
 mod webhooks;
 mod ws;

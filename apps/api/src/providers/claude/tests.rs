@@ -101,6 +101,38 @@ fn the_result_reports_token_usage_with_cache_reads_and_writes_in_input() {
 }
 
 #[test]
+fn a_rate_limit_event_reports_the_five_hour_and_weekly_windows() {
+    use crate::app::providers::LimitWindow;
+    let events = tracker().on(&json!({"type":"rate_limit_event","rate_limit_info":{
+        "status":"allowed","resetsAt":1794837600,"rateLimitType":"five_hour",
+        "unifiedWindows":{
+            "five_hour":{"utilization":0.09,"resetsAt":1794837600,"status":"allowed"},
+            "seven_day":{"utilization":0.16,"resetsAt":1795233600,"status":"allowed"}}}}));
+    assert_eq!(
+        events,
+        Ok(vec![Event::Limits(vec![
+            LimitWindow {
+                minutes: 300,
+                used_basis_points: 900,
+                resets_at: 1794837600,
+            },
+            LimitWindow {
+                minutes: 10080,
+                used_basis_points: 1600,
+                resets_at: 1795233600,
+            },
+        ])])
+    );
+}
+
+#[test]
+fn a_rate_limit_event_without_windows_reports_nothing() {
+    let events = tracker().on(&json!({"type":"rate_limit_event",
+        "rate_limit_info":{"status":"allowed","rateLimitType":"five_hour"}}));
+    assert_eq!(events, Ok(Vec::new()));
+}
+
+#[test]
 fn a_compact_boundary_reports_compaction() {
     let events = tracker().on(&json!({"type":"system","subtype":"compact_boundary",
         "compact_metadata":{"trigger":"auto","pre_tokens":150000}}));

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::app::providers::{TurnOutcome, Usage};
+use crate::app::providers::{LimitWindow, TurnOutcome, Usage};
 use crate::app::tools::SERVER_NAME;
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 
@@ -262,6 +262,24 @@ fn result_info(event: &Value) -> ResultInfo {
     }
 }
 
+/// The 5-hour and weekly windows of a `rate_limit_event`. The CLI reports
+/// each window's utilization as a fraction and its reset in Unix seconds.
+fn limit_windows(event: &Value) -> Vec<LimitWindow> {
+    let windows = &event["rate_limit_info"]["unifiedWindows"];
+    [("five_hour", 5 * 60), ("seven_day", 7 * 24 * 60)]
+        .into_iter()
+        .filter_map(|(key, minutes)| {
+            let window = &windows[key];
+            let used = window["utilization"].as_f64()?;
+            Some(LimitWindow {
+                minutes,
+                used_basis_points: (used * 10_000.0).round() as i64,
+                resets_at: window["resetsAt"].as_i64()?,
+            })
+        })
+        .collect()
+}
+
 impl Protocol for Tracker {
     type Message = Value;
     type Terminal = ResultInfo;
@@ -302,6 +320,12 @@ impl Protocol for Tracker {
                 return Err(Violation::policy(format!(
                     "Claude asked for permission: {what}"
                 )));
+            }
+            "rate_limit_event" => {
+                let windows = limit_windows(event);
+                if !windows.is_empty() {
+                    events.push(Event::Limits(windows));
+                }
             }
             "result" => {
                 events.extend(Usage::from_result(event).map(Event::Usage));

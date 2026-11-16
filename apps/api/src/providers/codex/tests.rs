@@ -1132,6 +1132,50 @@ for line in sys.stdin:
 }
 
 #[test]
+fn account_rate_limit_updates_report_both_windows() {
+    use crate::app::providers::LimitWindow;
+    use crate::providers::cli::attempt::{Event, Protocol};
+    let profile = Profile {
+        model: "gpt-6.1-sol".into(),
+        reasoning_effort: "medium".into(),
+        service_tier: "priority".into(),
+    };
+    let mut events = super::policy::TurnEvents {
+        thread_id: "th",
+        native_turn: "tu",
+        profile: &profile,
+        host_tools: true,
+        elsebot_tools: true,
+        current_message: None,
+    };
+    let update =
+        |snapshot: serde_json::Value| crate::providers::codex_rpc::Incoming::Notification {
+            method: "account/rateLimits/updated".into(),
+            params: json!({ "rateLimits": snapshot }),
+        };
+    let reported = events
+        .on(&update(json!({ "limitId": "codex",
+            "primary": { "usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1794837600 },
+            "secondary": { "usedPercent": 7, "resetsAt": 1795233600000_i64 } })))
+        .unwrap();
+    let expected = vec![
+        LimitWindow {
+            minutes: 300,
+            used_basis_points: 4200,
+            resets_at: 1794837600,
+        },
+        LimitWindow {
+            minutes: 10080,
+            used_basis_points: 700,
+            resets_at: 1795233600,
+        },
+    ];
+    assert!(matches!(reported.as_slice(), [Event::Limits(w)] if *w == expected));
+    let other_quota = json!({ "limitId": "codex_other", "primary": { "usedPercent": 90 } });
+    assert!(events.on(&update(other_quota)).unwrap().is_empty());
+}
+
+#[test]
 fn token_usage_of_this_turn_is_reported_per_model_request() {
     use crate::app::providers::Usage;
     use crate::providers::cli::attempt::{Event, Protocol};
