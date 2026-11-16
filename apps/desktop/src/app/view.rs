@@ -55,18 +55,6 @@ impl ElseApp {
         self.connection == Connection::Connected
     }
 
-    pub(crate) fn link(&self) -> super::Link {
-        match self.connection {
-            Connection::Connecting => super::Link::Connecting,
-            Connection::Connected => super::Link::Connected,
-            Connection::Disconnected(_) | Connection::InvalidCredentials(_) => super::Link::Failed,
-        }
-    }
-
-    pub(crate) fn set_server_label(&mut self, label: super::ServerLabel) {
-        self.server_label = Some(label);
-    }
-
     pub(crate) fn status_text(&self) -> (SharedString, bool) {
         match &self.connection {
             Connection::Connecting => ("Connecting…".into(), false),
@@ -258,10 +246,6 @@ impl ElseApp {
             }
             list = list.child(zone);
         }
-        let label = self
-            .server_label
-            .clone()
-            .map(|label| label(self.link(), cx));
         let brand = h_flex()
             .flex_none()
             .h(px(52.))
@@ -277,7 +261,7 @@ impl ElseApp {
                     .child("else")
                     .child(div().text_color(theme.primary).child(".")),
             )
-            .child(div().flex_1().min_w_0().overflow_hidden().children(label))
+            .child(div().flex_1())
             .child(
                 Button::new("new-bot")
                     .focus_ring(false)

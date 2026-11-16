@@ -1,6 +1,5 @@
 use super::servers::{Editor, Health, ReleaseStatus};
 use super::*;
-use crate::app::Link;
 use crate::controls::{Control as _, Scale, Tier};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
@@ -16,36 +15,6 @@ impl Shell {
             Some(Health::Incompatible) => ("Unsupported API", theme.warning),
             Some(Health::Checking) | None => ("Checking…", theme.muted_foreground),
         }
-    }
-
-    /// The current server's name and connection dot in the sidebar header.
-    /// The server rail switches servers, so this stays as quiet as
-    /// secondary text.
-    pub(super) fn render_server_label(&self, link: Link, cx: &mut Context<Self>) -> AnyElement {
-        let Some(active) = &self.active else {
-            return div().into_any_element();
-        };
-        let name = self
-            .registry
-            .find(active.id)
-            .map(|s| s.name.clone())
-            .unwrap_or_else(|| active.profile.origin.as_str().to_owned());
-        let theme = cx.theme();
-        let color = match link {
-            Link::Connected => self.server_status(active.id, cx).1,
-            Link::Failed => theme.danger,
-            Link::Connecting => theme.warning,
-        };
-        h_flex()
-            .min_w_0()
-            .px_2()
-            .gap(px(6.))
-            .items_center()
-            .text_size(px(13.))
-            .text_color(theme.muted_foreground)
-            .child(div().flex_none().size(px(6.)).rounded_full().bg(color))
-            .child(div().min_w_0().truncate().child(name))
-            .into_any_element()
     }
 
     pub(super) fn render_server_list(&self, cx: &mut Context<Self>) -> AnyElement {
