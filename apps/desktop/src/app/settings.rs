@@ -300,8 +300,23 @@ impl TriggerSave {
 
 enum UsageState {
     Loading(Uuid),
-    Ready(Vec<ProviderUsage>),
+    /// Keeps showing `providers` while the `refresh` attempt runs, so the
+    /// section neither collapses nor flashes on every refetch.
+    Ready {
+        providers: Vec<ProviderUsage>,
+        refresh: Option<Uuid>,
+    },
     Failed(String),
+}
+
+impl UsageState {
+    fn awaits(&self, attempt: Uuid) -> bool {
+        match self {
+            Self::Loading(current) => *current == attempt,
+            Self::Ready { refresh, .. } => *refresh == Some(attempt),
+            Self::Failed(_) => false,
+        }
+    }
 }
 
 pub(super) struct BotSettings {
@@ -394,7 +409,9 @@ impl ElseApp {
             },
         );
         self.load_profile(bot.id, window, cx);
-        self.load_bot_usage(bot.id, window, cx);
+        if self.settings_open {
+            self.load_bot_usage(bot.id, window, cx);
+        }
     }
 
     pub(super) fn sync_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -517,7 +534,10 @@ impl ElseApp {
             return;
         };
         let attempt = Uuid::new_v4();
-        entry.usage = UsageState::Loading(attempt);
+        match &mut entry.usage {
+            UsageState::Ready { refresh, .. } => *refresh = Some(attempt),
+            usage => *usage = UsageState::Loading(attempt),
+        }
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.usage().await;
@@ -525,12 +545,12 @@ impl ElseApp {
                 let Some(entry) = app.settings.get_mut(&bot) else {
                     return;
                 };
-                if !matches!(entry.usage, UsageState::Loading(current) if current == attempt) {
+                if !entry.usage.awaits(attempt) {
                     return;
                 }
                 entry.usage = match result {
-                    Ok(report) => UsageState::Ready(
-                        report
+                    Ok(report) => UsageState::Ready {
+                        providers: report
                             .providers
                             .into_iter()
                             .filter_map(|mut provider| {
@@ -541,11 +561,12 @@ impl ElseApp {
                                 provider
                                     .windows
                                     .iter()
-                                    .any(|window| window.bots.iter().any(|bot| bot.turns > 0))
+                                    .any(|window| !window.bots.is_empty())
                                     .then_some(provider)
                             })
                             .collect(),
-                    ),
+                        refresh: None,
+                    },
                     Err(error) => UsageState::Failed(error.to_string()),
                 };
                 cx.notify();
@@ -585,8 +606,8 @@ impl ElseApp {
                         .into_any_element(),
                 );
             }
-            UsageState::Ready(providers) if providers.is_empty() => return None,
-            UsageState::Ready(providers) => providers,
+            UsageState::Ready { providers, .. } if providers.is_empty() => return None,
+            UsageState::Ready { providers, .. } => providers,
         };
         let theme = cx.theme().clone();
         let mut body = section_frame(cx).gap_3().child(
@@ -638,8 +659,10 @@ impl ElseApp {
                         [
                             (amount, color(bot.id, Some(bot.avatar))),
                             (
-                                ((if capped { window.used_percent } else { None }).unwrap_or(100.)
-                                    - amount)
+                                (match attribution {
+                                    crate::api::Attribution::Priced { used } => used,
+                                    _ => 100.,
+                                } - amount)
                                     .max(0.),
                                 theme.muted_foreground.opacity(0.25),
                             ),

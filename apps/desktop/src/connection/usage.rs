@@ -2,7 +2,7 @@ use super::*;
 use crate::api::{Attribution, BotUsage, ProviderUsage, UsageReport, UsageWindow};
 use crate::avatar::{Avatar, bot_avatar};
 use crate::controls::{Control as _, Scale, Tier, field_style, segment, segment_track};
-use crate::usage_ui::{bar, color, dot, local_time, percent, resets, tokens};
+use crate::usage_ui::{bar, color, dot, local_time, percent, resets, tokens, turns};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::searchable_list::SearchableListItem;
@@ -66,65 +66,7 @@ impl Shell {
             loop {
                 let result = client.clone().usage().await;
                 let active = this.update_in(cx, |shell, window, cx| {
-                    let Some(view) = shell.usage.as_mut().filter(|view| view.id == id) else {
-                        return false;
-                    };
-                    match result {
-                        Ok(report) => {
-                            if !report.providers.iter().any(|provider| {
-                                Some(&provider.provider_id) == view.provider.as_ref()
-                            }) {
-                                view.provider = report
-                                    .default_provider()
-                                    .map(|provider| provider.provider_id.clone());
-                                view.expanded = None;
-                            }
-                            let mut bots: std::collections::BTreeMap<_, _> = shell
-                                .active
-                                .as_ref()
-                                .map(|active| {
-                                    active
-                                        .app
-                                        .read(cx)
-                                        .usage_bots()
-                                        .iter()
-                                        .map(|bot| (bot.id, bot.name.clone()))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            for bot in report
-                                .providers
-                                .iter()
-                                .flat_map(|p| &p.windows)
-                                .flat_map(|w| &w.bots)
-                            {
-                                bots.insert(bot.bot_id, bot.name.clone());
-                            }
-                            let choices = std::iter::once(BotChoice {
-                                id: None,
-                                name: "All bots".into(),
-                            })
-                            .chain(bots.into_iter().map(|(id, name)| BotChoice {
-                                id: Some(id),
-                                name: name.into(),
-                            }))
-                            .collect();
-                            view.filter
-                                .update(cx, |filter, cx| filter.set_items(choices, window, cx));
-                            view.state = ReportState::Ready {
-                                report,
-                                refresh_error: None,
-                            };
-                        }
-                        Err(error) => match &mut view.state {
-                            ReportState::Ready { refresh_error, .. } => {
-                                *refresh_error = Some(error.to_string())
-                            }
-                            _ => view.state = ReportState::Failed(error.to_string()),
-                        },
-                    }
-                    cx.notify();
-                    true
+                    shell.apply_usage(id, result, window, cx)
                 });
                 if !matches!(active, Ok(true)) {
                     break;
@@ -153,6 +95,101 @@ impl Shell {
             _poll: poll,
         });
         cx.notify();
+    }
+
+    /// Applies one fetch to the open usage view with this `id`; false once
+    /// that view is gone.
+    fn apply_usage(
+        &mut self,
+        id: Uuid,
+        result: Result<UsageReport, crate::api::ClientError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let shell = self;
+        let Some(view) = shell.usage.as_mut().filter(|view| view.id == id) else {
+            return false;
+        };
+        match result {
+            Ok(report) => {
+                if !report
+                    .providers
+                    .iter()
+                    .any(|provider| Some(&provider.provider_id) == view.provider.as_ref())
+                {
+                    let wanted = view.filter.read(cx).selected_value().copied().flatten();
+                    view.provider = wanted
+                        .and_then(|bot| {
+                            report.providers.iter().find(|provider| {
+                                provider.windows.iter().any(|w| w.bot(bot).is_some())
+                            })
+                        })
+                        .or_else(|| report.default_provider())
+                        .map(|provider| provider.provider_id.clone());
+                    view.expanded = None;
+                }
+                let mut bots: std::collections::BTreeMap<_, _> = shell
+                    .active
+                    .as_ref()
+                    .map(|active| {
+                        active
+                            .app
+                            .read(cx)
+                            .usage_bots()
+                            .iter()
+                            .map(|bot| (bot.id, bot.name.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for bot in report
+                    .providers
+                    .iter()
+                    .flat_map(|p| &p.windows)
+                    .flat_map(|w| &w.bots)
+                {
+                    bots.insert(bot.bot_id, bot.name.clone());
+                }
+                let choices = std::iter::once(BotChoice {
+                    id: None,
+                    name: "All bots".into(),
+                })
+                .chain(bots.into_iter().map(|(id, name)| BotChoice {
+                    id: Some(id),
+                    name: name.into(),
+                }))
+                .collect();
+                view.filter
+                    .update(cx, |filter, cx| filter.set_items(choices, window, cx));
+                view.state = ReportState::Ready {
+                    report,
+                    refresh_error: None,
+                };
+            }
+            Err(error) => match &mut view.state {
+                ReportState::Ready { refresh_error, .. } => {
+                    *refresh_error = Some(error.to_string())
+                }
+                _ => view.state = ReportState::Failed(error.to_string()),
+            },
+        }
+        cx.notify();
+        true
+    }
+
+    /// Fetches the report once, keeping the page as it is until it arrives.
+    fn refetch_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(active), Some(view)) = (&self.active, &self.usage) else {
+            return;
+        };
+        let (client, id) = (active.client.clone(), view.id);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = client.usage().await;
+            this.update_in(cx, |shell, window, cx| {
+                shell.apply_usage(id, result, window, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(super) fn filter_usage(
@@ -245,7 +282,7 @@ impl Shell {
                             .control(Tier::Secondary, Scale::Compact, false, cx)
                             .label("Retry")
                             .on_click(
-                                cx.listener(|shell, _, window, cx| shell.open_usage(window, cx)),
+                                cx.listener(|shell, _, window, cx| shell.refetch_usage(window, cx)),
                             ),
                     ),
             );
@@ -342,9 +379,25 @@ impl Shell {
         {
             body = body.child(timeline(window, filter, &avatars, cx));
         }
-        body = body.child(self.usage_table(provider, filter, &avatars, view.expanded, cx))
-            .child(div().text_xs().text_color(theme.muted_foreground.opacity(0.8)).child(format!("Figures come from {} with each bot turn; usage outside else.bot updates on the next turn.", provider.label())))
-            .child(div().text_xs().text_color(theme.muted_foreground.opacity(0.65)).child(format!("Report updated {}", local_time(report.generated_at))));
+        let source_note = format!(
+            "Figures come from {} with each bot turn; usage outside else.bot updates on the next turn.",
+            provider.label()
+        );
+        let updated = format!("Report updated {}", local_time(report.generated_at));
+        body = body
+            .child(self.usage_table(provider, filter, &avatars, view.expanded, cx))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground.opacity(0.8))
+                    .child(source_note),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground.opacity(0.65))
+                    .child(updated),
+            );
         body.into_any_element()
     }
 
@@ -394,19 +447,10 @@ impl Shell {
                 },
             ));
         }
-        for bot in bots {
-            let id = bot.bot_id;
-            let mut models = Vec::new();
-            for model in provider
-                .windows
-                .iter()
-                .filter_map(|window| window.bot(id))
-                .flat_map(|bot| &bot.models)
-            {
-                if !models.contains(&model.as_str()) {
-                    models.push(model.as_str());
-                }
-            }
+        let ledger = provider.windows.last();
+        for listed in bots {
+            let id = listed.bot_id;
+            let bot = ledger.and_then(|window| window.bot(id)).unwrap_or(listed);
             let row = h_flex()
                 .id(SharedString::from(format!("usage-bot-{id}")))
                 .w_full()
@@ -489,51 +533,47 @@ impl Shell {
                     110.,
                 ));
             table = table.child(row);
-            if expanded == Some(id) {
-                for window in &provider.windows {
-                    if let Some(bot) = window.bot(id) {
-                        for (index, source) in bot.sources.iter().enumerate() {
-                            table = table.child(
-                                h_flex()
-                                    .id(SharedString::from(format!(
-                                        "usage-source-{}-{}-{index}",
-                                        window.minutes,
-                                        source.routine_id.unwrap_or(id)
-                                    )))
-                                    .w_full()
-                                    .gap_3()
-                                    .py_2()
-                                    .pl_8()
-                                    .pr_3()
-                                    .bg(theme.muted_foreground.opacity(0.05))
-                                    .text_xs()
-                                    .child(
-                                        div()
-                                            .w(px(100.))
-                                            .text_color(theme.muted_foreground)
-                                            .child(source.source.label()),
-                                    )
-                                    .child(
-                                        div().flex_1().min_w_0().truncate().child(
-                                            source
-                                                .label
-                                                .clone()
-                                                .unwrap_or_else(|| source.source.label().into()),
-                                        ),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_color(theme.muted_foreground)
-                                            .child(window.label()),
-                                    )
-                                    .child(cell(format!("{} turns", source.turns), 65.))
-                                    .child(cell(
-                                        percent(source.percent.unwrap_or(source.share * 100.)),
-                                        55.,
-                                    )),
-                            );
-                        }
-                    }
+            if expanded == Some(id)
+                && let Some(window) = ledger.filter(|window| window.bot(id).is_some())
+            {
+                let priced = matches!(window.attribution(), Attribution::Priced { .. });
+                for (index, source) in bot.sources.iter().enumerate() {
+                    table = table.child(
+                        h_flex()
+                            .id(SharedString::from(format!(
+                                "usage-source-{}-{}-{index}",
+                                window.minutes,
+                                source.routine_id.unwrap_or(id)
+                            )))
+                            .w_full()
+                            .gap_3()
+                            .py_2()
+                            .pl_8()
+                            .pr_3()
+                            .bg(theme.muted_foreground.opacity(0.05))
+                            .text_xs()
+                            .child(
+                                div()
+                                    .w(px(100.))
+                                    .text_color(theme.muted_foreground)
+                                    .child(source.source.label()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(source.label.clone().unwrap_or_default()),
+                            )
+                            .child(cell(turns(source.turns), 65.))
+                            .child(cell(
+                                percent(match source.percent {
+                                    Some(percent) if priced => percent,
+                                    _ => source.share * bot.share * 100.,
+                                }),
+                                55.,
+                            )),
+                    );
                 }
             }
         }
@@ -559,9 +599,41 @@ impl Shell {
                     })),
             );
         }
-        v_flex().gap_2().child(crate::appearance::section_label("By bot", cx))
-            .child(div().text_xs().text_color(theme.muted_foreground).child(format!("{} · expand a bot for its sources. Turns and tokens cover its first active window.", if provider.windows.iter().all(|window| matches!(window.attribution(), Attribution::Priced { .. })) { "Share of your cap" } else if provider.windows.iter().any(|window| matches!(window.attribution(), Attribution::Priced { .. })) { "Share of your cap where attributed, else share of else.bot usage" } else { "Share of else.bot usage" })))
-            .child(div().id("usage-ledger-scroll").w_full().overflow_x_scroll().child(table)).into_any_element()
+        let priced = provider
+            .windows
+            .iter()
+            .filter(|window| matches!(window.attribution(), Attribution::Priced { .. }))
+            .count();
+        let unit = if priced == provider.windows.len() {
+            "Share of your cap"
+        } else if priced > 0 {
+            "Share of your cap where attributed, else share of else.bot usage"
+        } else {
+            "Share of else.bot usage"
+        };
+        let scope = ledger
+            .map(|window| window.label().to_lowercase())
+            .unwrap_or_default();
+        let caption = format!(
+            "{unit} · expand a bot for its sources. Turns, tokens, and sources cover the {scope}."
+        );
+        v_flex()
+            .gap_2()
+            .child(crate::appearance::section_label("By bot", cx))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(caption),
+            )
+            .child(
+                div()
+                    .id("usage-ledger-scroll")
+                    .w_full()
+                    .overflow_x_scroll()
+                    .child(table),
+            )
+            .into_any_element()
     }
 }
 
@@ -617,11 +689,15 @@ fn gauge(
                 .child(format!("used · {}", resets(window.resets_at))),
         )
     } else {
-        card.child(
-            div()
-                .text_sm()
-                .child(format!("{} doesn't report its limits", provider.label())),
-        )
+        let reports_limits = provider
+            .windows
+            .iter()
+            .any(|window| window.used_percent.is_some());
+        card.child(div().text_sm().child(if reports_limits {
+            "No reading since this window reset".to_owned()
+        } else {
+            format!("{} doesn't report its limits", provider.label())
+        }))
         .child(
             div()
                 .text_xs()

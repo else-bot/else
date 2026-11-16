@@ -35,8 +35,18 @@ pub(crate) fn percent(value: f64) -> String {
     }
 }
 
+pub(crate) fn turns(count: u64) -> String {
+    if count == 1 {
+        "1 turn".into()
+    } else {
+        format!("{count} turns")
+    }
+}
+
 pub(crate) fn tokens(value: u64) -> String {
-    if value >= 1_000_000 {
+    if value >= 1_000_000_000 {
+        format!("{:.2}B", value as f64 / 1_000_000_000.)
+    } else if value >= 999_500 {
         format!("{:.2}M", value as f64 / 1_000_000.)
     } else if value >= 1_000 {
         format!("{:.0}k", value as f64 / 1_000.)
