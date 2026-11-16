@@ -43,6 +43,3 @@ unused_dependencies = "warn"
 [profile.dev]
 debug = 0
 
-# Native link previews, pinned until the hook lands upstream.
-[patch.crates-io]
-gpui-base = { git = "https://github.com/else-bot/gpui-kit", rev = "f4403dce5487a5635f23f4175bbcd2acdefe787d" }
