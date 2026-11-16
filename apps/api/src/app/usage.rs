@@ -136,10 +136,31 @@ impl Turn {
             + cached * price.cache_read
             + self.output_tokens.max(0) as f64 * price.output
     }
+}
 
-    fn span(&self, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
-        let end = self.finished_at.unwrap_or(now).max(self.started_at);
-        (self.started_at, end)
+/// A turn with its weight and span worked out once per report.
+struct Weighed<'a> {
+    turn: &'a Turn,
+    weight: f64,
+    span: (DateTime<Utc>, DateTime<Utc>),
+}
+
+impl<'a> Weighed<'a> {
+    fn new(turn: &'a Turn, now: DateTime<Utc>) -> Self {
+        Self {
+            turn,
+            weight: turn.weight(),
+            span: (
+                turn.started_at,
+                turn.finished_at.unwrap_or(now).max(turn.started_at),
+            ),
+        }
+    }
+
+    /// The weight of the part of the turn inside `from..to`, spread evenly
+    /// over its span.
+    fn within(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> f64 {
+        self.weight * overlap(self.span, (from, to))
     }
 }
 
@@ -252,7 +273,11 @@ pub fn report(now: DateTime<Utc>, turns: &[Turn], readings: &[Reading]) -> Repor
     let providers = providers
         .into_iter()
         .map(|provider| {
-            let turns: Vec<&Turn> = turns.iter().filter(|t| t.provider_id == provider).collect();
+            let turns: Vec<Weighed> = turns
+                .iter()
+                .filter(|t| t.provider_id == provider)
+                .map(|t| Weighed::new(t, now))
+                .collect();
             let mut by_length: BTreeMap<i64, Vec<&Reading>> = BTreeMap::new();
             for reading in readings.iter().filter(|r| r.provider_id == provider) {
                 by_length
@@ -266,11 +291,20 @@ pub fn report(now: DateTime<Utc>, turns: &[Turn], readings: &[Reading]) -> Repor
                     .map(|&minutes| window(now, minutes, &turns, &[], None))
                     .collect()
             } else {
-                let series: BTreeMap<i64, Vec<Vec<&Reading>>> = by_length
+                let series: BTreeMap<i64, Vec<Group>> = by_length
                     .into_iter()
-                    .map(|(minutes, readings)| (minutes, by_reset(readings)))
+                    .map(|(minutes, readings)| {
+                        let groups = by_reset(readings)
+                            .into_iter()
+                            .map(|readings| Group {
+                                stretches: stretches(minutes, &readings, &turns),
+                                readings,
+                            })
+                            .collect();
+                        (minutes, groups)
+                    })
                     .collect();
-                let rates = rates(now, &series, &turns);
+                let rates = rates(&series);
                 series
                     .iter()
                     .map(|(&minutes, windows)| {
@@ -307,6 +341,12 @@ fn by_reset(mut readings: Vec<&Reading>) -> Vec<Vec<&Reading>> {
     windows
 }
 
+/// The readings of one window, and the stretches between them.
+struct Group<'a> {
+    readings: Vec<&'a Reading>,
+    stretches: Vec<Stretch>,
+}
+
 /// A stretch between two readings of one window, starting from zero at the
 /// window's start.
 struct Stretch {
@@ -321,12 +361,7 @@ struct Stretch {
 
 /// The window's stretches, measured from the start its latest reset gives,
 /// so they line up with the window the report shows.
-fn stretches(
-    now: DateTime<Utc>,
-    minutes: i64,
-    window: &[&Reading],
-    turns: &[&Turn],
-) -> Vec<Stretch> {
+fn stretches(minutes: i64, window: &[&Reading], turns: &[Weighed]) -> Vec<Stretch> {
     let resets_at = window.last().expect("windows are never empty").resets_at;
     let mut previous = (resets_at - Duration::minutes(minutes), 0.0);
     let mut stretches = Vec::new();
@@ -337,7 +372,7 @@ fn stretches(
         if to <= from {
             continue;
         }
-        let (weight, covered) = activity(now, turns, from, to);
+        let (weight, covered) = activity(turns, from, to);
         stretches.push(Stretch {
             from,
             to,
@@ -355,16 +390,12 @@ fn stretches(
 /// calibrated length's rate, scaled by how far the two totals rose between
 /// the same pairs of readings. A length with neither has no rate, so its use
 /// stays unattributed instead of being guessed.
-fn rates(
-    now: DateTime<Utc>,
-    series: &BTreeMap<i64, Vec<Vec<&Reading>>>,
-    turns: &[&Turn],
-) -> BTreeMap<i64, f64> {
+fn rates(series: &BTreeMap<i64, Vec<Group>>) -> BTreeMap<i64, f64> {
     let mut learned = BTreeMap::new();
-    for (&minutes, windows) in series {
+    for (&minutes, groups) in series {
         let (mut clean_rise, mut clean_weight) = (0.0, 0.0);
-        for window in windows {
-            for stretch in stretches(now, minutes, window, turns) {
+        for group in groups {
+            for stretch in &group.stretches {
                 if stretch.weight > 0.0 && stretch.coverage >= CLEAN_COVERAGE {
                     clean_rise += stretch.rise;
                     clean_weight += stretch.weight;
@@ -378,11 +409,11 @@ fn rates(
     let Some((&base, &base_rate)) = learned.iter().next() else {
         return learned;
     };
-    for (&minutes, windows) in series {
+    for (&minutes, groups) in series {
         if learned.contains_key(&minutes) {
             continue;
         }
-        if let Some(ratio) = rise_ratio(&series[&base], windows) {
+        if let Some(ratio) = rise_ratio(&series[&base], groups) {
             learned.insert(minutes, base_rate * ratio);
         }
     }
@@ -392,12 +423,13 @@ fn rates(
 /// How far `other` rose for each point `base` rose, over pairs of readings
 /// both lengths took in the same reports with no reset in either between
 /// them. `None` until `base` rose enough to tell.
-fn rise_ratio(base: &[Vec<&Reading>], other: &[Vec<&Reading>]) -> Option<f64> {
+fn rise_ratio(base: &[Group], other: &[Group]) -> Option<f64> {
     let partners: HashMap<Uuid, (usize, f64)> = base
         .iter()
         .enumerate()
         .flat_map(|(group, window)| {
             window
+                .readings
                 .iter()
                 .map(move |b| (b.report_id, (group, b.used_percent)))
         })
@@ -405,7 +437,7 @@ fn rise_ratio(base: &[Vec<&Reading>], other: &[Vec<&Reading>]) -> Option<f64> {
     let partner = |reading: &Reading| partners.get(&reading.report_id).copied();
     let (mut base_rise, mut other_rise) = (0.0, 0.0);
     for window in other {
-        for pair in window.windows(2) {
+        for pair in window.readings.windows(2) {
             let (Some((g0, b0)), Some((g1, b1))) = (partner(pair[0]), partner(pair[1])) else {
                 continue;
             };
@@ -427,7 +459,7 @@ enum Pricing<'a> {
         latest: &'a Reading,
         unit: f64,
         outside: f64,
-        stretches: Vec<Stretch>,
+        stretches: &'a [Stretch],
     },
     /// The provider reported the total, but no rate is known yet.
     Unattributed { latest: &'a Reading },
@@ -463,32 +495,31 @@ struct Scale {
     until: DateTime<Utc>,
 }
 
-fn window(
+fn window<'a>(
     now: DateTime<Utc>,
     minutes: i64,
-    turns: &[&Turn],
-    windows: &[Vec<&Reading>],
+    turns: &[Weighed],
+    groups: &'a [Group<'a>],
     rate: Option<f64>,
 ) -> WindowUsage {
     let length = Duration::minutes(minutes);
-    let current = windows
+    let current = groups
         .iter()
-        .filter(|w| w[0].resets_at > now)
-        .max_by_key(|w| w[0].resets_at);
-    let latest = current.map(|w| *w.last().expect("windows are never empty"));
+        .filter(|g| g.readings[0].resets_at > now)
+        .max_by_key(|g| g.readings[0].resets_at);
+    let latest = current.map(|g| *g.readings.last().expect("windows are never empty"));
     let starts_at = latest.map_or(now - length, |r| r.resets_at - length);
-    let members: Vec<&Turn> = turns
+    let members: Vec<&Weighed> = turns
         .iter()
-        .copied()
-        .filter(|t| overlap(t.span(now), (starts_at, now)) > 0.0)
+        .filter(|t| overlap(t.span, (starts_at, now)) > 0.0)
         .collect();
-    let in_window = |turn: &Turn, from: DateTime<Utc>, to: DateTime<Utc>| {
-        turn.weight() * overlap(turn.span(now), (from.max(starts_at), to.min(now)))
+    let in_window = |turn: &Weighed, from: DateTime<Utc>, to: DateTime<Utc>| {
+        turn.within(from.max(starts_at), to.min(now))
     };
     let weight_until =
         |until| -> f64 { members.iter().map(|t| in_window(t, starts_at, until)).sum() };
     let pricing = match (current, latest, rate) {
-        (Some(window), Some(latest), Some(rate)) => {
+        (Some(group), Some(latest), Some(rate)) => {
             // Bots never take more than the reported total.
             let priced = weight_until(latest.observed_at);
             let unit = if priced > 0.0 {
@@ -500,7 +531,7 @@ fn window(
                 latest,
                 unit,
                 outside: latest.used_percent - priced * unit,
-                stretches: stretches(now, minutes, window, turns),
+                stretches: &group.stretches,
             }
         }
         (_, Some(latest), None) => Pricing::Unattributed { latest },
@@ -519,7 +550,7 @@ fn window(
             }
         }
     };
-    let percent = |turn: &Turn, from: DateTime<Utc>, to: DateTime<Utc>| {
+    let percent = |turn: &Weighed, from: DateTime<Utc>, to: DateTime<Utc>| {
         in_window(turn, from, to.min(scale.until)) * scale.factor
     };
     let buckets = if minutes <= TIMELINE_MAX_MINUTES {
@@ -546,8 +577,8 @@ fn window(
 fn timeline(
     starts_at: DateTime<Utc>,
     length: Duration,
-    members: &[&Turn],
-    percent: impl Fn(&Turn, DateTime<Utc>, DateTime<Utc>) -> f64,
+    members: &[&Weighed],
+    percent: impl Fn(&Weighed, DateTime<Utc>, DateTime<Utc>) -> f64,
     pricing: &Pricing,
 ) -> Vec<Bucket> {
     let leftovers: Vec<(DateTime<Utc>, DateTime<Utc>, f64)> = match pricing {
@@ -578,7 +609,7 @@ fn timeline(
             let to = from + step;
             let mut by_bot: BTreeMap<Uuid, f64> = BTreeMap::new();
             for turn in members {
-                *by_bot.entry(turn.bot_id).or_default() += percent(turn, from, to);
+                *by_bot.entry(turn.turn.bot_id).or_default() += percent(turn, from, to);
             }
             let outside: f64 = leftovers
                 .iter()
@@ -600,22 +631,16 @@ fn timeline(
         .collect()
 }
 
-/// The weight of the turns' work inside `from..to`, spread evenly over each
-/// turn's span, and how long at least one of them ran there.
-fn activity(
-    now: DateTime<Utc>,
-    turns: &[&Turn],
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-) -> (f64, Duration) {
+/// The weight of the turns' work inside `from..to`, and how long at least
+/// one of them ran there.
+fn activity(turns: &[Weighed], from: DateTime<Utc>, to: DateTime<Utc>) -> (f64, Duration) {
     let mut weight = 0.0;
     let mut spans = Vec::new();
     for turn in turns {
-        let fraction = overlap(turn.span(now), (from, to));
-        if fraction > 0.0 {
-            weight += turn.weight() * fraction;
-            let (start, end) = turn.span(now);
-            spans.push((start.max(from), end.min(to)));
+        let inside = turn.within(from, to);
+        if inside > 0.0 {
+            weight += inside;
+            spans.push((turn.span.0.max(from), turn.span.1.min(to)));
         }
     }
     spans.sort();
@@ -657,14 +682,14 @@ type SourceKey<'a> = (Source, Option<&'a str>, Option<Uuid>);
 /// Groups the window's turns by bot. `percent` is a turn's percent in the
 /// window's unit; `weight` is its weight inside the window.
 fn bots(
-    turns: &[&Turn],
-    percent: impl Fn(&Turn) -> f64,
-    weight: impl Fn(&Turn) -> f64,
+    turns: &[&Weighed],
+    percent: impl Fn(&Weighed) -> f64,
+    weight: impl Fn(&Weighed) -> f64,
 ) -> Vec<BotUsage> {
     let total: f64 = turns.iter().map(|t| weight(t)).sum();
-    let mut by_bot: BTreeMap<Uuid, Vec<&Turn>> = BTreeMap::new();
+    let mut by_bot: BTreeMap<Uuid, Vec<&Weighed>> = BTreeMap::new();
     for turn in turns {
-        by_bot.entry(turn.bot_id).or_default().push(turn);
+        by_bot.entry(turn.turn.bot_id).or_default().push(turn);
     }
     let mut bots: Vec<BotUsage> = by_bot
         .into_values()
@@ -673,11 +698,15 @@ fn bots(
             let mut models: BTreeMap<&str, f64> = BTreeMap::new();
             let mut sources: BTreeMap<SourceKey, (u32, f64, f64)> = BTreeMap::new();
             for turn in &turns {
-                if let Some(model) = turn.model.as_deref() {
+                if let Some(model) = turn.turn.model.as_deref() {
                     *models.entry(model).or_default() += weight(turn);
                 }
                 let entry = sources
-                    .entry((turn.source, turn.label.as_deref(), turn.routine_id))
+                    .entry((
+                        turn.turn.source,
+                        turn.turn.label.as_deref(),
+                        turn.turn.routine_id,
+                    ))
                     .or_default();
                 entry.0 += 1;
                 entry.1 += weight(turn);
@@ -699,10 +728,10 @@ fn bots(
                 )
                 .collect();
             sources.sort_by(|a, b| b.share.total_cmp(&a.share));
-            let sum = |f: fn(&Turn) -> i64| turns.iter().map(|t| f(t)).sum();
+            let sum = |f: fn(&Turn) -> i64| turns.iter().map(|t| f(t.turn)).sum();
             BotUsage {
-                bot_id: turns[0].bot_id,
-                name: turns[0].bot_name.clone(),
+                bot_id: turns[0].turn.bot_id,
+                name: turns[0].turn.bot_name.clone(),
                 percent: round(turns.iter().map(|t| percent(t)).sum()),
                 share: ratio(bot_weight, total),
                 turns: turns.len() as u32,
