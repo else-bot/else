@@ -192,9 +192,10 @@ pub struct TurnInput {
     /// The owner message's ordered parts; empty for plain text. `text` is
     /// their flattening.
     pub parts: Vec<MessagePart>,
-    /// Newer owner messages an earlier attempt of this turn took in as
-    /// steers, oldest first; part of the request when it continues.
-    pub steered: Vec<String>,
+    /// Newer owner messages joined to this turn, oldest first: those an
+    /// earlier attempt delivered and those this request delivers. Their
+    /// files are in [`TurnInput::files`].
+    pub steered: Vec<Steered>,
     /// Bytes of the files this turn's packet may name: the message's own,
     /// then those of missed history within a budget, newest first.
     pub files: Vec<InputFile>,
@@ -638,6 +639,11 @@ pub trait TurnSink: Send + Sync {
         let _ = turn_id;
         Ok(false)
     }
+    /// The provider answered that it did not take steered message
+    /// `turn_id`: it waits for this turn's next attempt.
+    async fn steer_refused(&self, turn_id: Uuid) {
+        let _ = turn_id;
+    }
     /// The provider took steered message `turn_id` into this turn (its
     /// echo arrived). Later text starts a new assistant item.
     async fn steered(&self, turn_id: Uuid) -> Result<(), Fenced> {
@@ -646,13 +652,25 @@ pub trait TurnSink: Send + Sync {
     }
 }
 
-/// A newer owner message steered into a running turn, as its attempt
-/// sends it.
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+/// A newer owner message joined to a running or parked turn.
+#[derive(Debug, Clone)]
 pub struct Steer {
     /// The message's own turn, which ends with the reply that takes it.
     pub turn_id: Uuid,
     pub text: String,
+    /// Its ordered parts; empty for plain text.
+    pub parts: Vec<crate::app::messages::MessagePart>,
+    /// The bytes of its files, for an attempt that writes it mid-turn.
+    pub files: Vec<InputFile>,
+}
+
+/// A joined message as a turn's request carries it.
+#[derive(Debug, Clone)]
+pub struct Steered {
+    pub message: Steer,
+    /// An earlier attempt delivered it, so a resumed native session has
+    /// already seen it.
+    pub seen: bool,
 }
 
 /// The owner's stop requests for one attempt. [`Stop::request`] asks the
@@ -765,13 +783,6 @@ pub trait Provider: Send + Sync {
     ) -> Result<String, String> {
         let _ = (request, cancel);
         Err("this provider cannot produce a verified no-tool checkpoint".into())
-    }
-    /// Whether a running turn can take a newer owner message without being
-    /// stopped. Such a provider reads [`TurnSink::steers`] when
-    /// [`Stop::steered`] wakes it and reports each echo through
-    /// [`TurnSink::steered`].
-    fn steers(&self) -> bool {
-        false
     }
     /// Run one turn to a terminal outcome. A stop request must interrupt
     /// the provider; an escalation must end it at once. Either way it

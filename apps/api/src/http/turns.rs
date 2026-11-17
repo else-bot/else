@@ -127,11 +127,11 @@ async fn send(
     // A message sent during a backup is accepted without an admission and
     // waits in the queue; it lets the turns the backup is waiting for finish.
     let admission = state.scheduler.gate().enter();
-    let preemption = match admission {
-        Some(_) => turns::Preemption::Cancel,
-        None => turns::Preemption::Defer,
+    let mode = match admission {
+        Some(_) => turns::Admission::Open,
+        None => turns::Admission::Deferred,
     };
-    let accepted = accept_send(&state, bot_id, body, false, preemption).await?;
+    let accepted = accept_send(&state, bot_id, body, false, mode).await?;
     drop(admission);
     let status = if accepted.created {
         StatusCode::ACCEPTED
@@ -165,7 +165,7 @@ pub(super) async fn introduce(
             answers_notice: None,
         },
         true,
-        turns::Preemption::Cancel,
+        turns::Admission::Open,
     )
     .await
 }
@@ -175,7 +175,7 @@ async fn accept_send(
     bot_id: Uuid,
     body: SendBody,
     hidden: bool,
-    preemption: turns::Preemption,
+    admission: turns::Admission,
 ) -> Result<turns::Accepted, ApiError> {
     let request_id = body.request_id;
     let with_id = |err: ApiError| err.with_request_id(request_id);
@@ -208,7 +208,6 @@ async fn accept_send(
         requested_provider: requested,
         provider_id: requested.or(chosen).or(registry.default_id()).unwrap_or(""),
         uses_profile: false,
-        steers: false,
         open_draft: body.open_draft.as_ref(),
         answers_notice: body.answers_notice,
     };
@@ -238,17 +237,15 @@ async fn accept_send(
             }
             request.provider_id = provider.id();
             request.uses_profile = provider.uses_profile();
-            request.steers = provider.steers();
-            turns::accept(&state.db, request, preemption)
+            turns::accept(&state.db, request, admission)
                 .await
                 .map_err(|err| with_id(err.into()))?
         }
     };
-    for &active in &accepted.preempted {
-        state.scheduler.interrupt(active).await;
-    }
-    if let Some(running) = accepted.steered_into {
-        state.scheduler.steer(running).await;
+    if let Some(turns::Placement::Joined { into, status }) = accepted.placement
+        && status.is_active()
+    {
+        state.scheduler.steer(into).await;
     }
     if accepted.created {
         state.scheduler.wake();

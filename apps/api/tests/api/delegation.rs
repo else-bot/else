@@ -987,7 +987,7 @@ async fn stop_keeps_a_task_the_owner_stops_on_its_own_and_deletion_resolves_it()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_owner_follow_up_keeps_earlier_tasks_running_and_receives_every_reply() {
+async fn an_owner_follow_up_keeps_earlier_tasks_running_and_its_reply_receives_every_result() {
     let app = app_with(3).await;
     let growth = leaf(&app, "Growth").await;
     let scout = leaf(&app, "Scout").await;
@@ -1020,10 +1020,10 @@ async fn an_owner_follow_up_keeps_earlier_tasks_running_and_receives_every_reply
         )
         .await;
     assert_eq!(follow.status, StatusCode::ACCEPTED, "{}", follow.body);
+    assert_eq!(follow.body["turn"]["steered_into"], root.to_string());
     let follow: Uuid = follow.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    wait_status(&app, root, "interrupted").await;
-    wait_status(&app, follow, "running").await;
-    let token = grant_delegate(&app, follow).await;
+    wait_status(&app, root, "running").await;
+    let token = grant_delegate(&app, root).await;
     let reply = delegate(
         &app,
         &token,
@@ -1037,8 +1037,9 @@ async fn an_owner_follow_up_keeps_earlier_tasks_running_and_receives_every_reply
         .parse()
         .unwrap();
 
-    app.wait_turn_for(&follow.to_string(), &["completed"], Duration::from_secs(60))
+    app.wait_turn_for(&root.to_string(), &["completed"], Duration::from_secs(60))
         .await;
+    wait_status(&app, follow, "completed").await;
     let tasks: Vec<(Uuid, Uuid, String, Option<i64>)> = sqlx::query_as(
         "SELECT id, root_turn_id, status, delivered_attempt FROM delegations
          WHERE id IN (?1, ?2) ORDER BY created_at",
@@ -1050,9 +1051,9 @@ async fn an_owner_follow_up_keeps_earlier_tasks_running_and_receives_every_reply
     .unwrap();
     assert_eq!(tasks.len(), 2);
     for (id, carrier, status, delivered) in tasks {
-        assert_eq!(carrier, follow, "{id} reports to the follow-up");
+        assert_eq!(carrier, root, "{id} reports to the reply");
         assert_eq!(status, "completed", "{id} kept running after the follow-up");
-        assert!(delivered.is_some(), "{id} reached the follow-up");
+        assert!(delivered.is_some(), "{id} reached the reply");
     }
 }
 
@@ -2812,14 +2813,49 @@ async fn a_cancelled_child_keeps_its_partial_reply_and_an_empty_one_shows_empty(
     assert_eq!(upserts, 1);
 }
 
+/// Make seeded `turn` the reply to an owner message, so a newer owner
+/// message can join it.
+async fn owner_reply(db: &TestDb, turn: Uuid) {
+    let (conversation, item): (Uuid, Uuid) =
+        sqlx::query_as("SELECT conversation_id, owner_item_id FROM turns WHERE id = ?1")
+            .bind(turn)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+         VALUES (?1, ?2, (SELECT last_item_seq + 1 FROM conversations WHERE id = ?2),
+                 ?3, 'user', 'Find the form.')",
+    )
+    .bind(item)
+    .bind(conversation)
+    .bind(turn)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE conversations SET last_item_seq = last_item_seq + 1 WHERE id = ?1")
+        .bind(conversation)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+}
+
+async fn steered_into(db: &TestDb, turn: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar("SELECT into_turn_id FROM turn_steers WHERE turn_id = ?1")
+        .bind(turn)
+        .fetch_optional(&db.pool)
+        .await
+        .unwrap()
+}
+
 async fn follow_up(db: &TestDb, bot: Uuid) -> Uuid {
-    follow_up_with(db, bot, else_api::db::turns::Preemption::Cancel).await
+    follow_up_with(db, bot, else_api::db::turns::Admission::Open).await
 }
 
 async fn follow_up_with(
     db: &TestDb,
     bot: Uuid,
-    preemption: else_api::db::turns::Preemption,
+    preemption: else_api::db::turns::Admission,
 ) -> Uuid {
     sqlx::query(
         "UPDATE conversations SET last_turn_no = (SELECT max(turn_no) FROM turns t
@@ -2841,7 +2877,6 @@ async fn follow_up_with(
             requested_provider: Some("synthetic"),
             provider_id: "synthetic",
             uses_profile: false,
-            steers: false,
             open_draft: None,
             answers_notice: None,
         },
@@ -2862,37 +2897,31 @@ async fn set_status(db: &TestDb, turn: Uuid, status: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_follow_up_receives_an_outcome_its_earlier_turn_had_not_seen() {
+async fn a_follow_up_joins_the_reply_that_receives_its_tasks_outcome() {
     let db = TestDb::migrated().await;
     let (main, root, child, delegation) = seed(&db).await;
+    owner_reply(&db, root).await;
     set_status(&db, root, "waiting").await;
     set_status(&db, child, "completed").await;
+    let follow = follow_up(&db, main).await;
+    assert_eq!(steered_into(&db, follow).await, Some(root));
+    let (carrier, delivered, root_status): (Uuid, Option<i64>, String) = sqlx::query_as(
+        "SELECT d.root_turn_id, d.delivered_attempt, r.status
+         FROM delegations d, turns r WHERE d.id = ?1 AND r.id = ?2",
+    )
+    .bind(delegation)
+    .bind(root)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (carrier, delivered, root_status.as_str()),
+        (root, None, "queued"),
+        "the reply continues and receives the outcome with the message"
+    );
     let own = undelivered(&db, root).await;
     assert_eq!(own.len(), 1);
-    assert!(!own[0].earlier_request, "the delegating turn's own task");
-    let follow = follow_up(&db, main).await;
-    let (carrier, status, delivered, root_status): (Uuid, String, Option<i64>, String) =
-        sqlx::query_as(
-            "SELECT d.root_turn_id, d.status, d.delivered_attempt, r.status
-             FROM delegations d, turns r WHERE d.id = ?1 AND r.id = ?2",
-        )
-        .bind(delegation)
-        .bind(root)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-    assert_eq!(root_status, "interrupted");
-    assert_eq!(
-        (carrier, status.as_str(), delivered),
-        (follow, "completed", None),
-        "the follow-up will receive the outcome"
-    );
-    let carried = undelivered(&db, follow).await;
-    assert_eq!(carried.len(), 1);
-    assert!(
-        carried[0].earlier_request,
-        "the follow-up learns the task was started for an earlier message"
-    );
+    assert!(!own[0].earlier_request, "the reply's own task");
 }
 
 async fn undelivered(db: &TestDb, root: Uuid) -> Vec<else_api::db::delegations::Outcome> {
@@ -2903,9 +2932,12 @@ async fn undelivered(db: &TestDb, root: Uuid) -> Vec<else_api::db::delegations::
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_follow_up_does_not_wait_on_a_task_that_waits_on_it() {
+async fn a_follow_up_continues_the_reply_while_a_task_it_started_asks_back() {
     let db = TestDb::migrated().await;
     let (main, root, child, outbound) = seed(&db).await;
+    owner_reply(&db, root).await;
+    set_status(&db, root, "waiting").await;
+    set_status(&db, child, "waiting").await;
     let target: Uuid = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
         .bind(child)
         .fetch_one(&db.pool)
@@ -2917,13 +2949,13 @@ async fn a_follow_up_does_not_wait_on_a_task_that_waits_on_it() {
             .fetch_one(&db.pool)
             .await
             .unwrap();
-    let approval = Uuid::new_v4();
+    let asker = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
              owner_item_id, provider_id, status, attempt)
          VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 'synthetic', 'running', 1)",
     )
-    .bind(approval)
+    .bind(asker)
     .bind(target)
     .bind(target_chat)
     .bind(Uuid::new_v4())
@@ -2932,17 +2964,9 @@ async fn a_follow_up_does_not_wait_on_a_task_that_waits_on_it() {
     .execute(&db.pool)
     .await
     .unwrap();
-    sqlx::query("UPDATE delegations SET takeover_turn_id = ?2, status = 'running' WHERE id = ?1")
-        .bind(outbound)
-        .bind(approval)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    set_status(&db, child, "interrupted").await;
-    set_status(&db, root, "waiting").await;
     let inbound = else_api::db::delegations::create(
         &db.pool,
-        approval,
+        asker,
         main,
         "check with main",
         None,
@@ -2958,11 +2982,12 @@ async fn a_follow_up_does_not_wait_on_a_task_that_waits_on_it() {
         .await
         .unwrap();
     set_status(&db, asking, "waiting").await;
+    let question = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, choices)
          VALUES (?1, ?2, ?3, 1, 'choice', 'Which channel?', '[]')",
     )
-    .bind(Uuid::new_v4())
+    .bind(question)
     .bind(main)
     .bind(asking)
     .execute(&db.pool)
@@ -2970,28 +2995,34 @@ async fn a_follow_up_does_not_wait_on_a_task_that_waits_on_it() {
     .unwrap();
 
     let follow = follow_up(&db, main).await;
-    let takeover: Option<Uuid> =
-        sqlx::query_scalar("SELECT takeover_turn_id FROM delegations WHERE id = ?1")
-            .bind(inbound)
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
     assert_eq!(
-        takeover,
-        Some(follow),
-        "the follow-up answers the inbound task"
+        steered_into(&db, follow).await,
+        Some(root),
+        "the owner's own unfinished reply takes the message"
     );
-    let (carrier, status): (Uuid, String) =
-        sqlx::query_as("SELECT root_turn_id, status FROM delegations WHERE id = ?1")
-            .bind(outbound)
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
+    let tasks: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT root_turn_id, status, takeover_turn_id FROM delegations
+         WHERE id IN (?1, ?2) ORDER BY created_at",
+    )
+    .bind(outbound)
+    .bind(inbound)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
     assert_eq!(
-        (carrier, status.as_str()),
-        (root, "cancelled"),
-        "carrying the outbound task would leave both turns waiting on each other"
+        tasks,
+        [
+            (root, "queued".to_owned(), None),
+            (asker, "queued".to_owned(), None)
+        ],
+        "both tasks stay with the replies that started them"
     );
+    let asked: String = sqlx::query_scalar("SELECT status FROM owner_questions WHERE id = ?1")
+        .bind(question)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(asked, "pending", "the task's own question still waits");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3022,9 +3053,9 @@ async fn a_reply_wakes_the_parent_while_another_task_still_runs() {
             Some("synthetic"),
         )
         .await;
-    let follow: Uuid = follow.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    wait_status(&app, follow, "running").await;
-    let token = grant_delegate(&app, follow).await;
+    assert_eq!(follow.body["turn"]["steered_into"], root.to_string());
+    wait_status(&app, root, "running").await;
+    let token = grant_delegate(&app, root).await;
     let links = delegate(
         &app,
         &token,
@@ -3045,7 +3076,7 @@ async fn a_reply_wakes_the_parent_while_another_task_still_runs() {
              WHERE d.id = ?1 AND t.id = ?2",
         )
         .bind(links_id)
-        .bind(follow)
+        .bind(root)
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
@@ -3059,7 +3090,7 @@ async fn a_reply_wakes_the_parent_while_another_task_still_runs() {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "Scout's reply never reached the follow-up: {delivered:?} {status}"
+            "Scout's reply never reached the reply: {delivered:?} {status}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -3071,13 +3102,13 @@ async fn a_reply_wakes_the_parent_while_another_task_still_runs() {
             .unwrap();
     assert_eq!(
         (carrier, status.as_str()),
-        (follow, "running"),
+        (root, "running"),
         "Growth keeps working"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_routine_task_is_not_carried_onto_an_owner_message() {
+async fn an_owner_message_does_not_join_a_routine_run() {
     let db = TestDb::migrated().await;
     let (main, root, child, delegation) = seed(&db).await;
     let (conversation, item): (Uuid, Uuid) =
@@ -3104,21 +3135,26 @@ async fn a_routine_task_is_not_carried_onto_an_owner_message() {
         .unwrap();
     set_status(&db, child, "running").await;
     set_status(&db, root, "waiting").await;
-    follow_up(&db, main).await;
-    let carrier: Uuid = sqlx::query_scalar("SELECT root_turn_id FROM delegations WHERE id = ?1")
-        .bind(delegation)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-    let child_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
-        .bind(child)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
+    let follow = follow_up(&db, main).await;
     assert_eq!(
-        (carrier, child_status.as_str()),
-        (root, "cancelling"),
-        "an owner message would widen the routine task's authority"
+        steered_into(&db, follow).await,
+        None,
+        "an owner message would widen the routine's authority"
+    );
+    let state: (Uuid, String, String) = sqlx::query_as(
+        "SELECT d.root_turn_id, c.status, r.status FROM delegations d, turns c, turns r
+         WHERE d.id = ?1 AND c.id = ?2 AND r.id = ?3",
+    )
+    .bind(delegation)
+    .bind(child)
+    .bind(root)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        state,
+        (root, "running".into(), "waiting".into()),
+        "the routine and its task go on"
     );
 }
 
@@ -3282,10 +3318,11 @@ async fn a_task_hands_work_on_once_and_the_last_hop_routes_follow_ups_back() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_message_sent_during_a_pause_takes_over_only_once_it_ends() {
+async fn a_message_sent_during_a_pause_joins_only_once_it_ends() {
     let db = TestDb::migrated().await;
     let (main, root, child, delegation) = seed(&db).await;
-    let follow = follow_up_with(&db, main, else_api::db::turns::Preemption::Defer).await;
+    owner_reply(&db, root).await;
+    let follow = follow_up_with(&db, main, else_api::db::turns::Admission::Deferred).await;
     let state = || async {
         sqlx::query_as::<_, (Uuid, String, String, bool)>(
             "SELECT d.root_turn_id, r.status, f.status, f.deferred
@@ -3301,8 +3338,9 @@ async fn a_message_sent_during_a_pause_takes_over_only_once_it_ends() {
     assert_eq!(
         state().await,
         (root, "running".into(), "queued".into(), true),
-        "the running turn keeps its task and is not cancelled"
+        "the running turn keeps its task"
     );
+    assert_eq!(steered_into(&db, follow).await, None);
     assert!(
         else_api::db::turns::claim_next(&db.pool, &[], true)
             .await
@@ -3334,14 +3372,16 @@ async fn a_message_sent_during_a_pause_takes_over_only_once_it_ends() {
     assert_eq!(
         else_api::db::turns::settle_deferred(&db.pool)
             .await
-            .unwrap(),
+            .unwrap()
+            .0,
         1
     );
     assert_eq!(
         state().await,
-        (follow, "interrupted".into(), "queued".into(), false),
-        "once the pause ends the message takes over and receives the outcome"
+        (root, "queued".into(), "queued".into(), false),
+        "once the pause ends the message joins the reply, which continues"
     );
+    assert_eq!(steered_into(&db, follow).await, Some(root));
     let skipped: String = sqlx::query_scalar("SELECT status FROM owner_questions WHERE id = ?1")
         .bind(question)
         .fetch_one(&db.pool)
@@ -3354,7 +3394,8 @@ async fn a_message_sent_during_a_pause_takes_over_only_once_it_ends() {
     assert_eq!(
         else_api::db::turns::settle_deferred(&db.pool)
             .await
-            .unwrap(),
+            .unwrap()
+            .0,
         0,
         "settling again changes nothing"
     );
@@ -3454,10 +3495,10 @@ async fn control(app: &TestApp, token: &str, tool: &str, arguments: Value) -> (b
     (reply.body["result"]["isError"] == true, tool_text(&reply))
 }
 
-/// A task to `target` from the main bot's running turn, carried to a
-/// second owner message that hangs, as when the owner follows up while the
-/// task runs. Returns the task, its running child turn, and a delegate
-/// grant for the follow-up.
+/// A task to `target` from the main bot's running turn, whose waiting
+/// reply a second owner message joins and continues with a hang, as when
+/// the owner follows up while the task runs. Returns the task, its running
+/// child turn, and a delegate grant for the continued reply.
 async fn task_carried_to_a_follow_up(
     app: &TestApp,
     target: &str,
@@ -3481,9 +3522,14 @@ async fn task_carried_to_a_follow_up(
             Some("synthetic"),
         )
         .await;
-    let follow: Uuid = follow.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    wait_status(app, follow, "running").await;
-    (task_id, child, grant_delegate(app, follow).await)
+    assert_eq!(
+        follow.body["turn"]["steered_into"],
+        root.to_string(),
+        "{}",
+        follow.body
+    );
+    wait_status(app, root, "running").await;
+    (task_id, child, grant_delegate(app, root).await)
 }
 
 async fn child_of(app: &TestApp, task: Uuid) -> Uuid {

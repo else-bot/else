@@ -31,6 +31,12 @@ impl SinkState {
             })
     }
 
+    pub(super) async fn steer_refused(&self, turn_id: Uuid) {
+        if let Err(err) = crate::db::steers::refuse(&self.pool, turn_id, self.turn_id).await {
+            tracing::warn!(turn = %self.turn_id, steered = %turn_id, error = %err, "recording a refused steered message failed");
+        }
+    }
+
     /// The provider took a steered message: text after it starts a new
     /// assistant item, so the reply reads in order below the message. If
     /// its delivery cannot be recorded it stays `sending`, so its turn ends

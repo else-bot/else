@@ -1160,6 +1160,8 @@ fn account_rate_limit_updates_report_both_windows() {
         host_tools: true,
         elsebot_tools: true,
         current_message: None,
+        project: std::path::Path::new("/p"),
+        steers: Default::default(),
     };
     let update =
         |snapshot: serde_json::Value| crate::providers::codex_rpc::Incoming::Notification {
@@ -1204,6 +1206,8 @@ fn token_usage_of_this_turn_is_reported_per_model_request() {
         host_tools: true,
         elsebot_tools: true,
         current_message: None,
+        project: std::path::Path::new("/p"),
+        steers: Default::default(),
     };
     let update = |turn: &str| crate::providers::codex_rpc::Incoming::Notification {
         method: "thread/tokenUsage/updated".into(),
@@ -1239,6 +1243,8 @@ fn context_compaction_is_reported_once_per_signal() {
         host_tools: true,
         elsebot_tools: true,
         current_message: None,
+        project: std::path::Path::new("/p"),
+        steers: Default::default(),
     };
     let note = |method: &str, params: Value| crate::providers::codex_rpc::Incoming::Notification {
         method: method.into(),
@@ -1290,4 +1296,76 @@ fn debug_models_lists_shown_models_in_priority_order() {
     assert_eq!(sol.efforts, ["low"], "ultra is not offered");
     assert_eq!(sol.upgrade.as_deref(), Some("gpt-6.2-sol"));
     assert!(codex_home::listed_models(b"[]").is_err());
+}
+
+/// `turn/steer` names the running turn and our message ID; Codex echoes the
+/// ID on a user message item (measured on codex-cli 0.169.0), which the
+/// attempt takes once.
+#[test]
+fn a_steered_message_names_the_turn_and_its_echo_is_taken_once() {
+    use crate::providers::cli::attempt::{Event, Protocol};
+    let profile = Profile {
+        model: "gpt-6.1-sol".into(),
+        reasoning_effort: "medium".into(),
+        service_tier: "priority".into(),
+    };
+    let mut events = super::policy::TurnEvents {
+        thread_id: "th",
+        native_turn: "tu",
+        profile: &profile,
+        host_tools: true,
+        elsebot_tools: true,
+        current_message: None,
+        project: std::path::Path::new("/p"),
+        steers: Default::default(),
+    };
+    let steer = crate::app::providers::Steer {
+        turn_id: Uuid::new_v4(),
+        text: "Also say BANANA.".into(),
+        parts: Vec::new(),
+        files: Vec::new(),
+    };
+    let input = events.steer_input(&steer).unwrap();
+    assert_eq!(
+        (
+            &input["threadId"],
+            &input["expectedTurnId"],
+            &input["clientUserMessageId"]
+        ),
+        (&json!("th"), &json!("tu"), &json!(steer.turn_id))
+    );
+    assert!(
+        input["input"][0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("Also say BANANA.")
+    );
+    let item = |method: &str, client: Value| crate::providers::codex_rpc::Incoming::Notification {
+        method: method.into(),
+        params: json!({ "threadId": "th", "turnId": "tu", "item": {
+            "type": "userMessage", "id": "i", "clientId": client, "content": [] } }),
+    };
+    let echo = item("item/started", json!(steer.turn_id));
+    assert!(
+        events.on(&echo).unwrap().is_empty(),
+        "nothing is owed before it is sent"
+    );
+    events.steer_sent(&steer);
+    assert!(
+        events
+            .on(&item("item/started", Value::Null))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        events.on(&echo).unwrap().as_slice(),
+        [Event::Steered(turn)] if *turn == steer.turn_id
+    ));
+    assert!(
+        events
+            .on(&item("item/completed", json!(steer.turn_id)))
+            .unwrap()
+            .is_empty(),
+        "its completion is the same echo"
+    );
 }

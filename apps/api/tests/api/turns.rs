@@ -265,9 +265,8 @@ async fn one_active_turn_per_bot_while_newer_messages_steer() {
         }
         max_active
     });
-    assert_eq!(app.wait_turn(&turns[2], &["completed"]).await, "completed");
-    for turn in &turns[..2] {
-        assert_eq!(app.wait_turn(turn, &["interrupted"]).await, "interrupted");
+    for turn in &turns {
+        assert_eq!(app.wait_turn(turn, &["completed"]).await, "completed");
     }
     assert_eq!(
         monitor.await.unwrap(),
@@ -277,7 +276,7 @@ async fn one_active_turn_per_bot_while_newer_messages_steer() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rapid_corrections_are_all_accepted_and_reach_the_newest_reply() {
+async fn rapid_corrections_all_join_the_running_reply() {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let synthetic = Arc::new(else_api::providers::synthetic::Synthetic::new(
@@ -296,48 +295,32 @@ async fn rapid_corrections_are_all_accepted_and_reach_the_newest_reply() {
         )
         .await;
     let elsewhere = elsewhere.body["turn"]["id"].as_str().unwrap().to_owned();
-    let hang = app
-        .send(
-            &bot,
-            Uuid::new_v4(),
-            "[synthetic:hang] publish",
-            Some("synthetic"),
-        )
+    let publish = format!(
+        "[synthetic:slow] publish {}",
+        "the release notes ".repeat(10)
+    );
+    let sent = app
+        .send(&bot, Uuid::new_v4(), &publish, Some("synthetic"))
         .await;
-    let hang = hang.body["turn"]["id"].as_str().unwrap().to_owned();
-    app.wait_turn(&hang, &["running"]).await;
+    let answer = sent.body["turn"]["id"].as_str().unwrap().to_owned();
+    app.wait_turn(&answer, &["running"]).await;
     app.wait_turn(&elsewhere, &["running"]).await;
 
-    // Keep the cancelled hang turn draining until every correction is queued,
-    // so each one supersedes the one before however slowly they arrive.
-    synthetic.hold_hangs(true).await;
     let corrections: Vec<String> = Vec::from_fn(6, |i| format!("correction {i}"));
     let mut requests = Vec::new();
     for text in &corrections {
         let request = Uuid::new_v4();
         let reply = app.send(&bot, request, text, Some("synthetic")).await;
         assert_eq!(reply.status, StatusCode::ACCEPTED, "{}", reply.body);
+        assert_eq!(reply.body["turn"]["steered_into"], answer.as_str());
         requests.push((
             request,
             reply.body["turn"]["id"].as_str().unwrap().to_owned(),
         ));
     }
-    let listing = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
-    assert!(
-        listing.body["bot"]["activity"]["queued_count"]
-            .as_i64()
-            .unwrap()
-            <= 1,
-        "{}",
-        listing.body
-    );
-    synthetic.hold_hangs(false).await;
-
-    let (_, newest) = requests.last().unwrap();
-    assert_eq!(app.wait_turn(newest, &["completed"]).await, "completed");
-    assert_eq!(app.wait_turn(&hang, &["interrupted"]).await, "interrupted");
-    for (request, turn) in &requests[..requests.len() - 1] {
-        assert_eq!(app.wait_turn(turn, &["interrupted"]).await, "interrupted");
+    assert_eq!(app.wait_turn(&answer, &["completed"]).await, "completed");
+    for (request, turn) in &requests {
+        assert_eq!(app.wait_turn(turn, &["completed"]).await, "completed");
         let lookup = app
             .owner(
                 "GET",
@@ -345,7 +328,7 @@ async fn rapid_corrections_are_all_accepted_and_reach_the_newest_reply() {
                 None,
             )
             .await;
-        assert_eq!(lookup.body["turn"]["error"]["code"], "superseded");
+        assert_eq!(lookup.body["turn"]["steered_into"], answer.as_str());
     }
     let packet = synthetic.packets().await.last().unwrap().clone();
     for text in &corrections {
@@ -391,9 +374,8 @@ async fn a_retry_of_an_older_message_does_not_preempt_the_newer_one() {
             Some("synthetic"),
         )
         .await;
+    assert_eq!(second.body["turn"]["steered_into"], first.as_str());
     let second = second.body["turn"]["id"].as_str().unwrap().to_owned();
-    app.wait_turn(&second, &["running"]).await;
-    assert_eq!(app.wait_turn(&first, &["interrupted"]).await, "interrupted");
 
     let retry = app
         .send(
@@ -406,12 +388,17 @@ async fn a_retry_of_an_older_message_does_not_preempt_the_newer_one() {
     assert_eq!(retry.status, StatusCode::OK);
     assert_eq!(retry.body["turn"]["id"], first.as_str());
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
-        .bind(second.parse::<Uuid>().unwrap())
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    assert_eq!(status, "running");
+    let status = |turn: &str| {
+        sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id = ?1")
+            .bind(turn.parse::<Uuid>().unwrap())
+            .fetch_one(&app.db.pool)
+    };
+    assert_eq!(status(&first).await.unwrap(), "running");
+    assert_eq!(
+        status(&second).await.unwrap(),
+        "queued",
+        "the newer message stays joined to the running reply"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

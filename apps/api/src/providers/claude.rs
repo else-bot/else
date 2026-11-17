@@ -337,14 +337,17 @@ fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
 }
 
 fn user_message(uuid: &str, content: Value) -> String {
-    let mut line = json!({
+    let mut line = user_value(uuid, content).to_string();
+    line.push('\n');
+    line
+}
+
+fn user_value(uuid: &str, content: Value) -> Value {
+    json!({
         "type": "user",
         "uuid": uuid,
         "message": { "role": "user", "content": content },
     })
-    .to_string();
-    line.push('\n');
-    line
 }
 
 fn message_content(segments: &[prompt::Segment<'_>]) -> Value {
@@ -417,10 +420,6 @@ impl Provider for Claude {
     }
 
     fn uses_profile(&self) -> bool {
-        true
-    }
-
-    fn steers(&self) -> bool {
         true
     }
 

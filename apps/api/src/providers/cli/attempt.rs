@@ -1,9 +1,11 @@
 //! The stop lifecycle of one provider attempt and how it ends.
 
+use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::json;
+
+use serde_json::{Value, json};
 use tokio::time::Instant;
 
 use super::process::{Finish, Scope, Stderr, last_lines};
@@ -230,15 +232,16 @@ pub trait Protocol {
         true
     }
 
-    /// The input line that adds `steer` to the running turn; its echo
-    /// carries the steered turn's ID. `None` when this provider does not
-    /// steer.
-    fn steer_line(&self, steer: &Steer) -> Option<String> {
+    /// The input that adds `steer` to the running turn, for
+    /// [`Channel::send`]; its echo carries the steered turn's ID. `None`
+    /// when this provider takes no input mid-turn: the message waits for the
+    /// reply's next attempt.
+    fn steer_input(&self, steer: &Steer) -> Option<Value> {
         let _ = steer;
         None
     }
 
-    /// The line for `steer` reached the provider; its echo is now owed.
+    /// The input for `steer` reached the provider; its echo is now owed.
     fn steer_sent(&mut self, steer: &Steer) {
         let _ = steer;
     }
@@ -264,28 +267,65 @@ pub trait Channel: Send {
     /// stop escalates, so it must not hold state the attempt still needs.
     async fn interrupt(&mut self);
 
-    /// Write one input line to the running provider.
-    async fn send(&mut self, line: &str) -> Result<(), String> {
-        let _ = line;
-        Err("this provider takes no input while it runs".into())
+    /// Give the running provider one input from [`Protocol::steer_input`].
+    async fn send(&mut self, input: &Value) -> Result<(), SendError> {
+        let _ = input;
+        Err(SendError::Refused(
+            "this provider takes no input while it runs".into(),
+        ))
+    }
+
+    /// The project directory, where a steered message's files are staged.
+    fn project(&self) -> Option<&Path> {
+        None
     }
 }
 
-/// Write each owner message steered into the turn and not written yet,
-/// recording each as sending first. A stop request ends the batch at once,
-/// even mid-write; a message whose write failed or was cut off keeps an
-/// unknown delivery, so its turn ends uncertain and is never resent.
-async fn steer<C, P>(channel: &mut C, protocol: &mut P, sink: &dyn TurnSink, stop: &Stop)
-where
+/// Why [`Channel::send`] failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendError {
+    /// The provider answered that it took nothing.
+    Refused(String),
+    /// Cut off, timed out, or the transport closed: it may have taken it.
+    Unknown(String),
+}
+
+/// Give the provider each owner message steered into the turn and not
+/// given yet, oldest first, staging its files and recording it as sending
+/// first. A stop request ends the batch at once, even mid-write. A message
+/// the provider refused waits for the reply's next attempt; one whose write
+/// failed or was cut off keeps an unknown delivery, so its turn ends
+/// uncertain and is never resent. After either, the attempt gives nothing
+/// more (`closed`), so a later message never overtakes it.
+async fn steer<C, P>(
+    channel: &mut C,
+    protocol: &mut P,
+    sink: &dyn TurnSink,
+    stop: &Stop,
+    closed: &mut bool,
+) where
     C: Channel,
     P: Protocol<Message = C::Message>,
 {
+    if *closed {
+        return;
+    }
     for steer in sink.steers().await {
-        let Some(line) = protocol.steer_line(&steer) else {
-            continue;
+        let Some(input) = protocol.steer_input(&steer) else {
+            return;
         };
         if stop.is_requested() {
             return;
+        }
+        if !steer.files.is_empty() {
+            let Some(project) = channel.project() else {
+                return;
+            };
+            if let Err(err) = crate::providers::attachments::stage(project, &steer.files).await {
+                tracing::warn!(steered = %steer.turn_id, error = %err, "staging a steered message's files failed");
+                *closed = true;
+                return;
+            }
         }
         match sink.steer_sending(steer.turn_id).await {
             Ok(true) => {}
@@ -293,13 +333,20 @@ where
             Err(Fenced) => return,
         }
         let sent = tokio::select! {
-            sent = channel.send(&line) => sent,
-            () = stop.requested() => Err("stopped while writing".into()),
+            sent = channel.send(&input) => sent,
+            () = stop.requested() => Err(SendError::Unknown("stopped while writing".into())),
         };
         match sent {
             Ok(()) => protocol.steer_sent(&steer),
-            Err(err) => {
-                tracing::warn!(steered = %steer.turn_id, error = %err, "writing a steered message failed");
+            Err(SendError::Refused(why)) => {
+                tracing::info!(steered = %steer.turn_id, %why, "the provider refused a steered message");
+                sink.steer_refused(steer.turn_id).await;
+                *closed = true;
+                return;
+            }
+            Err(SendError::Unknown(why)) => {
+                tracing::warn!(steered = %steer.turn_id, %why, "writing a steered message failed");
+                *closed = true;
                 return;
             }
         }
@@ -334,6 +381,11 @@ where
 {
     let not_stopped = || format!("{label} did not stop after being interrupted.");
     let mut life = Lifecycle::start();
+    let mut closed = false;
+    // A message that joined before the provider took the turn had no wake.
+    if turn.accepted() {
+        steer(channel, protocol, sink, stop, &mut closed).await;
+    }
     loop {
         let read = tokio::select! {
             () = stop.escalated() => return Ended::Abandoned(life.abandoned(not_stopped())),
@@ -344,7 +396,7 @@ where
                 continue;
             }
             () = stop.steered(), if life.takes_steers() => {
-                steer(channel, protocol, sink, stop).await;
+                steer(channel, protocol, sink, stop, &mut closed).await;
                 continue;
             }
             () = tokio::time::sleep_until(life.wake_at()) => {
@@ -376,7 +428,11 @@ where
                 Event::Accepted { model, native_turn } => {
                     let reported =
                         json!({ "model": model, "reasoning_effort": null, "service_tier": null });
-                    turn.accept(sink, &reported, &native_turn).await
+                    let accepted = turn.accept(sink, &reported, &native_turn).await;
+                    if accepted.is_ok() && life.takes_steers() {
+                        steer(channel, protocol, sink, stop, &mut closed).await;
+                    }
+                    accepted
                 }
                 Event::Text(text) => sink.text(&text).await,
                 Event::EndMessage => sink.end_message().await,
@@ -478,8 +534,9 @@ mod tests {
         messages: VecDeque<Value>,
         interrupts: usize,
         interrupt_hangs: bool,
-        sent: Vec<String>,
+        sent: Vec<Value>,
         send_hangs: bool,
+        send_refuses: bool,
     }
 
     #[async_trait]
@@ -500,11 +557,14 @@ mod tests {
             }
         }
 
-        async fn send(&mut self, line: &str) -> Result<(), String> {
+        async fn send(&mut self, input: &Value) -> Result<(), SendError> {
             if self.send_hangs {
                 std::future::pending::<()>().await;
             }
-            self.sent.push(line.to_owned());
+            if self.send_refuses {
+                return Err(SendError::Refused("no active turn to steer".into()));
+            }
+            self.sent.push(input.clone());
             Ok(())
         }
     }
@@ -544,6 +604,7 @@ mod tests {
             interrupt_hangs: false,
             sent: Vec::new(),
             send_hangs: false,
+            send_refuses: false,
         }
     }
 
@@ -607,8 +668,8 @@ mod tests {
             self.owed
         }
 
-        fn steer_line(&self, steer: &Steer) -> Option<String> {
-            Some(steer.text.clone())
+        fn steer_input(&self, steer: &Steer) -> Option<Value> {
+            Some(json!(steer.text))
         }
     }
 
@@ -618,14 +679,8 @@ mod tests {
         let sink = Log::default();
         let turn_id = uuid::Uuid::new_v4();
         *sink.steers.lock().unwrap() = vec![
-            Steer {
-                turn_id,
-                text: "If they agreed, send the deal.".into(),
-            },
-            Steer {
-                turn_id: uuid::Uuid::new_v4(),
-                text: "What is this?".into(),
-            },
+            steer(turn_id, "If they agreed, send the deal."),
+            steer(uuid::Uuid::new_v4(), "What is this?"),
         ];
         let mut turn = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n".into()));
         let mut channel = replay(&[json!({"kind": "accept"})]);
@@ -660,6 +715,82 @@ mod tests {
             [format!("steer-sending:{turn_id}")],
             "only the message being written is marked; the rest stay pending"
         );
+    }
+
+    fn steer(turn_id: uuid::Uuid, text: &str) -> Steer {
+        Steer {
+            turn_id,
+            text: text.into(),
+            parts: Vec::new(),
+            files: Vec::new(),
+        }
+    }
+
+    /// Codex answers `turn/steer` with an error once its turn ended: the
+    /// message waits for the next attempt, and no later one overtakes it.
+    #[tokio::test]
+    async fn a_refused_steer_waits_and_nothing_after_it_is_given() {
+        let input = input();
+        let sink = Log::default();
+        let (first, second) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        *sink.steers.lock().unwrap() = vec![
+            steer(first, "If they agreed, send the deal."),
+            steer(second, "Schedule it too."),
+        ];
+        let mut turn = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n".into()));
+        let mut channel = replay(&[json!({"kind": "accept"}), json!({"kind": "end"})]);
+        channel.send_refuses = true;
+        let ended = drive(
+            &mut channel,
+            &mut Owing { owed: false },
+            &mut turn,
+            &sink,
+            &Stop::default(),
+            "P",
+        )
+        .await;
+        assert_eq!(
+            ended,
+            Ended::Terminal {
+                outcome: TurnOutcome::Completed,
+                resumable: true
+            }
+        );
+        let steering: Vec<_> = sink
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("steer"))
+            .collect();
+        assert_eq!(
+            steering,
+            [
+                format!("steer-sending:{first}"),
+                format!("steer-refused:{first}")
+            ]
+        );
+        assert!(channel.sent.is_empty());
+    }
+
+    /// A message that joined before the provider took the turn is given
+    /// as soon as it does, with no wake.
+    #[tokio::test]
+    async fn a_message_that_joined_before_acceptance_is_given_on_acceptance() {
+        let input = input();
+        let sink = Log::default();
+        let turn_id = uuid::Uuid::new_v4();
+        *sink.steers.lock().unwrap() = vec![steer(turn_id, "Schedule it too.")];
+        let mut turn = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n".into()));
+        let mut channel = replay(&[json!({"kind": "accept"}), json!({"kind": "end"})]);
+        drive(
+            &mut channel,
+            &mut Owing { owed: false },
+            &mut turn,
+            &sink,
+            &Stop::default(),
+            "P",
+        )
+        .await;
+        assert_eq!(channel.sent, [json!("Schedule it too.")]);
     }
 
     #[tokio::test]

@@ -5,8 +5,8 @@
 //! ends the job settles the wait and requeues the turn as a continuation
 //! that receives the job's outcome: an exit, a cancel, the job deadline, or
 //! a lost computer. Both transitions are triggers on `guest_jobs.status`,
-//! so no code path that ends a job can miss one. A new owner message
-//! carries the wait to its own turn ([`carry_forward`]). The owner may stop
+//! so no code path that ends a job can miss one. A new owner message joins
+//! the waiting turn and keeps the wait on it. The owner may stop
 //! the wait, which also cancels its job ([`stop_by_owner`]); the bot
 //! receives that like an outcome. Any other end of the turn first withdraws
 //! a pending wait (also a trigger), except the owner's Stop of the attempt
@@ -149,31 +149,6 @@ pub struct Pending {
     pub purpose: Option<String>,
     pub job_status: JobStatus,
     pub created_at: String,
-}
-
-/// The owner's new message `turn_id` takes the waits of the earlier active
-/// turns of `conversation_id` that are pending or settled and unseen, at
-/// attempt 0, as [`super::mcp_waits::carry_forward`] does.
-pub async fn carry_forward(
-    conn: &mut SqliteConnection,
-    conversation_id: Uuid,
-    turn_no: i64,
-    turn_id: Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE computer_job_waits SET turn_id = ?3, attempt = 0
-         WHERE turn_id IN (SELECT id FROM turns WHERE conversation_id = ?1 AND turn_no < ?2
-                           AND {})
-           AND (status = 'pending'
-                OR (delivered_attempt IS NULL AND status IN ('settled', 'stopped')))",
-        super::turns::HOLDS_CARRY
-    )))
-    .bind(conversation_id)
-    .bind(turn_no)
-    .bind(turn_id)
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
 }
 
 /// The pending waits of these turns.

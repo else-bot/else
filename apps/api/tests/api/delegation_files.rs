@@ -257,16 +257,41 @@ async fn a_delegated_file_reaches_the_other_bot_and_its_reply_files_come_back() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_owner_taking_over_a_task_gets_its_files() {
-    owner_takeover_gets_the_task_files(false).await;
+async fn an_owner_message_joining_a_task_reaches_it_with_its_files() {
+    owner_message_reaches_the_task_with_its_files(false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_owner_taking_over_an_updated_task_still_gets_its_files() {
-    owner_takeover_gets_the_task_files(true).await;
+async fn an_owner_message_joining_an_updated_task_still_reaches_it_with_its_files() {
+    owner_message_reaches_the_task_with_its_files(true).await;
 }
 
-async fn owner_takeover_gets_the_task_files(updated: bool) {
+/// A task that streams for long enough to ask the owner mid-reply.
+fn slow(task: &str) -> String {
+    format!(
+        "[synthetic:slow] {task} {}",
+        "Check the caption and the alt text. ".repeat(20)
+    )
+}
+
+/// Waits until `turn` runs its attempt `attempt`.
+async fn runs_attempt(app: &TestApp, turn: Uuid, attempt: i32) {
+    let deadline = std::time::Instant::now() + common::SETTLE;
+    loop {
+        let now: (i32, String) = sqlx::query_as("SELECT attempt, status FROM turns WHERE id = ?1")
+            .bind(turn)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+        if now.0 >= attempt && now.1 == "running" {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "{turn}: {now:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn owner_message_reaches_the_task_with_its_files(updated: bool) {
     let Setup {
         _root,
         provider,
@@ -274,13 +299,13 @@ async fn owner_takeover_gets_the_task_files(updated: bool) {
         main,
         twitter,
         card,
+        parent,
         token,
-        ..
     } = setup().await;
     let (error, pending) = delegate(
         &app,
         &token,
-        json!({ "target_bot_id": twitter, "task": "[synthetic:hang] Post the card.",
+        json!({ "target_bot_id": twitter, "task": slow("Post the card."),
                 "files": ["cards/whale.png"] }),
     )
     .await;
@@ -299,11 +324,11 @@ async fn owner_takeover_gets_the_task_files(updated: bool) {
         let follow = app
             .send(&main, Uuid::new_v4(), "[synthetic:hang] Any news?", None)
             .await;
-        let follow: Uuid = follow.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-        app.wait_turn(&follow.to_string(), &["running"]).await;
+        assert_eq!(follow.body["turn"]["steered_into"], parent.to_string());
+        runs_attempt(&app, parent, 2).await;
         let conversation: Uuid =
             sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-                .bind(follow)
+                .bind(parent)
                 .fetch_one(&app.db.pool)
                 .await
                 .unwrap();
@@ -313,7 +338,7 @@ async fn owner_takeover_gets_the_task_files(updated: bool) {
             .issue(
                 main.parse().unwrap(),
                 conversation,
-                follow,
+                parent,
                 vec![Tool::Delegate],
                 DEFAULT_TTL,
             )
@@ -325,7 +350,7 @@ async fn owner_takeover_gets_the_task_files(updated: bool) {
                 Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                              "params": { "name": "delegation_update", "arguments": {
                                  "task_id": task,
-                                 "message": "[synthetic:hang] Use the blue caption." } } })),
+                                 "message": slow("Use the blue caption.") } } })),
                 Some(&token),
             )
             .await;
@@ -365,32 +390,43 @@ async fn owner_takeover_gets_the_task_files(updated: bool) {
         .await;
     assert_ne!(asked.body["result"]["isError"], true, "{}", asked.body);
 
-    let sent = app
-        .send(
-            &twitter,
-            Uuid::new_v4(),
-            "Post it with this caption instead.",
-            None,
-        )
-        .await;
-    let steer = sent.body["turn"]["id"].as_str().unwrap().to_owned();
-    app.wait_turn_for(&steer, &["completed"], Duration::from_secs(20))
-        .await;
+    let text = "Post it with this caption instead.";
+    let sent = app.send(&twitter, Uuid::new_v4(), text, None).await;
+    assert_eq!(
+        sent.body["turn"]["steered_into"],
+        asking.to_string(),
+        "the message joins the task that asked: {}",
+        sent.body
+    );
+    runs_attempt(&app, asking, 2).await;
     let inputs = provider.inputs.lock().unwrap().clone();
-    let chat = inputs
+    let task = inputs
         .iter()
-        .find(|input| input.turn_id.to_string() == steer)
+        .rfind(|input| input.turn_id == asking)
         .unwrap();
-    let staged = chat
+    assert!(
+        task.steered.iter().any(|s| s.message.text == text),
+        "the task continues with the owner's message"
+    );
+    // An update's continuation resumes the task's session, which was given
+    // the file with the task; the task's own continuation is given it again.
+    let given = if updated {
+        inputs.iter().find(|input| input.turn_id == child).unwrap()
+    } else {
+        task
+    };
+    let staged = given
         .files
         .iter()
         .find(|file| file.attachment.name == "whale.png")
-        .expect("the task's file is staged for the chat turn");
+        .expect("the task's file is staged for it");
     assert_eq!(*staged.data, *card);
     let path = else_api::providers::attachments::relative_path(&staged.attachment);
-    let packet = else_api::providers::prompt::packet(chat, 0);
+    let packet = else_api::providers::prompt::packet(given, 0);
     assert!(
         packet.contains(&format!("saved at {}", path.display())),
         "{packet}"
     );
+    let packet = else_api::providers::prompt::packet(task, 0);
+    assert!(packet.contains(text), "{packet}");
 }

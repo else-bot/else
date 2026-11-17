@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::app::messages::{MessagePart, Reaction};
 use crate::app::providers::{HistoryEntry, Profile, SessionState, TurnInput};
+pub use crate::db::steers::Placement;
 use crate::db::steers::STEERED;
 
 /// Where a turn is in its life, as stored in `turns.status`.
@@ -103,12 +104,6 @@ pub const ENDED_STATUSES: &str = "('completed', 'interrupted', 'failed', 'uncert
 pub const UNFINISHED_STATUSES: &str =
     "('queued', 'preparing', 'sending', 'running', 'cancelling', 'waiting')";
 
-/// The turns of a conversation whose jobs, tasks and unseen results a newer
-/// owner message takes over, as an SQL condition on `turns`: unfinished
-/// ones, and one the owner's Stop left `cancelling` with its waits.
-pub const HOLDS_CARRY: &str = "(status IN ('queued', 'waiting', 'preparing', 'sending', 'running')
-     OR (status = 'cancelling' AND error_code IS 'stopped'))";
-
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TurnRecord {
     pub id: Uuid,
@@ -134,6 +129,8 @@ pub struct TurnRecord {
     /// The running reply this queued message joined
     /// ([`crate::db::steers`]).
     pub steered_into: Option<Uuid>,
+    /// How far this message got into [`Self::steered_into`].
+    pub steer_status: Option<crate::db::steers::Status>,
     /// The bot's requests for secrets during this turn (metadata only).
     #[sqlx(skip)]
     pub secret_requests: Vec<crate::db::secret_requests::RequestInfo>,
@@ -171,6 +168,7 @@ pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id,
     t.error_code, t.error_message, t.effect_uncertain, t.created_at, t.started_at, t.finished_at, t.attempt,
     (SELECT i.reaction FROM items i WHERE i.id = t.owner_item_id) AS reaction,
     (SELECT s.into_turn_id FROM turn_steers s WHERE s.turn_id = t.id) AS steered_into,
+    (SELECT s.status FROM turn_steers s WHERE s.turn_id = t.id) AS steer_status,
     (SELECT json_object('routine_id', lower(hex(r.routine_id)), 'name', r.name, 'due_at', r.due_at,
                         'reminder', json(iif(o.run_at IS NULL, 'false', 'true')))
      FROM routine_runs r JOIN routines o ON o.id = r.routine_id WHERE r.turn_id = t.id) AS routine";
@@ -345,13 +343,9 @@ pub struct Accepted {
     pub created: bool,
     pub turn: TurnRecord,
     pub item: ItemRecord,
-    /// Active turns this message preempted: the conversation's own, and
-    /// delegated tasks it took over before they parked. Each is
-    /// `cancelling` and must be interrupted.
-    pub preempted: Vec<Uuid>,
-    /// The running turn this message joined instead of stopping it; its
-    /// attempt must be told to take the message.
-    pub steered_into: Option<Uuid>,
+    /// Where the message went; `None` for a retry, or while admission is
+    /// deferred.
+    pub placement: Option<crate::db::steers::Placement>,
 }
 
 pub struct SendRequest<'a> {
@@ -368,9 +362,6 @@ pub struct SendRequest<'a> {
     /// The provider the turn is bound to.
     pub provider_id: &'a str,
     pub uses_profile: bool,
-    /// Whether the provider can take a newer owner message into its running
-    /// turn ([`crate::app::providers::Provider::steers`]).
-    pub steers: bool,
     /// The outgoing draft open in the app when the owner sent this
     /// message, with their unsaved edits (part of the request hash).
     pub open_draft: Option<&'a crate::db::outgoing_drafts::Attachment>,
@@ -418,21 +409,21 @@ pub fn request_hash(req: &SendRequest<'_>) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-/// What a new owner message does to the conversation's turns that are
-/// still working.
+/// Whether a new owner message is placed now ([`crate::db::steers::place`])
+/// or waits for the scheduler's gate to reopen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Preemption {
-    /// Stop them: the newer message takes over (the usual case).
-    Cancel,
-    /// Let them finish and queue behind them, as while a backup waits for
-    /// running turns to end.
-    Defer,
+pub enum Admission {
+    /// Place it now (the usual case).
+    Open,
+    /// Leave it queued and unplaced, as while a backup waits for running
+    /// turns to end; [`settle_deferred`] places it afterwards.
+    Deferred,
 }
 
 pub async fn accept(
     pool: &SqlitePool,
     req: SendRequest<'_>,
-    preemption: Preemption,
+    admission: Admission,
 ) -> Result<Accepted, AcceptError> {
     let hash = request_hash(&req);
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -467,8 +458,7 @@ pub async fn accept(
             created: false,
             turn,
             item,
-            preempted: Vec::new(),
-            steered_into: None,
+            placement: None,
         });
     }
     if let Some(reaction) = req.reaction {
@@ -537,7 +527,7 @@ pub async fn accept(
     .bind(req.provider_id)
     .bind(profile.as_ref().map(|(revision, _)| *revision))
     .bind(profile.as_ref().map(|(_, profile)| profile))
-    .bind(preemption == Preemption::Defer)
+    .bind(admission == Admission::Deferred)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -586,32 +576,24 @@ pub async fn accept(
                 AnswerError::Db(err) => AcceptError::Db(err),
             })?;
     }
-    let revision = profile.as_ref().map(|(revision, _)| *revision);
-    let (preempted, steered_into) = match preemption {
-        Preemption::Cancel => {
-            match crate::db::steers::join(
+    let placement = match admission {
+        // A setup message runs only on an idle bot.
+        Admission::Open if req.hidden => Some(crate::db::steers::Placement::Queued),
+        Admission::Open => Some(
+            crate::db::steers::place(
                 &mut tx,
-                &req,
+                req.bot_id,
                 conversation_id,
                 turn_no,
                 turn_id,
-                revision,
+                req.provider_id,
             )
-            .await?
-            {
-                Some(into) => (Vec::new(), Some(into)),
-                None => (
-                    take_conversation(&mut tx, req.bot_id, conversation_id, turn_no, turn_id)
-                        .await?,
-                    None,
-                ),
-            }
-        }
-        // Running turns finish first; settle_deferred takes over once the
-        // pause ends.
-        Preemption::Defer => (Vec::new(), None),
+            .await?,
+        ),
+        // Running turns finish first; settle_deferred places the message
+        // once the pause ends.
+        Admission::Deferred => None,
     };
-    // Show the tasks carried from the turns this message ended.
     crate::db::events::turn_changed(&mut tx, req.bot_id, turn_id).await?;
     crate::db::memory::log_item(&mut tx, item_id).await?;
     let (turn, item) = load_turn_and_item(&mut tx, turn_id).await?;
@@ -620,94 +602,15 @@ pub async fn accept(
         created: true,
         turn,
         item,
-        preempted,
-        steered_into,
+        placement,
     })
 }
 
-/// A new owner message takes over its conversation: it takes over delegated
-/// work, skips older questions and handoffs, carries tasks and waits forward, and
-/// supersedes or cancels the turns before it. Returns the turns to cancel.
-async fn take_conversation(
-    tx: &mut SqliteConnection,
-    bot_id: Uuid,
-    conversation_id: Uuid,
-    turn_no: i64,
-    turn_id: Uuid,
-) -> Result<Vec<Uuid>, sqlx::Error> {
-    crate::db::delegations::lock_targets_of_bot(&mut *tx, bot_id).await?;
-    crate::db::delegations::take_over(&mut *tx, bot_id, conversation_id, turn_no, turn_id).await?;
-    // A delegated task shows its cards here through its receipt item; its
-    // turn lives in a task conversation. One this message took over ends
-    // below; any other continues with the skip.
-    let skipped: Vec<(Uuid, bool)> = sqlx::query_as(
-        "UPDATE owner_questions SET status = 'skipped',
-             settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE status = 'pending'
-           AND (turn_id IN (SELECT id FROM turns WHERE conversation_id = ?1 AND turn_no < ?2)
-                OR turn_id IN (SELECT d.child_turn_id FROM delegations d
-                               JOIN items i ON i.turn_id = d.child_turn_id
-                               WHERE i.conversation_id = ?1))
-         RETURNING turn_id, turn_id IN (SELECT child_turn_id FROM delegations
-                                        WHERE takeover_turn_id IS NULL) AS delegated",
-    )
-    .bind(conversation_id)
-    .bind(turn_no)
-    .fetch_all(&mut *tx)
-    .await?;
-    for task in skipped
-        .into_iter()
-        .filter_map(|(turn, delegated)| delegated.then_some(turn))
-    {
-        continue_waiting(&mut *tx, task).await?;
-        crate::db::events::turn_changed(&mut *tx, bot_id, task).await?;
-    }
-    crate::db::computer_handoffs::skip_pending(&mut *tx, bot_id).await?;
-    crate::db::delegations::carry_forward(&mut *tx, conversation_id, turn_no, turn_id).await?;
-    crate::db::mcp_waits::carry_forward(&mut *tx, conversation_id, turn_no, turn_id).await?;
-    crate::db::computer_job_waits::carry_forward(&mut *tx, conversation_id, turn_no, turn_id)
-        .await?;
-    let superseded: Vec<Uuid> = sqlx::query_scalar(
-        "UPDATE turns SET status = 'interrupted', error_code = 'superseded',
-             error_message = 'A newer owner message continued this conversation before this one finished.',
-             finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE status IN ('queued', 'waiting')
-           AND ((conversation_id = ?1 AND turn_no < ?2)
-                OR id IN (SELECT child_turn_id FROM delegations WHERE takeover_turn_id = ?3))
-         RETURNING id",
-    )
-    .bind(conversation_id)
-    .bind(turn_no)
-    .bind(turn_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    for superseded in superseded {
-        crate::db::events::turn_changed(&mut *tx, bot_id, superseded).await?;
-        crate::db::delegations::cancel_for_root(&mut *tx, superseded).await?;
-    }
-    let preempted: Vec<Uuid> = sqlx::query_scalar(
-        "UPDATE turns SET status = 'cancelling', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE status IN ('preparing', 'sending', 'running')
-           AND ((conversation_id = ?1 AND turn_no < ?2)
-                OR id IN (SELECT child_turn_id FROM delegations WHERE takeover_turn_id = ?3))
-         RETURNING id",
-    )
-    .bind(conversation_id)
-    .bind(turn_no)
-    .bind(turn_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    for &active in &preempted {
-        crate::db::events::turn_changed(&mut *tx, bot_id, active).await?;
-    }
-    crate::db::steers::settle(&mut *tx).await?;
-    Ok(preempted)
-}
-
-/// Let messages sent during a pause take over their conversations, now that
-/// the turns they queued behind have finished or parked. Run while the gate
-/// is open, before claiming. Returns how many it settled.
-pub async fn settle_deferred(pool: &SqlitePool) -> Result<usize, sqlx::Error> {
+/// Place the messages sent during a pause ([`crate::db::steers::place`]),
+/// now that the turns they queued behind have finished or parked. Run while
+/// the gate is open, before claiming. Returns how many it settled, and the
+/// running replies that must be woken to take the messages that joined them.
+pub async fn settle_deferred(pool: &SqlitePool) -> Result<(usize, Vec<Uuid>), sqlx::Error> {
     let deferred: Vec<Uuid> = sqlx::query_scalar(
         "SELECT t.id FROM turns t JOIN bots b ON b.id = t.bot_id
          WHERE t.deferred = 1 AND t.status = 'queued'
@@ -717,27 +620,35 @@ pub async fn settle_deferred(pool: &SqlitePool) -> Result<usize, sqlx::Error> {
     .fetch_all(pool)
     .await?;
     let mut settled = 0;
+    let mut woken = Vec::new();
     for id in deferred {
         let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-        let turn: Option<(Uuid, Uuid, i64)> = sqlx::query_as(
+        let turn: Option<(Uuid, Uuid, i64, String)> = sqlx::query_as(
             "UPDATE turns SET deferred = 0
              WHERE id = ?1 AND deferred = 1 AND status = 'queued'
                AND bot_id IN (SELECT id FROM bots WHERE status = 'active' AND NOT cancel_pending)
-             RETURNING bot_id, conversation_id, turn_no",
+             RETURNING bot_id, conversation_id, turn_no, provider_id",
         )
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
-        // Superseded, stopped or settled since the scan: nothing to do.
-        let Some((bot_id, conversation_id, turn_no)) = turn else {
+        // Stopped or settled since the scan: nothing to do.
+        let Some((bot_id, conversation_id, turn_no, provider_id)) = turn else {
             continue;
         };
-        take_conversation(&mut tx, bot_id, conversation_id, turn_no, id).await?;
+        let placement =
+            crate::db::steers::place(&mut tx, bot_id, conversation_id, turn_no, id, &provider_id)
+                .await?;
+        if let crate::db::steers::Placement::Joined { into, status } = placement
+            && status.is_active()
+        {
+            woken.push(into);
+        }
         crate::db::events::turn_changed(&mut tx, bot_id, id).await?;
         tx.commit().await?;
         settled += 1;
     }
-    Ok(settled)
+    Ok((settled, woken))
 }
 
 pub async fn load_turn(
@@ -921,8 +832,7 @@ pub async fn existing_send(
                 created: false,
                 turn,
                 item,
-                preempted: Vec::new(),
-                steered_into: None,
+                placement: None,
             }))
         }
     }
@@ -995,10 +905,9 @@ pub struct Claimed {
 /// on (a task, an MCP or computer job, a card or draft): the bot is idle, so
 /// its routine runs, connector events and other continuations go ahead, and
 /// the waiting turn's continuation queues behind them by turn number. Its
-/// holds stay on it. Only an owner message takes them over, and it always
-/// does so when accepted ([`take_conversation`], or [`settle_deferred`] for
-/// one sent during a pause), so no owner request ever queues behind a
-/// waiting turn. The claimed turn moves to
+/// holds stay on it. An owner message joins it and continues it at once
+/// ([`crate::db::steers::place`]), so no owner request waits for its
+/// holds. The claimed turn moves to
 /// `preparing` and is returned; the caller must start it before claiming
 /// again, so a later failure never strands an already committed claim. A
 /// turn in `busy` still has a task finishing its previous attempt, whose
@@ -1034,7 +943,9 @@ pub async fn claim_next(
               AND (?2 OR (NOT {BACKGROUND}
                    AND NOT EXISTS (SELECT 1 FROM turns q
                                    WHERE q.conversation_id = t.conversation_id
-                                     AND q.status = 'queued' AND q.turn_no < t.turn_no)
+                                     AND q.status = 'queued' AND q.turn_no < t.turn_no
+                                     AND NOT EXISTS (SELECT 1 FROM turn_steers s
+                                                     WHERE s.turn_id = q.id))
                    AND NOT EXISTS (SELECT 1 FROM turns q
                                    WHERE q.bot_id = t.bot_id
                                      AND lower(hex(q.id)) IN (SELECT replace(value, '-', '') FROM json_each(?1)))))
@@ -1174,7 +1085,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
     .bind(turn.source_item_id)
     .fetch_one(&mut *conn)
     .await?;
-    let steered = crate::db::steers::delivered(&mut conn, turn_id).await?;
+    let steered = crate::db::steers::for_request(&mut conn, turn_id).await?;
     let history: Vec<HistoryEntry> = sqlx::query_as::<
         _,
         (
@@ -1283,6 +1194,12 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
                 .flat_map(|outcome| outcome.files.iter().chain(&outcome.messages))
                 .map(|file| file.id),
         )
+        .chain(steered.iter().flat_map(|steered| {
+            steered.message.parts.iter().filter_map(|part| match part {
+                MessagePart::File { file } => Some(file.id),
+                MessagePart::Text { .. } => None,
+            })
+        }))
         .filter(|id| !files.iter().any(|staged| staged.attachment.id == *id))
         .collect();
     files.extend(crate::db::attachments::load(&mut conn, turn.bot_id, &extra).await?);
@@ -1592,7 +1509,6 @@ mod tests {
             requested_provider: Some("synthetic"),
             provider_id: "synthetic",
             uses_profile: false,
-            steers: false,
             open_draft: None,
             answers_notice: None,
         }

@@ -341,7 +341,7 @@ async fn the_owner_stops_one_wait_and_the_bot_learns_it_was_cancelled() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stopping_a_reply_in_progress_keeps_the_waits_it_carried() {
+async fn stopping_a_continued_reply_keeps_its_waits() {
     let (app, synthetic) = harness().await;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
@@ -352,7 +352,7 @@ async fn stopping_a_reply_in_progress_keeps_the_waits_it_carried() {
     text(&tool(&app, &token, "mcp_wait", wait_args()).await);
     settle(&app, first, "waiting").await;
 
-    let (second, _) = running_follow_up(&app, &main, first).await;
+    let (next, _) = follow(&app, &main, first, 2).await;
     let stopped = app
         .owner(
             "POST",
@@ -361,25 +361,50 @@ async fn stopping_a_reply_in_progress_keeps_the_waits_it_carried() {
         )
         .await;
     assert!(stopped.status.is_success(), "{}", stopped.body);
-    settle(&app, second, "waiting").await;
-    assert_eq!(carried(&app, second).await, vec![(0, "pending".into())]);
-    let attempt = attempts(&app, second).await;
+    settle(&app, first, "waiting").await;
+    assert_eq!(turn_status(&app, next).await, "interrupted");
+    assert_eq!(carried(&app, first).await, vec![(1, "pending".into())]);
 
     std::fs::write(&state, "result_available").unwrap();
     check_now(&app).await;
-    settle(&app, second, "completed").await;
-    assert_eq!(attempts(&app, second).await, attempt + 1);
+    settle(&app, first, "completed").await;
+    assert_eq!(attempts(&app, first).await, 3);
     let packet = synthetic.packets().await.last().unwrap().clone();
     assert!(packet.contains("Opened PR #775"), "{packet}");
 }
 
-async fn running_follow_up(app: &TestApp, bot: &str, before: Uuid) -> (Uuid, String) {
-    let sent = app.send(bot, Uuid::new_v4(), SLOW, Some("synthetic")).await;
+/// Send a follow-up while `into` waits: it joins that reply, which
+/// continues with it as attempt `attempt`. Returns the message's own turn
+/// and an MCP grant for the running continuation.
+async fn follow(app: &TestApp, bot: &str, into: Uuid, attempt: i32) -> (Uuid, String) {
+    let sent = app
+        .send(
+            bot,
+            Uuid::new_v4(),
+            "Any news on WEB-284?",
+            Some("synthetic"),
+        )
+        .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    assert_eq!(sent.body["turn"]["steered_into"], into.to_string());
     let turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    settle(app, before, "interrupted").await;
-    app.wait_turn(&turn.to_string(), &["running"]).await;
-    (turn, grant(app, turn, vec![Tool::Mcp]).await)
+    rests_after(
+        app,
+        into,
+        attempt,
+        "running",
+        "the follow-up continues the reply",
+    )
+    .await;
+    (turn, grant(app, into, vec![Tool::Mcp]).await)
+}
+
+async fn turn_status(app: &TestApp, turn: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+        .bind(turn)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
 }
 
 fn wait_on(task: &str, purpose: &str) -> Value {
@@ -398,7 +423,7 @@ async fn carried(app: &TestApp, turn: Uuid) -> Vec<(i32, String)> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn follow_ups_carry_pending_waits_without_blocking_the_latest_requests_own_results() {
+async fn follow_ups_join_the_reply_and_each_of_its_waits_reports_once() {
     let (app, synthetic) = harness().await;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
@@ -409,61 +434,39 @@ async fn follow_ups_carry_pending_waits_without_blocking_the_latest_requests_own
     text(&tool(&app, &token, "mcp_wait", wait_args()).await);
     settle(&app, first, "waiting").await;
 
-    let (second, token) = running_follow_up(&app, &main, first).await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
-    assert!(
-        packet.contains("[else.bot MCP jobs in progress]"),
-        "{packet}"
-    );
-    assert!(
-        packet.contains("Review the WEB-284 PR once T3 finishes."),
-        "{packet}"
-    );
+    let (second, token) = follow(&app, &main, first, 2).await;
     let deploy = wait_on("WEB-286", "Check the WEB-286 deploy.");
     text(&tool(&app, &token, "mcp_wait", deploy).await);
-    settle(&app, second, "waiting").await;
+    rests_after(&app, first, 2, "waiting", "the reply parks on both waits").await;
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(packet.contains("Any news on WEB-284?"), "{packet}");
 
-    let (latest, token) = running_follow_up(&app, &main, second).await;
-    assert_eq!(
-        carried(&app, latest).await,
-        vec![(0, "pending".into()), (0, "pending".into())],
-        "both waits moved to the latest request"
-    );
+    let (latest, token) = follow(&app, &main, first, 3).await;
     let merge = wait_on("WEB-285", "Merge WEB-285 once T3 finishes.");
     text(&tool(&app, &token, "mcp_wait", merge).await);
-    settle(&app, latest, "waiting").await;
-    let shown = shown_waits(&app, &main, latest).await;
+    rests_after(&app, first, 3, "waiting", "the reply parks on three waits").await;
+    let shown = shown_waits(&app, &main, first).await;
     assert_eq!(shown.as_array().map(Vec::len), Some(3), "{shown}");
 
     std::fs::write(dir.path().join("job.WEB-285"), "result_available").unwrap();
     check_now(&app).await;
-    let deadline = std::time::Instant::now() + common::SETTLE;
-    loop {
-        let (attempt, status): (i32, String) =
-            sqlx::query_as("SELECT attempt, status FROM turns WHERE id = ?1")
-                .bind(latest)
-                .fetch_one(&app.db.pool)
-                .await
-                .unwrap();
-        if (attempt, status.as_str()) == (2, "waiting") {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the request's own result continues it while carried waits still run: \
-             attempt {attempt}, {status}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    rests_after(
+        &app,
+        first,
+        4,
+        "waiting",
+        "one result continues the reply while its other waits still run",
+    )
+    .await;
     let packet = synthetic.packets().await.last().unwrap().clone();
     assert!(packet.contains("Merge WEB-285"), "{packet}");
     assert!(packet.contains("Opened PR #775"), "{packet}");
     assert_eq!(
-        carried(&app, latest).await,
+        carried(&app, first).await,
         vec![
-            (0, "pending".into()),
-            (0, "pending".into()),
-            (1, "finished".into())
+            (1, "pending".into()),
+            (2, "pending".into()),
+            (3, "finished".into())
         ]
     );
 
@@ -472,21 +475,19 @@ async fn follow_ups_carry_pending_waits_without_blocking_the_latest_requests_own
         check_now(&app).await;
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
-    settle(&app, latest, "completed").await;
-    assert_eq!(
-        attempts(&app, first).await,
-        1,
-        "a superseded request did not continue"
-    );
-    assert_eq!(
-        attempts(&app, second).await,
-        1,
-        "a superseded request did not continue"
-    );
+    settle(&app, first, "completed").await;
+    for message in [second, latest] {
+        settle(&app, message, "completed").await;
+        assert_eq!(
+            attempts(&app, message).await,
+            0,
+            "a joined message never runs"
+        );
+    }
     let delivered: Vec<(String, Option<i32>)> = sqlx::query_as(
         "SELECT status, delivered_attempt FROM mcp_waits WHERE turn_id = ?1 ORDER BY created_at",
     )
-    .bind(latest)
+    .bind(first)
     .fetch_all(&app.db.pool)
     .await
     .unwrap();
@@ -620,14 +621,14 @@ async fn an_external_first_call_waits_for_the_owner_and_a_tool_that_stops_qualif
     assert_eq!(waits, 0);
     settle(&app, turn, "waiting").await;
 
-    let (next, token) = running(&app, &main).await;
+    let (_, token) = follow(&app, &main, turn, 2).await;
     text(&tool(&app, &token, "mcp_wait", wait_args()).await);
-    settle(&app, next, "waiting").await;
+    rests_after(&app, turn, 2, "waiting", "the reply parks on its wait").await;
     assert_eq!(calls(&state), 1);
     std::fs::write(state.with_extension("unsafe"), "").unwrap();
     check_now(&app).await;
-    settle(&app, next, "completed").await;
-    assert_eq!(wait_row(&app, next).await.0, "failed");
+    settle(&app, turn, "completed").await;
+    assert_eq!(wait_row(&app, turn).await.0, "failed");
     assert_eq!(
         calls(&state),
         1,
@@ -762,7 +763,7 @@ fn error_code(result: &Value) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_settled_wait_continues_a_request_whose_carried_task_still_runs() {
+async fn a_settled_wait_continues_a_reply_whose_task_still_runs() {
     let (app, synthetic) = harness().await;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
@@ -781,28 +782,34 @@ async fn a_settled_wait_continues_a_request_whose_carried_task_still_runs() {
     text(&tool(&app, &delegator, "delegate", task).await);
     settle(&app, root, "waiting").await;
 
-    let (latest, token) = running_follow_up(&app, &main, root).await;
-    let carried_task: Uuid =
+    let (_, token) = follow(&app, &main, root, 2).await;
+    let task_root: Uuid =
         sqlx::query_scalar("SELECT root_turn_id FROM delegations WHERE status = 'running'")
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
-    assert_eq!(carried_task, latest, "the task moved to the latest request");
+    assert_eq!(task_root, root, "the task stays with its reply");
     text(&tool(&app, &token, "mcp_wait", wait_args()).await);
-    settle(&app, latest, "waiting").await;
+    rests_after(
+        &app,
+        root,
+        2,
+        "waiting",
+        "the reply parks on its task and wait",
+    )
+    .await;
 
     std::fs::write(&state, "result_available").unwrap();
     check_now(&app).await;
-    let deadline = std::time::Instant::now() + common::SETTLE;
-    while attempts(&app, latest).await < 2 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the settled wait continues the request while its task still runs"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    settle(&app, latest, "waiting").await;
-    assert_eq!(wait_row(&app, latest).await.1, Some(2));
+    rests_after(
+        &app,
+        root,
+        3,
+        "waiting",
+        "the settled wait continues the reply while its task still runs",
+    )
+    .await;
+    assert_eq!(wait_row(&app, root).await.1, Some(3));
     let packet = synthetic.packets().await.last().unwrap().clone();
     assert!(packet.contains("Opened PR #775"), "{packet}");
 }
@@ -825,33 +832,33 @@ async fn rests_after(app: &TestApp, turn: Uuid, attempt: i32, status: &str, why:
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn carried_waits_that_settle_wake_the_bot_while_the_latest_requests_own_wait_still_runs() {
+async fn each_wait_that_settles_continues_the_reply_while_the_others_run() {
     let (app, synthetic) = harness().await;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
     std::fs::write(&state, "working").unwrap();
     let main = app.main_bot().await;
-    let (first, token) = running(&app, &main).await;
+    let (latest, token) = running(&app, &main).await;
     text(&tool(&app, &token, "mcp_install", install(&state)).await);
     text(&tool(&app, &token, "mcp_wait", wait_args()).await);
-    settle(&app, first, "waiting").await;
-    let (second, token) = running_follow_up(&app, &main, first).await;
+    settle(&app, latest, "waiting").await;
+    let (_, token) = follow(&app, &main, latest, 2).await;
     let deploy = wait_on("WEB-286", "Check the WEB-286 deploy.");
     text(&tool(&app, &token, "mcp_wait", deploy).await);
-    settle(&app, second, "waiting").await;
-    let (latest, token) = running_follow_up(&app, &main, second).await;
+    rests_after(&app, latest, 2, "waiting", "the reply parks on two waits").await;
+    let (_, token) = follow(&app, &main, latest, 3).await;
     let merge = wait_on("WEB-285", "Merge WEB-285 once T3 finishes.");
     text(&tool(&app, &token, "mcp_wait", merge).await);
-    settle(&app, latest, "waiting").await;
+    rests_after(&app, latest, 3, "waiting", "the reply parks on three waits").await;
 
     std::fs::write(dir.path().join("job.WEB-286"), "result_available").unwrap();
     check_now(&app).await;
     rests_after(
         &app,
         latest,
-        2,
+        4,
         "waiting",
-        "a carried wait that settles wakes the bot while its own wait runs",
+        "a wait that settles continues the reply while the others run",
     )
     .await;
     let packet = synthetic.packets().await.last().unwrap().clone();
@@ -870,9 +877,9 @@ async fn carried_waits_that_settle_wake_the_bot_while_the_latest_requests_own_wa
     rests_after(
         &app,
         latest,
-        3,
+        5,
         "waiting",
-        "a continuation that parked nothing still wakes on the next carried wait",
+        "a continuation that parked nothing still wakes on the next wait",
     )
     .await;
     let packet = synthetic.packets().await.last().unwrap().clone();
@@ -883,14 +890,7 @@ async fn carried_waits_that_settle_wake_the_bot_while_the_latest_requests_own_wa
 
     std::fs::write(dir.path().join("job.WEB-285"), "result_available").unwrap();
     check_now(&app).await;
-    rests_after(
-        &app,
-        latest,
-        4,
-        "completed",
-        "the request's own wait wakes it last",
-    )
-    .await;
+    rests_after(&app, latest, 6, "completed", "the last wait ends the reply").await;
     assert_eq!(
         sqlx::query_as::<_, (i32, String, Option<i32>)>(
             "SELECT attempt, status, delivered_attempt FROM mcp_waits
@@ -901,9 +901,9 @@ async fn carried_waits_that_settle_wake_the_bot_while_the_latest_requests_own_wa
         .await
         .unwrap(),
         vec![
-            (0, "finished".into(), Some(3)),
-            (0, "finished".into(), Some(2)),
-            (1, "finished".into(), Some(4)),
+            (1, "finished".into(), Some(5)),
+            (2, "finished".into(), Some(4)),
+            (3, "finished".into(), Some(6)),
         ]
     );
     let packets = synthetic.packets().await;

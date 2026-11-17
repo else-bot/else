@@ -29,14 +29,17 @@ async fn running(app: &TestApp, bot: &str) -> (Uuid, String) {
     let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
     app.wait_turn(&turn, &["running"]).await;
     let turn_id: Uuid = turn.parse().unwrap();
+    (turn_id, grant(app, turn_id).await)
+}
+
+async fn grant(app: &TestApp, turn_id: Uuid) -> String {
     let (bot, conversation): (Uuid, Uuid) =
         sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
             .bind(turn_id)
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
-    let token = app
-        .scheduler
+    app.scheduler
         .grants()
         .issue(
             bot,
@@ -45,8 +48,7 @@ async fn running(app: &TestApp, bot: &str) -> (Uuid, String) {
             vec![Tool::Computer],
             DEFAULT_TTL,
         )
-        .await;
-    (turn_id, token)
+        .await
 }
 
 async fn hand_off(app: &TestApp, token: &str, reason: &str) -> Value {
@@ -221,27 +223,15 @@ async fn chatting_while_in_control_keeps_the_computer_with_the_owner() {
     let taken = settle(&app, &bot, &asked["handoff_id"], "take").await;
     assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
 
+    let question = "Which account was it?";
     let sent = app
-        .send(
-            &bot,
-            Uuid::new_v4(),
-            "Which account was it?",
-            Some("synthetic"),
-        )
+        .send(&bot, Uuid::new_v4(), question, Some("synthetic"))
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    assert_eq!(sent.body["turn"]["steered_into"], turn.to_string());
     let next: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    wait(&app, next, "completed").await;
-    assert_eq!(
-        status(&app, &asked["handoff_id"]).await,
-        "taken",
-        "a message is not a hand back"
-    );
-    let packet = synthetic.packets().await.last().unwrap().clone();
-    assert!(packet.contains("[else.bot computer control]"), "{packet}");
-    assert!(packet.contains("They have not handed it back"), "{packet}");
-
-    let (_, token) = running(&app, &bot).await;
+    wait(&app, turn, "running").await;
+    let token = grant(&app, turn).await;
     let refused = hand_off(&app, &token, "Solve the captcha.").await;
     assert!(
         refused
@@ -249,13 +239,22 @@ async fn chatting_while_in_control_keeps_the_computer_with_the_owner() {
             .is_some_and(|t| t.starts_with("OWNER_IN_CONTROL")),
         "{refused}"
     );
+    wait(&app, turn, "waiting").await;
+    assert_eq!(
+        status(&app, &asked["handoff_id"]).await,
+        "taken",
+        "a message is not a hand back"
+    );
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(packet.contains(question), "{packet}");
+    assert!(packet.contains("[else.bot computer control]"), "{packet}");
+    assert!(packet.contains("They have not handed it back"), "{packet}");
+    assert_eq!(turn_status(&app, next).await, "queued");
+
     let back = settle(&app, &bot, &asked["handoff_id"], "hand-back").await;
     assert_eq!(back.status, StatusCode::OK, "{}", back.body);
-    assert_eq!(
-        turn_status(&app, turn).await,
-        "interrupted",
-        "the newer message superseded the waiting turn"
-    );
+    wait(&app, turn, "completed").await;
+    wait(&app, next, "completed").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

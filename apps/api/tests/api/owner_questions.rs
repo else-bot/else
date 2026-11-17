@@ -552,6 +552,7 @@ async fn an_owner_follow_up_skips_the_card_and_grants_nothing() {
         .send(&main, Uuid::new_v4(), follow_up, Some("synthetic"))
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    assert_eq!(sent.body["turn"]["steered_into"], turn.to_string());
     let (row_status, row_answer, consumed) = question_row(&app, question).await;
     assert_eq!(
         (row_status.as_str(), row_answer, consumed),
@@ -559,7 +560,6 @@ async fn an_owner_follow_up_skips_the_card_and_grants_nothing() {
     );
     assert_eq!(permissions(&app, &main).await, 0);
     assert_eq!(journaled(&app, &main, question).await["status"], "skipped");
-    assert_eq!(status(&app, turn).await, "interrupted");
 
     let late = answer(&app, &main, question, "approve").await;
     assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
@@ -568,11 +568,26 @@ async fn an_owner_follow_up_skips_the_card_and_grants_nothing() {
         "This question was already skipped."
     );
     assert_eq!(question_row(&app, question).await.0, "skipped");
+    wait(&app, turn, "completed").await;
     app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
+    assert_eq!(attempts(&app, turn).await, 2, "the reply continued with it");
     let packet = synthetic.packets().await.last().unwrap().clone();
     assert!(packet.contains(follow_up));
-    assert!(!packet.contains("[else.bot owner answers]"), "{packet}");
+    assert!(
+        packet.contains(&format!(
+            "id=\"{question}\" kind=\"destructive\" status=\"skipped\""
+        )) && packet.contains("Not approved"),
+        "the reply learns its action was not approved: {packet}"
+    );
+}
+
+async fn attempts(app: &TestApp, turn: Uuid) -> i32 {
+    sqlx::query_scalar("SELECT attempt FROM turns WHERE id = ?1")
+        .bind(turn)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -587,10 +602,12 @@ async fn a_follow_up_while_the_asking_attempt_still_runs_skips_the_card_too() {
         .send(&main, Uuid::new_v4(), "Use plain text.", Some("synthetic"))
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    assert_eq!(sent.body["turn"]["steered_into"], turn.to_string());
     assert_eq!(question_row(&app, question).await.0, "skipped");
+    wait(&app, turn, "completed").await;
     app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    assert_eq!(status(&app, turn).await, "interrupted");
+    assert_eq!(attempts(&app, turn).await, 2, "the reply continued with it");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1114,9 +1131,22 @@ async fn a_scoped_computer_call_can_be_always_allowed_for_its_task_and_target() 
             .unwrap()
             .clone();
         assert_eq!(choice_ids(&card), choices, "{other}");
-        turn_token = running(&app, &main).await;
+        turn_token = (turn, follow(&app, &main, turn).await);
     }
     app.wait_turn(&turn_token.0.to_string(), &["running"]).await;
+}
+
+/// Send a follow-up while `turn` waits on a card: it joins the reply,
+/// skips the card, and the reply continues. Returns a grant for the
+/// continuation.
+async fn follow(app: &TestApp, bot: &str, turn: Uuid) -> String {
+    let sent = app
+        .send(bot, Uuid::new_v4(), "Try the next one.", Some("synthetic"))
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    assert_eq!(sent.body["turn"]["steered_into"], turn.to_string());
+    wait(app, turn, "running").await;
+    grant(app, turn, owner_tools()).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1543,6 +1573,11 @@ async fn a_new_message_in_the_target_chat_skips_a_delegated_card() {
         .await;
     assert!(reply.status.is_success(), "{}", reply.body);
     assert_eq!(
+        reply.body["turn"]["steered_into"],
+        child.to_string(),
+        "the message joins the task that asked"
+    );
+    assert_eq!(
         question_row(&app, question).await.0,
         "skipped",
         "the owner answered in chat instead of on the card"
@@ -1557,11 +1592,10 @@ async fn a_new_message_in_the_target_chat_skips_a_delegated_card() {
         StatusCode::CONFLICT,
         "a skipped card cannot approve"
     );
-    assert_eq!(
-        status(&app, child).await,
-        "interrupted",
-        "the chat reply carries the task instead of the parked turn"
-    );
+    wait(&app, child, "completed").await;
+    app.wait_turn(reply.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    assert_eq!(attempts(&app, child).await, 2, "the task continued with it");
 }
 
 async fn delegated_card(app: &TestApp, leaf: &str) -> (Uuid, Uuid, Uuid, Uuid) {
@@ -1600,8 +1634,8 @@ async fn delegated_card(app: &TestApp, leaf: &str) -> (Uuid, Uuid, Uuid, Uuid) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_owner_reply_in_chat_takes_over_a_delegated_card_and_reports_back() {
-    let Harness { app, .. } = harness().await;
+async fn an_owner_reply_in_chat_joins_a_delegated_card_and_the_task_reports_back() {
+    let Harness { app, synthetic } = harness().await;
     let main = app.main_bot().await;
     let leaf = app.create_bot("Release").await;
     let (root, task, child, question) = delegated_card(&app, &leaf).await;
@@ -1611,31 +1645,32 @@ async fn an_owner_reply_in_chat_takes_over_a_delegated_card_and_reports_back() {
         .send(&leaf, Uuid::new_v4(), follow_up, Some("synthetic"))
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    assert_eq!(sent.body["turn"]["steered_into"], child.to_string());
     assert_eq!(question_row(&app, question).await.0, "skipped");
-    assert_eq!(status(&app, child).await, "interrupted");
     let reply = sent.body["turn"]["id"].as_str().unwrap().to_owned();
+    wait(&app, child, "completed").await;
     app.wait_turn(&reply, &["completed"]).await;
     wait(&app, root, "completed").await;
-
-    let (state, result): (String, Option<String>) =
-        sqlx::query_as("SELECT status, result FROM delegations WHERE id = ?1")
-            .bind(task)
-            .fetch_one(&app.db.pool)
+    assert!(
+        synthetic
+            .packets()
             .await
-            .unwrap();
-    assert_eq!(state, "completed");
-    assert!(
-        result.as_deref().is_some_and(|r| r.contains(follow_up)),
-        "the owner's chat turn answers the task: {result:?}"
+            .iter()
+            .any(|p| p.contains(follow_up)),
+        "the task continued with the owner's message"
     );
-    let shown: String = sqlx::query_scalar("SELECT text FROM items WHERE id = ?1")
-        .bind(task)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    assert!(
-        shown.contains(follow_up),
-        "the delegating chat shows it: {shown}"
+
+    let (state, carrier, takeover): (String, Uuid, Option<Uuid>) = sqlx::query_as(
+        "SELECT status, root_turn_id, takeover_turn_id FROM delegations WHERE id = ?1",
+    )
+    .bind(task)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (state.as_str(), carrier, takeover),
+        ("completed", root, None),
+        "the task reports back to the reply that delegated it"
     );
     assert_eq!(
         answer(&app, &leaf, question, "approve").await.status,
@@ -1646,22 +1681,23 @@ async fn an_owner_reply_in_chat_takes_over_a_delegated_card_and_reports_back() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stopping_a_taken_over_task_keeps_the_owner_chat_turn() {
+async fn stopping_a_task_ends_the_message_that_joined_it() {
     let Harness { app, .. } = harness().await;
     let main = app.main_bot().await;
     let leaf = app.create_bot("Release").await;
-    let (_, task, _, _) = delegated_card(&app, &leaf).await;
+    let (_, task, child, _) = delegated_card(&app, &leaf).await;
 
     let sent = app
         .send(
             &leaf,
             Uuid::new_v4(),
-            "[synthetic:slow] Yes, publish it.",
+            "[synthetic:hang] Yes, publish it.",
             Some("synthetic"),
         )
         .await;
+    assert_eq!(sent.body["turn"]["steered_into"], child.to_string());
     let reply: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    wait(&app, reply, "running").await;
+    wait(&app, child, "running").await;
     let stop = app
         .owner(
             "POST",
@@ -1670,13 +1706,8 @@ async fn stopping_a_taken_over_task_keeps_the_owner_chat_turn() {
         )
         .await;
     assert_eq!(stop.status, StatusCode::OK, "{}", stop.body);
-    let state: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
-        .bind(task)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    assert_eq!(state, "cancelled");
-    wait(&app, reply, "completed").await;
+    wait(&app, child, "interrupted").await;
+    wait(&app, reply, "interrupted").await;
     let state: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
         .bind(task)
         .fetch_one(&app.db.pool)
@@ -1686,48 +1717,52 @@ async fn stopping_a_taken_over_task_keeps_the_owner_chat_turn() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_newer_chat_message_carries_a_taken_over_task() {
-    let Harness { app, .. } = harness().await;
+async fn a_newer_chat_message_leaves_the_task_its_first_message_joined() {
+    let Harness { app, synthetic } = harness().await;
     let leaf = app.create_bot("Release").await;
-    let (root, task, _, _) = delegated_card(&app, &leaf).await;
+    let (root, task, child, _) = delegated_card(&app, &leaf).await;
 
     let first = app
-        .send(
-            &leaf,
-            Uuid::new_v4(),
-            "[synthetic:slow] Yes, publish it.",
-            Some("synthetic"),
-        )
+        .send(&leaf, Uuid::new_v4(), "Yes, publish it.", Some("synthetic"))
         .await;
+    assert_eq!(first.body["turn"]["steered_into"], child.to_string());
     let first: Uuid = first.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    wait(&app, first, "running").await;
+    wait(&app, child, "running").await;
     let correction = "Publish it as a patch release.";
     let second = app
         .send(&leaf, Uuid::new_v4(), correction, Some("synthetic"))
         .await;
+    assert_eq!(
+        second.body["turn"]["steered_into"],
+        Value::Null,
+        "the task no longer waits on the owner, so the message runs on its own"
+    );
     app.wait_turn(second.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    wait(&app, first, "interrupted").await;
+    wait(&app, first, "completed").await;
     wait(&app, root, "completed").await;
-    let (state, result): (String, Option<String>) =
-        sqlx::query_as("SELECT status, result FROM delegations WHERE id = ?1")
-            .bind(task)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
+    let state: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
+        .bind(task)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
     assert_eq!(state, "completed");
     assert!(
-        result.as_deref().is_some_and(|r| r.contains(correction)),
-        "{result:?}"
+        synthetic
+            .packets()
+            .await
+            .iter()
+            .any(|p| p.contains("Yes, publish it.")),
+        "the task continued with the first message"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_follow_up_to_the_delegating_bot_receives_a_taken_over_task() {
+async fn a_follow_up_to_the_delegating_bot_joins_the_reply_that_receives_the_task() {
     let Harness { app, .. } = harness().await;
     let main = app.main_bot().await;
     let leaf = app.create_bot("Telegram").await;
-    let (root, task, _, _) = delegated_card(&app, &leaf).await;
+    let (root, task, child, _) = delegated_card(&app, &leaf).await;
 
     let approval = app
         .send(
@@ -1737,12 +1772,13 @@ async fn a_follow_up_to_the_delegating_bot_receives_a_taken_over_task() {
             Some("synthetic"),
         )
         .await;
+    assert_eq!(approval.body["turn"]["steered_into"], child.to_string());
     let approval: Uuid = approval.body["turn"]["id"]
         .as_str()
         .unwrap()
         .parse()
         .unwrap();
-    wait(&app, approval, "running").await;
+    wait(&app, child, "running").await;
     let follow = app
         .send(
             &main,
@@ -1752,9 +1788,10 @@ async fn a_follow_up_to_the_delegating_bot_receives_a_taken_over_task() {
         )
         .await;
     assert_eq!(follow.status, StatusCode::ACCEPTED, "{}", follow.body);
+    assert_eq!(follow.body["turn"]["steered_into"], root.to_string());
     let follow: Uuid = follow.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    wait(&app, root, "interrupted").await;
     wait(&app, approval, "completed").await;
+    wait(&app, root, "completed").await;
     wait(&app, follow, "completed").await;
 
     let (state, carrier, delivered): (String, Uuid, Option<i64>) = sqlx::query_as(
@@ -1764,10 +1801,10 @@ async fn a_follow_up_to_the_delegating_bot_receives_a_taken_over_task() {
     .fetch_one(&app.db.pool)
     .await
     .unwrap();
+    assert_eq!(state, "completed", "the task still reports back");
     assert_eq!(
-        state, "completed",
-        "the owner's chat turn still reports back"
+        carrier, root,
+        "the task stays with the reply that delegated it"
     );
-    assert_eq!(carrier, follow, "the follow-up carries the task");
-    assert!(delivered.is_some(), "the follow-up received the outcome");
+    assert!(delivered.is_some(), "the reply received the outcome");
 }

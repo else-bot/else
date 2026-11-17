@@ -9,7 +9,7 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{ChildStdin, ChildStdout};
 
-use super::attempt::{self, Channel, Ended, Protocol};
+use super::attempt::{self, Channel, Ended, Protocol, SendError};
 use super::lines::JsonLines;
 use super::process::{Finish, Scope, Stderr};
 use super::session::PreparedTurn;
@@ -33,6 +33,7 @@ pub struct StreamAttempt {
     stderr: Stderr,
     interrupt: Interrupt,
     label: &'static str,
+    project: std::path::PathBuf,
 }
 
 impl StreamAttempt {
@@ -66,6 +67,7 @@ impl StreamAttempt {
             stderr: Stderr::collect(stderr, spec),
             interrupt,
             label,
+            project: spec.dirs.project.clone(),
         })
     }
 
@@ -125,7 +127,16 @@ impl Channel for StreamAttempt {
         }
     }
 
-    async fn send(&mut self, line: &str) -> Result<(), String> {
-        self.write(line).await.map_err(|e| e.to_string())
+    /// A pipe write that fails may have been read in part: never a refusal.
+    async fn send(&mut self, input: &Value) -> Result<(), SendError> {
+        let mut line = input.to_string();
+        line.push('\n');
+        self.write(&line)
+            .await
+            .map_err(|err| SendError::Unknown(err.to_string()))
+    }
+
+    fn project(&self) -> Option<&std::path::Path> {
+        Some(&self.project)
     }
 }

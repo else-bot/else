@@ -349,13 +349,14 @@ impl Protocol for Tracker {
         Ok(events)
     }
 
-    /// A steered message is a user line of its own. The CLI takes it at the
-    /// next tool boundary, or as one more native turn after the current
-    /// result, and echoes it either way.
-    fn steer_line(&self, steer: &Steer) -> Option<String> {
-        Some(super::user_message(
+    /// A steered message is a user line of its own, with its images inline
+    /// as in a first message. The CLI takes it at the next tool boundary, or
+    /// as one more native turn after the current result, and echoes it
+    /// either way.
+    fn steer_input(&self, steer: &Steer) -> Option<Value> {
+        Some(super::user_value(
             &steer.turn_id.to_string(),
-            Value::String(crate::providers::prompt::steer_text(&steer.text)),
+            super::message_content(&crate::providers::prompt::steer_segments(steer)),
         ))
     }
 

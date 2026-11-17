@@ -115,8 +115,25 @@ async fn request_status(app: &TestApp, request: Uuid) -> (String, Option<i32>) {
         .unwrap()
 }
 
+/// Waits until `turn` parks again after attempt `attempt`.
+async fn parks_after(app: &TestApp, turn: Uuid, attempt: i32) {
+    let deadline = std::time::Instant::now() + common::SETTLE;
+    loop {
+        let now: (i32, String) = sqlx::query_as("SELECT attempt, status FROM turns WHERE id = ?1")
+            .bind(turn)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+        if now.0 >= attempt && now.1 == "waiting" {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "{turn}: {now:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn an_owner_follow_up_withdraws_the_secret_request_and_runs() {
+async fn an_owner_follow_up_continues_the_reply_and_keeps_the_secret_request() {
     let Harness { app, synthetic } = harness().await;
     let main = app.main_bot().await;
     let (turn, token) = running(&app, &main, owner_tools()).await;
@@ -128,9 +145,10 @@ async fn an_owner_follow_up_withdraws_the_secret_request_and_runs() {
         .send(&main, Uuid::new_v4(), correction, Some("synthetic"))
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
-    assert_eq!(request_status(&app, request).await.0, "cancelled");
-    app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
-        .await;
+    assert_eq!(sent.body["turn"]["steered_into"], turn.to_string());
+    let next: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    parks_after(&app, turn, 2).await;
+    assert_eq!(request_status(&app, request).await.0, "pending");
     assert!(
         synthetic
             .packets()
@@ -139,10 +157,17 @@ async fn an_owner_follow_up_withdraws_the_secret_request_and_runs() {
             .unwrap()
             .contains(correction)
     );
+    assert_eq!(status(&app, next).await, "queued");
+
+    let answered = fulfill(&app, &main, request, values()).await;
+    assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
+    wait(&app, turn, "completed").await;
+    wait(&app, next, "completed").await;
+    assert_eq!(attempts(&app, turn).await, 3);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_follow_up_while_the_asking_attempt_still_runs_withdraws_the_request() {
+async fn a_follow_up_while_the_asking_attempt_still_runs_keeps_the_request() {
     let Harness { app, synthetic } = harness().await;
     let main = app.main_bot().await;
     let (turn, token) = running(&app, &main, owner_tools()).await;
@@ -158,26 +183,28 @@ async fn a_follow_up_while_the_asking_attempt_still_runs_withdraws_the_request()
         .send(&main, Uuid::new_v4(), correction, Some("synthetic"))
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
-    assert_eq!(request_status(&app, request).await.0, "cancelled");
-    let next = sent.body["turn"]["id"].as_str().unwrap().to_owned();
-    app.wait_turn(&next, &["completed"]).await;
-    assert_eq!(
-        status(&app, turn).await,
-        "interrupted",
-        "the drained attempt ends instead of parking on the withdrawn request"
-    );
+    assert_eq!(sent.body["turn"]["steered_into"], turn.to_string());
+    parks_after(&app, turn, 2).await;
+    assert_eq!(request_status(&app, request).await.0, "pending");
     assert!(
         synthetic
             .packets()
             .await
             .last()
             .unwrap()
-            .contains(correction)
+            .contains(correction),
+        "the reply continues with the message instead of only parking"
     );
+
+    let declined = cancel(&app, &main, request).await;
+    assert_eq!(declined.status, StatusCode::OK, "{}", declined.body);
+    wait(&app, turn, "completed").await;
+    app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_answer_to_a_request_withdrawn_by_a_follow_up_stores_nothing() {
+async fn an_answer_to_a_request_declined_after_a_follow_up_stores_nothing() {
     let Harness { app, .. } = harness().await;
     let main = app.main_bot().await;
     let (turn, token) = running(&app, &main, owner_tools()).await;
@@ -192,6 +219,10 @@ async fn an_answer_to_a_request_withdrawn_by_a_follow_up_stores_nothing() {
         )
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    assert_eq!(sent.body["turn"]["steered_into"], turn.to_string());
+    parks_after(&app, turn, 2).await;
+    let declined = cancel(&app, &main, request).await;
+    assert_eq!(declined.status, StatusCode::OK, "{}", declined.body);
 
     let late = fulfill(&app, &main, request, values()).await;
     assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
@@ -201,9 +232,9 @@ async fn an_answer_to_a_request_withdrawn_by_a_follow_up_stores_nothing() {
         .await
         .unwrap();
     assert_eq!(stored, 0);
+    wait(&app, turn, "completed").await;
     app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    assert_eq!(status(&app, turn).await, "interrupted");
     assert_canary_absent_from_database(&app).await;
 }
 
@@ -701,7 +732,7 @@ async fn a_task_delegated_for_an_owner_request_opens_a_social_connection_card_in
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_owner_reply_in_the_bot_chat_takes_over_a_task_waiting_on_its_connection_card() {
+async fn an_owner_reply_in_the_bot_chat_joins_a_task_waiting_on_its_connection_card() {
     let Harness { app, .. } = harness().await;
     let (leaf, child) = delegated_task(&app).await;
     let child_token = grant(&app, child, vec![Tool::AskOwner]).await;
@@ -724,7 +755,13 @@ async fn an_owner_reply_in_the_bot_chat_takes_over_a_task_waiting_on_its_connect
             Some("synthetic"),
         )
         .await;
+    assert_eq!(
+        reply.body["turn"]["steered_into"],
+        child.to_string(),
+        "the owner's reply joins the task that asked"
+    );
     let reply: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    parks_after(&app, child, 2).await;
     let (takeover, setup): (Option<Uuid>, String) = sqlx::query_as(
         "SELECT d.takeover_turn_id, s.status FROM delegations d
          JOIN social_setups s ON s.turn_id = d.child_turn_id WHERE d.child_turn_id = ?1",
@@ -733,8 +770,9 @@ async fn an_owner_reply_in_the_bot_chat_takes_over_a_task_waiting_on_its_connect
     .fetch_one(&app.db.pool)
     .await
     .unwrap();
-    assert_eq!(takeover, Some(reply), "the owner's reply answers the task");
-    assert_eq!(setup, "cancelled");
+    assert_eq!(takeover, None, "the task keeps its delegating reply");
+    assert_eq!(setup, "pending", "the connection card stays for the owner");
+    assert_eq!(status(&app, reply).await, "queued");
 }
 
 /// A running task the main bot delegated to a new bot while serving an owner

@@ -246,11 +246,16 @@ impl Scheduler {
             tracing::warn!(orphaned, "settled turns without a running provider task");
         }
         if let Some(_admission) = self.gate.enter() {
-            // Messages sent during a pause take over before anything is
-            // claimed; the turns they cancel are interrupted on the next scan.
+            // Messages sent during a pause are placed before anything is
+            // claimed.
             match turns::settle_deferred(&self.pool).await {
-                Ok(0) => {}
-                Ok(_) => self.wake(),
+                Ok((0, _)) => {}
+                Ok((_, woken)) => {
+                    for into in woken {
+                        self.steer(into).await;
+                    }
+                    self.wake();
+                }
                 Err(err) => tracing::warn!(error = %err, "settling deferred messages failed"),
             }
             let now = chrono::Utc::now();

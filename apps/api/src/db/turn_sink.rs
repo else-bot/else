@@ -46,6 +46,9 @@ struct SinkState {
     progress_at: Option<std::time::Instant>,
     delivered_skills: Vec<Uuid>,
     delivered_handoffs: Vec<Uuid>,
+    /// The joined owner messages this attempt's request carries for the
+    /// first time ([`crate::db::steers::fold`]).
+    folded_steers: Vec<Uuid>,
 }
 
 /// How often a delegated task's streamed text republishes its handoff.
@@ -83,6 +86,12 @@ impl SqliteSink {
                 delivered_waits: input.mcp_waits.iter().map(|w| w.id).collect(),
                 delivered_job_waits: input.computer_job_waits.iter().map(|w| w.id).collect(),
                 delegated: input.delegation.delegated_task(),
+                folded_steers: input
+                    .steered
+                    .iter()
+                    .filter(|steered| !steered.seen)
+                    .map(|steered| steered.message.turn_id)
+                    .collect(),
                 progress_at: None,
                 delivered_skills: input.skill_installs.iter().map(|o| o.id).collect(),
                 delivered_handoffs: input.computer_handoffs.iter().map(|o| o.id).collect(),
@@ -230,7 +239,8 @@ impl SinkState {
                         "prepared",
                         "sending",
                     )
-                    .await?
+                    .await?;
+                    crate::db::steers::fold(&mut tx, self.turn_id, &self.folded_steers).await?;
                 }
                 TurnStatus::Running => {
                     crate::db::handoffs::transition(
@@ -468,7 +478,10 @@ impl SinkState {
         // batch or any other unseen outcome, as `turns_continuable` decides
         // for a waiting turn.
         let own_outcome = ready > 0 || waits_unseen + owner_unseen > 0;
-        let status = if parks && blocking == 0 && own_outcome {
+        // An owner message joined the reply and was not taken yet: the reply
+        // continues with it now, whatever it waits on.
+        let joined = crate::db::steers::waiting_for(&mut tx, self.turn_id).await? > 0;
+        let status = if parks && (joined || (blocking == 0 && own_outcome)) {
             TurnStatus::Queued
         } else if parks && pending > 0 {
             TurnStatus::Waiting
@@ -973,6 +986,11 @@ impl TurnSink for SqliteSink {
         self.state
             .call_async(move |state| Box::pin(state.steer_sending(turn_id)))
             .await
+    }
+    async fn steer_refused(&self, turn_id: Uuid) {
+        self.state
+            .call_async(move |state| Box::pin(state.steer_refused(turn_id)))
+            .await;
     }
     async fn steered(&self, turn_id: Uuid) -> Result<(), Fenced> {
         self.state
