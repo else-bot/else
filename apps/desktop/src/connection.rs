@@ -161,6 +161,8 @@ enum Open {
         bot: Uuid,
     },
     Bot(Uuid),
+    /// The server itself: focus its bot list.
+    Server,
 }
 
 struct RemoteForm {

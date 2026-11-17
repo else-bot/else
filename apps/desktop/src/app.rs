@@ -262,8 +262,8 @@ pub struct ElseApp {
     /// A bot list arrived since the last connection event. The live stream
     /// reports a connection before its first list, so `bots` can be stale.
     listed: bool,
-    /// A bot the quick switcher asked to open before the first bot list
-    /// arrived; opened when it does.
+    /// A bot the quick switcher asked to open before the bot list arrived;
+    /// opened when it does, unless another open or hiding this view drops it.
     requested: Option<Uuid>,
     mention_bots: Arc<bot_mention::MentionRegistry>,
     categories: Vec<Category>,
@@ -583,6 +583,7 @@ impl ElseApp {
     }
 
     pub(crate) fn open_bot(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        self.requested = None;
         self.inbox.open(id);
         self.select(Some(id), window, cx);
         self.check_reading(window, cx);
@@ -598,25 +599,36 @@ impl ElseApp {
             .then(|| crate::quick_switcher::Bot::listed(&self.bots))
     }
 
+    /// Whether opening `id` can succeed: it is listed, or no list has
+    /// arrived since the connection changed.
+    pub(crate) fn may_have_bot(&self, id: Uuid) -> bool {
+        !self.listed || self.active_bots().any(|bot| bot.id == id)
+    }
+
     /// Opens a bot's chat with the composer focused, as the quick switcher
-    /// does; before the bot list arrives, once it does. Returns false when
-    /// the listed bots have no such bot.
-    pub(crate) fn open_bot_chat(
-        &mut self,
-        id: Uuid,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    /// does; before the bot list arrives, once it does.
+    pub(crate) fn open_bot_chat(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         if !self.listed {
             self.requested = Some(id);
-            return true;
+            return;
         }
-        if !self.bots.iter().any(|bot| bot.id == id && bot.is_active()) {
-            return false;
+        if !self.active_bots().any(|bot| bot.id == id) {
+            return;
         }
         self.open_bot(id, window, cx);
-        self.composer.read(cx).focus_handle(cx).focus(window, cx);
-        true
+        if !self.hidden {
+            self.composer.read(cx).focus_handle(cx).focus(window, cx);
+        }
+    }
+
+    pub(crate) fn focus_sidebar(&self, window: &mut Window, cx: &mut App) {
+        if !self.hidden {
+            self.sidebar_focus.focus(window, cx);
+        }
+    }
+
+    pub(crate) fn drop_requested_bot(&mut self) {
+        self.requested = None;
     }
 
     fn select(&mut self, id: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {

@@ -356,6 +356,9 @@ impl Connections {
                         {
                             return false;
                         }
+                        if let Some(bots) = &snapshot.bots {
+                            shell.cache_bots(id, bots, cx);
+                        }
                         shell.servers.entries.insert(id, snapshot);
                         shell.adopt_server_name(id, cx);
                         shell.adopt_server_icon(id, cx);
@@ -837,6 +840,13 @@ impl Shell {
                             shell.open_notification(scope, bot, window, cx)
                         }
                         Open::Bot(bot) => shell.open_active_bot(bot, window, cx),
+                        Open::Server => {
+                            if let Some(active) = &shell.active {
+                                active
+                                    .app
+                                    .update(cx, |app, cx| app.focus_sidebar(window, cx));
+                            }
+                        }
                     }
                 }
                 cx.notify();

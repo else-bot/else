@@ -5,7 +5,7 @@
 //! desktop last saw on it, so a search never waits on the network and an
 //! offline server's bots still show. A match on the start of the name beats
 //! one on the start of a word, which beats one inside a word, which beats
-//! letters spread across word starts. A bot also matches on its server's name,
+//! letters spread out from a word start. A bot also matches on its server's name,
 //! at a lower weight. Recently opened items rank higher.
 
 use std::collections::HashMap;
@@ -201,28 +201,46 @@ pub fn score(query: &str, text: &str) -> Option<(i32, Vec<usize>)> {
     if let Some(&at) = found.first() {
         return Some((500 - len, run(at)));
     }
-    // Letters spread out: the first must start a word, and each one prefers
-    // the next word start over a letter inside a word.
-    let mut at = Vec::with_capacity(query.len());
-    let mut from = 0;
-    let mut points = 200;
-    for &c in &query {
-        let next = (from..text.len())
-            .find(|&i| text[i] == c && word_start(i))
-            .or_else(|| (from..text.len()).find(|&i| text[i] == c))?;
-        if at.is_empty() && !word_start(next) {
-            return None;
+    // Letters spread out: the first must start a word. Of every way to
+    // place the letters, keep the best scoring: word starts and adjacent
+    // letters earn points, skipped letters cost them.
+    let (q, t) = (query.len(), text.len());
+    let gain = |j: usize| if word_start(j) { 12 } else { 0 };
+    // best[i][j]: the best score with letter i of the query at char j.
+    let mut best = vec![vec![None::<i32>; t]; q];
+    let mut from = vec![vec![0usize; t]; q];
+    for j in 0..t {
+        if text[j] == query[0] && word_start(j) {
+            best[0][j] = Some(gain(j) - j as i32 * 2);
         }
-        if word_start(next) {
-            points += 12;
-        }
-        if at.last().is_some_and(|&last| next == last + 1) {
-            points += 6;
-        }
-        points -= (next - from) as i32 * 2;
-        at.push(next);
-        from = next + 1;
     }
+    for i in 1..q {
+        for j in i..t {
+            if text[j] != query[i] {
+                continue;
+            }
+            for k in i - 1..j {
+                let Some(before) = best[i - 1][k] else {
+                    continue;
+                };
+                let adjacent = if j == k + 1 { 6 } else { 0 };
+                let points = before + gain(j) + adjacent - (j - k - 1) as i32 * 2;
+                if best[i][j].is_none_or(|current| points > current) {
+                    best[i][j] = Some(points);
+                    from[i][j] = k;
+                }
+            }
+        }
+    }
+    let (mut j, points) = (0..t)
+        .filter_map(|j| best[q - 1][j].map(|points| (j, points)))
+        .max_by_key(|&(j, points)| (points, std::cmp::Reverse(j)))?;
+    let mut at = vec![j; q];
+    for i in (1..q).rev() {
+        j = from[i][j];
+        at[i - 1] = j;
+    }
+    let points = 200 + points;
     (points >= 150).then_some((points, at))
 }
 
@@ -339,9 +357,27 @@ impl Memory {
             .unwrap_or_default()
     }
 
+    /// Writes the memory, dropping the largest bot lists until it fits
+    /// the size [`Memory::load`] accepts.
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        let bytes = serde_json::to_vec(self)
-            .map_err(|err| format!("Could not serialize the quick switcher: {err}"))?;
+        let encode = |memory: &Self| {
+            serde_json::to_vec(memory)
+                .map_err(|err| format!("Could not serialize the quick switcher: {err}"))
+        };
+        let mut bytes = encode(self)?;
+        let mut kept = self.clone();
+        while bytes.len() as u64 > MAX_MEMORY_BYTES {
+            let Some(largest) = kept
+                .bots
+                .iter()
+                .max_by_key(|(_, bots)| bots.len())
+                .map(|(id, _)| *id)
+            else {
+                return Err("The quick switcher's memory is too large to save.".into());
+            };
+            kept.bots.remove(&largest);
+            bytes = encode(&kept)?;
+        }
         crate::config::replace_private(path, &bytes)
             .map_err(|err| format!("Could not save the quick switcher: {err}"))
     }
@@ -401,6 +437,34 @@ mod tests {
         assert!(prefix.0 > word.0 && word.0 > inside.0 && inside.0 > spread.0);
         assert_eq!(word.1, vec![5, 6, 7]);
         assert_eq!(spread.1, vec![0, 5]);
+    }
+
+    #[test]
+    fn spread_letters_find_a_match_a_greedy_pass_would_miss() {
+        let (_, at) = score("rsc", "Research Studio").unwrap();
+        assert_eq!(at, vec![0, 2, 6]);
+        let (_, at) = score("hs", "Home server").unwrap();
+        assert_eq!(at, vec![0, 5], "word starts win over letters inside words");
+    }
+
+    #[test]
+    fn an_oversized_memory_drops_bot_lists_but_keeps_recents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("switcher.json");
+        let mut memory = Memory::default();
+        let server = Uuid::new_v4();
+        remember(&mut memory.recents, Target::Server { server });
+        let small = Uuid::new_v4();
+        memory.bots.insert(small, vec![bot("Kept")]);
+        let long = "x".repeat(200);
+        memory
+            .bots
+            .insert(server, (0..4000).map(|_| bot(&long)).collect());
+        memory.save(&path).unwrap();
+        let loaded = Memory::load(&path);
+        assert_eq!(loaded.recents, memory.recents);
+        assert!(!loaded.bots.contains_key(&server));
+        assert_eq!(loaded.bots[&small], memory.bots[&small]);
     }
 
     #[test]

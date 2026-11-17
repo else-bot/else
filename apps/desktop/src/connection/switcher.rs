@@ -176,6 +176,14 @@ impl Shell {
     ) {
         self.close_switcher(window, cx);
         self.remember(target, cx);
+        // A newer pick supersedes a switch still verifying and a bot still
+        // waiting for its list, so neither can land after this one.
+        self.switch_attempt = None;
+        self._switch = None;
+        self.arrival = None;
+        if let Some(active) = &self.active {
+            active.app.update(cx, |app, _| app.drop_requested_bot());
+        }
         let here = self
             .active
             .as_ref()
@@ -194,7 +202,13 @@ impl Shell {
                 });
                 self.select_server(server, window, cx);
             }
-            Target::Server { server } => self.select_server(server, window, cx),
+            Target::Server { server } => {
+                self.arrival = Some(Arrival {
+                    server,
+                    open: Open::Server,
+                });
+                self.select_server(server, window, cx);
+            }
         }
     }
 
@@ -207,7 +221,7 @@ impl Shell {
     ) {
         let Some(active) = &self.active else { return };
         let app = active.app.clone();
-        if !app.update(cx, |app, cx| app.open_bot_chat(bot, window, cx)) {
+        if !app.read(cx).may_have_bot(bot) {
             return;
         }
         if self.setup.is_some() {
@@ -216,6 +230,17 @@ impl Shell {
             }
             self.cancel(window, cx);
         }
+        app.update(cx, |app, cx| app.open_bot_chat(bot, window, cx));
+    }
+
+    /// Keeps a server's latest bot list for searches while it is offline,
+    /// including after a restart.
+    pub(super) fn cache_bots(&mut self, id: Uuid, bots: &[qs::Bot], cx: &mut Context<Self>) {
+        if self.recall.memory.bots.get(&id).map(Vec::as_slice) == Some(bots) {
+            return;
+        }
+        self.recall.memory.bots.insert(id, bots.to_vec());
+        self.save_recall(cx);
     }
 
     /// Records an opened item and saves the switcher's memory shortly after.
@@ -432,13 +457,18 @@ impl Shell {
             .text_color(theme.muted_foreground)
             .child(hint("up down", "Move"))
             .child(hint("enter", "Open"))
-            .child(if picker.scope.is_some() {
-                hint("backspace", "Leave server")
-            } else {
-                hint("tab", "Search in server")
-            })
+            .children(
+                picker
+                    .scope
+                    .is_none()
+                    .then(|| hint("tab", "Search in server")),
+            )
             .child(div().flex_1())
-            .child(hint("escape", "Close"));
+            .child(if picker.scope.is_some() {
+                hint("escape", "Leave server")
+            } else {
+                hint("escape", "Close")
+            });
         let panel = v_flex()
             .id("quick-switcher")
             .key_context(CONTEXT)
