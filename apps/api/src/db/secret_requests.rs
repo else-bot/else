@@ -7,6 +7,8 @@
 //! encrypted, in the same transaction that marks the request stored and
 //! requeues the turn as a continuation. A continuation learns only the
 //! secret's name, variable names, and whether it was stored or declined.
+//! A request may carry a description and the website a login is for; the
+//! owner may edit both and add variables (such as a TOTP seed) when saving.
 //! Ending the turn for any reason withdraws a pending request (a trigger).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -19,7 +21,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::events;
-use super::task_secrets::{self, SecretError, valid_name, valid_var};
+use super::task_secrets::{self, Meta, SecretError, Website, valid_name, valid_var};
 use crate::credentials::SecretKey;
 
 /// Requests per owner request (turn).
@@ -28,28 +30,53 @@ pub const MAX_REASON: usize = 500;
 
 pub use crate::app::providers::SecretOutcome as Outcome;
 
-/// What the bot asks for: a task secret name, why, and its variables.
+/// What the bot asks for: a task secret name, why, its variables, and
+/// optionally how the Vault describes it and the website it signs in to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spec {
     pub name: String,
     pub reason: String,
     pub env: BTreeSet<String>,
+    pub description: Option<String>,
+    pub website: Option<Website>,
 }
 
 impl Spec {
-    /// Parse tool arguments: exactly `name`, `reason`, and `env`, nothing
-    /// else, so no value can ride along. Errors never echo the input.
+    /// Parse tool arguments: `name`, `reason`, and `env`, optionally
+    /// `description` and `website`, nothing else, so no value can ride
+    /// along. Errors never echo the input.
     pub fn parse(args: &Value) -> Result<Self, &'static str> {
         let Some(args) = args.as_object() else {
             return Err("arguments must be an object with name, reason, and env");
         };
-        if args.len() != 3
-            || !["name", "reason", "env"]
-                .iter()
-                .all(|k| args.contains_key(*k))
+        if !["name", "reason", "env"]
+            .iter()
+            .all(|k| args.contains_key(*k))
+            || args
+                .keys()
+                .any(|k| !["name", "reason", "env", "description", "website"].contains(&k.as_str()))
         {
-            return Err("use exactly name, reason, and env; never send values");
+            return Err(
+                "use name, reason, env, and optionally description and website; never send values",
+            );
         }
+        let description = match args.get("description") {
+            None | Some(Value::Null) => None,
+            Some(text) => Some(
+                text.as_str()
+                    .and_then(|t| task_secrets::description(t).ok())
+                    .filter(|t| !t.is_empty())
+                    .ok_or("description is one line of 1 to 200 bytes")?,
+            ),
+        };
+        let website = match args.get("website") {
+            None | Some(Value::Null) => None,
+            Some(text) => Some(
+                text.as_str()
+                    .and_then(|t| Website::parse(t).ok())
+                    .ok_or("website is a host such as x.com or a URL")?,
+            ),
+        };
         let name = args["name"]
             .as_str()
             .filter(|n| valid_name(n))
@@ -77,6 +104,8 @@ impl Spec {
             name: name.to_owned(),
             reason: reason.to_owned(),
             env,
+            description,
+            website,
         })
     }
 }
@@ -108,6 +137,8 @@ pub struct RequestInfo {
     pub name: String,
     pub reason: String,
     pub env: Vec<String>,
+    pub description: Option<String>,
+    pub website: Option<Website>,
     pub status: Status,
     pub created_at: DateTime<Utc>,
     pub settled_at: Option<DateTime<Utc>>,
@@ -120,16 +151,18 @@ type Row = (
     String,
     String,
     Json<Vec<String>>,
+    Option<String>,
+    Option<String>,
     String,
     DateTime<Utc>,
     Option<DateTime<Utc>>,
 );
 
-const COLUMNS: &str =
-    "id, bot_id, turn_id, name, reason, env_names, status, created_at, settled_at";
+const COLUMNS: &str = "id, bot_id, turn_id, name, reason, env_names, description, website, \
+                       status, created_at, settled_at";
 
 fn info(
-    (id, bot_id, turn_id, name, reason, env, status, created_at, settled_at): Row,
+    (id, bot_id, turn_id, name, reason, env, description, website, status, created_at, settled_at): Row,
 ) -> RequestInfo {
     RequestInfo {
         id,
@@ -138,6 +171,8 @@ fn info(
         name,
         reason,
         env: env.0,
+        description,
+        website: website.and_then(|w| Website::parse(&w).ok()),
         status: Status::parse(&status),
         created_at,
         settled_at,
@@ -194,7 +229,11 @@ pub async fn create(
     if let Some(row) = existing {
         let found = info(row);
         let env: BTreeSet<String> = found.env.iter().cloned().collect();
-        if env != spec.env || found.reason != spec.reason {
+        if env != spec.env
+            || found.reason != spec.reason
+            || found.description != spec.description
+            || found.website != spec.website
+        {
             return Err(RequestError::Conflict);
         }
         return Ok(found);
@@ -212,8 +251,9 @@ pub async fn create(
     let id = Uuid::new_v4();
     let env: Vec<&String> = spec.env.iter().collect();
     let row: Row = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "INSERT INTO secret_requests (id, bot_id, turn_id, attempt, name, reason, env_names)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING {COLUMNS}"
+        "INSERT INTO secret_requests (id, bot_id, turn_id, attempt, name, reason, env_names,
+             description, website)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) RETURNING {COLUMNS}"
     )))
     .bind(id)
     .bind(bot_id)
@@ -222,6 +262,8 @@ pub async fn create(
     .bind(&spec.name)
     .bind(&spec.reason)
     .bind(Json(&env))
+    .bind(spec.description.as_deref())
+    .bind(spec.website.as_ref().map(Website::as_str))
     .fetch_one(&mut *tx)
     .await?;
     events::turn_changed(&mut tx, bot_id, turn_id).await?;
@@ -256,7 +298,7 @@ pub enum SettleError {
     NotFound,
     #[error("the request was already answered")]
     Settled(Status),
-    #[error("send exactly the requested variables: {}", .0.join(", "))]
+    #[error("send every requested variable: {}", .0.join(", "))]
     EnvMismatch(Vec<String>),
     #[error(transparent)]
     Secret(#[from] SecretError),
@@ -335,23 +377,29 @@ async fn settle_in(
 }
 
 /// Store the owner's values for a pending request as a task secret every
-/// bot can use, replacing one with the same name, and continue its turn, atomically. `env` must name exactly the requested
-/// variables. A retry after success changes nothing and never overwrites
-/// what was stored.
+/// bot can use, replacing one with the same name, and continue its turn,
+/// atomically. `env` names every requested variable and may add more; the
+/// owner's description and website, else the bot's, describe the entry. A
+/// retry after success changes nothing and never overwrites what was stored.
 pub async fn fulfill(
     pool: &SqlitePool,
     key: Option<&SecretKey>,
     bot_id: Uuid,
     request_id: Uuid,
     env: &BTreeMap<String, String>,
+    meta: Meta,
 ) -> Result<Settled, SettleError> {
     let request = load(&mut *pool.acquire().await?, bot_id, request_id).await?;
     if request.status != Status::Pending {
         return answered(request, Status::Stored);
     }
-    if !env.keys().eq(request.env.iter()) {
+    if !request.env.iter().all(|var| env.contains_key(var)) {
         return Err(SettleError::EnvMismatch(request.env));
     }
+    let meta = Meta {
+        description: meta.description.or_else(|| request.description.clone()),
+        website: meta.website.or_else(|| request.website.clone().map(Some)),
+    };
     let key = key.ok_or(SecretError::NoKey)?;
     let sealed = task_secrets::seal_env(key, &request.name, env)?;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -359,7 +407,7 @@ pub async fn fulfill(
     if request.status != Status::Pending {
         return answered(request, Status::Stored);
     }
-    task_secrets::write_in(&mut tx, &request.name, &sealed).await?;
+    task_secrets::write_in(&mut tx, &request.name, &sealed, &meta).await?;
     let settled = settle_in(&mut tx, &request, Status::Stored).await?;
     tx.commit().await?;
     Ok(settled)

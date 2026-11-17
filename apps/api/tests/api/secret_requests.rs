@@ -559,7 +559,8 @@ async fn only_the_owner_answers_and_only_for_the_requesting_bot() {
     }
 
     let bad_bodies = [
-        json!({ "env": { "DEPLOY_USER": "u" , "DEPLOY_KEY": PEM, "EXTRA": CANARY } }),
+        json!({ "env": { "DEPLOY_USER": "u" , "DEPLOY_KEY": PEM, "PATH": CANARY } }),
+        json!({ "env": { "DEPLOY_USER": "u", "DEPLOY_KEY": PEM }, "website": CANARY }),
         json!({ "env": { "DEPLOY_KEY": PEM } }),
         json!({ "env": { "DEPLOY_USER": CANARY, "DEPLOY_KEY": 7 } }),
         json!({ "env": { "DEPLOY_USER": "u", "DEPLOY_KEY": PEM }, "note": CANARY }),
@@ -588,6 +589,59 @@ async fn only_the_owner_answers_and_only_for_the_requesting_bot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_login_request_saves_the_owners_fields_and_website_in_the_vault() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (_, token) = running(&app, &main, owner_tools()).await;
+    let asked = ask(
+        &app,
+        &token,
+        json!({ "name": "x-login", "reason": "Post the weekly thread on X.",
+                "env": ["USERNAME", "PASSWORD"], "description": "X account",
+                "website": "https://www.X.com/i/flow/login" }),
+    )
+    .await;
+    let asked = tool_text(&asked);
+    assert_eq!(asked["status"], "pending", "{asked}");
+    let request: Uuid = asked["request_id"].as_str().unwrap().parse().unwrap();
+    let turn = app
+        .owner("GET", &format!("/v1/bots/{main}/conversation"), None)
+        .await;
+    assert!(
+        turn.body.to_string().contains("\"website\":\"x.com\""),
+        "the card shows the website: {}",
+        turn.body
+    );
+
+    let missing = fulfill(
+        &app,
+        &main,
+        request,
+        json!({ "env": { "USERNAME": "me@example.com" } }),
+    )
+    .await;
+    assert_eq!(missing.status, StatusCode::BAD_REQUEST, "every asked field");
+    let saved = fulfill(
+        &app,
+        &main,
+        request,
+        json!({ "env": { "USERNAME": "me@example.com", "PASSWORD": CANARY,
+                         "TOTP_SECRET": "JBSWY3DPEHPK3PXP" },
+                "description": "X, @example" }),
+    )
+    .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    let vault = app.owner("GET", "/v1/task-secrets", None).await;
+    let entry = &vault.body["secrets"][0];
+    assert_eq!(entry["name"], "x-login");
+    assert_eq!(entry["description"], "X, @example", "the owner's edit wins");
+    assert_eq!(entry["website"], "x.com");
+    assert_eq!(entry["env"], json!(["PASSWORD", "TOTP_SECRET", "USERNAME"]));
+    assert_eq!(entry["last_used"], Value::Null);
+    assert!(!vault.body.to_string().contains(CANARY));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn arguments_carry_metadata_only() {
     let Harness { app, .. } = harness().await;
     let main = app.main_bot().await;
@@ -596,6 +650,8 @@ async fn arguments_carry_metadata_only() {
         json!({ "name": "deploy", "reason": "r", "env": ["DEPLOY_KEY"], "value": CANARY }),
         json!({ "name": "deploy", "reason": "r", "env": { "DEPLOY_KEY": CANARY } }),
         json!({ "name": "deploy", "reason": "r", "env": [CANARY] }),
+        json!({ "name": "deploy", "reason": "r", "env": ["DEPLOY_KEY"], "website": CANARY }),
+        json!({ "name": "deploy", "reason": "r", "env": ["DEPLOY_KEY"], "description": format!("a\n{CANARY}") }),
     ] {
         let reply = ask(&app, &token, args).await;
         assert_eq!(reply.body["result"]["isError"], true, "{}", reply.body);

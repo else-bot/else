@@ -23,6 +23,8 @@ mod computers;
 pub use computers::*;
 mod usage;
 pub use usage::*;
+mod vault;
+pub use vault::*;
 mod skills;
 pub use skills::*;
 mod mcp;
@@ -490,7 +492,11 @@ impl ClientError {
     pub fn outcome_unknown(&self) -> bool {
         match self {
             Self::Unreachable { .. } | Self::Protocol(_) => true,
-            Self::Api { code, .. } if code == "provider_unavailable" => false,
+            Self::Api { code, .. }
+                if code == "provider_unavailable" || code == "secrets_unavailable" =>
+            {
+                false
+            }
             Self::Api { status, .. } => *status >= 500,
             Self::Unauthorized | Self::Transport(_) => false,
         }
@@ -835,16 +841,15 @@ impl Client {
             .map(|(_, v)| v["state"].as_str().unwrap_or_default().to_owned())
     }
 
-    /// Answer a bot's secret request: store `env` (exactly the requested
-    /// variables) or, with `None`, decline it. Values are never returned.
+    /// Save requested and owner-added fields, or decline with `None`.
     pub async fn answer_secret(
         self: Arc<Self>,
         bot: Uuid,
         request: Uuid,
-        env: Option<std::collections::BTreeMap<String, String>>,
+        secret: Option<SaveSecret>,
     ) -> Result<(), ClientError> {
-        let (action, body) = match env {
-            Some(env) => ("fulfill", Some(json!({ "env": env }))),
+        let (action, body) = match secret {
+            Some(secret) => ("fulfill", Some(json!(secret))),
             None => ("cancel", None),
         };
         let path = format!("/v1/bots/{bot}/secret-requests/{request}/{action}");
@@ -1236,6 +1241,157 @@ pub(crate) mod tests {
     fn client(origin: Origin) -> Arc<Client> {
         let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
         Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn vault_http_contract_keeps_values_in_owner_requests() {
+        use axum::{
+            Router,
+            body::{Body, to_bytes},
+            extract::State,
+            http::Request,
+            response::IntoResponse,
+            routing::any,
+        };
+        use tokio::sync::mpsc;
+        async fn handle(
+            State(sent): State<mpsc::Sender<(String, String, serde_json::Value)>>,
+            request: Request<Body>,
+        ) -> axum::response::Response {
+            let method = request.method().to_string();
+            let path = request.uri().path().to_owned();
+            let bytes = to_bytes(request.into_body(), 16384).await.unwrap();
+            let body = if bytes.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::from_slice(&bytes).unwrap()
+            };
+            sent.send((method.clone(), path.clone(), body))
+                .await
+                .unwrap();
+            let entry = json!({"name": "x_login", "description": "X, @owner", "website": "x.com", "env": ["PASSWORD"], "updated_at": "2026-11-17T12:00:00Z", "last_used": null});
+            match (method.as_str(), path.as_str()) {
+                ("GET", "/v1/task-secrets") => axum::Json(json!({"secrets": [entry]})).into_response(),
+                ("POST", "/v1/task-secrets/x_login") => (StatusCode::CREATED, axum::Json(json!({"name": "x_login", "env": ["PASSWORD"], "not_redacted": ["PASSWORD"]}))).into_response(),
+                ("PATCH", _) => axum::Json(entry).into_response(),
+                ("POST", "/v1/task-secrets/x_login/reveal") => axum::Json(json!({"env": {"PASSWORD": "test-only-value"}})).into_response(),
+                ("POST", _) => axum::Json(json!({})).into_response(),
+                ("DELETE", _) => StatusCode::NO_CONTENT.into_response(),
+                _ => StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+        let (sent, mut received) = mpsc::channel(8);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = Origin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().fallback(any(handle)).with_state(sent),
+            )
+            .await
+            .unwrap();
+        });
+        let client = client(origin);
+        let entries = client.clone().vault().await.unwrap();
+        assert_eq!(entries[0].description, "X, @owner");
+        assert_eq!(entries[0].website.as_deref(), Some("x.com"));
+        assert!(entries[0].last_used.is_none());
+        assert_eq!(received.recv().await.unwrap().0, "GET");
+        let secret = || SaveSecret {
+            env: [
+                ("PASSWORD".into(), "abc".into()),
+                ("TOTP_SECRET".into(), "seed".into()),
+            ]
+            .into(),
+            description: "X, @owner".into(),
+            website: Some("x.com".into()),
+        };
+        let saved = client
+            .clone()
+            .create_secret("x_login".into(), secret())
+            .await
+            .unwrap();
+        assert_eq!(saved.not_redacted, ["PASSWORD"]);
+        let (method, path, body) = received.recv().await.unwrap();
+        assert_eq!(
+            (method.as_str(), path.as_str()),
+            ("POST", "/v1/task-secrets/x_login")
+        );
+        assert_eq!(body["env"]["TOTP_SECRET"], "seed");
+        client
+            .clone()
+            .patch_secret(
+                "x_login".into(),
+                PatchSecret {
+                    description: "Renamed".into(),
+                    website: None,
+                    set: [("PASSWORD".into(), "new".into())].into(),
+                    remove: vec!["USERNAME".into()],
+                },
+            )
+            .await
+            .unwrap();
+        let (method, _, body) = received.recv().await.unwrap();
+        assert_eq!(method, "PATCH");
+        assert_eq!(body["website"], serde_json::Value::Null);
+        assert_eq!(body["remove"], json!(["USERNAME"]));
+        assert_eq!(body["set"]["PASSWORD"], "new");
+        let revealed = client
+            .clone()
+            .reveal_secret("x_login".into())
+            .await
+            .unwrap();
+        assert_eq!(revealed.env["PASSWORD"], "test-only-value");
+        let (method, path, body) = received.recv().await.unwrap();
+        assert_eq!(
+            (method.as_str(), path.as_str()),
+            ("POST", "/v1/task-secrets/x_login/reveal")
+        );
+        assert!(body.is_null());
+        client
+            .clone()
+            .delete_secret("x_login".into())
+            .await
+            .unwrap();
+        assert_eq!(received.recv().await.unwrap().0, "DELETE");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn vault_request_fulfillment_includes_metadata_and_added_fields() {
+        for store in [true, false] {
+            let (origin, server) = serve_once(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .await;
+            let secret = store.then(|| SaveSecret {
+                env: [
+                    ("PASSWORD".into(), "test-password".into()),
+                    ("TOTP_SECRET".into(), "test-seed".into()),
+                ]
+                .into(),
+                description: "X, @owner".into(),
+                website: Some("x.com".into()),
+            });
+            client(origin)
+                .answer_secret(Uuid::nil(), Uuid::nil(), secret)
+                .await
+                .unwrap();
+            let request = server.await.unwrap();
+            assert!(request.starts_with("POST /v1/bots/00000000-0000-0000-0000-000000000000/secret-requests/00000000-0000-0000-0000-000000000000/"));
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            if store {
+                assert!(headers.contains("/fulfill "));
+                let body: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert_eq!(body["description"], "X, @owner");
+                assert_eq!(body["website"], "x.com");
+                assert_eq!(body["env"]["TOTP_SECRET"], "test-seed");
+                assert_eq!(body["env"]["PASSWORD"], "test-password");
+            } else {
+                assert!(headers.contains("/cancel "));
+                assert!(body.is_empty());
+            }
+        }
     }
 
     #[tokio::test]

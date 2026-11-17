@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Drive the guest's Chromium through DevTools on guest loopback.
 
-Usage: else-browser [--accept-dialogs] open URL | text | title | snapshot | click SELECTOR | type SELECTOR TEXT | reconcile
+Usage: else-browser [--accept-dialogs] open URL | text | title | snapshot | click SELECTOR | type SELECTOR TEXT
+       | type-secret SELECTOR SITE | reconcile
+type-secret reads the text from stdin, so a Vault value is in no command line,
+and types it only into a field of a page on SITE or one of its subdomains.
 SELECTOR is CSS, text=Label for the one visible element with exactly that text,
 or a ref such as @kqvzb3 from the latest snapshot of the same page.
 Prints one JSON object. Runs inside the guest; nothing leaves the VM.
@@ -260,6 +263,50 @@ def type_into(tab, element, selector, text, secret):
                      typed.get("index"))
     if "error" in held:
         fail(held["error"])
+
+# Runs in an isolated world of the top frame, where the page's scripts cannot
+# redefine location, ownerDocument, or the value setter. The value is set on
+# this element directly, never typed through keyboard focus, which the page
+# could move into another frame between a check and the keystrokes.
+SECRET_FILL = r"""function(value, site) {
+  const host = location.hostname.toLowerCase().replace(/\.$/, "");
+  if (host !== site && !host.endsWith("." + site))
+    return { error: `WRONG_SITE: the page is on ${host}, not ${site}; nothing was typed` };
+  const e = this;
+  if (!e.isConnected || e.ownerDocument !== document)
+    return { error: "the field is inside a frame; a Vault value goes only into the page itself" };
+  const text = e instanceof HTMLInputElement && /^(text|email|password|tel|number|search|url)$/.test(e.type);
+  if (!text && !(e instanceof HTMLTextAreaElement))
+    return { error: "a Vault value goes into a text or password input" };
+  if (e.disabled || e.readOnly) return { error: "the field is disabled or read-only" };
+  e.focus();
+  const proto = text ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+  Object.getOwnPropertyDescriptor(proto, "value").set.call(e, value);
+  e.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+  e.dispatchEvent(new Event("change", { bubbles: true }));
+  return { held: e.value === value, length: e.value.length };
+}"""
+
+def fill_secret(tab, selector, site, value):
+    def fail(error):
+        raise SystemExit(json.dumps({"error": f"{json.dumps(selector)}: {error}"}))
+    element = field_of(tab, find(tab, selector))
+    backend = tab.call("DOM.describeNode", objectId=element)["node"]["backendNodeId"]
+    frame = tab.call("Page.getFrameTree")["frameTree"]["frame"]["id"]
+    world = tab.call("Page.createIsolatedWorld", frameId=frame, worldName="else-vault")["executionContextId"]
+    try:
+        isolated = tab.call("DOM.resolveNode", backendNodeId=backend, executionContextId=world)["object"]["objectId"]
+    except SystemExit:
+        fail("the field is inside a frame; a Vault value goes only into the page itself")
+    check_ref(tab)
+    filled = tab.call("Runtime.callFunctionOn", objectId=isolated, functionDeclaration=SECRET_FILL,
+                      arguments=[{"value": value}, {"value": site}], returnByValue=True)
+    filled = filled.get("result", {}).get("value") or {}
+    if "error" in filled or "held" not in filled:
+        fail(filled.get("error", "the page refused the value"))
+    if not filled["held"]:
+        fail(f"the field holds {filled['length']} characters after filling; the page changed or refused the value")
+    tab.vault_length = filled["length"]
 
 PAGE_TEXT = "document.body ? document.body.innerText : ''"
 TEXT_LIMIT = 20000
@@ -528,6 +575,11 @@ def main(argv):
         result = act(tab, lambda: type_into(tab, element, rest[0], rest[1], secret), False)
         if not result.get("navigated"):
             result = {"value": page_step(tab, element, "fieldValue", secret), **result}
+    elif action == "type-secret":
+        value = sys.stdin.read()
+        result = act(tab, lambda: fill_secret(tab, rest[0], rest[1], value), False)
+        if not result.get("navigated"):
+            result = {"value": f"({tab.vault_length} characters)", **result}
     elif action == "snapshot":
         result = snapshot(tab)
     elif action in ("text", "title"):

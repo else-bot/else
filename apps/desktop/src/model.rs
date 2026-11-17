@@ -258,6 +258,8 @@ pub struct TurnError {
 /// A bot's request for credentials: metadata only, never a value.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SecretRequest {
+    pub description: Option<String>,
+    pub website: Option<String>,
     pub id: Uuid,
     pub name: String,
     pub reason: String,
@@ -2425,5 +2427,23 @@ mod tests {
         .unwrap();
         assert!(!c.question(question).unwrap().is_pending());
         assert!(c.question(question).unwrap().answer.is_none());
+    }
+}
+
+#[cfg(test)]
+mod vault_request_tests {
+    use super::SecretRequest;
+    #[test]
+    fn vault_requests_read_optional_metadata_and_older_payloads() {
+        let mut data = serde_json::json!({"id": uuid::Uuid::nil(), "name": "x_login", "reason": "Sign in", "env": ["USERNAME", "PASSWORD"], "status": "pending"});
+        let old: SecretRequest = serde_json::from_value(data.clone()).unwrap();
+        assert!(old.description.is_none());
+        assert!(old.website.is_none());
+        data["description"] = serde_json::json!("X, @owner");
+        data["website"] = serde_json::json!("x.com");
+        let request: SecretRequest = serde_json::from_value(data).unwrap();
+        assert_eq!(request.description.as_deref(), Some("X, @owner"));
+        assert_eq!(request.website.as_deref(), Some("x.com"));
+        assert!(request.is_pending());
     }
 }

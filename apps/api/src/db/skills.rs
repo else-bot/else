@@ -430,7 +430,13 @@ pub async fn approve(
     .execute(&mut *tx)
     .await?;
     if let Some(sealed) = &sealed {
-        task_secrets::write_in(&mut tx, &card.secret, sealed).await?;
+        task_secrets::write_in(
+            &mut tx,
+            &card.secret,
+            sealed,
+            &task_secrets::Meta::default(),
+        )
+        .await?;
     }
     let settled = settle_in(
         &mut tx,

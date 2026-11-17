@@ -692,6 +692,10 @@ impl Shell {
             .skills
             .as_ref()
             .is_some_and(|view| view.has_unsaved_work(cx))
+            || self
+                .vault
+                .as_ref()
+                .is_some_and(|view| view.read(cx).has_unsaved_work())
             || self.server_editor.is_some()
             || self
                 .mcp
