@@ -48,8 +48,12 @@ fn wait_title(wait: &Wait<'_>) -> String {
     let purpose = match wait {
         Wait::Mcp(wait) if !wait.purpose.trim().is_empty() => one_line(&wait.purpose),
         Wait::Mcp(wait) => format!("{} job", wait.mcp_id),
-        Wait::Job(job) if !job.command.trim().is_empty() => one_line(&job.command),
-        Wait::Job(_) => "Computer job".to_owned(),
+        Wait::Job(job) => job
+            .purpose
+            .as_deref()
+            .map(one_line)
+            .filter(|purpose| !purpose.is_empty())
+            .unwrap_or_else(|| "Computer job".to_owned()),
         Wait::Task(task) => one_line(&task.task),
     };
     format!("Waiting: {purpose}")
@@ -284,7 +288,11 @@ impl ElseApp {
                 .as_deref()
                 .and_then(first_link)
                 .or_else(|| first_link(&wait.purpose)),
-            Wait::Job(job) => first_link(&job.command),
+            Wait::Job(job) => job
+                .purpose
+                .as_deref()
+                .and_then(first_link)
+                .or_else(|| first_link(&job.command)),
             Wait::Task(_) => None,
         };
         v_flex()
@@ -607,10 +615,14 @@ fn mcp_details(wait: &McpWait) -> Vec<Detail> {
 }
 
 fn job_details(job: &ComputerJobWait) -> Vec<Detail> {
-    vec![
-        ("Command", job.command.clone(), true),
-        ("Job", job.job_id.to_string(), true),
-    ]
+    job.purpose
+        .iter()
+        .map(|purpose| ("Purpose", purpose.clone(), false))
+        .chain([
+            ("Command", job.command.clone(), true),
+            ("Job", job.job_id.to_string(), true),
+        ])
+        .collect()
 }
 
 #[cfg(test)]
@@ -661,12 +673,25 @@ mod tests {
         let job = ComputerJobWait {
             id: Uuid::from_u128(2),
             job_id: Uuid::from_u128(3),
-            command: "./crawl.sh --all".into(),
+            command: "for i in $(seq 1 50); do curl -s https://api.github.com/x; done".into(),
+            purpose: Some("CI checks on PR #482".into()),
             job_status: None,
             created_at: None,
         };
-        assert_eq!(wait_title(&Wait::Job(&job)), "Waiting: ./crawl.sh --all");
+        assert_eq!(
+            wait_title(&Wait::Job(&job)),
+            "Waiting: CI checks on PR #482"
+        );
         assert_eq!(job_status(&Wait::Job(&job)).as_deref(), Some("running"));
+        let unlabeled = ComputerJobWait {
+            purpose: None,
+            ..job
+        };
+        assert_eq!(
+            wait_title(&Wait::Job(&unlabeled)),
+            "Waiting: Computer job",
+            "never the raw command"
+        );
     }
 
     #[test]

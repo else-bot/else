@@ -64,7 +64,16 @@ pub(super) async fn admit_check(
     let reserved = match computers {
         Some(computers) => {
             computers
-                .reserve_job(&mut tx, bot_id, None, &command, CHECK_DURATION, &[], None)
+                .reserve_job(
+                    &mut tx,
+                    bot_id,
+                    None,
+                    &command,
+                    None,
+                    CHECK_DURATION,
+                    &[],
+                    None,
+                )
                 .await?
         }
         None => None,

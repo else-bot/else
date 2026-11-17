@@ -584,6 +584,10 @@ pub struct ComputerJobWait {
     pub job_id: Uuid,
     #[serde(default)]
     pub command: String,
+    /// What the bot said the job is for. Absent for jobs started without
+    /// one and from older servers.
+    #[serde(default)]
+    pub purpose: Option<String>,
     #[serde(default)]
     pub job_status: Option<String>,
     #[serde(default)]

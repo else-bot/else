@@ -114,9 +114,12 @@ pub fn tool_list() -> Vec<Value> {
                 "webhook_id": { "type": "string", "format": "uuid",
                                 "description": "One of your webhooks, fired when this job exits 0." },
                 "effect": effect.clone(),
-                "purpose": purpose.clone(), "context": context.clone(),
+                "purpose": { "type": "string", "minLength": 1, "maxLength": MAX_PURPOSE,
+                    "description": "What the job does or waits for, in plain words, e.g. CI checks on \
+                        PR #482. The owner sees it while you wait and as an approval card's title." },
+                "context": context.clone(),
                 "task_scope": task_scope.clone(), "approved_draft": approved_draft.clone() },
-                "required": ["command", "effect"], "additionalProperties": false },
+                "required": ["command", "effect", "purpose"], "additionalProperties": false },
             "annotations": guest,
         }),
         json!({
@@ -911,6 +914,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                     grant.bot_id,
                     Some(grant.turn_id),
                     &command,
+                    args["purpose"].as_str().map(str::trim),
                     Duration::from_secs(minutes * 60),
                     &env,
                     &names,

@@ -145,6 +145,8 @@ pub struct Pending {
     pub job_id: Uuid,
     /// The start of the job's command.
     pub command: String,
+    /// The bot's label for the job; `None` for jobs started without one.
+    pub purpose: Option<String>,
     pub job_status: JobStatus,
     pub created_at: String,
 }
@@ -181,7 +183,7 @@ pub async fn pending_for_turns(
 ) -> Result<HashMap<Uuid, Vec<Pending>>, sqlx::Error> {
     let rows: Vec<Pending> = sqlx::query_as(
         "SELECT w.id, w.turn_id, w.job_id, substr(j.command, 1, 500) AS command,
-             j.status AS job_status, w.created_at
+             j.purpose, j.status AS job_status, w.created_at
          FROM computer_job_waits w JOIN guest_jobs j ON j.id = w.job_id
          WHERE w.status = 'pending'
            AND lower(hex(w.turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))
