@@ -4,13 +4,17 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
-
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
 use super::process::{Finish, Scope, Stderr, last_lines};
 use super::session::PreparedTurn;
-use crate::app::providers::{Fenced, Steer, Stop, TurnOutcome, TurnSink};
+use crate::app::providers::{Steer, Stop, TurnOutcome, TurnSink};
+
+mod steer;
+
+pub use steer::SendError;
+use steer::Steering;
 
 pub const TURN_DEADLINE: Duration = Duration::from_secs(30 * 60);
 /// How long an interrupted provider may take to report its terminal result.
@@ -281,78 +285,6 @@ pub trait Channel: Send {
     }
 }
 
-/// Why [`Channel::send`] failed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SendError {
-    /// The provider answered that it took nothing.
-    Refused(String),
-    /// Cut off, timed out, or the transport closed: it may have taken it.
-    Unknown(String),
-}
-
-/// Give the provider each owner message steered into the turn and not
-/// given yet, oldest first, staging its files and recording it as sending
-/// first. A stop request ends the batch at once, even mid-write. A message
-/// the provider refused waits for the reply's next attempt; one whose write
-/// failed or was cut off keeps an unknown delivery, so its turn ends
-/// uncertain and is never resent. After either, the attempt gives nothing
-/// more (`closed`), so a later message never overtakes it.
-async fn steer<C, P>(
-    channel: &mut C,
-    protocol: &mut P,
-    sink: &dyn TurnSink,
-    stop: &Stop,
-    closed: &mut bool,
-) where
-    C: Channel,
-    P: Protocol<Message = C::Message>,
-{
-    if *closed {
-        return;
-    }
-    for steer in sink.steers().await {
-        let Some(input) = protocol.steer_input(&steer) else {
-            return;
-        };
-        if stop.is_requested() {
-            return;
-        }
-        if !steer.files.is_empty() {
-            let Some(project) = channel.project() else {
-                return;
-            };
-            if let Err(err) = crate::providers::attachments::stage(project, &steer.files).await {
-                tracing::warn!(steered = %steer.turn_id, error = %err, "staging a steered message's files failed");
-                *closed = true;
-                return;
-            }
-        }
-        match sink.steer_sending(steer.turn_id).await {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(Fenced) => return,
-        }
-        let sent = tokio::select! {
-            sent = channel.send(&input) => sent,
-            () = stop.requested() => Err(SendError::Unknown("stopped while writing".into())),
-        };
-        match sent {
-            Ok(()) => protocol.steer_sent(&steer),
-            Err(SendError::Refused(why)) => {
-                tracing::info!(steered = %steer.turn_id, %why, "the provider refused a steered message");
-                sink.steer_refused(steer.turn_id).await;
-                *closed = true;
-                return;
-            }
-            Err(SendError::Unknown(why)) => {
-                tracing::warn!(steered = %steer.turn_id, %why, "writing a steered message failed");
-                *closed = true;
-                return;
-            }
-        }
-    }
-}
-
 /// Ask the provider to stop; false when the stop escalated first. A
 /// transport wait (a full pipe, an unanswered request) never delays a hard
 /// stop.
@@ -381,10 +313,10 @@ where
 {
     let not_stopped = || format!("{label} did not stop after being interrupted.");
     let mut life = Lifecycle::start();
-    let mut closed = false;
+    let mut steering = Steering::Open;
     // A message that joined before the provider took the turn had no wake.
     if turn.accepted() {
-        steer(channel, protocol, sink, stop, &mut closed).await;
+        steering.give(channel, protocol, sink, stop).await;
     }
     loop {
         let read = tokio::select! {
@@ -396,7 +328,7 @@ where
                 continue;
             }
             () = stop.steered(), if life.takes_steers() => {
-                steer(channel, protocol, sink, stop, &mut closed).await;
+                steering.give(channel, protocol, sink, stop).await;
                 continue;
             }
             () = tokio::time::sleep_until(life.wake_at()) => {
@@ -430,7 +362,7 @@ where
                         json!({ "model": model, "reasoning_effort": null, "service_tier": null });
                     let accepted = turn.accept(sink, &reported, &native_turn).await;
                     if accepted.is_ok() && life.takes_steers() {
-                        steer(channel, protocol, sink, stop, &mut closed).await;
+                        steering.give(channel, protocol, sink, stop).await;
                     }
                     accepted
                 }
