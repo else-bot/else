@@ -25,6 +25,8 @@ struct Fake {
     fail_stop: std::sync::atomic::AtomicBool,
     fail_list: std::sync::atomic::AtomicBool,
     create_delay: Mutex<Duration>,
+    /// While set, each create waits for a permit.
+    create_hold: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     fail_unpack: std::sync::atomic::AtomicBool,
     fail_close: std::sync::atomic::AtomicBool,
     fail_configure: std::sync::atomic::AtomicBool,
@@ -81,6 +83,10 @@ impl ComputerRuntime for Fake {
         let delay = *self.create_delay.lock().unwrap();
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
+        }
+        let hold = self.create_hold.lock().unwrap().clone();
+        if let Some(hold) = hold {
+            let _ = hold.acquire().await;
         }
         let mut computers = self.computers.lock().unwrap();
         if computers.contains_key(&spec.name) {
@@ -2008,7 +2014,8 @@ async fn upgrade_all_goes_on_after_a_failure_and_cancels_what_is_left() {
         .execute(&app.db.pool)
         .await
         .unwrap();
-    *fake.create_delay.lock().unwrap() = Duration::from_millis(400);
+    let hold = Arc::new(tokio::sync::Semaphore::new(0));
+    *fake.create_hold.lock().unwrap() = Some(hold.clone());
     let queued = app.owner("POST", "/v1/computers/upgrade-all", None).await;
     assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
 
@@ -2043,6 +2050,7 @@ async fn upgrade_all_goes_on_after_a_failure_and_cancels_what_is_left() {
         cancelled.body["cancelled"],
         serde_json::json!([bots[2].to_string()])
     );
+    hold.add_permits(1);
     let (_, by_bot) = computers_when(&app, |by_bot| by_bot[&bots[1]]["upgrade"].is_null()).await;
     assert_eq!(by_bot[&bots[1]]["image"], "img:new");
     assert_eq!(

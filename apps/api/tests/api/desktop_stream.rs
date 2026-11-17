@@ -447,6 +447,19 @@ impl Setup {
         }
         panic!("never logged {line:?}: {:?}", self.log.lines());
     }
+
+    /// Until the guest has logged a close for every connection it opened.
+    async fn wait_closed(&self) {
+        for _ in 0..200 {
+            let lines = self.log.lines();
+            let count = |suffix: &str| lines.iter().filter(|l| l.ends_with(suffix)).count();
+            if count(" open") == count(" closed") {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("connections left open: {:?}", self.log.lines());
+    }
 }
 
 async fn next_json(socket: &mut Socket) -> Value {
@@ -623,7 +636,7 @@ async fn control_sends_input_releases_it_and_excludes_other_controllers() {
     .await;
     send(&mut socket, json!({"type":"key","key":0x61,"down":true})).await;
     send(&mut socket, json!({"type":"release"})).await;
-    s.wait_log("control key 97 0").await;
+    s.wait_log("control pointer 0 63 7").await;
     assert_eq!(
         s.log.input("control"),
         [
@@ -892,6 +905,7 @@ async fn stopping_the_api_releases_held_input_and_refuses_new_streams() {
         "held input is released before the control connection closes: {lines:?}"
     );
     ends_with(&mut socket, "server_stopping").await;
+    s.wait_closed().await;
 
     let opened = s.log.lines().len();
     assert_eq!(
