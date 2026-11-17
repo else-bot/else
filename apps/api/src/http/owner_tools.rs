@@ -52,7 +52,7 @@ pub(super) fn choice_schema() -> Value {
                               "description": "False or omitted: one choice, submitted on click. True: several, confirmed with \
                                   Done; requires choices. Never approves destructive or external actions." },
                 "context": { "type": "string", "maxLength": crate::app::questions::MAX_CONTEXT,
-                             "description": "Optional: what the choice is about, such as a draft." },
+                             "description": "Optional: what the choice is about, such as a draft. Put code, commands and file contents in fenced code blocks." },
             },
             "required": ["question"],
             "additionalProperties": false,
@@ -76,7 +76,7 @@ pub(super) fn permission_schema() -> Value {
                 "kind": { "type": "string", "enum": ["destructive", "external"] },
                 "action": { "type": "string", "minLength": 1,
                             "maxLength": crate::app::questions::MAX_CONTEXT,
-                            "description": "Exactly what will be done: the command, or the message and its recipients." },
+                            "description": "Exactly what will be done: the command, or the message and its recipients. Put commands, scripts and file contents in fenced code blocks, one per file." },
                 "reason": { "type": "string", "maxLength": crate::app::questions::MAX_TITLE,
                             "description": "Shown as the card's title: what it is for." },
                 "authorization": { "type": "string", "minLength": 1,
