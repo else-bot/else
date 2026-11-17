@@ -1,4 +1,5 @@
 use super::*;
+use session::Socket;
 use std::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpListener;
@@ -779,4 +780,37 @@ fn sender_date_keeps_offsets_and_falls_back_to_the_header_text() {
     );
     assert_eq!(header_date(Some("  ")), None);
     assert_eq!(header_date(None), None);
+}
+
+#[tokio::test]
+async fn a_tls_write_reaches_the_peer_before_the_reply_is_awaited() {
+    const SIZE: usize = 1024 * 1024;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (acceptor, connector) = tls();
+    let _server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut tls = acceptor.accept(socket).await.unwrap();
+        let mut bytes = vec![0; 16384];
+        let mut received = 0;
+        while received < SIZE {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            let n = tls.read(&mut bytes).await.unwrap();
+            assert_ne!(n, 0, "the client closed the connection");
+            received += n;
+        }
+        tls.write_all(b"250 queued\r\n").await.unwrap();
+        tls.flush().await.unwrap();
+    });
+    let tcp = tokio::net::TcpSocket::new_v4().unwrap();
+    tcp.set_send_buffer_size(4096).unwrap();
+    let tcp = tcp.connect(address).await.unwrap();
+    let name = ServerName::try_from("localhost").unwrap();
+    let mut socket = Socket::Tls(Box::new(connector.connect(name, tcp).await.unwrap()));
+    socket.write(&vec![b'x'; SIZE]).await.unwrap();
+    let mut reply = [0; 16];
+    timeout(Duration::from_secs(30), socket.read(&mut reply))
+        .await
+        .expect("the peer never received the end of the write")
+        .unwrap();
 }
