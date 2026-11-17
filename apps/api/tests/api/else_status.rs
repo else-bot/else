@@ -14,7 +14,13 @@ async fn grant(app: &TestApp, tools: Vec<Tool>) -> String {
     let reply = app
         .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
         .await;
-    let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    let turn = &reply.body["turn"];
+    let turn: Uuid = turn["steered_into"]
+        .as_str()
+        .or(turn["id"].as_str())
+        .unwrap()
+        .parse()
+        .unwrap();
     app.wait_turn(&turn.to_string(), &["running"]).await;
     let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
         .bind(turn)
