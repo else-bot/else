@@ -1019,6 +1019,12 @@ async fn mail_event(
     )
     .await
     .unwrap();
+    // Before the arrival: the scheduler may admit it on its next scan.
+    sqlx::query("UPDATE connector_grants SET wake_instructions = ?1")
+        .bind(instructions)
+        .execute(&h.app.db.pool)
+        .await
+        .unwrap();
     let arrival = Scan {
         cursor: Cursor {
             uid_validity: 1,
@@ -1042,11 +1048,6 @@ async fn mail_event(
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE connector_grants SET wake_instructions = ?1")
-        .bind(instructions)
-        .execute(&h.app.db.pool)
-        .await
-        .unwrap();
     else_api::connectors::delivery::admit_pending(&h.app.db.pool, h.app.scheduler.registry(), 32)
         .await
         .unwrap();
