@@ -1296,7 +1296,7 @@ mod ready_tests {
     #[test]
     fn the_continuable_view_uses_the_ready_rule() {
         let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let view = words(include_str!("../../migrations/0061_carry_waits.sql"));
+        let view = words(include_str!("../../migrations/0065_waits_never_block.sql"));
         let ready = words(super::READY);
         assert!(view.contains(&ready), "{ready}");
     }

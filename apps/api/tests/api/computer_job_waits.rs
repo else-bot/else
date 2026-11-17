@@ -418,3 +418,125 @@ async fn stop_keeps_a_waited_job_and_the_owner_stops_that_wait_and_its_job() {
     assert!(packet.contains("status=\"stopped\""), "{packet}");
     assert!(packet.contains("Cancelled by owner"), "{packet}");
 }
+
+async fn follow_up(app: &TestApp, bot: &str, before: Uuid) -> (Uuid, String) {
+    let sent = app.send(bot, Uuid::new_v4(), SLOW, Some("synthetic")).await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    let turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    settle(app, before, "interrupted").await;
+    app.wait_turn(&turn.to_string(), &["running"]).await;
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
+        .bind(turn)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    let token = app
+        .scheduler
+        .grants()
+        .issue(
+            bot.parse().unwrap(),
+            conversation,
+            turn,
+            vec![Tool::Computer, Tool::AskOwner],
+            DEFAULT_TTL,
+        )
+        .await;
+    (turn, token)
+}
+
+async fn waits(app: &TestApp, turn: Uuid) -> Vec<(i32, String, Option<i32>)> {
+    sqlx::query_as(
+        "SELECT attempt, status, delivered_attempt FROM computer_job_waits
+         WHERE turn_id = ?1 ORDER BY created_at",
+    )
+    .bind(turn)
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap()
+}
+
+async fn wait_job(app: &TestApp, token: &str, job: Uuid) {
+    text(
+        &tool(
+            app,
+            token,
+            "computer_job",
+            json!({ "job_id": job, "wait": true }),
+        )
+        .await,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_carried_job_that_ends_wakes_the_bot_unless_an_owner_question_is_pending() {
+    let Setup { app, manager, .. } = setup().await;
+    let bot = app.create_bot("Scout").await;
+    let (first, token) = running(&app, &bot).await;
+    let crawl = start_job(&app, &token).await;
+    wait_job(&app, &token, crawl).await;
+    settle(&app, first, "waiting").await;
+    let (second, token) = follow_up(&app, &bot, first).await;
+    let index = start_job(&app, &token).await;
+    wait_job(&app, &token, index).await;
+    settle(&app, second, "waiting").await;
+
+    manager
+        .cancel_job(bot.parse().unwrap(), crawl)
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + common::SETTLE;
+    while attempts(&app, second).await < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the carried job's end continues the request"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    settle(&app, second, "waiting").await;
+    assert_eq!(
+        waits(&app, second).await,
+        vec![(0, "settled".into(), Some(2)), (1, "pending".into(), None)],
+        "the carried job's end woke the bot while its own job still runs"
+    );
+
+    let (latest, token) = follow_up(&app, &bot, second).await;
+    let asked = tool(
+        &app,
+        &token,
+        "ask_owner",
+        json!({ "question": "Index the archive too?", "choices": ["Yes", "No"] }),
+    )
+    .await;
+    let question: Uuid = text(&asked)["question_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    settle(&app, latest, "waiting").await;
+    manager
+        .cancel_job(bot.parse().unwrap(), index)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        attempts(&app, latest).await,
+        1,
+        "a pending question still blocks"
+    );
+    assert_eq!(waits(&app, latest).await, vec![(0, "settled".into(), None)]);
+
+    let chosen = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{bot}/questions/{question}/answer"),
+            Some(json!({ "choice": "a" })),
+        )
+        .await;
+    assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.body);
+    settle(&app, latest, "completed").await;
+    assert_eq!(attempts(&app, latest).await, 2);
+    assert_eq!(
+        waits(&app, latest).await,
+        vec![(0, "settled".into(), Some(2))]
+    );
+}
