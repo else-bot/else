@@ -8,6 +8,7 @@ type Emitted = Vec<Event<ResultInfo>>;
 impl Claude {
     fn offline(account: &str) -> Self {
         Self {
+            models: Models::new(&DEFINITION),
             ready: Ok(Ready {
                 host: Host::new(std::path::Path::new("/data"), std::path::Path::new("/bots")),
                 program: PathBuf::new(),
@@ -624,7 +625,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         steered: Vec::new(),
         files: Vec::new(),
         profile: Some(Profile {
-            model: DEFINITION.catalog.models[0].into(),
+            model: DEFINITION.fallback[0].into(),
             reasoning_effort: "medium".into(),
             service_tier: "default".into(),
         }),
@@ -986,4 +987,49 @@ pub(crate) fn pinned_fingerprints() -> [(crate::app::providers::Origin, &'static
             claude.fingerprint(ready, &profile, &input),
         )
     })
+}
+
+#[test]
+fn initialize_lists_models_by_their_exact_ids() {
+    let answer = json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": "else-models",
+            "response": { "models": [
+                { "value": "default", "resolvedModel": "claude-opus-5-5",
+                  "supportsEffort": true, "supportedEffortLevels": ["low", "max"] },
+                { "value": "fable", "resolvedModel": "claude-fable-5-2",
+                  "supportsEffort": true, "supportedEffortLevels": ["high"] },
+                { "value": "claude-haiku-4-5-20251001" },
+            ] },
+        },
+    })
+    .to_string();
+    assert!(protocol::listed_models(&answer, "other").is_none());
+    assert!(protocol::listed_models(r#"{"type":"system"}"#, "else-models").is_none());
+    let listed = protocol::listed_models(&answer, "else-models")
+        .unwrap()
+        .unwrap();
+    let ids: Vec<&str> = listed.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "claude-opus-5-5",
+            "claude-fable-5-2",
+            "claude-haiku-4-5-20251001"
+        ]
+    );
+    assert_eq!(listed[1].efforts.as_deref(), Some(&["high".to_owned()][..]));
+    assert_eq!(
+        listed[2].efforts.as_deref(),
+        Some(&[][..]),
+        "no effort, so not runnable"
+    );
+    let models = Models::new(&DEFINITION);
+    models.listed(listed, chrono::Utc::now()).unwrap();
+    assert_eq!(
+        models.current().ids(),
+        ["claude-opus-5-5", "claude-fable-5-2"]
+    );
 }

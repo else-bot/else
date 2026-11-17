@@ -14,6 +14,7 @@ mod fingerprints;
 pub mod grok;
 pub mod grok_home;
 pub mod host;
+pub mod models;
 pub mod output_files;
 pub mod prompt;
 pub mod synthetic;
@@ -170,19 +171,20 @@ mod registration_tests {
         };
         for (definition, provider) in definitions::DEFINITIONS.iter().zip(registry.all()) {
             assert_eq!(provider.label(), definition.label);
+            let catalog = provider.catalog();
+            let mut shown = catalog.ids();
+            shown.sort_unstable();
+            let mut bundled = definition.fallback.to_vec();
+            bundled.sort_unstable();
             assert_eq!(
-                format!("{:?}", provider.catalog()),
-                format!("{:?}", definition.catalog)
+                shown, bundled,
+                "the bundled list until the CLI lists its own"
             );
             let setting = format!("ELSE_{}_BIN", definition.id.to_uppercase());
             assert!(
                 matches!(provider.availability(), Availability::Unavailable(why) if why.contains(&setting)),
                 "{setting} is named in {:?}",
                 provider.availability()
-            );
-            assert_eq!(
-                provider.validate_profile(&rejected),
-                definitions::validate_restored(definition.id, &rejected)
             );
             assert!(provider.validate_profile(&rejected).is_err());
         }

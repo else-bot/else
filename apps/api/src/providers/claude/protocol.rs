@@ -408,3 +408,67 @@ fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
         message: message.into(),
     }
 }
+
+/// Byte cap for the CLI's output before it answers `initialize`; the answer
+/// itself lists every skill and command, so it is large.
+pub const MODELS_LIMIT: usize = 4 * 1024 * 1024;
+
+/// The `initialize` control request, whose answer lists the CLI's models.
+pub fn initialize_request(id: &str) -> String {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": id,
+        "request": { "subtype": "initialize" },
+    })
+    .to_string()
+}
+
+/// The models in the answer to `initialize` request `id`, by the exact ID
+/// each resolves to: `fable` and `default` are aliases that move. A model
+/// without effort levels lists none, so the adapter, which always sends
+/// one, cannot run it. `None` for any other line.
+pub fn listed_models(
+    line: &str,
+    id: &str,
+) -> Option<Result<Vec<crate::providers::models::Listed>, String>> {
+    let message: Value = serde_json::from_str(line).ok()?;
+    if message["type"] != "control_response" || message["response"]["request_id"] != id {
+        return None;
+    }
+    let response = &message["response"];
+    if response["subtype"] != "success" {
+        let error = response["error"].as_str().unwrap_or("initialize failed");
+        return Some(Err(error.to_owned()));
+    }
+    let Some(models) = response["response"]["models"].as_array() else {
+        return Some(Err("its answer lists no models".into()));
+    };
+    let strings = |value: &Value| -> Vec<String> {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    };
+    let listed = models
+        .iter()
+        .filter_map(|model| {
+            let id = model["resolvedModel"]
+                .as_str()
+                .or(model["value"].as_str())?;
+            let efforts = if model["supportsEffort"] == true {
+                strings(&model["supportedEffortLevels"])
+            } else {
+                Vec::new()
+            };
+            Some(crate::providers::models::Listed {
+                id: id.to_owned(),
+                efforts: Some(efforts),
+                tiers: None,
+            })
+        })
+        .collect();
+    Some(Ok(listed))
+}

@@ -41,35 +41,34 @@ use super::codex_home;
 use super::codex_rpc::AppServer;
 use super::definitions::Definition;
 use super::host::{Host, LaunchSpec};
+use super::models::{Listed, Models};
 use super::prompt;
 use crate::app::providers::{
-    Availability, Catalog, CheckpointRequest, Profile, Provider, Stop, TurnInput, TurnOutcome,
-    TurnSink,
+    Availability, CheckpointRequest, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
 };
 
 pub const ID: &str = "codex";
 const PROMPT_VERSION: &str = "else-codex-v20";
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
-const MODELS: &[&str] = &[
-    "gpt-6.1-sol",
-    "gpt-6-astra",
-    "gpt-6.1-terra",
-    "gpt-6-luna",
-    "gpt-6-sol",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-];
 
 pub static DEFINITION: Definition = Definition {
     id: ID,
     label: "Codex",
-    catalog: Catalog {
-        models: MODELS,
-        featured_models: MODELS.split_at(4).0,
-        efforts: &["low", "medium", "high", "xhigh", "max"],
-        tiers: &["default", "priority"],
-    },
+    fallback: &[
+        "gpt-6.2-sol",
+        "gpt-6.2-astra",
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6.1-terra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ],
+    efforts: &["low", "medium", "high", "xhigh", "max"],
+    tiers: &["default", "priority"],
+    pinned: super::definitions::any_id,
     model_note: "",
     effort_note: " Ultra delegates to native sub-agents, which are disabled.",
     tier_note: "",
@@ -84,6 +83,7 @@ fn build(wiring: &super::Wiring) -> super::Built {
     );
     let codex = std::sync::Arc::new(
         Codex {
+            models: Models::new(&DEFINITION),
             ready: Codex::ready(
                 Some(wiring.host.clone()),
                 super::executable(wiring.config.codex_bin.as_deref(), "codex"),
@@ -108,6 +108,7 @@ struct Ready {
 }
 
 pub struct Codex {
+    models: Models,
     ready: Result<Ready, String>,
     tool_url: Option<String>,
 }
@@ -118,6 +119,7 @@ impl Codex {
     /// failing startup. The version is only session identity.
     pub fn detect(host: Option<Host>, program: Option<PathBuf>, auth: Option<PathBuf>) -> Self {
         Self {
+            models: Models::new(&DEFINITION),
             ready: Self::ready(host, Ok(program), auth),
             tool_url: None,
         }
@@ -291,11 +293,22 @@ impl Provider for Codex {
     }
 
     fn validate_profile(&self, profile: &Profile) -> Result<(), String> {
-        DEFINITION.validate(profile)
+        self.models.validate(profile)
     }
 
-    fn catalog(&self) -> Catalog {
-        DEFINITION.catalog
+    fn models(&self) -> Option<&Models> {
+        Some(&self.models)
+    }
+
+    async fn list_models(&self) -> Result<Vec<Listed>, String> {
+        let ready = self.ready.as_ref().map_err(Clone::clone)?;
+        let (host, program) = (ready.host.clone(), ready.program.clone());
+        let exported =
+            tokio::task::spawn_blocking(move || host.probe(&program, &["debug", "models"], &[]))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|why| format!("`codex debug models` failed: {why}"))?;
+        codex_home::listed_models(exported.as_bytes())
     }
 
     async fn checkpoint(
@@ -328,7 +341,7 @@ impl Provider for Codex {
                 "No execution profile was snapshotted.",
             );
         };
-        if let Err(reason) = DEFINITION.validate(&profile) {
+        if let Err(reason) = self.models.validate(&profile) {
             return failed("invalid_profile", reason);
         }
         let spec = match self.launch(ready, &input, &profile.model, &stop).await {

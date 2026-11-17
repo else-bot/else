@@ -201,6 +201,62 @@ impl Host {
         cleanup.map(|()| out)
     }
 
+    /// Start `program` outside any bot, write `input` to it, and return the
+    /// first stdout line `answer` accepts. The process group is killed when
+    /// this returns or is dropped, and it carries the installation marker
+    /// so a restarted API sweeps it. Errors past `limit` bytes or at EOF.
+    pub async fn ask<T>(
+        &self,
+        program: &Path,
+        args: &[&str],
+        env: &[(String, String)],
+        input: &str,
+        limit: usize,
+        answer: impl Fn(&str) -> Option<T>,
+    ) -> Result<T, String> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let mut command = tokio::process::Command::new(program);
+        command
+            .args(args)
+            .current_dir(std::env::temp_dir())
+            .env_clear()
+            .envs(passed_env())
+            .envs(env.iter().map(|(k, v)| (k, v)))
+            .env(MARKER_VAR, self.marker(Uuid::nil()))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut process =
+            Supervised::spawn(command).map_err(|e| format!("could not start ({e})"))?;
+        let mut stdin = process.child.stdin.take().ok_or("no stdin")?;
+        let stdout = process.child.stdout.take().ok_or("no stdout")?;
+        stdin
+            .write_all(input.as_bytes())
+            .await
+            .map_err(|e| format!("could not write its input ({e})"))?;
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let mut read = 0;
+        let found = loop {
+            let line = lines
+                .next_line()
+                .await
+                .map_err(|e| format!("could not read its output ({e})"))?
+                .ok_or("it exited without answering")?;
+            read += line.len() + 1;
+            if read > limit {
+                break Err(format!("its output exceeded {limit} bytes"));
+            }
+            if let Some(found) = answer(&line) {
+                break Ok(found);
+            }
+        };
+        drop(stdin);
+        process.kill().await;
+        found
+    }
+
     pub fn marker_prefix(&self) -> &str {
         &self.marker_prefix
     }

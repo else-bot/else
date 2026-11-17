@@ -350,7 +350,8 @@ fn profiles_reject_settings_the_cli_cannot_apply() {
         reasoning_effort: "high".into(),
         service_tier: "default".into(),
     };
-    assert!(DEFINITION.validate(&profile).is_ok());
+    let grok = Grok::detect(None, None, None);
+    assert!(grok.validate_profile(&profile).is_ok());
     for bad in [
         Profile {
             model: "grok".into(),
@@ -365,12 +366,18 @@ fn profiles_reject_settings_the_cli_cannot_apply() {
             ..profile
         },
     ] {
-        assert!(DEFINITION.validate(&bad).is_err());
+        assert!(grok.validate_profile(&bad).is_err());
     }
-    assert!(matches!(
-        Grok::detect(None, None, None).availability(),
-        Availability::Unavailable(_)
-    ));
+    assert!(matches!(grok.availability(), Availability::Unavailable(_)));
+}
+
+#[test]
+fn grok_models_prints_the_listed_models() {
+    let printed = "You are logged in with grok.com.\n\nDefault model: grok-4.7\n\n\
+                   Available models:\n  * grok-4.7 (default)\n  - grok-4.7-build-fast\n  - grok-4.5\n";
+    let ids: Vec<String> = listed_models(printed).into_iter().map(|m| m.id).collect();
+    assert_eq!(ids, ["grok-4.7", "grok-4.7-build-fast", "grok-4.5"]);
+    assert!(listed_models("Not logged in.").is_empty());
 }
 
 #[test]
@@ -388,6 +395,7 @@ fn the_fingerprint_follows_the_account_not_the_login_path() {
         .unwrap();
     };
     let grok = Grok {
+        models: Models::new(&DEFINITION),
         ready: Ok(Ready {
             host: Host::new(&root.path().join("data"), &root.path().join("bots")),
             program: PathBuf::new(),

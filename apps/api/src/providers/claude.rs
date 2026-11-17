@@ -55,31 +55,31 @@ use super::cli::session::{self, Identity, Opened, PreparedTurn};
 use super::cli::stream::{Interrupt, StreamAttempt};
 use super::definitions::Definition;
 use super::host::{BotDirs, Host, LaunchSpec};
+use super::models::{Listed, Models};
 use super::prompt;
 use super::{attachments, claude_home};
 use crate::app::providers::{
-    Availability, Catalog, CheckpointRequest, Profile, Provider, Stop, TurnInput, TurnOutcome,
-    TurnSink,
+    Availability, CheckpointRequest, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
 };
 use protocol::Tracker;
 
 pub const ID: &str = "claude";
 const PROMPT_VERSION: &str = "else-claude-v17";
+const MODELS_REQUEST: &str = "else-models";
 
 pub static DEFINITION: Definition = Definition {
     id: ID,
     label: "Claude",
-    catalog: Catalog {
-        models: &[
-            "claude-opus-5-5",
-            "claude-sonnet-5-5",
-            "claude-haiku-5-5",
-            "claude-fable-5-1",
-        ],
-        featured_models: &[],
-        efforts: &["low", "medium", "high", "xhigh", "max"],
-        tiers: &["default"],
-    },
+    fallback: &[
+        "claude-opus-5-5",
+        "claude-fable-5-2",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-fable-5-1",
+    ],
+    efforts: &["low", "medium", "high", "xhigh", "max"],
+    tiers: &["default"],
+    pinned: |model| model.starts_with("claude-") && !model.contains(char::is_whitespace),
     model_note: " An alias would follow the CLI's floating default.",
     effort_note: "",
     tier_note: " Fast mode needs an SDK opt-in this adapter does not use.",
@@ -90,6 +90,7 @@ fn build(wiring: &super::Wiring) -> super::Built {
     let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
     let home = std::env::var("HOME").ok();
     let claude = Claude {
+        models: Models::new(&DEFINITION),
         ready: Claude::ready(
             Some(wiring.host.clone()),
             super::executable(wiring.config.claude_bin.as_deref(), "claude"),
@@ -115,6 +116,7 @@ struct Ready {
 }
 
 pub struct Claude {
+    models: Models,
     ready: Result<Ready, String>,
     tool_url: Option<String>,
 }
@@ -153,6 +155,7 @@ impl Claude {
         account: String,
     ) -> Self {
         Self {
+            models: Models::new(&DEFINITION),
             ready: Self::ready(host, Ok(program), config, account),
             tool_url: None,
         }
@@ -422,11 +425,43 @@ impl Provider for Claude {
     }
 
     fn validate_profile(&self, profile: &Profile) -> Result<(), String> {
-        DEFINITION.validate(profile)
+        self.models.validate(profile)
     }
 
-    fn catalog(&self) -> Catalog {
-        DEFINITION.catalog
+    fn models(&self) -> Option<&Models> {
+        Some(&self.models)
+    }
+
+    async fn list_models(&self) -> Result<Vec<Listed>, String> {
+        let ready = self.ready.as_ref().map_err(Clone::clone)?;
+        let mut env = ready.config.env();
+        env.push(("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned()));
+        let request = format!("{}\n", protocol::initialize_request(MODELS_REQUEST));
+        ready
+            .host
+            .ask(
+                &ready.program,
+                &[
+                    "-p",
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--setting-sources",
+                    "",
+                    "--strict-mcp-config",
+                    "--tools",
+                    "",
+                ],
+                &env,
+                &request,
+                protocol::MODELS_LIMIT,
+                |line| protocol::listed_models(line, MODELS_REQUEST),
+            )
+            .await
+            .and_then(|listed| listed)
+            .map_err(|why| format!("Claude Code did not list its models: {why}"))
     }
 
     async fn checkpoint(
@@ -436,7 +471,7 @@ impl Provider for Claude {
     ) -> Result<String, String> {
         let ready = self.ready.as_ref().map_err(Clone::clone)?;
         let profile = request.profile.ok_or("no saved Claude execution profile")?;
-        DEFINITION.validate(&profile)?;
+        self.models.validate(&profile)?;
         let text = self
             .checkpoint_once(ready, request.bot_id, &profile, &request.prompt, cancel)
             .await?;
@@ -454,7 +489,7 @@ impl Provider for Claude {
                 "No execution profile was snapshotted.",
             );
         };
-        if let Err(reason) = DEFINITION.validate(&profile) {
+        if let Err(reason) = self.models.validate(&profile) {
             return failed("invalid_profile", reason);
         }
         let dirs = match ready.host.bot_dirs(input.bot_id, ID) {

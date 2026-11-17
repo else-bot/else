@@ -180,6 +180,43 @@ pub fn no_native_catalog(exported: &[u8], model: &str) -> Result<Vec<u8>, String
     Ok(serde_json::to_vec(&json!({ "models": [entry] })).expect("JSON values serialize"))
 }
 
+/// The models `codex debug models` lists for the picker, in Codex's own
+/// priority order. Hidden models stay out; every model runs on the
+/// `default` tier and on each service tier it names.
+pub fn listed_models(exported: &[u8]) -> Result<Vec<super::models::Listed>, String> {
+    let catalog: Value = serde_json::from_slice(exported)
+        .map_err(|e| format!("the Codex model catalog is not JSON: {e}"))?;
+    let models = catalog["models"]
+        .as_array()
+        .ok_or("the Codex model catalog lists no models")?;
+    let mut shown: Vec<&Value> = models
+        .iter()
+        .filter(|model| model["visibility"] == "list")
+        .collect();
+    shown.sort_by_key(|model| model["priority"].as_i64().unwrap_or(i64::MAX));
+    let ids = |values: &Value, key: &str| -> Vec<String> {
+        values
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value[key].as_str())
+            .map(str::to_owned)
+            .collect()
+    };
+    Ok(shown
+        .into_iter()
+        .filter_map(|model| {
+            let mut tiers = vec!["default".to_owned()];
+            tiers.extend(ids(&model["service_tiers"], "id"));
+            Some(super::models::Listed {
+                id: model["slug"].as_str()?.to_owned(),
+                efforts: Some(ids(&model["supported_reasoning_levels"], "effort")),
+                tiers: Some(tiers),
+            })
+        })
+        .collect())
+}
+
 /// Export the installed CLI's catalog under `launch`'s environment, write
 /// `model`'s entry without native tools into the provider home, and return
 /// the arguments that start Codex on it. The home's `config.toml` must

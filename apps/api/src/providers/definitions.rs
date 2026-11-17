@@ -3,14 +3,23 @@
 //! that must not probe an installed CLI, and the constructor the runtime
 //! registry calls. Adding a CLI is one entry in [`DEFINITIONS`].
 
-use crate::app::providers::{Catalog, Profile};
+use crate::app::providers::Profile;
 
 /// One provider's identity and the exact profiles it applies.
 #[derive(Debug)]
 pub struct Definition {
     pub id: &'static str,
     pub label: &'static str,
-    pub catalog: Catalog,
+    /// The models shown until the installed CLI lists its own, newest
+    /// first per family.
+    pub fallback: &'static [&'static str],
+    /// The efforts and tiers this adapter can apply. A listed model keeps
+    /// only these; a CLI that lists none per model gets all of them.
+    pub efforts: &'static [&'static str],
+    pub tiers: &'static [&'static str],
+    /// Whether a model ID names one model exactly, not an alias that
+    /// follows the CLI's default.
+    pub pinned: fn(&str) -> bool,
     /// Added to each rejection of a model, effort, or tier.
     pub model_note: &'static str,
     pub effort_note: &'static str,
@@ -50,37 +59,36 @@ pub fn validate_restored(provider: &str, profile: &Profile) -> Result<(), String
     find(provider).map_or(Ok(()), |definition| definition.validate(profile))
 }
 
+/// Any ID without spaces: the CLI has no aliases that move.
+pub fn any_id(model: &str) -> bool {
+    !model.is_empty() && !model.contains(char::is_whitespace)
+}
+
 impl Definition {
-    /// Reject a profile the adapter cannot apply exactly. No substitution.
+    /// Reject a profile the adapter could never apply, without asking the
+    /// CLI which models it runs: restore checks this offline. Running
+    /// adapters also check the listed catalog.
     pub fn validate(&self, profile: &Profile) -> Result<(), String> {
-        let Catalog {
-            models,
-            efforts,
-            tiers,
-            ..
-        } = self.catalog;
         let label = self.label;
-        if !models.contains(&profile.model.as_str()) {
+        if !(self.pinned)(&profile.model) {
             return Err(format!(
-                "Unsupported {label} model {}. Supported: {}.{}",
-                profile.model,
-                models.join(", "),
-                self.model_note
+                "Unsupported {label} model {}.{}",
+                profile.model, self.model_note
             ));
         }
-        if !efforts.contains(&profile.reasoning_effort.as_str()) {
+        if !self.efforts.contains(&profile.reasoning_effort.as_str()) {
             return Err(format!(
                 "Unsupported {label} reasoning effort {}. Supported: {}.{}",
                 profile.reasoning_effort,
-                efforts.join(", "),
+                self.efforts.join(", "),
                 self.effort_note
             ));
         }
-        if !tiers.contains(&profile.service_tier.as_str()) {
+        if !self.tiers.contains(&profile.service_tier.as_str()) {
             return Err(format!(
                 "Unsupported {label} service tier {}. Supported: {}.{}",
                 profile.service_tier,
-                tiers.join(", "),
+                self.tiers.join(", "),
                 self.tier_note
             ));
         }
@@ -93,40 +101,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_catalog_entry_validates_and_nothing_outside_it_does() {
+    fn restore_takes_any_pinned_model_with_a_supported_effort_and_tier() {
         for definition in DEFINITIONS {
-            let Catalog {
-                models,
-                featured_models,
-                efforts,
-                tiers,
-            } = definition.catalog;
-            assert!(
-                featured_models.iter().all(|m| models.contains(m)),
-                "{}",
-                definition.id
-            );
-            for model in models {
-                for effort in efforts {
-                    for tier in tiers {
+            for model in definition.fallback {
+                assert!((definition.pinned)(model), "{model}");
+                for effort in definition.efforts {
+                    for tier in definition.tiers {
                         let profile = Profile {
                             model: (*model).into(),
                             reasoning_effort: (*effort).into(),
                             service_tier: (*tier).into(),
                         };
-                        assert_eq!(definition.validate(&profile), Ok(()), "{profile:?}");
                         assert_eq!(validate_restored(definition.id, &profile), Ok(()));
                     }
                 }
             }
             let valid = Profile {
-                model: models[0].into(),
-                reasoning_effort: efforts[0].into(),
-                service_tier: tiers[0].into(),
+                model: definition.fallback[0].into(),
+                reasoning_effort: definition.efforts[0].into(),
+                service_tier: definition.tiers[0].into(),
             };
+            let newer = Profile {
+                model: format!("{}-next", definition.fallback[0]),
+                ..valid.clone()
+            };
+            assert_eq!(validate_restored(definition.id, &newer), Ok(()));
             for bad in [
                 Profile {
-                    model: "unknown".into(),
+                    model: "two words".into(),
                     ..valid.clone()
                 },
                 Profile {
@@ -138,10 +140,15 @@ mod tests {
                     ..valid.clone()
                 },
             ] {
-                assert!(definition.validate(&bad).is_err(), "{bad:?}");
-                assert!(validate_restored(definition.id, &bad).is_err());
+                assert!(validate_restored(definition.id, &bad).is_err(), "{bad:?}");
             }
         }
+        let alias = Profile {
+            model: "fable".into(),
+            reasoning_effort: "high".into(),
+            service_tier: "default".into(),
+        };
+        assert!(validate_restored("claude", &alias).is_err());
     }
 
     #[test]

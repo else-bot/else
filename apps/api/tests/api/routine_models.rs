@@ -8,7 +8,7 @@ use chrono::DateTime;
 use common::TestApp;
 use common::recorder::{self, GATE, Harness, tool};
 use else_api::app::providers::{
-    Availability, Catalog, Profile, Provider, TurnInput, TurnOutcome, TurnSink,
+    Availability, Catalog, Model, Profile, Provider, TurnInput, TurnOutcome, TurnSink,
 };
 use else_api::providers::synthetic::Synthetic;
 use serde_json::{Value, json};
@@ -44,13 +44,22 @@ impl Provider for Catalogued {
         ok.then_some(())
             .ok_or_else(|| format!("unsupported profile {p:?}"))
     }
-    fn catalog(&self) -> Catalog {
-        Catalog {
-            models: MODELS,
-            featured_models: &[],
-            efforts: EFFORTS,
-            tiers: TIERS,
-        }
+    fn catalog(&self) -> Arc<Catalog> {
+        let strings = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect();
+        Arc::new(Catalog {
+            models: MODELS
+                .iter()
+                .map(|id| Model {
+                    id: (*id).to_owned(),
+                    label: (*id).to_owned(),
+                    efforts: strings(EFFORTS),
+                    tiers: strings(TIERS),
+                    featured: true,
+                    upgrade: None,
+                })
+                .collect(),
+            ..Catalog::default()
+        })
     }
     async fn run(
         &self,

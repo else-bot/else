@@ -298,15 +298,13 @@ pub(super) async fn resolve(
         .filter(|p| p.uses_profile())
         .filter(|p| request.provider_id.is_none_or(|id| p.id() == id))
         .collect();
-    let catalogs: Vec<_> = providers
+    let catalogs: Vec<_> = providers.iter().map(|p| (p.id(), p.catalog())).collect();
+    let listed: Vec<_> = catalogs
         .iter()
-        .map(|p| (p.id(), p.catalog().models))
+        .map(|(id, catalog)| (*id, catalog.ids()))
         .collect();
-    let Some((provider_id, model)) = match_model(request.model, &catalogs) else {
-        let known: Vec<&str> = catalogs
-            .iter()
-            .flat_map(|(_, m)| m.iter().copied())
-            .collect();
+    let Some((provider_id, model)) = match_model(request.model, &listed) else {
+        let known: Vec<&str> = listed.iter().flat_map(|(_, m)| m.iter().copied()).collect();
         return Err(if known.is_empty() {
             "no provider here offers a model choice".to_owned()
         } else {
@@ -316,7 +314,13 @@ pub(super) async fn resolve(
             )
         });
     };
-    let Some(provider) = providers.into_iter().find(|p| p.id() == provider_id) else {
+    let (Some(provider), Some(entry)) = (
+        providers.iter().find(|p| p.id() == provider_id),
+        catalogs
+            .iter()
+            .find(|(id, _)| *id == provider_id)
+            .and_then(|(_, catalog)| catalog.model(model)),
+    ) else {
         return Err("no provider here offers a model choice".to_owned());
     };
     if let Availability::Unavailable(why) = provider.availability() {
@@ -340,25 +344,25 @@ pub(super) async fn resolve(
             .find(|(id, _)| *id == provider_id)
             .map(|(_, profile)| profile)
     });
-    let catalog = provider.catalog();
-    let pick = |asked: Option<&str>, saved: Option<&str>, values: &[&str], usual: &str| {
+    let pick = |asked: Option<&str>, saved: Option<&str>, values: &[String], usual: &str| {
+        let offered = |v: &str| values.iter().any(|value| value == v);
         asked
-            .or(saved.filter(|v| values.contains(v)))
-            .or(values.contains(&usual).then_some(usual))
-            .or(values.first().copied())
+            .or(saved.filter(|v| offered(v)))
+            .or(offered(usual).then_some(usual))
+            .or(values.first().map(String::as_str))
             .map(str::to_owned)
     };
     let (Some(reasoning_effort), Some(service_tier)) = (
         pick(
             request.reasoning_effort,
             saved.as_ref().map(|p| p.reasoning_effort.as_str()),
-            catalog.efforts,
+            &entry.efforts,
             "medium",
         ),
         pick(
             request.service_tier,
             saved.as_ref().map(|p| p.service_tier.as_str()),
-            catalog.tiers,
+            &entry.tiers,
             "default",
         ),
     ) else {
