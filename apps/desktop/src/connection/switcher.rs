@@ -80,6 +80,11 @@ impl Recall {
 }
 
 impl Shell {
+    /// The switcher is modal: Ctrl+1..9 server keys wait until it closes.
+    pub(super) fn switcher_open(&self) -> bool {
+        self.switcher.is_some()
+    }
+
     pub(super) fn toggle_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.switcher.is_some() {
             self.close_switcher(window, cx);
