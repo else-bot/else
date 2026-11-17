@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use super::reply::Quoted;
 use crate::api::SendRequest;
 use crate::attachments::MessagePart;
 use crate::model::{DraftAttachment, Reaction};
@@ -14,7 +15,7 @@ pub(super) struct PendingSend {
     pub(super) sent_at: DateTime<Utc>,
     pub(super) reaction: Option<Reaction>,
     pub(super) open_draft: Option<DraftAttachment>,
-    pub(super) answers_notice: Option<Uuid>,
+    pub(super) quoted: Option<Quoted>,
     delivery: Delivery,
 }
 
@@ -49,7 +50,7 @@ impl PendingSend {
         parts: Vec<MessagePart>,
         reaction: Option<Reaction>,
         open_draft: Option<DraftAttachment>,
-        answers_notice: Option<Uuid>,
+        quoted: Option<Quoted>,
     ) -> Self {
         Self {
             request_id: Uuid::new_v4(),
@@ -58,7 +59,7 @@ impl PendingSend {
             sent_at: Utc::now(),
             reaction,
             open_draft,
-            answers_notice,
+            quoted,
             delivery: Delivery::Sending,
         }
     }
@@ -88,7 +89,7 @@ impl PendingSend {
             reaction: self.reaction,
             parts: self.parts.clone(),
             open_draft: self.open_draft.clone(),
-            answers_notice: self.answers_notice,
+            answers_notice: self.quoted.as_ref().and_then(Quoted::answers),
         }
     }
 
@@ -208,7 +209,15 @@ mod tests {
     #[test]
     fn a_retry_answers_the_same_ask() {
         let notice = Uuid::new_v4();
-        let pending = PendingSend::new("hotfix it".into(), Vec::new(), None, None, Some(notice));
+        let quoted = Quoted {
+            quotes: vec![super::super::reply::Quote::ask(
+                notice,
+                "Hotfix?".into(),
+                true,
+            )],
+            prefix: 0,
+        };
+        let pending = PendingSend::new("hotfix it".into(), Vec::new(), None, None, Some(quoted));
         assert_eq!(pending.request().answers_notice, Some(notice));
         assert_eq!(pending.request().request_id, pending.request().request_id);
     }

@@ -93,7 +93,7 @@ impl ElseApp {
             view.bot_id,
             text,
             Vec::new(),
-            super::super::SendKind::Message { answers: None },
+            super::super::SendKind::Message { quoted: None },
             window,
             cx,
         ) {

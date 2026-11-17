@@ -119,6 +119,22 @@ impl Quote {
     }
 }
 
+/// The quotes a sent message was written with, kept so an edit of a
+/// rejected send gets them back as quotes, with the ask a reply answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Quoted {
+    pub(super) quotes: Vec<Quote>,
+    /// Bytes of the message the quotes take before the owner's own text.
+    pub(super) prefix: usize,
+}
+
+impl Quoted {
+    /// The ask the reply answers, if it replies to one.
+    pub(super) fn answers(&self) -> Option<Uuid> {
+        self.quotes.iter().find_map(|quote| quote.answers)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct Draft {
     pub(super) content: InputContent,
@@ -146,9 +162,13 @@ impl Draft {
         }
     }
 
-    /// The ask the draft's reply answers, if it replies to one.
-    pub(super) fn answers(&self) -> Option<Uuid> {
-        self.quotes.iter().find_map(|quote| quote.answers)
+    /// The draft's quotes as sent with `message`, which starts with their
+    /// text and ends with the composer's own.
+    pub(super) fn quoted(&self, message: &str) -> Option<Quoted> {
+        (!self.quotes.is_empty()).then(|| Quoted {
+            quotes: self.quotes.clone(),
+            prefix: message.len() - self.content.text().len(),
+        })
     }
 
     pub(super) fn has_unsaved_work(&self) -> bool {
@@ -728,8 +748,10 @@ mod tests {
         let notice = Uuid::new_v4();
         let mut answer = draft("Approve it.", None);
         answer.set_reply(Quote::ask(notice, "Approve the Romow DM?".into(), true));
-        assert_eq!(answer.answers(), Some(notice));
         let message = answer.message().unwrap();
+        let quoted = answer.quoted(&message).unwrap();
+        assert_eq!(quoted.answers(), Some(notice));
+        assert_eq!(&message[quoted.prefix..], "Approve it.");
         let quoted = QuotedReply::parse(&message).unwrap();
         assert_eq!(quoted.author, Author::Bot);
         assert_eq!(quoted.original(), "Approve the Romow DM?");
@@ -737,7 +759,25 @@ mod tests {
 
         let mut legacy = draft("Approve it.", None);
         legacy.set_reply(Quote::ask(notice, "Approve the Romow DM?".into(), false));
-        assert_eq!(legacy.answers(), None, "an older server settles by itself");
-        assert_eq!(legacy.message(), Some(message));
+        let legacy_message = legacy.message().unwrap();
+        assert_eq!(
+            legacy.quoted(&legacy_message).unwrap().answers(),
+            None,
+            "an older server settles by itself"
+        );
+        assert_eq!(legacy_message, message);
+    }
+
+    #[test]
+    fn an_ask_reply_with_a_cited_passage_keeps_its_quotes_and_target() {
+        let notice = Uuid::new_v4();
+        let mut answer = passages("Ship it.", &[(Author::Bot, "Retries persist.", "Why?")]);
+        answer.set_reply(Quote::ask(notice, "Approve the migration?".into(), true));
+        let message = answer.message().unwrap();
+        assert!(message.starts_with("Replying to 2 passages:"), "{message}");
+        let quoted = answer.quoted(&message).unwrap();
+        assert_eq!(quoted.answers(), Some(notice));
+        assert_eq!(quoted.quotes, answer.quotes);
+        assert_eq!(&message[quoted.prefix..], "Ship it.");
     }
 }

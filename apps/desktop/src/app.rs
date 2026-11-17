@@ -739,7 +739,6 @@ impl ElseApp {
         let Some(message) = draft.message() else {
             return;
         };
-        let answers = draft.answers();
         let mut parts = match attachments::parts(&draft.content, &draft.files) {
             Ok(parts) => parts,
             Err(error) => {
@@ -748,6 +747,7 @@ impl ElseApp {
                 return;
             }
         };
+        let quoted = draft.quoted(&message);
         if !parts.is_empty() {
             let prefix = message.len() - draft.content.text().len();
             if prefix > 0 {
@@ -763,7 +763,7 @@ impl ElseApp {
             bot,
             message,
             parts,
-            SendKind::Message { answers },
+            SendKind::Message { quoted },
             window,
             cx,
         ) {
@@ -796,8 +796,8 @@ impl ElseApp {
             cx.notify();
             return false;
         }
-        let (reaction, answers_notice) = match kind {
-            SendKind::Message { answers } => (None, answers),
+        let (reaction, quoted) = match kind {
+            SendKind::Message { quoted } => (None, quoted),
             SendKind::Reaction(reaction) => (Some(reaction), None),
         };
         let open_draft = if reaction.is_none() {
@@ -805,7 +805,7 @@ impl ElseApp {
         } else {
             None
         };
-        let pending = PendingSend::new(text, parts, reaction, open_draft, answers_notice);
+        let pending = PendingSend::new(text, parts, reaction, open_draft, quoted);
         let request = pending.request();
         self.notice = None;
         self.pending.entry(bot).or_default().push(pending);
@@ -953,21 +953,19 @@ impl ElseApp {
         let pending = list.remove(ix);
         if restore {
             let current = self.composer.read(cx).content();
-            // A reply to an ask comes back as that reply, so the resend
-            // still answers it; other quotes come back as text.
-            let (text, parts) = match pending
-                .answers_notice
-                .zip(reply::QuotedReply::parse(&pending.text))
-            {
-                Some((notice, quoted)) if quoted.author == reply::Author::Bot => {
-                    let quote = reply::Quote::ask(notice, quoted.original(), true);
-                    let body = quoted.body.to_owned();
-                    let prefix = pending.text.len() - body.len();
-                    let parts = without_prefix(&pending.parts, prefix);
-                    self.add_quote(bot, quote, window, cx);
-                    (body, parts)
+            // Quotes come back as quotes, a reply to an ask still
+            // answering it, and the composer gets only the owner's text.
+            let (text, parts) = match &pending.quoted {
+                Some(quoted) => {
+                    for quote in &quoted.quotes {
+                        self.add_quote(bot, quote.clone(), window, cx);
+                    }
+                    (
+                        pending.text[quoted.prefix..].to_owned(),
+                        without_prefix(&pending.parts, quoted.prefix),
+                    )
                 }
-                _ => (pending.text.clone(), pending.parts.clone()),
+                None => (pending.text.clone(), pending.parts.clone()),
             };
             let restored = crate::attachments::input_content(&text, &parts);
             for part in &pending.parts {
@@ -1018,11 +1016,11 @@ impl ElseApp {
 }
 
 /// What an owner message is besides its text.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum SendKind {
-    /// Typed in the composer; `answers` is the ask its reply quote answers.
+    /// Typed in the composer, with the quotes it was written with.
     Message {
-        answers: Option<Uuid>,
+        quoted: Option<reply::Quoted>,
     },
     Reaction(Reaction),
 }
@@ -1061,5 +1059,17 @@ mod prefix_tests {
             [text("hi")]
         );
         assert_eq!(without_prefix(&[text("> quoted\n\nhi")], 10), [text("hi")]);
+        let file = MessagePart::File {
+            file: crate::attachments::Attachment {
+                id: uuid::Uuid::nil(),
+                name: "plan.md".into(),
+                media_type: "text/markdown".into(),
+                size: 3,
+            },
+        };
+        assert_eq!(
+            without_prefix(&[text("> quoted\n\n"), text("see "), file.clone()], 10),
+            [text("see "), file]
+        );
     }
 }

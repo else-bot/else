@@ -182,6 +182,20 @@ fn open_ask(bot: &Bot) -> Option<AskKey> {
     }
 }
 
+/// Whether the sidebar shows a card it ranks above an ask, so an open ask
+/// may be behind it.
+fn masks_an_ask(bot: &Bot) -> bool {
+    matches!(
+        bot.sidebar_status,
+        Some(
+            SidebarStatus::WaitingForAnswer { .. }
+                | SidebarStatus::NeedsApproval { .. }
+                | SidebarStatus::NeedsTakeover { .. }
+                | SidebarStatus::NeedsCredentials { .. }
+        )
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AskKey {
     Notice(Uuid),
@@ -289,9 +303,11 @@ impl Inbox {
                     attention.ask.seen = Some(ask);
                 }
                 Some(_) => {}
-                // Without an ID, the same text could be a new ask later.
+                // Without an ID, the same text could be a new ask later, so
+                // the key goes once the ask is settled: no card the sidebar
+                // ranks above it could be hiding it.
                 None => {
-                    if matches!(attention.ask.seen, Some(AskKey::Legacy(_))) {
+                    if matches!(attention.ask.seen, Some(AskKey::Legacy(_))) && !masks_an_ask(bot) {
                         attention.ask.seen = None;
                     }
                 }
@@ -741,6 +757,19 @@ mod tests {
         inbox.observe(&[legacy(false)]);
         assert!(inbox.observe(&[legacy(true)]));
         assert_eq!(inbox.alerts(&[legacy(true)], nobody).len(), 1);
+
+        let mut masked = legacy(false);
+        masked.sidebar_status = Some(SidebarStatus::NeedsApproval {
+            preview: "Run the migration".into(),
+            since: None,
+        });
+        inbox.observe(std::slice::from_ref(&masked));
+        inbox.alerts(std::slice::from_ref(&masked), nobody);
+        inbox.observe(&[legacy(true)]);
+        assert!(
+            inbox.alerts(&[legacy(true)], nobody).is_empty(),
+            "a card above the ask does not make it new"
+        );
     }
 
     #[test]
