@@ -90,6 +90,15 @@ async fn skills_are_not_acknowledged_while_delivery_is_uncertain() {
     app.wait_turn(turn, &["sending"]).await;
     let (native, skills) = active(&app, &bot).await;
     assert!(skills.is_empty());
+    let stop = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{bot}/cancel"),
+            Some(serde_json::json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert!(stop.status.is_success(), "{:?}", stop.body);
+    app.wait_turn(turn, &["uncertain", "interrupted"]).await;
     send(&app, &bot, "Continue my request.").await;
     let (replacement, skills) = active(&app, &bot).await;
     assert_ne!(replacement, native);

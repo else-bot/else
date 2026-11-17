@@ -207,8 +207,25 @@ async fn asks_in_new_request(h: &Harness, bot: &str, args: Value, choices: &[&st
     let (turn, token) = h.running(bot, GATE).await;
     let (_, shown) = pending(&h.app, &token, args).await;
     assert_eq!(shown, choices);
+    end_request(h, bot, turn).await;
+}
+
+/// Park `turn` on its cards and deny each, so the next message starts a
+/// request of its own instead of joining this one.
+async fn end_request(h: &Harness, bot: &str, turn: Uuid) {
     h.release(turn).await;
     wait(&h.app, turn, "waiting").await;
+    let asked: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM owner_questions WHERE turn_id = ?1 AND status = 'pending'",
+    )
+    .bind(turn)
+    .fetch_all(&h.app.db.pool)
+    .await
+    .unwrap();
+    for question in asked {
+        assert_eq!(answer(&h.app, bot, question, "deny").await, StatusCode::OK);
+    }
+    wait(&h.app, turn, "completed").await;
 }
 
 async fn permissions(app: &TestApp, bot: &str) -> Vec<Value> {
@@ -286,8 +303,7 @@ async fn always_allow_covers_one_task_on_one_target_until_revoked() {
     let unscoped = json!({ "kind": "destructive", "action": "ssh omarchy-m1 sudo tailscale down" });
     let (_, choices) = pending(app, &token, unscoped).await;
     assert_eq!(choices, ONCE, "an undeclared scope is never covered");
-    h.release(next).await;
-    wait(app, next, "waiting").await;
+    end_request(&h, &main, next).await;
 
     let (computer_turn, token) = h.running(&main, GATE).await;
     let mut computer = like(TASK, HOST);
@@ -298,8 +314,7 @@ async fn always_allow_covers_one_task_on_one_target_until_revoked() {
         ALWAYS,
         "a host grant never covers a computer call with the same task scope"
     );
-    h.release(computer_turn).await;
-    wait(app, computer_turn, "waiting").await;
+    end_request(&h, &main, computer_turn).await;
 
     asks_in_new_request(
         &h,
