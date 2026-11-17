@@ -1,5 +1,5 @@
 {
   "schema": 1,
-  "source_sha256": "4cc903982666cc9ab5b562e7793d684e0b3b03e6b21267a590828a17344a6258",
-  "image": "ghcr.io/else-bot/else-guest@sha256:f1bee64b945497873998b8ff3f0611437f2cd3d5536407cb9898b8d03479249a"
+  "source_sha256": "2d2f6d94d1847d1f9076e167ee044b4b5cfbba6c3c8382f42c9b629a034a703a",
+  "image": "ghcr.io/else-bot/else-guest@sha256:75cfb02676a2a16c96ebba0857883758bc377fcb4dc6888bdc46c28c2181ded0"
 }
