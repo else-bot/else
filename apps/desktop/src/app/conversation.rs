@@ -373,6 +373,9 @@ pub(super) struct ConversationView {
     pub(super) sightings: super::question_card::Sightings,
     /// The typed answer field on each pending single-choice card.
     pub(super) write_ins: HashMap<Uuid, super::question_card::WriteIn>,
+    /// The parsed markdown of each question context that formats.
+    pub(super) card_contexts:
+        HashMap<(Uuid, super::question_card::Extent), super::question_card::FormattedContext>,
     /// The approval scope picked on each pending approval card.
     pub(super) approval_scopes: HashMap<Uuid, String>,
     pub(super) draft_forms: HashMap<Uuid, super::draft_card::DraftForm>,
@@ -486,6 +489,7 @@ impl ConversationView {
             question_submits: HashMap::new(),
             sightings: Default::default(),
             write_ins: HashMap::new(),
+            card_contexts: HashMap::new(),
             connections: HashMap::new(),
             approval_scopes: HashMap::new(),
             draft_forms: HashMap::new(),
@@ -1151,6 +1155,7 @@ impl ElseApp {
         self.sync_secret_forms(window, cx);
         self.sync_question_submits();
         self.sync_write_ins(window, cx);
+        self.sync_card_contexts(cx);
         self.sync_connections(window, cx);
         self.sync_draft_forms(window, cx);
         self.sync_social_forms(window, cx);

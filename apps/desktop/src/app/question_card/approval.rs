@@ -52,7 +52,7 @@ const PREVIEW_BYTES: usize = 480;
 
 /// The first lines of a long context, or `None` when it fits whole. A line
 /// cut partway ends in an ellipsis; "Show all" marks the hidden lines.
-fn preview(context: &str) -> Option<String> {
+pub(super) fn preview(context: &str) -> Option<String> {
     let lines = context
         .match_indices('\n')
         .nth(PREVIEW_LINES - 1)
@@ -129,11 +129,18 @@ impl ElseApp {
                 );
             if expanded && let Some(context) = &question.context {
                 card = card.child(
-                    div()
-                        .w_full()
-                        .px_4()
-                        .pb_4()
-                        .child(super::super::action_card::body_text(context.clone())),
+                    div().w_full().px_4().pb_4().child(
+                        self.formatted_context(
+                            id,
+                            Extent::Whole,
+                            theme.foreground,
+                            theme.background,
+                            cx,
+                        )
+                        .unwrap_or_else(|| {
+                            super::super::action_card::body_text(context.clone()).into_any_element()
+                        }),
+                    ),
                 );
             }
             return card.into_any_element();
@@ -239,11 +246,16 @@ impl ElseApp {
         }
         if let Some(context) = question.context.as_ref().filter(|_| attachments.is_none()) {
             let short = preview(context);
-            let shown = match (&short, expanded) {
-                (Some(short), false) => short.clone(),
-                _ => context.clone(),
+            let (shown, extent) = match (&short, expanded) {
+                (Some(short), false) => (short.clone(), Extent::Preview),
+                _ => (context.clone(), Extent::Whole),
             };
-            card = card.child(super::super::action_card::body_text(shown));
+            card = card.child(
+                self.formatted_context(id, extent, theme.foreground, theme.secondary, cx)
+                    .unwrap_or_else(|| {
+                        super::super::action_card::body_text(shown).into_any_element()
+                    }),
+            );
             if short.is_some() {
                 card = card.child(
                     Button::new(SharedString::from(format!("question-details-{id}")))
