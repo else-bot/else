@@ -144,9 +144,9 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_in_the_same_turn_when_
         known.body
     );
 
-    tokio::time::timeout(common::SETTLE, inbox.ready.notified())
-        .await
-        .expect("the new inbox is watched");
+    // The other inbox's watcher may have signalled ready first; wait for this
+    // one's own connected write, or it would overwrite the rejection below.
+    health_becomes(app, account, Health::Connected).await;
     let generation = store::account(&app.db.pool, account)
         .await
         .unwrap()
