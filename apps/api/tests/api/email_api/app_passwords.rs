@@ -38,7 +38,10 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_in_the_same_turn_when_
             .await
     };
     let (turn, token) = h
-        .running(&bot, &format!("{GATE} Connect my iCloud inbox"))
+        .running(
+            &bot,
+            &format!("{GATE_EVERY_ATTEMPT} Connect my iCloud inbox"),
+        )
         .await;
     let (path, card) = parked_card(
         app,

@@ -350,7 +350,7 @@ async fn a_bot_sets_a_mail_trigger_the_owner_approved_and_the_owner_pauses_or_de
     );
     let args =
         json!({"account_id": account.id, "instructions": " Flag invoices from new vendors. "});
-    let (turn, token) = h.running(&bot, GATE).await;
+    let (turn, token) = h.running(&bot, GATE_EVERY_ATTEMPT).await;
     let parked = tool(&h.app, &token, "mail_trigger_set", args.clone()).await;
     assert_eq!(parked.result["parked"], true, "{}", parked.body);
     assert_eq!(
