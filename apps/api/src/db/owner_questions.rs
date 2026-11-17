@@ -345,7 +345,11 @@ async fn scope(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Scope, sqlx
     .await?;
     Ok(match run {
         Some((current, granted)) => Scope::Routine { current, granted },
-        None if super::delegations::origin(conn, turn_id).await? == Origin::RoutineRun => {
+        None if matches!(
+            super::delegations::origin(conn, turn_id).await?,
+            Origin::RoutineRun | Origin::WebhookWake
+        ) =>
+        {
             Scope::RoutineTask
         }
         None => Scope::Bot,
@@ -353,10 +357,9 @@ async fn scope(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Scope, sqlx
 }
 
 /// Which saved grants `turn_id` may use.
-async fn reach(
+pub(crate) async fn grant_reach(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
-    scope: Scope,
 ) -> Result<GrantReach, sqlx::Error> {
     let owner_chat: Option<bool> = sqlx::query_scalar(
         "SELECT c.kind = 'owner' FROM turns t JOIN conversations c ON c.id = t.conversation_id
@@ -367,18 +370,8 @@ async fn reach(
     .await?;
     Ok(GrantReach::of(
         super::delegations::origin(conn, turn_id).await?,
-        matches!(scope, Scope::Routine { .. }),
         owner_chat.unwrap_or(false),
     ))
-}
-
-/// Which saved grants `turn_id` may use.
-pub(crate) async fn grant_reach(
-    conn: &mut SqliteConnection,
-    turn_id: Uuid,
-) -> Result<GrantReach, sqlx::Error> {
-    let scope = scope(conn, turn_id).await?;
-    reach(conn, turn_id, scope).await
 }
 
 /// What a gated computer tool call may do now.
@@ -438,7 +431,7 @@ pub async fn gate_host(
         .await?
         .ok_or(RequestError::NotRunning)?;
     let scope = scope(&mut tx, turn_id).await?;
-    let reach = reach(&mut tx, turn_id, scope).await?;
+    let reach = grant_reach(&mut tx, turn_id).await?;
     let standing_allowed = spec
         .approval
         .as_ref()
@@ -659,8 +652,7 @@ pub async fn answer(
     };
     let granted_scope = match standing {
         Some(standing) => {
-            let scope = scope(&mut tx, question.turn_id).await?;
-            let reach = reach(&mut tx, question.turn_id, scope).await?;
+            let reach = grant_reach(&mut tx, question.turn_id).await?;
             Some(
                 question
                     .action

@@ -71,6 +71,11 @@ impl DraftContent {
     pub fn is_post(&self) -> bool {
         matches!(self, Self::Message { platform, .. } if platform == "x")
     }
+    /// Messages go out as the owner's own account, so Approve always covers
+    /// one chat.
+    pub fn sends_as_owner(&self) -> bool {
+        matches!(self, Self::Message { platform, .. } if platform == "whatsapp")
+    }
 
     pub fn label(&self) -> &str {
         match self {

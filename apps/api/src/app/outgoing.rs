@@ -64,9 +64,9 @@ pub enum ApprovalSource {
 /// files under a recurring task, every message of that task from that
 /// account, to any destination. Emails have no kind (each goes to its own
 /// recipients), nor do X replies without a task (each answers its own
-/// post), nor does WhatsApp, which sends as the owner's own account, so each
-/// message there needs its own approval. `kind!` in `db::outgoing_drafts`
-/// derives it from stored content.
+/// post). WhatsApp sends as the owner's own account, so its kind is always
+/// one chat, never a task. `kind!` in `db::outgoing_drafts` derives it from
+/// stored content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftKind {
     pub platform: Platform,
@@ -177,10 +177,10 @@ impl Platform {
         }
     }
 
-    /// Whether every message is approved on its own, so no draft kind is
-    /// ever approved always. The SQL `kind!` in `db::outgoing_drafts`
-    /// mirrors this.
-    pub fn approved_per_message(self) -> bool {
+    /// Whether messages go out as the owner's own account, so Approve always
+    /// covers one chat and never a task. The SQL `kind!` in
+    /// `db::outgoing_drafts` mirrors this.
+    pub fn sends_as_owner(self) -> bool {
         match self {
             Self::WhatsApp => true,
             Self::X | Self::Telegram | Self::Discord => false,
@@ -546,9 +546,9 @@ impl Message {
         let task = handle(args, "task")?
             .filter(|_| destination.is_some() || reply_to.is_some())
             .map(|task| task.split_whitespace().collect::<Vec<_>>().join(" "));
-        if task.is_some() && platform.approved_per_message() {
+        if task.is_some() && platform.sends_as_owner() {
             return Err(
-                "a WhatsApp message goes out as the owner and is approved one at a time; omit task",
+                "a WhatsApp message goes out as the owner, so Approve always covers one chat, never a task; omit task",
             );
         }
         if task.is_some() && account.is_none() && account_id.is_none() {

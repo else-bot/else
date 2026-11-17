@@ -203,6 +203,11 @@ pub(super) async fn confirm_permission(state: &AppState, grant: &Grant, args: &V
                             computer tool calls declaring this task_scope. MCP tools/call is not \
                             covered. Sensitive actions outside this scope still need approval.",
                     }
+                } else if matches!(target, PermissionTarget::Routine { .. }) {
+                    "Standing permission is recorded for destructive actions in this routine's own \
+                     runs only. It does not cover drafted messages or the bots it delegates to: a \
+                     message is sent without a card only after the owner clicks Approve always on a \
+                     draft card for that destination."
                 } else {
                     "Standing permission is recorded for this scope. Declare each effect honestly. \
                      Routine reversible work needs no card. Sensitive actions outside this scope still need approval."

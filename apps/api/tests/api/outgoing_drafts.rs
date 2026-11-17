@@ -1948,11 +1948,38 @@ async fn root_source(app: &TestApp, root: Uuid, kind: &str) {
     .unwrap();
 }
 
+/// Makes `root` a scheduled run of a saved routine. A 'routine' item alone
+/// is how a webhook wake starts.
+async fn scheduled_run(app: &TestApp, root: Uuid) {
+    root_source(app, root, "routine").await;
+    let routine = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO routines (id, bot_id, conversation_id, name, prompt, cron, timezone,
+             created_turn_id, created_name, request_hash)
+         SELECT ?1, bot_id, conversation_id, 'School blog', 'Forward new posts.', '0 8 * * 1-5',
+             'UTC', id, 'School blog', zeroblob(32) FROM turns WHERE id = ?2",
+    )
+    .bind(routine)
+    .bind(root)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO routine_runs (id, routine_id, due_at, name, turn_id)
+         VALUES (randomblob(16), ?1, '2030-01-01T08:00:00Z', 'School blog', ?2)",
+    )
+    .bind(routine)
+    .bind(root)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_task_a_routine_run_delegated_drafts_for_the_owners_approval() {
     let Harness { app, synthetic } = harness().await;
     let (leaf, root, _, child) = delegated_task(&app, SLOW).await;
-    root_source(&app, root, "routine").await;
+    scheduled_run(&app, root).await;
 
     let id = draft(&app, &grant(&app, child).await, ship_post()).await;
     wait(&app, child, "waiting").await;
@@ -1976,6 +2003,131 @@ async fn a_task_a_routine_run_delegated_drafts_for_the_owners_approval() {
             .await
             .unwrap();
     assert_eq!(delegation, "completed", "the routine run gets the result");
+}
+
+/// Drafts `family_message` from a task delegated by a scheduled routine run
+/// or a webhook wake, clicks Approve always on its card, and returns the
+/// next draft's result in the same task.
+async fn delegated_draft_after_approving_always(scheduled: bool) -> Value {
+    let Harness { app, .. } = harness().await;
+    let (leaf, root, _, child) = delegated_task(&app, SLOW).await;
+    if scheduled {
+        scheduled_run(&app, root).await;
+    } else {
+        root_source(&app, root, "routine").await;
+    }
+    let first = draft(&app, &grant(&app, child).await, family_message()).await;
+    wait(&app, child, "waiting").await;
+    let approved = owner_action(
+        &app,
+        &leaf,
+        first,
+        "approve",
+        json!({ "version": 1, "always": true }),
+    )
+    .await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    wait(&app, child, "running").await;
+    let mut next = family_message();
+    next["body"] = json!("Pick-up moved to 16:30.");
+    let drafted = tool(&app, &grant(&app, child).await, "draft_message", next).await;
+    tool_text(&drafted)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_a_routine_run_delegated_sends_with_its_bots_approve_always() {
+    let result = delegated_draft_after_approving_always(true).await;
+    assert_eq!(result["status"], "approved", "{result}");
+    assert_eq!(
+        result["draft"]["content"]["body"], "Pick-up moved to 16:30.",
+        "it sends exactly what the task proposed: {result}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_a_webhook_wake_delegated_still_asks_for_each_message() {
+    let result = delegated_draft_after_approving_always(false).await;
+    assert_eq!(result["status"], "pending", "{result}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_whatsapp_draft_is_approved_always_for_its_chat_only() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let to = |chat: &str, body: &str| {
+        json!({ "platform": "whatsapp", "account": "+33612345678", "destination": chat,
+                "body": body })
+    };
+    let family = "120363041234567890@g.us";
+    let unsigned = draft(
+        &app,
+        &token,
+        json!({ "platform": "whatsapp", "destination": family, "body": "Bonjour" }),
+    )
+    .await;
+    wait(&app, turn, "waiting").await;
+    assert_eq!(shown(&app, &main, turn).await[0]["kind"], Value::Null);
+    let refused = owner_action(
+        &app,
+        &main,
+        unsigned,
+        "approve",
+        json!({ "version": 1, "always": true }),
+    )
+    .await;
+    assert_eq!(
+        refused.body["error"]["code"], "no_kind",
+        "without its sending account, consent could outlive a switch of account: {}",
+        refused.body
+    );
+    let discarded = owner_action(&app, &main, unsigned, "discard", json!({})).await;
+    assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
+    wait(&app, turn, "running").await;
+    let token = grant(&app, turn).await;
+    let first = draft(&app, &token, to(family, "Nouvel article sur le blog.")).await;
+    wait(&app, turn, "waiting").await;
+    let kind = json!({ "platform": "whatsapp", "account_id": null, "account": "+33612345678",
+                       "destination": family });
+    assert_eq!(
+        shown(&app, &main, turn).await[1]["kind"],
+        kind,
+        "a WhatsApp card offers Approve always for its one chat"
+    );
+    let approved = owner_action(
+        &app,
+        &main,
+        first,
+        "approve",
+        json!({ "version": 1, "always": true }),
+    )
+    .await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    assert_eq!(granted(&app, &main).await, json!([kind]));
+
+    wait(&app, turn, "running").await;
+    let token = grant(&app, turn).await;
+    let same = tool(
+        &app,
+        &token,
+        "draft_message",
+        to(family, "Sortie scolaire vendredi."),
+    )
+    .await;
+    assert_eq!(tool_text(&same)["status"], "approved", "{}", same.body);
+    let other = tool(
+        &app,
+        &token,
+        "draft_message",
+        to("33698765432@s.whatsapp.net", "Bonjour"),
+    )
+    .await;
+    assert_eq!(
+        tool_text(&other)["status"],
+        "pending",
+        "another chat still waits for the owner: {}",
+        other.body
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
