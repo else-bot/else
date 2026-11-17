@@ -105,8 +105,28 @@ impl ComputerManager {
         args: &[&str],
         timeout: Duration,
     ) -> Result<ExecOutput, ComputerError> {
+        self.exec_with(lease_id, program, args, None, timeout).await
+    }
+
+    /// `exec` with `input` on the command's stdin, for values that must not
+    /// appear in a command line.
+    pub async fn exec_with(
+        &self,
+        lease_id: Uuid,
+        program: &str,
+        args: &[&str],
+        input: Option<&[u8]>,
+        timeout: Duration,
+    ) -> Result<ExecOutput, ComputerError> {
         let (bot, name, _op) = self.checked(lease_id).await?;
-        let out = self.runtime.exec(&name, program, args, timeout).await?;
+        let out = match input {
+            None => self.runtime.exec(&name, program, args, timeout).await?,
+            Some(input) => {
+                self.runtime
+                    .exec_input(&name, program, args, input, timeout)
+                    .await?
+            }
+        };
         sqlx::query("UPDATE bot_computers SET last_used_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE bot_id = ?1")
             .bind(bot)
             .execute(&self.pool)

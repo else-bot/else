@@ -7,21 +7,25 @@ use crate::grants::Grant;
 pub(super) fn secret_schema() -> Value {
     json!({
         "name": "request_secret",
-        "description": "Ask the owner for credentials a task needs when computer_secrets does not list them. \
-            The owner types the values into a private form; they are stored as the task secret \
-            name for every bot and never shown to you. Never ask for credentials in chat. At \
-            most one per attempt.",
+        "description": "Ask the owner for a login or credentials when a computer_secrets search finds none. \
+            The owner types them into a private card; they are saved in the Vault for every bot \
+            and never shown to you. For a website login, pass website and env USERNAME and \
+            PASSWORD. At most one per attempt.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "name": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,39}$",
-                          "description": "The task secret to store, e.g. smtp or github." },
+                          "description": "The Vault entry to store, e.g. smtp or x-login." },
                 "reason": { "type": "string", "minLength": 1,
                             "maxLength": crate::db::secret_requests::MAX_REASON,
                             "description": "Shown to the owner: what it is for." },
                 "env": { "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true,
                          "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]{0,63}$" },
-                         "description": "Environment variable names, e.g. SMTP_PASSWORD." },
+                         "description": "Variable names, e.g. USERNAME, PASSWORD, or SMTP_PASSWORD." },
+                "description": { "type": "string", "maxLength": crate::db::task_secrets::MAX_DESCRIPTION,
+                                 "description": "How the Vault lists it, e.g. X account @example." },
+                "website": { "type": "string", "maxLength": 2000,
+                             "description": "The site it signs in to, e.g. x.com. Needed to type it in the browser." },
             },
             "required": ["name", "reason", "env"],
             "additionalProperties": false,
@@ -235,7 +239,7 @@ pub(super) fn handoff_schema() -> Value {
     json!({
         "name": "computer_handoff",
         "description": "Ask the owner to take over your computer when only they can get past something \
-            on screen: a login, a captcha, a 2FA prompt, or a broken page to inspect. Pins a Take \
+            on screen: a captcha, a 2FA prompt, a login not in the Vault, or a broken page. Pins a Take \
             over bar, shares your current screen, and returns parked: leave the screen as it is, \
             link the shared image and say what you need in your reply, and end the attempt. You \
             continue once they hand it back, decline, or message you.",
@@ -388,7 +392,7 @@ pub(super) async fn request_secret(state: &AppState, grant: &Grant, args: &Value
                 "secret": request.name,
                 "env": request.env,
                 "next": if stored {
-                    "The owner stored this secret; name it in the secrets argument of computer_run or computer_job_start."
+                    "The owner saved it in the Vault; type it with computer_browser (secret, field) or name it in the secrets argument of computer_run or computer_job_start."
                 } else {
                     "The owner declined this request; continue without it and do not ask again unless they do."
                 },

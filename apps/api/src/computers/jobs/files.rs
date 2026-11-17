@@ -178,6 +178,17 @@ impl ComputerManager {
 
     /// Run the guest browser helper (`else-browser`).
     pub async fn browser(&self, lease: Uuid, args: &[&str]) -> Result<ExecOutput, ComputerError> {
+        self.browser_with(lease, args, None).await
+    }
+
+    /// `browser` with `input` on the helper's stdin, such as a Vault value
+    /// to type, which never appears in its command line.
+    pub async fn browser_with(
+        &self,
+        lease: Uuid,
+        args: &[&str],
+        input: Option<&[u8]>,
+    ) -> Result<ExecOutput, ComputerError> {
         let bot: Option<Uuid> =
             sqlx::query_scalar("SELECT bot_id FROM computer_leases WHERE id = ?1")
                 .bind(lease)
@@ -192,13 +203,12 @@ impl ComputerManager {
                     .into(),
             ));
         }
-        self.guest(
-            lease,
-            r#"DISPLAY=:99 exec /usr/local/bin/else-browser "$@""#,
-            args,
-            Duration::from_secs(60),
-        )
-        .await
+        let (program, mut all) =
+            self.as_guest_user(r#"DISPLAY=:99 exec /usr/local/bin/else-browser "$@""#);
+        all.extend(args.iter().map(|a| (*a).to_owned()));
+        let all: Vec<&str> = all.iter().map(String::as_str).collect();
+        self.exec_with(lease, &program, &all, input, Duration::from_secs(60))
+            .await
     }
 
     /// Write a text file in the guest (via base64, no shell quoting).

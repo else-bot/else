@@ -480,6 +480,40 @@ async fn scripts_drive_the_visible_browser_safely() {
         typed["added"][0], "state:ref@example.com",
         "the page's own state saw the text"
     );
+    let vault = |site: &'static str| {
+        let manager = manager.clone();
+        let email = email.clone();
+        async move {
+            let out = manager
+                .browser_with(
+                    lease_id,
+                    &["type-secret", &email, site],
+                    Some(b"vault@example.com"),
+                )
+                .await
+                .unwrap();
+            let json = if out.stdout.trim().is_empty() {
+                out.stderr
+            } else {
+                out.stdout
+            };
+            serde_json::from_str::<Value>(json.trim()).unwrap()
+        }
+    };
+    let elsewhere = vault("x.com").await;
+    assert!(
+        elsewhere["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("WRONG_SITE"),
+        "{elsewhere}"
+    );
+    let filled = vault("127.0.0.1").await;
+    assert_eq!(filled["value"], "(17 characters)", "{filled}");
+    assert_eq!(
+        filled["added"][0], "state:vault@example.com",
+        "a value from stdin reaches the page"
+    );
     let again = ref_of(&browse(&["snapshot"]).await, "button \"Like\"");
     assert_ne!(again, like, "refs are not reused across snapshots");
     let replaced = browse(&["click", &like]).await;

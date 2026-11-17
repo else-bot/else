@@ -401,29 +401,6 @@ impl TaskSecrets {
     }
 }
 
-fn redact(value: Value, set: &[task_secrets::Redact]) -> Value {
-    match value {
-        Value::String(text) => Value::String(task_secrets::redact(&text, set)),
-        Value::Number(number) => {
-            let text = number.to_string();
-            let redacted = task_secrets::redact(&text, set);
-            if redacted == text {
-                Value::Number(number)
-            } else {
-                Value::String(redacted)
-            }
-        }
-        Value::Array(items) => Value::Array(items.into_iter().map(|v| redact(v, set)).collect()),
-        Value::Object(fields) => Value::Object(
-            fields
-                .into_iter()
-                .map(|(k, v)| (task_secrets::redact(&k, set), redact(v, set)))
-                .collect(),
-        ),
-        other => other,
-    }
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Installation {
@@ -855,7 +832,7 @@ impl Library {
                     Ok(if secrets.is_empty() {
                         result
                     } else {
-                        redact(result, &secrets)
+                        task_secrets::redact_json(result, &secrets)
                     })
                 })
             })
