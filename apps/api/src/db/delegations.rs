@@ -994,9 +994,14 @@ pub async fn undelivered(
                 d.parent_attempt = 0 AS earlier_request,
                 CASE WHEN EXISTS (
                     SELECT 1 FROM owner_notices n WHERE n.status = 'pending'
-                      AND (n.turn_id = d.child_turn_id
-                           OR n.turn_id IN (SELECT g.child_turn_id FROM delegations g
-                                            WHERE g.root_turn_id = d.child_turn_id)))
+                      AND n.turn_id IN (
+                          SELECT t.id FROM turns t WHERE t.conversation_id = d.conversation_id
+                          UNION SELECT d.takeover_turn_id
+                          UNION SELECT gt.id FROM delegations g
+                              JOIN turns gt ON gt.conversation_id = g.conversation_id
+                          WHERE g.root_turn_id = d.takeover_turn_id
+                             OR g.root_turn_id IN (SELECT t.id FROM turns t
+                                                   WHERE t.conversation_id = d.conversation_id)))
                 THEN 'asked' ELSE d.owner_need END AS owner
              FROM delegations d JOIN bots b ON b.id = d.target_bot_id
              WHERE d.root_turn_id = ?1 AND {READY}

@@ -253,8 +253,12 @@ pub async fn declare(
             Declared::Ask(record_ask(&mut tx, turn_id, caller.bot_id, spec).await?)
         }
         Declaration::Nothing | Declaration::Fyi { .. } => {
+            // Any attempt of this task: an update leaves the earlier
+            // attempt's ask pending in the same task conversation.
             let pending: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM owner_notices WHERE turn_id = ?1 AND status = 'pending')",
+                "SELECT EXISTS (SELECT 1 FROM owner_notices WHERE status = 'pending'
+                     AND turn_id IN (SELECT id FROM turns WHERE conversation_id =
+                                         (SELECT conversation_id FROM turns WHERE id = ?1)))",
             )
             .bind(turn_id)
             .fetch_one(&mut *tx)

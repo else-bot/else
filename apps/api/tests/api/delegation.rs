@@ -65,6 +65,26 @@ async fn running_main_with(app: &TestApp, prompt: &str) -> (String, Uuid, String
     (main, turn_id, token)
 }
 
+/// A grant for tools every task may call, such as notify_owner.
+async fn grant_history(app: &TestApp, turn: Uuid) -> String {
+    let (bot, conversation): (Uuid, Uuid) =
+        sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
+            .bind(turn)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    app.scheduler
+        .grants()
+        .issue(
+            bot,
+            conversation,
+            turn,
+            vec![Tool::ReadHistory],
+            DEFAULT_TTL,
+        )
+        .await
+}
+
 async fn grant_delegate(app: &TestApp, turn: Uuid) -> String {
     let (bot, conversation): (Uuid, Uuid) =
         sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
@@ -4028,4 +4048,68 @@ async fn a_single_message_child_returns_no_extra_file() {
         Some("Done: 3 failing tests.")
     );
     assert_eq!(outcomes[0].messages, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_updated_task_keeps_its_earlier_attempts_ask() {
+    let app = app_with(3).await;
+    let work = leaf(&app, "Work").await;
+    let (task, first, token) =
+        task_carried_to_a_follow_up(&app, &work, "[synthetic:hang] Triage the checkout 500s.")
+            .await;
+    let first_token = grant_history(&app, first).await;
+    let (_, asked) = control(
+        &app,
+        &first_token,
+        "notify_owner",
+        json!({ "kind": "decision", "summary": "Roll back the deploy or hotfix it?" }),
+    )
+    .await;
+    assert_eq!(asked["status"], "pending", "{asked}");
+
+    let (failed, updated) = control(
+        &app,
+        &token,
+        "delegation_update",
+        json!({ "task_id": task, "message": "[synthetic:slow] Only the EU region matters now: recheck every EU checkout error from \
+                     this morning, compare it with yesterday, and report which ones still fail." }),
+    )
+    .await;
+    assert!(!failed, "{updated}");
+    let next = child_of(&app, task).await;
+    assert_ne!(next, first);
+    wait_status(&app, next, "running").await;
+    let next_token = grant_history(&app, next).await;
+    let (failed, quiet) = control(
+        &app,
+        &next_token,
+        "notify_owner",
+        json!({ "kind": "nothing" }),
+    )
+    .await;
+    assert!(
+        failed,
+        "the new attempt cannot hide the earlier ask: {quiet}"
+    );
+    assert!(
+        quiet.as_str().unwrap().starts_with("ASK_PENDING"),
+        "{quiet}"
+    );
+
+    wait_task(&app, task, "completed").await;
+    let main = app.main_bot().await;
+    let page = app
+        .owner("GET", &format!("/v1/bots/{main}/conversation"), None)
+        .await;
+    let reply = page.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == task.to_string())
+        .unwrap_or_else(|| panic!("no reply item: {}", page.body))["bot_reply"]
+        .clone();
+    let asks = reply["asks"].as_array().unwrap();
+    assert_eq!(asks.len(), 1, "{reply}");
+    assert_eq!(asks[0]["id"], asked["notice_id"]);
+    assert_eq!(asks[0]["status"], "pending");
 }

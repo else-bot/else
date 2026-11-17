@@ -319,7 +319,7 @@ pub(super) fn notice_schema() -> Value {
                 "kind": { "type": "string", "enum": ["nothing", "fyi", "decision", "blocked"],
                           "description": "decision: waits on the owner's choice, incl. whether to start work you propose. blocked: only they can clear it. fyi: you decided something they'd want to know. nothing: the rest, e.g. routine counts." },
                 "summary": { "type": "string", "minLength": 1, "maxLength": MAX_SUMMARY,
-                             "description": "Required unless nothing. For the owner, one or two sentences: the ask, e.g. Approve the Romow DM before I send it; for fyi one line, e.g. Declined MIRAY myself." },
+                             "description": "Required unless nothing. For the owner: the ask in one or two sentences, e.g. Approve the Romow DM before I send it; for fyi one line under 200 bytes, e.g. Declined MIRAY myself." },
                 "tried": { "type": "string", "minLength": 1, "maxLength": MAX_TRIED,
                            "description": "For decision or blocked: what you already tried, e.g. Delegated to Dev; refused, no eligible session." },
             },

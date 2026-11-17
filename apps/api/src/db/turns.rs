@@ -287,7 +287,8 @@ pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kin
                     (SELECT nullif(c.error_message, '') FROM turns c
                      WHERE c.id = coalesce(d.takeover_turn_id, d.child_turn_id)) END,
                 'title', d.title, 'owner_need', d.owner_need, 'owner_line', d.owner_line,
-                -- The task's own notices, then those of tasks it delegated.
+                -- Notices from every attempt of the task (an update starts a
+                -- new turn in its conversation), then from tasks it delegated.
                 'asks', json((SELECT json_group_array(json(a.ask)) FROM (
                     SELECT json_object('id', lower(hex(n.id)), 'bot_id', lower(hex(n.bot_id)),
                             'bot_name', nb.name, 'turn_id', lower(hex(n.turn_id)), 'kind', n.kind,
@@ -295,9 +296,14 @@ pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kin
                             'created_at', n.created_at, 'settled_at', n.settled_at) AS ask
                     FROM owner_notices n JOIN bots nb ON nb.id = n.bot_id
                     WHERE n.status <> 'superseded'
-                      AND (n.turn_id = d.child_turn_id
-                           OR n.turn_id IN (SELECT g.child_turn_id FROM delegations g
-                                            WHERE g.root_turn_id = d.child_turn_id))
+                      AND n.turn_id IN (
+                          SELECT t.id FROM turns t WHERE t.conversation_id = d.conversation_id
+                          UNION SELECT d.takeover_turn_id
+                          UNION SELECT gt.id FROM delegations g
+                              JOIN turns gt ON gt.conversation_id = g.conversation_id
+                          WHERE g.root_turn_id = d.takeover_turn_id
+                             OR g.root_turn_id IN (SELECT t.id FROM turns t
+                                                   WHERE t.conversation_id = d.conversation_id))
                     ORDER BY n.created_at, n.id) AS a)))
          FROM delegations d JOIN bots b ON b.id = d.target_bot_id WHERE d.id = i.id)
     END AS bot_reply, coalesce(i.parts, i.assistant_parts) AS parts, i.routine_update,

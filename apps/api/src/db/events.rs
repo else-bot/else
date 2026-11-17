@@ -161,17 +161,23 @@ pub async fn exchange_changed(
     task_turn: Uuid,
 ) -> Result<(), sqlx::Error> {
     let shown: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT t.bot_id, i.id FROM items i JOIN turns t ON t.id = i.turn_id
+        // The task whose attempt (or takeover) `task_turn` is, and the task
+        // that delegated it, whichever of their attempts did.
+        "WITH task AS (
+             SELECT d.* FROM delegations d
+             WHERE d.conversation_id = (SELECT conversation_id FROM turns WHERE id = ?1)
+                OR d.takeover_turn_id = ?1)
+         SELECT t.bot_id, i.id FROM items i JOIN turns t ON t.id = i.turn_id
          JOIN conversations c ON c.id = i.conversation_id AND c.kind = 'owner'
-         WHERE i.turn_id = ?1 AND i.kind = 'status'
-           AND EXISTS (SELECT 1 FROM delegations d WHERE d.child_turn_id = ?1)
+         WHERE i.turn_id = ?1 AND i.kind = 'status' AND EXISTS (SELECT 1 FROM task)
          UNION
-         SELECT d.parent_bot_id, d.id FROM delegations d
-         WHERE d.child_turn_id = ?1 AND EXISTS (SELECT 1 FROM items WHERE id = d.id)
+         SELECT task.parent_bot_id, task.id FROM task
+         WHERE EXISTS (SELECT 1 FROM items WHERE id = task.id)
          UNION
-         SELECT a.parent_bot_id, a.id FROM delegations d
-         JOIN delegations a ON a.child_turn_id = d.root_turn_id
-         WHERE d.child_turn_id = ?1 AND EXISTS (SELECT 1 FROM items WHERE id = a.id)",
+         SELECT a.parent_bot_id, a.id FROM task JOIN delegations a
+             ON a.conversation_id = (SELECT conversation_id FROM turns WHERE id = task.root_turn_id)
+             OR a.takeover_turn_id = task.root_turn_id
+         WHERE EXISTS (SELECT 1 FROM items WHERE id = a.id)",
     )
     .bind(task_turn)
     .fetch_all(&mut *conn)

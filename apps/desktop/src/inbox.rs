@@ -160,16 +160,21 @@ struct BotAttention {
 /// when the owner settles it.
 #[derive(Debug, Default)]
 struct AskAlert {
-    /// The ask last seen, so the same one is not announced again.
+    /// The ask last seen open. It survives another card showing in the
+    /// sidebar for a while, so the same ask is not announced again after.
     seen: Option<String>,
     due: bool,
     shown: bool,
 }
 
-/// The bot's open ask, as a key that changes when a new one replaces it.
+/// The bot's open ask, keyed by when it was raised: the bot rewriting its
+/// text keeps the key, and a new ask has a new one. Servers without `since`
+/// fall back to the text.
 fn open_ask(bot: &Bot) -> Option<String> {
     match &bot.sidebar_status {
-        Some(SidebarStatus::NeedsYou { preview, since }) => Some(format!("{since:?} {preview}")),
+        Some(SidebarStatus::NeedsYou { preview, since }) => {
+            Some(since.map_or_else(|| preview.clone(), |since| since.to_rfc3339()))
+        }
         _ => None,
     }
 }
@@ -269,10 +274,11 @@ impl Inbox {
         let mut due = false;
         for bot in bots.iter().filter(|bot| bot.is_active()) {
             let attention = self.bots.entry(bot.id).or_default();
-            let ask = open_ask(bot);
-            if ask != attention.ask.seen {
-                attention.ask.due = ask.is_some() && !first;
-                attention.ask.seen = ask;
+            if let Some(ask) = open_ask(bot)
+                && attention.ask.seen.as_ref() != Some(&ask)
+            {
+                attention.ask.due = !first;
+                attention.ask.seen = Some(ask);
             }
             due |= attention.ask.due;
             let Some(latest) = bot
@@ -316,7 +322,6 @@ impl Inbox {
                     title: format!("{} needs you", bot.name),
                     body: preview.clone(),
                 });
-                continue;
             }
             let Some(latest) = bot
                 .read_state
@@ -329,6 +334,11 @@ impl Inbox {
                 continue;
             }
             attention.due = false;
+            // The reply shares the ask's notification, so its prose would
+            // replace what the owner has to act on.
+            if matches!(bot.sidebar_status, Some(SidebarStatus::NeedsYou { .. })) {
+                continue;
+            }
             if !unread(Some(&attention.read), bot) || viewing(bot.id) {
                 continue;
             }
@@ -632,6 +642,56 @@ mod tests {
         assert!(inbox.observe(&[asking(2)]), "a new ask is due");
         assert!(inbox.alerts(&[asking(2)], |_| true).is_empty());
         assert!(inbox.shown().next().is_none());
+    }
+
+    #[test]
+    fn an_ask_keeps_its_notification_over_the_reply_and_is_announced_once() {
+        let with = |status: SidebarStatus| {
+            let mut bot = bot(1, Some((1, at(2, 9))), at(0, 0));
+            bot.sidebar_status = Some(status);
+            bot
+        };
+        let ask = |preview: &str| SidebarStatus::NeedsYou {
+            preview: preview.into(),
+            since: chrono::DateTime::from_timestamp(5, 0),
+        };
+        let mut inbox = Inbox::default();
+        inbox.observe(&[bot(1, None, at(0, 0))]);
+        let asking = with(ask("Approve the Romow DM"));
+        assert!(inbox.observe(std::slice::from_ref(&asking)));
+        let alerts = inbox.alerts(std::slice::from_ref(&asking), nobody);
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].title, format!("{} needs you", asking.name));
+        for _ in 0..2 {
+            inbox.observe(std::slice::from_ref(&asking));
+            assert!(
+                inbox
+                    .alerts(std::slice::from_ref(&asking), nobody)
+                    .is_empty(),
+                "the reply's prose does not replace the ask"
+            );
+        }
+
+        let rewritten = with(ask("Approve the Romow DM, now with the fee"));
+        inbox.observe(std::slice::from_ref(&rewritten));
+        assert!(
+            inbox
+                .alerts(std::slice::from_ref(&rewritten), nobody)
+                .is_empty()
+        );
+        let masked = with(SidebarStatus::NeedsApproval {
+            preview: "Run the migration".into(),
+            since: None,
+        });
+        inbox.observe(std::slice::from_ref(&masked));
+        inbox.alerts(std::slice::from_ref(&masked), nobody);
+        inbox.observe(std::slice::from_ref(&rewritten));
+        assert!(
+            inbox
+                .alerts(std::slice::from_ref(&rewritten), nobody)
+                .is_empty(),
+            "the same ask showing again after another card is not new"
+        );
     }
 
     #[test]
