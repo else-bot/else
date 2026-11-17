@@ -350,7 +350,7 @@ async fn a_bot_sets_a_mail_trigger_the_owner_approved_and_the_owner_pauses_or_de
     );
     let args =
         json!({"account_id": account.id, "instructions": " Flag invoices from new vendors. "});
-    let (turn, token) = h.running(&bot, GATE).await;
+    let (turn, token) = h.running(&bot, GATE_EVERY_ATTEMPT).await;
     let parked = tool(&h.app, &token, "mail_trigger_set", args.clone()).await;
     assert_eq!(parked.result["parked"], true, "{}", parked.body);
     assert_eq!(
@@ -727,9 +727,11 @@ struct QuietInbox {
     /// Rejects every new sign-in, as after the owner revokes the password.
     /// A watch session that already signed in keeps waiting.
     revoked: std::sync::atomic::AtomicBool,
-    /// Holds the next scan after it signs in, until the watch stops.
+    /// Holds the next scan after it signs in, until `release_scan` or the
+    /// watch stops.
     hold_scan: std::sync::atomic::AtomicBool,
     scan_held: tokio::sync::Notify,
+    release_scan: tokio::sync::Notify,
 }
 impl QuietInbox {
     fn signs_in(&self, auth: &Auth) -> Result<(), MailError> {
@@ -763,7 +765,7 @@ impl MailTransport for QuietInbox {
         self.signs_in(auth)?;
         if self.hold_scan.swap(false, Ordering::SeqCst) {
             self.scan_held.notify_one();
-            std::future::pending::<()>().await;
+            self.release_scan.notified().await;
         }
         self.scans.fetch_add(1, Ordering::SeqCst);
         Ok(Scan {
@@ -829,6 +831,63 @@ async fn quiet_watchers_survive_bot_commands_and_never_queue_empty_turns() {
     stop.cancel();
     running.await.unwrap();
 }
+#[tokio::test]
+async fn a_scan_that_began_before_a_rejection_never_reports_connected() {
+    for already_rejected in [false, true] {
+        scan_then_rejection(already_rejected).await;
+    }
+}
+
+async fn scan_then_rejection(already_rejected: bool) {
+    let h = recorder::harness(4).await;
+    let account = account(&h.app).await;
+    let reject = || async {
+        store::set_health(
+            &h.app.db.pool,
+            account.id,
+            account.generation,
+            &Health::CredentialRejected,
+        )
+        .await
+        .unwrap()
+    };
+    if already_rejected {
+        assert!(reject().await);
+    }
+    let inbox = Arc::new(QuietInbox::default());
+    inbox.hold_scan.store(true, Ordering::SeqCst);
+    let manager = Arc::new(ConnectorManager::with_transport(
+        h.app.db.pool.clone(),
+        h.app.state.secret_key.clone().unwrap(),
+        h.app.scheduler.clone(),
+        inbox.clone(),
+    ));
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(manager.clone().run(stop.clone()));
+    tokio::time::timeout(common::SETTLE, inbox.scan_held.notified())
+        .await
+        .expect("the watch signs in and scans");
+    assert_eq!(reject().await, !already_rejected);
+    inbox.release_scan.notify_one();
+    tokio::time::timeout(common::SETTLE, inbox.ready.notified())
+        .await
+        .expect("the held scan finishes and the watch waits");
+    assert_eq!(
+        store::account(&h.app.db.pool, account.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .health,
+        Health::CredentialRejected,
+        "a sign-in older than the rejection cannot clear it (already rejected: {already_rejected})"
+    );
+
+    manager.changed(account.id).await;
+    health_becomes(&h.app, account.id, Health::Connected).await;
+    stop.cancel();
+    running.await.unwrap();
+}
+
 #[async_trait::async_trait]
 impl MailTransport for Transport {
     async fn verify(&self, _: &MailConfig, _: &Auth) -> Result<(), MailError> {

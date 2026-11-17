@@ -28,8 +28,8 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::types::{
-    AUTHENTICATION_FAILED, Account, Credential, Cursor, Health, MailCommand, MailConfig,
-    MailTrigger, Permissions, Provider, REAUTHENTICATION_REQUIRED, Scan,
+    Account, Credential, Cursor, Health, MailCommand, MailConfig, MailTrigger, Permissions,
+    Provider, Scan,
 };
 use crate::credentials::SecretKey;
 use crate::db::turns::TurnStatus;
@@ -333,7 +333,7 @@ pub async fn configure_folders(
     {
         return Err(StoreError::Invalid("Folder names need 1 to 255 bytes."));
     }
-    let changed = sqlx::query("UPDATE connector_accounts SET config=?3,generation=generation+1,health='unknown',updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=?1 AND generation=?2 AND state <> 'removed'")
+    let changed = sqlx::query("UPDATE connector_accounts SET config=?3,generation=generation+1,health='unknown',health_version=health_version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=?1 AND generation=?2 AND state <> 'removed'")
         .bind(id).bind(current.generation).bind(Json(config)).execute(pool).await?.rows_affected();
     if changed != 1 {
         return Err(StoreError::Inactive);
@@ -450,7 +450,8 @@ pub async fn replace_credential(
         )?;
         let done = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE connector_accounts SET credential_version = ?3, credential_salt = ?4, credential = ?5,
-                 generation = generation + 1, health = 'unknown', updated_at = {NOW}
+                 generation = generation + 1, health = 'unknown',
+                 health_version = health_version + 1, updated_at = {NOW}
              WHERE id = ?1 AND credential_version = ?2 AND state <> 'removed'"
         )))
         .bind(id)
@@ -495,35 +496,88 @@ pub async fn set_active(
     account(pool, id).await
 }
 
+/// Counts an account's health writes. A watch reads it before it scans and
+/// hands it to [`mark_connected`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HealthVersion(i64);
+
+pub async fn health_version(pool: &SqlitePool, id: Uuid) -> Result<HealthVersion, StoreError> {
+    sqlx::query_scalar(
+        "SELECT health_version FROM connector_accounts WHERE id = ?1 AND state <> 'removed'",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .map(HealthVersion)
+    .ok_or(StoreError::NotFound)
+}
+
+/// Record that a scan which began at `since` signed in. Refused when any
+/// health was written after `since`, such as a rejection reported while the
+/// scan ran, because that write is newer than this sign-in.
+pub async fn mark_connected(
+    pool: &SqlitePool,
+    id: Uuid,
+    generation: i64,
+    since: HealthVersion,
+) -> Result<bool, StoreError> {
+    let done = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE connector_accounts
+         SET health = 'connected', health_version = health_version + 1, updated_at = {NOW}
+         WHERE id = ?1 AND generation = ?2 AND state <> 'removed' AND health_version = ?3"
+    )))
+    .bind(id)
+    .bind(generation)
+    .bind(since.0)
+    .execute(pool)
+    .await?;
+    Ok(done.rows_affected() == 1)
+}
+
 /// Record the runtime's view of an account's health for this generation.
 /// A rejected credential or an expired OAuth grant stays recorded until the
 /// owner replaces it or a sign-in succeeds, so a network error cannot hide
-/// it. The account's
-/// worker stops a watch session before it records a rejection, so only a
-/// sign-in that began afterwards reports `connected`.
+/// it. Only a sign-in that began afterwards reports `connected`, through
+/// [`mark_connected`], so a repeated rejection still counts as a write.
+/// Returns whether `health` is now recorded.
 pub async fn set_health(
     pool: &SqlitePool,
     id: Uuid,
     generation: i64,
     health: &Health,
 ) -> Result<bool, StoreError> {
-    let health = health.code();
-    if !field(health) || health.len() > 64 {
+    let code = health.code();
+    if !field(code) || code.len() > 64 {
         return Err(StoreError::Invalid("a health code needs 1 to 64 bytes"));
     }
-    let done = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE connector_accounts SET health = ?3, updated_at = {NOW}
-         WHERE id = ?1 AND generation = ?2 AND state <> 'removed'
-            AND (health NOT IN (?4, ?5) OR ?3 = 'connected')"
-    )))
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let current: Option<String> = sqlx::query_scalar(
+        "SELECT health FROM connector_accounts WHERE id = ?1 AND generation = ?2 AND state <> 'removed'",
+    )
     .bind(id)
     .bind(generation)
-    .bind(health)
-    .bind(AUTHENTICATION_FAILED)
-    .bind(REAUTHENTICATION_REQUIRED)
-    .execute(pool)
+    .fetch_optional(&mut *tx)
     .await?;
-    Ok(done.rows_affected() == 1)
+    let Some(current) = current else {
+        return Ok(false);
+    };
+    let applied = !Health::from(current).needs_new_credential() || *health == Health::Connected;
+    if applied || health.needs_new_credential() {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE connector_accounts
+             SET health = CASE WHEN ?4 THEN ?3 ELSE health END,
+                 health_version = health_version + 1, updated_at = {NOW}
+             WHERE id = ?1 AND generation = ?2"
+        )))
+        .bind(id)
+        .bind(generation)
+        .bind(code)
+        .bind(applied)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(applied)
 }
 
 /// Remove an account: erase its credential, drop its grants and cancel

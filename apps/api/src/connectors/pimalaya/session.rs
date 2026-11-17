@@ -47,7 +47,11 @@ impl Socket {
     pub(super) async fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
         match self {
             Self::Plain(s) => s.write_all(bytes).await,
-            Self::Tls(s) => s.write_all(bytes).await,
+            // rustls can still hold the end of the write when the socket is full.
+            Self::Tls(s) => {
+                s.write_all(bytes).await?;
+                s.flush().await
+            }
         }
     }
     async fn upgrade(self, connector: &TlsConnector, host: &str) -> Result<Self, MailError> {

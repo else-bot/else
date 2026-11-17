@@ -152,11 +152,16 @@ impl ConnectorManager {
     }
 
     async fn worker(self: &Arc<Self>, id: Uuid) -> Result<Worker, MailError> {
+        self.worker_or_start(id).await.map(|(worker, _)| worker)
+    }
+
+    /// The account's worker, and whether this call started it.
+    async fn worker_or_start(self: &Arc<Self>, id: Uuid) -> Result<(Worker, bool), MailError> {
         let manager = self.clone();
         self.workers
             .call(move |workers| {
                 if let Some(worker) = workers.get(&id) {
-                    return Ok(worker.clone());
+                    return Ok((worker.clone(), false));
                 }
                 if workers.len() >= 32 {
                     return Err(MailError::new("connector_limit"));
@@ -175,13 +180,15 @@ impl ConnectorManager {
                     manager.account_loop(id, running, receiver).await;
                     let _ = done.send(true);
                 });
-                Ok(worker)
+                Ok((worker, true))
             })
             .await
     }
 
     pub async fn changed(self: &Arc<Self>, id: Uuid) {
-        if let Ok(worker) = self.worker(id).await {
+        // A worker this call starts reads the changed account itself; a
+        // notification would restart its first watch for nothing.
+        if let Ok((worker, false)) = self.worker_or_start(id).await {
             worker.changed.notify_one();
         }
     }
@@ -498,6 +505,9 @@ impl ConnectorManager {
         stop: CancellationToken,
     ) -> Result<(), MailError> {
         let id = account.id;
+        let since = store::health_version(&self.db, id)
+            .await
+            .map_err(|_| MailError::new("mail_account_unavailable"))?;
         let cursor = loop {
             let old = store::cursor(&self.db, id)
                 .await
@@ -527,7 +537,9 @@ impl ConnectorManager {
                 break scan.cursor;
             }
         };
-        self.health(id, account.generation, "connected").await;
+        if let Some(_admission) = self.scheduler.gate().enter() {
+            let _ = store::mark_connected(&self.db, id, account.generation, since).await;
+        }
         self.transport
             .wait(&account.config, auth, &cursor, stop)
             .await
