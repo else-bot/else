@@ -43,6 +43,26 @@ impl DraftStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DraftFile {
+    pub id: Uuid,
+    pub name: String,
+    pub media_type: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+impl DraftFile {
+    pub fn attachment(&self) -> crate::attachments::Attachment {
+        crate::attachments::Attachment {
+            id: self.id,
+            name: self.name.clone(),
+            media_type: self.media_type.clone(),
+            size: self.size,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "channel", rename_all = "lowercase")]
 pub enum DraftContent {
@@ -53,6 +73,8 @@ pub enum DraftContent {
         bcc: Vec<String>,
         subject: String,
         body: String,
+        #[serde(default)]
+        attachments: Vec<DraftFile>,
     },
     Message {
         platform: String,
@@ -61,10 +83,23 @@ pub enum DraftContent {
         /// The recurring task the bot filed it under.
         task: Option<String>,
         body: String,
+        #[serde(default)]
+        attachments: Vec<DraftFile>,
     },
 }
 
 impl DraftContent {
+    pub fn attachments(&self) -> &[DraftFile] {
+        match self {
+            Self::Email { attachments, .. } | Self::Message { attachments, .. } => attachments,
+        }
+    }
+
+    pub fn attachment_ids(&self) -> Option<Vec<Uuid>> {
+        let files = self.attachments();
+        (!files.is_empty()).then(|| files.iter().map(|file| file.id).collect())
+    }
+
     pub fn is_email(&self) -> bool {
         matches!(self, Self::Email { .. })
     }
@@ -273,6 +308,8 @@ pub struct DraftEdit {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
     pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<Uuid>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -334,6 +371,7 @@ impl OutgoingDraft {
             version: self.version,
             subject: self.content.subject().map(str::to_owned),
             body: self.content.body().to_owned(),
+            attachments: self.content.attachment_ids(),
         }
     }
 }
@@ -342,6 +380,109 @@ impl OutgoingDraft {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn file_content(channel: &str, attachments: Option<serde_json::Value>) -> DraftContent {
+        let mut value = match channel {
+            "email" => json!({"channel":"email", "from":"owner@example.com",
+                "to":["ada@example.com"], "cc":[], "bcc":[], "subject":"Flyer", "body":"See flyer."}),
+            _ => json!({"channel":"message", "platform":"whatsapp", "body":"See flyer."}),
+        };
+        if let Some(attachments) = attachments {
+            value["attachments"] = attachments;
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn card(content: DraftContent) -> OutgoingDraft {
+        OutgoingDraft {
+            id: Uuid::nil(),
+            lineage_id: Uuid::nil(),
+            revision: 1,
+            content,
+            version: 3,
+            status: DraftStatus::Pending,
+            can_approve: true,
+            in_reply: false,
+            result_detail: None,
+            approval_source: None,
+            kind: None,
+            updated_at: Utc::now(),
+            settled_at: None,
+        }
+    }
+
+    #[test]
+    fn draft_files_decode_for_both_channels_and_keep_metadata_and_order() {
+        let ids = [Uuid::from_u128(1), Uuid::from_u128(2)];
+        let hash = "ab".repeat(32);
+        for channel in ["email", "message"] {
+            let draft = card(file_content(
+                channel,
+                Some(json!([
+                    {"id":ids[0], "name":"flyer.png", "media_type":"image/png", "size":820_000, "sha256":hash},
+                    {"id":ids[1], "name":"details.pdf", "media_type":"application/pdf", "size":4_200_000, "sha256":hash},
+                ])),
+            ));
+            let files = draft.content.attachments();
+            assert_eq!(files.len(), 2);
+            assert_eq!(files[0].id, ids[0]);
+            assert_eq!(files[0].name, "flyer.png");
+            assert_eq!(files[0].media_type, "image/png");
+            assert_eq!(files[0].size, 820_000);
+            assert_eq!(files[0].sha256, hash);
+            assert_eq!(files[1].id, ids[1]);
+            assert_eq!(
+                serde_json::to_value(draft.edit()).unwrap()["attachments"],
+                json!(ids)
+            );
+
+            let mut edit = draft.edit();
+            edit.attachments.as_mut().unwrap().remove(0);
+            let reply = DraftAttachment {
+                id: draft.id,
+                edit: edit.clone(),
+            };
+            assert_eq!(
+                serde_json::to_value(&edit).unwrap()["attachments"],
+                json!([ids[1]])
+            );
+            assert_eq!(
+                serde_json::to_value(reply).unwrap()["attachments"],
+                json!([ids[1]])
+            );
+            edit.attachments.as_mut().unwrap().clear();
+            assert_eq!(
+                serde_json::to_value(edit).unwrap()["attachments"],
+                json!([])
+            );
+        }
+    }
+
+    #[test]
+    fn drafts_without_files_omit_attachment_ids_for_older_apis() {
+        for channel in ["email", "message"] {
+            for attachments in [None, Some(json!([]))] {
+                let draft = card(file_content(channel, attachments));
+                assert!(draft.content.attachments().is_empty());
+                assert!(
+                    serde_json::to_value(draft.edit())
+                        .unwrap()
+                        .get("attachments")
+                        .is_none()
+                );
+                let reply = DraftAttachment {
+                    id: draft.id,
+                    edit: draft.edit(),
+                };
+                assert!(
+                    serde_json::to_value(reply)
+                        .unwrap()
+                        .get("attachments")
+                        .is_none()
+                );
+            }
+        }
+    }
 
     #[test]
     fn connected_email_cards_keep_edits_and_read_mail_receipts() {
@@ -391,6 +532,7 @@ mod tests {
                     version: 3,
                     subject: content.subject().map(str::to_owned),
                     body: content.body().to_owned(),
+                    attachments: None,
                 },
             };
             let payload = serde_json::to_value(edit).unwrap();
@@ -580,6 +722,7 @@ mod tests {
                 version: 3,
                 subject: Some("New subject".into()),
                 body: "Hello\n\nChanged body".into(),
+                attachments: None,
             },
         };
         assert_eq!(

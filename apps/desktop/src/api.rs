@@ -1226,6 +1226,49 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn approve_draft_sends_retained_files_including_when_approving_always() {
+        for always in [false, true] {
+            for attachments in [
+                None,
+                Some(vec![Uuid::from_u128(2), Uuid::from_u128(3)]),
+                Some(vec![]),
+            ] {
+                let (origin, server) = serve_once(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+                ).await;
+                let bot = Uuid::from_u128(10);
+                let draft = Uuid::from_u128(11);
+                let _ = client(origin)
+                    .approve_draft(
+                        bot,
+                        draft,
+                        crate::model::DraftEdit {
+                            version: 7,
+                            subject: None,
+                            body: "See flyer.".into(),
+                            attachments: attachments.clone(),
+                        },
+                        always,
+                    )
+                    .await;
+                let request = server.await.unwrap();
+                assert!(request.starts_with(&format!(
+                    "POST /v1/bots/{bot}/outgoing-drafts/{draft}/approve "
+                )));
+                let (_, body) = request.split_once("\r\n\r\n").unwrap();
+                let body: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert_eq!(body["version"], 7);
+                assert_eq!(body["body"], "See flyer.");
+                assert_eq!(body.get("always"), always.then_some(&json!(true)));
+                match attachments {
+                    Some(ids) => assert_eq!(body["attachments"], json!(ids)),
+                    None => assert!(body.get("attachments").is_none()),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn create_sends_avatar_only_when_supported() {
         let capabilities: Capabilities = serde_json::from_value(json!({
             "providers": [], "limits": { "max_text_bytes": 1024 }
