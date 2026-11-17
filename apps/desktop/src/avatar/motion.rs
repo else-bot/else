@@ -46,7 +46,18 @@ pub struct Input {
     /// Gaze direction, each axis in -1..=1; zero looks straight ahead.
     pub gaze: (f32, f32),
     pub hovered: bool,
-    pub working: bool,
+    pub work: Work,
+}
+
+/// Whether the bot is working, and whether its working loop may move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Work {
+    #[default]
+    Idle,
+    /// Working, held in the working pose because looping motion is paused.
+    Still,
+    /// Working and moving every frame.
+    Looping,
 }
 
 /// What to draw this frame.
@@ -114,7 +125,7 @@ impl Motion {
         self.gaze.1.step(gy, 170., 21., dt);
         let hover_target = if input.hovered { 1. } else { 0. };
         self.hover.step(hover_target, 320., 16., dt);
-        let work_target = if input.working { 1. } else { 0. };
+        let work_target = if input.work == Work::Idle { 0. } else { 1. };
         self.work.step(work_target, 170., 24., dt);
 
         if !input.hovered {
@@ -150,7 +161,7 @@ impl Motion {
         let moving = !self.gaze.0.resting_at(gx)
             || !self.gaze.1.resting_at(gy)
             || !self.hover.resting_at(hover_target)
-            || input.working
+            || input.work == Work::Looping
             || !self.work.resting_at(work_target)
             || self.blink_started.is_some();
         let next = match (moving, self.blink_due) {
@@ -195,7 +206,7 @@ mod tests {
         let look = Input {
             gaze: (3., 0.),
             hovered: false,
-            working: false,
+            work: Work::Idle,
         };
         let (pose, next, frames) = run(&mut motion, start, 120, look);
         assert_eq!(pose.gaze, (1., 0.), "clamped to the unit circle");
@@ -216,7 +227,7 @@ mod tests {
         let look = Input {
             gaze: (1., 0.),
             hovered: false,
-            working: false,
+            work: Work::Idle,
         };
         let (pose, next) = motion.advance(start + Duration::from_secs(5), look);
         assert!(pose.gaze.0 > 0. && pose.gaze.0 < 0.2, "{:?}", pose.gaze);
@@ -231,7 +242,7 @@ mod tests {
         let hover = Input {
             gaze: (0., 0.),
             hovered: true,
-            working: false,
+            work: Work::Idle,
         };
         let mut closed = 0f32;
         let mut next = Next::Frame;
@@ -286,7 +297,7 @@ mod tests {
         let start = Instant::now();
         motion.advance(start, Input::default());
         let working = Input {
-            working: true,
+            work: Work::Looping,
             ..Input::default()
         };
         let (pose, next, frames) = run(&mut motion, start, 240, working);
@@ -303,5 +314,29 @@ mod tests {
         let (pose, next, _) = run(&mut motion, later, 120, Input::default());
         assert_eq!(pose.work, 0.);
         assert_eq!(next, Next::Rest, "stops asking for frames once idle");
+    }
+
+    #[test]
+    fn a_paused_working_loop_rests_in_the_working_pose_until_it_may_move() {
+        let mut motion = Motion::default();
+        let start = Instant::now();
+        motion.advance(start, Input::default());
+        let still = Input {
+            work: Work::Still,
+            ..Input::default()
+        };
+        let (pose, next, frames) = run(&mut motion, start, 240, still);
+        assert_eq!(next, Next::Rest, "stops asking for frames once eased in");
+        assert!(frames < 240, "eases in, then rests: took {frames} frames");
+        assert_eq!(pose.work, 1., "holds the working pose");
+
+        let resumed = start + Duration::from_secs(10);
+        let looping = Input {
+            work: Work::Looping,
+            ..Input::default()
+        };
+        let (pose, next) = motion.advance(resumed, looping);
+        assert_eq!(pose.work, 1., "resumes without easing in again");
+        assert_eq!(next, Next::Frame, "moves again once allowed");
     }
 }

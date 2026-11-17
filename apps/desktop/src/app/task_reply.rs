@@ -5,6 +5,7 @@ use super::conversation::ReplyLayout;
 use super::message_row::CardPlacement;
 use super::reply::Author;
 use super::{ElseApp, RowKey};
+use crate::ambient::looping;
 use crate::avatar::bot_avatar;
 use chrono::{DateTime, Utc};
 use gpui_kit::assets::IconName;
@@ -210,7 +211,7 @@ impl ElseApp {
                     .items_center()
                     .gap_2()
                     .when(working, |line| {
-                        line.child(working_dots(task.turn, theme.primary, cx.reduce_motion()))
+                        line.child(working_dots(task.turn, theme.primary))
                     })
                     .children(delegate_faces)
                     .child(tail(
@@ -433,16 +434,17 @@ pub(super) fn shows_only_name(task: &TaskReply, turn: &crate::model::Turn) -> bo
 }
 
 /// Three dots that pulse in turn beside a working turn's label, one lap per 1.2 s.
-fn working_dots(turn: Uuid, color: Hsla, still: bool) -> impl IntoElement {
-    h_flex()
-        .flex_none()
-        .items_center()
-        .gap(px(3.))
-        .children((0..3).map(move |ix| {
-            let dot = div().size(px(5.)).rounded_full().bg(color);
-            if still {
-                dot.opacity(0.4 + 0.3 * ix as f32).into_any_element()
-            } else {
+fn working_dots(turn: Uuid, color: Hsla) -> impl IntoElement {
+    looping(move |moving| {
+        h_flex()
+            .flex_none()
+            .items_center()
+            .gap(px(3.))
+            .children((0..3).map(move |ix| {
+                let dot = div().size(px(5.)).rounded_full().bg(color);
+                if !moving {
+                    return dot.opacity(0.4 + 0.3 * ix as f32).into_any_element();
+                }
                 dot.with_animation(
                     SharedString::from(format!("task-dots-{turn}-{ix}")),
                     Animation::new(Duration::from_millis(1200)).repeat(),
@@ -453,6 +455,7 @@ fn working_dots(turn: Uuid, color: Hsla, still: bool) -> impl IntoElement {
                     },
                 )
                 .into_any_element()
-            }
-        }))
+            }))
+            .into_any_element()
+    })
 }

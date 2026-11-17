@@ -1,4 +1,5 @@
 use super::*;
+use crate::ambient::looping;
 use chrono::{DateTime, Utc};
 use gpui_kit::component::tooltip::Tooltip;
 
@@ -496,19 +497,23 @@ fn progress(id: Uuid, color: Hsla) -> Div {
         .rounded_sm()
         .overflow_hidden()
         .bg(color.opacity(0.18))
-        .child(
-            div()
+        .child(looping(move |moving| {
+            let bar = div()
                 .absolute()
                 .h_full()
                 .w(relative(0.35))
                 .rounded_sm()
-                .bg(color)
-                .with_animation(
-                    SharedString::from(format!("computer-upgrade-progress-{id}")),
-                    Animation::new(Duration::from_millis(1600)).repeat(),
-                    |bar, delta| bar.left(relative(delta * 1.35 - 0.35)),
-                ),
-        )
+                .bg(color);
+            if !moving {
+                return bar.left(relative(0.325)).into_any_element();
+            }
+            bar.with_animation(
+                SharedString::from(format!("computer-upgrade-progress-{id}")),
+                Animation::new(Duration::from_millis(1600)).repeat(),
+                |bar, delta| bar.left(relative(delta * 1.35 - 0.35)),
+            )
+            .into_any_element()
+        }))
 }
 
 fn status(computer: &Computer, theme: &gpui_kit::component::Theme) -> (&'static str, Hsla) {

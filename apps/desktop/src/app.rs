@@ -359,8 +359,11 @@ impl ElseApp {
         let composer_observer = cx.observe_in(&composer, window, |app, _, window, cx| {
             app.sync_mentions(window, cx);
         });
-        let visibility = cx
-            .observe_window_visibility(window, |app, _, window, cx| app.check_reading(window, cx));
+        let visibility = cx.observe_window_visibility(window, |app, _, window, cx| {
+            // Looping indicators read visibility while rendering.
+            window.refresh();
+            app.check_reading(window, cx);
+        });
         let bounds =
             cx.observe_window_bounds(window, |app, window, cx| app.check_reading(window, cx));
         let mut app = Self {
