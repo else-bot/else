@@ -806,3 +806,119 @@ async fn a_settled_wait_continues_a_request_whose_carried_task_still_runs() {
     let packet = synthetic.packets().await.last().unwrap().clone();
     assert!(packet.contains("Opened PR #775"), "{packet}");
 }
+
+/// Waits until `turn` has run `attempt` attempts and rests in `status`.
+async fn rests_after(app: &TestApp, turn: Uuid, attempt: i32, status: &str, why: &str) {
+    let deadline = std::time::Instant::now() + common::SETTLE;
+    loop {
+        let now: (i32, String) = sqlx::query_as("SELECT attempt, status FROM turns WHERE id = ?1")
+            .bind(turn)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+        if (now.0, now.1.as_str()) == (attempt, status) {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "{why}: {now:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn carried_waits_that_settle_wake_the_bot_while_the_latest_requests_own_wait_still_runs() {
+    let (app, synthetic) = harness().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("job");
+    std::fs::write(&state, "working").unwrap();
+    let main = app.main_bot().await;
+    let (first, token) = running(&app, &main).await;
+    text(&tool(&app, &token, "mcp_install", install(&state)).await);
+    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
+    settle(&app, first, "waiting").await;
+    let (second, token) = running_follow_up(&app, &main, first).await;
+    let deploy = wait_on("WEB-286", "Check the WEB-286 deploy.");
+    text(&tool(&app, &token, "mcp_wait", deploy).await);
+    settle(&app, second, "waiting").await;
+    let (latest, token) = running_follow_up(&app, &main, second).await;
+    let merge = wait_on("WEB-285", "Merge WEB-285 once T3 finishes.");
+    text(&tool(&app, &token, "mcp_wait", merge).await);
+    settle(&app, latest, "waiting").await;
+
+    std::fs::write(dir.path().join("job.WEB-286"), "result_available").unwrap();
+    check_now(&app).await;
+    rests_after(
+        &app,
+        latest,
+        2,
+        "waiting",
+        "a carried wait that settles wakes the bot while its own wait runs",
+    )
+    .await;
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(
+        packet.contains("Purpose: Check the WEB-286 deploy"),
+        "{packet}"
+    );
+    assert!(
+        packet.contains("Merge WEB-285 once T3 finishes.")
+            && packet.contains("Review the WEB-284 PR once T3 finishes."),
+        "the continuation lists the waits still running: {packet}"
+    );
+
+    std::fs::write(dir.path().join("job.WEB-284"), "result_available").unwrap();
+    check_now(&app).await;
+    rests_after(
+        &app,
+        latest,
+        3,
+        "waiting",
+        "a continuation that parked nothing still wakes on the next carried wait",
+    )
+    .await;
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(
+        packet.contains("Purpose: Review the WEB-284 PR"),
+        "{packet}"
+    );
+
+    std::fs::write(dir.path().join("job.WEB-285"), "result_available").unwrap();
+    check_now(&app).await;
+    rests_after(
+        &app,
+        latest,
+        4,
+        "completed",
+        "the request's own wait wakes it last",
+    )
+    .await;
+    assert_eq!(
+        sqlx::query_as::<_, (i32, String, Option<i32>)>(
+            "SELECT attempt, status, delivered_attempt FROM mcp_waits
+             WHERE turn_id = ?1 ORDER BY created_at",
+        )
+        .bind(latest)
+        .fetch_all(&app.db.pool)
+        .await
+        .unwrap(),
+        vec![
+            (0, "finished".into(), Some(3)),
+            (0, "finished".into(), Some(2)),
+            (1, "finished".into(), Some(4)),
+        ]
+    );
+    let packets = synthetic.packets().await;
+    for purpose in [
+        "Review the WEB-284 PR",
+        "Check the WEB-286 deploy",
+        "Merge WEB-285",
+    ] {
+        assert_eq!(
+            packets
+                .iter()
+                .filter(|p| p.contains(&format!("Purpose: {purpose}")))
+                .count(),
+            1,
+            "each result arrives once: {purpose}"
+        );
+    }
+}
