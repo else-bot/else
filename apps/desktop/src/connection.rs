@@ -145,6 +145,13 @@ struct Active {
     /// Cached so a background session redraws the rail only when its
     /// badges change.
     attention: Option<crate::attention::Attention>,
+    /// Tracked on the element that holds the app, so the shell can tell
+    /// whether focus is inside this session.
+    pane: FocusHandle,
+    /// Where focus was when the session went to the background. A hidden
+    /// session's elements are not drawn, so focus left there would stop
+    /// key and modifier events from reaching the shell.
+    last_focus: Option<FocusHandle>,
     _app: Subscription,
 }
 
@@ -403,14 +410,17 @@ impl Shell {
         self.backups = None;
         self.mcp = None;
         self.email = None;
-        if let Some(previous) = self.active.take() {
+        if let Some(mut previous) = self.active.take() {
+            previous.last_focus = window
+                .focused(cx)
+                .filter(|focused| previous.pane.contains(focused, window));
             previous.app.update(cx, |app, cx| {
                 app.dismiss_notifications(cx);
                 app.set_hidden(true, window, cx);
             });
             self.inactive.insert(previous.id, previous);
         }
-        if let Some(cached) = self.inactive.remove(&id).filter(|s| s.profile == profile) {
+        if let Some(mut cached) = self.inactive.remove(&id).filter(|s| s.profile == profile) {
             let hidden = self.settings_section().is_some();
             cached.app.update(cx, |app, cx| {
                 if let Some(widths) = widths {
@@ -418,6 +428,12 @@ impl Shell {
                 }
                 app.set_hidden(hidden, window, cx);
             });
+            let last_focus = cached.last_focus.take();
+            if !hidden {
+                last_focus
+                    .unwrap_or_else(|| cached.app.read(cx).sidebar_focus_handle())
+                    .focus(window, cx);
+            }
             self.active = Some(cached);
             cx.notify();
             return;
@@ -472,6 +488,8 @@ impl Shell {
             client,
             app,
             attention: None,
+            pane: cx.focus_handle(),
+            last_focus: None,
             _app: observer,
         });
         cx.notify();
@@ -988,7 +1006,7 @@ impl Render for Shell {
                     )
                 },
             )
-            .child(self.render_with_rail(active.app.clone().into(), window, cx))
+            .child(self.render_with_rail(active.app.clone().into(), &active.pane, window, cx))
             .children(self.render_switcher(cx))
     }
 }

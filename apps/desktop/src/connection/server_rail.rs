@@ -120,6 +120,7 @@ impl Shell {
     pub(super) fn render_with_rail(
         &self,
         app: AnyView,
+        pane: &FocusHandle,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -129,7 +130,14 @@ impl Shell {
             .min_h_0()
             .w_full()
             .child(self.render_server_rail(hints, cx))
-            .child(div().flex_1().min_w_0().h_full().child(app))
+            .child(
+                div()
+                    .track_focus(pane)
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(app),
+            )
     }
 
     fn render_server_rail(&self, hints: bool, cx: &mut Context<Self>) -> AnyElement {
