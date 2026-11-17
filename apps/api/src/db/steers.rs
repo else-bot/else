@@ -366,6 +366,17 @@ pub async fn waiting_for(conn: &mut SqliteConnection, into: Uuid) -> Result<i64,
     .await
 }
 
+/// What [`settle`] does with a steer whose message or reply moved on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fate {
+    /// The steer goes: the message runs on its own, or had already ended.
+    Released,
+    /// It may have reached the provider: the message ends uncertain.
+    Uncertain,
+    /// The reply took it and ended: the message ends the same way.
+    EndsWithReply,
+}
+
 /// Settle the steers whose message or reply is no longer where the steer
 /// left it. A message that already ended (the owner stopped it) drops its
 /// steer unless the reply had taken it. While the reply is parked, a
@@ -386,26 +397,26 @@ pub async fn settle(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
         .fetch_all(&mut *conn)
         .await?;
     for (turn_id, bot_id, own, status, into, into_status) in settled {
-        let release = match (own, status, into_status.is_ended()) {
+        let fate = match (own, status, into_status.is_ended()) {
             (TurnStatus::Queued, Status::Pending | Status::Delivered, false) => continue,
-            (TurnStatus::Queued, Status::Pending, true) => true,
-            (TurnStatus::Queued, Status::Sending | Status::Delivered, _) => false,
-            _ => true,
+            (TurnStatus::Queued, Status::Sending, _) => Fate::Uncertain,
+            (TurnStatus::Queued, Status::Delivered, true) => Fate::EndsWithReply,
+            _ => Fate::Released,
         };
         // A delivered message stays part of its reply for good, so the chat
         // shows one answer to both.
-        if status != Status::Delivered {
+        if fate != Fate::EndsWithReply {
             sqlx::query("DELETE FROM turn_steers WHERE turn_id = ?1")
                 .bind(turn_id)
                 .execute(&mut *conn)
                 .await?;
         }
-        if release {
-            crate::db::events::turn_changed(&mut *conn, bot_id, turn_id).await?;
-            continue;
-        }
-        let updated = if status == Status::Sending {
-            sqlx::query(
+        let updated = match fate {
+            Fate::Released => {
+                crate::db::events::turn_changed(&mut *conn, bot_id, turn_id).await?;
+                continue;
+            }
+            Fate::Uncertain => sqlx::query(
                 "UPDATE turns SET status = 'uncertain', effect_uncertain = true,
                      error_code = 'steer_uncertain',
                      error_message = 'This message was sent into the reply in progress, which \
@@ -414,9 +425,8 @@ did not confirm it. It was not resent; send a follow-up to continue.',
                      updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
                  WHERE id = ?1 AND status = 'queued'",
             )
-            .bind(turn_id)
-        } else {
-            sqlx::query(
+            .bind(turn_id),
+            Fate::EndsWithReply => sqlx::query(
                 "UPDATE turns SET status = a.status, error_code = a.error_code,
                      error_message = a.error_message,
                      effect_uncertain = turns.effect_uncertain OR a.effect_uncertain,
@@ -426,7 +436,7 @@ did not confirm it. It was not resent; send a follow-up to continue.',
                  WHERE turns.id = ?1 AND turns.status = 'queued' AND a.id = ?2",
             )
             .bind(turn_id)
-            .bind(into)
+            .bind(into),
         }
         .execute(&mut *conn)
         .await?
