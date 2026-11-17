@@ -356,8 +356,8 @@ impl Connections {
                         {
                             return false;
                         }
-                        if let Some(bots) = &snapshot.bots {
-                            shell.cache_bots(id, bots, cx);
+                        if let (Some(bots), Some(asked)) = (&snapshot.bots, snapshot.asked) {
+                            shell.cache_bots(id, bots, asked, cx);
                         }
                         shell.servers.entries.insert(id, snapshot);
                         shell.adopt_server_name(id, cx);
@@ -849,6 +849,7 @@ impl Shell {
                         }
                     }
                 }
+                shell.reclaim_switcher_focus(window, cx);
                 cx.notify();
             });
         }));

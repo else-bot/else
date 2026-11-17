@@ -450,7 +450,9 @@ impl Shell {
                 session.attention = attention;
                 cx.notify();
             }
+            shell.cache_session_bots(id, &app, cx);
             if shell.active.as_ref().is_some_and(|active| active.id == id) {
+                shell.reclaim_switcher_focus(window, cx);
                 if let Some(bot) = app.read(cx).selected_bot_id() {
                     shell.remember(crate::quick_switcher::Target::Bot { server: id, bot }, cx);
                 }

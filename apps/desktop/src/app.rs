@@ -259,9 +259,10 @@ pub struct ElseApp {
     connection: Connection,
     caps: Option<Capabilities>,
     bots: Vec<Bot>,
-    /// A bot list arrived since the last connection event. The live stream
-    /// reports a connection before its first list, so `bots` can be stale.
-    listed: bool,
+    /// When a bot list last arrived, if one has since the last connection
+    /// event. The live stream reports a connection before its first list, so
+    /// `bots` can be stale.
+    listed_at: Option<std::time::Instant>,
     /// A bot the quick switcher asked to open before the bot list arrived;
     /// opened when it does, unless another open or hiding this view drops it.
     requested: Option<Uuid>,
@@ -367,7 +368,7 @@ impl ElseApp {
             connection: Connection::Connecting,
             caps: None,
             bots: Vec::new(),
-            listed: false,
+            listed_at: None,
             requested: None,
             mention_bots: Default::default(),
             categories: Vec::new(),
@@ -462,7 +463,7 @@ impl ElseApp {
             event,
             LiveEvent::Connected | LiveEvent::Disconnected(_) | LiveEvent::Unauthorized
         ) {
-            self.listed = false;
+            self.listed_at = None;
         }
         match event {
             LiveEvent::Connected => {
@@ -541,7 +542,7 @@ impl ElseApp {
     fn apply_bots(&mut self, list: BotList, window: &mut Window, cx: &mut Context<Self>) {
         self.default_bot_id = list.default_bot_id;
         self.bots = list.bots;
-        self.listed = true;
+        self.listed_at = Some(std::time::Instant::now());
         let mention_bots = bot_mention::MentionRegistry::new(&self.bots);
         if *self.mention_bots != mention_bots {
             self.mention_bots = Arc::new(mention_bots);
@@ -593,22 +594,29 @@ impl ElseApp {
         self.selected
     }
 
-    /// The bots the quick switcher lists; `None` until a list arrives.
-    pub(crate) fn switcher_bots(&self) -> Option<Vec<crate::quick_switcher::Bot>> {
-        self.listed
-            .then(|| crate::quick_switcher::Bot::listed(&self.bots))
+    /// The bots the quick switcher lists and when they arrived; `None`
+    /// until a list arrives.
+    pub(crate) fn switcher_bots(
+        &self,
+    ) -> Option<(std::time::Instant, Vec<crate::quick_switcher::Bot>)> {
+        self.listed_at
+            .map(|at| (at, crate::quick_switcher::Bot::listed(&self.bots)))
+    }
+
+    pub(crate) fn listed_at(&self) -> Option<std::time::Instant> {
+        self.listed_at
     }
 
     /// Whether opening `id` can succeed: it is listed, or no list has
     /// arrived since the connection changed.
     pub(crate) fn may_have_bot(&self, id: Uuid) -> bool {
-        !self.listed || self.active_bots().any(|bot| bot.id == id)
+        self.listed_at.is_none() || self.active_bots().any(|bot| bot.id == id)
     }
 
     /// Opens a bot's chat with the composer focused, as the quick switcher
     /// does; before the bot list arrives, once it does.
     pub(crate) fn open_bot_chat(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.listed {
+        if self.listed_at.is_none() {
             self.requested = Some(id);
             return;
         }

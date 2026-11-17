@@ -3,8 +3,9 @@
 //! keys live in `crate::quick_switcher`; this file draws the switcher and
 //! opens what it picks.
 
+use std::collections::HashMap;
 use std::ops::Range;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{
@@ -57,6 +58,9 @@ pub(super) struct Switcher {
 #[derive(Default)]
 pub(super) struct Recall {
     memory: Memory,
+    /// When each server's cached bot list was fetched, so an older list
+    /// never replaces a newer one.
+    fetched: HashMap<Uuid, Instant>,
     _save: Option<Task<()>>,
 }
 
@@ -67,6 +71,7 @@ impl Recall {
                 .as_ref()
                 .map(|store| Memory::load(&store.quick_switcher_path()))
                 .unwrap_or_default(),
+            fetched: HashMap::new(),
             _save: None,
         }
     }
@@ -235,12 +240,66 @@ impl Shell {
 
     /// Keeps a server's latest bot list for searches while it is offline,
     /// including after a restart.
-    pub(super) fn cache_bots(&mut self, id: Uuid, bots: &[qs::Bot], cx: &mut Context<Self>) {
+    pub(super) fn cache_bots(
+        &mut self,
+        id: Uuid,
+        bots: &[qs::Bot],
+        fetched: Instant,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .recall
+            .fetched
+            .get(&id)
+            .is_some_and(|at| *at >= fetched)
+        {
+            return;
+        }
+        self.recall.fetched.insert(id, fetched);
         if self.recall.memory.bots.get(&id).map(Vec::as_slice) == Some(bots) {
             return;
         }
         self.recall.memory.bots.insert(id, bots.to_vec());
         self.save_recall(cx);
+    }
+
+    /// Caches a session's bot list when it is newer than the cached one.
+    pub(super) fn cache_session_bots(
+        &mut self,
+        id: Uuid,
+        app: &Entity<ElseApp>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(at) = app.read(cx).listed_at() else {
+            return;
+        };
+        if self
+            .recall
+            .fetched
+            .get(&id)
+            .is_some_and(|known| *known >= at)
+        {
+            return;
+        }
+        if let Some((at, bots)) = app.read(cx).switcher_bots() {
+            self.cache_bots(id, &bots, at, cx);
+        }
+    }
+
+    /// Keeps keyboard focus in an open switcher when a switch or a bot list
+    /// lands behind it, and returns focus there once it closes.
+    pub(super) fn reclaim_switcher_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(switcher) = &mut self.switcher else {
+            return;
+        };
+        let input = switcher.input.read(cx).focus_handle(cx);
+        if input.is_focused(window) {
+            return;
+        }
+        if let Some(focused) = window.focused(cx) {
+            switcher.restore = focused;
+        }
+        input.focus(window, cx);
     }
 
     /// Records an opened item and saves the switcher's memory shortly after.
@@ -274,55 +333,31 @@ impl Shell {
     }
 
     /// Every saved server in rail order with its bots: a session's live list
-    /// first, then the last background check, then what an earlier launch saw.
+    /// when it has one, otherwise the newest list cached from any source.
     fn switcher_index(&mut self, cx: &mut Context<Self>) -> Index {
-        let mut changed = false;
         let mut servers = Vec::with_capacity(self.registry.servers.len());
         for saved in &self.registry.servers {
             let session = match &self.active {
                 Some(active) if active.id == saved.id => Some(active),
                 _ => self.inactive.get(&saved.id),
             };
-            let seen = session
+            let bots = session
                 .and_then(|session| session.app.read(cx).switcher_bots())
-                .or_else(|| {
-                    self.servers
-                        .entries
-                        .get(&saved.id)
-                        .and_then(|entry| entry.bots.clone())
-                });
-            let bots = match seen {
-                Some(bots) => {
-                    if self.recall.memory.bots.get(&saved.id) != Some(&bots) {
-                        self.recall.memory.bots.insert(saved.id, bots.clone());
-                        changed = true;
-                    }
-                    bots
-                }
-                None => self
-                    .recall
-                    .memory
-                    .bots
-                    .get(&saved.id)
-                    .cloned()
-                    .unwrap_or_default(),
-            };
+                .map(|(_, bots)| bots)
+                .or_else(|| self.recall.memory.bots.get(&saved.id).cloned())
+                .unwrap_or_default();
             servers.push(qs::Server {
                 id: saved.id,
                 name: saved.name.clone(),
                 bots,
             });
         }
-        let known = |id: &Uuid| self.registry.find(*id).is_some();
-        let before = self.recall.memory.bots.len() + self.recall.memory.recents.len();
-        self.recall.memory.bots.retain(|id, _| known(id));
         let index = Index { servers };
-        self.recall
-            .memory
-            .recents
-            .retain(|target| index.contains(*target));
-        changed |= before != self.recall.memory.bots.len() + self.recall.memory.recents.len();
-        if changed {
+        let memory = &mut self.recall.memory;
+        let before = (memory.bots.len(), memory.recents.len());
+        memory.bots.retain(|id, _| index.server(*id).is_some());
+        memory.recents.retain(|target| index.contains(*target));
+        if before != (memory.bots.len(), memory.recents.len()) {
             self.save_recall(cx);
         }
         index
