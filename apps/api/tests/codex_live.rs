@@ -577,6 +577,22 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_newer_owner_message_joins_a_running_codex_reply() {
+    if !live() {
+        eprintln!("SKIPPED: set ELSE_LIVE_CODEX=1 to run live Codex checks");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let db = Arc::new(TestDb::migrated().await);
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let app = codex_app(db, &data);
+    common::steer::joins_mid_tool_and_mid_text(&app, "codex", true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn codex_retrieves_a_saved_fact_through_memory_tools() {
     if !live() {
         eprintln!("SKIPPED: set ELSE_LIVE_CODEX=1 to run live Codex checks");
