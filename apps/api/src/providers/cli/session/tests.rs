@@ -71,6 +71,8 @@ pub(crate) struct Log {
     pub calls: Mutex<Vec<String>>,
     pub sessions: Mutex<Vec<SessionState>>,
     pub fenced: std::sync::atomic::AtomicBool,
+    /// Steered messages [`TurnSink::steers`] hands out, once each.
+    pub steers: Mutex<Vec<crate::app::providers::Steer>>,
 }
 
 impl Log {
@@ -115,6 +117,15 @@ impl TurnSink for Log {
     }
     async fn reported(&self, settings: &Value, native_turn: &str) -> Result<(), Fenced> {
         self.push(format!("reported:{}:{native_turn}", settings["model"]))
+    }
+    async fn steers(&self) -> Vec<crate::app::providers::Steer> {
+        std::mem::take(&mut *self.steers.lock().unwrap())
+    }
+    async fn steer_sending(&self, turn_id: Uuid) -> Result<bool, Fenced> {
+        self.push(format!("steer-sending:{turn_id}")).map(|()| true)
+    }
+    async fn steered(&self, turn_id: Uuid) -> Result<(), Fenced> {
+        self.push(format!("steered:{turn_id}"))
     }
 }
 

@@ -386,19 +386,26 @@ pub enum Gate {
     Denied(QuestionInfo),
 }
 
+/// Whether the owner's chat message of `turn_id`, or one the provider took
+/// into that running turn as a steer, contains `quote`.
 pub(crate) async fn owner_message_quotes(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
     quote: &str,
 ) -> Result<bool, sqlx::Error> {
-    let source: Option<String> = sqlx::query_scalar(
+    let sources: Vec<String> = sqlx::query_scalar(
         "SELECT i.text FROM turns t JOIN items i ON i.id = t.owner_item_id
-         WHERE t.id = ?1 AND i.kind = 'user'",
+         WHERE t.id = ?1 AND i.kind = 'user'
+         UNION ALL
+         SELECT i.text FROM turn_steers s
+         JOIN turns t ON t.id = s.turn_id
+         JOIN items i ON i.id = t.owner_item_id AND i.kind = 'user'
+         WHERE s.into_turn_id = ?1 AND s.status = 'delivered'",
     )
     .bind(turn_id)
-    .fetch_optional(&mut *conn)
+    .fetch_all(&mut *conn)
     .await?;
-    Ok(source.is_some_and(|text| text.contains(quote)))
+    Ok(sources.iter().any(|text| text.contains(quote)))
 }
 
 /// Decide a destructive or external action, atomically: a broad or routine

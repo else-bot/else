@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::app::messages::{MessagePart, Reaction};
 use crate::app::providers::{HistoryEntry, Profile, SessionState, TurnInput};
+use crate::db::steers::STEERED;
 
 /// Where a turn is in its life, as stored in `turns.status`.
 #[derive(
@@ -130,6 +131,9 @@ pub struct TurnRecord {
     pub finished_at: Option<DateTime<Utc>>,
     pub reaction: Option<Json<Reaction>>,
     pub attempt: i32,
+    /// The running reply this queued message joined
+    /// ([`crate::db::steers`]).
+    pub steered_into: Option<Uuid>,
     /// The bot's requests for secrets during this turn (metadata only).
     #[sqlx(skip)]
     pub secret_requests: Vec<crate::db::secret_requests::RequestInfo>,
@@ -166,6 +170,7 @@ pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id,
     t.owner_item_id AS source_item_id, t.provider_id, t.profile_revision, t.profile, t.status,
     t.error_code, t.error_message, t.effect_uncertain, t.created_at, t.started_at, t.finished_at, t.attempt,
     (SELECT i.reaction FROM items i WHERE i.id = t.owner_item_id) AS reaction,
+    (SELECT s.into_turn_id FROM turn_steers s WHERE s.turn_id = t.id) AS steered_into,
     (SELECT json_object('routine_id', lower(hex(r.routine_id)), 'name', r.name, 'due_at', r.due_at,
                         'reminder', json(iif(o.run_at IS NULL, 'false', 'true')))
      FROM routine_runs r JOIN routines o ON o.id = r.routine_id WHERE r.turn_id = t.id) AS routine";
@@ -344,6 +349,9 @@ pub struct Accepted {
     /// delegated tasks it took over before they parked. Each is
     /// `cancelling` and must be interrupted.
     pub preempted: Vec<Uuid>,
+    /// The running turn this message joined instead of stopping it; its
+    /// attempt must be told to take the message.
+    pub steered_into: Option<Uuid>,
 }
 
 pub struct SendRequest<'a> {
@@ -360,6 +368,9 @@ pub struct SendRequest<'a> {
     /// The provider the turn is bound to.
     pub provider_id: &'a str,
     pub uses_profile: bool,
+    /// Whether the provider can take a newer owner message into its running
+    /// turn ([`crate::app::providers::Provider::steers`]).
+    pub steers: bool,
     /// The outgoing draft open in the app when the owner sent this
     /// message, with their unsaved edits (part of the request hash).
     pub open_draft: Option<&'a crate::db::outgoing_drafts::Attachment>,
@@ -457,6 +468,7 @@ pub async fn accept(
             turn,
             item,
             preempted: Vec::new(),
+            steered_into: None,
         });
     }
     if let Some(reaction) = req.reaction {
@@ -574,13 +586,40 @@ pub async fn accept(
                 AnswerError::Db(err) => AcceptError::Db(err),
             })?;
     }
-    let preempted = match preemption {
-        Preemption::Cancel => {
+    // A plain request joins the reply still running; anything the running
+    // attempt cannot take as text (files, a reaction, an open draft, an
+    // answer to an ask, a setup message) stops it as before.
+    let steerable = preemption == Preemption::Cancel
+        && req.steers
+        && !req.hidden
+        && req.reaction.is_none()
+        && req.open_draft.is_none()
+        && req.answers_notice.is_none()
+        && files.is_empty();
+    let steered_into = if steerable {
+        crate::db::steers::target(
+            &mut tx,
+            req.bot_id,
+            conversation_id,
+            turn_no,
+            req.provider_id,
+            profile.as_ref().map(|(revision, _)| *revision),
+        )
+        .await?
+    } else {
+        None
+    };
+    let preempted = match (steered_into, preemption) {
+        (Some(into), _) => {
+            crate::db::steers::record(&mut tx, turn_id, into).await?;
+            Vec::new()
+        }
+        (None, Preemption::Cancel) => {
             take_conversation(&mut tx, req.bot_id, conversation_id, turn_no, turn_id).await?
         }
         // Running turns finish first; settle_deferred takes over once the
         // pause ends.
-        Preemption::Defer => Vec::new(),
+        (None, Preemption::Defer) => Vec::new(),
     };
     // Show the tasks carried from the turns this message ended.
     crate::db::events::turn_changed(&mut tx, req.bot_id, turn_id).await?;
@@ -592,6 +631,7 @@ pub async fn accept(
         turn,
         item,
         preempted,
+        steered_into,
     })
 }
 
@@ -670,6 +710,7 @@ async fn take_conversation(
     for &active in &preempted {
         crate::db::events::turn_changed(&mut *tx, bot_id, active).await?;
     }
+    crate::db::steers::settle(&mut *tx).await?;
     Ok(preempted)
 }
 
@@ -891,6 +932,7 @@ pub async fn existing_send(
                 turn,
                 item,
                 preempted: Vec::new(),
+                steered_into: None,
             }))
         }
     }
@@ -995,7 +1037,7 @@ pub async fn claim_next(
                                           AND i.kind = 'user') DESC,
                                 t.turn_no) AS queue_rank
             FROM turns t JOIN bots b ON b.id = t.bot_id
-            WHERE t.status = 'queued' AND NOT t.deferred
+            WHERE t.status = 'queued' AND NOT t.deferred AND NOT {STEERED}
               AND b.status = 'active' AND NOT b.cancel_pending
               AND NOT EXISTS (SELECT 1 FROM turns a
                               WHERE a.bot_id = t.bot_id AND a.status IN {ACTIVE_STATUSES})
@@ -1029,6 +1071,7 @@ pub async fn claim_next(
             "UPDATE turns SET status = 'preparing', started_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
                  attempt = attempt + 1
              WHERE id = ?1 AND status = 'queued' AND NOT deferred
+               AND NOT EXISTS (SELECT 1 FROM turn_steers s WHERE s.turn_id = ?1)
                AND NOT EXISTS (SELECT 1 FROM turns a
                                WHERE a.bot_id = ?2 AND a.status IN {ACTIVE_STATUSES})"
         )))
@@ -1135,12 +1178,23 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         .bind(turn.bot_id)
         .fetch_one(&mut *conn)
         .await?;
-    let (text, Json(parts)): (String, Json<Vec<MessagePart>>) = sqlx::query_as(
+    let (mut text, Json(mut parts)): (String, Json<Vec<MessagePart>>) = sqlx::query_as(
         "SELECT text, coalesce(parts, '[]') FROM items WHERE id = ?1 AND kind IN ('user', 'routine', 'connector')",
     )
     .bind(turn.source_item_id)
     .fetch_one(&mut *conn)
     .await?;
+    let steered = crate::db::steers::delivered(&mut conn, turn_id).await?;
+    if !steered.is_empty() {
+        let added = format!(
+            "\n\n[else.bot] The owner added while you worked on this:\n{}",
+            steered.join("\n\n")
+        );
+        text.push_str(&added);
+        if !parts.is_empty() {
+            parts.push(MessagePart::Text { text: added });
+        }
+    }
     let history: Vec<HistoryEntry> = sqlx::query_as::<
         _,
         (
@@ -1416,6 +1470,7 @@ It was not resent; send a follow-up to continue.',
         crate::db::memory::log_turn_end(&mut tx, *turn_id).await?;
         crate::db::delegations::cancel_for_root(&mut tx, *turn_id).await?;
     }
+    crate::db::steers::settle(&mut tx).await?;
     tx.commit().await?;
     crate::db::stop::settle_all(pool).await?;
     Ok((requeued.len() as u64, uncertain.len() as u64))
@@ -1445,6 +1500,7 @@ pub async fn settle_orphans(pool: &SqlitePool, live: &[Uuid]) -> Result<u64, sql
             .is_empty()
         {
             crate::db::stop::settle(&mut tx, bot_id).await?;
+            crate::db::steers::settle(&mut tx).await?;
             tx.commit().await?;
             settled += 1;
             continue;
@@ -1471,6 +1527,7 @@ pub async fn settle_orphans(pool: &SqlitePool, live: &[Uuid]) -> Result<u64, sql
             crate::db::delegations::cancel_for_root(&mut tx, turn_id).await?;
             crate::db::handoffs::settle_ended(&mut tx, Some(turn_id)).await?;
             crate::db::stop::settle(&mut tx, bot_id).await?;
+            crate::db::steers::settle(&mut tx).await?;
             settled += 1;
         }
         tx.commit().await?;
@@ -1554,6 +1611,7 @@ mod tests {
             requested_provider: Some("synthetic"),
             provider_id: "synthetic",
             uses_profile: false,
+            steers: false,
             open_draft: None,
             answers_notice: None,
         }

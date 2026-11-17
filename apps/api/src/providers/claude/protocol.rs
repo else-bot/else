@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::app::providers::{LimitWindow, TurnOutcome, Usage};
+use crate::app::providers::{LimitWindow, Steer, TurnOutcome, Usage};
 use crate::app::tools::SERVER_NAME;
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 
@@ -33,6 +33,9 @@ pub(super) struct Tracker {
     separate: bool,
     pub(super) text: String,
     activity: bool,
+    /// Steered owner messages written to the CLI and not echoed yet, by the
+    /// UUID their echo carries.
+    steers: HashMap<String, uuid::Uuid>,
 }
 
 fn malformed(what: &str) -> Violation {
@@ -80,6 +83,7 @@ impl Tracker {
             separate: false,
             text: String::new(),
             activity: false,
+            steers: HashMap::new(),
         }
     }
 
@@ -133,13 +137,16 @@ impl Tracker {
         event: &Value,
         events: &mut Vec<Event<ResultInfo>>,
     ) -> Result<(), Violation> {
-        if text(&event["uuid"], "user message")? == Some(self.message_uuid.as_str())
-            && event["isReplay"].as_bool() == Some(true)
-        {
-            events.push(Event::Accepted {
-                model: self.model.clone(),
-                native_turn: self.message_uuid.clone(),
-            });
+        let uuid = text(&event["uuid"], "user message")?;
+        if event["isReplay"].as_bool() == Some(true) {
+            if uuid == Some(self.message_uuid.as_str()) {
+                events.push(Event::Accepted {
+                    model: self.model.clone(),
+                    native_turn: self.message_uuid.clone(),
+                });
+            } else if let Some(turn) = uuid.and_then(|uuid| self.steers.remove(uuid)) {
+                events.push(Event::Steered(turn));
+            }
         }
         let prefix = format!("mcp__{SERVER_NAME}__");
         let blocks = match &event["message"]["content"] {
@@ -337,6 +344,31 @@ impl Protocol for Tracker {
             _ => {}
         }
         Ok(events)
+    }
+
+    /// A steered message is a user line of its own. The CLI takes it at the
+    /// next tool boundary, or as one more native turn after the current
+    /// result, and echoes it either way.
+    fn steer_line(&self, steer: &Steer) -> Option<(String, String)> {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let text = format!(
+            "[else.bot] The owner sent this while you were working. It adds to the work in \
+             progress and cancels nothing: finish everything still asked, including this, unless \
+             it says to stop.\n\n{}",
+            steer.text
+        );
+        let line = super::user_message(&uuid, Value::String(text));
+        Some((uuid, line))
+    }
+
+    fn steer_sent(&mut self, key: String, steer: &Steer) {
+        self.steers.insert(key, steer.turn_id);
+    }
+
+    /// A result before a written steer's echo means the CLI will answer it
+    /// in one more native turn.
+    fn continues(&self, info: &ResultInfo) -> bool {
+        info.success && !self.steers.is_empty()
     }
 
     fn outcome(

@@ -124,4 +124,8 @@ impl Channel for StreamAttempt {
             Interrupt::Signal => self.scope.interrupt(),
         }
     }
+
+    async fn send(&mut self, line: &str) -> Result<(), String> {
+        self.write(line).await.map_err(|e| e.to_string())
+    }
 }

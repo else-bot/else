@@ -514,6 +514,7 @@ impl SinkState {
             crate::db::memory::log_turn_end(&mut tx, self.turn_id).await?;
         }
         crate::db::stop::settle(&mut tx, self.bot_id).await?;
+        crate::db::steers::settle(&mut tx).await?;
         tx.commit().await?;
         if let Some(item_id) = wrote_item {
             self.assistant_item = Some(item_id);
@@ -850,6 +851,48 @@ impl SinkState {
         Ok(())
     }
 
+    async fn steers(&self) -> Vec<crate::app::providers::Steer> {
+        if self.fenced {
+            return Vec::new();
+        }
+        crate::db::steers::pending(&self.pool, self.turn_id)
+            .await
+            .unwrap_or_else(|err| {
+                tracing::warn!(turn = %self.turn_id, error = %err, "loading steered messages failed");
+                Vec::new()
+            })
+    }
+
+    async fn steer_sending(&self, turn_id: Uuid) -> Result<bool, Fenced> {
+        if self.fenced {
+            return Err(Fenced);
+        }
+        crate::db::steers::sending(&self.pool, turn_id, self.turn_id)
+            .await
+            .map_err(|err| {
+                tracing::warn!(turn = %self.turn_id, steered = %turn_id, error = %err, "recording a steered message failed");
+                Fenced
+            })
+    }
+
+    /// The provider took a steered message: text after it starts a new
+    /// assistant item, so the reply reads in order below the message. If
+    /// its delivery cannot be recorded it stays `sending`, so its turn ends
+    /// uncertain rather than running again.
+    async fn steered(&mut self, turn_id: Uuid) -> Result<(), Fenced> {
+        self.end_message().await?;
+        match crate::db::steers::deliver(&self.pool, turn_id, self.turn_id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(turn = %self.turn_id, steered = %turn_id, "a steered message was no longer sending");
+            }
+            Err(err) => {
+                tracing::warn!(turn = %self.turn_id, steered = %turn_id, error = %err, "recording a steered message failed");
+            }
+        }
+        Ok(())
+    }
+
     async fn end_message(&mut self) -> Result<(), Fenced> {
         self.flush().await?;
         if self.pending.is_empty() {
@@ -959,6 +1002,21 @@ impl TurnSink for SqliteSink {
     async fn end_message(&self) -> Result<(), Fenced> {
         self.state
             .call_async(|state| Box::pin(state.end_message()))
+            .await
+    }
+    async fn steers(&self) -> Vec<crate::app::providers::Steer> {
+        self.state
+            .call_async(|state| Box::pin(state.steers()))
+            .await
+    }
+    async fn steer_sending(&self, turn_id: Uuid) -> Result<bool, Fenced> {
+        self.state
+            .call_async(move |state| Box::pin(state.steer_sending(turn_id)))
+            .await
+    }
+    async fn steered(&self, turn_id: Uuid) -> Result<(), Fenced> {
+        self.state
+            .call_async(move |state| Box::pin(state.steered(turn_id)))
             .await
     }
 }

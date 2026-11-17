@@ -80,6 +80,7 @@ pub fn turn_json(turn: &TurnRecord) -> Value {
         "started_at": turn.started_at,
         "finished_at": turn.finished_at,
         "reaction": turn.reaction.as_ref().map(|reaction| reaction.0),
+        "steered_into": turn.steered_into,
         "secret_requests": turn.secret_requests,
         "social_setups": turn.social_setups,
         "skill_installs": turn.skill_installs,

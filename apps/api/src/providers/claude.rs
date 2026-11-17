@@ -417,6 +417,10 @@ impl Provider for Claude {
         true
     }
 
+    fn steers(&self) -> bool {
+        true
+    }
+
     fn validate_profile(&self, profile: &Profile) -> Result<(), String> {
         DEFINITION.validate(profile)
     }
