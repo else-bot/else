@@ -64,16 +64,6 @@ pub(crate) fn source_summary(bot: &crate::api::BotUsage) -> String {
         .join(" · ")
 }
 
-/// "this week" → "This week".
-pub(crate) fn sentence(text: &str) -> SharedString {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect::<String>())
-        .unwrap_or_default()
-        .into()
-}
-
 pub(crate) fn local_time(value: DateTime<Utc>) -> String {
     value.with_timezone(&Local).format("%H:%M").to_string()
 }
