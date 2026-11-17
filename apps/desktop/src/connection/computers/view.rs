@@ -1,5 +1,6 @@
 use super::*;
 use chrono::{DateTime, Utc};
+use gpui_kit::component::tooltip::Tooltip;
 
 impl Shell {
     pub(in super::super) fn render_computers(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -199,11 +200,11 @@ impl Shell {
             .find(|bot| bot.id == id)
             .map(|bot| bot.avatar)
             .unwrap_or_default();
-        let latest = computer
+        let latest_ref = computer
             .latest_image
             .as_deref()
-            .or(report.latest_image.as_deref())
-            .unwrap_or("the latest image");
+            .or(report.latest_image.as_deref());
+        let latest = latest_ref.map_or_else(|| "the latest image".into(), image_label);
         let subline = h_flex()
             .flex_wrap()
             .gap_1p5()
@@ -221,15 +222,28 @@ impl Shell {
             .child("·")
             .child(
                 div()
+                    .id(SharedString::from(format!("computer-image-{id}")))
+                    .min_w_0()
+                    .truncate()
                     .font_family(theme.mono_font_family.clone())
-                    .child(computer.image.clone()),
+                    .child(image_label(&computer.image))
+                    .tooltip(full_ref(computer.image.clone())),
             )
             .when(computer.outdated(), |row| {
-                row.child(pill(
-                    format!("↑ {latest}"),
-                    theme.warning,
-                    theme.warning.opacity(0.14),
-                ))
+                row.child(
+                    pill(
+                        format!("↑ {latest}"),
+                        theme.warning,
+                        theme.warning.opacity(0.14),
+                    )
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .truncate()
+                    .id(SharedString::from(format!("computer-latest-{id}")))
+                    .when_some(latest_ref, |pill, image| {
+                        pill.tooltip(full_ref(image.to_owned()))
+                    }),
+                )
             });
         let identity = h_flex()
             .id(SharedString::from(format!("computer-bot-{id}")))
@@ -391,6 +405,10 @@ impl Shell {
         }
         card
     }
+}
+
+fn full_ref(image: String) -> impl Fn(&mut Window, &mut App) -> AnyView {
+    move |window, cx| Tooltip::new(image.clone()).build(window, cx)
 }
 
 fn pill(text: String, color: Hsla, background: Hsla) -> Div {
