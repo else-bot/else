@@ -97,16 +97,93 @@ fn yes() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+/// The models a provider applies, each with its own efforts and tiers.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(from = "WireCatalog")]
 pub struct Catalog {
-    #[serde(default)]
-    pub models: Vec<String>,
-    #[serde(default)]
-    pub featured_models: Vec<String>,
-    #[serde(default)]
+    /// Featured models first, then older ones.
+    pub models: Vec<ModelInfo>,
+    /// When the server's CLI listed these; `None` for the bundled list.
+    pub listed_at: Option<String>,
+    /// Why the server's latest ask failed.
+    pub refresh_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub label: String,
     pub efforts: Vec<String>,
-    #[serde(default)]
     pub tiers: Vec<String>,
+    #[serde(default)]
+    pub featured: bool,
+    /// The newest model of the same family, when this one is older.
+    #[serde(default)]
+    pub upgrade: Option<String>,
+}
+
+impl Catalog {
+    pub fn model(&self, id: &str) -> Option<&ModelInfo> {
+        self.models.iter().find(|model| model.id == id)
+    }
+
+    /// Whether the provider applies `choice` exactly.
+    pub fn applies(&self, choice: &ProfileChoice) -> bool {
+        self.model(&choice.model).is_some_and(|model| {
+            model.efforts.contains(&choice.reasoning_effort)
+                && model.tiers.contains(&choice.service_tier)
+        })
+    }
+}
+
+/// The catalog as sent. APIs before per-model details send only the flat
+/// lists, which apply to every model; empty featured models feature all.
+#[derive(Deserialize)]
+struct WireCatalog {
+    #[serde(default)]
+    models: Vec<String>,
+    #[serde(default)]
+    featured_models: Vec<String>,
+    #[serde(default)]
+    efforts: Vec<String>,
+    #[serde(default)]
+    tiers: Vec<String>,
+    #[serde(default)]
+    details: Vec<ModelInfo>,
+    #[serde(default)]
+    listed_at: Option<String>,
+    #[serde(default)]
+    refresh_error: Option<String>,
+}
+
+impl From<WireCatalog> for Catalog {
+    fn from(wire: WireCatalog) -> Self {
+        let models = if wire.details.is_empty() {
+            let featured =
+                |id: &String| wire.featured_models.is_empty() || wire.featured_models.contains(id);
+            let (first, rest): (Vec<_>, Vec<_>) = wire.models.into_iter().partition(featured);
+            first
+                .into_iter()
+                .map(|id| (id, true))
+                .chain(rest.into_iter().map(|id| (id, false)))
+                .map(|(id, featured)| ModelInfo {
+                    label: crate::profile_picker::model_label(&id),
+                    id,
+                    efforts: wire.efforts.clone(),
+                    tiers: wire.tiers.clone(),
+                    featured,
+                    upgrade: None,
+                })
+                .collect()
+        } else {
+            wire.details
+        };
+        Self {
+            models,
+            listed_at: wire.listed_at,
+            refresh_error: wire.refresh_error,
+        }
+    }
 }
 
 /// A provider and an exact profile for it, as the API takes and reports.

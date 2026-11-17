@@ -17,6 +17,8 @@ pub struct Preferences {
     pub collapsed: HashSet<Option<Uuid>>,
     /// The rules version the owner last opened, per bot.
     pub rules_seen: HashMap<Uuid, i64>,
+    /// The models the owner has seen in a model picker, per provider.
+    pub models_seen: HashMap<String, HashSet<String>>,
 }
 
 impl Default for Preferences {
@@ -28,6 +30,7 @@ impl Default for Preferences {
             category_order: Vec::new(),
             collapsed: HashSet::new(),
             rules_seen: HashMap::new(),
+            models_seen: HashMap::new(),
         }
     }
 }
@@ -58,6 +61,30 @@ impl Preferences {
         } else {
             Self::load(path)
         }
+    }
+
+    /// The (provider, model) pairs listed since the owner last opened a
+    /// model picker, marking every listed model seen. A provider seen for
+    /// the first time has none, so a new install shows no badges.
+    pub fn see_models(&mut self, caps: &crate::api::Capabilities) -> HashSet<(String, String)> {
+        let mut new = HashSet::new();
+        for provider in &caps.providers {
+            let listed = provider.catalog.models.iter().map(|model| model.id.clone());
+            match self.models_seen.get_mut(&provider.id) {
+                Some(seen) => {
+                    for model in listed {
+                        if seen.insert(model.clone()) {
+                            new.insert((provider.id.clone(), model));
+                        }
+                    }
+                }
+                None => {
+                    self.models_seen
+                        .insert(provider.id.clone(), listed.collect());
+                }
+            }
+        }
+        new
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -131,6 +158,29 @@ mod tests {
             Preferences::load_for_server(&store, second, false).category_order,
             unrelated.category_order
         );
+    }
+
+    #[test]
+    fn models_listed_since_the_last_picker_are_new_once() {
+        let caps = |models: &[&str]| -> crate::api::Capabilities {
+            serde_json::from_value(serde_json::json!({
+                "providers": [{ "id": "claude", "label": "Claude",
+                    "catalog": { "models": models, "efforts": ["low"] } }],
+                "limits": { "max_text_bytes": 1, "max_bot_name_chars": 1 },
+            }))
+            .unwrap()
+        };
+        let mut prefs = Preferences::default();
+        assert!(
+            prefs.see_models(&caps(&["claude-fable-5-1"])).is_empty(),
+            "a first look marks nothing new"
+        );
+        let new = prefs.see_models(&caps(&["claude-fable-5-2", "claude-fable-5-1"]));
+        assert_eq!(
+            new,
+            HashSet::from([("claude".to_owned(), "claude-fable-5-2".to_owned())])
+        );
+        assert!(prefs.see_models(&caps(&["claude-fable-5-2"])).is_empty());
     }
 
     #[test]

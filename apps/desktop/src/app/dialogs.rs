@@ -33,7 +33,8 @@ impl ElseApp {
                 .placeholder("Your assistant's name, e.g. Jarvis")
                 .default_value(current)
         });
-        let picker = cx.new(|_| ProfilePicker::new(caps, caps.defaults.as_ref()));
+        let picker = self.profile_picker(caps, caps.defaults.as_ref(), cx);
+        let picker = cx.new(|_| picker);
         self._welcome_enter =
             Some(
                 cx.subscribe_in(&name, window, |app, _, event: &InputEvent, window, cx| {

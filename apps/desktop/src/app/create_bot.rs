@@ -62,10 +62,12 @@ pub(super) struct CreateFormHolder {
 impl ElseApp {
     pub(super) fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("e.g. Research"));
-        let profile = self
-            .caps
-            .clone()
-            .map(|caps| cx.new(|_| ProfilePicker::new(&caps, caps.defaults.as_ref()).tabs()));
+        let profile = self.caps.clone().map(|caps| {
+            let picker = self
+                .profile_picker(&caps, caps.defaults.as_ref(), cx)
+                .tabs();
+            cx.new(|_| picker)
+        });
         let choices = category_choices(&self.categories);
         let category =
             cx.new(|cx| SelectState::new(choices.clone(), Some(IndexPath::new(0)), window, cx));
