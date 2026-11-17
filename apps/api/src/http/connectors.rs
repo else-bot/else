@@ -1031,7 +1031,10 @@ async fn tool_call(
     if source.is_none() && request.command.sends() {
         return Err(MailError::new("mail_send_needs_approved_draft"));
     }
-    if matches!(request.command, MailCommand::OpenAttachments { .. }) {
+    if matches!(
+        request.command,
+        MailCommand::OpenAttachments { .. } | MailCommand::FindSent { .. }
+    ) {
         return Err(MailError::new("invalid_mail_request"));
     }
     manager

@@ -953,6 +953,7 @@ async fn duplicate_and_uncertain_send_retries_never_repeat_transport_effects() {
                 body: "Done".into(),
                 attachments: vec![],
                 reply_to: None,
+                message_id: None,
             },
         };
         let first = manager

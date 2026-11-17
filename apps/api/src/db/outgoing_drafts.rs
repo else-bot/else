@@ -744,6 +744,11 @@ pub async fn confirm(
     if draft.context_turn_id != Some(turn_id) || draft.context_version != Some(draft.version) {
         return Err(DraftError::NotInContext);
     }
+    // This message approved it before and the send may have gone out: only
+    // a later owner message may send it again.
+    if draft.status == Status::Uncertain && draft.approved_item_id == Some(source) {
+        return Err(DraftError::Settled(draft.status));
+    }
     // This message approved it before and its send failed: it granted
     // always then or never, and the owner may have stopped it since.
     if always.is_some()
@@ -943,6 +948,269 @@ pub async fn after_mail_send(
     let draft = reload(&mut tx, draft_id).await?;
     tx.commit().await?;
     Ok(draft)
+}
+
+/// What a claimed connected email does next.
+#[derive(Debug, Clone)]
+pub enum MailSend {
+    /// Send it, with this Message-ID. The attempt is recorded first.
+    Dispatch { message_id: String },
+    /// An earlier send of it already succeeded: the claim is settled as
+    /// sent, naming that send, and nothing is sent.
+    Sent(Box<OutgoingDraft>),
+    /// Earlier sends that may have gone out (`earlier`, newest first) block
+    /// it: search Sent for `message_id`, then [`record_sent_check`]. `None`
+    /// when an earlier send carried no stable Message-ID to search for.
+    CheckSent {
+        message_id: Option<String>,
+        earlier: Vec<Uuid>,
+    },
+}
+
+/// What a search of the Sent folder found for an earlier, uncertain send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, sqlx::Type)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+pub enum SentCheck {
+    Found,
+    Absent,
+}
+
+/// One mail action that sent, or tried to send, a draft, oldest first.
+#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+pub struct MailAttempt {
+    pub action_id: Uuid,
+    /// The action's status; none when the connector refused it before
+    /// recording it, so nothing was sent.
+    pub status: Option<String>,
+    pub phase: Option<String>,
+    pub reason: Option<String>,
+    pub message_id: Option<String>,
+    pub sent_check: Option<SentCheck>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The mail action this request claimed for a connected email.
+fn claimed_mail(draft: &OutgoingDraft) -> Option<(Uuid, Uuid)> {
+    match (draft.status, draft.delivery.as_deref()) {
+        (
+            Status::Sending,
+            Some(Delivery::Mail {
+                account_id,
+                action_id,
+            }),
+        ) => Some((*account_id, *action_id)),
+        _ => None,
+    }
+}
+
+/// Decide whether a claimed connected email may be sent. An earlier send
+/// that may have gone out, and that Sent was not searched for, blocks it.
+/// The search moves the draft out of `sending`, so the next claim needs a
+/// new approval. Otherwise its attempt is recorded, once, before the mail
+/// connector sends it.
+pub async fn next_mail_send(
+    pool: &SqlitePool,
+    draft_id: Uuid,
+    message_id: &str,
+) -> Result<MailSend, DraftError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let draft = reload(&mut tx, draft_id).await?;
+    let Some((account_id, action_id)) = claimed_mail(&draft) else {
+        return Err(DraftError::Settled(draft.status));
+    };
+    let recorded: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT message_id FROM draft_mail_sends WHERE account_id = ?1 AND action_id = ?2",
+    )
+    .bind(account_id)
+    .bind(action_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(recorded) = recorded {
+        return Ok(MailSend::Dispatch {
+            message_id: recorded.unwrap_or_else(|| message_id.to_owned()),
+        });
+    }
+    let succeeded: Option<Uuid> = sqlx::query_scalar(
+        "SELECT s.action_id FROM draft_mail_sends s JOIN connector_actions a
+           ON a.account_id = s.account_id AND a.action_id = s.action_id
+         WHERE s.draft_id = ?1 AND a.status = 'succeeded'
+         ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1",
+    )
+    .bind(draft_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(earlier) = succeeded {
+        let settled = sqlx::query(
+            "UPDATE outgoing_drafts SET status = 'sent', delivery = ?2,
+                 result_detail = 'An earlier send of it went out. It was not sent again.',
+                 settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE id = ?1 AND status = 'sending'",
+        )
+        .bind(draft_id)
+        .bind(Json(Delivery::Mail {
+            account_id,
+            action_id: earlier,
+        }))
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if settled == 0 {
+            return Err(DraftError::Settled(draft.status));
+        }
+        events::turn_changed(&mut tx, draft.bot_id, draft.turn_id).await?;
+        let draft = reload(&mut tx, draft_id).await?;
+        tx.commit().await?;
+        return Ok(MailSend::Sent(Box::new(draft)));
+    }
+    let unchecked: Vec<(Uuid, Option<String>)> = sqlx::query_as(
+        "SELECT s.action_id, s.message_id
+         FROM draft_mail_sends s JOIN connector_actions a
+           ON a.account_id = s.account_id AND a.action_id = s.action_id
+         WHERE s.draft_id = ?1 AND s.sent_check IS NULL
+           AND a.status IN ('uncertain', 'dispatching')
+         ORDER BY s.created_at DESC, s.rowid DESC",
+    )
+    .bind(draft_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    if !unchecked.is_empty() {
+        let first = unchecked[0].1.clone();
+        let searchable = first.is_some() && unchecked.iter().all(|(_, id)| *id == first);
+        return Ok(MailSend::CheckSent {
+            message_id: first.filter(|_| searchable),
+            earlier: unchecked.into_iter().map(|(id, _)| id).collect(),
+        });
+    }
+    sqlx::query(
+        "INSERT INTO draft_mail_sends (account_id, action_id, draft_id, message_id)
+         VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(account_id)
+    .bind(action_id)
+    .bind(draft_id)
+    .bind(message_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(MailSend::Dispatch {
+        message_id: message_id.to_owned(),
+    })
+}
+
+/// Settle the claim `claimed` of a connected email after searching Sent for
+/// the `earlier` sends [`next_mail_send`] named, without sending it.
+/// `Ok(check)` is what the search found; `Err(reason)` says why there was
+/// no search.
+///
+/// Found: the newest earlier action succeeded and the draft is sent,
+/// naming it. Absent: the draft is uncertain again, naming it, and the next
+/// approval sends. No search: the draft is uncertain and nothing is
+/// recorded, so the next approval must search again. A draft no longer in
+/// that claim, or an earlier send already searched for, changes nothing.
+pub async fn record_sent_check(
+    pool: &SqlitePool,
+    draft_id: Uuid,
+    claimed: Uuid,
+    earlier: &[Uuid],
+    check: Result<SentCheck, String>,
+) -> Result<OutgoingDraft, DraftError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let draft = reload(&mut tx, draft_id).await?;
+    let (Some((account_id, _)), Some(&newest)) = (claimed_mail(&draft), earlier.first()) else {
+        return Ok(draft);
+    };
+    let (status, detail) = match &check {
+        Ok(SentCheck::Found) => (
+            Status::Sent,
+            "Its Sent folder already holds it, so the earlier send went out. It was not sent again."
+                .to_owned(),
+        ),
+        Ok(SentCheck::Absent) => (
+            Status::Uncertain,
+            "Its Sent folder does not hold it, which does not prove the earlier send failed. \
+             Nothing was sent again; it sends only if the owner approves it again."
+                .to_owned(),
+        ),
+        Err(reason) => (
+            Status::Uncertain,
+            format!(
+                "Its Sent folder was not searched: {reason}. Nothing was sent again."
+            ),
+        ),
+    };
+    let moved = sqlx::query(
+        "UPDATE outgoing_drafts SET status = ?2, delivery = ?3, result_detail = ?4,
+             settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE id = ?1 AND status = 'sending' AND json_extract(delivery, '$.via') = 'mail'
+           AND json_extract(delivery, '$.action_id') = ?5",
+    )
+    .bind(draft_id)
+    .bind(status.as_str())
+    .bind(Json(Delivery::Mail {
+        account_id,
+        action_id: newest,
+    }))
+    .bind(
+        detail
+            .chars()
+            .take(outgoing::MAX_DETAIL)
+            .collect::<String>(),
+    )
+    .bind(claimed.to_string())
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if moved == 0 {
+        return Ok(draft);
+    }
+    if let Ok(check) = check {
+        let marked = sqlx::query(
+            "UPDATE draft_mail_sends SET sent_check = ?2,
+                 checked_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE draft_id = ?1 AND sent_check IS NULL
+               AND lower(hex(action_id)) IN (SELECT replace(value, '-', '') FROM json_each(?3))",
+        )
+        .bind(draft_id)
+        .bind(check)
+        .bind(Json(earlier))
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        // Another search already settled one of them, or the newest send
+        // failed after all: keep the claim as it was.
+        let settled = marked != earlier.len() as u64
+            || (check == SentCheck::Found
+                && !crate::connectors::store::found_in_sent(&mut tx, account_id, newest).await?);
+        if settled {
+            tx.rollback().await?;
+            return Ok(reload(&mut *pool.acquire().await?, draft_id).await?);
+        }
+    }
+    events::turn_changed(&mut tx, draft.bot_id, draft.turn_id).await?;
+    let draft = reload(&mut tx, draft_id).await?;
+    tx.commit().await?;
+    Ok(draft)
+}
+
+/// Every mail action that sent, or tried to send, `draft_id`.
+pub async fn mail_attempts(
+    pool: &SqlitePool,
+    draft_id: Uuid,
+) -> Result<Vec<MailAttempt>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT s.action_id, a.status, json_extract(a.result, '$.phase') AS phase,
+                json_extract(a.result, '$.reason') AS reason, s.message_id, s.sent_check,
+                s.created_at
+         FROM draft_mail_sends s LEFT JOIN connector_actions a
+           ON a.account_id = s.account_id AND a.action_id = s.action_id
+         WHERE s.draft_id = ?1 ORDER BY s.created_at, s.rowid",
+    )
+    .bind(draft_id)
+    .fetch_all(pool)
+    .await
 }
 
 pub async fn after_social_send(

@@ -15,8 +15,11 @@ use super::mcp::{Outcome, tool_error, tool_result};
 use crate::app::outgoing::{
     self, ApprovalSource, Content, Delivery, Email, MAX_DETAIL, Message, Platform, Status,
 };
-use crate::connectors::{store, types::MailError};
-use crate::db::outgoing_drafts::{self, DraftError, OutgoingDraft};
+use crate::connectors::{
+    store,
+    types::{MailCommand, MailError},
+};
+use crate::db::outgoing_drafts::{self, DraftError, MailSend, OutgoingDraft, SentCheck};
 use crate::grants::{Grant, Tool};
 
 pub const TOOL_NAMES: &[&str] = &[
@@ -606,19 +609,62 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
                     .connectors
                     .as_ref()
                     .ok_or_else(|| refused(DraftError::NotConnected))?;
-                let result = manager
-                    .execute(
-                        account_id,
-                        grant.bot_id,
-                        grant.turn_id,
-                        Some(action_id),
-                        email.send_command(approved.iter().map(mail_file).collect()),
-                    )
-                    .await;
-                let refusal = result.as_ref().err().map(|err: &MailError| err.code);
-                outgoing_drafts::after_mail_send(&state.db, id, refusal)
+                match outgoing_drafts::next_mail_send(&state.db, id, &email.message_id(row.id))
                     .await
                     .map_err(refused)?
+                {
+                    MailSend::Dispatch { message_id } => {
+                        let result = manager
+                            .execute(
+                                account_id,
+                                grant.bot_id,
+                                grant.turn_id,
+                                Some(action_id),
+                                email.send_command(
+                                    approved.iter().map(mail_file).collect(),
+                                    Some(message_id),
+                                ),
+                            )
+                            .await;
+                        let refusal = result.as_ref().err().map(|err: &MailError| err.code);
+                        outgoing_drafts::after_mail_send(&state.db, id, refusal)
+                            .await
+                            .map_err(refused)?
+                    }
+                    MailSend::Sent(row) => *row,
+                    MailSend::CheckSent {
+                        message_id,
+                        earlier,
+                    } => {
+                        let check =
+                            match message_id {
+                                None => Err("an earlier send carried no Message-ID to search for"
+                                    .to_owned()),
+                                Some(message_id) => manager
+                                    .execute(
+                                        account_id,
+                                        grant.bot_id,
+                                        grant.turn_id,
+                                        None,
+                                        MailCommand::FindSent { message_id },
+                                    )
+                                    .await
+                                    .map(|found| {
+                                        if found["found"] == true {
+                                            SentCheck::Found
+                                        } else {
+                                            SentCheck::Absent
+                                        }
+                                    })
+                                    .map_err(|error| error.reason()),
+                            };
+                        outgoing_drafts::record_sent_check(
+                            &state.db, id, action_id, &earlier, check,
+                        )
+                        .await
+                        .map_err(refused)?
+                    }
+                }
             }
             ConnectedPayload::Social {
                 account_id,
@@ -675,19 +721,29 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
             "The result is not known yet. Call send_draft again later in this request to read it; it never sends twice."
         }
         Status::Failed => "It was not sent. Tell the owner why; they can approve it again in chat.",
+        _ if matches!(row.delivery.as_deref(), Some(Delivery::Mail { .. })) => {
+            "It may have been sent. Tell the owner the detail; never send it again without their new approval."
+        }
         _ => {
             "It may have been sent. Tell the owner to check the destination service; never send it again without their new approval."
         }
     };
     let medium = row.content.noun();
+    let mut result = json!({
+        "status": row.status,
+        "draft_id": row.id,
+        "medium": medium,
+        "detail": row.result_detail,
+        "next": next,
+    });
+    if matches!(row.delivery.as_deref(), Some(Delivery::Mail { .. })) {
+        let attempts = outgoing_drafts::mail_attempts(&state.db, row.id)
+            .await
+            .map_err(|err| refused(err.into()))?;
+        result["sends"] = json!(attempts);
+    }
     Ok((
-        tool_result(json!({
-            "status": row.status,
-            "draft_id": row.id,
-            "medium": medium,
-            "detail": row.result_detail,
-            "next": next,
-        })),
+        tool_result(result),
         Some(format!(
             "{medium} {} {} through its connected account",
             row.id,
