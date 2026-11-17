@@ -11,6 +11,8 @@ use super::turns::{ACTIVE_STATUSES, TurnStatus};
 use crate::actor::Actor;
 use crate::app::providers::{Fenced, SessionState, TurnInput, TurnOutcome, TurnSink};
 
+mod steers;
+
 /// Flush buffered provider text at least this often or at this size.
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 pub const FLUSH_BYTES: usize = 2048;
@@ -846,48 +848,6 @@ impl SinkState {
             self.flush().await?;
             if self.pending.len() >= FLUSH_BYTES {
                 return Err(Fenced);
-            }
-        }
-        Ok(())
-    }
-
-    async fn steers(&self) -> Vec<crate::app::providers::Steer> {
-        if self.fenced {
-            return Vec::new();
-        }
-        crate::db::steers::pending(&self.pool, self.turn_id)
-            .await
-            .unwrap_or_else(|err| {
-                tracing::warn!(turn = %self.turn_id, error = %err, "loading steered messages failed");
-                Vec::new()
-            })
-    }
-
-    async fn steer_sending(&self, turn_id: Uuid) -> Result<bool, Fenced> {
-        if self.fenced {
-            return Err(Fenced);
-        }
-        crate::db::steers::sending(&self.pool, turn_id, self.turn_id)
-            .await
-            .map_err(|err| {
-                tracing::warn!(turn = %self.turn_id, steered = %turn_id, error = %err, "recording a steered message failed");
-                Fenced
-            })
-    }
-
-    /// The provider took a steered message: text after it starts a new
-    /// assistant item, so the reply reads in order below the message. If
-    /// its delivery cannot be recorded it stays `sending`, so its turn ends
-    /// uncertain rather than running again.
-    async fn steered(&mut self, turn_id: Uuid) -> Result<(), Fenced> {
-        self.end_message().await?;
-        match crate::db::steers::deliver(&self.pool, turn_id, self.turn_id).await {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::info!(turn = %self.turn_id, steered = %turn_id, "a steered message was no longer sending");
-            }
-            Err(err) => {
-                tracing::warn!(turn = %self.turn_id, steered = %turn_id, error = %err, "recording a steered message failed");
             }
         }
         Ok(())
