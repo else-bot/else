@@ -305,7 +305,7 @@ impl Form {
             );
         }
         // The track spans the column; Microsoft 365 shows as "Microsoft" so
-        // five equal segments fit the 560 px column untruncated.
+        // five equal segments fit untruncated when the sheet shrinks.
         form = form.child(providers);
         if self.provider != EmailProvider::Gmail {
             form = form.child(field("Email address", &self.address));

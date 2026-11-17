@@ -161,22 +161,15 @@ impl Shell {
 
     pub(super) fn render_usage(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let mut body = v_flex().w_full().gap_4().text_sm().child(
-            v_flex()
-                .gap_1()
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(15.))
-                        .child("Usage"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child("How much of each AI subscription is used, and which bots use it."),
-                ),
-        );
+        let mut body = v_flex()
+            .w_full()
+            .gap_5()
+            .text_sm()
+            .child(settings::section_heading(
+                "Usage",
+                "How much of each AI subscription is used, and which bots use it.",
+                cx,
+            ));
         let (view, report, error) = match self.usage.as_ref().map(|view| (view, &view.state)) {
             None | Some((_, Loaded::Loading(_))) => {
                 return body.child("Loading usage…").into_any_element();
@@ -210,6 +203,7 @@ impl Shell {
         };
         if report.providers.is_empty() {
             return body
+                .flex_1()
                 .child(settings::empty_state(
                     IconName::Gauge,
                     "No usage yet",
