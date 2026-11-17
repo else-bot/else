@@ -8,7 +8,9 @@ use crate::usage_ui::Loaded;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::h_flex;
-use model::{Action, action, gb, ordinal, queue_active, queue_line, summary, upgrade_count};
+use model::{
+    Action, action, gb, image_label, ordinal, queue_active, queue_line, summary, upgrade_count,
+};
 use std::time::Duration;
 
 const REFRESH: Duration = Duration::from_secs(3);

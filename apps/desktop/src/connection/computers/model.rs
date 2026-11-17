@@ -114,6 +114,14 @@ pub(super) fn queue_line(
     Some(text)
 }
 
+pub(super) fn image_label(image: &str) -> String {
+    let name = image.rsplit('/').next().unwrap_or(image);
+    match name.split_once("@sha256:") {
+        Some((repo, digest)) => format!("{repo}@{}", digest.get(..12).unwrap_or(digest)),
+        None => name.into(),
+    }
+}
+
 pub(super) fn ordinal(position: u32) -> String {
     let suffix = match (position % 100, position % 10) {
         (11..=13, _) => "th",
@@ -207,6 +215,25 @@ mod tests {
             (21, "21st"),
         ] {
             assert_eq!(ordinal(number), text);
+        }
+    }
+
+    #[test]
+    fn image_labels_keep_the_name_and_a_short_digest() {
+        for (image, label) in [
+            (
+                "ghcr.io/else-bot/else-guest@sha256:305dd19efe5856762299e5f4554a02a5ccb893107aa",
+                "else-guest@305dd19efe58",
+            ),
+            ("else-guest@sha256:f1bee6", "else-guest@f1bee6"),
+            ("else-guest@sha256:0123456789aé", "else-guest@0123456789aé"),
+            ("else-guest:4", "else-guest:4"),
+            (
+                "ghcr.io/else-bot/else-guest:src-4cc9",
+                "else-guest:src-4cc9",
+            ),
+        ] {
+            assert_eq!(image_label(image), label);
         }
     }
 }
