@@ -168,19 +168,35 @@ pub async fn create(
     Ok(handoff(row))
 }
 
-/// Withdraw the bot's pending request, when the owner messages it or the
-/// same request asks again. The turn that waits on it continues and learns it was
+/// Withdraw the bot's pending request, when the same request asks again. The turn that waits on it continues and learns it was
 /// skipped. A request the owner already took over stays theirs.
 pub async fn skip_pending(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<(), sqlx::Error> {
-    let skipped: Option<Uuid> = sqlx::query_scalar(
+    skip(conn, "bot_id = ?1", bot_id).await
+}
+
+/// Withdraw the pending request of turn `turn_id`, when an owner message
+/// joins that turn.
+pub async fn skip_pending_of(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    skip(conn, "turn_id = ?1", turn_id).await
+}
+
+async fn skip(
+    conn: &mut SqliteConnection,
+    owner: &'static str,
+    id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let skipped: Option<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "UPDATE computer_handoffs SET status = 'skipped',
              settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE bot_id = ?1 AND status = 'pending' RETURNING turn_id",
-    )
-    .bind(bot_id)
+         WHERE {owner} AND status = 'pending' RETURNING bot_id, turn_id"
+    )))
+    .bind(id)
     .fetch_optional(&mut *conn)
     .await?;
-    if let Some(turn_id) = skipped {
+    if let Some((bot_id, turn_id)) = skipped {
         super::turns::continue_waiting(conn, turn_id).await?;
         events::turn_changed(conn, bot_id, turn_id).await?;
     }

@@ -2952,6 +2952,37 @@ async fn owner_messages_join_a_task_waiting_on_its_card_only_on_its_provider() {
     );
 }
 
+#[tokio::test]
+async fn joining_a_reply_leaves_another_replys_handoff_pending() {
+    let db = TestDb::migrated().await;
+    let (main, root, _child, _outbound) = seed(&db).await;
+    owner_reply(&db, root).await;
+    set_status(&db, root, "waiting").await;
+    let handoff = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO computer_handoffs (id, bot_id, turn_id, attempt, reason)
+         SELECT ?1, bot_id, id, 1, 'Log in to the mail account.' FROM turns WHERE id = ?2",
+    )
+    .bind(handoff)
+    .bind(root)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let open = else_api::db::turns::Admission::Open;
+    let codex = follow_up_with(&db, main, "codex", open).await;
+    assert_eq!(steered_into(&db, codex).await, None);
+
+    let joined = follow_up_with(&db, main, "codex", open).await;
+
+    assert_eq!(steered_into(&db, joined).await, Some(codex));
+    let status: String = sqlx::query_scalar("SELECT status FROM computer_handoffs WHERE id = ?1")
+        .bind(handoff)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "pending", "the handoff belongs to the older reply");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_follow_up_joins_the_reply_that_receives_its_tasks_outcome() {
     let db = TestDb::migrated().await;

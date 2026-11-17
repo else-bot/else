@@ -102,8 +102,7 @@ impl Placement {
 ///    provider whose card waits on the owner;
 /// 3. otherwise it queues.
 ///
-/// Joining skips the target's pending questions and the bot's pending
-/// computer handoff, as an owner who types instead of clicking does, and
+/// Joining skips the target's pending questions and computer handoff, as an owner who types instead of clicking does, and
 /// continues a waiting target at once with every other hold kept. Runs in
 /// the accepting immediate transaction.
 pub async fn place(
@@ -131,7 +130,7 @@ pub async fn place(
     .bind(target.id)
     .execute(&mut *conn)
     .await?;
-    super::computer_handoffs::skip_pending(&mut *conn, bot_id).await?;
+    super::computer_handoffs::skip_pending_of(&mut *conn, target.id).await?;
     if target.status == TurnStatus::Waiting {
         super::turns::continue_waiting(&mut *conn, target.id).await?;
     }
