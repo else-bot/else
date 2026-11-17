@@ -41,6 +41,16 @@ pub enum Status {
 /// the scheduler must not claim it.
 pub const STEERED: &str = "EXISTS (SELECT 1 FROM turn_steers s WHERE s.turn_id = t.id)";
 
+/// SQL expression: how many turns of the bot that the SQL expression `bot`
+/// names wait to be claimed. A joined message is never claimed, so it does
+/// not count toward the queue limit.
+pub fn queued_runs(bot: &str) -> String {
+    format!(
+        "(SELECT count(*) FROM turns q WHERE q.bot_id = {bot} AND q.status = 'queued'
+          AND NOT EXISTS (SELECT 1 FROM turn_steers s WHERE s.turn_id = q.id))"
+    )
+}
+
 /// SQL condition on `turns t`: the turn waits on an owner card (question,
 /// secret, draft, connection, skill install, or computer handoff).
 pub const WAITS_ON_OWNER: &str = "t.id IN (
