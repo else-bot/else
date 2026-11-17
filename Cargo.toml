@@ -44,6 +44,6 @@ unused_dependencies = "warn"
 [profile.dev]
 debug = 0
 
-# Table scrollbar (#460), pinned until it lands upstream.
+# Table scrollbar (#460) and wrapped-row selection (#485), pinned until they land upstream.
 [patch.crates-io]
-gpui-base = { git = "https://github.com/else-bot/gpui-kit", rev = "0320269eb05b853bda23dec2acced712fa963f5b" }
+gpui-base = { git = "https://github.com/else-bot/gpui-kit", rev = "f7ea1221e882d424263727596b909c040534b2de" }
