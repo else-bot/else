@@ -88,20 +88,22 @@ pub enum Standing {
 pub enum GrantReach {
     /// The owner's own chat request: every saved grant.
     OwnerChat,
-    /// Work delegated for an owner request, or a scheduled routine run.
+    /// A scheduled routine run, or work delegated for an owner request or
+    /// a routine run.
     Tasks,
-    /// Webhook wakes, events, and work delegated outside an owner request.
+    /// Webhook wakes, events, and work delegated for them.
     Nothing,
 }
 
 impl GrantReach {
-    pub fn of(origin: crate::app::providers::Origin, routine_run: bool, owner_chat: bool) -> Self {
+    pub fn of(origin: crate::app::providers::Origin, owner_chat: bool) -> Self {
         use crate::app::providers::Origin;
         match origin {
             Origin::OwnerRequest if owner_chat => Self::OwnerChat,
-            Origin::OwnerRequest => Self::Tasks,
-            Origin::RoutineRun if routine_run => Self::Tasks,
-            _ => Self::Nothing,
+            Origin::OwnerRequest | Origin::RoutineRun => Self::Tasks,
+            Origin::WebhookWake | Origin::ConnectorEvent | Origin::SocialEvent | Origin::Other => {
+                Self::Nothing
+            }
         }
     }
 
@@ -949,6 +951,38 @@ impl Spec {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_routine_run_and_its_tasks_reach_task_grants_and_webhooks_reach_none() {
+        use crate::app::providers::Origin;
+        let reach = |origin, owner_chat| GrantReach::of(origin, owner_chat);
+        assert_eq!(reach(Origin::OwnerRequest, true), GrantReach::OwnerChat);
+        assert_eq!(reach(Origin::OwnerRequest, false), GrantReach::Tasks);
+        for owner_chat in [true, false] {
+            assert_eq!(
+                reach(Origin::RoutineRun, owner_chat),
+                GrantReach::Tasks,
+                "a routine's own turn sits in the owner chat yet never reaches every grant"
+            );
+            for origin in [
+                Origin::WebhookWake,
+                Origin::ConnectorEvent,
+                Origin::SocialEvent,
+                Origin::Other,
+            ] {
+                assert_eq!(reach(origin, owner_chat), GrantReach::Nothing, "{origin:?}");
+            }
+        }
+        let routine = PermissionTarget::Routine {
+            routine_id: uuid::Uuid::nil(),
+            prompt_revision: 1,
+        };
+        assert!(
+            !GrantReach::Tasks.covers(&routine)
+                && !GrantReach::Tasks.covers(&PermissionTarget::Bot),
+            "a routine's destructive grant never carries over to its tasks"
+        );
+    }
 
     #[test]
     fn a_choice_question_parses_only_its_fields_and_letters_its_options() {

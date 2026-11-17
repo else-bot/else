@@ -719,8 +719,8 @@ pub async fn asking_caller(
 }
 
 /// Whether `caller` may show the owner a card: from the owner's own chat, or
-/// from a task another bot delegated for an owner request or a routine run,
-/// whose cards appear in its own bot's chat.
+/// from a task another bot delegated for an owner request, a routine run, or
+/// a webhook wake, whose cards appear in its own bot's chat.
 pub async fn may_ask_owner(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
@@ -730,7 +730,7 @@ pub async fn may_ask_owner(
     Ok(caller.owner_conversation
         || matches!(
             super::delegations::origin(conn, turn_id).await?,
-            Origin::OwnerRequest | Origin::RoutineRun
+            Origin::OwnerRequest | Origin::RoutineRun | Origin::WebhookWake
         ))
 }
 

@@ -122,18 +122,25 @@ fn saved_task_permissions_are_refreshed_even_in_resumed_sessions() {
         .contains("[else.bot saved permissions]"),
         "work delegated for an owner request sees its task scopes"
     );
-    turn.delegation.origin = crate::app::providers::Origin::RoutineRun;
-    assert!(
-        !prompt::turn_packet(
-            &turn,
-            turn.turn_no,
-            None,
-            &skills,
-            &crate::providers::context::for_session(&turn, None)
-        )
-        .0
-        .contains("[else.bot saved permissions]")
-    );
+    for (origin, sees) in [
+        (crate::app::providers::Origin::RoutineRun, true),
+        (crate::app::providers::Origin::WebhookWake, false),
+    ] {
+        turn.delegation.origin = origin;
+        assert_eq!(
+            prompt::turn_packet(
+                &turn,
+                turn.turn_no,
+                None,
+                &skills,
+                &crate::providers::context::for_session(&turn, None)
+            )
+            .0
+            .contains("[else.bot saved permissions]"),
+            sees,
+            "a task delegated by a {origin:?}"
+        );
+    }
 }
 
 #[test]

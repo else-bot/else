@@ -278,20 +278,19 @@ fn delegation_rules(input: &TurnInput) -> String {
             )
         };
         let approvals = if delegation.acts_for_owner() {
-            let (root, saved) = if delegation.origin == crate::app::providers::Origin::OwnerRequest
-            {
-                (
-                    "An owner request",
-                    "Your saved task permissions apply here to the host actions or computer \
-                     tool calls each one covers, declaring the same task_scope: call ask_permission \
-                     before each sensitive host action, with the saved task and target when the work fits.",
-                )
+            use crate::app::providers::Origin;
+            let root = match delegation.origin {
+                Origin::OwnerRequest => "An owner request",
+                Origin::RoutineRun => "A routine run",
+                _ => "A webhook wake",
+            };
+            let saved = if input.grant_reach() != crate::app::questions::GrantReach::Nothing {
+                "Your saved task permissions apply here to the host actions or computer \
+                 tool calls each one covers, declaring the same task_scope: call ask_permission \
+                 before each sensitive host action, with the saved task and target when the work fits."
             } else {
-                (
-                    "A routine run",
-                    "Saved task permissions do not apply to this task: call ask_permission \
-                     before each sensitive host action.",
-                )
+                "Saved task permissions do not apply to this task: call ask_permission \
+                 before each sensitive host action."
             };
             format!(
                 "{handing}{follow_ups} {root} started this task and you act for the \

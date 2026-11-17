@@ -1564,17 +1564,49 @@ async fn a_sub_task_of_a_routine_run_keeps_the_routine_origin() {
     .await
     .unwrap();
     let _ = main;
-    let mut conn = db.pool.acquire().await.unwrap();
-    for turn in [root, child, grandchild] {
-        assert_eq!(
-            else_api::db::delegations::origin(&mut conn, turn)
-                .await
-                .unwrap(),
-            Origin::RoutineRun,
-            "a task's own request item never makes it an owner request"
-        );
-    }
-    drop(conn);
+    let origins = |expected: Origin, why: &'static str| {
+        let pool = db.pool.clone();
+        async move {
+            let mut conn = pool.acquire().await.unwrap();
+            for turn in [root, child, grandchild] {
+                let origin = else_api::db::delegations::origin(&mut conn, turn)
+                    .await
+                    .unwrap();
+                assert_eq!(origin, expected, "{why}");
+            }
+        }
+    };
+    origins(
+        Origin::WebhookWake,
+        "a 'routine' item without a scheduled run is a webhook wake",
+    )
+    .await;
+    let routine = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO routines (id, bot_id, conversation_id, name, prompt, cron, timezone,
+             created_turn_id, created_name, request_hash)
+         SELECT ?1, bot_id, conversation_id, 'Triage', 'Hourly triage', '0 * * * *', 'UTC',
+             id, 'Triage', zeroblob(32) FROM turns WHERE id = ?2",
+    )
+    .bind(routine)
+    .bind(root)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO routine_runs (id, routine_id, due_at, name, turn_id)
+         VALUES (randomblob(16), ?1, '2030-01-01T09:00:00Z', 'Triage', ?2)",
+    )
+    .bind(routine)
+    .bind(root)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    origins(
+        Origin::RoutineRun,
+        "a task's own request item never makes it an owner request",
+    )
+    .await;
     assert!(
         else_api::db::turns::claim_next(&db.pool, &[], false)
             .await

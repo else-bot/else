@@ -549,8 +549,13 @@ impl ElseApp {
         let footer = super::action_card::footer()
             .when(draft.kind.is_some() && draft.can_approve, |row| {
                 row.note(format!(
-                    "Approve always also approves later {} without asking.",
-                    draft.content.kind_label()
+                    "Approve always also approves later {} without asking.{}",
+                    draft.content.kind_label(),
+                    if draft.content.sends_as_owner() {
+                        " They go out from your own account, to this chat only."
+                    } else {
+                        ""
+                    }
                 ))
             })
             .child(

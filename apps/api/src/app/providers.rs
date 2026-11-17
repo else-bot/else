@@ -209,11 +209,7 @@ pub struct InstalledMcp {
 
 impl TurnInput {
     pub fn grant_reach(&self) -> super::questions::GrantReach {
-        super::questions::GrantReach::of(
-            self.delegation.origin,
-            matches!(self.run, Some(SavedRun::Routine(_))),
-            !self.delegation.delegated_task(),
-        )
+        super::questions::GrantReach::of(self.delegation.origin, !self.delegation.delegated_task())
     }
 }
 
@@ -322,8 +318,10 @@ pub use super::questions::{Choice as QuestionChoice, Outcome as QuestionOutcome}
 pub enum Origin {
     /// An owner message in the bot's owner conversation.
     OwnerRequest,
-    /// A scheduled run of a saved routine, or a webhook wake.
+    /// A scheduled run of a saved routine.
     RoutineRun,
+    /// A webhook wake: a saved prompt an outside caller triggered.
+    WebhookWake,
     ConnectorEvent,
     SocialEvent,
     /// Anything else, such as the greeting that opens a conversation.
@@ -391,11 +389,15 @@ impl DelegationContext {
     }
 
     /// Work done for the owner: the bot's own conversation, or a task another
-    /// bot delegated for an owner request or a routine run, which may ask the
-    /// owner itself. It may use mail and social tools and show the owner
-    /// cards, which a task shows in its own bot's chat.
+    /// bot delegated for an owner request, a routine run, or a webhook wake,
+    /// which may ask the owner itself. It may use mail and social tools and
+    /// show the owner cards, which a task shows in its own bot's chat.
     pub fn acts_for_owner(&self) -> bool {
-        !self.delegated_task() || matches!(self.origin, Origin::OwnerRequest | Origin::RoutineRun)
+        !self.delegated_task()
+            || matches!(
+                self.origin,
+                Origin::OwnerRequest | Origin::RoutineRun | Origin::WebhookWake
+            )
     }
 
     /// A bot manages its own routines for work rooted in an owner message,

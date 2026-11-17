@@ -1172,7 +1172,20 @@ pub async fn origin(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Origin
     .await?;
     Ok(match source.as_deref() {
         Some("user") => Origin::OwnerRequest,
-        Some("routine") => Origin::RoutineRun,
+        // A webhook wake also starts from a 'routine' item; only a
+        // routine_runs row makes it a scheduled run.
+        Some("routine") => {
+            let scheduled: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM routine_runs WHERE turn_id = ?1)")
+                    .bind(top)
+                    .fetch_one(&mut *conn)
+                    .await?;
+            if scheduled {
+                Origin::RoutineRun
+            } else {
+                Origin::WebhookWake
+            }
+        }
         Some("connector") => {
             let social: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM social_deliveries WHERE turn_id=?1)",
