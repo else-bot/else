@@ -470,7 +470,7 @@ impl ElseApp {
         match event {
             LiveEvent::Connected => {
                 self.connection = Connection::Connected;
-                self.sync_skill_cards(window, cx);
+                self.sync_secret_forms(window, cx);
                 self.sync_social_forms(window, cx);
                 if let Some(view) = self.view.as_mut() {
                     view.stream_problem = None;

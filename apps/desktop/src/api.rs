@@ -23,6 +23,8 @@ mod computers;
 pub use computers::*;
 mod usage;
 pub use usage::*;
+mod vault;
+pub use vault::*;
 mod skills;
 pub use skills::*;
 mod mcp;
@@ -835,16 +837,15 @@ impl Client {
             .map(|(_, v)| v["state"].as_str().unwrap_or_default().to_owned())
     }
 
-    /// Answer a bot's secret request: store `env` (exactly the requested
-    /// variables) or, with `None`, decline it. Values are never returned.
+    /// Save requested and owner-added fields, or decline with `None`.
     pub async fn answer_secret(
         self: Arc<Self>,
         bot: Uuid,
         request: Uuid,
-        env: Option<std::collections::BTreeMap<String, String>>,
+        secret: Option<SaveSecret>,
     ) -> Result<(), ClientError> {
-        let (action, body) = match env {
-            Some(env) => ("fulfill", Some(json!({ "env": env }))),
+        let (action, body) = match secret {
+            Some(secret) => ("fulfill", Some(json!(secret))),
             None => ("cancel", None),
         };
         let path = format!("/v1/bots/{bot}/secret-requests/{request}/{action}");
@@ -1236,6 +1237,43 @@ pub(crate) mod tests {
     fn client(origin: Origin) -> Arc<Client> {
         let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
         Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn vault_request_fulfillment_includes_metadata_and_added_fields() {
+        for store in [true, false] {
+            let (origin, server) = serve_once(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .await;
+            let secret = store.then(|| SaveSecret {
+                env: [
+                    ("PASSWORD".into(), "test-password".into()),
+                    ("TOTP_SECRET".into(), "test-seed".into()),
+                ]
+                .into(),
+                description: "X, @owner".into(),
+                website: Some("x.com".into()),
+            });
+            client(origin)
+                .answer_secret(Uuid::nil(), Uuid::nil(), secret)
+                .await
+                .unwrap();
+            let request = server.await.unwrap();
+            assert!(request.starts_with("POST /v1/bots/00000000-0000-0000-0000-000000000000/secret-requests/00000000-0000-0000-0000-000000000000/"));
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            if store {
+                assert!(headers.contains("/fulfill "));
+                let body: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert_eq!(body["description"], "X, @owner");
+                assert_eq!(body["website"], "x.com");
+                assert_eq!(body["env"]["TOTP_SECRET"], "test-seed");
+                assert_eq!(body["env"]["PASSWORD"], "test-password");
+            } else {
+                assert!(headers.contains("/cancel "));
+                assert!(body.is_empty());
+            }
+        }
     }
 
     #[tokio::test]
