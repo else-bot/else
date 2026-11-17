@@ -578,6 +578,9 @@ pub struct Turn {
     pub finished_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub reaction: Option<Reaction>,
+    /// The running reply this message joined. Absent from older servers.
+    #[serde(default)]
+    pub steered_into: Option<Uuid>,
     #[serde(default)]
     pub secret_requests: Vec<SecretRequest>,
     #[serde(default)]

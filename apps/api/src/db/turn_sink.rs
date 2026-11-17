@@ -11,6 +11,8 @@ use super::turns::{ACTIVE_STATUSES, TurnStatus};
 use crate::actor::Actor;
 use crate::app::providers::{Fenced, SessionState, TurnInput, TurnOutcome, TurnSink};
 
+mod steers;
+
 /// Flush buffered provider text at least this often or at this size.
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 pub const FLUSH_BYTES: usize = 2048;
@@ -514,6 +516,7 @@ impl SinkState {
             crate::db::memory::log_turn_end(&mut tx, self.turn_id).await?;
         }
         crate::db::stop::settle(&mut tx, self.bot_id).await?;
+        crate::db::steers::settle(&mut tx).await?;
         tx.commit().await?;
         if let Some(item_id) = wrote_item {
             self.assistant_item = Some(item_id);
@@ -959,6 +962,21 @@ impl TurnSink for SqliteSink {
     async fn end_message(&self) -> Result<(), Fenced> {
         self.state
             .call_async(|state| Box::pin(state.end_message()))
+            .await
+    }
+    async fn steers(&self) -> Vec<crate::app::providers::Steer> {
+        self.state
+            .call_async(|state| Box::pin(state.steers()))
+            .await
+    }
+    async fn steer_sending(&self, turn_id: Uuid) -> Result<bool, Fenced> {
+        self.state
+            .call_async(move |state| Box::pin(state.steer_sending(turn_id)))
+            .await
+    }
+    async fn steered(&self, turn_id: Uuid) -> Result<(), Fenced> {
+        self.state
+            .call_async(move |state| Box::pin(state.steered(turn_id)))
             .await
     }
 }

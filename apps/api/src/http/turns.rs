@@ -208,6 +208,7 @@ async fn accept_send(
         requested_provider: requested,
         provider_id: requested.or(chosen).or(registry.default_id()).unwrap_or(""),
         uses_profile: false,
+        steers: false,
         open_draft: body.open_draft.as_ref(),
         answers_notice: body.answers_notice,
     };
@@ -237,6 +238,7 @@ async fn accept_send(
             }
             request.provider_id = provider.id();
             request.uses_profile = provider.uses_profile();
+            request.steers = provider.steers();
             turns::accept(&state.db, request, preemption)
                 .await
                 .map_err(|err| with_id(err.into()))?
@@ -244,6 +246,9 @@ async fn accept_send(
     };
     for &active in &accepted.preempted {
         state.scheduler.interrupt(active).await;
+    }
+    if let Some(running) = accepted.steered_into {
+        state.scheduler.steer(running).await;
     }
     if accepted.created {
         state.scheduler.wake();

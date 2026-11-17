@@ -5,6 +5,8 @@
 //! returning; SQLite stays authoritative for visible history. Provider
 //! event formats never cross this boundary.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -127,6 +129,9 @@ pub struct TurnInput {
     /// The owner message's ordered parts; empty for plain text. `text` is
     /// their flattening.
     pub parts: Vec<MessagePart>,
+    /// Newer owner messages an earlier attempt of this turn took in as
+    /// steers, oldest first; part of the request when it continues.
+    pub steered: Vec<String>,
     /// Bytes of the files this turn's packet may name: the message's own,
     /// then those of missed history within a budget, newest first.
     pub files: Vec<InputFile>,
@@ -558,6 +563,33 @@ pub trait TurnSink: Send + Sync {
         settings: &serde_json::Value,
         native_turn_id: &str,
     ) -> Result<(), Fenced>;
+    /// Newer owner messages steered into this running turn and not written
+    /// to the provider yet, oldest first.
+    async fn steers(&self) -> Vec<Steer> {
+        Vec::new()
+    }
+    /// Record, before writing it, that steered message `turn_id` goes to
+    /// the provider; after this its delivery is unknown until its echo.
+    /// False when it is no longer pending.
+    async fn steer_sending(&self, turn_id: Uuid) -> Result<bool, Fenced> {
+        let _ = turn_id;
+        Ok(false)
+    }
+    /// The provider took steered message `turn_id` into this turn (its
+    /// echo arrived). Later text starts a new assistant item.
+    async fn steered(&self, turn_id: Uuid) -> Result<(), Fenced> {
+        let _ = turn_id;
+        Ok(())
+    }
+}
+
+/// A newer owner message steered into a running turn, as its attempt
+/// sends it.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct Steer {
+    /// The message's own turn, which ends with the reply that takes it.
+    pub turn_id: Uuid,
+    pub text: String,
 }
 
 /// The owner's stop requests for one attempt. [`Stop::request`] asks the
@@ -565,10 +597,14 @@ pub trait TurnSink: Send + Sync {
 /// when that takes too long: the provider must then stop at once, verify
 /// its cleanup, and return. Its caller keeps awaiting it either way, so
 /// capacity is never released while provider processes may remain.
+///
+/// It also carries the wake for owner messages steered into the running
+/// turn ([`Stop::steer`]); a provider that steers reads them from its sink.
 #[derive(Debug, Clone, Default)]
 pub struct Stop {
     graceful: CancellationToken,
     hard: CancellationToken,
+    steer: Arc<tokio::sync::Notify>,
 }
 
 impl Stop {
@@ -577,7 +613,19 @@ impl Stop {
         Self {
             graceful,
             hard: CancellationToken::new(),
+            steer: Arc::default(),
         }
+    }
+
+    /// A newer owner message joined this turn: wake the attempt to take it.
+    pub fn steer(&self) {
+        self.steer.notify_one();
+    }
+
+    /// Wait for [`Stop::steer`]. Cancellation safe; a wake that came while
+    /// nobody waited is kept.
+    pub async fn steered(&self) {
+        self.steer.notified().await;
     }
 
     pub fn request(&self) {
@@ -644,6 +692,13 @@ pub trait Provider: Send + Sync {
     ) -> Result<String, String> {
         let _ = (request, cancel);
         Err("this provider cannot produce a verified no-tool checkpoint".into())
+    }
+    /// Whether a running turn can take a newer owner message without being
+    /// stopped. Such a provider reads [`TurnSink::steers`] when
+    /// [`Stop::steered`] wakes it and reports each echo through
+    /// [`TurnSink::steered`].
+    fn steers(&self) -> bool {
+        false
     }
     /// Run one turn to a terminal outcome. A stop request must interrupt
     /// the provider; an escalation must end it at once. Either way it

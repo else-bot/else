@@ -768,6 +768,7 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
         .and_then(|e| e.message.clone())
         .unwrap_or_default();
     match turn.status.as_str() {
+        "queued" if turn.steered_into.is_some() => (String::new(), false),
         "queued" => ("Queued".into(), false),
         "preparing" | "sending" | "running" => ("Working".into(), false),
         "waiting" if turn.waits_on_job() => {
@@ -1029,6 +1030,31 @@ mod tests {
         assert_eq!(
             turn_label(&turn),
             ("Waiting for you to connect an account…".into(), false)
+        );
+    }
+
+    #[test]
+    fn a_message_that_joined_the_running_reply_is_not_shown_as_queued() {
+        let queued = |steered_into: serde_json::Value| {
+            serde_json::from_value(serde_json::json!({
+                "id": uuid::Uuid::nil(),
+                "request_id": uuid::Uuid::nil(),
+                "turn_no": 2,
+                "provider_id": "claude",
+                "status": "queued",
+                "error": null,
+                "effect_uncertain": false,
+                "steered_into": steered_into,
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            turn_label(&queued(serde_json::json!(null))),
+            ("Queued".into(), false)
+        );
+        assert_eq!(
+            turn_label(&queued(serde_json::json!(uuid::Uuid::nil()))),
+            (String::new(), false)
         );
     }
 

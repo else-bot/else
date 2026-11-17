@@ -506,6 +506,38 @@ fn completion_requires_a_verified_init_and_a_stop_explains_a_failure() {
 }
 
 #[test]
+fn a_steered_message_is_its_own_line_and_its_echo_names_its_turn() {
+    let mut t = tracker();
+    let steer = crate::app::providers::Steer {
+        turn_id: uuid::Uuid::new_v4(),
+        text: "If they agreed, send the deal.".into(),
+    };
+    let sent: Value = serde_json::from_str(&t.steer_line(&steer).unwrap()).unwrap();
+    let key = steer.turn_id.to_string();
+    assert_eq!(
+        (&sent["type"], &sent["uuid"]),
+        (&json!("user"), &json!(key))
+    );
+    assert!(
+        !t.continues(&info(true, Some(1))),
+        "nothing owed before it is sent"
+    );
+    t.steer_sent(&steer);
+    assert!(
+        t.continues(&info(true, Some(1))),
+        "a result before the echo"
+    );
+    assert!(
+        !t.continues(&info(false, Some(1))),
+        "a failed result ends it"
+    );
+    let echo = json!({"type":"user","uuid":key,"isReplay":true});
+    assert_eq!(t.on(&echo).unwrap(), vec![Event::Steered(steer.turn_id)]);
+    assert!(!t.continues(&info(true, Some(1))));
+    assert!(t.on(&echo).unwrap().is_empty(), "an echo is taken once");
+}
+
+#[test]
 fn an_api_error_fails_the_turn_with_the_clis_message() {
     let mut t = tracker();
     t.on(&init(claude_home::tool_names(), connected())).unwrap();
@@ -589,6 +621,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         bot_name: "GitHub".into(),
         text: "Clean up the stale branches.".into(),
         parts: Vec::new(),
+        steered: Vec::new(),
         files: Vec::new(),
         profile: Some(Profile {
             model: DEFINITION.catalog.models[0].into(),

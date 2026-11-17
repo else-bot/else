@@ -698,7 +698,7 @@ fn request_segments(input: &TurnInput) -> Vec<Segment<'_>> {
     if input.run.is_some() || input.parts.is_empty() {
         return vec![Segment::Text(request_text(input))];
     }
-    input
+    let mut segments: Vec<_> = input
         .parts
         .iter()
         .map(|part| match part {
@@ -709,7 +709,28 @@ fn request_segments(input: &TurnInput) -> Vec<Segment<'_>> {
                 .find(|staged| staged.attachment.id == file.id)
                 .map_or_else(|| Segment::Text(file_reference(file)), Segment::File),
         })
-        .collect()
+        .collect();
+    segments.extend(steered_text(input).map(Segment::Text));
+    segments
+}
+
+/// The framing of an owner message written into the running reply.
+pub fn steer_text(text: &str) -> String {
+    format!(
+        "[else.bot] The owner sent this while you were working. It adds to the work in \
+         progress and cancels nothing: finish everything still asked, including this, unless \
+         it says to stop.\n\n{text}"
+    )
+}
+
+/// The messages an earlier attempt took in as steers, for a continuation.
+fn steered_text(input: &TurnInput) -> Option<String> {
+    (!input.steered.is_empty()).then(|| {
+        format!(
+            "\n\n[else.bot] The owner added while you worked on this:\n{}",
+            input.steered.join("\n\n")
+        )
+    })
 }
 
 /// What this turn asks as text: the owner's message, or a routine run's
@@ -733,7 +754,7 @@ pub fn request_text(input: &TurnInput) -> String {
         time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     };
     match &input.run {
-        None => parts_text(&input.text, &input.parts),
+        None => parts_text(&input.text, &input.parts) + &steered_text(input).unwrap_or_default(),
         Some(SavedRun::Routine(run)) => format!(
             "[else.bot routine] Scheduled run of the routine \"{name}\" (routine_id {id}, due {due}). \
              This is not a new message from the owner: the owner saved this task earlier and asked \

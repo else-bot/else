@@ -2841,6 +2841,7 @@ async fn follow_up_with(
             requested_provider: Some("synthetic"),
             provider_id: "synthetic",
             uses_profile: false,
+            steers: false,
             open_draft: None,
             answers_notice: None,
         },

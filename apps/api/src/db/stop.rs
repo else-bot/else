@@ -252,6 +252,7 @@ pub async fn halt_accepted(
     .bind(KEEPS_WAITS)
     .fetch_optional(&mut *conn)
     .await?;
+    crate::db::steers::settle(&mut *conn).await?;
     if let Some(turn_id) = active {
         events::turn_changed(conn, bot_id, turn_id).await?;
         return Ok(Some(turn_id));

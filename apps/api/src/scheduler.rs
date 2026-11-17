@@ -26,7 +26,7 @@ pub struct Scheduler {
     pool: SqlitePool,
     registry: Registry,
     wake: Notify,
-    running: Actor<HashMap<Uuid, CancellationToken>>,
+    running: Actor<HashMap<Uuid, Stop>>,
     cancel_grace: Duration,
     tasks: TaskTracker,
     grants: Arc<Grants>,
@@ -168,8 +168,23 @@ impl Scheduler {
     pub async fn interrupt(&self, turn_id: Uuid) -> bool {
         self.running
             .call(move |running| match running.get(&turn_id) {
-                Some(token) => {
-                    token.cancel();
+                Some(stop) => {
+                    stop.request();
+                    true
+                }
+                None => false,
+            })
+            .await
+    }
+
+    /// Wake a turn running in this process to take the owner messages
+    /// steered into it. False when it does not run here; its end then
+    /// releases them.
+    pub async fn steer(&self, turn_id: Uuid) -> bool {
+        self.running
+            .call(move |running| match running.get(&turn_id) {
+                Some(stop) => {
+                    stop.steer();
                     true
                 }
                 None => false,
@@ -179,7 +194,7 @@ impl Scheduler {
 
     pub async fn cancellation(&self, turn_id: Uuid) -> Option<CancellationToken> {
         self.running
-            .call(move |running| running.get(&turn_id).cloned())
+            .call(move |running| running.get(&turn_id).map(|stop| stop.token().clone()))
             .await
     }
 
@@ -204,8 +219,8 @@ impl Scheduler {
         }
         self.running
             .call(|running| {
-                for token in running.values() {
-                    token.cancel();
+                for stop in running.values() {
+                    stop.request();
                 }
             })
             .await;
@@ -315,14 +330,14 @@ impl Scheduler {
                     return Err(err);
                 }
             };
-            let token = CancellationToken::new();
+            let stop = Stop::new(CancellationToken::new());
             let this = self.clone();
             self.running
                 .call(move |running| {
-                    running.insert(turn_id, token.clone());
+                    running.insert(turn_id, stop.clone());
                     let tasks = this.tasks.clone();
                     tasks.spawn(async move {
-                        this.execute(turn_id, token).await;
+                        this.execute(turn_id, stop).await;
                         this.grants.revoke_turn(turn_id).await;
                         this.running
                             .call(move |running| running.remove(&turn_id))
@@ -351,7 +366,8 @@ impl Scheduler {
         });
     }
 
-    async fn execute(&self, turn_id: Uuid, cancel: CancellationToken) {
+    async fn execute(&self, turn_id: Uuid, stop: Stop) {
+        let cancel = stop.token().clone();
         let loaded = async {
             let input = turns::input(&self.pool, turn_id).await?;
             let provider_id: String =
@@ -476,7 +492,6 @@ impl Scheduler {
             },
             Some(provider) => {
                 let provider = provider.clone();
-                let stop = Stop::new(cancel.clone());
                 let done = CancellationToken::new();
                 let run = async {
                     let escalation = async {

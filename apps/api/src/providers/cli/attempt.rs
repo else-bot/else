@@ -8,7 +8,7 @@ use tokio::time::Instant;
 
 use super::process::{Finish, Scope, Stderr, last_lines};
 use super::session::PreparedTurn;
-use crate::app::providers::{Stop, TurnOutcome, TurnSink};
+use crate::app::providers::{Fenced, Steer, Stop, TurnOutcome, TurnSink};
 
 pub const TURN_DEADLINE: Duration = Duration::from_secs(30 * 60);
 /// How long an interrupted provider may take to report its terminal result.
@@ -97,6 +97,11 @@ impl Lifecycle {
 
     pub fn running(&self) -> bool {
         matches!(self.phase, Phase::Running { .. })
+    }
+
+    /// Running and not parked, so newer owner messages may join the turn.
+    pub fn takes_steers(&self) -> bool {
+        matches!(self.phase, Phase::Running { park_at: None })
     }
 
     pub fn cause(&self) -> Option<StopCause> {
@@ -196,6 +201,8 @@ pub enum Event<T> {
     /// The provider compacted the native session's context, which may drop
     /// the memory, skills, and context blocks it was given.
     Compacted,
+    /// The provider took the steered owner message of this turn ID.
+    Steered(uuid::Uuid),
     Finished(T),
 }
 
@@ -222,6 +229,26 @@ pub trait Protocol {
         let _ = outcome;
         true
     }
+
+    /// The input line that adds `steer` to the running turn; its echo
+    /// carries the steered turn's ID. `None` when this provider does not
+    /// steer.
+    fn steer_line(&self, steer: &Steer) -> Option<String> {
+        let _ = steer;
+        None
+    }
+
+    /// The line for `steer` reached the provider; its echo is now owed.
+    fn steer_sent(&mut self, steer: &Steer) {
+        let _ = steer;
+    }
+
+    /// Whether the provider still owes an answer to a steered message after
+    /// `terminal`, so the attempt keeps reading instead of ending.
+    fn continues(&self, terminal: &Self::Terminal) -> bool {
+        let _ = terminal;
+        false
+    }
 }
 
 /// Where a running turn's messages come from, and how it is interrupted.
@@ -236,6 +263,47 @@ pub trait Channel: Send {
     /// Ask the provider to end its turn. It may be abandoned midway when the
     /// stop escalates, so it must not hold state the attempt still needs.
     async fn interrupt(&mut self);
+
+    /// Write one input line to the running provider.
+    async fn send(&mut self, line: &str) -> Result<(), String> {
+        let _ = line;
+        Err("this provider takes no input while it runs".into())
+    }
+}
+
+/// Write each owner message steered into the turn and not written yet,
+/// recording each as sending first. A stop request ends the batch at once,
+/// even mid-write; a message whose write failed or was cut off keeps an
+/// unknown delivery, so its turn ends uncertain and is never resent.
+async fn steer<C, P>(channel: &mut C, protocol: &mut P, sink: &dyn TurnSink, stop: &Stop)
+where
+    C: Channel,
+    P: Protocol<Message = C::Message>,
+{
+    for steer in sink.steers().await {
+        let Some(line) = protocol.steer_line(&steer) else {
+            continue;
+        };
+        if stop.is_requested() {
+            return;
+        }
+        match sink.steer_sending(steer.turn_id).await {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(Fenced) => return,
+        }
+        let sent = tokio::select! {
+            sent = channel.send(&line) => sent,
+            () = stop.requested() => Err("stopped while writing".into()),
+        };
+        match sent {
+            Ok(()) => protocol.steer_sent(&steer),
+            Err(err) => {
+                tracing::warn!(steered = %steer.turn_id, error = %err, "writing a steered message failed");
+                return;
+            }
+        }
+    }
 }
 
 /// Ask the provider to stop; false when the stop escalated first. A
@@ -273,6 +341,10 @@ where
                 if life.stop(StopCause::Owner) && !interrupt(channel, stop).await {
                     return Ended::Abandoned(life.abandoned(not_stopped()));
                 }
+                continue;
+            }
+            () = stop.steered(), if life.takes_steers() => {
+                steer(channel, protocol, sink, stop).await;
                 continue;
             }
             () = tokio::time::sleep_until(life.wake_at()) => {
@@ -321,6 +393,12 @@ where
                     Ok(())
                 }
                 Event::Compacted => turn.compacted(sink).await,
+                Event::Steered(turn_id) => sink.steered(turn_id).await,
+                Event::Finished(terminal)
+                    if life.takes_steers() && protocol.continues(&terminal) =>
+                {
+                    Ok(())
+                }
                 Event::Finished(terminal) => {
                     let outcome =
                         life.settled(protocol.outcome(terminal, life.cause(), turn.accepted()));
@@ -400,6 +478,8 @@ mod tests {
         messages: VecDeque<Value>,
         interrupts: usize,
         interrupt_hangs: bool,
+        sent: Vec<String>,
+        send_hangs: bool,
     }
 
     #[async_trait]
@@ -418,6 +498,14 @@ mod tests {
             if self.interrupt_hangs {
                 std::future::pending::<()>().await;
             }
+        }
+
+        async fn send(&mut self, line: &str) -> Result<(), String> {
+            if self.send_hangs {
+                std::future::pending::<()>().await;
+            }
+            self.sent.push(line.to_owned());
+            Ok(())
         }
     }
 
@@ -454,6 +542,8 @@ mod tests {
             messages: messages.iter().cloned().collect(),
             interrupts: 0,
             interrupt_hangs: false,
+            sent: Vec::new(),
+            send_hangs: false,
         }
     }
 
@@ -489,6 +579,163 @@ mod tests {
             ["running", "session", "reported:\"m\":t", "text:a", "text:b"]
         );
         assert_eq!(channel.interrupts, 0);
+    }
+
+    /// [`Plain`] that owes an answer to one steered message until a
+    /// `steered` message echoes it.
+    struct Owing {
+        owed: bool,
+    }
+
+    impl Protocol for Owing {
+        type Message = Value;
+        type Terminal = ();
+
+        fn on(&mut self, message: &Value) -> Result<Vec<Event<()>>, Violation> {
+            if message["kind"] == "steered" {
+                self.owed = false;
+                return Ok(vec![Event::Steered(uuid::Uuid::nil())]);
+            }
+            Plain.on(message)
+        }
+
+        fn outcome(&self, (): (), stopping: Option<StopCause>, accepted: bool) -> TurnOutcome {
+            Plain.outcome((), stopping, accepted)
+        }
+
+        fn continues(&self, (): &()) -> bool {
+            self.owed
+        }
+
+        fn steer_line(&self, steer: &Steer) -> Option<String> {
+            Some(steer.text.clone())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_cuts_off_a_steer_write_that_never_completes() {
+        let input = input();
+        let sink = Log::default();
+        let turn_id = uuid::Uuid::new_v4();
+        *sink.steers.lock().unwrap() = vec![
+            Steer {
+                turn_id,
+                text: "If they agreed, send the deal.".into(),
+            },
+            Steer {
+                turn_id: uuid::Uuid::new_v4(),
+                text: "What is this?".into(),
+            },
+        ];
+        let mut turn = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n".into()));
+        let mut channel = replay(&[json!({"kind": "accept"})]);
+        channel.send_hangs = true;
+        let stop = Stop::default();
+        stop.steer();
+        let owner = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            owner.request();
+        });
+        let started = Instant::now();
+        let ended = drive(
+            &mut channel,
+            &mut Owing { owed: false },
+            &mut turn,
+            &sink,
+            &stop,
+            "P",
+        )
+        .await;
+        assert!(matches!(ended, Ended::Abandoned(_)), "{ended:?}");
+        assert_eq!(channel.interrupts, 1, "the stop reached the provider");
+        assert!(started.elapsed() <= Duration::from_millis(50) + INTERRUPT_GRACE);
+        let marked: Vec<_> = sink
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("steer-sending"))
+            .collect();
+        assert_eq!(
+            marked,
+            [format!("steer-sending:{turn_id}")],
+            "only the message being written is marked; the rest stay pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_result_that_still_owes_a_steered_message_keeps_the_attempt_reading() {
+        let input = input();
+        let sink = Log::default();
+        let mut turn = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n".into()));
+        let mut channel = replay(&[
+            json!({"kind": "accept"}),
+            json!({"kind": "text", "text": "a"}),
+            json!({"kind": "end"}),
+            json!({"kind": "steered"}),
+            json!({"kind": "text", "text": "b"}),
+            json!({"kind": "end"}),
+        ]);
+        let ended = drive(
+            &mut channel,
+            &mut Owing { owed: true },
+            &mut turn,
+            &sink,
+            &Stop::default(),
+            "P",
+        )
+        .await;
+        assert_eq!(
+            ended,
+            Ended::Terminal {
+                outcome: TurnOutcome::Completed,
+                resumable: true
+            }
+        );
+        assert!(
+            channel.messages.is_empty(),
+            "read through the second result"
+        );
+        assert_eq!(
+            sink.calls(),
+            [
+                "running".to_owned(),
+                "session".into(),
+                "reported:\"m\":t".into(),
+                "text:a".into(),
+                format!("steered:{}", uuid::Uuid::nil()),
+                "text:b".into(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_parked_turn_ends_at_its_result_even_while_a_steer_is_owed() {
+        let input = input();
+        let sink = Log::default();
+        let mut turn = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n".into()));
+        let mut channel = replay(&[
+            json!({"kind": "accept"}),
+            json!({"kind": "park"}),
+            json!({"kind": "end"}),
+            json!({"kind": "steered"}),
+        ]);
+        let ended = drive(
+            &mut channel,
+            &mut Owing { owed: true },
+            &mut turn,
+            &sink,
+            &Stop::default(),
+            "P",
+        )
+        .await;
+        assert_eq!(
+            ended,
+            Ended::Terminal {
+                outcome: TurnOutcome::Completed,
+                resumable: true
+            }
+        );
+        assert_eq!(channel.messages.len(), 1, "stopped at the first result");
     }
 
     #[tokio::test]

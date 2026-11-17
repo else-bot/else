@@ -66,6 +66,7 @@ mod social_sessions;
 mod social_triggers;
 mod socials;
 mod sqlite;
+mod steering;
 mod task_permissions;
 mod task_secrets;
 mod tool_permissions;

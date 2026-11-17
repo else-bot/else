@@ -1,10 +1,10 @@
 //! Claude Code's `stream-json` events, validated against the turn's policy.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-use crate::app::providers::{LimitWindow, TurnOutcome, Usage};
+use crate::app::providers::{LimitWindow, Steer, TurnOutcome, Usage};
 use crate::app::tools::SERVER_NAME;
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 
@@ -33,6 +33,9 @@ pub(super) struct Tracker {
     separate: bool,
     pub(super) text: String,
     activity: bool,
+    /// Steered turns whose message was written to the CLI and not echoed
+    /// yet. Each message's UUID is its turn's ID.
+    steers: HashSet<uuid::Uuid>,
 }
 
 fn malformed(what: &str) -> Violation {
@@ -80,6 +83,7 @@ impl Tracker {
             separate: false,
             text: String::new(),
             activity: false,
+            steers: HashSet::new(),
         }
     }
 
@@ -133,13 +137,19 @@ impl Tracker {
         event: &Value,
         events: &mut Vec<Event<ResultInfo>>,
     ) -> Result<(), Violation> {
-        if text(&event["uuid"], "user message")? == Some(self.message_uuid.as_str())
-            && event["isReplay"].as_bool() == Some(true)
-        {
-            events.push(Event::Accepted {
-                model: self.model.clone(),
-                native_turn: self.message_uuid.clone(),
-            });
+        let uuid = text(&event["uuid"], "user message")?;
+        if event["isReplay"].as_bool() == Some(true) {
+            if uuid == Some(self.message_uuid.as_str()) {
+                events.push(Event::Accepted {
+                    model: self.model.clone(),
+                    native_turn: self.message_uuid.clone(),
+                });
+            } else if let Some(turn) = uuid
+                .and_then(|uuid| uuid.parse().ok())
+                .filter(|turn| self.steers.remove(turn))
+            {
+                events.push(Event::Steered(turn));
+            }
         }
         let prefix = format!("mcp__{SERVER_NAME}__");
         let blocks = match &event["message"]["content"] {
@@ -337,6 +347,26 @@ impl Protocol for Tracker {
             _ => {}
         }
         Ok(events)
+    }
+
+    /// A steered message is a user line of its own. The CLI takes it at the
+    /// next tool boundary, or as one more native turn after the current
+    /// result, and echoes it either way.
+    fn steer_line(&self, steer: &Steer) -> Option<String> {
+        Some(super::user_message(
+            &steer.turn_id.to_string(),
+            Value::String(crate::providers::prompt::steer_text(&steer.text)),
+        ))
+    }
+
+    fn steer_sent(&mut self, steer: &Steer) {
+        self.steers.insert(steer.turn_id);
+    }
+
+    /// A result before a written steer's echo means the CLI will answer it
+    /// in one more native turn.
+    fn continues(&self, info: &ResultInfo) -> bool {
+        info.success && !self.steers.is_empty()
     }
 
     fn outcome(
