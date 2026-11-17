@@ -1856,6 +1856,7 @@ async fn background_work_leaves_a_waiting_requests_cards_to_the_owner() {
             body: body.into(),
             account_id: None,
             reply_to: None,
+            attachments: Vec::new(),
         })
     };
     sqlx::query("UPDATE turns SET attempt = 2 WHERE id = ?1")
