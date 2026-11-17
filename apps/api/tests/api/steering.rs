@@ -112,17 +112,17 @@ async fn send(app: &TestApp, bot: &str, text: &str) -> String {
     reply.body["turn"]["id"].as_str().unwrap().to_owned()
 }
 
-async fn turn(app: &TestApp, id: &str) -> (String, Option<String>) {
+async fn status(pool: &sqlx::SqlitePool, turn: Uuid) -> (String, Option<String>) {
     sqlx::query_as("SELECT status, error_code FROM turns WHERE id = ?1")
-        .bind(id.parse::<Uuid>().unwrap())
-        .fetch_one(&app.db.pool)
+        .bind(turn)
+        .fetch_one(pool)
         .await
         .unwrap()
 }
 
-async fn steer_rows(app: &TestApp) -> i64 {
+async fn rows(pool: &sqlx::SqlitePool) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM turn_steers")
-        .fetch_one(&app.db.pool)
+        .fetch_one(pool)
         .await
         .unwrap()
 }
@@ -159,8 +159,11 @@ async fn a_newer_owner_message_joins_the_running_reply() {
 
     assert_eq!(app.wait_turn(&first, ENDED).await, "completed");
     assert_eq!(app.wait_turn(&second, ENDED).await, "completed");
-    assert_eq!(turn(&app, &first).await, ("completed".into(), None));
-    assert_eq!(steer_rows(&app).await, 0);
+    assert_eq!(
+        status(&app.db.pool, first.parse().unwrap()).await,
+        ("completed".into(), None)
+    );
+    assert_eq!(rows(&app.db.pool).await, 0);
     assert_eq!(
         transcript(&app, &bot).await,
         [
@@ -189,7 +192,7 @@ async fn a_provider_that_cannot_steer_is_still_stopped_by_a_newer_message() {
 
     assert_eq!(app.wait_turn(&first, ENDED).await, "interrupted");
     assert_eq!(app.wait_turn(&second, ENDED).await, "completed");
-    assert_eq!(steer_rows(&app).await, 0);
+    assert_eq!(rows(&app.db.pool).await, 0);
 }
 
 #[tokio::test]
@@ -210,7 +213,7 @@ async fn a_steered_message_the_reply_never_took_runs_on_its_own() {
             .await
             .unwrap();
     assert_eq!(answered, 1, "the released message got its own reply");
-    assert_eq!(steer_rows(&app).await, 0);
+    assert_eq!(rows(&app.db.pool).await, 0);
 }
 
 #[tokio::test]
@@ -225,7 +228,7 @@ async fn a_steered_message_ends_with_the_reply_that_took_it() {
     assert_eq!(app.wait_turn(&first, ENDED).await, "failed");
     assert_eq!(app.wait_turn(&second, ENDED).await, "failed");
     assert_eq!(
-        turn(&app, &second).await,
+        status(&app.db.pool, second.parse().unwrap()).await,
         ("failed".into(), Some("provider_failed".into()))
     );
 }
@@ -248,7 +251,11 @@ async fn stop_ends_the_reply_and_every_message_steered_into_it() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert_eq!(turn(&app, &second).await.0, "queued", "held while steered");
+    assert_eq!(
+        status(&app.db.pool, second.parse().unwrap()).await.0,
+        "queued",
+        "held while steered"
+    );
 
     let stop = app
         .owner(
@@ -261,7 +268,7 @@ async fn stop_ends_the_reply_and_every_message_steered_into_it() {
 
     assert_eq!(app.wait_turn(&first, ENDED).await, "interrupted");
     assert_eq!(app.wait_turn(&second, ENDED).await, "interrupted");
-    assert_eq!(steer_rows(&app).await, 0);
+    assert_eq!(rows(&app.db.pool).await, 0);
 }
 
 async fn accept(
@@ -294,14 +301,6 @@ async fn accept(
     (accepted.turn.id, accepted.steered_into)
 }
 
-async fn status(pool: &sqlx::SqlitePool, turn: Uuid) -> (String, Option<String>) {
-    sqlx::query_as("SELECT status, error_code FROM turns WHERE id = ?1")
-        .bind(turn)
-        .fetch_one(pool)
-        .await
-        .unwrap()
-}
-
 async fn setup_running() -> (TestDb, Uuid, Uuid) {
     let db = TestDb::migrated().await;
     else_api::db::installation::setup(&db.pool).await.unwrap();
@@ -316,13 +315,6 @@ async fn setup_running() -> (TestDb, Uuid, Uuid) {
         .await
         .unwrap();
     (db, bot, first)
-}
-
-async fn rows(pool: &sqlx::SqlitePool) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM turn_steers")
-        .fetch_one(pool)
-        .await
-        .unwrap()
 }
 
 #[tokio::test]

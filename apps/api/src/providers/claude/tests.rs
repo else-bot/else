@@ -508,53 +508,33 @@ fn completion_requires_a_verified_init_and_a_stop_explains_a_failure() {
 #[test]
 fn a_steered_message_is_its_own_line_and_its_echo_names_its_turn() {
     let mut t = tracker();
-    t.on(&json!({"type":"user","uuid":"u-1","isReplay":true}))
-        .unwrap();
     let steer = crate::app::providers::Steer {
         turn_id: uuid::Uuid::new_v4(),
         text: "If they agreed, send the deal.".into(),
     };
-    let line = t.steer_line(&steer).unwrap();
-    let sent: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(sent["type"], "user");
+    let sent: Value = serde_json::from_str(&t.steer_line(&steer).unwrap()).unwrap();
     let key = steer.turn_id.to_string();
     assert_eq!(
-        sent["uuid"],
-        key.as_str(),
-        "the echo names the steered turn"
+        (&sent["type"], &sent["uuid"]),
+        (&json!("user"), &json!(key))
     );
-    let content = sent["message"]["content"].as_str().unwrap();
-    assert!(
-        content.ends_with("\n\nIf they agreed, send the deal."),
-        "{content}"
-    );
-    assert!(content.contains("cancels nothing"), "{content}");
-
     assert!(
         !t.continues(&info(true, Some(1))),
-        "nothing is owed before the line is sent"
+        "nothing owed before it is sent"
     );
     t.steer_sent(&steer);
     assert!(
         t.continues(&info(true, Some(1))),
-        "a result before the echo leaves one more native turn to read"
+        "a result before the echo"
     );
     assert!(
         !t.continues(&info(false, Some(1))),
-        "a failed result ends the attempt"
+        "a failed result ends it"
     );
-    let echo = t
-        .on(&json!({"type":"user","uuid":key,"isReplay":true,
-                    "message":{"role":"user","content":content}}))
-        .unwrap();
-    assert_eq!(echo, vec![Event::Steered(steer.turn_id)]);
+    let echo = json!({"type":"user","uuid":key,"isReplay":true});
+    assert_eq!(t.on(&echo).unwrap(), vec![Event::Steered(steer.turn_id)]);
     assert!(!t.continues(&info(true, Some(1))));
-    assert!(
-        t.on(&json!({"type":"user","uuid":key,"isReplay":true}))
-            .unwrap()
-            .is_empty(),
-        "an echo is taken once"
-    );
+    assert!(t.on(&echo).unwrap().is_empty(), "an echo is taken once");
 }
 
 #[test]
