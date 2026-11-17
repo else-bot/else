@@ -122,13 +122,8 @@ impl Shell {
             }
             let shell = shell.clone();
             let shell_close = shell_close.clone();
-            let viewport = window.viewport_size();
-            let section = shell
-                .upgrade()
-                .and_then(|shell| shell.read(cx).settings_section())
-                .unwrap_or(SettingsSection::Server);
             crate::appearance::modal_surface(dialog, cx)
-                .w(sheet_size(section, viewport).width)
+                .w(sheet_size(window.viewport_size()).width)
                 .centered()
                 .entrance(DialogEntrance::None)
                 .p_0()
@@ -371,16 +366,6 @@ impl Shell {
         // its first and last lines clear of the edge fades at rest.
         let body = if section == SettingsSection::Backups {
             body
-        } else if section == SettingsSection::Usage {
-            sheet_scroller(
-                div()
-                    .id("usage-page-scroll")
-                    .size_full()
-                    .child(v_flex().min_h_full().py_8().px_6().child(body))
-                    .overflow_y_scrollbar(),
-                cx,
-            )
-            .into_any_element()
         } else if section == SettingsSection::Updates {
             v_flex()
                 .flex_1()
@@ -406,7 +391,7 @@ impl Shell {
                 shell.modifiers_changed(event.modifiers, cx)
             }))
             .w_full()
-            .h(sheet_size(section, window.viewport_size()).height)
+            .h(sheet_size(window.viewport_size()).height)
             .overflow_hidden()
             .child(
                 // One header: the sheet's title over the server it edits.
@@ -497,12 +482,15 @@ impl Shell {
             return v_flex()
                 .gap_4()
                 .child(
-                    Button::new("server-update-back")
-                        .control(Tier::Ghost, Scale::Compact, false, cx)
-                        .label("Back to servers")
-                        .on_click(cx.listener(|shell, _, window, cx| {
-                            shell.close_server_update(window, cx)
-                        })),
+                    h_flex().child(
+                        Button::new("server-update-back")
+                            .control(Tier::Ghost, Scale::Compact, false, cx)
+                            .label("Back to servers")
+                            .icon(IconName::ChevronLeft)
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.close_server_update(window, cx)
+                            })),
+                    ),
                 )
                 .child(self.render_updates(cx))
                 .into_any_element();
@@ -602,12 +590,15 @@ impl Shell {
             );
         let mut content = v_flex()
             .child(
-                Button::new("connection-editor-back")
-                    .control(Tier::Ghost, Scale::Compact, false, cx)
-                    .label("Back to servers")
-                    .on_click(
-                        cx.listener(|shell, _, window, cx| shell.close_server_editor(window, cx)),
-                    ),
+                h_flex().child(
+                    Button::new("connection-editor-back")
+                        .control(Tier::Ghost, Scale::Compact, false, cx)
+                        .label("Back to servers")
+                        .icon(IconName::ChevronLeft)
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            shell.close_server_editor(window, cx)
+                        })),
+                ),
             )
             .child(div().pt_4().child(section_heading(
                 if matches!(self.server_editor, Some(servers::Editor::Edit(_))) {
@@ -842,42 +833,24 @@ fn settings_row(
         )
 }
 
-/// Width of the content column on standard Settings pages.
-pub(super) const SETTINGS_COLUMN: Pixels = px(560.);
-/// Least inset of that column from the edges of the Settings pane; a wider
-/// pane centres the column.
-pub(super) const SETTINGS_INSET: Pixels = px(32.);
-/// Standard Settings pages keep a compact sheet.
+/// Inset of the content column from the edges of the Settings pane.
+const SETTINGS_INSET: Pixels = px(32.);
+/// Every Settings page shares one sheet, sized for the Usage gauges and
+/// ledger, so switching pages never resizes the dialog.
 const SHEET_SIZE: Size<Pixels> = Size {
-    width: px(840.),
-    height: px(620.),
-};
-/// The Usage page's gauges and ledger need a wider, taller sheet.
-const USAGE_SHEET_SIZE: Size<Pixels> = Size {
     width: px(1120.),
     height: px(900.),
 };
-
-impl SettingsSection {
-    /// The sheet this page asks for before it shrinks to fit the window.
-    fn sheet(self) -> Size<Pixels> {
-        match self {
-            Self::Usage => USAGE_SHEET_SIZE,
-            _ => SHEET_SIZE,
-        }
-    }
-}
 /// The least gap between the sheet and each window edge.
 const SHEET_CLEARANCE: Pixels = px(32.);
 
-/// The section's sheet size, shrunk only when the window cannot fit it with
+/// The sheet size, shrunk only when the window cannot fit it with
 /// [`SHEET_CLEARANCE`] on every side. The dialog centres it.
-fn sheet_size(section: SettingsSection, viewport: Size<Pixels>) -> Size<Pixels> {
-    let wanted = section.sheet();
+fn sheet_size(viewport: Size<Pixels>) -> Size<Pixels> {
     let room = |extent: Pixels| (extent - SHEET_CLEARANCE * 2.).max(px(0.));
     Size {
-        width: wanted.width.min(room(viewport.width)),
-        height: wanted.height.min(room(viewport.height)),
+        width: SHEET_SIZE.width.min(room(viewport.width)),
+        height: SHEET_SIZE.height.min(room(viewport.height)),
     }
 }
 
@@ -895,17 +868,14 @@ pub(super) fn sheet_scroller(scroller: impl IntoElement, cx: &App) -> Div {
         .min_h_0()
 }
 
-/// Place `content` in the shared Settings column.
+/// Place `content` in the shared Settings column, which fills the pane.
 pub(super) fn settings_column(content: impl IntoElement) -> Div {
-    v_flex().flex_1().w_full().px(SETTINGS_INSET).child(
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .max_w(SETTINGS_COLUMN)
-            .mx_auto()
-            .child(content),
-    )
+    v_flex()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .px(SETTINGS_INSET)
+        .child(content)
 }
 
 /// The empty state of an inventory page (MCP, Skills): a 28 px icon, 12 px

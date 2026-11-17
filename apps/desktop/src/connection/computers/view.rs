@@ -16,11 +16,7 @@ impl Shell {
             Some(Availability::Available(report)) => Some(report),
             _ => None,
         };
-        let mut heading = h_flex().items_start().gap_3().child(
-            v_flex().flex_1().min_w_0().gap_1p5()
-                .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).child("Computers"))
-                .child(div().text_sm().text_color(theme.muted_foreground).child("Each bot's computer, what it uses, and whether it runs the latest image. Upgrading keeps the bot's files and installed packages.")),
-        );
+        let mut actions = Vec::new();
         if let (Some(view), Some(report)) = (
             view,
             available.filter(|report| !report.computers.is_empty()),
@@ -32,7 +28,7 @@ impl Shell {
             } else {
                 Command::UpgradeAll
             };
-            heading = heading.child(
+            actions.push(
                 Button::new("computers-upgrade-all")
                     .control(
                         if queued {
@@ -56,9 +52,16 @@ impl Shell {
                     })
                     .on_click(cx.listener(move |shell, _, window, cx| {
                         shell.computer_command(command, window, cx)
-                    })),
+                    }))
+                    .into_any_element(),
             );
         }
+        let heading = crate::panel_kit::page_heading(
+            "Computers",
+            "Each bot's computer, what it uses, and whether it runs the latest image. Upgrading keeps the bot's files and installed packages.",
+            actions,
+            cx,
+        );
         let mut body = v_flex().w_full().flex_1().gap_4().text_sm().child(heading);
         if let Some(error) = error {
             body = body.child(
