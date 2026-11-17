@@ -80,7 +80,8 @@ impl<'a> PreparedTurn<'a> {
                 .insert(prompt::MEMORY_RECEIPT.to_owned(), line.end.to_string());
         }
         let advance = Advance {
-            through: input.turn_no,
+            // A continuation can run after newer turns in the same session.
+            through: input.turn_no.max(session.considered_through_turn),
             memory_revision: memory.map(|m| m.revision).or(session.memory_revision),
             default_skills: skills.applied,
             context: context.applied,
