@@ -774,7 +774,9 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
         .and_then(|e| e.message.clone())
         .unwrap_or_default();
     match turn.status.as_str() {
-        "queued" if turn.steer_status.as_deref() == Some("delivered") => (String::new(), false),
+        "queued" if turn.steer_status == Some(crate::model::SteerStatus::Delivered) => {
+            (String::new(), false)
+        }
         "queued" => ("Queued".into(), false),
         "preparing" | "sending" | "running" => ("Working".into(), false),
         "waiting" if turn.waits_on_job() => {
