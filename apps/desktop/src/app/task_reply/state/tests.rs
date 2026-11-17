@@ -1175,3 +1175,49 @@ fn a_card_settled_after_a_single_attempts_last_reply_keeps_its_row() {
     assert!(task.earlier(&c, &task.history, true).is_empty());
     assert_eq!(rows, [(RowKey::Draft(id(310)), Some(id(3)))]);
 }
+
+#[test]
+fn an_unfinished_turn_keeps_its_status_row_after_a_notice() {
+    let rule = json!({
+        "version": 3, "section": "New owner messages steer, not stop", "change": "added",
+        "owner_words": "Me sending another message shouldn't stop you", "diff": []
+    });
+    let bot = json!({
+        "bot_id": id(20), "name": "Auto", "creator_bot_id": id(21),
+        "creator_name": "Tech Manager", "purpose": "Own the routines."
+    });
+    for (field, value) in [("rules_update", rule), ("bot_created", bot)] {
+        let mut notice = item(2, 10, "status");
+        notice[field] = value;
+        for (status, state) in [
+            ("queued", ReplyState::Queued),
+            ("preparing", ReplyState::Working),
+            ("sending", ReplyState::Working),
+            ("running", ReplyState::Working),
+            ("waiting", ReplyState::Waiting),
+            ("cancelling", ReplyState::Stopping),
+        ] {
+            let mut resumed = turn(10, status);
+            resumed["attempt"] = json!(2);
+            let c = conversation(vec![item(1, 10, "user"), notice.clone()], vec![resumed]);
+            let replies = task_replies(&c);
+            let reply = replies.get(&id(10)).unwrap_or_else(|| {
+                panic!("a {status} turn ending in a {field} notice lost its status row")
+            });
+            assert_eq!(reply.state, state);
+            assert_eq!(
+                reply.anchor,
+                Some(id(1)),
+                "the notice does not move the status row"
+            );
+        }
+        let c = conversation(
+            vec![item(1, 10, "user"), notice],
+            vec![turn(10, "completed")],
+        );
+        assert!(
+            task_replies(&c).is_empty(),
+            "a finished {field} turn still shows no empty task card"
+        );
+    }
+}
