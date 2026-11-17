@@ -700,7 +700,7 @@ fn request_segments(input: &TurnInput) -> Vec<Segment<'_>> {
     } else {
         message_segments(&input.text, &input.parts, &input.files)
     };
-    segments.extend(steered_segments(input, false));
+    segments.extend(set_off(steered_segments(input, false)));
     segments
 }
 
@@ -746,7 +746,7 @@ fn steered_segments(input: &TurnInput, only_new: bool) -> Vec<Segment<'_>> {
     let mut segments = Vec::new();
     for steered in input.steered.iter().filter(|s| !(only_new && s.seen)) {
         segments.push(Segment::Text(if segments.is_empty() {
-            format!("\n\n{STEER_FRAMING}\n\n")
+            format!("{STEER_FRAMING}\n\n")
         } else {
             "\n\n".to_owned()
         }));
@@ -758,6 +758,16 @@ fn steered_segments(input: &TurnInput, only_new: bool) -> Vec<Segment<'_>> {
         ));
     }
     segments
+}
+
+/// `segments` set off by a blank line from the text before them.
+fn set_off(segments: Vec<Segment<'_>>) -> Vec<Segment<'_>> {
+    if segments.is_empty() {
+        return segments;
+    }
+    std::iter::once(Segment::Text("\n\n".to_owned()))
+        .chain(segments)
+        .collect()
 }
 
 /// What this turn asks as text: the owner's message with the messages
@@ -1086,14 +1096,10 @@ pub(super) fn turn_content<'a>(
     // joined to it since: sending the request again would restart it.
     let seen_request = considered >= input.turn_no;
     let new_steers = steered_segments(input, true);
-    let request = if seen_request && outcomes.is_empty() && !new_steers.is_empty() {
-        let mut steers = new_steers.clone();
-        if let Some(Segment::Text(first)) = steers.first_mut() {
-            *first = first.trim_start().to_owned();
-        }
-        steers
+    let (request, new_steers) = if seen_request && outcomes.is_empty() && !new_steers.is_empty() {
+        (new_steers, Vec::new())
     } else {
-        request_segments(input)
+        (request_segments(input), set_off(new_steers))
     };
     let (mut segments, selection) = content_with_request(input, considered, request);
     if !outcomes.is_empty() {
