@@ -1093,7 +1093,10 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
             Json<Vec<MessagePart>>,
         ),
     >(
-        "SELECT t.turn_no, i.kind, i.text, t.status,
+        "SELECT coalesce((SELECT a.turn_no FROM turn_steers s JOIN turns a ON a.id = s.into_turn_id
+                          WHERE s.turn_id = t.id AND s.status = 'delivered'),
+                         t.turn_no) AS history_turn,
+                i.kind, i.text, t.status,
                 CASE WHEN t.status IN ('failed', 'uncertain') THEN t.error_message END,
                 coalesce(i.parts, i.assistant_parts, '[]')
          FROM items i JOIN turns t ON t.id = i.turn_id
@@ -1114,7 +1117,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
                 SELECT max(u.turn_no) FROM turns u JOIN items j ON j.turn_id = u.id
                 WHERE u.conversation_id = ?1 AND u.turn_no < ?2
                   AND u.session_lane = lane.name AND j.kind = 'assistant')))
-         ORDER BY t.turn_no, i.seq",
+         ORDER BY history_turn, i.seq",
     )
     .bind(turn.conversation_id)
     .bind(turn.turn_no)

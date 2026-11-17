@@ -658,3 +658,47 @@ async fn a_refused_message_waits_for_the_reply_to_continue() {
     let input = else_api::db::turns::input(pool, first).await.unwrap();
     assert!(!input.steered[0].seen, "the next request carries it");
 }
+
+#[tokio::test]
+async fn a_message_the_reply_took_is_history_of_that_reply() {
+    let (db, bot, first) = setup_running().await;
+    let pool = &db.pool;
+    let (taken, _) = accept(pool, bot, "Schedule it too.").await;
+    assert!(
+        else_api::db::steers::sending(pool, taken, first)
+            .await
+            .unwrap()
+    );
+    assert!(
+        else_api::db::steers::deliver(pool, taken, first)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE turns SET status = 'completed' WHERE id = ?1")
+        .bind(first)
+        .execute(pool)
+        .await
+        .unwrap();
+    else_api::db::steers::settle(&mut pool.acquire().await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(status(pool, taken).await.0, "completed");
+
+    let (next, into) = accept(pool, bot, "What did they say?").await;
+    assert_eq!(into, None);
+    let first_no: i64 = sqlx::query_scalar("SELECT turn_no FROM turns WHERE id = ?1")
+        .bind(first)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let input = else_api::db::turns::input(pool, next).await.unwrap();
+    let entry = input
+        .history
+        .iter()
+        .find(|entry| entry.text == "Schedule it too.")
+        .expect("the taken message is history");
+    assert_eq!(
+        entry.turn_no, first_no,
+        "a session that considered the reply has seen it"
+    );
+}
