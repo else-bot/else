@@ -51,6 +51,8 @@ pub(super) struct Switcher {
     scroll: UniformListScrollHandle,
     /// What had focus before the switcher opened, for Esc to return to.
     restore: FocusHandle,
+    /// The active server `restore` belongs to.
+    server: Uuid,
     _input: Subscription,
 }
 
@@ -83,8 +85,10 @@ impl Shell {
             self.close_switcher(window, cx);
             return;
         }
-        if self.active.is_none()
-            || window.has_active_dialog(cx)
+        let Some(active) = self.active.as_ref().map(|active| active.id) else {
+            return;
+        };
+        if window.has_active_dialog(cx)
             || self
                 .setup
                 .as_ref()
@@ -111,6 +115,7 @@ impl Shell {
             index,
             scroll: UniformListScrollHandle::new(),
             restore,
+            server: active,
             _input: subscription,
         });
         cx.notify();
@@ -292,6 +297,12 @@ impl Shell {
         let Some(switcher) = &mut self.switcher else {
             return;
         };
+        if let Some(active) = &self.active
+            && active.id != switcher.server
+        {
+            switcher.server = active.id;
+            switcher.restore = active.app.read(cx).sidebar_focus_handle();
+        }
         let input = switcher.input.read(cx).focus_handle(cx);
         if input.is_focused(window) {
             return;

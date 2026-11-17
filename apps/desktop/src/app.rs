@@ -635,6 +635,10 @@ impl ElseApp {
         }
     }
 
+    pub(crate) fn sidebar_focus_handle(&self) -> FocusHandle {
+        self.sidebar_focus.clone()
+    }
+
     pub(crate) fn drop_requested_bot(&mut self) {
         self.requested = None;
     }

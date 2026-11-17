@@ -76,9 +76,9 @@ pub(super) struct Observation {
     pub asked: Option<Instant>,
     /// From the last answered check; `None` when the bot list failed.
     pub attention: Option<crate::attention::Attention>,
-    /// The bots from the last bot list that loaded, kept while the server
-    /// is offline.
-    pub bots: Option<Vec<crate::quick_switcher::Bot>>,
+    /// The last bot list that loaded and when its check started, kept
+    /// while the server is offline or the list fails.
+    pub bots: Option<(Instant, Vec<crate::quick_switcher::Bot>)>,
 }
 
 impl Default for Observation {
@@ -93,6 +93,33 @@ impl Default for Observation {
             asked: None,
             attention: None,
             bots: None,
+        }
+    }
+}
+
+impl Observation {
+    /// Applies a check that started at `asked`. A failed bot list keeps the
+    /// previous list with the time of the check that loaded it.
+    fn record(&mut self, result: Result<Observed, (Health, String)>, asked: Instant) {
+        match result {
+            Ok(observed) => {
+                self.health = Health::Online;
+                self.version = observed.version;
+                self.working = observed.working;
+                self.server = observed.server;
+                self.attention = observed.attention;
+                if let Some(bots) = observed.bots {
+                    self.bots = Some((asked, bots));
+                }
+                self.asked = Some(asked);
+                self.seen = Some(Utc::now());
+                self.error = None;
+            }
+            Err((health, error)) => {
+                self.health = health;
+                self.error = Some(error);
+                self.working = None;
+            }
         }
     }
 }
@@ -279,22 +306,7 @@ fn monitor(
                 Ok(client) => tokio::select! { _ = states.closed() => break, result = observe(client.clone()) => result },
                 Err(error) => Err((Health::Offline, error.clone())),
             };
-            states.send_modify(|state| match result {
-                Ok(observed) => {
-                    state.health = Health::Online;
-                    state.version = observed.version;
-                    state.working = observed.working;
-                    state.server = observed.server;
-                    state.attention = observed.attention;
-                    if observed.bots.is_some() {
-                        state.bots = observed.bots;
-                    }
-                    state.asked = Some(asked);
-                    state.seen = Some(Utc::now());
-                    state.error = None;
-                }
-                Err((health, error)) => { state.health = health; state.error = Some(error); state.working = None; }
-            });
+            states.send_modify(|state| state.record(result, asked));
         }
     });
     (commands, snapshots)
@@ -356,8 +368,8 @@ impl Connections {
                         {
                             return false;
                         }
-                        if let (Some(bots), Some(asked)) = (&snapshot.bots, snapshot.asked) {
-                            shell.cache_bots(id, bots, asked, cx);
+                        if let Some((fetched, bots)) = &snapshot.bots {
+                            shell.cache_bots(id, bots, *fetched, cx);
                         }
                         shell.servers.entries.insert(id, snapshot);
                         shell.adopt_server_name(id, cx);
@@ -967,6 +979,35 @@ fn version_numbers(value: &str) -> Option<(u64, u64, u64)> {
 
 #[cfg(test)]
 mod tests {
+    #[::core::prelude::v1::test]
+    fn a_failed_bot_list_keeps_the_last_list_and_its_time() {
+        let observed = |bots: Option<Vec<crate::quick_switcher::Bot>>| Observed {
+            version: None,
+            working: None,
+            server: None,
+            attention: None,
+            bots,
+        };
+        let bot = crate::quick_switcher::Bot {
+            id: Uuid::new_v4(),
+            name: "Inbox".into(),
+            avatar: Default::default(),
+        };
+        let first = Instant::now();
+        let mut state = Observation::default();
+        state.record(Ok(observed(Some(vec![bot.clone()]))), first);
+        let later = first + Duration::from_secs(30);
+        state.record(Ok(observed(None)), later);
+        assert_eq!(state.asked, Some(later));
+        assert_eq!(state.bots, Some((first, vec![bot.clone()])));
+        state.record(
+            Err((Health::Offline, "down".into())),
+            later + Duration::from_secs(30),
+        );
+        assert_eq!(state.health, Health::Offline);
+        assert_eq!(state.bots, Some((first, vec![bot])));
+    }
+
     use super::*;
     use axum::{
         Json, Router,
