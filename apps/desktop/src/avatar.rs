@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use gpui_kit::*;
-use motion::{Input, Motion, Next, Pose};
+use motion::{Input, Motion, Next, Pose, Work};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,7 +467,11 @@ impl Element for BotAvatar {
                 (0., 0.)
             },
             hovered: attending && hitbox.is_hovered(window),
-            working: self.working,
+            work: match (self.working, crate::ambient::ambient_motion(window, cx)) {
+                (false, _) => Work::Idle,
+                (true, false) => Work::Still,
+                (true, true) => Work::Looping,
+            },
         };
         let view = window.current_view();
         let now = Instant::now();
@@ -479,7 +483,12 @@ impl Element for BotAvatar {
                 wake: None,
             });
             let (pose, next) = live.motion.advance(now, input);
-            let elapsed = now.duration_since(live.started).as_secs_f32();
+            // A paused loop holds the reduced-motion pose, so unrelated
+            // repaints do not jump it to a new phase.
+            let elapsed = match input.work {
+                Work::Still => 0.,
+                Work::Idle | Work::Looping => now.duration_since(live.started).as_secs_f32(),
+            };
             live.awake.set(next != Next::Rest || input.gaze != (0., 0.));
             match next {
                 Next::Frame => {

@@ -414,18 +414,15 @@ impl ElseApp {
             | Phase::ConfirmationRequired(error) => Some(error.clone()),
             _ => None,
         };
-        let still = cx.reduce_motion();
         let status = match phase {
-            _ if error.is_some() => pill(id, "Needs attention", theme.danger, false, still),
-            Phase::Ready(_) => pill(id, "Waiting for you", theme.warning, false, still),
-            Phase::SigningIn => pill(id, "Signing in", theme.info, true, still),
-            Phase::Exchanging | Phase::Confirming => {
-                pill(id, "Connecting", theme.info, true, still)
-            }
-            Phase::Recorded => pill(id, "Connected", theme.success, false, still),
-            Phase::Cancelled => pill(id, "Cancelled", theme.muted_foreground, false, still),
-            Phase::Cancelling => pill(id, "Cancelling", theme.muted_foreground, true, still),
-            _ => pill(id, "Checking", theme.muted_foreground, true, still),
+            _ if error.is_some() => pill(id, "Needs attention", theme.danger, false),
+            Phase::Ready(_) => pill(id, "Waiting for you", theme.warning, false),
+            Phase::SigningIn => pill(id, "Signing in", theme.info, true),
+            Phase::Exchanging | Phase::Confirming => pill(id, "Connecting", theme.info, true),
+            Phase::Recorded => pill(id, "Connected", theme.success, false),
+            Phase::Cancelled => pill(id, "Cancelled", theme.muted_foreground, false),
+            Phase::Cancelling => pill(id, "Cancelling", theme.muted_foreground, true),
+            _ => pill(id, "Checking", theme.muted_foreground, true),
         };
         let copy = form.map(|f| f.flow.ready_copy());
         let ready_label = copy.as_ref().map_or("Connect in browser", |c| c.action);

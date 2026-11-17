@@ -4,6 +4,7 @@
 use super::server_keys;
 use super::servers::{Editor, Health, ReleaseStatus};
 use super::*;
+use crate::ambient::looping;
 use crate::attention::Attention;
 use crate::config::ProfileStore;
 use crate::server_icon::{self, Icons, ServerIcon};
@@ -525,24 +526,28 @@ fn rail_face(id: Uuid, face: &Face, badges: Badges, cx: &App) -> Div {
     div()
         .relative()
         .when(waiting > 0, |face| {
-            face.child(
-                div()
-                    .absolute()
-                    .top(px(-4.))
-                    .left(px(-4.))
-                    .size(px(ICON_SIZE + 8.))
-                    .rounded(px(14.))
-                    .border_2()
-                    .border_color(theme.warning.opacity(opacity))
-                    .with_animation(
-                        SharedString::from(format!("rail-waiting-{id}")),
-                        Animation::new(std::time::Duration::from_millis(1800)).repeat(),
-                        |ring, t| {
-                            let wave = (std::f32::consts::TAU * t).cos();
-                            ring.opacity(0.675 + 0.325 * wave)
-                        },
-                    ),
-            )
+            let ring = div()
+                .absolute()
+                .top(px(-4.))
+                .left(px(-4.))
+                .size(px(ICON_SIZE + 8.))
+                .rounded(px(14.))
+                .border_2()
+                .border_color(theme.warning.opacity(opacity));
+            face.child(looping(move |moving| {
+                if !moving {
+                    return ring.into_any_element();
+                }
+                ring.with_animation(
+                    SharedString::from(format!("rail-waiting-{id}")),
+                    Animation::new(std::time::Duration::from_millis(1800)).repeat(),
+                    |ring, t| {
+                        let wave = (std::f32::consts::TAU * t).cos();
+                        ring.opacity(0.675 + 0.325 * wave)
+                    },
+                )
+                .into_any_element()
+            }))
         })
         .child(face.render(cx))
         .child(status_dot)

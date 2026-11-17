@@ -532,7 +532,7 @@ fn tile(icon: IconName, color: Hsla) -> Div {
 }
 
 /// A status pill in the task card's style, with working dots while busy.
-fn pill(id: Uuid, label: &'static str, color: Hsla, working: bool, still: bool) -> Div {
+fn pill(id: Uuid, label: &'static str, color: Hsla, working: bool) -> Div {
     h_flex()
         .flex_none()
         .items_center()
@@ -546,7 +546,7 @@ fn pill(id: Uuid, label: &'static str, color: Hsla, working: bool, still: bool) 
         .text_color(color)
         .child(label)
         .when(working, |pill| {
-            pill.child(super::view::working_dots(id, color, still))
+            pill.child(super::view::working_dots(id, color))
         })
 }
 

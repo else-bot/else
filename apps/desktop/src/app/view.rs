@@ -5,6 +5,7 @@ use super::{
     FocusSidebar, LoadOlder, MoveBot, NewBot, NewCategory, SIDEBAR_CONTEXT, SelectNext, SelectPrev,
     StopWork, TakeOverComputer, ToggleSettings,
 };
+use crate::ambient::looping;
 use crate::api::Bot;
 use crate::appearance::{Tone, tone};
 use crate::avatar::bot_avatar;
@@ -501,9 +502,7 @@ impl ElseApp {
                     style.text_color(tone(Tone::Primary, cx))
                 })
             })
-            .when(working, |line| {
-                line.child(working_dots(id, color, cx.reduce_motion()))
-            })
+            .when(working, |line| line.child(working_dots(id, color)))
             .children(faces)
             .when_some(icon, |line, icon| {
                 line.child(
@@ -1057,28 +1056,31 @@ impl ElseApp {
 }
 
 /// Three dots that ripple left to right in place of a spinner icon.
-pub(super) fn working_dots(id: Uuid, color: Hsla, still: bool) -> impl IntoElement {
-    h_flex()
-        .flex_none()
-        .size(px(14.))
-        .gap(px(2.))
-        .items_center()
-        .justify_center()
-        .children((0..3).map(move |i| {
-            let dot = div().relative().size(px(3.5)).rounded_full().bg(color);
-            if still {
-                return dot.into_any_element();
-            }
-            dot.with_animation(
-                SharedString::from(format!("working-dot-{id}-{i}")),
-                Animation::new(std::time::Duration::from_millis(1050)).repeat(),
-                move |dot, t| {
-                    let lift = (std::f32::consts::TAU * t - i as f32 * 0.75).sin().max(0.);
-                    dot.top(px(-2.6 * lift * lift)).opacity(0.6 + 0.4 * lift)
-                },
-            )
+pub(super) fn working_dots(id: Uuid, color: Hsla) -> impl IntoElement {
+    looping(move |moving| {
+        h_flex()
+            .flex_none()
+            .size(px(14.))
+            .gap(px(2.))
+            .items_center()
+            .justify_center()
+            .children((0..3).map(move |i| {
+                let dot = div().relative().size(px(3.5)).rounded_full().bg(color);
+                if !moving {
+                    return dot.into_any_element();
+                }
+                dot.with_animation(
+                    SharedString::from(format!("working-dot-{id}-{i}")),
+                    Animation::new(std::time::Duration::from_millis(1050)).repeat(),
+                    move |dot, t| {
+                        let lift = (std::f32::consts::TAU * t - i as f32 * 0.75).sin().max(0.);
+                        dot.top(px(-2.6 * lift * lift)).opacity(0.6 + 0.4 * lift)
+                    },
+                )
+                .into_any_element()
+            }))
             .into_any_element()
-        }))
+    })
 }
 
 fn subtitle(bot: &Bot, main: bool) -> String {

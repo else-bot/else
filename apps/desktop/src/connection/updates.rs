@@ -894,15 +894,22 @@ pub(super) fn work_summary(turns: u64, commands: u64) -> String {
 }
 
 pub(super) fn checking_icon(id: impl Into<ElementId>, size: Pixels, color: Hsla) -> AnyElement {
-    let icon = Icon::new(IconName::LoaderCircle)
-        .size(size)
-        .text_color(color);
-    icon.with_animation(
-        id,
-        Animation::new(std::time::Duration::from_millis(900))
-            .repeat()
-            .with_max_fps(60.),
-        |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
-    )
+    let id = id.into();
+    crate::ambient::looping(move |moving| {
+        let icon = Icon::new(IconName::LoaderCircle)
+            .size(size)
+            .text_color(color);
+        if !moving {
+            return icon.into_any_element();
+        }
+        icon.with_animation(
+            id,
+            Animation::new(std::time::Duration::from_millis(900))
+                .repeat()
+                .with_max_fps(60.),
+            |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
+        )
+        .into_any_element()
+    })
     .into_any_element()
 }
