@@ -6,6 +6,7 @@
 use super::action_card::{Disclosure, EVENT_INDENT, EventEnd};
 use super::conversation::{ReplyLayout, Reveal, Spot, TranscriptRow};
 use super::{ElseApp, RowKey};
+use crate::attachments::MessagePart;
 use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{
     BotCreated, BotReplyStatus, Conversation, ExchangeAsk, Item, OwnerNeed, OwnerNoticeStatus,
@@ -102,14 +103,16 @@ fn waits_on_owner(conversation: &Conversation, turn: Uuid) -> bool {
     })
 }
 
-/// `text` cut to what an exchange shows before "Show more", or `None` when
-/// it all fits. The cut falls at the end of a paragraph or list item where
-/// one fits, so the excerpt is real markdown and holds no hidden text.
-pub(super) fn excerpt(text: &str) -> Option<String> {
+/// Where an exchange cuts `text` before "Show more": the byte the shown
+/// prefix ends at, and what closes it. `None` when it all fits. The cut
+/// falls at the end of a paragraph or list item where one fits, so the
+/// excerpt is real markdown and holds no hidden text.
+fn excerpt_cut(text: &str) -> Option<(usize, &'static str)> {
     let text = text.trim_end();
+    let count = |line: &str| line.trim_end_matches(['\n', '\r']).chars().count();
     let filled = |lines: usize, chars: usize| lines > EXCERPT_LINES || chars > EXCERPT_CHARS;
     let all_lines = text.lines().filter(|line| !line.trim().is_empty()).count();
-    if !filled(all_lines, text.chars().count()) {
+    if !filled(all_lines, text.split_inclusive('\n').map(count).sum()) {
         return None;
     }
     let (mut lines, mut chars, mut fenced) = (0, 0, false);
@@ -119,11 +122,11 @@ pub(super) fn excerpt(text: &str) -> Option<String> {
     for line in text.split_inclusive('\n') {
         let body = line.trim_end_matches(['\n', '\r']);
         let blank = body.trim().is_empty();
-        if filled(lines + usize::from(!blank), chars + body.chars().count()) {
+        if filled(lines + usize::from(!blank), chars + count(body)) {
             break;
         }
         lines += usize::from(!blank);
-        chars += body.chars().count();
+        chars += count(body);
         if body.trim_start().starts_with("```") {
             fenced = !fenced;
         }
@@ -138,10 +141,10 @@ pub(super) fn excerpt(text: &str) -> Option<String> {
             block_end = Some(end);
         }
     }
-    Some(match (block_end, line_end) {
-        (Some(end), _) => text[..end].to_owned(),
-        (None, Some((end, true))) => format!("{}\n```", &text[..end]),
-        (None, Some((end, false))) => format!("{}…", &text[..end]),
+    let cut = match (block_end, line_end) {
+        (Some(end), _) => (end, ""),
+        (None, Some((end, true))) => (end, "\n```"),
+        (None, Some((end, false))) => (end, "…"),
         // The first line alone is over the budget: cut it between words.
         (None, None) => {
             let limit = text
@@ -152,9 +155,71 @@ pub(super) fn excerpt(text: &str) -> Option<String> {
                 .rfind(char::is_whitespace)
                 .filter(|&at| at > 0)
                 .unwrap_or(limit);
-            format!("{}…", text[..cut].trim_end())
+            (text[..cut].trim_end().len(), "…")
         }
-    })
+    };
+    (cut.0 < text.len()).then_some(cut)
+}
+
+/// `text` as an exchange shows it before "Show more", or `None` when it
+/// all fits.
+pub(super) fn excerpt(text: &str) -> Option<String> {
+    excerpt_cut(text).map(|(end, close)| format!("{}{close}", &text[..end]))
+}
+
+/// A reply's text and parts cut together, so rebuilding the text from its
+/// parts gives the excerpt back. Images and visuals past the cut stay: they
+/// draw outside the text.
+pub(super) fn excerpt_message(
+    text: &str,
+    parts: &[MessagePart],
+) -> Option<(String, Vec<MessagePart>)> {
+    let (end, close) = excerpt_cut(text)?;
+    let shown = format!("{}{close}", &text[..end]);
+    if parts.is_empty() {
+        return Some((shown, Vec::new()));
+    }
+    let mut cut = Vec::new();
+    // Where the shown text ends among the kept parts.
+    let mut tail = None;
+    let mut offset = 0;
+    for part in parts {
+        let left = end.saturating_sub(offset);
+        match part {
+            MessagePart::Text { text } => {
+                if left > 0 {
+                    let keep = (0..=left.min(text.len()))
+                        .rev()
+                        .find(|&at| text.is_char_boundary(at))
+                        .unwrap_or(0);
+                    cut.push(MessagePart::Text {
+                        text: text[..keep].to_owned(),
+                    });
+                }
+                offset += text.len();
+            }
+            MessagePart::File { file } => {
+                let len = file.fallback().len();
+                let drawn = super::images::is_image(file) || super::visuals::is_visual(file);
+                if offset + len <= end {
+                    cut.push(part.clone());
+                } else if offset >= end && drawn {
+                    tail.get_or_insert(cut.len());
+                    cut.push(part.clone());
+                }
+                offset += len;
+            }
+        }
+    }
+    if !close.is_empty() {
+        cut.insert(
+            tail.unwrap_or(cut.len()),
+            MessagePart::Text {
+                text: close.to_owned(),
+            },
+        );
+    }
+    Some((shown, cut))
 }
 
 fn list_item(line: &str) -> bool {
@@ -652,6 +717,8 @@ impl ElseApp {
                         && !view.expanded_events.remove(&id)
                     {
                         view.expanded_events.insert(id);
+                        // What the owner opened stays open once its ask settles.
+                        view.opened_exchanges.insert(id);
                     }
                     app.refold_exchange(id, window, cx);
                 }));
@@ -783,6 +850,7 @@ impl ElseApp {
                                 view.full_replies.remove(reply);
                             }
                         } else {
+                            view.opened_exchanges.insert(id);
                             view.full_replies.extend(reply_ids.iter().copied());
                         }
                         app.refold_exchange(id, window, cx);
@@ -891,7 +959,11 @@ impl ElseApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivityStatus, Block, Side, block_status, excerpt, exchange_asks, task_title};
+    use super::{
+        ActivityStatus, Block, Side, block_status, excerpt, excerpt_message, exchange_asks,
+        task_title,
+    };
+    use crate::attachments::{Attachment, MessagePart};
     use crate::model::{Conversation, OwnerNoticeStatus};
     use serde_json::json;
     use uuid::Uuid;
@@ -1164,5 +1236,46 @@ mod tests {
         let cut = excerpt(&long).unwrap();
         assert!(cut.ends_with("word…"), "{cut}");
         assert!(cut.chars().count() <= 601);
+    }
+    #[test]
+    fn line_endings_do_not_count_toward_the_budget() {
+        for end in ["\n", "\r\n"] {
+            let reply = vec!["x".repeat(75); 8].join(end);
+            assert_eq!(excerpt(&reply), None, "eight full lines fit");
+        }
+    }
+
+    #[test]
+    fn a_cut_reply_drops_the_prose_its_parts_would_rebuild_and_keeps_its_images() {
+        let image = Attachment {
+            id: Uuid::from_u128(7),
+            name: "chart.png".into(),
+            media_type: "image/png".into(),
+            size: 10,
+        };
+        let head = "word ".repeat(130);
+        let tail = "\n\nMore prose after the chart.";
+        let text = format!("{head}{}{tail}", image.fallback());
+        let parts = vec![
+            MessagePart::Text { text: head.clone() },
+            MessagePart::File {
+                file: image.clone(),
+            },
+            MessagePart::Text { text: tail.into() },
+        ];
+        let (shown, cut) = excerpt_message(&text, &parts).unwrap();
+        let rebuilt: String = cut
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Text { text } => Some(text.as_str()),
+                MessagePart::File { .. } => None,
+            })
+            .collect();
+        assert_eq!(rebuilt, shown, "text parts rebuild exactly the excerpt");
+        assert!(!shown.contains("More prose"));
+        assert!(
+            cut.contains(&MessagePart::File { file: image }),
+            "the image still shows"
+        );
     }
 }

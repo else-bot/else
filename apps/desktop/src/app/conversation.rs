@@ -906,10 +906,10 @@ impl ElseApp {
             // owner asks for all of it.
             let exchange_reply = item.bot_reply.is_some()
                 || (item.kind == "assistant" && delegated.contains(&item.turn_id));
-            let text = if exchange_reply && !view.full_replies.contains(&item.id) {
-                super::bot_activity::excerpt(&text).unwrap_or(text)
+            let (text, parts) = if exchange_reply && !view.full_replies.contains(&item.id) {
+                super::bot_activity::excerpt_message(&text, &parts).unwrap_or((text, parts))
             } else {
-                text
+                (text, parts)
             };
             texts.push((RowKey::Item(item.id), text, format, parts));
             if tasks

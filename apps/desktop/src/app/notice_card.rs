@@ -63,14 +63,16 @@ impl ElseApp {
         let sender = receipt
             .and_then(|item| item.bot_task.as_ref())
             .map(|task| &task.sender_name);
-        let subtitle = sender.map_or_else(String::new, |sender| format!("From {sender}'s task"));
         // A received task's ask is its own row. Right under its exchange,
-        // the exchange's header shows the task; further down, this does.
+        // the exchange's header names the task; further down, the card does.
         let here = view.row_index(super::RowKey::OwnerNotice(id));
-        let task = receipt.map(|receipt| receipt.id).filter(|item| {
-            view.row_index(super::RowKey::Item(*item))
-                .is_some_and(|exchange| here != Some(exchange + 1))
-        });
+        let exchange =
+            receipt.and_then(|r| Some((r.id, view.row_index(super::RowKey::Item(r.id))?)));
+        let below = exchange.is_some_and(|(_, ix)| here == Some(ix + 1));
+        let subtitle = sender
+            .filter(|_| !below)
+            .map_or_else(String::new, |sender| format!("From {sender}'s task"));
+        let task = exchange.filter(|_| !below).map(|(item, _)| item);
         Some(self.ask_card(notice, name, subtitle, task, cx))
     }
 
