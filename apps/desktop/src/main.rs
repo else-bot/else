@@ -18,6 +18,7 @@ mod oauth_callback;
 mod panel_kit;
 mod preferences;
 mod profile_picker;
+mod quick_switcher;
 mod server_icon;
 mod sidebar;
 mod skill_ui;
@@ -220,6 +221,7 @@ fn main() {
             ui_font::init(cx);
             appearance::init(cx);
             app::bind_keys(cx);
+            connection::bind_keys(cx);
             app::install_menus(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {

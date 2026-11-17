@@ -275,7 +275,7 @@ impl ElseApp {
 
     /// `None` until this connection has listed the bots.
     pub(crate) fn attention(&self) -> Option<crate::attention::Attention> {
-        (self.listed && self.connected())
+        (self.listed_at.is_some() && self.connected())
             .then(|| crate::attention::Attention::of(&self.bots, |bot| self.inbox.is_unread(bot)))
     }
 
@@ -300,6 +300,7 @@ impl ElseApp {
     pub fn set_hidden(&mut self, hidden: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.hidden = hidden;
         if hidden {
+            self.requested = None;
             self.computer = None;
             self._computer_layout = None;
             self.clear_social_forms(window, cx);

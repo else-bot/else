@@ -144,7 +144,11 @@ impl Shell {
         else {
             return;
         };
-        if !self.rail_shown() || !self.owns_focus(window, cx) || composing(window, cx) {
+        if !self.rail_shown()
+            || self.switcher_open()
+            || !self.owns_focus(window, cx)
+            || composing(window, cx)
+        {
             return;
         }
         cx.stop_propagation();

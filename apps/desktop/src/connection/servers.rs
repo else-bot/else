@@ -76,6 +76,9 @@ pub(super) struct Observation {
     pub asked: Option<Instant>,
     /// From the last answered check; `None` when the bot list failed.
     pub attention: Option<crate::attention::Attention>,
+    /// The last bot list that loaded and when its check started, kept
+    /// while the server is offline or the list fails.
+    pub bots: Option<(Instant, Vec<crate::quick_switcher::Bot>)>,
 }
 
 impl Default for Observation {
@@ -89,6 +92,34 @@ impl Default for Observation {
             server: None,
             asked: None,
             attention: None,
+            bots: None,
+        }
+    }
+}
+
+impl Observation {
+    /// Applies a check that started at `asked`. A failed bot list keeps the
+    /// previous list with the time of the check that loaded it.
+    fn record(&mut self, result: Result<Observed, (Health, String)>, asked: Instant) {
+        match result {
+            Ok(observed) => {
+                self.health = Health::Online;
+                self.version = observed.version;
+                self.working = observed.working;
+                self.server = observed.server;
+                self.attention = observed.attention;
+                if let Some(bots) = observed.bots {
+                    self.bots = Some((asked, bots));
+                }
+                self.asked = Some(asked);
+                self.seen = Some(Utc::now());
+                self.error = None;
+            }
+            Err((health, error)) => {
+                self.health = health;
+                self.error = Some(error);
+                self.working = None;
+            }
         }
     }
 }
@@ -192,6 +223,7 @@ struct Observed {
     working: Option<u64>,
     server: Option<crate::api::ServerInfo>,
     attention: Option<crate::attention::Attention>,
+    bots: Option<Vec<crate::quick_switcher::Bot>>,
 }
 
 async fn observe(client: Arc<Client>) -> Result<Observed, (Health, String)> {
@@ -238,14 +270,16 @@ async fn observe(client: Arc<Client>) -> Result<Observed, (Health, String)> {
                 ),
                 Err(_) => (None, None),
             };
-            let attention = bots.ok().map(|(_, list)| {
-                crate::attention::Attention::of(&list.bots, crate::inbox::saved_unread)
-            });
+            let list = bots.ok().map(|(_, list)| list.bots);
+            let attention = list
+                .as_ref()
+                .map(|bots| crate::attention::Attention::of(bots, crate::inbox::saved_unread));
             Ok(Observed {
                 version,
                 working,
                 server: caps.server,
                 attention,
+                bots: list.as_deref().map(crate::quick_switcher::Bot::listed),
             })
         })
         .await
@@ -272,19 +306,7 @@ fn monitor(
                 Ok(client) => tokio::select! { _ = states.closed() => break, result = observe(client.clone()) => result },
                 Err(error) => Err((Health::Offline, error.clone())),
             };
-            states.send_modify(|state| match result {
-                Ok(observed) => {
-                    state.health = Health::Online;
-                    state.version = observed.version;
-                    state.working = observed.working;
-                    state.server = observed.server;
-                    state.attention = observed.attention;
-                    state.asked = Some(asked);
-                    state.seen = Some(Utc::now());
-                    state.error = None;
-                }
-                Err((health, error)) => { state.health = health; state.error = Some(error); state.working = None; }
-            });
+            states.send_modify(|state| state.record(result, asked));
         }
     });
     (commands, snapshots)
@@ -345,6 +367,9 @@ impl Connections {
                             .is_some_and(|s| s.profile == expected)
                         {
                             return false;
+                        }
+                        if let Some((fetched, bots)) = &snapshot.bots {
+                            shell.cache_bots(id, bots, *fetched, cx);
                         }
                         shell.servers.entries.insert(id, snapshot);
                         shell.adopt_server_name(id, cx);
@@ -659,7 +684,7 @@ impl Shell {
         if self.active.as_ref().is_some_and(|active| active.id == id) {
             self.switch_attempt = None;
             self._switch = None;
-            self.notification_target = None;
+            self.arrival = None;
             cx.notify();
             return;
         }
@@ -700,7 +725,7 @@ impl Shell {
                                     .control(Tier::Ghost, Scale::Standard, false, cx)
                                     .label("Keep editing")
                                     .on_click(move |_, window, cx| {
-                                        let _ = cancel.update(cx, |shell, _| shell.notification_target = None);
+                                        let _ = cancel.update(cx, |shell, _| shell.arrival = None);
                                         window.close_dialog(cx);
                                     })
                             )
@@ -784,7 +809,7 @@ impl Shell {
                 let verified = match outcome {
                     Ok(verified) => verified,
                     Err(err) => {
-                        shell.notification_target = None;
+                        shell.arrival = None;
                         shell.connection_error = Some(format!(
                             "Could not use {}. {err} Your current server is unchanged.",
                             saved.name
@@ -819,11 +844,24 @@ impl Shell {
                     }
                     shell.select_settings(section, window, cx);
                 }
-                if let Some((target, scope, bot)) = shell.notification_target.take()
-                    && target == id
+                if let Some(arrival) = shell.arrival.take()
+                    && arrival.server == id
                 {
-                    shell.open_notification(scope, bot, window, cx);
+                    match arrival.open {
+                        Open::Notification { scope, bot } => {
+                            shell.open_notification(scope, bot, window, cx)
+                        }
+                        Open::Bot(bot) => shell.open_active_bot(bot, window, cx),
+                        Open::Server => {
+                            if let Some(active) = &shell.active {
+                                active
+                                    .app
+                                    .update(cx, |app, cx| app.focus_sidebar(window, cx));
+                            }
+                        }
+                    }
                 }
+                shell.reclaim_switcher_focus(window, cx);
                 cx.notify();
             });
         }));
@@ -941,6 +979,35 @@ fn version_numbers(value: &str) -> Option<(u64, u64, u64)> {
 
 #[cfg(test)]
 mod tests {
+    #[::core::prelude::v1::test]
+    fn a_failed_bot_list_keeps_the_last_list_and_its_time() {
+        let observed = |bots: Option<Vec<crate::quick_switcher::Bot>>| Observed {
+            version: None,
+            working: None,
+            server: None,
+            attention: None,
+            bots,
+        };
+        let bot = crate::quick_switcher::Bot {
+            id: Uuid::new_v4(),
+            name: "Inbox".into(),
+            avatar: Default::default(),
+        };
+        let first = Instant::now();
+        let mut state = Observation::default();
+        state.record(Ok(observed(Some(vec![bot.clone()]))), first);
+        let later = first + Duration::from_secs(30);
+        state.record(Ok(observed(None)), later);
+        assert_eq!(state.asked, Some(later));
+        assert_eq!(state.bots, Some((first, vec![bot.clone()])));
+        state.record(
+            Err((Health::Offline, "down".into())),
+            later + Duration::from_secs(30),
+        );
+        assert_eq!(state.health, Health::Offline);
+        assert_eq!(state.bots, Some((first, vec![bot])));
+    }
+
     use super::*;
     use axum::{
         Json, Router,

@@ -259,9 +259,13 @@ pub struct ElseApp {
     connection: Connection,
     caps: Option<Capabilities>,
     bots: Vec<Bot>,
-    /// A bot list arrived since the last connection event. The live stream
-    /// reports a connection before its first list, so `bots` can be stale.
-    listed: bool,
+    /// When a bot list last arrived, if one has since the last connection
+    /// event. The live stream reports a connection before its first list, so
+    /// `bots` can be stale.
+    listed_at: Option<std::time::Instant>,
+    /// A bot the quick switcher asked to open before the bot list arrived;
+    /// opened when it does, unless another open or hiding this view drops it.
+    requested: Option<Uuid>,
     mention_bots: Arc<bot_mention::MentionRegistry>,
     categories: Vec<Category>,
     default_bot_id: Option<Uuid>,
@@ -364,7 +368,8 @@ impl ElseApp {
             connection: Connection::Connecting,
             caps: None,
             bots: Vec::new(),
-            listed: false,
+            listed_at: None,
+            requested: None,
             mention_bots: Default::default(),
             categories: Vec::new(),
             default_bot_id: None,
@@ -458,7 +463,7 @@ impl ElseApp {
             event,
             LiveEvent::Connected | LiveEvent::Disconnected(_) | LiveEvent::Unauthorized
         ) {
-            self.listed = false;
+            self.listed_at = None;
         }
         match event {
             LiveEvent::Connected => {
@@ -537,7 +542,7 @@ impl ElseApp {
     fn apply_bots(&mut self, list: BotList, window: &mut Window, cx: &mut Context<Self>) {
         self.default_bot_id = list.default_bot_id;
         self.bots = list.bots;
-        self.listed = true;
+        self.listed_at = Some(std::time::Instant::now());
         let mention_bots = bot_mention::MentionRegistry::new(&self.bots);
         if *self.mention_bots != mention_bots {
             self.mention_bots = Arc::new(mention_bots);
@@ -551,6 +556,9 @@ impl ElseApp {
         });
         self.observe_replies(window, cx);
         self.reconcile_selection(window, cx);
+        if let Some(id) = self.requested.take() {
+            self.open_bot_chat(id, window, cx);
+        }
         self.sync_settings(window, cx);
         self.sync_mentions(window, cx);
         self.sync_rows(window, cx);
@@ -576,6 +584,7 @@ impl ElseApp {
     }
 
     pub(crate) fn open_bot(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        self.requested = None;
         self.inbox.open(id);
         self.select(Some(id), window, cx);
         self.check_reading(window, cx);
@@ -583,6 +592,55 @@ impl ElseApp {
 
     pub(crate) fn selected_bot_id(&self) -> Option<Uuid> {
         self.selected
+    }
+
+    /// The bots the quick switcher lists and when they arrived; `None`
+    /// until a list arrives.
+    pub(crate) fn switcher_bots(
+        &self,
+    ) -> Option<(std::time::Instant, Vec<crate::quick_switcher::Bot>)> {
+        self.listed_at
+            .map(|at| (at, crate::quick_switcher::Bot::listed(&self.bots)))
+    }
+
+    pub(crate) fn listed_at(&self) -> Option<std::time::Instant> {
+        self.listed_at
+    }
+
+    /// Whether opening `id` can succeed: it is listed, or no list has
+    /// arrived since the connection changed.
+    pub(crate) fn may_have_bot(&self, id: Uuid) -> bool {
+        self.listed_at.is_none() || self.active_bots().any(|bot| bot.id == id)
+    }
+
+    /// Opens a bot's chat with the composer focused, as the quick switcher
+    /// does; before the bot list arrives, once it does.
+    pub(crate) fn open_bot_chat(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        if self.listed_at.is_none() {
+            self.requested = Some(id);
+            return;
+        }
+        if !self.active_bots().any(|bot| bot.id == id) {
+            return;
+        }
+        self.open_bot(id, window, cx);
+        if !self.hidden {
+            self.composer.read(cx).focus_handle(cx).focus(window, cx);
+        }
+    }
+
+    pub(crate) fn focus_sidebar(&self, window: &mut Window, cx: &mut App) {
+        if !self.hidden {
+            self.sidebar_focus.focus(window, cx);
+        }
+    }
+
+    pub(crate) fn sidebar_focus_handle(&self) -> FocusHandle {
+        self.sidebar_focus.clone()
+    }
+
+    pub(crate) fn drop_requested_bot(&mut self) {
+        self.requested = None;
     }
 
     fn select(&mut self, id: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
