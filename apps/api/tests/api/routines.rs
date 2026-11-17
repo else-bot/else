@@ -687,6 +687,7 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
             child,
             main.parse().unwrap(),
             "x",
+            None,
             &[],
             None
         )

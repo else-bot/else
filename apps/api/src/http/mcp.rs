@@ -31,6 +31,9 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 const HIT_BODY: usize = 600;
 const MAX_QUERY: usize = 200;
 const MAX_READ: i64 = 20;
+/// The owner reads a task by this line; the task text stays folded.
+const TITLE_DESCRIPTION: &str =
+    "A short name for the task, for the owner, e.g. Triage overnight WhatsApp DMs. No IDs.";
 
 pub async fn endpoint(
     State(state): State<Arc<AppState>>,
@@ -288,8 +291,9 @@ fn tool_list() -> Value {
             "description": "Ask 1 to 32 distinct bots for reports on the same self-contained task. Use list_bots with category_id to find every member of a category. Accepted atomically; runs asynchronously and returns all outcomes in a continuation. After pending, end this attempt immediately. Delegated tasks cannot create councils. No memory or permissions are shared.",
             "inputSchema": {"type": "object", "properties": {
                 "target_bot_ids": {"type": "array", "items": {"type": "string", "format": "uuid"}, "minItems": 1, "maxItems": crate::db::delegations::MAX_COUNCIL_BOTS, "uniqueItems": true},
-                "task": {"type": "string", "minLength": 1, "maxLength": 4000}
-            }, "required": ["target_bot_ids", "task"], "additionalProperties": false},
+                "task": {"type": "string", "minLength": 1, "maxLength": 4000},
+                "title": {"type": "string", "minLength": 1, "maxLength": crate::db::delegations::MAX_TITLE_CHARS, "description": TITLE_DESCRIPTION}
+            }, "required": ["target_bot_ids", "task", "title"], "additionalProperties": false},
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
         },
         {
@@ -306,6 +310,9 @@ fn tool_list() -> Value {
                     "target_bot_id": { "type": "string", "format": "uuid" },
                     "task": { "type": "string", "minLength": 1, "maxLength": 4000,
                               "description": "What the other bot should do, self-contained." },
+                    "title": { "type": "string", "minLength": 1,
+                               "maxLength": crate::db::delegations::MAX_TITLE_CHARS,
+                               "description": TITLE_DESCRIPTION },
                     "files": { "type": "array", "maxItems": crate::app::messages::MAX_MESSAGE_FILES,
                                "items": { "type": "string", "minLength": 1, "maxLength": 1024 },
                                "description": "Project paths of files the other bot needs, up to 10 MiB \
@@ -315,7 +322,7 @@ fn tool_list() -> Value {
                                       "description": "ID of a choice card the owner answered in this request that \
                                           decides this task. The other bot sees the answer as the owner's own words." },
                 },
-                "required": ["target_bot_id", "task"],
+                "required": ["target_bot_id", "task", "title"],
                 "additionalProperties": false,
             },
             "annotations": { "readOnlyHint": false, "destructiveHint": false,

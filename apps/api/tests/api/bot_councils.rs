@@ -218,7 +218,7 @@ async fn a_category_council_collects_every_report_with_one_provider_slot() {
     );
     assert_eq!(accepted.result["tasks"].as_array().unwrap().len(), 3);
     let ids: Vec<Uuid> = targets.iter().map(|id| id.parse().unwrap()).collect();
-    let replay = else_api::db::delegations::council(&h.app.db.pool, root, &ids, task)
+    let replay = else_api::db::delegations::council(&h.app.db.pool, root, &ids, task, None)
         .await
         .unwrap();
     assert!(replay.iter().all(|a| !a.created));
@@ -285,7 +285,8 @@ async fn councils_are_atomic_bounded_and_cannot_create_nested_work() {
             &h.app.db.pool,
             root,
             &[extra.parse().unwrap()],
-            "Review"
+            "Review",
+            None,
         )
         .await
         .is_err()
@@ -303,7 +304,8 @@ async fn councils_are_atomic_bounded_and_cannot_create_nested_work() {
             &h.app.db.pool,
             child,
             &[main.parse().unwrap()],
-            "Report"
+            "Report",
+            None,
         )
         .await,
         Err(else_api::db::delegations::DelegateError::NotAllowed)

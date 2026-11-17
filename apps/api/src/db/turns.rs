@@ -175,6 +175,14 @@ pub struct BotTask {
     pub sender_bot_id: Uuid,
     pub sender_name: String,
     pub prompt: String,
+    /// The delegating bot's short name for the task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// What the task declared it needs from the owner; absent until it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_need: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_line: Option<String>,
 }
 
 /// A delegated bot's settled reply, shown in the delegating bot's
@@ -188,6 +196,33 @@ pub struct BotReply {
     /// Why a failed task failed, apart from the progress it wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_need: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_line: Option<String>,
+    /// The owner notices of the task and of the tasks it delegated, oldest
+    /// first, read live so settling one shows in every chat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asks: Vec<ExchangeAsk>,
+}
+
+/// An owner notice shown on an exchange, with the name of the bot asking.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExchangeAsk {
+    pub id: Uuid,
+    pub bot_id: Uuid,
+    pub bot_name: String,
+    pub turn_id: Uuid,
+    pub kind: String,
+    pub summary: String,
+    #[serde(default)]
+    pub tried: Option<String>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub settled_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -238,7 +273,8 @@ pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kin
     CASE WHEN i.kind = 'status' AND i.routine_update IS NULL AND i.conversation_id <> t.conversation_id THEN
         (SELECT json_object('sender_bot_id', lower(hex(d.parent_bot_id)), 'sender_name', b.name,
                 'prompt', CASE WHEN t.request_id = d.id THEN d.task
-                               ELSE (SELECT s.text FROM items s WHERE s.id = t.owner_item_id) END)
+                               ELSE (SELECT s.text FROM items s WHERE s.id = t.owner_item_id) END,
+                'title', d.title, 'owner_need', d.owner_need, 'owner_line', d.owner_line)
          FROM delegations d JOIN bots b ON b.id = d.parent_bot_id
          -- A task's first turn carries the delegation's ID as its request
          -- (see delegations::control::update_request_id).
@@ -249,7 +285,20 @@ pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kin
         (SELECT json_object('sender_bot_id', lower(hex(d.target_bot_id)), 'sender_name', b.name, 'prompt', d.task, 'status', d.status,
                 'reason', CASE WHEN d.status = 'failed' THEN
                     (SELECT nullif(c.error_message, '') FROM turns c
-                     WHERE c.id = coalesce(d.takeover_turn_id, d.child_turn_id)) END)
+                     WHERE c.id = coalesce(d.takeover_turn_id, d.child_turn_id)) END,
+                'title', d.title, 'owner_need', d.owner_need, 'owner_line', d.owner_line,
+                -- The task's own notices, then those of tasks it delegated.
+                'asks', json((SELECT json_group_array(json(a.ask)) FROM (
+                    SELECT json_object('id', lower(hex(n.id)), 'bot_id', lower(hex(n.bot_id)),
+                            'bot_name', nb.name, 'turn_id', lower(hex(n.turn_id)), 'kind', n.kind,
+                            'summary', n.summary, 'tried', n.tried, 'status', n.status,
+                            'created_at', n.created_at, 'settled_at', n.settled_at) AS ask
+                    FROM owner_notices n JOIN bots nb ON nb.id = n.bot_id
+                    WHERE n.status <> 'superseded'
+                      AND (n.turn_id = d.child_turn_id
+                           OR n.turn_id IN (SELECT g.child_turn_id FROM delegations g
+                                            WHERE g.root_turn_id = d.child_turn_id))
+                    ORDER BY n.created_at, n.id) AS a)))
          FROM delegations d JOIN bots b ON b.id = d.target_bot_id WHERE d.id = i.id)
     END AS bot_reply, coalesce(i.parts, i.assistant_parts) AS parts, i.routine_update,
     i.bot_created, i.rules_update, i.attempt";
@@ -1454,6 +1503,7 @@ mod tests {
                 messages,
                 earlier_request: false,
                 ran: Vec::new(),
+                owner: None,
             }
         };
         let mut outcomes = vec![

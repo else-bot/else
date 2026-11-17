@@ -308,22 +308,22 @@ pub(super) fn notice_schema() -> Value {
     use crate::db::owner_notices::{MAX_SUMMARY, MAX_TRIED};
     json!({
         "name": "notify_owner",
-        "description": "In a delegated task, flag that it ends needing the owner: a decision, or a \
-            blocker only they can clear. Shows a Needs you card in your chat with the owner. Not for \
-            what a card asks (ask_owner, ask_permission, request_secret, drafts, \
-            computer_handoff) or for work the owner already chose for another bot: name that in your \
-            final message. Calling again rewrites it. Still give the full result there.",
+        "description": "In a delegated task, call once before your final message to declare what \
+            the task needs from the owner. The owner sees it on the exchange in both chats; \
+            decision and blocked also show a Needs you card. Not for what a card asks \
+            (ask_owner, ask_permission, request_secret, drafts, computer_handoff). Still give \
+            the full result in your final message.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "kind": { "type": "string", "enum": ["blocked", "decision"],
-                          "description": "blocked: something only the owner can clear stops the work. decision: the work waits on the owner's choice, including whether to start work you propose beyond the task." },
+                "kind": { "type": "string", "enum": ["nothing", "fyi", "decision", "blocked"],
+                          "description": "nothing: no owner attention. fyi: done, one line worth knowing. decision: waits on the owner's choice, including proposed work. blocked: only the owner can clear it." },
                 "summary": { "type": "string", "minLength": 1, "maxLength": MAX_SUMMARY,
-                             "description": "What the owner must do, in one or two sentences, e.g. Dev has no eligible session, so the fix can't start. Start one, or tell me who should take it." },
+                             "description": "Required unless nothing. For the owner, one or two sentences: the ask, e.g. Approve the Romow DM before I send it; for fyi one line, e.g. Declined MIRAY myself." },
                 "tried": { "type": "string", "minLength": 1, "maxLength": MAX_TRIED,
-                           "description": "What you already tried, e.g. Delegated to Dev; refused, no eligible session." },
+                           "description": "For decision or blocked: what you already tried, e.g. Delegated to Dev; refused, no eligible session." },
             },
-            "required": ["kind", "summary"],
+            "required": ["kind"],
             "additionalProperties": false,
         },
         "annotations": { "readOnlyHint": false, "destructiveHint": false,
@@ -332,26 +332,36 @@ pub(super) fn notice_schema() -> Value {
 }
 
 pub(super) async fn notify_owner(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    use crate::db::owner_notices::{self, CreateError, Spec};
-    let spec = match Spec::parse(args) {
-        Ok(spec) => spec,
+    use crate::db::owner_notices::{self, CreateError, Declaration, Declared};
+    let declaration = match Declaration::parse(args) {
+        Ok(declaration) => declaration,
         Err(message) => return (tool_error(&format!("INVALID_REQUEST: {message}")), None),
     };
-    match owner_notices::create(&state.db, grant.turn_id, &spec).await {
-        Ok(notice) => (
+    match owner_notices::declare(&state.db, grant.turn_id, &declaration).await {
+        Ok(Declared::Ask(notice)) => (
             tool_result(json!({
                 "status": "pending",
                 "notice_id": notice.id,
-                "next": "The owner sees this card in your chat with them. Finish the task: your \
-                         final message still goes back to the bot that delegated it.",
+                "next": "The owner sees this card in your chat with them and on the exchange. \
+                         Finish the task: your final message still goes back to the bot that \
+                         delegated it.",
             })),
             Some(format!("pending {}", notice.id)),
+        ),
+        Ok(Declared::Quiet(need)) => (
+            tool_result(json!({
+                "status": "recorded",
+                "kind": need,
+                "next": "Now write your final message with the full result.",
+            })),
+            Some(format!("declared {}", need.as_str())),
         ),
         Err(err) => {
             let code = match err {
                 CreateError::NotDelegated => "NOT_DELEGATED",
                 CreateError::NotRunning => "NOT_RUNNING",
                 CreateError::AttemptParked => "ATTEMPT_PARKED",
+                CreateError::AskPending => "ASK_PENDING",
                 CreateError::Db => "UNAVAILABLE",
             };
             (
