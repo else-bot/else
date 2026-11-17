@@ -87,6 +87,13 @@ impl CredentialFields {
         });
     }
 
+    pub fn names(&self, cx: &App) -> Vec<String> {
+        self.fields
+            .iter()
+            .map(|field| field.name.read(cx).value().to_string())
+            .collect()
+    }
+
     pub fn values(&self, cx: &App) -> Result<BTreeMap<String, String>, String> {
         collect_fields(self.fields.iter().map(|field| {
             (

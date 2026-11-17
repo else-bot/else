@@ -16,6 +16,7 @@ mod skills;
 mod switcher;
 mod updates;
 mod usage;
+mod vault;
 mod view;
 pub(crate) use switcher::bind_keys;
 pub(crate) use view::brand_mark;
@@ -191,7 +192,7 @@ struct Setup {
     name: Entity<InputState>,
     error: Option<String>,
     focus: FocusHandle,
-    navigation_focus: [FocusHandle; 9],
+    navigation_focus: [FocusHandle; 10],
     _attempt: Option<Task<()>>,
 }
 
@@ -226,6 +227,7 @@ pub struct Shell {
     backups: Option<backups::View>,
     mcp: Option<mcp::View>,
     skills: Option<skills::View>,
+    vault: Option<Entity<vault::View>>,
     usage: Option<usage::View>,
     computers: Option<computers::View>,
     socials: Option<Entity<crate::socials::SocialsView>>,
@@ -327,6 +329,7 @@ impl Shell {
             backups: None,
             mcp: None,
             skills: None,
+            vault: None,
             usage: None,
             computers: None,
             socials: None,
@@ -404,6 +407,7 @@ impl Shell {
             .as_ref()
             .map(|active| active.app.read(cx).panel_widths());
         self.clear_skills(window, cx);
+        self.clear_vault(window, cx);
         self.usage = None;
         self.computers = None;
         self.clear_socials(window, cx);
@@ -474,6 +478,11 @@ impl Shell {
                 }
                 if !app.read(cx).connected() {
                     shell.clear_skill_keys(window, cx);
+                    shell.clear_vault(window, cx);
+                } else if shell.settings_section() == Some(settings::SettingsSection::Vault)
+                    && shell.vault.is_none()
+                {
+                    shell.open_vault(window, cx);
                 }
                 if let Some(socials) = &shell.socials {
                     let available = app.read(cx).social_network_available();
@@ -865,6 +874,7 @@ impl Shell {
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_skills(window, cx);
+        self.clear_vault(window, cx);
         self.usage = None;
         self.computers = None;
         self.clear_socials(window, cx);

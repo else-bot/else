@@ -16,6 +16,7 @@ pub(super) enum SettingsSection {
     Socials,
     Mcp,
     Skills,
+    Vault,
     Usage,
     Computers,
     Backups,
@@ -174,6 +175,7 @@ impl Shell {
                 SettingsSection::Socials => 2,
                 SettingsSection::Mcp => 3,
                 SettingsSection::Skills => 4,
+                SettingsSection::Vault => 9,
                 SettingsSection::Usage => 5,
                 SettingsSection::Backups => 6,
                 SettingsSection::Updates => 7,
@@ -181,6 +183,13 @@ impl Shell {
             }]
             .focus(window, cx);
             cx.notify();
+        }
+        if section == SettingsSection::Vault {
+            if self.vault.is_none() {
+                self.open_vault(window, cx);
+            }
+        } else {
+            self.clear_vault(window, cx);
         }
         if section == SettingsSection::Skills {
             if self.skills.is_none() {
@@ -329,6 +338,13 @@ impl Shell {
                 &setup.navigation_focus[4],
             ))
             .child(nav_item(
+                "settings-vault",
+                "Vault",
+                IconName::Lock,
+                SettingsSection::Vault,
+                &setup.navigation_focus[9],
+            ))
+            .child(nav_item(
                 "settings-usage",
                 "Usage",
                 IconName::Gauge,
@@ -357,6 +373,12 @@ impl Shell {
             SettingsSection::Socials => div().children(self.socials.clone()).into_any_element(),
             SettingsSection::Mcp => self.render_mcp(window, cx),
             SettingsSection::Skills => self.render_skills(cx),
+            SettingsSection::Vault => match &self.vault {
+                Some(view) => div().child(view.clone()).into_any_element(),
+                None => div()
+                    .child("Reconnect to the server to open the Vault.")
+                    .into_any_element(),
+            },
             SettingsSection::Usage => self.render_usage(cx),
             SettingsSection::Computers => self.render_computers(cx),
             SettingsSection::Backups => self.render_backups(window, cx),
@@ -457,6 +479,7 @@ impl Shell {
                                 SettingsSection::Socials => "settings-socials-content",
                                 SettingsSection::Mcp => "settings-mcp-content",
                                 SettingsSection::Skills => "settings-skills-content",
+                                SettingsSection::Vault => "settings-vault-content",
                                 SettingsSection::Usage => "settings-usage-content",
                                 SettingsSection::Computers => "settings-computers-content",
                                 SettingsSection::Backups => "settings-backups-content",
