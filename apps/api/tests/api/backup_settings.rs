@@ -118,6 +118,21 @@ impl Harness {
         .await
         .unwrap()
     }
+    /// The first reply other than `backup_running`, which a scheduled
+    /// capture causes while it runs.
+    async fn until_not_busy(&self, method: &str, path: &str, body: Option<Value>) -> common::Reply {
+        tokio::time::timeout(common::SETTLE, async {
+            loop {
+                let reply = self.app.owner(method, path, body.clone()).await;
+                if reply.body["error"]["code"] != "backup_running" {
+                    return reply;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
 }
 
 fn destination(endpoint: &str) -> Value {
@@ -689,7 +704,7 @@ async fn a_failed_capture_retries_capture_before_the_full_remote_interval() {
 async fn a_successful_local_capture_does_not_clear_a_failed_remote_upload() {
     let mut h = Harness::new().await;
     let store = Store::new(true).await;
-    h.config.backup.cadence = else_api::backup::capture::Cadence::Every(Duration::from_millis(200));
+    h.config.backup.cadence = else_api::backup::capture::Cadence::Every(Duration::from_secs(1));
     h.restart().await;
     tokio::time::timeout(common::SETTLE, async {
         loop {
@@ -707,28 +722,20 @@ async fn a_successful_local_capture_does_not_clear_a_failed_remote_upload() {
     })
     .await
     .unwrap();
+    // A scheduled capture can start first and refuse the save and the
+    // manual run.
     let saved = h
-        .app
-        .owner(
+        .until_not_busy(
             "PUT",
             "/v1/settings/backups",
             Some(update(0, &store.endpoint)),
         )
         .await;
     assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
-    // A scheduled capture can start first and refuse the manual run.
-    tokio::time::timeout(common::SETTLE, async {
-        loop {
-            let run = h.app.owner("POST", "/v1/settings/backups/run", None).await;
-            match run.status {
-                StatusCode::ACCEPTED => break,
-                StatusCode::CONFLICT => tokio::time::sleep(Duration::from_millis(20)).await,
-                other => panic!("{other}: {}", run.body),
-            }
-        }
-    })
-    .await
-    .unwrap();
+    let run = h
+        .until_not_busy("POST", "/v1/settings/backups/run", None)
+        .await;
+    assert_eq!(run.status, StatusCode::ACCEPTED, "{}", run.body);
     let failed = h.wait_idle().await;
     assert!(
         failed["last_error"]
