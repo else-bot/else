@@ -47,7 +47,11 @@ enum Query {
 
 /// Whether this turn may read `account_id`: an incoming-mail turn reads only
 /// its own inbox, and the bot needs read permission.
-async fn readable(state: &AppState, grant: &Grant, account_id: Uuid) -> Result<(), MailError> {
+pub(super) async fn readable(
+    state: &AppState,
+    grant: &Grant,
+    account_id: Uuid,
+) -> Result<(), MailError> {
     let unavailable = |_| MailError::new("mail_unavailable");
     let (source, permissions) = tokio::join!(
         store::event_account(&state.db, grant.turn_id),

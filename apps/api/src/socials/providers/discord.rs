@@ -156,13 +156,28 @@ pub async fn send(
     d: &str,
     body: &str,
     reply: Option<&str>,
+    files: &[SendFile],
 ) -> Result<Value, Error> {
     if body.chars().count() > 2000 {
         return Err(Error::Invalid(
             "Discord messages are limited to 2000 characters.",
         ));
     }
+    let attachments: Vec<_> = files
+        .iter()
+        .zip(0..)
+        .map(|(file, index)| {
+            twilight_model::http::attachment::Attachment::from_bytes(
+                file.name.clone(),
+                file.data.to_vec(),
+                index,
+            )
+        })
+        .collect();
     let mut request = c.create_message(id(d)?).content(body);
+    if !attachments.is_empty() {
+        request = request.attachments(&attachments);
+    }
     if let Some(reply) = reply {
         request = request.reply(id(reply)?);
     }

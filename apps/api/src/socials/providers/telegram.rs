@@ -106,18 +106,66 @@ pub async fn resolve(c: &Connection, b: &Bot, username: &str) -> Result<Destinat
         can_send,
     })
 }
-pub async fn send(b: &Bot, d: &str, body: &str, reply: Option<&str>) -> Result<Value, Error> {
+pub async fn send(
+    b: &Bot,
+    d: &str,
+    body: &str,
+    reply: Option<&str>,
+    files: &[SendFile],
+) -> Result<Value, Error> {
+    use teloxide_core::types::{InputFile, ReplyParameters};
     if body.chars().count() > 4096 {
         return Err(Error::Invalid(
             "Telegram messages are limited to 4096 characters.",
         ));
     }
-    let mut request = b.send_message(chat(d)?, body);
-    if let Some(reply) = reply {
-        request =
-            request.reply_parameters(teloxide_core::types::ReplyParameters::new(message(reply)?));
+    let chat = chat(d)?;
+    let reply = reply.map(message).transpose()?.map(ReplyParameters::new);
+    if files.is_empty() {
+        let mut request = b.send_message(chat, body);
+        if let Some(reply) = reply {
+            request = request.reply_parameters(reply);
+        }
+        return value(request.await.map_err(|_| Error::Platform)?);
     }
-    value(request.await.map_err(|_| Error::Platform)?)
+    super::send_parts(super::parts(body, files), |part, first| {
+        let reply = reply.clone().filter(|_| first);
+        async move {
+            let sent = match part {
+                super::Part::Text(text) => {
+                    let mut request = b.send_message(chat, text);
+                    if let Some(reply) = reply {
+                        request = request.reply_parameters(reply);
+                    }
+                    request.await
+                }
+                super::Part::File(file, caption) => {
+                    let input = InputFile::memory(file.data.to_vec()).file_name(file.name.clone());
+                    if file.is_image() {
+                        let mut request = b.send_photo(chat, input);
+                        if let Some(caption) = caption {
+                            request = request.caption(caption);
+                        }
+                        if let Some(reply) = reply {
+                            request = request.reply_parameters(reply);
+                        }
+                        request.await
+                    } else {
+                        let mut request = b.send_document(chat, input);
+                        if let Some(caption) = caption {
+                            request = request.caption(caption);
+                        }
+                        if let Some(reply) = reply {
+                            request = request.reply_parameters(reply);
+                        }
+                        request.await
+                    }
+                }
+            };
+            value(sent.map_err(|_| Error::Platform)?)
+        }
+    })
+    .await
 }
 pub async fn execute(b: &Bot, cmd: &Command) -> Result<Value, Error> {
     match cmd {

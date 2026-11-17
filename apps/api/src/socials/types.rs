@@ -6,6 +6,26 @@ pub struct SendMessage {
     pub destination: String,
     pub body: String,
     pub reply_to: Option<String>,
+    pub files: Vec<SendFile>,
+}
+
+/// A file sent with a message, as the owner approved it.
+#[derive(Clone)]
+pub struct SendFile {
+    pub name: String,
+    pub media_type: String,
+    pub sha256: String,
+    pub data: std::sync::Arc<[u8]>,
+}
+
+impl SendFile {
+    /// A picture platforms show inline.
+    pub fn is_image(&self) -> bool {
+        matches!(
+            self.media_type.as_str(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]

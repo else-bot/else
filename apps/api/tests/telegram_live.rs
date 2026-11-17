@@ -37,7 +37,7 @@ async fn a_public_channel_link_resolves_and_receives_a_post() {
     assert!(found.id.starts_with('-'), "a channel ID is negative");
     assert!(found.can_send, "the bot may post in {chat}");
     let sent = Native
-        .send(&session, &found.id, "Test", None)
+        .send(&session, &found.id, "Test", None, &[])
         .await
         .unwrap();
     println!("sent message {}", sent["message_id"]);

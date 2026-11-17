@@ -44,6 +44,28 @@ pub(super) fn schemas() -> Vec<Value> {
                 "description": description })
     };
     let platforms: Vec<&str> = Platform::ALL.iter().map(|p| p.as_str()).collect();
+    let attachments = json!({
+        "type": "array", "maxItems": outgoing::MAX_FILES,
+        "description": "Files to send: {path} in your project or ~/work, or {email} for an \
+            attachment of an email you can read, by its part. Limits per platform are checked now.",
+        "items": { "oneOf": [
+            { "type": "object", "required": ["path"], "additionalProperties": false,
+              "properties": { "path": { "type": "string", "minLength": 1 } } },
+            { "type": "object", "required": ["email"], "additionalProperties": false,
+              "properties": { "email": {
+                  "type": "object", "required": ["account_id", "message", "part"],
+                  "additionalProperties": false,
+                  "properties": {
+                      "account_id": { "type": "string", "format": "uuid" },
+                      "message": { "type": "object",
+                                   "required": ["folder", "uid_validity", "uid"],
+                                   "properties": {
+                                       "folder": { "type": "string" },
+                                       "uid_validity": { "type": "integer", "minimum": 1 },
+                                       "uid": { "type": "integer", "minimum": 1 } },
+                                   "additionalProperties": false },
+                      "part": { "type": "integer", "minimum": 0 } } } } } ] },
+    });
     vec![
         json!({
             "name": "draft_email",
@@ -77,6 +99,7 @@ pub(super) fn schemas() -> Vec<Value> {
                     "bcc": list,
                     "subject": { "type": "string", "maxLength": outgoing::MAX_SUBJECT },
                     "body": body.clone(),
+                    "attachments": attachments.clone(),
                     "replaces": draft_id(),
                 },
                 "required": ["to", "subject", "body"],
@@ -106,6 +129,7 @@ pub(super) fn schemas() -> Vec<Value> {
                         public post), such as \"Initial lead DMs\", so Approve always covers it to \
                         anyone. Reuse a listed always-approved task exactly."),
                     "body": body,
+                    "attachments": attachments,
                     "replaces": draft_id(),
                 },
                 "required": ["platform", "body"],
@@ -182,13 +206,42 @@ pub(super) fn schemas() -> Vec<Value> {
 }
 
 fn draft_json(draft: &OutgoingDraft) -> Value {
-    json!({
+    let mut value = json!({
         "draft_id": draft.id,
         "lineage_id": draft.lineage_id,
         "revision": draft.revision,
         "status": draft.status,
         "content": draft.content,
-    })
+    });
+    if draft.content.account().is_none() && !draft.content.files().is_empty() {
+        value["attachment_paths"] = draft
+            .content
+            .files()
+            .iter()
+            .map(files::staged_path)
+            .collect();
+    }
+    value
+}
+
+/// Stage an unconnected draft's approved files for the bot's own send.
+async fn stage_for_send(
+    state: &AppState,
+    grant: &Grant,
+    draft: &OutgoingDraft,
+) -> Result<(), Outcome> {
+    let approved = match files::approved(state, grant.bot_id, draft.content.files()).await {
+        Ok(approved) => approved,
+        Err(changed) => return Err(file_changed(state, grant, draft, changed).await),
+    };
+    files::stage(state, grant.bot_id, &approved)
+        .await
+        .map_err(|message| {
+            (
+                tool_error(&message),
+                Some("rejected FILE_UNAVAILABLE".into()),
+            )
+        })
 }
 
 pub(super) fn refused(err: DraftError) -> Outcome {
@@ -271,6 +324,21 @@ async fn draft(
 ) -> Result<Outcome, Outcome> {
     let content =
         content.map_err(|message| (tool_error(&format!("INVALID_DRAFT: {message}")), None))?;
+    let sources = files::sources(args).map_err(|message| (tool_error(&message), None))?;
+    let content = if sources.is_empty() {
+        content
+    } else {
+        let rejected = |message: String| {
+            let code = message.split(':').next().unwrap_or_default().to_owned();
+            (tool_error(&message), Some(format!("rejected {code}")))
+        };
+        let files = files::snapshot(state, grant, sources)
+            .await
+            .map_err(rejected)?;
+        content
+            .with_files(files)
+            .map_err(|why| rejected(format!("INVALID_DRAFT: {why}")))?
+    };
     let replaces = match &args["replaces"] {
         Value::Null => None,
         _ => Some(id_arg(args, "replaces")?),
@@ -278,6 +346,14 @@ async fn draft(
     let row = outgoing_drafts::propose(&state.db, grant.turn_id, &content, replaces)
         .await
         .map_err(refused)?;
+    if row.content.account().is_none() && !row.content.files().is_empty() {
+        let approved = files::approved(state, grant.bot_id, row.content.files())
+            .await
+            .map_err(|changed| (tool_error(&changed.to_string()), None))?;
+        files::stage(state, grant.bot_id, &approved)
+            .await
+            .map_err(|message| (tool_error(&message), None))?;
+    }
     if row.status == Status::Approved
         && row.approval_source == Some(ApprovalSource::Standing)
         && row.send_turn_id == Some(grant.turn_id)
@@ -412,6 +488,12 @@ async fn confirm(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcom
 async fn start(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
     only(args, &["draft_id"])?;
     let id = id_arg(args, "draft_id")?;
+    let draft = outgoing_drafts::load_for(&state.db, grant.bot_id, id)
+        .await
+        .map_err(refused)?;
+    if draft.status == Status::Approved && draft.content.account().is_none() {
+        stage_for_send(state, grant, &draft).await?;
+    }
     let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &Delivery::Host)
         .await
         .map_err(refused)?;
@@ -419,9 +501,10 @@ async fn start(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome,
         tool_result(json!({
             "status": "sending",
             "draft": draft_json(&row),
-            "next": format!("Send exactly this {} now with your host tools, once, then call \
+            "next": format!("Send exactly this {}{} now with your host tools, once, then call \
                      report_draft_send with the result. Do not send it any other way or again.",
-                     row.content.noun()),
+                     row.content.noun(),
+                     if row.content.files().is_empty() { "" } else { " with the files at attachment_paths" }),
         })),
         Some(format!(
             "claimed {} {} for a host send",
@@ -519,6 +602,10 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
     let row = if settled {
         draft
     } else {
+        let approved = match files::approved(state, grant.bot_id, draft.content.files()).await {
+            Ok(approved) => approved,
+            Err(changed) => return Err(file_changed(state, grant, &draft, changed).await),
+        };
         let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &delivery)
             .await
             .map_err(refused)?;
@@ -538,7 +625,7 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
                         grant.bot_id,
                         grant.turn_id,
                         Some(action_id),
-                        email.send_command(),
+                        email.send_command(approved.iter().map(mail_file).collect()),
                     )
                     .await;
                 let refusal = result.as_ref().err().map(|err: &MailError| err.code);
@@ -579,6 +666,7 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
                                 destination: destination.to_owned(),
                                 body: message.body.clone(),
                                 reply_to: message.reply_to.clone(),
+                                files: approved.into_iter().map(social_file).collect(),
                             },
                         )
                         .await
@@ -621,6 +709,52 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
     ))
 }
 
+fn mail_file(file: &files::Approved) -> crate::connectors::types::OutgoingAttachment {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    crate::connectors::types::OutgoingAttachment {
+        name: file.file.name.clone(),
+        media_type: file.file.media_type.clone(),
+        data_base64: STANDARD.encode(&file.data),
+    }
+}
+
+fn social_file(file: files::Approved) -> crate::socials::types::SendFile {
+    crate::socials::types::SendFile {
+        name: file.file.name,
+        media_type: file.file.media_type,
+        sha256: file.file.sha256,
+        data: file.data.into(),
+    }
+}
+
+/// An approved file is gone or differs from what the owner approved: the
+/// approval fails without sending, so only a new approval sends it.
+async fn file_changed(
+    state: &AppState,
+    grant: &Grant,
+    draft: &OutgoingDraft,
+    changed: files::FileChanged,
+) -> Outcome {
+    let detail = changed.to_string();
+    if let Err(err) = outgoing_drafts::report(
+        &state.db,
+        grant.turn_id,
+        draft.id,
+        outgoing::Outcome::Failed,
+        Some(&detail),
+    )
+    .await
+    {
+        return refused(err);
+    }
+    (
+        tool_error(&format!(
+            "FILE_CHANGED: {detail}. Tell the owner; draft it again for a new approval."
+        )),
+        Some("rejected FILE_CHANGED".into()),
+    )
+}
+
 async fn report(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
     only(args, &["draft_id", "status", "detail"])?;
     let id = id_arg(args, "draft_id")?;
@@ -653,6 +787,12 @@ pub(super) async fn claim_for_tool(
     args: &Value,
 ) -> Result<String, Outcome> {
     let id = id_arg(args, "approved_draft")?;
+    if let Ok(draft) = outgoing_drafts::load_for(&state.db, grant.bot_id, id).await
+        && draft.status == Status::Approved
+        && draft.content.account().is_none()
+    {
+        stage_for_send(state, grant, &draft).await?;
+    }
     let delivery = Delivery::Tool {
         tool: name.to_owned(),
         args: crate::app::tools::loggable_args(name, args),
@@ -677,5 +817,6 @@ pub(super) async fn claim_for_tool(
     ))
 }
 
+mod files;
 #[cfg(test)]
 mod tests;

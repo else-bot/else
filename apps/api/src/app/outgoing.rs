@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::connectors::types::{Draft, MailCommand, MessageRef};
+use crate::connectors::types::{Draft, MailCommand, MessageRef, OutgoingAttachment};
 
 pub const MAX_ADDRESS: usize = 320;
 pub const MAX_RECIPIENTS: usize = 50;
@@ -11,6 +11,123 @@ pub const MAX_BODY: usize = 100_000;
 pub const MAX_DETAIL: usize = 2000;
 /// An account or destination name on a messaging or social platform.
 pub const MAX_HANDLE: usize = 200;
+/// Files one draft may name, on any channel.
+pub const MAX_FILES: usize = 10;
+const MIB: u64 = 1024 * 1024;
+
+/// A file attached to a draft. Drafting copies it into the bot's file store
+/// (`attachments`), so the owner approves these exact bytes and a send
+/// refuses bytes whose hash differs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftFile {
+    pub id: Uuid,
+    pub name: String,
+    pub media_type: String,
+    pub size: u64,
+    /// Lowercase hex SHA-256 of the approved bytes.
+    pub sha256: String,
+}
+
+impl DraftFile {
+    /// A picture platforms show inline: a photo on Telegram, an image with
+    /// a caption on WhatsApp.
+    pub fn is_image(&self) -> bool {
+        matches!(
+            self.media_type.as_str(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        )
+    }
+}
+
+/// Where `attachments` takes a file from, as the bot names it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
+pub enum FileSource {
+    /// A file in the bot's project: project-relative or under `~/work/`.
+    Path(String),
+    /// One attachment of an email the bot can read in a connected account.
+    Email(EmailPart),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmailPart {
+    pub account_id: Uuid,
+    pub message: MessageRef,
+    pub part: usize,
+}
+
+/// The `attachments` argument of a draft tool; absent means none.
+pub fn file_sources(args: &Value) -> Result<Vec<FileSource>, &'static str> {
+    const USAGE: &str = "attachments is a list of up to 10 items, each {path} for a file in your \
+                         project or {email: {account_id, message, part}} for an email attachment";
+    match args.get("attachments") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(list)) if list.len() <= MAX_FILES => list
+            .iter()
+            .map(|item| serde_json::from_value(item.clone()).map_err(|_| USAGE))
+            .collect(),
+        Some(_) => Err(USAGE),
+    }
+}
+
+/// What a channel accepts as attachments, checked when drafting so a send
+/// never meets a file its platform refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileRules {
+    pub medium: &'static str,
+    pub max_files: usize,
+    pub max_file_bytes: u64,
+    pub max_total_bytes: u64,
+    pub images_only: bool,
+}
+
+impl FileRules {
+    pub fn check(&self, files: &[DraftFile]) -> Result<(), String> {
+        let FileRules {
+            medium,
+            max_files,
+            max_file_bytes,
+            max_total_bytes,
+            images_only,
+        } = *self;
+        if files.len() > max_files {
+            return Err(format!("{medium} takes at most {max_files} attachments"));
+        }
+        if let Some(file) = files.iter().find(|f| f.size > max_file_bytes) {
+            return Err(format!(
+                "{} is {}; {medium} takes files of at most {}",
+                file.name,
+                size_text(file.size),
+                size_text(max_file_bytes)
+            ));
+        }
+        let total: u64 = files.iter().map(|f| f.size).sum();
+        if total > max_total_bytes {
+            return Err(format!(
+                "the attachments total {}; {medium} takes at most {} in all",
+                size_text(total),
+                size_text(max_total_bytes)
+            ));
+        }
+        if images_only && let Some(file) = files.iter().find(|f| !f.is_image()) {
+            return Err(format!(
+                "{} is {}; {medium} takes only PNG, JPEG, GIF, or WebP images",
+                file.name, file.media_type
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A size as the owner reads it: "820 KB", "4.2 MB".
+pub fn size_text(bytes: u64) -> String {
+    if bytes < MIB {
+        format!("{} KB", bytes.div_ceil(1024))
+    } else {
+        format!("{:.1} MB", bytes as f64 / MIB as f64)
+    }
+}
 
 /// Where a draft is in its life. `pending` is the only state the owner can
 /// edit. `approved` allows exactly one send by its send request; the claim
@@ -177,6 +294,41 @@ impl Platform {
         }
     }
 
+    /// The attachments one message accepts. X takes up to four pictures;
+    /// Telegram photos and Discord uploads cap at 10 MB.
+    pub fn file_rules(self) -> FileRules {
+        match self {
+            Self::X => FileRules {
+                medium: "an X post",
+                max_files: 4,
+                max_file_bytes: 5 * MIB,
+                max_total_bytes: 20 * MIB,
+                images_only: true,
+            },
+            Self::Telegram => FileRules {
+                medium: "a Telegram message",
+                max_files: MAX_FILES,
+                max_file_bytes: 10 * MIB,
+                max_total_bytes: 100 * MIB,
+                images_only: false,
+            },
+            Self::Discord => FileRules {
+                medium: "a Discord message",
+                max_files: MAX_FILES,
+                max_file_bytes: 10 * MIB,
+                max_total_bytes: 10 * MIB,
+                images_only: false,
+            },
+            Self::WhatsApp => FileRules {
+                medium: "a WhatsApp message",
+                max_files: MAX_FILES,
+                max_file_bytes: 10 * MIB,
+                max_total_bytes: 100 * MIB,
+                images_only: false,
+            },
+        }
+    }
+
     /// Whether messages go out as the owner's own account, so Approve always
     /// covers one chat and never a task. The SQL `kind!` in
     /// `db::outgoing_drafts` mirrors this.
@@ -206,7 +358,18 @@ pub struct Email {
     pub account_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<MessageRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<DraftFile>,
 }
+
+/// What one email accepts, the connector's MIME limit included.
+pub const EMAIL_FILES: FileRules = FileRules {
+    medium: "an email",
+    max_files: MAX_FILES,
+    max_file_bytes: 10 * MIB,
+    max_total_bytes: crate::connectors::types::MAX_ATTACHMENT_TOTAL as u64,
+    images_only: false,
+};
 
 /// A message or post on a messaging or social platform. It has no subject
 /// and no addresses: `destination` names the chat, channel, user, or post
@@ -225,6 +388,8 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<DraftFile>,
 }
 
 /// What the bot drafts, by channel. The owner can change only the body and,
@@ -243,6 +408,8 @@ pub enum Content {
 pub struct Edits<'a> {
     pub subject: Option<&'a str>,
     pub body: Option<&'a str>,
+    /// The attachments the owner keeps, by id: removal only.
+    pub attachments: Option<&'a [Uuid]>,
 }
 
 impl Content {
@@ -251,6 +418,31 @@ impl Content {
             Self::Email(email) => &email.body,
             Self::Message(message) => &message.body,
         }
+    }
+
+    pub fn files(&self) -> &[DraftFile] {
+        match self {
+            Self::Email(email) => &email.attachments,
+            Self::Message(message) => &message.attachments,
+        }
+    }
+
+    /// What this draft's channel accepts as attachments.
+    pub fn file_rules(&self) -> FileRules {
+        match self {
+            Self::Email(_) => EMAIL_FILES,
+            Self::Message(message) => message.platform.file_rules(),
+        }
+    }
+
+    /// This content carrying `files`, if its channel accepts them.
+    pub fn with_files(mut self, files: Vec<DraftFile>) -> Result<Self, String> {
+        self.file_rules().check(&files)?;
+        match &mut self {
+            Self::Email(email) => email.attachments = files,
+            Self::Message(message) => message.attachments = files,
+        }
+        Ok(self)
     }
 
     /// What this draft is, for receipts and logs: "email", "X post", ...
@@ -310,6 +502,21 @@ impl Content {
     /// This content with the owner's edits applied.
     pub fn edited(&self, edits: Edits<'_>) -> Result<Self, &'static str> {
         let body = edits.body.map(body).transpose()?;
+        let attachments = match edits.attachments {
+            None => self.files().to_vec(),
+            Some(kept)
+                if kept
+                    .iter()
+                    .all(|id| self.files().iter().any(|f| f.id == *id)) =>
+            {
+                self.files()
+                    .iter()
+                    .filter(|file| kept.contains(&file.id))
+                    .cloned()
+                    .collect()
+            }
+            Some(_) => return Err("the owner can only remove attachments the draft has"),
+        };
         match self {
             Self::Email(email) => Email {
                 subject: match edits.subject {
@@ -317,6 +524,7 @@ impl Content {
                     None => email.subject.clone(),
                 },
                 body: body.unwrap_or_else(|| email.body.clone()),
+                attachments,
                 ..email.clone()
             }
             .connectable()
@@ -326,6 +534,7 @@ impl Content {
             }
             Self::Message(message) => Ok(Self::Message(Message {
                 body: body.unwrap_or_else(|| message.body.clone()),
+                attachments,
                 ..message.clone()
             })),
         }
@@ -425,9 +634,10 @@ impl Email {
                 "replaces",
                 "account_id",
                 "reply_to",
+                "attachments",
             ],
             "use from (or account_id), to, subject, body, and optionally cc, bcc, reply_to, \
-             replaces",
+             attachments, replaces",
         )?;
         let account_id = match args.get("account_id") {
             None | Some(Value::Null) => None,
@@ -471,12 +681,14 @@ impl Email {
             body: body(args["body"].as_str().ok_or("body is text")?)?,
             account_id,
             reply_to,
+            attachments: Vec::new(),
         }
         .connectable()
     }
 
-    /// The mail command that sends exactly this email from its account.
-    pub fn send_command(&self) -> MailCommand {
+    /// The mail command that sends exactly this email from its account,
+    /// with the bytes of its attachments in order.
+    pub fn send_command(&self, files: Vec<OutgoingAttachment>) -> MailCommand {
         MailCommand::Send {
             draft: Draft {
                 to: self.to.clone(),
@@ -484,14 +696,14 @@ impl Email {
                 bcc: self.bcc.clone(),
                 subject: self.subject.clone(),
                 body: self.body.clone(),
-                attachments: Vec::new(),
+                attachments: files,
                 reply_to: self.reply_to.clone(),
             },
         }
     }
 
     fn connectable(self) -> Result<Self, &'static str> {
-        if self.account_id.is_some() && self.send_command().validate().is_err() {
+        if self.account_id.is_some() && self.send_command(Vec::new()).validate().is_err() {
             return Err(
                 "an email from a connected account has 1 to 50 bare addresses \
                         (name@example.com) and a body of at most 32000 bytes",
@@ -515,9 +727,10 @@ impl Message {
                 "account_id",
                 "reply_to",
                 "task",
+                "attachments",
             ],
-            "use platform, body, and optionally account, destination, task, replaces (a message \
-             has no subject or addresses; use draft_email for email)",
+            "use platform, body, and optionally account, destination, task, attachments, replaces \
+             (a message has no subject or addresses; use draft_email for email)",
         )?;
         let platform = args["platform"]
             .as_str()
@@ -562,6 +775,7 @@ impl Message {
             destination,
             task,
             body: body(args["body"].as_str().ok_or("body is text")?)?,
+            attachments: Vec::new(),
         })
     }
 }
@@ -587,6 +801,125 @@ pub struct Note {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn file(name: &str, media_type: &str, size: u64) -> DraftFile {
+        DraftFile {
+            id: Uuid::new_v5(&Uuid::nil(), name.as_bytes()),
+            name: name.into(),
+            media_type: media_type.into(),
+            size,
+            sha256: "0".repeat(64),
+        }
+    }
+
+    #[test]
+    fn each_platform_refuses_files_it_cannot_send_when_drafting() {
+        let photo = file("flyer.jpg", "image/jpeg", 800 * 1024);
+        let pdf = file("menu.pdf", "application/pdf", 2 * MIB);
+        assert!(
+            Platform::WhatsApp
+                .file_rules()
+                .check(&[photo.clone(), pdf.clone()])
+                .is_ok()
+        );
+        let refused = Platform::X
+            .file_rules()
+            .check(std::slice::from_ref(&pdf))
+            .unwrap_err();
+        assert!(
+            refused.contains("only PNG, JPEG, GIF, or WebP"),
+            "{refused}"
+        );
+        let five = vec![photo.clone(); 5];
+        assert!(
+            Platform::X.file_rules().check(&five).is_err(),
+            "X takes four"
+        );
+        let big = file("video.mp4", "video/mp4", 11 * MIB);
+        let refused = Platform::Telegram.file_rules().check(&[big]).unwrap_err();
+        assert_eq!(
+            refused,
+            "video.mp4 is 11.0 MB; a Telegram message takes files of at most 10.0 MB"
+        );
+        let two = [
+            file("a.pdf", "application/pdf", 6 * MIB),
+            file("b.pdf", "application/pdf", 6 * MIB),
+        ];
+        assert!(
+            Platform::Discord.file_rules().check(&two).is_err(),
+            "10 MB per message"
+        );
+        assert!(EMAIL_FILES.check(&two).is_ok());
+    }
+
+    #[test]
+    fn attachments_name_a_project_path_or_an_email_part() {
+        let account = Uuid::new_v4();
+        let sources = file_sources(&json!({ "attachments": [
+            { "path": "flyer.jpg" },
+            { "email": { "account_id": account, "part": 1,
+                         "message": { "folder": "INBOX", "uid_validity": 7, "uid": 42 } } } ] }))
+        .unwrap();
+        assert_eq!(sources[0], FileSource::Path("flyer.jpg".into()));
+        assert!(matches!(&sources[1], FileSource::Email(part) if part.part == 1));
+        assert!(file_sources(&json!({})).unwrap().is_empty());
+        for bad in [
+            json!({ "attachments": [{ "path": "a", "email": {} }] }),
+            json!({ "attachments": [{ "data_base64": "AAAA" }] }),
+            json!({ "attachments": vec![json!({ "path": "a" }); 11] }),
+        ] {
+            assert!(file_sources(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_owner_removes_attachments_but_never_adds_one() {
+        let kept = file("a.png", "image/png", 10);
+        let dropped = file("b.png", "image/png", 10);
+        let message = Content::Message(Message {
+            platform: Platform::WhatsApp,
+            account_id: None,
+            reply_to: None,
+            account: None,
+            destination: Some("chat".into()),
+            task: None,
+            body: "Flyer".into(),
+            attachments: Vec::new(),
+        })
+        .with_files(vec![kept.clone(), dropped])
+        .unwrap();
+        let edited = message
+            .edited(Edits {
+                subject: None,
+                body: None,
+                attachments: Some(&[kept.id]),
+            })
+            .unwrap();
+        assert_eq!(edited.files(), [kept]);
+        assert!(
+            message
+                .edited(Edits {
+                    subject: None,
+                    body: None,
+                    attachments: Some(&[Uuid::new_v4()])
+                })
+                .is_err()
+        );
+        let plain = serde_json::to_value(
+            edited
+                .edited(Edits {
+                    subject: None,
+                    body: None,
+                    attachments: Some(&[]),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            plain.get("attachments").is_none(),
+            "no files keeps today's wire shape"
+        );
+    }
 
     #[test]
     fn a_whatsapp_message_is_never_filed_under_an_always_approved_task() {
@@ -664,7 +997,7 @@ mod tests {
         assert_eq!(email.from, "owner@example.com");
         assert_eq!(email.account_id, Some(account));
         assert_eq!(email.reply_to.as_ref().map(|m| m.uid), Some(42));
-        let MailCommand::Send { draft } = email.send_command() else {
+        let MailCommand::Send { draft } = email.send_command(Vec::new()) else {
             panic!("a send");
         };
         assert_eq!(
@@ -699,7 +1032,8 @@ mod tests {
             bound
                 .edited(Edits {
                     subject: None,
-                    body: Some(&long)
+                    body: Some(&long),
+                    attachments: None,
                 })
                 .is_err()
         );
@@ -767,11 +1101,13 @@ mod tests {
             destination: Some("Family".into()),
             task: None,
             body: "Dinner?".into(),
+            attachments: Vec::new(),
         });
         let edited = message
             .edited(Edits {
                 subject: None,
                 body: Some("Dinner at 8?"),
+                attachments: None,
             })
             .unwrap();
         assert_eq!(edited.body(), "Dinner at 8?");
@@ -780,7 +1116,8 @@ mod tests {
             message
                 .edited(Edits {
                     subject: Some(""),
-                    body: None
+                    body: None,
+                    attachments: None,
                 })
                 .is_err(),
             "a message has no subject to edit"
@@ -800,6 +1137,7 @@ mod tests {
             destination: None,
             task: None,
             body: "x".into(),
+            attachments: Vec::new(),
         });
         assert!(!post.same_channel(&message), "platforms differ");
     }

@@ -42,6 +42,11 @@ struct VersionedEdits {
     subject: Option<String>,
     #[serde(default)]
     body: Option<String>,
+    /// The attachments the owner keeps, by id. Approving a draft with
+    /// attachments needs it, so an app that cannot show them never approves
+    /// them unseen.
+    #[serde(default)]
+    attachments: Option<Vec<Uuid>>,
     /// Also approve later drafts of this kind as the bot proposes them.
     #[serde(default)]
     always: bool,
@@ -52,6 +57,7 @@ impl VersionedEdits {
         Edits {
             subject: self.subject.as_deref(),
             body: self.body.as_deref(),
+            attachments: self.attachments.as_deref(),
         }
     }
 }
@@ -73,6 +79,14 @@ pub(super) fn draft_error(err: DraftError) -> ApiError {
             "The request that drafted this has ended. Reply in chat to send it.".into(),
         ),
         DraftError::Invalid(message) => ApiError::bad_request("invalid_draft", message),
+        DraftError::FilesUnseen(count) => conflict(
+            "attachments_unseen",
+            format!(
+                "This draft has {count} attachment{} this app cannot show. Update the app to \
+                 review them, or reply in chat to approve.",
+                if count == 1 { "" } else { "s" }
+            ),
+        ),
         DraftError::NoKind => ApiError::bad_request(
             "no_kind",
             "Only a message or a new post can be approved always.",

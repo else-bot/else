@@ -558,6 +558,22 @@ fn drafts_block(input: &TurnInput) -> String {
             ),
             (status, _, _) => format!("It is {}; do not send it.", status.as_str()),
         };
+        let files = match note.content.files() {
+            [] => String::new(),
+            files => format!(
+                "Attachments: {}\n",
+                files
+                    .iter()
+                    .map(|f| format!(
+                        "{} ({}, {})",
+                        f.name,
+                        f.media_type,
+                        crate::app::outgoing::size_text(f.size)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        };
         let (attributes, rendered) = match &note.content {
             Content::Email(email) => {
                 let mut headers = format!("From: {}\nTo: {}\n", email.from, email.to.join(", "));
@@ -579,7 +595,10 @@ fn drafts_block(input: &TurnInput) -> String {
                 };
                 (
                     attributes,
-                    format!("{headers}Subject: {}\n\n{}", email.subject, email.body),
+                    format!(
+                        "{headers}{files}Subject: {}\n\n{}",
+                        email.subject, email.body
+                    ),
                 )
             }
             Content::Message(message) => {
@@ -595,7 +614,7 @@ fn drafts_block(input: &TurnInput) -> String {
                         "channel=\"message\" platform=\"{}\"",
                         message.platform.as_str()
                     ),
-                    format!("{headers}\n{}", message.body),
+                    format!("{headers}{files}\n{}", message.body),
                 )
             }
         };
