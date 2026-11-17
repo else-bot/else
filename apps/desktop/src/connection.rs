@@ -6,6 +6,7 @@ mod backups;
 mod computers;
 mod icon_editor;
 mod mcp;
+mod server_keys;
 mod server_rail;
 mod server_views;
 mod servers;
@@ -178,6 +179,8 @@ pub struct Shell {
     servers: servers::Connections,
     server_editor: Option<servers::Editor>,
     rail: server_rail::Rail,
+    hold: server_keys::Hold,
+    _server_keys: [Subscription; 2],
     switch_attempt: Option<Uuid>,
     notification_target: Option<(Uuid, Uuid, Uuid)>,
     _switch: Option<Task<()>>,
@@ -245,6 +248,22 @@ impl Shell {
         let server_updates = updates::View::new_server(&launch, &runtime, window, cx);
         let servers = servers::Connections::new(&registry, &runtime, window, cx);
         let (rail, rail_error) = server_rail::Rail::load(&launch.store);
+        let this = cx.weak_entity();
+        let shell_window = window.window_handle();
+        let server_keys = [
+            cx.intercept_keystrokes(move |event, window, cx| {
+                if window.window_handle() == shell_window {
+                    let _ = this.update(cx, |shell, cx| {
+                        shell.server_key(&event.keystroke, window, cx)
+                    });
+                }
+            }),
+            cx.observe_window_activation(window, |shell, window, cx| {
+                if !window.is_window_active() {
+                    shell.move_hold(server_keys::Hold::blurred, cx);
+                }
+            }),
+        ];
         let mut shell = Self {
             launch,
             key,
@@ -255,6 +274,8 @@ impl Shell {
             servers,
             server_editor: None,
             rail,
+            hold: server_keys::Hold::Idle,
+            _server_keys: server_keys,
             switch_attempt: None,
             notification_target: None,
             _switch: None,
@@ -839,6 +860,9 @@ impl Render for Shell {
         let root =
             v_flex()
                 .key_context(SHELL_CONTEXT)
+                .on_modifiers_changed(cx.listener(|shell, event: &ModifiersChangedEvent, _, cx| {
+                    shell.modifiers_changed(event.modifiers, cx)
+                }))
                 .on_action(cx.listener(|shell, _: &OpenAppSettings, window, cx| {
                     shell.open_settings(window, cx)
                 }))
@@ -921,7 +945,7 @@ impl Render for Shell {
                     )
                 },
             )
-            .child(self.render_with_rail(active.app.clone().into(), cx))
+            .child(self.render_with_rail(active.app.clone().into(), window, cx))
     }
 }
 
