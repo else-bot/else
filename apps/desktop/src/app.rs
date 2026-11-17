@@ -4,6 +4,7 @@ mod bot_activity;
 mod bot_exchange;
 mod bot_mention;
 mod bot_menu;
+mod card_markdown;
 mod categories;
 mod computer;
 mod computer_handoff;

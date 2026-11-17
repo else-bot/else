@@ -10,6 +10,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::text::TextViewState;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _, StyledExt as _, Theme, h_flex, v_flex,
 };
@@ -17,6 +18,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
+use super::card_markdown::{self, CardText};
 use super::message_row::CardPlacement;
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
@@ -30,6 +32,20 @@ mod choice;
 pub(super) mod connection;
 
 pub(super) use choice::WriteIn;
+
+/// Which part of a card's context a formatted view shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum Extent {
+    Whole,
+    /// The first lines a long approval shows before "Show all".
+    Preview,
+}
+
+/// A card context that shows as markdown, parsed once per question.
+pub(super) struct FormattedContext {
+    state: Entity<TextViewState>,
+    _parsed: Subscription,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct QuestionForm {
@@ -134,6 +150,66 @@ impl ElseApp {
                 .and_then(|c| c.question(*id))
                 .is_some_and(Question::is_pending)
         });
+    }
+
+    /// Parses each question context that formats, so its card measures
+    /// with the formatted height once the background parse finishes.
+    pub(super) fn sync_card_contexts(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        let mut wanted = Vec::new();
+        for question in view.conversation.iter().flat_map(|c| c.questions()) {
+            let Some(context) = &question.context else {
+                continue;
+            };
+            let text = if question.is_approval() {
+                CardText::Action
+            } else {
+                CardText::Prose
+            };
+            let Some(source) = text.markdown(context) else {
+                continue;
+            };
+            wanted.push(((question.id, Extent::Whole), source));
+            if let Some(short) = question
+                .is_approval()
+                .then(|| approval::preview(context))
+                .flatten()
+                .and_then(|short| card_markdown::restricted(&short))
+            {
+                wanted.push(((question.id, Extent::Preview), short));
+            }
+        }
+        view.card_contexts
+            .retain(|key, _| wanted.iter().any(|(wanted, _)| wanted == key));
+        for (key, source) in wanted {
+            if view.card_contexts.contains_key(&key) {
+                continue;
+            }
+            let state = cx.new(|cx| TextViewState::markdown(&source, cx));
+            let row = RowKey::Question(key.0);
+            let _parsed = cx.observe(&state, move |app, _, cx| app.remeasure_row(row, cx));
+            view.card_contexts
+                .insert(key, FormattedContext { state, _parsed });
+        }
+    }
+
+    /// The formatted view of a question's context, or `None` when the
+    /// context shows as its exact characters.
+    fn formatted_context(
+        &self,
+        id: Uuid,
+        extent: Extent,
+        ink: Hsla,
+        code_background: Hsla,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        let context = self.view.as_ref()?.card_contexts.get(&(id, extent))?;
+        Some(
+            super::row_text::card_markdown_view(&context.state, ink, code_background, cx)
+                .into_any_element(),
+        )
     }
 
     fn answer_question(

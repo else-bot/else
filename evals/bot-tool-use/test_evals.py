@@ -439,6 +439,11 @@ def run(runner):
                     "question": "What time and time zone should the weekday whale callout run?",
                     "choices": ["9:00 a.m. New York", "10:00 a.m. New York"]},
                     {"status": "pending", "parked": True})], "Pick a time on the card."),
+                "choice-context-fences-code": ([self.call("ask_owner", {
+                    "question": "Which backup timer should I install?",
+                    "choices": ["Daily at 03:00", "Every 6 hours"],
+                    "context": "Daily:\n```ini\n[Timer]\nOnCalendar=*-*-* 03:00:00\n```"},
+                    {"status": "pending", "parked": True})], "Pick a timer on the card."),
                 "routine-always-reads-back": ([self.call("use_tool", {
                     "name": "routine_update", "arguments": {"routine_id": "10000000-0000-0000-0000-000000000002",
                                                             "active_hours": "always"}})],
@@ -453,6 +458,11 @@ def run(runner):
                     self.assertFalse(self.passed(write_in_case["expect"], [self.call("ask_owner", {
                         "question": "What time and time zone should the weekday whale callout run?", **bad_args},
                         {"status": "pending", "parked": True})], "Pick a time on the card."))
+            fence_case = next(c for c in runner.load_cases() if c["id"] == "choice-context-fences-code")
+            self.assertFalse(self.passed(fence_case["expect"], [self.call("ask_owner", {
+                "question": "Which backup timer should I install?", "choices": ["Daily", "Every 6 hours"],
+                "context": "Daily: [Timer] OnCalendar=*-*-* 03:00:00"}, {"status": "pending", "parked": True})],
+                "Pick a timer on the card."))
             unscoped = [self.call("computer_run", {"command": "node unfollow.js @UST_mean", "effect": "external"},
                                   {"status": "pending", "parked": True})]
             carried = next(c for c in runner.load_cases() if c["id"] == "carried-result-keeps-current-request-status")

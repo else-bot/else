@@ -7,7 +7,7 @@ use crate::attachments::{Attachment, MessagePart, byte_size, file_id, input_cont
 use gpui_kit::assets::IconName;
 use gpui_kit::base::FocusableExt;
 use gpui_kit::base::text::{
-    MarkdownExtensions, RangeHighlight, RenderedText, TextView, TextViewStyle,
+    CodeBlock, MarkdownExtensions, RangeHighlight, RenderedText, TextView, TextViewStyle,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::InputContent;
@@ -684,8 +684,7 @@ impl RowText {
                 let heading_ink = crate::appearance::tone(crate::appearance::Tone::Strong, cx);
                 TextView::new(state)
                     .style(
-                        TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
-                            .with_code_background(cx.theme().secondary)
+                        code_style(cx.theme().secondary, cx)
                             .with_link(cx.theme().link)
                             .with_border(cx.theme().foreground.opacity(0.08))
                             // A reply's title (H1, H2) leads at 18–19 px with 20 px
@@ -707,14 +706,6 @@ impl RowText {
                                     style
                                 }
                             })
-                            .with_code_block(
-                                StyleRefinement::default()
-                                    .rounded(cx.theme().radius)
-                                    .border_0()
-                                    .pt(px(28.))
-                                    .text_size(px(13.))
-                                    .line_height(px(21.)),
-                            )
                             .with_table({
                                 let mut table = StyleRefinement::default()
                                     .min_w_0()
@@ -740,34 +731,7 @@ impl RowText {
                                     .pr(TABLE_CELL_GUTTER),
                             ),
                     )
-                    .code_block_actions(|block, _, cx| {
-                        let code = block.code();
-                        h_flex()
-                            .h(px(16.))
-                            .gap_2()
-                            .items_center()
-                            .font_family(cx.theme().font_family.clone())
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .children(block.lang())
-                            .child(
-                                Button::new("copy-code")
-                                    .ghost()
-                                    .xsmall()
-                                    .size(px(16.))
-                                    .focus_ring(false)
-                                    .cursor_pointer()
-                                    .icon(IconName::Copy)
-                                    .accessibility_label("Copy code")
-                                    .on_click(move |_, window, cx| {
-                                        cx.stop_propagation();
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            code.to_string(),
-                                        ));
-                                        window.push_notification("Code copied to clipboard.", cx);
-                                    }),
-                            )
-                    })
+                    .code_block_actions(copy_code)
                     .markdown_extensions(
                         MarkdownExtensions::default()
                             .plugin(MentionPlugin {
@@ -890,6 +854,68 @@ impl RowText {
                 .into_any_element(),
         )
     }
+}
+
+/// The theme's text style with the code block look chat replies and cards
+/// share, filled with `background`.
+fn code_style(background: Hsla, cx: &App) -> TextViewStyle {
+    TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
+        .with_code_background(background)
+        .with_code_block(
+            StyleRefinement::default()
+                .rounded(cx.theme().radius)
+                .border_0()
+                .pt(px(28.))
+                .text_size(px(13.))
+                .line_height(px(21.)),
+        )
+}
+
+/// A code block's language and copy button.
+fn copy_code(block: &CodeBlock, _: &mut Window, cx: &mut App) -> Div {
+    let code = block.code();
+    h_flex()
+        .h(px(16.))
+        .gap_2()
+        .items_center()
+        .font_family(cx.theme().font_family.clone())
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .children(block.lang())
+        .child(
+            Button::new("copy-code")
+                .ghost()
+                .xsmall()
+                .size(px(16.))
+                .focus_ring(false)
+                .cursor_pointer()
+                .icon(IconName::Copy)
+                .accessibility_label("Copy code")
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
+                    window.push_notification("Code copied to clipboard.", cx);
+                }),
+        )
+}
+
+/// A card body in the restricted markdown of [`super::card_markdown`]: no
+/// links or images reach it, so the view needs no link handling.
+pub(super) fn card_markdown_view(
+    state: &Entity<TextViewState>,
+    ink: Hsla,
+    code_background: Hsla,
+    cx: &App,
+) -> TextView {
+    TextView::new(state)
+        .style(code_style(code_background, cx).with_foreground(ink))
+        .code_block_actions(copy_code)
+        .w_full()
+        .min_w_0()
+        .text_sm()
+        .line_height(relative(1.5))
+        .scrollable(false)
+        .selectable(true)
 }
 
 /// A read-only markdown view for text outside the transcript's rows.

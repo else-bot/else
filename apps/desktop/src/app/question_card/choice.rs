@@ -14,7 +14,9 @@ use uuid::Uuid;
 
 use super::super::action_card::OPTION_HEIGHT;
 use super::super::message_row::CardPlacement;
-use super::{Connection, ElseApp, QuestionForm, RowKey, SubmitState, callout, letter, receipt};
+use super::{
+    Connection, ElseApp, Extent, QuestionForm, RowKey, SubmitState, callout, letter, receipt,
+};
 use crate::model::{Question, QuestionAnswer};
 
 /// The field on a pending single-choice card for an answer its options don't
@@ -185,7 +187,16 @@ impl ElseApp {
                         .text_sm()
                         .whitespace_normal()
                         .text_color(theme.muted_foreground)
-                        .child(context.clone()),
+                        .child(
+                            self.formatted_context(
+                                id,
+                                Extent::Whole,
+                                theme.muted_foreground,
+                                theme.background,
+                                cx,
+                            )
+                            .unwrap_or_else(|| context.clone().into_any_element()),
+                        ),
                 );
             }
             // Inside its task the card already sits where the bot paused, so
@@ -224,10 +235,21 @@ impl ElseApp {
         if let Some(context) = &question.context {
             body = body.child(
                 div()
+                    .w_full()
+                    .min_w_0()
                     .text_sm()
                     .whitespace_normal()
                     .text_color(theme.muted_foreground)
-                    .child(context.clone()),
+                    .child(
+                        self.formatted_context(
+                            question.id,
+                            Extent::Whole,
+                            theme.muted_foreground,
+                            theme.secondary,
+                            cx,
+                        )
+                        .unwrap_or_else(|| context.clone().into_any_element()),
+                    ),
             );
         }
         // Options are borderless rows split by hairlines: the card is the
