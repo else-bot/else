@@ -94,6 +94,16 @@ impl FileRules {
         if files.len() > max_files {
             return Err(format!("{medium} takes at most {max_files} attachments"));
         }
+        if let Some((_, file)) = files
+            .iter()
+            .enumerate()
+            .find(|(index, file)| files[..*index].iter().any(|f| f.id == file.id))
+        {
+            return Err(format!(
+                "{} is attached twice; attach each file once",
+                file.name
+            ));
+        }
         if let Some(file) = files.iter().find(|f| f.size > max_file_bytes) {
             return Err(format!(
                 "{} is {}; {medium} takes files of at most {}",
@@ -850,6 +860,8 @@ mod tests {
             "10 MB per message"
         );
         assert!(EMAIL_FILES.check(&two).is_ok());
+        let twice = EMAIL_FILES.check(&[photo.clone(), photo]).unwrap_err();
+        assert_eq!(twice, "flyer.jpg is attached twice; attach each file once");
     }
 
     #[test]

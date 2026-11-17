@@ -224,26 +224,6 @@ fn draft_json(draft: &OutgoingDraft) -> Value {
     value
 }
 
-/// Stage an unconnected draft's approved files for the bot's own send.
-async fn stage_for_send(
-    state: &AppState,
-    grant: &Grant,
-    draft: &OutgoingDraft,
-) -> Result<(), Outcome> {
-    let approved = match files::approved(state, grant.bot_id, draft.content.files()).await {
-        Ok(approved) => approved,
-        Err(changed) => return Err(file_changed(state, grant, draft, changed).await),
-    };
-    files::stage(state, grant.bot_id, &approved)
-        .await
-        .map_err(|message| {
-            (
-                tool_error(&message),
-                Some("rejected FILE_UNAVAILABLE".into()),
-            )
-        })
-}
-
 pub(super) fn refused(err: DraftError) -> Outcome {
     let code = err.code();
     if let DraftError::Db(err) = &err {
@@ -480,15 +460,10 @@ async fn confirm(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcom
 async fn start(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
     only(args, &["draft_id"])?;
     let id = id_arg(args, "draft_id")?;
-    let draft = outgoing_drafts::load_for(&state.db, grant.bot_id, id)
-        .await
-        .map_err(refused)?;
-    if draft.status == Status::Approved && draft.content.account().is_none() {
-        stage_for_send(state, grant, &draft).await?;
-    }
     let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &Delivery::Host)
         .await
         .map_err(refused)?;
+    stage_claimed(state, &row).await?;
     Ok((
         tool_result(json!({
             "status": "sending",
@@ -597,21 +572,8 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
         let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &delivery)
             .await
             .map_err(refused)?;
-        let approved = match files::approved(state, grant.bot_id, row.content.files()).await {
-            Ok(approved) => approved,
-            Err(changed) => {
-                let detail = changed.to_string();
-                outgoing_drafts::fail_unsent(&state.db, id, &detail)
-                    .await
-                    .map_err(refused)?;
-                return Err((
-                    tool_error(&format!(
-                        "FILE_CHANGED: {detail}. Tell the owner; draft it again for a new approval."
-                    )),
-                    Some("rejected FILE_CHANGED".into()),
-                ));
-            }
-        };
+        let fresh = row.delivery.as_deref() == Some(&delivery);
+        let approved = claimed_files(state, &row, fresh).await?;
         match connected_payload(&row).map_err(refused)? {
             ConnectedPayload::Mail {
                 account_id,
@@ -730,32 +692,52 @@ fn social_file(file: files::Approved) -> crate::socials::types::SendFile {
     }
 }
 
-/// An approved file is gone or differs from what the owner approved: the
-/// approval fails without sending, so only a new approval sends it.
-async fn file_changed(
+/// The approved bytes of the draft this call claimed. A fresh claim whose
+/// files changed fails before any external effect. A claim an earlier call
+/// made may already have sent, so its state stays as it is.
+async fn claimed_files(
     state: &AppState,
-    grant: &Grant,
-    draft: &OutgoingDraft,
-    changed: files::FileChanged,
-) -> Outcome {
-    let detail = changed.to_string();
-    if let Err(err) = outgoing_drafts::report(
-        &state.db,
-        grant.turn_id,
-        draft.id,
-        outgoing::Outcome::Failed,
-        Some(&detail),
-    )
-    .await
-    {
-        return refused(err);
+    row: &OutgoingDraft,
+    fresh: bool,
+) -> Result<Vec<files::Approved>, Outcome> {
+    let changed = match files::approved(state, row.bot_id, row.content.files()).await {
+        Ok(approved) => return Ok(approved),
+        Err(changed) => changed.to_string(),
+    };
+    if !fresh {
+        return Err((
+            tool_error(&format!(
+                "FILE_CHANGED: {changed}. An earlier call already started this send and its \
+                 result is not known; never send it again without the owner's new approval."
+            )),
+            Some("rejected FILE_CHANGED".into()),
+        ));
     }
-    (
+    outgoing_drafts::fail_unsent(&state.db, row.id, &changed)
+        .await
+        .map_err(refused)?;
+    Err((
         tool_error(&format!(
-            "FILE_CHANGED: {detail}. Tell the owner; draft it again for a new approval."
+            "FILE_CHANGED: {changed}. Tell the owner; draft it again for a new approval."
         )),
         Some("rejected FILE_CHANGED".into()),
-    )
+    ))
+}
+
+/// Stage the files of an unconnected draft this call just claimed for the
+/// bot's own send; nothing was sent if that fails.
+async fn stage_claimed(state: &AppState, row: &OutgoingDraft) -> Result<(), Outcome> {
+    let approved = claimed_files(state, row, true).await?;
+    if let Err(message) = files::stage(state, row.bot_id, &approved).await {
+        outgoing_drafts::fail_unsent(&state.db, row.id, &message)
+            .await
+            .map_err(refused)?;
+        return Err((
+            tool_error(&message),
+            Some("rejected FILE_UNAVAILABLE".into()),
+        ));
+    }
+    Ok(())
 }
 
 async fn report(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
@@ -790,12 +772,6 @@ pub(super) async fn claim_for_tool(
     args: &Value,
 ) -> Result<String, Outcome> {
     let id = id_arg(args, "approved_draft")?;
-    if let Ok(draft) = outgoing_drafts::load_for(&state.db, grant.bot_id, id).await
-        && draft.status == Status::Approved
-        && draft.content.account().is_none()
-    {
-        stage_for_send(state, grant, &draft).await?;
-    }
     let delivery = Delivery::Tool {
         tool: name.to_owned(),
         args: crate::app::tools::loggable_args(name, args),
@@ -812,6 +788,7 @@ pub(super) async fn claim_for_tool(
                 Some(format!("rejected {code}")),
             )
         })?;
+    stage_claimed(state, &row).await?;
     Ok(format!(
         "sends approved {} {} version {}",
         row.content.noun(),

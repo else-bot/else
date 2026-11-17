@@ -134,7 +134,8 @@ impl ElseApp {
                     if local == form.baseline
                         || (local.subject.as_deref() == draft.content.subject()
                             && local.body == draft.content.body()
-                            && local.attachments == draft.content.attachment_ids())
+                            && local.attachments.unwrap_or_default()
+                                == draft.content.attachment_ids().unwrap_or_default())
                     {
                         *form = DraftForm::new(draft, window, cx);
                     } else {
