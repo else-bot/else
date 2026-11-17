@@ -168,7 +168,7 @@ pub async fn send(
         .zip(0..)
         .map(|(file, index)| {
             twilight_model::http::attachment::Attachment::from_bytes(
-                file.name.clone(),
+                upload_name(&file.name),
                 file.data.to_vec(),
                 index,
             )
@@ -183,6 +183,20 @@ pub async fn send(
     }
     model!(request)
 }
+/// twilight-http accepts only ASCII letters, digits, `.`, `-` and `_` in an
+/// upload's name; anything else becomes `_`.
+fn upload_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 pub async fn execute(c: &twilight_http::Client, cmd: &Command) -> Result<Value, Error> {
     match cmd {
         Command::History {
@@ -306,5 +320,17 @@ pub async fn listen(
             tokio::select! {biased;_=stop.cancelled()=>return Ok(()),r=events.send(Envelope{incoming,next_offset:0,ack})=>r.map_err(|_|Error::Platform)?};
             tokio::select! {biased;_=stop.cancelled()=>return Ok(()),r=stored=>r.map_err(|_|Error::Platform)?};
         }
+    }
+}
+
+#[cfg(test)]
+mod upload_tests {
+    #[test]
+    fn an_upload_name_keeps_only_what_discord_accepts() {
+        assert_eq!(
+            super::upload_name("école flyer (1).pdf"),
+            "_cole_flyer__1_.pdf"
+        );
+        assert_eq!(super::upload_name("menu-2026_v2.png"), "menu-2026_v2.png");
     }
 }

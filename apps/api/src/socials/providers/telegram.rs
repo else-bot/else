@@ -141,7 +141,7 @@ pub async fn send(
                 }
                 super::Part::File(file, caption) => {
                     let input = InputFile::memory(file.data.to_vec()).file_name(file.name.clone());
-                    if file.is_image() {
+                    if file.is_image() && is_photo(&file.data) {
                         let mut request = b.send_photo(chat, input);
                         if let Some(caption) = caption {
                             request = request.caption(caption);
@@ -167,6 +167,20 @@ pub async fn send(
     })
     .await
 }
+/// Whether Telegram takes the image as a photo: its width and height total
+/// at most 10000 and their ratio is at most 20. Any other image goes as a
+/// document, which Telegram never resizes or refuses for its shape.
+fn is_photo(data: &[u8]) -> bool {
+    image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .is_some_and(|(w, h)| {
+            let (long, short) = (w.max(h), w.min(h).max(1));
+            w + h <= 10_000 && long <= short * 20
+        })
+}
+
 pub async fn execute(b: &Bot, cmd: &Command) -> Result<Value, Error> {
     match cmd {
         Command::Chat { destination } => value(
@@ -331,5 +345,22 @@ mod tests {
             poll_error(RequestError::Api(ApiError::InvalidToken)),
             Error::Platform
         ));
+    }
+}
+
+#[cfg(test)]
+mod photo_tests {
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::RgbImage::new(w, h)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn a_banner_beyond_telegrams_photo_ratio_goes_as_a_document() {
+        assert!(super::is_photo(&png(400, 300)));
+        assert!(!super::is_photo(&png(1000, 10)));
     }
 }

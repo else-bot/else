@@ -658,6 +658,10 @@ pub async fn attach_to_message(
     if !draft.status.approvable_in_chat() {
         return Err(DraftError::Settled(draft.status));
     }
+    let files = draft.content.files().len();
+    if files > 0 && attachment.attachments.is_none() {
+        return Err(DraftError::FilesUnseen(files));
+    }
     apply_edits(conn, &draft, attachment.version, attachment.edits()).await?;
     sqlx::query(
         "UPDATE outgoing_drafts SET context_turn_id = ?2, context_version = version,
@@ -781,6 +785,35 @@ pub async fn claim(
     .await?;
     events::turn_changed(&mut tx, caller.bot_id, draft.turn_id).await?;
     let draft = reload(&mut tx, draft_id).await?;
+    tx.commit().await?;
+    Ok(draft)
+}
+
+/// A send this request just claimed stopped before any external effect,
+/// such as an approved file whose bytes changed: it fails, and only a new
+/// approval sends it.
+pub async fn fail_unsent(
+    pool: &SqlitePool,
+    draft_id: Uuid,
+    detail: &str,
+) -> Result<OutgoingDraft, DraftError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let failed = sqlx::query(
+        "UPDATE outgoing_drafts SET status = 'failed', result_detail = ?2,
+             settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE id = ?1 AND status = 'sending'",
+    )
+    .bind(draft_id)
+    .bind(detail)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    let draft = reload(&mut tx, draft_id).await?;
+    if failed == 0 {
+        return Err(DraftError::Settled(draft.status));
+    }
+    events::turn_changed(&mut tx, draft.bot_id, draft.turn_id).await?;
     tx.commit().await?;
     Ok(draft)
 }

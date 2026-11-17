@@ -346,14 +346,6 @@ async fn draft(
     let row = outgoing_drafts::propose(&state.db, grant.turn_id, &content, replaces)
         .await
         .map_err(refused)?;
-    if row.content.account().is_none() && !row.content.files().is_empty() {
-        let approved = files::approved(state, grant.bot_id, row.content.files())
-            .await
-            .map_err(|changed| (tool_error(&changed.to_string()), None))?;
-        files::stage(state, grant.bot_id, &approved)
-            .await
-            .map_err(|message| (tool_error(&message), None))?;
-    }
     if row.status == Status::Approved
         && row.approval_source == Some(ApprovalSource::Standing)
         && row.send_turn_id == Some(grant.turn_id)
@@ -602,13 +594,24 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
     let row = if settled {
         draft
     } else {
-        let approved = match files::approved(state, grant.bot_id, draft.content.files()).await {
-            Ok(approved) => approved,
-            Err(changed) => return Err(file_changed(state, grant, &draft, changed).await),
-        };
         let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &delivery)
             .await
             .map_err(refused)?;
+        let approved = match files::approved(state, grant.bot_id, row.content.files()).await {
+            Ok(approved) => approved,
+            Err(changed) => {
+                let detail = changed.to_string();
+                outgoing_drafts::fail_unsent(&state.db, id, &detail)
+                    .await
+                    .map_err(refused)?;
+                return Err((
+                    tool_error(&format!(
+                        "FILE_CHANGED: {detail}. Tell the owner; draft it again for a new approval."
+                    )),
+                    Some("rejected FILE_CHANGED".into()),
+                ));
+            }
+        };
         match connected_payload(&row).map_err(refused)? {
             ConnectedPayload::Mail {
                 account_id,
