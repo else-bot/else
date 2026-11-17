@@ -1708,6 +1708,104 @@ async fn restart_reconciliation_ends_the_children_of_an_ended_root() {
     assert_eq!(delegation_status, "cancelled");
 }
 
+/// A bot waiting on a task is idle: a mail event or routine run in the same
+/// chat runs at once, and the waiting request continues after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn background_work_in_a_waiting_chat_runs_and_the_request_continues_after_it() {
+    for kind in ["connector", "routine"] {
+        let db = TestDb::migrated().await;
+        let (main, root, child, _) = seed(&db).await;
+        sqlx::query("UPDATE turns SET status = 'waiting' WHERE id = ?1")
+            .bind(root)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
+            .bind(child)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let event = Uuid::new_v4();
+        let item = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
+                 owner_item_id, provider_id)
+             SELECT ?1, bot_id, conversation_id, ?2, ?3, 2, ?4, 'synthetic' FROM turns WHERE id = ?5",
+        )
+        .bind(event)
+        .bind(Uuid::new_v4())
+        .bind(vec![0u8; 32])
+        .bind(item)
+        .bind(root)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+             SELECT ?1, conversation_id, 1000, id, ?2, 'New mail arrived.' FROM turns WHERE id = ?3",
+        )
+        .bind(item)
+        .bind(kind)
+        .bind(event)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let claimed = else_api::db::turns::claim_next(&db.pool, &[], true)
+            .await
+            .unwrap()
+            .map(|c| (c.id, c.background));
+        assert_eq!(
+            claimed,
+            Some((event, true)),
+            "{kind} runs while {main} waits"
+        );
+
+        sqlx::query(
+            "UPDATE turns SET status = 'completed',
+                 finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
+        )
+        .bind(child)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let root_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+            .bind(root)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            root_status, "queued",
+            "the task's result continues the request"
+        );
+        assert!(
+            else_api::db::turns::claim_next(&db.pool, &[], true)
+                .await
+                .unwrap()
+                .is_none(),
+            "one active turn per bot"
+        );
+
+        sqlx::query(
+            "UPDATE turns SET status = 'completed',
+                 finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
+        )
+        .bind(event)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let next = else_api::db::turns::claim_next(&db.pool, &[], true)
+            .await
+            .unwrap()
+            .map(|c| c.id);
+        assert_eq!(
+            next,
+            Some(root),
+            "the continuation runs after the {kind} turn"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_same_task_to_another_bot_is_a_different_child() {
     let db = TestDb::migrated().await;
