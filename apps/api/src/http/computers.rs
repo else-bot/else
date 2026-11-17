@@ -123,6 +123,12 @@ async fn show(
     ApiPath(bot_id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     require_bot(&state, bot_id, false).await?;
+    // Before the row: an upgrade writes its row before its status ends, so
+    // a status that has ended is never paired with the row it replaced.
+    let status = match &state.computers {
+        Some(computers) => computers.upgrade_status(bot_id).await,
+        None => None,
+    };
     #[derive(sqlx::FromRow)]
     struct ComputerRow {
         runtime_name: String,
@@ -154,7 +160,7 @@ async fn show(
     let (latest_image, upgrade) = match &state.computers {
         Some(computers) => (
             Some(computers.config().image.clone()),
-            match computers.upgrade_status(bot_id).await {
+            match status {
                 None => last_upgrade(&state, bot_id).await?,
                 Some(status) => upgrade_json(status),
             },
@@ -216,6 +222,9 @@ const MIB: u64 = 1024 * 1024;
 /// computers that upgrades and rollbacks kept.
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let computers = manager(&state)?;
+    // Before the rows: an upgrade writes its row before its status ends, so
+    // a status that has ended is never paired with the row it replaced.
+    let statuses = computers.upgrade_statuses().await;
     #[derive(sqlx::FromRow)]
     struct Row {
         bot_id: Uuid,
@@ -241,13 +250,12 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiErro
          EXCEPT SELECT runtime_name FROM bot_computers",
     )
     .fetch_all(&state.db);
-    let (rows, replaced, recorded, usage, disks, statuses) = tokio::join!(
+    let (rows, replaced, recorded, usage, disks) = tokio::join!(
         rows,
         replaced,
         recorded_upgrades(&state, None),
         computers.usage(),
         computers.disks(),
-        computers.upgrade_statuses(),
     );
     let (rows, replaced, mut recorded) = (rows?, replaced?, recorded?);
     let latest = &computers.config().image;
