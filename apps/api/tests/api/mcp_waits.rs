@@ -922,3 +922,86 @@ async fn carried_waits_that_settle_wake_the_bot_while_the_latest_requests_own_wa
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn upgrading_continues_a_turn_whose_settled_carried_wait_its_own_wait_stranded() {
+    let db = TestDb::empty().await;
+    let before = sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            else_api::db::MIGRATOR
+                .migrations
+                .iter()
+                .filter(|m| m.version < 65)
+                .cloned()
+                .collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    before.run(&db.pool).await.unwrap();
+    let (bot, conversation) = (Uuid::new_v4(), Uuid::new_v4());
+    let (stranded, waiting) = (Uuid::new_v4(), Uuid::new_v4());
+    sqlx::query("INSERT INTO bots (id, name) VALUES (?1, 'Old')")
+        .bind(bot)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO conversations (id, bot_id, last_turn_no) VALUES (?1, ?2, 2)")
+        .bind(conversation)
+        .bind(bot)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    for (no, turn) in [(1, waiting), (2, stranded)] {
+        sqlx::query(
+            "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
+                 owner_item_id, provider_id, status, attempt)
+             VALUES (?1, ?2, ?3, ?4, zeroblob(32), ?5, ?6, 'synthetic', 'waiting', 1)",
+        )
+        .bind(turn)
+        .bind(bot)
+        .bind(conversation)
+        .bind(Uuid::new_v4())
+        .bind(no)
+        .bind(Uuid::new_v4())
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    for (turn, attempt, status) in [
+        (waiting, 1, "pending"),
+        (stranded, 1, "pending"),
+        (stranded, 0, "finished"),
+    ] {
+        sqlx::query(
+            "INSERT INTO mcp_waits (id, bot_id, turn_id, attempt, mcp_id, tool, arguments,
+                 status_pointer, running_values, purpose, interval_seconds, deadline_at,
+                 next_check_at, status)
+             VALUES (?1, ?2, ?3, ?4, 't3-code', 'task_status', '{}', '/workState', '[]',
+                 'Review the PR.', 15, '2999-01-01T00:00:00.000+00:00',
+                 '2999-01-01T00:00:00.000+00:00', ?5)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(bot)
+        .bind(turn)
+        .bind(attempt)
+        .bind(status)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+
+    else_api::db::MIGRATOR.run(&db.pool).await.unwrap();
+    let statuses: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, status FROM turns ORDER BY turn_no")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        statuses,
+        vec![
+            (waiting, "waiting".to_owned()),
+            (stranded, "queued".to_owned())
+        ],
+        "only the turn with an undelivered result continues"
+    );
+}

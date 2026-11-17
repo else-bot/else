@@ -416,36 +416,33 @@ impl SinkState {
             .bind(self.turn_id)
             .execute(&mut *tx)
             .await?;
-        let (current, error_code, pending, unseen): (TurnStatus, Option<String>, i64, i64) =
-            sqlx::query_as(
-                "SELECT t.status, t.error_code, coalesce(sum(h.pending), 0),
-                     coalesce(sum(h.unseen), 0)
-                 FROM turns t LEFT JOIN turn_holds h ON h.turn_id = t.id
-                 WHERE t.id = ?1 GROUP BY t.id",
-            )
-            .bind(self.turn_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        let (tasks_pending, carried, tasks_unseen, ready, jobs_unseen): (i64, i64, i64, i64, i64) =
-            sqlx::query_as(sqlx::AssertSqlSafe(format!(
-                "SELECT (SELECT count(*) FROM delegations
-                     WHERE root_turn_id = ?1 AND status IN ('queued', 'running')),
-                    (SELECT count(*) FROM carried_waits WHERE turn_id = ?1),
-                    (SELECT count(*) FROM delegations
-                     WHERE root_turn_id = ?1 AND delivered_attempt IS NULL
-                       AND status IN ('completed', 'failed', 'cancelled')),
-                    (SELECT count(*) FROM delegations d
-                     WHERE d.root_turn_id = ?1 AND {}),
-                    (SELECT count(*) FROM mcp_waits WHERE turn_id = ?1
-                       AND delivered_attempt IS NULL
-                       AND status IN ('finished', 'failed', 'expired', 'stopped'))
-                    + (SELECT count(*) FROM computer_job_waits WHERE turn_id = ?1
-                       AND delivered_attempt IS NULL AND status IN ('settled', 'stopped'))",
-                crate::db::delegations::READY
-            )))
-            .bind(self.turn_id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let (current, error_code, pending, blocking, tasks_unseen, waits_unseen, owner_unseen): (
+            TurnStatus,
+            Option<String>,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = sqlx::query_as(
+            "SELECT t.status, t.error_code, coalesce(sum(h.pending), 0),
+                 coalesce(sum(h.pending AND h.kind = 'owner'), 0),
+                 coalesce(sum(h.unseen AND h.kind = 'task'), 0),
+                 coalesce(sum(h.unseen AND h.kind = 'wait'), 0),
+                 coalesce(sum(h.unseen AND h.kind = 'owner'), 0)
+             FROM turns t LEFT JOIN turn_holds h ON h.turn_id = t.id
+             WHERE t.id = ?1 GROUP BY t.id",
+        )
+        .bind(self.turn_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let ready: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM delegations d WHERE d.root_turn_id = ?1 AND {}",
+            crate::db::delegations::READY
+        )))
+        .bind(self.turn_id)
+        .fetch_one(&mut *tx)
+        .await?;
         // The owner stopped only this attempt: the turn parks on its jobs
         // and tasks, or continues with their outcomes. What the attempt
         // itself left unseen (a withdrawn question) restarts nothing. With
@@ -455,24 +452,21 @@ impl SinkState {
                 == crate::db::stop::Unwind::KeepWaits
             && (matches!(status, TurnStatus::Completed | TurnStatus::Interrupted)
                 || pending > 0
-                || jobs_unseen + tasks_unseen > 0);
-        let (status, code, message, unseen) = if kept {
-            (
-                TurnStatus::Interrupted,
-                None,
-                None,
-                jobs_unseen + tasks_unseen,
-            )
+                || waits_unseen + tasks_unseen > 0);
+        let owner_unseen = if kept { 0 } else { owner_unseen };
+        let unseen = tasks_unseen + waits_unseen + owner_unseen;
+        let (status, code, message) = if kept {
+            (TurnStatus::Interrupted, None, None)
         } else {
-            (status, code, message, unseen)
+            (status, code, message)
         };
         let parks = (kept || current != TurnStatus::Cancelling)
             && matches!(status, TurnStatus::Completed | TurnStatus::Interrupted);
-        // Pending tasks and carried waits hold the turn without blocking a
-        // ready batch or any other unseen outcome, as `turns_continuable`
-        // decides for a waiting turn.
-        let own_outcome = ready > 0 || unseen > tasks_unseen;
-        let status = if parks && pending == tasks_pending + carried && own_outcome {
+        // Pending tasks and waits hold the turn without blocking a ready
+        // batch or any other unseen outcome, as `turns_continuable` decides
+        // for a waiting turn.
+        let own_outcome = ready > 0 || waits_unseen + owner_unseen > 0;
+        let status = if parks && blocking == 0 && own_outcome {
             TurnStatus::Queued
         } else if parks && pending > 0 {
             TurnStatus::Waiting
