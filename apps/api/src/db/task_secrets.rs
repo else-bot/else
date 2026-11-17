@@ -687,28 +687,79 @@ pub async fn login(
     ))
 }
 
-/// What to redact from a page on `host`: the values of every entry whose
-/// website covers it, since an earlier fill may still show on the page.
-pub async fn redaction_for_host(
+/// What to redact from a bot's browser results: the values of every entry
+/// whose website covers `host` and of every entry this bot has typed into
+/// its browser, since a page keeps a value after the call that filled it
+/// and a result can carry text from an earlier page. Each value is also
+/// matched in the forms a snapshot shows it in. Best effort: the bot's own
+/// computer can always read its pages another way.
+pub async fn browser_redaction(
     pool: &SqlitePool,
     key: Option<&SecretKey>,
-    host: &str,
+    bot_id: Uuid,
+    host: Option<&str>,
 ) -> Result<Vec<Redact>, SecretError> {
-    let Some(key) = key else {
-        return Ok(Vec::new());
-    };
-    let rows: Vec<(String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
-        "SELECT website, salt, ciphertext FROM task_secrets WHERE website IS NOT NULL",
+    type Row = (Option<String>, bool, Vec<u8>, Vec<u8>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT s.website, EXISTS (SELECT 1 FROM secret_uses u WHERE u.secret = s.name
+                                   AND u.bot_id = ?1 AND u.use = 'browser'),
+                s.salt, s.ciphertext
+         FROM task_secrets s WHERE s.website IS NOT NULL",
     )
+    .bind(bot_id)
     .fetch_all(pool)
     .await?;
     let mut env = Env::default();
-    for (website, salt, cipher) in rows {
-        if Website(website).covers(host) {
-            env.vars.extend(decrypt(key, &salt, &cipher)?);
+    for (website, filled, salt, cipher) in rows {
+        let on_page = host
+            .is_some_and(|host| Website::stored(website.clone()).is_some_and(|w| w.covers(host)));
+        if filled || on_page {
+            env.vars
+                .extend(decrypt(key.ok_or(SecretError::NoKey)?, &salt, &cipher)?);
         }
     }
-    Ok(env.redaction())
+    let mut set = Vec::new();
+    for redact in env.redaction() {
+        for form in shown_forms(&redact.value) {
+            if form.len() >= MIN_REDACTED && form != *redact.value {
+                set.push(Redact {
+                    name: redact.name.clone(),
+                    value: Zeroizing::new(form),
+                });
+            }
+        }
+        set.push(redact);
+    }
+    set.sort_by_key(|r| std::cmp::Reverse(r.value.len()));
+    Ok(set)
+}
+
+/// How a browser snapshot can print a value: whitespace collapsed, cut to
+/// 100 characters, and JSON-escaped with non-ASCII as `\uXXXX`.
+fn shown_forms(value: &str) -> Vec<String> {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cut: String = collapsed.chars().take(100).collect();
+    let mut forms = Vec::new();
+    for text in [collapsed, cut] {
+        let mut escaped = String::new();
+        for c in text.chars() {
+            match c {
+                '"' => escaped.push_str("\\\""),
+                '\\' => escaped.push_str("\\\\"),
+                ' '..='~' => escaped.push(c),
+                _ => {
+                    let mut units = [0u16; 2];
+                    for unit in c.encode_utf16(&mut units) {
+                        escaped.push_str(&format!("\\u{unit:04x}"));
+                    }
+                }
+            }
+        }
+        forms.push(escaped);
+        forms.push(text);
+    }
+    forms.dedup();
+    forms
 }
 
 /// One entry's values, for the owner only.
@@ -835,5 +886,19 @@ mod tests {
         for miss in ["gmail.com", "account gmail", "evilx.com"] {
             assert!(!entry.matches(miss), "{miss}");
         }
+    }
+
+    #[test]
+    fn a_value_is_matched_as_a_snapshot_prints_it() {
+        let forms = shown_forms("élise  @example.com");
+        assert!(forms.contains(&"élise @example.com".to_owned()));
+        assert!(forms.contains(&"\\u00e9lise @example.com".to_owned()));
+        let long = "x".repeat(120);
+        assert!(forms_contain(&long, &"x".repeat(100)));
+        assert!(shown_forms("say \"hi\"").contains(&"say \\\"hi\\\"".to_owned()));
+    }
+
+    fn forms_contain(value: &str, form: &str) -> bool {
+        shown_forms(value).iter().any(|f| f == form)
     }
 }

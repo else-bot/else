@@ -158,6 +158,8 @@ impl ComputerRuntime for Guest {
                     "value": format!("({} characters)", typed.len()),
                     "added": [format!("Signed in as {typed}")] })
             .to_string()
+        } else if script.contains("else-browser") && args.contains(&"#echoes") {
+            json!({ "error": format!("no element matches; similar: \"{PASSWORD}\"") }).to_string()
         } else if script.contains("else-browser") && args.contains(&"text") {
             json!({ "url": "https://mobile.x.com/home", "title": "Home",
                     "text": format!("Signed in as me@example.com with {PASSWORD}") })
@@ -1178,6 +1180,17 @@ async fn a_vault_login_is_typed_from_stdin_only_into_its_website_and_never_shown
     assert_eq!(
         later["text"], "Signed in as [secret USERNAME] with [secret PASSWORD]",
         "a later read of the same site hides what was filled: {later}"
+    );
+    let echoed = tool(
+        &app,
+        &token,
+        "computer_browser",
+        json!({ "action": "click", "selector": "#echoes", "effect": "local" }),
+    )
+    .await;
+    assert!(
+        !echoed.to_string().contains(PASSWORD),
+        "an error without a page URL is redacted for what this bot filled: {echoed}"
     );
     let put = app
         .owner(

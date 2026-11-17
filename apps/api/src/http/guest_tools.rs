@@ -703,32 +703,35 @@ struct VaultFill {
     redaction: Vec<task_secrets::Redact>,
 }
 
-/// The Vault values a page on the result's host might show, since a page
-/// keeps what an earlier call filled. Fails closed: when the Vault cannot
-/// be read, the whole result is withheld rather than shown unredacted.
+/// The Vault values a browser result might show (see
+/// `task_secrets::browser_redaction`). When the Vault cannot be read, the
+/// result is withheld rather than shown unredacted.
 async fn page_redaction(
     state: &AppState,
+    grant: &Grant,
     result: &Value,
 ) -> Result<Vec<task_secrets::Redact>, Outcome> {
-    let Some(host) = result["url"]
+    let host = result["url"]
         .as_str()
         .and_then(|url| reqwest::Url::parse(url).ok())
-        .and_then(|url| url.host_str().map(str::to_owned))
-    else {
-        return Ok(Vec::new());
-    };
-    task_secrets::redaction_for_host(&state.db, state.secret_key.as_deref(), &host)
-        .await
-        .map_err(|err| {
-            tracing::warn!(error = %err, "vault redaction unavailable");
-            (
-                tool_error(
-                    "VAULT_UNAVAILABLE: the page may show a Vault value and the Vault could \
-                     not be read, so the result is withheld. The action itself ran.",
-                ),
-                None,
-            )
-        })
+        .and_then(|url| url.host_str().map(str::to_owned));
+    task_secrets::browser_redaction(
+        &state.db,
+        state.secret_key.as_deref(),
+        grant.bot_id,
+        host.as_deref(),
+    )
+    .await
+    .map_err(|err| {
+        tracing::warn!(error = %err, "vault redaction unavailable");
+        (
+            tool_error(
+                "VAULT_UNAVAILABLE: the page may show a Vault value and the Vault could \
+                 not be read, so the result is withheld. The action itself ran.",
+            ),
+            None,
+        )
+    })
 }
 
 /// Look up the value `computer_browser` types for `secret` and `field`.
@@ -1243,7 +1246,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                         Some(ref fill) => fill.redaction.clone(),
                         None => Vec::new(),
                     };
-                    match page_redaction(state, &parsed).await {
+                    match page_redaction(state, grant, &parsed).await {
                         Ok(more) => redaction.extend(more),
                         Err(outcome) => return outcome,
                     }
