@@ -104,10 +104,7 @@ impl Log {
 }
 
 #[allow(clippy::result_large_err)] // the handshake callback's signature is tungstenite's
-async fn fake_guest(port: u16, password: String, old_image: bool, log: Arc<Log>) {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-        .await
-        .unwrap();
+fn fake_guest(listener: tokio::net::TcpListener, password: String, old_image: bool, log: Arc<Log>) {
     tokio::spawn(async move {
         loop {
             let Ok((tcp, _)) = listener.accept().await else {
@@ -369,9 +366,13 @@ async fn setup(old_image: bool, lease_ttl: Duration) -> Setup {
         panic!("not ready");
     };
     manager.release(lease_id).await.unwrap();
-    let port: i64 = sqlx::query_scalar("SELECT desktop_port FROM bot_computers WHERE bot_id = ?1")
+    // The computer's port was free when it was chosen; another test may
+    // have taken it since, so the guest binds its own and the row follows.
+    let guest = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    sqlx::query("UPDATE bot_computers SET desktop_port = ?2 WHERE bot_id = ?1")
         .bind(bot_id)
-        .fetch_one(&app.db.pool)
+        .bind(i64::from(guest.local_addr().unwrap().port()))
+        .execute(&app.db.pool)
         .await
         .unwrap();
     let password = std::fs::read_to_string(manager.desktop_password_file(bot_id))
@@ -379,7 +380,7 @@ async fn setup(old_image: bool, lease_ttl: Duration) -> Setup {
         .trim()
         .to_owned();
     let log = Arc::new(Log::default());
-    fake_guest(port as u16, password, old_image, log.clone()).await;
+    fake_guest(guest, password, old_image, log.clone());
     Setup {
         app,
         runtime,
@@ -640,12 +641,14 @@ async fn control_sends_input_releases_it_and_excludes_other_controllers() {
         next_json(&mut socket).await,
         json!({"type":"mode","mode":"watch"})
     );
+    // The guest logs the close when it reads it, which can be after the ack.
+    s.wait_log("control closed").await;
     let lines = s.log.lines();
     let closed = lines.iter().position(|l| l == "control closed");
     let released = lines.iter().position(|l| l == "control key 65507 0");
     assert!(
-        released.is_some() && closed.is_some() && released < closed,
-        "leaving control releases held keys, then closes before the ack: {lines:?}"
+        released.is_some() && released < closed,
+        "leaving control releases held keys, then closes: {lines:?}"
     );
     send(&mut socket, json!({"type":"key","key":0x62,"down":true})).await;
     assert_eq!(
@@ -880,6 +883,7 @@ async fn stopping_the_api_releases_held_input_and_refuses_new_streams() {
     );
     s.wait_log("control key 65363 0").await;
     s.wait_log("control pointer 0 3 4").await;
+    s.wait_log("control closed").await;
     let lines = s.log.lines();
     let released = lines.iter().position(|l| l == "control key 65363 0");
     let closed = lines.iter().position(|l| l == "control closed");
