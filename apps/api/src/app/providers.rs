@@ -49,43 +49,38 @@ impl Catalog {
     pub fn ids(&self) -> Vec<&str> {
         self.models.iter().map(|model| model.id.as_str()).collect()
     }
-
-    /// Every effort or tier some model takes, in first-listed order.
-    fn union(&self, values: impl Fn(&Model) -> &[String]) -> Vec<&str> {
-        let mut all: Vec<&str> = Vec::new();
-        for value in self.models.iter().flat_map(&values) {
-            if !all.contains(&value.as_str()) {
-                all.push(value);
-            }
-        }
-        all
-    }
-
-    pub fn efforts(&self) -> Vec<&str> {
-        self.union(|model| &model.efforts)
-    }
-
-    pub fn tiers(&self) -> Vec<&str> {
-        self.union(|model| &model.tiers)
-    }
 }
 
-/// The flat lists older desktops read beside `details`, which carries each
-/// model's own efforts, tiers, label, and upgrade.
+/// Older desktops read the flat lists and apply every effort and tier to
+/// every model, so they get the first model's efforts and tiers and only
+/// the models that take all of them. `details` carries each model's own.
 impl Serialize for Catalog {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let featured: Vec<&str> = self
+        let (efforts, tiers): (&[String], &[String]) = self
+            .models
+            .first()
+            .map_or((&[], &[]), |first| (&first.efforts, &first.tiers));
+        let legacy: Vec<&Model> = self
             .models
             .iter()
-            .filter(|model| model.featured)
-            .map(|model| model.id.as_str())
+            .filter(|model| {
+                efforts.iter().all(|e| model.efforts.contains(e))
+                    && tiers.iter().all(|t| model.tiers.contains(t))
+            })
             .collect();
+        let ids = |featured_only: bool| -> Vec<&str> {
+            legacy
+                .iter()
+                .filter(|model| !featured_only || model.featured)
+                .map(|model| model.id.as_str())
+                .collect()
+        };
         let mut out = serializer.serialize_struct("Catalog", 7)?;
-        out.serialize_field("models", &self.ids())?;
-        out.serialize_field("featured_models", &featured)?;
-        out.serialize_field("efforts", &self.efforts())?;
-        out.serialize_field("tiers", &self.tiers())?;
+        out.serialize_field("models", &ids(false))?;
+        out.serialize_field("featured_models", &ids(true))?;
+        out.serialize_field("efforts", efforts)?;
+        out.serialize_field("tiers", tiers)?;
         out.serialize_field("details", &self.models)?;
         out.serialize_field("listed_at", &self.listed_at)?;
         out.serialize_field("refresh_error", &self.refresh_error)?;

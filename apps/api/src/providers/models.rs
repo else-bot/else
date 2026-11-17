@@ -530,6 +530,33 @@ mod tests {
     }
 
     #[test]
+    fn older_desktops_get_only_combinations_every_listed_model_takes() {
+        let models = Models::new(&super::super::claude::DEFINITION);
+        let effort = |id: &str, efforts: &[&str]| Listed {
+            id: id.into(),
+            efforts: Some(efforts.iter().map(|e| (*e).to_owned()).collect()),
+            tiers: None,
+        };
+        models
+            .listed(
+                vec![
+                    effort("claude-opus-5-5", &["low", "xhigh"]),
+                    effort("claude-opus-4-6", &["low"]),
+                    effort("claude-sonnet-5-5", &["low", "xhigh", "max"]),
+                ],
+                Utc::now(),
+            )
+            .unwrap();
+        let json = serde_json::to_value(models.current().as_ref()).unwrap();
+        assert_eq!(
+            json["models"],
+            serde_json::json!(["claude-opus-5-5", "claude-sonnet-5-5"])
+        );
+        assert_eq!(json["efforts"], serde_json::json!(["low", "xhigh"]));
+        assert_eq!(json["details"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
     fn a_listed_model_validates_and_a_failed_ask_keeps_it() {
         let models = Models::new(&super::super::claude::DEFINITION);
         let profile = Profile {

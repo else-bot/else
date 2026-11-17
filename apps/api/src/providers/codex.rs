@@ -302,12 +302,11 @@ impl Provider for Codex {
 
     async fn list_models(&self) -> Result<Vec<Listed>, String> {
         let ready = self.ready.as_ref().map_err(Clone::clone)?;
-        let (host, program) = (ready.host.clone(), ready.program.clone());
-        let exported =
-            tokio::task::spawn_blocking(move || host.probe(&program, &["debug", "models"], &[]))
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|why| format!("`codex debug models` failed: {why}"))?;
+        let exported = ready
+            .host
+            .output(&ready.program, &["debug", "models"], &[], 16 * 1024 * 1024)
+            .await
+            .map_err(|why| format!("`codex debug models` failed: {why}"))?;
         codex_home::listed_models(exported.as_bytes())
     }
 

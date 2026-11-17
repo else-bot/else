@@ -453,6 +453,7 @@ impl Provider for Claude {
                     "--strict-mcp-config",
                     "--tools",
                     "",
+                    "--no-session-persistence",
                 ],
                 &env,
                 &request,

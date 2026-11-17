@@ -291,10 +291,10 @@ impl Provider for Grok {
     }
     async fn list_models(&self) -> Result<Vec<Listed>, String> {
         let ready = self.ready.as_ref().map_err(Clone::clone)?;
-        let (host, program) = (ready.host.clone(), ready.program.clone());
-        let printed = tokio::task::spawn_blocking(move || host.probe(&program, &["models"], &[]))
+        let printed = ready
+            .host
+            .output(&ready.program, &["models"], &[], 1024 * 1024)
             .await
-            .map_err(|e| e.to_string())?
             .map_err(|why| format!("`grok models` failed: {why}"))?;
         Ok(listed_models(&printed))
     }

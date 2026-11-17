@@ -201,10 +201,65 @@ impl Host {
         cleanup.map(|()| out)
     }
 
+    /// `program` started outside any bot, in its own process group with
+    /// the installation marker, so dropping it or a restarted API's sweep
+    /// stops everything it started.
+    fn spawn_probe(
+        &self,
+        program: &Path,
+        args: &[&str],
+        env: &[(String, String)],
+        stdin: Stdio,
+    ) -> Result<Supervised, String> {
+        let mut command = tokio::process::Command::new(program);
+        command
+            .args(args)
+            .current_dir(std::env::temp_dir())
+            .env_clear()
+            .envs(passed_env())
+            .envs(env.iter().map(|(k, v)| (k, v)))
+            .env(MARKER_VAR, self.marker(Uuid::nil()))
+            .stdin(stdin)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true);
+        Supervised::spawn(command).map_err(|e| format!("could not start ({e})"))
+    }
+
+    /// Run `program` outside any bot to completion and return its stdout:
+    /// an error if it fails or writes more than `limit` bytes. Dropping the
+    /// call kills it.
+    pub async fn output(
+        &self,
+        program: &Path,
+        args: &[&str],
+        env: &[(String, String)],
+        limit: usize,
+    ) -> Result<String, String> {
+        use tokio::io::AsyncReadExt;
+        let mut process = self.spawn_probe(program, args, env, Stdio::null())?;
+        let stdout = process.child.stdout.take().ok_or("no stdout")?;
+        let mut out = Vec::new();
+        stdout
+            .take(limit as u64 + 1)
+            .read_to_end(&mut out)
+            .await
+            .map_err(|e| format!("could not read its output ({e})"))?;
+        if out.len() > limit {
+            process.kill().await;
+            return Err(format!("its output exceeded {limit} bytes"));
+        }
+        let status = process.child.wait().await.map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err(format!("exited with {status}"));
+        }
+        String::from_utf8(out).map_err(|_| "its output is not UTF-8".into())
+    }
+
     /// Start `program` outside any bot, write `input` to it, and return the
     /// first stdout line `answer` accepts. The process group is killed when
-    /// this returns or is dropped, and it carries the installation marker
-    /// so a restarted API sweeps it. Errors past `limit` bytes or at EOF.
+    /// this returns or is dropped. Errors past `limit` bytes or at EOF.
     pub async fn ask<T>(
         &self,
         program: &Path,
@@ -214,42 +269,33 @@ impl Host {
         limit: usize,
         answer: impl Fn(&str) -> Option<T>,
     ) -> Result<T, String> {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-        let mut command = tokio::process::Command::new(program);
-        command
-            .args(args)
-            .current_dir(std::env::temp_dir())
-            .env_clear()
-            .envs(passed_env())
-            .envs(env.iter().map(|(k, v)| (k, v)))
-            .env(MARKER_VAR, self.marker(Uuid::nil()))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .kill_on_drop(true);
-        let mut process =
-            Supervised::spawn(command).map_err(|e| format!("could not start ({e})"))?;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut process = self.spawn_probe(program, args, env, Stdio::piped())?;
         let mut stdin = process.child.stdin.take().ok_or("no stdin")?;
-        let stdout = process.child.stdout.take().ok_or("no stdout")?;
+        let mut stdout = process.child.stdout.take().ok_or("no stdout")?;
         stdin
             .write_all(input.as_bytes())
             .await
             .map_err(|e| format!("could not write its input ({e})"))?;
-        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let mut pending: Vec<u8> = Vec::new();
         let mut read = 0;
-        let found = loop {
-            let line = lines
-                .next_line()
-                .await
-                .map_err(|e| format!("could not read its output ({e})"))?
-                .ok_or("it exited without answering")?;
-            read += line.len() + 1;
+        let mut chunk = vec![0; 64 * 1024];
+        let found = 'read: loop {
+            let n = match stdout.read(&mut chunk).await {
+                Ok(0) => break Err("it exited without answering".to_owned()),
+                Ok(n) => n,
+                Err(e) => break Err(format!("could not read its output ({e})")),
+            };
+            read += n;
             if read > limit {
                 break Err(format!("its output exceeded {limit} bytes"));
             }
-            if let Some(found) = answer(&line) {
-                break Ok(found);
+            pending.extend_from_slice(&chunk[..n]);
+            while let Some(end) = pending.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = pending.drain(..=end).collect();
+                if let Some(found) = answer(String::from_utf8_lossy(&line).trim_end()) {
+                    break 'read Ok(found);
+                }
             }
         };
         drop(stdin);
@@ -696,5 +742,76 @@ impl Supervised {
 impl Drop for Supervised {
     fn drop(&mut self) {
         self.signal(Signal::KILL);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn host(dir: &Path) -> Host {
+        Host::new(&dir.join("data"), &dir.join("bots"))
+    }
+
+    #[tokio::test]
+    async fn probes_stop_reading_at_their_limit_even_without_a_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(dir.path());
+        let sh = Path::new("/bin/sh");
+        let flood = ["-c", "head -c 4000000 /dev/zero; sleep 60"];
+        let asked = host.ask(sh, &flood, &[], "", 1024, |_| Some(())).await;
+        assert!(asked.unwrap_err().contains("exceeded 1024 bytes"));
+        let output = host.output(sh, &flood, &[], 1024).await;
+        assert!(output.unwrap_err().contains("exceeded 1024 bytes"));
+        let answered = host
+            .ask(
+                sh,
+                &["-c", "read line; echo skip; echo \"got $line\""],
+                &[],
+                "hi\n",
+                1024,
+                |l| l.strip_prefix("got ").map(str::to_owned),
+            )
+            .await;
+        assert_eq!(answered.as_deref(), Ok("hi"));
+        assert_eq!(
+            host.output(sh, &["-c", "echo listed"], &[], 1024)
+                .await
+                .as_deref(),
+            Ok("listed\n")
+        );
+        assert!(host.output(sh, &["-c", "exit 3"], &[], 1024).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_dropped_probe_kills_its_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(dir.path());
+        let pids = dir.path().join("pids");
+        let script = format!("sleep 60 & echo $! > {}; wait", pids.display());
+        let args = ["-c", script.as_str()];
+        let hung = host.output(Path::new("/bin/sh"), &args, &[], 1024);
+        let waited = tokio::time::timeout(Duration::from_millis(500), async {
+            tokio::join!(hung, async {
+                while !pids.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+        })
+        .await;
+        assert!(waited.is_err(), "the probe hangs until dropped");
+        let child: i32 = fs::read_to_string(&pids).unwrap().trim().parse().unwrap();
+        let gone = || {
+            fs::read_to_string(format!("/proc/{child}/stat"))
+                .map_or(true, |stat| stat.split_whitespace().nth(2) == Some("Z"))
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !gone() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            gone(),
+            "the background child {child} was killed with its group"
+        );
     }
 }
