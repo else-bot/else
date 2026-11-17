@@ -168,19 +168,17 @@ impl ElseApp {
             } else {
                 CardText::Prose
             };
-            if !text.formats(context) {
+            let Some(source) = text.markdown(context) else {
                 continue;
-            }
-            wanted.push(((question.id, Extent::Whole), card_markdown::source(context)));
+            };
+            wanted.push(((question.id, Extent::Whole), source));
             if let Some(short) = question
                 .is_approval()
                 .then(|| approval::preview(context))
                 .flatten()
+                .and_then(|short| card_markdown::restricted(&short))
             {
-                wanted.push((
-                    (question.id, Extent::Preview),
-                    card_markdown::source(&short),
-                ));
+                wanted.push(((question.id, Extent::Preview), short));
             }
         }
         view.card_contexts

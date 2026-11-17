@@ -15,19 +15,67 @@ pub(super) enum CardText {
 }
 
 impl CardText {
-    /// Whether `text` shows as markdown rather than as its exact characters.
-    pub(super) fn formats(self, text: &str) -> bool {
-        let found = convert(text).1;
-        match self {
+    /// The markdown source that shows `text`, or `None` when `text` shows as
+    /// its exact characters.
+    pub(super) fn markdown(self, text: &str) -> Option<String> {
+        let (source, found) = convert(text);
+        let formats = match self {
             Self::Prose => found.fence || found.markup,
             Self::Action => found.fence,
-        }
+        };
+        (formats && allowed(&source)).then_some(source)
     }
 }
 
-/// The markdown source that shows `text` with only the allowed markup.
-pub(super) fn source(text: &str) -> String {
-    convert(text).0
+/// The markdown source that shows `text` with only the allowed markup, or
+/// `None` when the conversion would let anything else through.
+pub(super) fn restricted(text: &str) -> Option<String> {
+    let source = convert(text).0;
+    allowed(&source).then_some(source)
+}
+
+/// Whether `source` parses, as the text view parses it, into only the
+/// allowed nodes.
+fn allowed(source: &str) -> bool {
+    use markdown::mdast::Node;
+    fn only_allowed(node: &Node) -> bool {
+        matches!(
+            node,
+            Node::Root(_)
+                | Node::Paragraph(_)
+                | Node::Text(_)
+                | Node::Code(_)
+                | Node::InlineCode(_)
+                | Node::List(_)
+                | Node::ListItem(_)
+                | Node::Strong(_)
+                | Node::Break(_)
+        ) && node.children().into_iter().flatten().all(only_allowed)
+    }
+    let mut options = markdown::ParseOptions::gfm();
+    options.constructs.math_text = true;
+    options.constructs.math_flow = true;
+    markdown::to_mdast(source, &options).is_ok_and(|root| only_allowed(&root))
+}
+
+/// Each line with the ending that closed it, split on every line ending the
+/// markdown parser knows: `\r\n`, `\n` and a lone `\r`.
+fn lines(text: &str) -> impl Iterator<Item = (&str, &str)> {
+    let mut rest = text;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let end = rest.find(['\r', '\n']).unwrap_or(rest.len());
+        let ending = if rest[end..].starts_with("\r\n") {
+            2
+        } else {
+            usize::from(end < rest.len())
+        };
+        let line = (&rest[..end], &rest[end..end + ending]);
+        rest = &rest[end + ending..];
+        Some(line)
+    })
 }
 
 #[derive(Default)]
@@ -68,7 +116,7 @@ fn closes(line: &str, run: &str) -> bool {
     let rest = trimmed.trim_start_matches(mark);
     line.len() - trimmed.len() <= 3
         && trimmed.len() - rest.len() >= run.len()
-        && rest.trim().is_empty()
+        && rest.trim_matches([' ', '\t']).is_empty()
 }
 
 fn classify(line: &str) -> Line<'_> {
@@ -109,9 +157,9 @@ fn classify(line: &str) -> Line<'_> {
 fn convert(text: &str) -> (String, Found) {
     let mut found = Found::default();
     let mut out = String::new();
-    let mut lines = text.lines().peekable();
+    let mut lines = lines(text);
     let mut prose: Vec<Line> = Vec::new();
-    while let Some(line) = lines.next() {
+    while let Some((line, _)) = lines.next() {
         let Some((run, info)) = fence(line) else {
             prose.push(classify(line));
             continue;
@@ -120,14 +168,17 @@ fn convert(text: &str) -> (String, Found) {
         flush(&prose, &mut out, &mut found);
         prose.clear();
         out.push_str(run);
-        out.push_str(info);
+        if !info.is_empty() {
+            out.push(' ');
+            out.push_str(info);
+        }
         out.push('\n');
-        for body in lines.by_ref() {
+        for (body, ending) in lines.by_ref() {
             if closes(body, run) {
                 break;
             }
             out.push_str(body);
-            out.push('\n');
+            out.push_str(if ending.is_empty() { "\n" } else { ending });
         }
         out.push_str(run);
         out.push_str("\n\n");
@@ -207,7 +258,7 @@ fn inline(text: &str, bold: bool, out: &mut String, found: &mut Found) {
         }
         if bold
             && let Some(after) = rest.strip_prefix("**")
-            && let Some(end) = after.find("**")
+            && let Some(end) = closing_stars(after)
             && end > 0
             && !after.starts_with(char::is_whitespace)
             && !after[..end].ends_with(char::is_whitespace)
@@ -227,6 +278,25 @@ fn inline(text: &str, bold: bool, out: &mut String, found: &mut Found) {
     }
 }
 
+/// Where the `**` that closes a bold run starts in `text`, skipping matched
+/// code spans so a delimiter inside code stays code.
+fn closing_stars(text: &str) -> Option<usize> {
+    let mut at = 0;
+    while at < text.len() {
+        let rest = &text[at..];
+        if rest.starts_with("**") {
+            return Some(at);
+        }
+        if rest.starts_with('`') {
+            let run = rest.len() - rest.trim_start_matches('`').len();
+            at += closing_ticks(&rest[run..], run).map_or(run, |end| run + end + run);
+            continue;
+        }
+        at += rest.chars().next().map_or(1, char::len_utf8);
+    }
+    None
+}
+
 /// Where a run of exactly `run` backticks starts in `text`.
 fn closing_ticks(text: &str, run: usize) -> Option<usize> {
     let mut at = 0;
@@ -242,7 +312,11 @@ fn closing_ticks(text: &str, run: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CardText, source};
+    use super::{CardText, restricted};
+
+    fn source(text: &str) -> String {
+        restricted(text).expect("only allowed markup")
+    }
     use markdown::mdast::Node;
 
     fn tree(text: &str) -> Node {
@@ -283,7 +357,7 @@ mod tests {
         let text = format!(
             "Writes two files on **omarchy-m1**, then enables the unit:\n\n```sh\n{script}\n```\n\n`/etc/systemd/system/usb-eth-fix.service`:\n```ini\n{unit}\n```\n\n```\n{command}\n```"
         );
-        assert!(CardText::Action.formats(&text));
+        assert!(CardText::Action.markdown(&text).is_some());
         let mut blocks = Vec::new();
         code_blocks(&tree(&text), &mut blocks);
         assert_eq!(
@@ -305,8 +379,8 @@ mod tests {
             "Line one\nLine two",
             "Price: $5 & up <today>",
         ] {
-            assert!(!CardText::Prose.formats(text), "{text}");
-            assert!(!CardText::Action.formats(text), "{text}");
+            assert!(CardText::Prose.markdown(text).is_none(), "{text}");
+            assert!(CardText::Action.markdown(text).is_none(), "{text}");
         }
     }
 
@@ -317,10 +391,14 @@ mod tests {
             "rm -rf **/node_modules **/dist",
             "- run this",
         ] {
-            assert!(!CardText::Action.formats(action), "{action}");
+            assert!(CardText::Action.markdown(action).is_none(), "{action}");
         }
-        assert!(CardText::Prose.formats("cp `which foo` /tmp"));
-        assert!(!CardText::Prose.formats("rm -rf **/node_modules **/dist"));
+        assert!(CardText::Prose.markdown("cp `which foo` /tmp").is_some());
+        assert!(
+            CardText::Prose
+                .markdown("rm -rf **/node_modules **/dist")
+                .is_none()
+        );
     }
 
     #[test]
@@ -387,5 +465,59 @@ mod tests {
         let mut blocks = Vec::new();
         code_blocks(&tree(text), &mut blocks);
         assert_eq!(blocks, vec![(Some("md".into()), "```sh\nls\n```".into())]);
+    }
+
+    #[test]
+    fn line_endings_split_as_the_parser_splits_them() {
+        for text in [
+            "~~~sh\r~~~\r# heading\nbody\n~~~",
+            "```sh\rls\r```\r[link](https://example.com) ![i](a.png) <b>x</b>\r| a |\r|---|",
+        ] {
+            let source = source(text);
+            let mut found = Vec::new();
+            kinds(
+                &markdown::to_mdast(&source, &markdown::ParseOptions::gfm()).unwrap(),
+                &mut found,
+            );
+            assert!(!found.contains(&"other"), "{found:?}\n{source}");
+        }
+    }
+
+    #[test]
+    fn code_keeps_its_line_endings_and_fence_rules() {
+        let mut blocks = Vec::new();
+        code_blocks(&tree("```sh\r\necho hi\r\n    next\r\n```"), &mut blocks);
+        assert_eq!(
+            blocks,
+            vec![(Some("sh".into()), "echo hi\r\n    next".into())]
+        );
+        let mut blocks = Vec::new();
+        code_blocks(&tree("~~~ ~foo\nhi\n~~~\nafter"), &mut blocks);
+        assert_eq!(blocks, vec![(Some("~foo".into()), "hi".into())]);
+        let mut blocks = Vec::new();
+        code_blocks(&tree("```sh\nfirst\n```\u{a0}\nlast\n```"), &mut blocks);
+        assert_eq!(
+            blocks,
+            vec![(Some("sh".into()), "first\n```\u{a0}\nlast".into())]
+        );
+    }
+
+    #[test]
+    fn bold_never_ends_inside_inline_code() {
+        let Node::Root(root) = tree("**Run `echo \"**\"` now**") else {
+            unreachable!()
+        };
+        let Some(Node::Paragraph(paragraph)) = root.children.first() else {
+            panic!("{root:?}")
+        };
+        let [Node::Strong(strong)] = paragraph.children.as_slice() else {
+            panic!("{paragraph:?}")
+        };
+        assert!(
+            strong
+                .children
+                .iter()
+                .any(|node| matches!(node, Node::InlineCode(code) if code.value == "echo \"**\""))
+        );
     }
 }
