@@ -83,6 +83,7 @@ impl Transport for ObserveSessions {
         _: &str,
         _: &str,
         _: Option<&str>,
+        _: &[SendFile],
     ) -> Result<Value, Error> {
         self.observe("send", session).await;
         Ok(json!({"id": "sent"}))
@@ -217,6 +218,7 @@ async fn discovery_commands_and_listener_share_sdk_until_credential_rotation() {
                 destination: "100".into(),
                 body: "approved message".into(),
                 reply_to: None,
+                files: Vec::new(),
             },
         )
         .await

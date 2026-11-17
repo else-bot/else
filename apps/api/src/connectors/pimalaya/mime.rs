@@ -148,14 +148,14 @@ fn build(
         return Err(MailError::new("mail_attachments_too_large"));
     }
     for attachment in &draft.attachments {
-        if attachment.data_base64.len() > 1_398_104 {
+        if attachment.data_base64.len() > crate::connectors::types::MAX_ATTACHMENT_BASE64 {
             return Err(MailError::new("mail_attachments_too_large"));
         }
         let bytes = STANDARD
             .decode(&attachment.data_base64)
             .map_err(|_| MailError::new("invalid_mail_attachment"))?;
         attachment_bytes += bytes.len();
-        if attachment_bytes > 1024 * 1024 {
+        if attachment_bytes > crate::connectors::types::MAX_ATTACHMENT_TOTAL {
             return Err(MailError::new("mail_attachments_too_large"));
         }
         builder = builder.attachment(

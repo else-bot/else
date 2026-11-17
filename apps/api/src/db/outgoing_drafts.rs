@@ -135,6 +135,8 @@ pub enum DraftError {
     Invalid(&'static str),
     #[error("only a message or a new post can be approved always")]
     NoKind,
+    #[error("the draft has {0} attachments the approval did not name")]
+    FilesUnseen(usize),
     #[error(
         "only the owner's own conversation or a task delegated for an owner request can draft for approval"
     )]
@@ -175,6 +177,7 @@ impl DraftError {
             Self::Inactive => "DRAFT_INACTIVE",
             Self::Invalid(_) => "INVALID_DRAFT",
             Self::NoKind => "NO_KIND",
+            Self::FilesUnseen(_) => "ATTACHMENTS_UNSEEN",
             Self::NotAllowed => "NOT_ALLOWED",
             Self::ChannelChanged(_) => "CHANNEL_CHANGED",
             Self::AttemptParked => "ATTEMPT_PARKED",
@@ -258,7 +261,9 @@ async fn caller(
 /// a revision of the bot's pending or failed draft `replaces`, which it
 /// supersedes. A draft of a kind the owner approves always is approved
 /// for this request instead, when the turn may use saved grants (not a
-/// webhook wake or an event), and the attempt goes on to send it. A revision keeps the channel (email, or the same platform).
+/// webhook wake or an event), and the attempt goes on to send it; a draft
+/// with attachments always waits for its own approval. A revision keeps the
+/// channel (email, or the same platform).
 /// Proposing the same content again in this turn returns the earlier
 /// revision, so a retried tool call never makes a second card.
 pub async fn propose(
@@ -347,7 +352,8 @@ pub async fn propose(
                  approved_version = version,
                  approved_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
                  send_turn_id = turn_id, delivered_attempt = attempt
-             WHERE d.id = ?1 AND EXISTS (SELECT 1 FROM draft_grants g
+             WHERE d.id = ?1 AND json_array_length(d.content, '$.attachments') IS NULL
+               AND EXISTS (SELECT 1 FROM draft_grants g
                  WHERE g.bot_id = d.bot_id AND g.kind = ",
             kind!(),
             ")"
@@ -458,6 +464,10 @@ pub async fn approve(
     let draft = load(&mut tx, bot_id, draft_id).await?;
     if always && draft.kind.is_none() {
         return Err(DraftError::NoKind);
+    }
+    let files = draft.content.files().len();
+    if files > 0 && edits.attachments.is_none() {
+        return Err(DraftError::FilesUnseen(files));
     }
     if draft.status != Status::Pending {
         if is_button_approval_replay(&draft, version, edits)
@@ -619,6 +629,9 @@ pub struct Attachment {
     pub subject: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// The draft's files the owner keeps, by id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<Uuid>>,
 }
 
 impl Attachment {
@@ -626,6 +639,7 @@ impl Attachment {
         Edits {
             subject: self.subject.as_deref(),
             body: self.body.as_deref(),
+            attachments: self.attachments.as_deref(),
         }
     }
 }
@@ -643,6 +657,10 @@ pub async fn attach_to_message(
     let draft = load(conn, bot_id, attachment.id).await?;
     if !draft.status.approvable_in_chat() {
         return Err(DraftError::Settled(draft.status));
+    }
+    let files = draft.content.files().len();
+    if files > 0 && attachment.attachments.is_none() {
+        return Err(DraftError::FilesUnseen(files));
     }
     apply_edits(conn, &draft, attachment.version, attachment.edits()).await?;
     sqlx::query(
@@ -767,6 +785,35 @@ pub async fn claim(
     .await?;
     events::turn_changed(&mut tx, caller.bot_id, draft.turn_id).await?;
     let draft = reload(&mut tx, draft_id).await?;
+    tx.commit().await?;
+    Ok(draft)
+}
+
+/// A send this request just claimed stopped before any external effect,
+/// such as an approved file whose bytes changed: it fails, and only a new
+/// approval sends it.
+pub async fn fail_unsent(
+    pool: &SqlitePool,
+    draft_id: Uuid,
+    detail: &str,
+) -> Result<OutgoingDraft, DraftError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let failed = sqlx::query(
+        "UPDATE outgoing_drafts SET status = 'failed', result_detail = ?2,
+             settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE id = ?1 AND status = 'sending'",
+    )
+    .bind(draft_id)
+    .bind(detail)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    let draft = reload(&mut tx, draft_id).await?;
+    if failed == 0 {
+        return Err(DraftError::Settled(draft.status));
+    }
+    events::turn_changed(&mut tx, draft.bot_id, draft.turn_id).await?;
     tx.commit().await?;
     Ok(draft)
 }

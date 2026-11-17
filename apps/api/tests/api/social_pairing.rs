@@ -75,7 +75,14 @@ impl Transport for Phone {
     async fn execute(&self, _: &Session, command: &Command) -> Result<Value, Error> {
         Ok(json!({"ran": command}))
     }
-    async fn send(&self, _: &Session, _: &str, _: &str, _: Option<&str>) -> Result<Value, Error> {
+    async fn send(
+        &self,
+        _: &Session,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: &[SendFile],
+    ) -> Result<Value, Error> {
         Ok(json!({"id":"sent"}))
     }
     async fn listen(

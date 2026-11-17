@@ -23,9 +23,17 @@ async fn harness() -> Harness {
 }
 
 async fn harness_with(mail: Option<Arc<FakeMail>>) -> Harness {
+    harness_in(mail, None).await
+}
+
+async fn harness_in(mail: Option<Arc<FakeMail>>, projects: Option<&std::path::Path>) -> Harness {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
+    let mut synthetic = Synthetic::new(Duration::from_millis(5));
+    if let Some(root) = projects {
+        synthetic = synthetic.with_projects(root.to_owned());
+    }
+    let synthetic = Arc::new(synthetic);
     let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
     let app = match mail {
         Some(mail) => TestApp::with_mail(db, 4, registry, mail),
@@ -1535,7 +1543,7 @@ async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_e
                 bot,
                 turn,
                 action_id,
-                &email.send_command(),
+                &email.send_command(Vec::new()),
             )
             .await
             .unwrap();
@@ -2276,4 +2284,307 @@ async fn approving_a_task_always_approves_its_later_messages_to_anyone() {
         "another task still waits for the owner: {}",
         other.body
     );
+}
+
+/// A bot's project directory with `files` written into it.
+fn project(root: &std::path::Path, bot: &str, files: &[(&str, &[u8])]) {
+    let dir = else_api::providers::host::project_dir(root, bot.parse().unwrap()).unwrap();
+    for (name, data) in files {
+        std::fs::write(dir.join(name), data).unwrap();
+    }
+}
+
+fn png(shade: u8) -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(2, 2, image::Rgb([shade, 0, 0]))
+        .write_to(&mut out, image::ImageFormat::Png)
+        .unwrap();
+    out.into_inner()
+}
+
+const PDF: &[u8] = b"%PDF-1.7\n1 0 obj << >> endobj\ntrailer << >>\n%%EOF\n";
+
+fn files_of(card: &Value) -> Vec<Value> {
+    card["content"]["attachments"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connected_email_sends_its_approved_pdf_from_the_account() {
+    let root = tempfile::tempdir().unwrap();
+    let mail = Arc::new(FakeMail::default());
+    let Harness { app, synthetic } = harness_in(Some(mail.clone()), Some(root.path())).await;
+    let main = app.main_bot().await;
+    project(root.path(), &main, &[("report.pdf", PDF)]);
+    let account = connect(&app, &main, "main@owner.example", true).await;
+    let (turn, token) = running(&app, &main, SLOW, None).await;
+
+    let mut args = connected_reply(account);
+    args["attachments"] = json!([{ "path": "~/work/missing.pdf" }]);
+    assert!(
+        refusal(&tool(&app, &token, "draft_email", args.clone()).await)
+            .starts_with("FILE_UNAVAILABLE"),
+        "a missing file is refused when drafting"
+    );
+    args["attachments"] = json!([{ "path": "report.pdf" }]);
+    let id = draft(&app, &token, args).await;
+    wait(&app, turn, "waiting").await;
+    let card = shown(&app, &main, turn).await[0].clone();
+    let files = files_of(&card);
+    assert_eq!(files.len(), 1, "{card}");
+    assert_eq!(files[0]["name"], "report.pdf");
+    assert_eq!(files[0]["media_type"], "application/pdf");
+    assert_eq!(files[0]["size"], PDF.len());
+    assert_eq!(files[0]["sha256"].as_str().unwrap().len(), 64);
+    let file_id = files[0]["id"].as_str().unwrap().to_owned();
+    let bytes = app
+        .owner(
+            "GET",
+            &format!("/v1/bots/{main}/attachments/{file_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(bytes.status, StatusCode::OK, "the card can fetch the file");
+
+    let unseen = owner_action(&app, &main, id, "approve", json!({ "version": 1 })).await;
+    assert_eq!(unseen.status, StatusCode::CONFLICT, "{}", unseen.body);
+    assert_eq!(unseen.body["error"]["code"], "attachments_unseen");
+    let approved = owner_action(
+        &app,
+        &main,
+        id,
+        "approve",
+        json!({ "version": 1, "attachments": [file_id] }),
+    )
+    .await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    wait(&app, turn, "running").await;
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(
+        packet.contains("Attachments: report.pdf (application/pdf, 1 KB)"),
+        "{packet}"
+    );
+    let token = grant(&app, turn).await;
+    let sent = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert_eq!(tool_text(&sent)["status"], "sent", "{}", sent.body);
+    let sends = mail.sends();
+    assert_eq!(sends.len(), 1);
+    assert_eq!(sends[0].attachments.len(), 1);
+    let attached = &sends[0].attachments[0];
+    assert_eq!(
+        (attached.name.as_str(), attached.media_type.as_str()),
+        ("report.pdf", "application/pdf")
+    );
+    use base64::Engine;
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(&attached.data_base64)
+            .unwrap(),
+        PDF
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_x_post_takes_pictures_the_owner_may_remove_and_stages_them_for_its_send() {
+    let root = tempfile::tempdir().unwrap();
+    let Harness { app, .. } = harness_in(None, Some(root.path())).await;
+    let main = app.main_bot().await;
+    let (first, second) = (png(10), png(200));
+    project(
+        root.path(),
+        &main,
+        &[("a.png", &first), ("b.png", &second), ("report.pdf", PDF)],
+    );
+    let (turn, token) = running(&app, &main, SLOW, None).await;
+
+    let mut post = ship_post();
+    post["attachments"] = json!([{ "path": "report.pdf" }]);
+    let refused = refusal(&tool(&app, &token, "draft_message", post.clone()).await);
+    assert!(
+        refused.contains("an X post takes only PNG, JPEG, GIF, or WebP images"),
+        "{refused}"
+    );
+    post["attachments"] = json!([{ "path": "a.png" }, { "path": "~/work/b.png" }]);
+    let id = draft(&app, &token, post).await;
+    wait(&app, turn, "waiting").await;
+    let files = files_of(&shown(&app, &main, turn).await[0]);
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().all(|f| f["media_type"] == "image/png"));
+    let keep = files[1]["id"].as_str().unwrap().to_owned();
+    let dir = else_api::providers::host::project_dir(root.path(), main.parse().unwrap()).unwrap();
+    let staged = dir.join(".attachments").join(&keep).join("b.png");
+    assert!(
+        !staged.exists(),
+        "nothing is staged before the owner approves"
+    );
+    for (change, why) in [
+        (
+            "json_insert(content, '$.attachments[#]', json_extract(content, '$.attachments[0]'))",
+            "repeat",
+        ),
+        (
+            "json_set(content, '$.attachments', json_array(json_extract(content, '$.attachments[1]'), \
+          json_extract(content, '$.attachments[0]')))",
+            "reorder",
+        ),
+    ] {
+        let changed = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE outgoing_drafts SET content = {change} WHERE id = ?1"
+        )))
+        .bind(id)
+        .execute(&app.db.pool)
+        .await;
+        assert!(changed.is_err(), "the owner may not {why} attachments");
+    }
+
+    let added = owner_action(
+        &app,
+        &main,
+        id,
+        "edit",
+        json!({ "version": 1, "attachments": [Uuid::new_v4()] }),
+    )
+    .await;
+    assert_eq!(added.status, StatusCode::BAD_REQUEST, "{}", added.body);
+    let removed = owner_action(
+        &app,
+        &main,
+        id,
+        "edit",
+        json!({ "version": 1, "attachments": [keep] }),
+    )
+    .await;
+    assert_eq!(removed.status, StatusCode::OK, "{}", removed.body);
+    let files = files_of(&removed.body["draft"]);
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["id"], keep);
+    let changed = sqlx::query(
+        "UPDATE outgoing_drafts SET content = json_set(content, '$.attachments[0].name', 'x.png')
+         WHERE id = ?1",
+    )
+    .bind(id)
+    .execute(&app.db.pool)
+    .await;
+    assert!(changed.is_err(), "a stored file never changes");
+
+    let approved = owner_action(
+        &app,
+        &main,
+        id,
+        "approve",
+        json!({ "version": 2, "attachments": [keep] }),
+    )
+    .await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    wait(&app, turn, "running").await;
+    let token = grant(&app, turn).await;
+    std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+    std::fs::write(&staged, b"tampered").unwrap();
+    let started = tool(&app, &token, "start_draft_send", json!({ "draft_id": id })).await;
+    let result = tool_text(&started);
+    assert_eq!(result["status"], "sending", "{}", started.body);
+    assert_eq!(
+        result["draft"]["attachment_paths"],
+        json!([format!("~/work/.attachments/{keep}/b.png")])
+    );
+    assert_eq!(
+        std::fs::read(&staged).unwrap(),
+        second,
+        "the claim restores the approved bytes"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_attachment_fails_the_send_and_nothing_leaves() {
+    let root = tempfile::tempdir().unwrap();
+    let mail = Arc::new(FakeMail::default());
+    let Harness { app, .. } = harness_in(Some(mail.clone()), Some(root.path())).await;
+    let main = app.main_bot().await;
+    project(root.path(), &main, &[("report.pdf", PDF)]);
+    let account = connect(&app, &main, "main@owner.example", true).await;
+    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let mut args = connected_reply(account);
+    args["attachments"] = json!([{ "path": "report.pdf" }]);
+    let id = draft(&app, &token, args).await;
+    wait(&app, turn, "waiting").await;
+    let file_id = files_of(&shown(&app, &main, turn).await[0])[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let approved = owner_action(
+        &app,
+        &main,
+        id,
+        "approve",
+        json!({ "version": 1, "attachments": [file_id] }),
+    )
+    .await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    wait(&app, turn, "running").await;
+    sqlx::query("UPDATE attachments SET data = zeroblob(size) WHERE id = ?1")
+        .bind(file_id.parse::<Uuid>().unwrap())
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let token = grant(&app, turn).await;
+    let sent = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert!(refusal(&sent).starts_with("FILE_CHANGED"), "{}", sent.body);
+    assert!(mail.commands.lock().unwrap().is_empty(), "nothing was sent");
+    let status: String = sqlx::query_scalar("SELECT status FROM outgoing_drafts WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "failed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_approval_of_a_draft_with_files_needs_the_files_the_owner_saw() {
+    let root = tempfile::tempdir().unwrap();
+    let mail = Arc::new(FakeMail::default());
+    let Harness { app, .. } = harness_in(Some(mail.clone()), Some(root.path())).await;
+    let main = app.main_bot().await;
+    project(root.path(), &main, &[("report.pdf", PDF)]);
+    let account = connect(&app, &main, "main@owner.example", true).await;
+    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let mut args = connected_reply(account);
+    args["attachments"] = json!([{ "path": "report.pdf" }]);
+    let id = draft(&app, &token, args).await;
+    wait(&app, turn, "waiting").await;
+    let file_id = files_of(&shown(&app, &main, turn).await[0])[0]["id"].clone();
+
+    let unseen = send(
+        &app,
+        &main,
+        "Send it.",
+        Some(json!({ "id": id, "version": 1 })),
+    )
+    .await;
+    assert_eq!(unseen.status, StatusCode::CONFLICT, "{}", unseen.body);
+    assert_eq!(unseen.body["error"]["code"], "attachments_unseen");
+    let (_, token) = running(
+        &app,
+        &main,
+        "[synthetic:slow] Send it.",
+        Some(json!({ "id": id, "version": 1, "attachments": [file_id] })),
+    )
+    .await;
+    let confirmed = tool(
+        &app,
+        &token,
+        "confirm_draft_approval",
+        json!({ "draft_id": id }),
+    )
+    .await;
+    assert_eq!(
+        tool_text(&confirmed)["status"],
+        "approved",
+        "{}",
+        confirmed.body
+    );
+    let sent = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert_eq!(tool_text(&sent)["status"], "sent", "{}", sent.body);
+    assert_eq!(mail.sends()[0].attachments.len(), 1);
 }

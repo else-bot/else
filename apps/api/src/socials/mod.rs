@@ -43,7 +43,17 @@ impl Operation {
                 destination,
                 body,
                 reply_to,
-            }) => json!({"send":destination,"body":body,"reply_to":reply_to}),
+                files,
+            }) => {
+                let mut payload = json!({"send":destination,"body":body,"reply_to":reply_to});
+                if !files.is_empty() {
+                    payload["files"] = files
+                        .iter()
+                        .map(|f| json!({"name":f.name,"media_type":f.media_type,"sha256":f.sha256}))
+                        .collect();
+                }
+                payload
+            }
         }
     }
 }
@@ -546,10 +556,11 @@ impl Manager {
                 destination,
                 body,
                 reply_to,
+                files,
             }) => {
                 let result = self
                     .transport
-                    .send(session, destination, body, reply_to.as_deref())
+                    .send(session, destination, body, reply_to.as_deref(), files)
                     .await;
                 if let Ok(value) = &result {
                     let remote = value

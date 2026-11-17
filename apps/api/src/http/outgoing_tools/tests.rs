@@ -51,6 +51,7 @@ async fn connected_send_uses_the_owner_edit_approved_after_the_initial_read() {
             task: None,
             reply_to: Some("42".into()),
             body: "Provisional text A".into(),
+            attachments: Vec::new(),
         });
         let draft = outgoing_drafts::propose(&db, turn, &content, None)
             .await
@@ -65,6 +66,7 @@ async fn connected_send_uses_the_owner_edit_approved_after_the_initial_read() {
             Edits {
                 subject: None,
                 body: Some("Owner-approved text B"),
+                attachments: None,
             },
             false,
         )

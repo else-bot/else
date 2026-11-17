@@ -756,7 +756,8 @@ fn attachments_round_trip_and_forward_preserves_the_original_message() {
         "invalid_mail_attachment"
     );
     let mut oversized = draft;
-    oversized.attachments[0].data_base64 = STANDARD.encode(vec![0; 1024 * 1024 + 1]);
+    oversized.attachments[0].data_base64 =
+        STANDARD.encode(vec![0; crate::connectors::types::MAX_ATTACHMENT_TOTAL + 1]);
     assert_eq!(
         compose("owner@example.org", &oversized, None)
             .unwrap_err()

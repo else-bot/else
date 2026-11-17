@@ -7,10 +7,12 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
+use super::images::{MessageImages, is_image};
 use super::message_row::{CardPlacement, short_stamp};
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
-use crate::model::{DraftAttachment, DraftEdit, DraftStatus, OutgoingDraft};
+use crate::attachments::{MessagePart, byte_size};
+use crate::model::{DraftAttachment, DraftEdit, DraftFile, DraftStatus, OutgoingDraft};
 
 #[derive(Clone, Copy)]
 enum Choice {
@@ -25,10 +27,32 @@ enum Operation {
     Discard,
 }
 
+pub(super) struct DraftImages {
+    gallery: Entity<MessageImages>,
+    _observe: Subscription,
+}
+
+fn image_parts(files: &[DraftFile]) -> Vec<MessagePart> {
+    files
+        .iter()
+        .map(DraftFile::attachment)
+        .filter(is_image)
+        .map(|file| MessagePart::File { file })
+        .collect()
+}
+
+impl DraftImages {
+    fn sync(&self, files: &[DraftFile], cx: &mut Context<ElseApp>) {
+        self.gallery
+            .update(cx, |images, cx| images.sync(&image_parts(files), cx));
+    }
+}
+
 pub(super) struct DraftForm {
     subject: Option<Entity<InputState>>,
     body: Entity<TextareaState>,
     baseline: DraftEdit,
+    files: Vec<DraftFile>,
     operation: Option<Operation>,
     retryable: bool,
     error: Option<String>,
@@ -64,6 +88,7 @@ impl DraftForm {
             subject,
             body,
             baseline: draft.edit(),
+            files: draft.content.attachments().to_vec(),
             operation: None,
             retryable: false,
             error: None,
@@ -79,6 +104,11 @@ impl DraftForm {
                 .as_ref()
                 .map(|input| input.read(cx).value().to_string()),
             body: self.body.read(cx).value().to_string(),
+            attachments: self
+                .baseline
+                .attachments
+                .as_ref()
+                .map(|_| self.files.iter().map(|file| file.id).collect()),
         }
     }
 }
@@ -93,20 +123,21 @@ impl ElseApp {
             .iter()
             .flat_map(|c| c.turns_in_order())
             .flat_map(|t| &t.outgoing_drafts)
-            .filter(|d| d.is_open())
             .cloned()
             .collect();
         view.draft_forms
-            .retain(|id, _| drafts.iter().any(|d| d.id == *id));
-        for draft in drafts {
+            .retain(|id, _| drafts.iter().any(|d| d.id == *id && d.is_open()));
+        for draft in drafts.iter().filter(|draft| draft.is_open()) {
             match view.draft_forms.get_mut(&draft.id) {
                 Some(form) if form.baseline.version != draft.version => {
                     let local = form.edit(cx);
                     if local == form.baseline
                         || (local.subject.as_deref() == draft.content.subject()
-                            && local.body == draft.content.body())
+                            && local.body == draft.content.body()
+                            && local.attachments.unwrap_or_default()
+                                == draft.content.attachment_ids().unwrap_or_default())
                     {
-                        *form = DraftForm::new(&draft, window, cx);
+                        *form = DraftForm::new(draft, window, cx);
                     } else {
                         form.error = Some("This draft changed elsewhere. Your edits are still here. Load the latest draft before approving.".into());
                     }
@@ -114,8 +145,31 @@ impl ElseApp {
                 Some(_) => {}
                 None => {
                     view.draft_forms
-                        .insert(draft.id, DraftForm::new(&draft, window, cx));
+                        .insert(draft.id, DraftForm::new(draft, window, cx));
                 }
+            }
+        }
+        view.draft_images
+            .retain(|id, _| drafts.iter().any(|d| d.id == *id));
+        for draft in &drafts {
+            let files = view
+                .draft_forms
+                .get(&draft.id)
+                .map_or(draft.content.attachments(), |form| form.files.as_slice());
+            let parts = image_parts(files);
+            if let Some(images) = view.draft_images.get(&draft.id) {
+                images.sync(files, cx);
+            } else if !parts.is_empty() {
+                let (gallery, _observe) = Self::message_images(
+                    self.client.clone(),
+                    RowKey::Draft(draft.id),
+                    view.bot_id,
+                    &parts,
+                    window,
+                    cx,
+                );
+                view.draft_images
+                    .insert(draft.id, DraftImages { gallery, _observe });
             }
         }
     }
@@ -160,7 +214,9 @@ impl ElseApp {
         };
         let operation = match (view.draft_forms.get(&id), choice) {
             (Some(form), _) if form.retryable => form.operation.clone(),
-            (Some(form), Choice::Approve | Choice::ApproveAlways) if form.operation.is_none() => {
+            (Some(form), Choice::Approve | Choice::ApproveAlways)
+                if form.operation.is_none() && !form.body.read(cx).value().trim().is_empty() =>
+            {
                 Some(Operation::Approve {
                     edit: form.edit(cx),
                     always: matches!(choice, Choice::ApproveAlways),
@@ -255,8 +311,74 @@ impl ElseApp {
         if let (Some(draft), Some(view)) = (draft, self.view.as_mut()) {
             view.draft_forms
                 .insert(id, DraftForm::new(&draft, window, cx));
+            self.sync_draft_forms(window, cx);
         }
         self.remeasure_row(RowKey::Draft(id), cx);
+    }
+
+    fn render_draft_files(
+        &self,
+        draft: &OutgoingDraft,
+        files: &[DraftFile],
+        editable: bool,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = draft.id;
+        let theme = cx.theme();
+        v_flex()
+            .gap_2()
+            .children(files.iter().map(|file| {
+                let file_id = file.id;
+                h_flex()
+                    .gap_2()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(div().text_sm().whitespace_normal().child(file.name.clone()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .whitespace_normal()
+                                    .child(format!(
+                                        "{} · {}",
+                                        file.media_type,
+                                        byte_size(file.size)
+                                    )),
+                            ),
+                    )
+                    .when(editable, |row| {
+                        row.child(
+                            Button::new(SharedString::from(format!("draft-remove-{id}-{file_id}")))
+                                .control(Tier::Ghost, Scale::Compact, busy, cx)
+                                .label("Remove")
+                                .accessibility_label(format!("Remove attachment {}", file.name))
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    let Some(view) = app.view.as_mut() else {
+                                        return;
+                                    };
+                                    let Some(form) = view.draft_forms.get_mut(&id) else {
+                                        return;
+                                    };
+                                    form.files.retain(|file| file.id != file_id);
+                                    if let Some(images) = view.draft_images.get(&id) {
+                                        images.sync(&form.files, cx);
+                                    }
+                                    app.remeasure_row(RowKey::Draft(id), cx);
+                                })),
+                        )
+                    })
+            }))
+            .when_some(
+                self.view
+                    .as_ref()
+                    .and_then(|view| view.draft_images.get(&id)),
+                |column, images| column.child(images.gallery.clone()),
+            )
+            .into_any_element()
     }
 
     pub(super) fn render_draft_card(
@@ -402,6 +524,15 @@ impl ElseApp {
                     app.remeasure_row(RowKey::Draft(id), cx);
                 }));
             card = card.child(header);
+            if !draft.content.attachments().is_empty() {
+                card = card.child(div().px_4().pb_3().child(self.render_draft_files(
+                    draft,
+                    draft.content.attachments(),
+                    false,
+                    false,
+                    cx,
+                )));
+            }
             if expanded {
                 card = card.child(
                     v_flex()
@@ -482,7 +613,11 @@ impl ElseApp {
         let connected = self.connection == Connection::Connected;
         let busy = form.operation.is_some() || self.draft_in_flight(id);
         let conflict = form.baseline.version != draft.version;
-        let approve_enabled = connected && !busy && !conflict && draft.can_approve;
+        let approve_enabled = connected
+            && !busy
+            && !conflict
+            && draft.can_approve
+            && !form.body.read(cx).value().trim().is_empty();
         // The bot's name row sits above the card. An email's editable subject
         // is its one title, with what it is as quiet meta beside it; anything
         // else is titled by what it is.
@@ -546,6 +681,9 @@ impl ElseApp {
                         ),
                 ),
             );
+        if !form.files.is_empty() {
+            card = card.child(self.render_draft_files(draft, &form.files, true, busy, cx));
+        }
         let footer = super::action_card::footer()
             .when(draft.kind.is_some() && draft.can_approve, |row| {
                 row.note(format!(

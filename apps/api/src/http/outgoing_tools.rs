@@ -44,6 +44,28 @@ pub(super) fn schemas() -> Vec<Value> {
                 "description": description })
     };
     let platforms: Vec<&str> = Platform::ALL.iter().map(|p| p.as_str()).collect();
+    let attachments = json!({
+        "type": "array", "maxItems": outgoing::MAX_FILES,
+        "description": "Files to send: {path} in your project or ~/work, or {email} for an \
+            attachment of an email you can read, by its part. Limits per platform are checked now.",
+        "items": { "oneOf": [
+            { "type": "object", "required": ["path"], "additionalProperties": false,
+              "properties": { "path": { "type": "string", "minLength": 1 } } },
+            { "type": "object", "required": ["email"], "additionalProperties": false,
+              "properties": { "email": {
+                  "type": "object", "required": ["account_id", "message", "part"],
+                  "additionalProperties": false,
+                  "properties": {
+                      "account_id": { "type": "string", "format": "uuid" },
+                      "message": { "type": "object",
+                                   "required": ["folder", "uid_validity", "uid"],
+                                   "properties": {
+                                       "folder": { "type": "string" },
+                                       "uid_validity": { "type": "integer", "minimum": 1 },
+                                       "uid": { "type": "integer", "minimum": 1 } },
+                                   "additionalProperties": false },
+                      "part": { "type": "integer", "minimum": 0 } } } } } ] },
+    });
     vec![
         json!({
             "name": "draft_email",
@@ -77,6 +99,7 @@ pub(super) fn schemas() -> Vec<Value> {
                     "bcc": list,
                     "subject": { "type": "string", "maxLength": outgoing::MAX_SUBJECT },
                     "body": body.clone(),
+                    "attachments": attachments.clone(),
                     "replaces": draft_id(),
                 },
                 "required": ["to", "subject", "body"],
@@ -106,6 +129,7 @@ pub(super) fn schemas() -> Vec<Value> {
                         public post), such as \"Initial lead DMs\", so Approve always covers it to \
                         anyone. Reuse a listed always-approved task exactly."),
                     "body": body,
+                    "attachments": attachments,
                     "replaces": draft_id(),
                 },
                 "required": ["platform", "body"],
@@ -182,13 +206,22 @@ pub(super) fn schemas() -> Vec<Value> {
 }
 
 fn draft_json(draft: &OutgoingDraft) -> Value {
-    json!({
+    let mut value = json!({
         "draft_id": draft.id,
         "lineage_id": draft.lineage_id,
         "revision": draft.revision,
         "status": draft.status,
         "content": draft.content,
-    })
+    });
+    if draft.content.account().is_none() && !draft.content.files().is_empty() {
+        value["attachment_paths"] = draft
+            .content
+            .files()
+            .iter()
+            .map(files::staged_path)
+            .collect();
+    }
+    value
 }
 
 pub(super) fn refused(err: DraftError) -> Outcome {
@@ -271,6 +304,21 @@ async fn draft(
 ) -> Result<Outcome, Outcome> {
     let content =
         content.map_err(|message| (tool_error(&format!("INVALID_DRAFT: {message}")), None))?;
+    let sources = files::sources(args).map_err(|message| (tool_error(&message), None))?;
+    let content = if sources.is_empty() {
+        content
+    } else {
+        let rejected = |message: String| {
+            let code = message.split(':').next().unwrap_or_default().to_owned();
+            (tool_error(&message), Some(format!("rejected {code}")))
+        };
+        let files = files::snapshot(state, grant, sources)
+            .await
+            .map_err(rejected)?;
+        content
+            .with_files(files)
+            .map_err(|why| rejected(format!("INVALID_DRAFT: {why}")))?
+    };
     let replaces = match &args["replaces"] {
         Value::Null => None,
         _ => Some(id_arg(args, "replaces")?),
@@ -415,13 +463,15 @@ async fn start(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome,
     let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &Delivery::Host)
         .await
         .map_err(refused)?;
+    stage_claimed(state, &row).await?;
     Ok((
         tool_result(json!({
             "status": "sending",
             "draft": draft_json(&row),
-            "next": format!("Send exactly this {} now with your host tools, once, then call \
+            "next": format!("Send exactly this {}{} now with your host tools, once, then call \
                      report_draft_send with the result. Do not send it any other way or again.",
-                     row.content.noun()),
+                     row.content.noun(),
+                     if row.content.files().is_empty() { "" } else { " with the files at attachment_paths" }),
         })),
         Some(format!(
             "claimed {} {} for a host send",
@@ -522,6 +572,8 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
         let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &delivery)
             .await
             .map_err(refused)?;
+        let fresh = row.delivery.as_deref() == Some(&delivery);
+        let approved = claimed_files(state, &row, fresh).await?;
         match connected_payload(&row).map_err(refused)? {
             ConnectedPayload::Mail {
                 account_id,
@@ -538,7 +590,7 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
                         grant.bot_id,
                         grant.turn_id,
                         Some(action_id),
-                        email.send_command(),
+                        email.send_command(approved.iter().map(mail_file).collect()),
                     )
                     .await;
                 let refusal = result.as_ref().err().map(|err: &MailError| err.code);
@@ -579,6 +631,7 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
                                 destination: destination.to_owned(),
                                 body: message.body.clone(),
                                 reply_to: message.reply_to.clone(),
+                                files: approved.into_iter().map(social_file).collect(),
                             },
                         )
                         .await
@@ -619,6 +672,72 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
             row.status.as_str()
         )),
     ))
+}
+
+fn mail_file(file: &files::Approved) -> crate::connectors::types::OutgoingAttachment {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    crate::connectors::types::OutgoingAttachment {
+        name: file.file.name.clone(),
+        media_type: file.file.media_type.clone(),
+        data_base64: STANDARD.encode(&file.data),
+    }
+}
+
+fn social_file(file: files::Approved) -> crate::socials::types::SendFile {
+    crate::socials::types::SendFile {
+        name: file.file.name,
+        media_type: file.file.media_type,
+        sha256: file.file.sha256,
+        data: file.data.into(),
+    }
+}
+
+/// The approved bytes of the draft this call claimed. A fresh claim whose
+/// files changed fails before any external effect. A claim an earlier call
+/// made may already have sent, so its state stays as it is.
+async fn claimed_files(
+    state: &AppState,
+    row: &OutgoingDraft,
+    fresh: bool,
+) -> Result<Vec<files::Approved>, Outcome> {
+    let changed = match files::approved(state, row.bot_id, row.content.files()).await {
+        Ok(approved) => return Ok(approved),
+        Err(changed) => changed.to_string(),
+    };
+    if !fresh {
+        return Err((
+            tool_error(&format!(
+                "FILE_CHANGED: {changed}. An earlier call already started this send and its \
+                 result is not known; never send it again without the owner's new approval."
+            )),
+            Some("rejected FILE_CHANGED".into()),
+        ));
+    }
+    outgoing_drafts::fail_unsent(&state.db, row.id, &changed)
+        .await
+        .map_err(refused)?;
+    Err((
+        tool_error(&format!(
+            "FILE_CHANGED: {changed}. Tell the owner; draft it again for a new approval."
+        )),
+        Some("rejected FILE_CHANGED".into()),
+    ))
+}
+
+/// Stage the files of an unconnected draft this call just claimed for the
+/// bot's own send; nothing was sent if that fails.
+async fn stage_claimed(state: &AppState, row: &OutgoingDraft) -> Result<(), Outcome> {
+    let approved = claimed_files(state, row, true).await?;
+    if let Err(message) = files::stage(state, row.bot_id, &approved).await {
+        outgoing_drafts::fail_unsent(&state.db, row.id, &message)
+            .await
+            .map_err(refused)?;
+        return Err((
+            tool_error(&message),
+            Some("rejected FILE_UNAVAILABLE".into()),
+        ));
+    }
+    Ok(())
 }
 
 async fn report(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
@@ -669,6 +788,7 @@ pub(super) async fn claim_for_tool(
                 Some(format!("rejected {code}")),
             )
         })?;
+    stage_claimed(state, &row).await?;
     Ok(format!(
         "sends approved {} {} version {}",
         row.content.noun(),
@@ -677,5 +797,6 @@ pub(super) async fn claim_for_tool(
     ))
 }
 
+mod files;
 #[cfg(test)]
 mod tests;

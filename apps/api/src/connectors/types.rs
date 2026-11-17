@@ -306,6 +306,11 @@ impl From<SendNow> for bool {
 
 /// Attachments one `open_attachments` call or approval card may cover.
 pub const MAX_OPEN_ATTACHMENTS: usize = 10;
+/// Decoded bytes one sent email's attachments may total. Base64 makes the
+/// message about a third larger, which stays under Gmail's 25 MB.
+pub const MAX_ATTACHMENT_TOTAL: usize = 15 * 1024 * 1024;
+/// Base64 text of the largest attachment `MAX_ATTACHMENT_TOTAL` allows.
+pub const MAX_ATTACHMENT_BASE64: usize = MAX_ATTACHMENT_TOTAL.div_ceil(3) * 4;
 
 fn default_limit() -> usize {
     50

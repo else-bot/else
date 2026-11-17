@@ -219,7 +219,7 @@ fn draft(d: &Draft) -> Rule {
                 && !a.media_type.contains([' ', ';']),
             "an attachment media_type must look like text/plain",
         )?;
-        let data = (a.data_base64.len() <= 1_400_000)
+        let data = (a.data_base64.len() <= super::types::MAX_ATTACHMENT_BASE64)
             .then(|| {
                 base64::engine::general_purpose::STANDARD
                     .decode(&a.data_base64)
@@ -227,11 +227,14 @@ fn draft(d: &Draft) -> Rule {
             })
             .flatten();
         let Some(data) = data else {
-            return Err("an attachment must be base64 of at most 1 MiB");
+            return Err("an attachment must be base64 of at most 15 MiB");
         };
         bytes += data.len();
     }
-    ensure(bytes <= 1_048_576, "attachments must total at most 1 MiB")?;
+    ensure(
+        bytes <= super::types::MAX_ATTACHMENT_TOTAL,
+        "attachments must total at most 15 MiB",
+    )?;
     ensure(!d.to.is_empty(), "to needs at least one address")?;
     ensure(
         d.to.len() + d.cc.len() + d.bcc.len() <= 50,

@@ -571,6 +571,8 @@ struct Fake {
     blocked: AtomicBool,
     sends: AtomicUsize,
     sent_to: std::sync::Mutex<Vec<String>>,
+    /// Each sent file as (name, media type, bytes).
+    sent_files: std::sync::Mutex<Vec<(String, String, Vec<u8>)>>,
     refused: AtomicBool,
 }
 #[async_trait]
@@ -614,6 +616,7 @@ impl Transport for Fake {
         destination: &str,
         body: &str,
         _: Option<&str>,
+        files: &[SendFile],
     ) -> Result<Value, Error> {
         self.started.notify_one();
         if self.blocked.load(Ordering::SeqCst) {
@@ -621,6 +624,11 @@ impl Transport for Fake {
         }
         self.sends.fetch_add(1, Ordering::SeqCst);
         self.sent_to.lock().unwrap().push(destination.to_owned());
+        self.sent_files.lock().unwrap().extend(
+            files
+                .iter()
+                .map(|f| (f.name.clone(), f.media_type.clone(), f.data.to_vec())),
+        );
         Ok(json!({"id":"sent","body":body}))
     }
     async fn listen(
@@ -691,6 +699,7 @@ async fn changing_generation_cancels_inflight_sdk_wait_and_records_uncertainty()
                     destination: "100".into(),
                     body: "approved body".into(),
                     reply_to: None,
+                    files: Vec::new(),
                 },
             )
             .await
@@ -747,6 +756,7 @@ async fn stopped_turn_cancels_sdk_wait_without_connection_change() {
                     destination: "100".into(),
                     body: "body".into(),
                     reply_to: None,
+                    files: Vec::new(),
                 },
             )
             .await
@@ -1374,6 +1384,7 @@ async fn completing_another_bots_setup_keeps_an_approved_send_running() {
                     destination: "100".into(),
                     body: "approved body".into(),
                     reply_to: None,
+                    files: Vec::new(),
                 },
             )
             .await
@@ -1498,4 +1509,112 @@ fn connection_state_transitions() {
     assert_eq!(Paused.transition(Paused).unwrap(), None);
     assert!(matches!(Removed.transition(Active), Err(Error::NotFound)));
     assert!(matches!(Removed.transition(Removed), Err(Error::NotFound)));
+}
+
+#[tokio::test]
+async fn an_approved_message_sends_exactly_its_approved_picture() {
+    use else_api::{
+        credentials::OwnerToken, grants::Tool, http::AppState, providers::Registry,
+        providers::synthetic::Synthetic, scheduler::Scheduler,
+    };
+    let db = TestDb::migrated().await;
+    let bot = bot(&db).await;
+    let turn = turn(&db, bot, "user").await;
+    let root = tempfile::tempdir().unwrap();
+    let dir = else_api::providers::host::project_dir(root.path(), bot).unwrap();
+    let mut flyer = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(3, 2, image::Rgb([0, 90, 200]))
+        .write_to(&mut flyer, image::ImageFormat::Png)
+        .unwrap();
+    let flyer = flyer.into_inner();
+    std::fs::write(dir.join("flyer.png"), &flyer).unwrap();
+    let fake = Arc::new(Fake::default());
+    let manager = Arc::new(Manager::with_transport(
+        db.pool.clone(),
+        Arc::new(key()),
+        fake.clone(),
+    ));
+    let synthetic = Synthetic::new(Duration::from_millis(5)).with_projects(root.path().into());
+    let scheduler = Scheduler::new(db.pool.clone(), Registry::new(vec![Arc::new(synthetic)]), 1);
+    let stop = CancellationToken::new();
+    let state = Arc::new(
+        AppState::new(
+            OwnerToken::parse(common::TOKEN).unwrap(),
+            db.pool.clone(),
+            scheduler.clone(),
+            else_api::events::EventHub::start(db.pool.clone(), stop.clone()),
+        )
+        .with_secret_key(Arc::new(key()))
+        .with_socials(manager),
+    );
+    let router = else_api::http::router(&else_api::config::Config::load(&TestEnv).unwrap(), state);
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?1")
+        .bind(turn)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let tools = vec![Tool::Social, Tool::AskOwner, Tool::DraftEmail];
+    let grant = scheduler
+        .grants()
+        .issue(
+            bot,
+            conversation,
+            turn,
+            tools.clone(),
+            Duration::from_secs(300),
+        )
+        .await;
+    let (status, created) = http(
+        &router,
+        "POST",
+        "/v1/connectors/socials/connections",
+        common::TOKEN,
+        json!({"provider":"telegram","token":"private-owner-bot-token"}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{created}");
+    let connection = created["connection"]["id"].as_str().unwrap().to_owned();
+    destinations(&db, connection.parse().unwrap()).await;
+    let proposed = rpc(
+        &router,
+        &grant,
+        "draft_message",
+        json!({"platform":"telegram","account_id":connection,"destination":"100",
+               "body":"Rue aux enfants samedi !","attachments":[{"path":"flyer.png"}]}),
+    )
+    .await;
+    let draft = proposed["draft"]["draft_id"].as_str().unwrap().to_owned();
+    let file = proposed["draft"]["content"]["attachments"][0].clone();
+    assert_eq!(file["media_type"], "image/png", "{proposed}");
+    assert!(
+        proposed["draft"].get("attachment_paths").is_none(),
+        "a connected draft is never sent by the bot's own tools"
+    );
+    let (status, approved) = http(
+        &router,
+        "POST",
+        &format!("/v1/bots/{bot}/outgoing-drafts/{draft}/approve"),
+        common::TOKEN,
+        json!({"version":1,"attachments":[file["id"]]}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{approved}");
+    sqlx::query("UPDATE turns SET attempt=2 WHERE id=?1")
+        .bind(turn)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let grant = scheduler
+        .grants()
+        .issue(bot, conversation, turn, tools, Duration::from_secs(300))
+        .await;
+    std::fs::write(dir.join("flyer.png"), b"changed after approval").unwrap();
+    let result = rpc(&router, &grant, "send_draft", json!({"draft_id":draft})).await;
+    assert_eq!(result["status"], "sent", "{result}");
+    assert_eq!(
+        *fake.sent_files.lock().unwrap(),
+        vec![("flyer.png".to_owned(), "image/png".to_owned(), flyer)],
+        "the snapshot the owner approved, not the file as it is now"
+    );
+    stop.cancel();
 }

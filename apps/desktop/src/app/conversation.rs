@@ -379,6 +379,7 @@ pub(super) struct ConversationView {
     /// The approval scope picked on each pending approval card.
     pub(super) approval_scopes: HashMap<Uuid, String>,
     pub(super) draft_forms: HashMap<Uuid, super::draft_card::DraftForm>,
+    pub(super) draft_images: HashMap<Uuid, super::draft_card::DraftImages>,
     pub(super) social_forms: HashMap<Uuid, super::social_card::SocialCard>,
     pub(super) expanded_drafts: HashSet<Uuid>,
     pub(super) expanded_questions: HashSet<Uuid>,
@@ -493,6 +494,7 @@ impl ConversationView {
             connections: HashMap::new(),
             approval_scopes: HashMap::new(),
             draft_forms: HashMap::new(),
+            draft_images: HashMap::new(),
             social_forms: HashMap::new(),
             expanded_drafts: HashSet::new(),
             expanded_questions: HashSet::new(),

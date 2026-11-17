@@ -312,7 +312,7 @@ fn is_image(media_type: &str) -> bool {
     )
 }
 
-fn image_type(data: &[u8]) -> Option<&'static str> {
+pub(crate) fn image_type(data: &[u8]) -> Option<&'static str> {
     let mut reader = image::ImageReader::new(Cursor::new(data))
         .with_guessed_format()
         .ok()?;

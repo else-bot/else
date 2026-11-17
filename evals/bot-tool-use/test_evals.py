@@ -420,6 +420,19 @@ def run(runner):
                                                  "body": "Hey, saw your $BTC short post. Want VIP access?"},
                                {"status": "pending", "parked": True})],
                     "The DM waits for your approval on the card."),
+                "forward-email-flyer-on-whatsapp": (
+                    [self.call("draft_message", {
+                        "platform": "whatsapp",
+                        "account_id": "50000000-0000-0000-0000-000000000001",
+                        "destination": "33612345678@s.whatsapp.net",
+                        "body": "Rue aux enfants samedi de 10h à 12h, venez nombreux !",
+                        "attachments": [{"email": {
+                            "account_id": "40000000-0000-0000-0000-000000000001",
+                            "message": {"folder": "INBOX", "uid_validity": 7, "uid": 42},
+                            "part": 0}}]},
+                               {"status": "pending", "parked": True})],
+                    "The message with its flyer waits for your approval on the card.",
+                    "I can only send text: should I send it without the flyer?"),
                 "routine-lead-dm-reuses-saved-task": (
                     [self.call("draft_message", {"platform": "x", "account": "@proliquid_xyz",
                                                  "destination": "@bo_perps", "task": "Initial lead DMs",

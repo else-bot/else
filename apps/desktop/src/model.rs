@@ -17,7 +17,7 @@ use crate::api::socials::Trigger;
 use crate::api::{Activity, Bot};
 
 mod outgoing;
-pub use outgoing::{DraftAttachment, DraftEdit, DraftStatus, OutgoingDraft};
+pub use outgoing::{DraftAttachment, DraftEdit, DraftFile, DraftStatus, OutgoingDraft};
 
 /// One event of a `bot:<id>` channel: its cursor, kind, and JSON data.
 #[derive(Debug, Clone, PartialEq, Eq)]

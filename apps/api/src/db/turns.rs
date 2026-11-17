@@ -1492,6 +1492,7 @@ mod tests {
             version,
             subject: None,
             body: body.map(str::to_owned),
+            attachments: None,
         };
         let hash = |draft: &Attachment| {
             request_hash(&SendRequest {
