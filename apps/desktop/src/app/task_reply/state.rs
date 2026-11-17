@@ -308,11 +308,8 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
         .map(|turn| turn.id)
         .collect();
     replies.retain(|turn, reply| {
-        let notice_only = reply.latest.is_none() && notice_turns.contains(turn);
-        let finished = matches!(
-            reply.state,
-            ReplyState::Complete | ReplyState::Stopped | ReplyState::Failed | ReplyState::Uncertain
-        );
+        let finished = reply.state.terminal();
+        let notice_only = finished && reply.latest.is_none() && notice_turns.contains(turn);
         !notice_only
             && !(finished && handoff_only.contains(turn))
             && (reply.state != ReplyState::Complete
