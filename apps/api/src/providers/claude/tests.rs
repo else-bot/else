@@ -514,10 +514,15 @@ fn a_steered_message_is_its_own_line_and_its_echo_names_its_turn() {
         turn_id: uuid::Uuid::new_v4(),
         text: "If they agreed, send the deal.".into(),
     };
-    let (key, line) = t.steer_line(&steer).unwrap();
+    let line = t.steer_line(&steer).unwrap();
     let sent: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(sent["type"], "user");
-    assert_eq!(sent["uuid"], key.as_str());
+    let key = steer.turn_id.to_string();
+    assert_eq!(
+        sent["uuid"],
+        key.as_str(),
+        "the echo names the steered turn"
+    );
     let content = sent["message"]["content"].as_str().unwrap();
     assert!(
         content.ends_with("\n\nIf they agreed, send the deal."),
@@ -529,7 +534,7 @@ fn a_steered_message_is_its_own_line_and_its_echo_names_its_turn() {
         !t.continues(&info(true, Some(1))),
         "nothing is owed before the line is sent"
     );
-    t.steer_sent(key.clone(), &steer);
+    t.steer_sent(&steer);
     assert!(
         t.continues(&info(true, Some(1))),
         "a result before the echo leaves one more native turn to read"

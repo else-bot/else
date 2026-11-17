@@ -230,16 +230,17 @@ pub trait Protocol {
         true
     }
 
-    /// The input line that adds `steer` to the running turn, and the key
-    /// its echo will carry. `None` when this provider does not steer.
-    fn steer_line(&self, steer: &Steer) -> Option<(String, String)> {
+    /// The input line that adds `steer` to the running turn; its echo
+    /// carries the steered turn's ID. `None` when this provider does not
+    /// steer.
+    fn steer_line(&self, steer: &Steer) -> Option<String> {
         let _ = steer;
         None
     }
 
-    /// The line for `steer` reached the provider under `key`.
-    fn steer_sent(&mut self, key: String, steer: &Steer) {
-        let _ = (key, steer);
+    /// The line for `steer` reached the provider; its echo is now owed.
+    fn steer_sent(&mut self, steer: &Steer) {
+        let _ = steer;
     }
 
     /// Whether the provider still owes an answer to a steered message after
@@ -280,7 +281,7 @@ where
     P: Protocol<Message = C::Message>,
 {
     for steer in sink.steers().await {
-        let Some((key, line)) = protocol.steer_line(&steer) else {
+        let Some(line) = protocol.steer_line(&steer) else {
             continue;
         };
         if stop.is_requested() {
@@ -296,7 +297,7 @@ where
             () = stop.requested() => Err("stopped while writing".into()),
         };
         match sent {
-            Ok(()) => protocol.steer_sent(key, &steer),
+            Ok(()) => protocol.steer_sent(&steer),
             Err(err) => {
                 tracing::warn!(steered = %steer.turn_id, error = %err, "writing a steered message failed");
                 return;
@@ -606,8 +607,8 @@ mod tests {
             self.owed
         }
 
-        fn steer_line(&self, steer: &Steer) -> Option<(String, String)> {
-            Some(("key".into(), steer.text.clone()))
+        fn steer_line(&self, steer: &Steer) -> Option<String> {
+            Some(steer.text.clone())
         }
     }
 
