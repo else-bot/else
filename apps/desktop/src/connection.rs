@@ -13,9 +13,11 @@ mod servers;
 mod settings;
 mod shared_icons;
 mod skills;
+mod switcher;
 mod updates;
 mod usage;
 mod view;
+pub(crate) use switcher::bind_keys;
 pub(crate) use view::brand_mark;
 
 use settings::Presentation;
@@ -146,6 +148,21 @@ struct Active {
     _app: Subscription,
 }
 
+/// What to open once a server switch lands.
+struct Arrival {
+    server: Uuid,
+    open: Open,
+}
+
+enum Open {
+    /// A system notification's bot, found by its session scope.
+    Notification {
+        scope: Uuid,
+        bot: Uuid,
+    },
+    Bot(Uuid),
+}
+
 struct RemoteForm {
     origin: Entity<InputState>,
     token: Entity<InputState>,
@@ -182,7 +199,7 @@ pub struct Shell {
     hold: server_keys::Hold,
     _server_keys: [Subscription; 3],
     switch_attempt: Option<Uuid>,
-    notification_target: Option<(Uuid, Uuid, Uuid)>,
+    arrival: Option<Arrival>,
     _switch: Option<Task<()>>,
     connection_error: Option<String>,
     names: servers::Writes<servers::NameWrite>,
@@ -204,6 +221,8 @@ pub struct Shell {
     computers: Option<computers::View>,
     socials: Option<Entity<crate::socials::SocialsView>>,
     email: Option<(Entity<crate::email::EmailSettings>, Subscription)>,
+    switcher: Option<switcher::Switcher>,
+    recall: switcher::Recall,
 }
 
 impl Shell {
@@ -269,6 +288,7 @@ impl Shell {
                 shell.move_hold(|hold| hold.refocused(modifiers), cx);
             }),
         ];
+        let recall = switcher::Recall::load(&launch.store);
         let mut shell = Self {
             launch,
             key,
@@ -282,7 +302,7 @@ impl Shell {
             hold: server_keys::Hold::Idle,
             _server_keys: server_keys,
             switch_attempt: None,
-            notification_target: None,
+            arrival: None,
             _switch: None,
             connection_error: loaded.err().or(rail_error),
             server_updates,
@@ -302,6 +322,8 @@ impl Shell {
             computers: None,
             socials: None,
             email: None,
+            switcher: None,
+            recall,
         };
         shell.sync_server_updates(window, cx);
         match selected {
@@ -427,6 +449,9 @@ impl Shell {
                 cx.notify();
             }
             if shell.active.as_ref().is_some_and(|active| active.id == id) {
+                if let Some(bot) = app.read(cx).selected_bot_id() {
+                    shell.remember(crate::quick_switcher::Target::Bot { server: id, bot }, cx);
+                }
                 if !app.read(cx).connected() {
                     shell.clear_skill_keys(window, cx);
                 }
@@ -466,7 +491,10 @@ impl Shell {
                 .find(|session| session.app.read(cx).notification_scope() == scope)
                 .map(|session| session.id)
             {
-                self.notification_target = Some((id, scope, bot));
+                self.arrival = Some(Arrival {
+                    server: id,
+                    open: Open::Notification { scope, bot },
+                });
                 self.select_server(id, window, cx);
             }
             return;
@@ -868,6 +896,12 @@ impl Render for Shell {
                 .on_modifiers_changed(cx.listener(|shell, event: &ModifiersChangedEvent, _, cx| {
                     shell.modifiers_changed(event.modifiers, cx)
                 }))
+                .relative()
+                .on_action(
+                    cx.listener(|shell, _: &switcher::ToggleQuickSwitcher, window, cx| {
+                        shell.toggle_switcher(window, cx)
+                    }),
+                )
                 .on_action(cx.listener(|shell, _: &OpenAppSettings, window, cx| {
                     shell.open_settings(window, cx)
                 }))
@@ -951,6 +985,7 @@ impl Render for Shell {
                 },
             )
             .child(self.render_with_rail(active.app.clone().into(), window, cx))
+            .children(self.render_switcher(cx))
     }
 }
 

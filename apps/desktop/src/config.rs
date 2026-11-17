@@ -411,6 +411,10 @@ impl ProfileStore {
         self.path.with_extension(format!("{id}.layout.json"))
     }
 
+    pub(crate) fn quick_switcher_path(&self) -> PathBuf {
+        self.path.with_extension("switcher.json")
+    }
+
     pub(crate) fn server_icons_path(&self) -> PathBuf {
         self.path.with_extension("icons.json")
     }

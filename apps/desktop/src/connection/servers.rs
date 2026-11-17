@@ -76,6 +76,9 @@ pub(super) struct Observation {
     pub asked: Option<Instant>,
     /// From the last answered check; `None` when the bot list failed.
     pub attention: Option<crate::attention::Attention>,
+    /// The bots from the last bot list that loaded, kept while the server
+    /// is offline.
+    pub bots: Option<Vec<crate::quick_switcher::Bot>>,
 }
 
 impl Default for Observation {
@@ -89,6 +92,7 @@ impl Default for Observation {
             server: None,
             asked: None,
             attention: None,
+            bots: None,
         }
     }
 }
@@ -192,6 +196,7 @@ struct Observed {
     working: Option<u64>,
     server: Option<crate::api::ServerInfo>,
     attention: Option<crate::attention::Attention>,
+    bots: Option<Vec<crate::quick_switcher::Bot>>,
 }
 
 async fn observe(client: Arc<Client>) -> Result<Observed, (Health, String)> {
@@ -238,14 +243,16 @@ async fn observe(client: Arc<Client>) -> Result<Observed, (Health, String)> {
                 ),
                 Err(_) => (None, None),
             };
-            let attention = bots.ok().map(|(_, list)| {
-                crate::attention::Attention::of(&list.bots, crate::inbox::saved_unread)
-            });
+            let list = bots.ok().map(|(_, list)| list.bots);
+            let attention = list
+                .as_ref()
+                .map(|bots| crate::attention::Attention::of(bots, crate::inbox::saved_unread));
             Ok(Observed {
                 version,
                 working,
                 server: caps.server,
                 attention,
+                bots: list.as_deref().map(crate::quick_switcher::Bot::listed),
             })
         })
         .await
@@ -279,6 +286,9 @@ fn monitor(
                     state.working = observed.working;
                     state.server = observed.server;
                     state.attention = observed.attention;
+                    if observed.bots.is_some() {
+                        state.bots = observed.bots;
+                    }
                     state.asked = Some(asked);
                     state.seen = Some(Utc::now());
                     state.error = None;
@@ -659,7 +669,7 @@ impl Shell {
         if self.active.as_ref().is_some_and(|active| active.id == id) {
             self.switch_attempt = None;
             self._switch = None;
-            self.notification_target = None;
+            self.arrival = None;
             cx.notify();
             return;
         }
@@ -700,7 +710,7 @@ impl Shell {
                                     .control(Tier::Ghost, Scale::Standard, false, cx)
                                     .label("Keep editing")
                                     .on_click(move |_, window, cx| {
-                                        let _ = cancel.update(cx, |shell, _| shell.notification_target = None);
+                                        let _ = cancel.update(cx, |shell, _| shell.arrival = None);
                                         window.close_dialog(cx);
                                     })
                             )
@@ -784,7 +794,7 @@ impl Shell {
                 let verified = match outcome {
                     Ok(verified) => verified,
                     Err(err) => {
-                        shell.notification_target = None;
+                        shell.arrival = None;
                         shell.connection_error = Some(format!(
                             "Could not use {}. {err} Your current server is unchanged.",
                             saved.name
@@ -819,10 +829,15 @@ impl Shell {
                     }
                     shell.select_settings(section, window, cx);
                 }
-                if let Some((target, scope, bot)) = shell.notification_target.take()
-                    && target == id
+                if let Some(arrival) = shell.arrival.take()
+                    && arrival.server == id
                 {
-                    shell.open_notification(scope, bot, window, cx);
+                    match arrival.open {
+                        Open::Notification { scope, bot } => {
+                            shell.open_notification(scope, bot, window, cx)
+                        }
+                        Open::Bot(bot) => shell.open_active_bot(bot, window, cx),
+                    }
                 }
                 cx.notify();
             });

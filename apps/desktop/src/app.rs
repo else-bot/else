@@ -262,6 +262,9 @@ pub struct ElseApp {
     /// A bot list arrived since the last connection event. The live stream
     /// reports a connection before its first list, so `bots` can be stale.
     listed: bool,
+    /// A bot the quick switcher asked to open before the first bot list
+    /// arrived; opened when it does.
+    requested: Option<Uuid>,
     mention_bots: Arc<bot_mention::MentionRegistry>,
     categories: Vec<Category>,
     default_bot_id: Option<Uuid>,
@@ -365,6 +368,7 @@ impl ElseApp {
             caps: None,
             bots: Vec::new(),
             listed: false,
+            requested: None,
             mention_bots: Default::default(),
             categories: Vec::new(),
             default_bot_id: None,
@@ -551,6 +555,9 @@ impl ElseApp {
         });
         self.observe_replies(window, cx);
         self.reconcile_selection(window, cx);
+        if let Some(id) = self.requested.take() {
+            self.open_bot_chat(id, window, cx);
+        }
         self.sync_settings(window, cx);
         self.sync_mentions(window, cx);
         self.sync_rows(window, cx);
@@ -583,6 +590,33 @@ impl ElseApp {
 
     pub(crate) fn selected_bot_id(&self) -> Option<Uuid> {
         self.selected
+    }
+
+    /// The bots the quick switcher lists; `None` until a list arrives.
+    pub(crate) fn switcher_bots(&self) -> Option<Vec<crate::quick_switcher::Bot>> {
+        self.listed
+            .then(|| crate::quick_switcher::Bot::listed(&self.bots))
+    }
+
+    /// Opens a bot's chat with the composer focused, as the quick switcher
+    /// does; before the bot list arrives, once it does. Returns false when
+    /// the listed bots have no such bot.
+    pub(crate) fn open_bot_chat(
+        &mut self,
+        id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.listed {
+            self.requested = Some(id);
+            return true;
+        }
+        if !self.bots.iter().any(|bot| bot.id == id && bot.is_active()) {
+            return false;
+        }
+        self.open_bot(id, window, cx);
+        self.composer.read(cx).focus_handle(cx).focus(window, cx);
+        true
     }
 
     fn select(&mut self, id: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
