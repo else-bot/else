@@ -698,8 +698,9 @@ pub async fn attach_to_message(
 /// The card moves under this request, which may now send it once.
 /// `always` quotes the owner's words in that message asking to approve
 /// drafts like it always; it also grants what the card's Approve always
-/// would. A retry returns the approval without granting again, so it never
-/// undoes the owner's Stop approving always.
+/// would. Once this message has approved the draft, even if its send then
+/// failed, `always` only reads the grant back, so it never undoes the
+/// owner's Stop approving always.
 pub async fn confirm(
     pool: &SqlitePool,
     turn_id: Uuid,
@@ -742,6 +743,14 @@ pub async fn confirm(
     };
     if draft.context_turn_id != Some(turn_id) || draft.context_version != Some(draft.version) {
         return Err(DraftError::NotInContext);
+    }
+    // This message approved it before and its send failed: it granted
+    // always then or never, and the owner may have stopped it since.
+    if always.is_some()
+        && draft.approved_item_id == Some(source)
+        && !approved_always(&mut tx, &draft).await?
+    {
+        return Err(DraftError::NotAlways);
     }
     sqlx::query(
         "UPDATE outgoing_drafts SET status = 'approved', approval_source = 'message',

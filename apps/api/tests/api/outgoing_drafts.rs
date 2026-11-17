@@ -2259,6 +2259,34 @@ async fn an_owner_reply_saying_always_approves_a_delegated_chat_always() {
         "a retry never brings back what the owner stopped: {}",
         after.body
     );
+    let claimed = tool(
+        &app,
+        &token,
+        "start_draft_send",
+        json!({ "draft_id": first }),
+    )
+    .await;
+    assert_eq!(tool_text(&claimed)["status"], "sending", "{}", claimed.body);
+    let failed = tool(
+        &app,
+        &token,
+        "report_draft_send",
+        json!({ "draft_id": first, "status": "failed", "detail": "offline" }),
+    )
+    .await;
+    assert_eq!(tool_text(&failed)["status"], "failed", "{}", failed.body);
+    let retried = tool(
+        &app,
+        &token,
+        "confirm_draft_approval",
+        json!({ "draft_id": first, "always": "Always approve posting messages" }),
+    )
+    .await;
+    assert!(
+        refusal(&retried).starts_with("NOT_ALWAYS"),
+        "nor does a retry after its send failed: {}",
+        retried.body
+    );
     assert_eq!(granted(&app, &leaf).await, json!([]));
 }
 
