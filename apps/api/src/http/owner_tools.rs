@@ -206,8 +206,8 @@ pub(super) async fn confirm_permission(state: &AppState, grant: &Grant, args: &V
                 } else if matches!(target, PermissionTarget::Routine { .. }) {
                     "Standing permission is recorded for destructive actions in this routine's own \
                      runs only. It does not cover drafted messages or the bots it delegates to: a \
-                     message is sent without a card only after the owner clicks Approve always on a \
-                     draft card for that destination."
+                     message is sent without a card only after the owner approves a draft for that \
+                     destination always, on its card or in chat (confirm_draft_approval always)."
                 } else {
                     "Standing permission is recorded for this scope. Declare each effect honestly. \
                      Routine reversible work needs no card. Sensitive actions outside this scope still need approval."

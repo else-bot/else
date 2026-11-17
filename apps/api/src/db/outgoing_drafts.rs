@@ -153,6 +153,12 @@ pub enum DraftError {
         "the owner's message for this request was not sent with this draft open at its current version"
     )]
     NotInContext,
+    #[error("always needs the owner's exact words from their current message")]
+    NotQuoted,
+    #[error(
+        "this draft was approved once, without always, or the owner has since stopped approving it always"
+    )]
+    NotAlways,
     #[error("this draft was approved for another request")]
     OtherRequest,
     #[error("an earlier request still waits on the owner for this draft; make a new draft instead")]
@@ -184,6 +190,8 @@ impl DraftError {
             Self::BudgetExhausted => "BUDGET_EXHAUSTED",
             Self::NotRunning => "NOT_RUNNING",
             Self::NotInContext => "NOT_IN_CONTEXT",
+            Self::NotQuoted => "NOT_QUOTED",
+            Self::NotAlways => "NOT_ALWAYS",
             Self::OtherRequest => "OTHER_REQUEST",
             Self::Held => "DRAFT_HELD",
             Self::Connected => "CONNECTED_ACCOUNT",
@@ -486,17 +494,7 @@ pub async fn approve(
     }
     apply_edits(&mut tx, &draft, version, edits).await?;
     if always {
-        sqlx::query(concat!(
-            "INSERT INTO draft_grants (bot_id, kind, draft_id) SELECT d.bot_id, ",
-            kind!(),
-            ", d.id FROM outgoing_drafts d WHERE d.id = ?1
-             ON CONFLICT (bot_id, kind) DO UPDATE SET draft_id = excluded.draft_id,
-                 granted_at = excluded.granted_at"
-        ))
-        .bind(draft.id)
-        .execute(&mut *tx)
-        .await?;
-        events::bot_updated(&mut tx, bot_id).await?;
+        grant_always(&mut tx, &draft).await?;
     }
     sqlx::query(
         "UPDATE outgoing_drafts SET status = 'approved', approval_source = 'button',
@@ -548,6 +546,24 @@ pub async fn stop_always(
         changed,
         requeued: false,
     })
+}
+
+/// Approve every later draft of `draft`'s kind as the bot proposes it.
+async fn grant_always(
+    conn: &mut SqliteConnection,
+    draft: &OutgoingDraft,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(concat!(
+        "INSERT INTO draft_grants (bot_id, kind, draft_id) SELECT d.bot_id, ",
+        kind!(),
+        ", d.id FROM outgoing_drafts d WHERE d.id = ?1
+         ON CONFLICT (bot_id, kind) DO UPDATE SET draft_id = excluded.draft_id,
+             granted_at = excluded.granted_at"
+    ))
+    .bind(draft.id)
+    .execute(&mut *conn)
+    .await?;
+    events::bot_updated(conn, draft.bot_id).await
 }
 
 async fn approved_always(
@@ -680,10 +696,16 @@ pub async fn attach_to_message(
 /// that message was sent with. Only that request, only the version the
 /// owner saw (unchanged since), and only a draft still open to sending.
 /// The card moves under this request, which may now send it once.
+/// `always` quotes the owner's words in that message asking to approve
+/// drafts like it always; it also grants what the card's Approve always
+/// would. Once this message has approved the draft, even if its send then
+/// failed, `always` only reads the grant back, so it never undoes the
+/// owner's Stop approving always.
 pub async fn confirm(
     pool: &SqlitePool,
     turn_id: Uuid,
     draft_id: Uuid,
+    always: Option<&str>,
 ) -> Result<OutgoingDraft, DraftError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = caller(&mut tx, turn_id).await?;
@@ -692,10 +714,22 @@ pub async fn confirm(
         && draft.send_turn_id == Some(turn_id)
         && draft.approval_source == Some(ApprovalSource::Message)
     {
+        if always.is_some() && !approved_always(&mut tx, &draft).await? {
+            return Err(DraftError::NotAlways);
+        }
         return Ok(draft);
     }
     if !draft.status.approvable_in_chat() {
         return Err(DraftError::Settled(draft.status));
+    }
+    if always.is_some() && draft.kind.is_none() {
+        return Err(DraftError::NoKind);
+    }
+    if let Some(quote) = always.map(str::trim)
+        && (quote.is_empty()
+            || !super::owner_questions::owner_message_quotes(&mut tx, turn_id, quote).await?)
+    {
+        return Err(DraftError::NotQuoted);
     }
     let source: Option<Uuid> = sqlx::query_scalar(
         "SELECT i.id FROM turns t JOIN items i ON i.id = t.owner_item_id
@@ -709,6 +743,14 @@ pub async fn confirm(
     };
     if draft.context_turn_id != Some(turn_id) || draft.context_version != Some(draft.version) {
         return Err(DraftError::NotInContext);
+    }
+    // This message approved it before and its send failed: it granted
+    // always then or never, and the owner may have stopped it since.
+    if always.is_some()
+        && draft.approved_item_id == Some(source)
+        && !approved_always(&mut tx, &draft).await?
+    {
+        return Err(DraftError::NotAlways);
     }
     sqlx::query(
         "UPDATE outgoing_drafts SET status = 'approved', approval_source = 'message',
@@ -724,6 +766,9 @@ pub async fn confirm(
     .bind(caller.attempt)
     .execute(&mut *tx)
     .await?;
+    if always.is_some() {
+        grant_always(&mut tx, &draft).await?;
+    }
     if draft.turn_id != turn_id {
         events::turn_changed(&mut tx, caller.bot_id, draft.turn_id).await?;
     }

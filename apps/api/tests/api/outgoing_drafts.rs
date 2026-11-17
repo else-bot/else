@@ -2139,6 +2139,158 @@ async fn a_whatsapp_draft_is_approved_always_for_its_chat_only() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_owner_reply_saying_always_approves_a_delegated_chat_always() {
+    let Harness { app, .. } = harness().await;
+    let (leaf, _, _, child) = delegated_task(&app, SLOW).await;
+    let school = "120363431565310389@g.us";
+    let to = |chat: &str, body: &str| {
+        json!({ "platform": "whatsapp", "account": "+33612345678", "destination": chat,
+                "body": body })
+    };
+    let first = draft(
+        &app,
+        &grant(&app, child).await,
+        to(school, "Rue aux enfants vendredi."),
+    )
+    .await;
+    wait(&app, child, "waiting").await;
+
+    let (reply, token) = running(
+        &app,
+        &leaf,
+        "[synthetic:slow] Always approve posting messages",
+        Some(json!({ "id": first, "version": 1 })),
+    )
+    .await;
+    let unquoted = tool(
+        &app,
+        &token,
+        "confirm_draft_approval",
+        json!({ "draft_id": first, "always": "approve everything always" }),
+    )
+    .await;
+    assert!(
+        refusal(&unquoted).starts_with("NOT_QUOTED"),
+        "only the owner's own words can approve always: {}",
+        unquoted.body
+    );
+    assert_eq!(granted(&app, &leaf).await, json!([]));
+    assert_eq!(shown(&app, &leaf, child).await[0]["status"], "pending");
+
+    let confirmed = tool(
+        &app,
+        &token,
+        "confirm_draft_approval",
+        json!({ "draft_id": first, "always": "Always approve posting messages" }),
+    )
+    .await;
+    let result = tool_text(&confirmed);
+    assert_eq!(result["status"], "approved", "{}", confirmed.body);
+    let kind = json!({ "platform": "whatsapp", "account_id": null, "account": "+33612345678",
+                       "destination": school });
+    assert_eq!(result["always"], kind, "{result}");
+    assert_eq!(granted(&app, &leaf).await, json!([kind]));
+    let card = shown(&app, &leaf, reply).await[0].clone();
+    assert_eq!(card["approval_source"], "message");
+    let replay = tool(
+        &app,
+        &token,
+        "confirm_draft_approval",
+        json!({ "draft_id": first, "always": "Always approve posting messages" }),
+    )
+    .await;
+    assert_eq!(tool_text(&replay)["status"], "approved", "{}", replay.body);
+
+    let same = tool(
+        &app,
+        &token,
+        "draft_message",
+        to(school, "Invitation de la CAF."),
+    )
+    .await;
+    assert_eq!(
+        tool_text(&same)["status"],
+        "approved",
+        "the next post to that chat needs no card: {}",
+        same.body
+    );
+    let same: Uuid = tool_text(&same)["draft"]["draft_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let other = tool(
+        &app,
+        &token,
+        "draft_message",
+        to("33698765432@s.whatsapp.net", "Bonjour"),
+    )
+    .await;
+    assert_eq!(
+        tool_text(&other)["status"],
+        "pending",
+        "another chat still waits for the owner: {}",
+        other.body
+    );
+    let other: Uuid = tool_text(&other)["draft"]["draft_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait(&app, reply, "waiting").await;
+    let discarded = owner_action(&app, &leaf, other, "discard", json!({})).await;
+    assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
+    wait(&app, reply, "running").await;
+    let token = grant(&app, reply).await;
+
+    let stop = format!("/v1/bots/{leaf}/outgoing-drafts/{same}/always");
+    let stopped = app.owner("DELETE", &stop, None).await;
+    assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);
+    assert_eq!(granted(&app, &leaf).await, json!([]));
+    let after = tool(
+        &app,
+        &token,
+        "confirm_draft_approval",
+        json!({ "draft_id": first, "always": "Always approve posting messages" }),
+    )
+    .await;
+    assert!(
+        refusal(&after).starts_with("NOT_ALWAYS"),
+        "a retry never brings back what the owner stopped: {}",
+        after.body
+    );
+    let claimed = tool(
+        &app,
+        &token,
+        "start_draft_send",
+        json!({ "draft_id": first }),
+    )
+    .await;
+    assert_eq!(tool_text(&claimed)["status"], "sending", "{}", claimed.body);
+    let failed = tool(
+        &app,
+        &token,
+        "report_draft_send",
+        json!({ "draft_id": first, "status": "failed", "detail": "offline" }),
+    )
+    .await;
+    assert_eq!(tool_text(&failed)["status"], "failed", "{}", failed.body);
+    let retried = tool(
+        &app,
+        &token,
+        "confirm_draft_approval",
+        json!({ "draft_id": first, "always": "Always approve posting messages" }),
+    )
+    .await;
+    assert!(
+        refusal(&retried).starts_with("NOT_ALWAYS"),
+        "nor does a retry after its send failed: {}",
+        retried.body
+    );
+    assert_eq!(granted(&app, &leaf).await, json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_task_rooted_in_neither_the_owner_nor_a_routine_cannot_draft() {
     let Harness { app, .. } = harness().await;
     let (_, root, _, child) = delegated_task(&app, SLOW).await;
