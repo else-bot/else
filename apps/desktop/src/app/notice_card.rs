@@ -1,7 +1,7 @@
 use super::{Connection, ElseApp};
 use crate::api::ClientError;
 use crate::controls::{Control as _, Scale, Tier};
-use crate::model::{OwnerNoticeKind, OwnerNoticeStatus};
+use crate::model::{OwnerNotice, OwnerNoticeKind, OwnerNoticeStatus};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::Button;
@@ -51,40 +51,18 @@ impl ElseApp {
         let view = self.view.as_ref()?;
         let c = view.conversation.as_ref()?;
         let notice = c.owner_notice(id)?;
-        let theme = cx.theme();
-        let settled = match notice.status {
-            OwnerNoticeStatus::Pending => None,
-            OwnerNoticeStatus::Replied => Some("You replied"),
-            OwnerNoticeStatus::Dismissed => Some("Handled"),
-            OwnerNoticeStatus::Superseded => return None,
-        };
-        if let Some(label) = settled {
-            return Some(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .truncate()
-                    .child(format!("{label} · {}", notice.summary))
-                    .into_any_element(),
-            );
+        if notice.status == OwnerNoticeStatus::Superseded {
+            return None;
         }
-        let bot = notice.bot_id;
         let name = self
             .bots
             .iter()
-            .find(|b| b.id == bot)
+            .find(|b| b.id == notice.bot_id)
             .map_or("The bot", |b| b.name.as_str());
-        let title = match notice.kind {
-            OwnerNoticeKind::Blocked => format!("{name} is blocked and needs you"),
-            OwnerNoticeKind::Decision => format!("{name} needs a decision from you"),
-        };
         let receipt = c.task_receipt(notice.turn_id);
         let sender = receipt
             .and_then(|item| item.bot_task.as_ref())
             .map(|task| &task.sender_name);
-        let since = crate::sidebar::status::waited(notice.created_at, chrono::Utc::now());
         let subtitle = sender.map_or_else(String::new, |sender| format!("From {sender}'s task"));
         let anchor = receipt.and_then(|receipt| {
             view.rows.iter().find_map(|row| {
@@ -97,7 +75,46 @@ impl ElseApp {
         });
         let exchange_title =
             sender.map_or_else(|| name.to_owned(), |sender| format!("{sender} & {name}"));
+        let open = anchor.map(|anchor| (anchor, exchange_title, "Open task"));
+        Some(self.ask_card(notice, name, subtitle, open, cx))
+    }
+
+    /// An owner notice as a card: the bot's ask in its own words with the
+    /// owner's actions, or one muted line once settled. `open` names the
+    /// exchange its button opens.
+    pub(super) fn ask_card(
+        &self,
+        notice: &OwnerNotice,
+        name: &str,
+        subtitle: String,
+        open: Option<(Uuid, String, &'static str)>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let id = notice.id;
+        let settled = match notice.status {
+            OwnerNoticeStatus::Pending | OwnerNoticeStatus::Superseded => None,
+            OwnerNoticeStatus::Replied => Some("You replied"),
+            OwnerNoticeStatus::Dismissed => Some("Handled"),
+        };
+        if let Some(label) = settled {
+            return div()
+                .w_full()
+                .min_w_0()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .truncate()
+                .child(format!("{label} · {}", notice.summary))
+                .into_any_element();
+        }
+        let bot = notice.bot_id;
+        let title = match notice.kind {
+            OwnerNoticeKind::Blocked => format!("{name} is blocked and needs you"),
+            OwnerNoticeKind::Decision => format!("{name} needs a decision from you"),
+        };
+        let since = crate::sidebar::status::waited(notice.created_at, chrono::Utc::now());
         let connected = self.connection == Connection::Connected;
+        let here = self.view.as_ref().is_some_and(|view| view.bot_id == bot);
         let button = |action: &str, label: String, tier: Tier, disabled: bool| {
             Button::new(SharedString::from(format!("notice-{id}-{action}")))
                 .control(tier, Scale::Compact, disabled, cx)
@@ -105,10 +122,10 @@ impl ElseApp {
                 .label(label)
         };
         let actions = super::action_card::footer()
-            .children(anchor.map(|anchor| {
-                button("open", "Open task".into(), Tier::Ghost, false).on_click(cx.listener(
+            .children(open.map(|(anchor, exchange, label)| {
+                button("open", label.into(), Tier::Ghost, false).on_click(cx.listener(
                     move |app, _, window, cx| {
-                        app.open_bot_exchange(anchor, exchange_title.clone(), window, cx);
+                        app.open_bot_exchange(anchor, exchange.clone(), window, cx);
                     },
                 ))
             }))
@@ -123,30 +140,37 @@ impl ElseApp {
                     app.dismiss_owner_notice(bot, id, window, cx);
                 })),
             )
-            .child(
+            .child({
+                let summary = notice.summary.clone();
                 button("reply", format!("Reply to {name}"), Tier::Primary, false).on_click(
-                    cx.listener(|app, _, window, cx| {
-                        app.composer.read(cx).focus_handle(cx).focus(window, cx);
+                    cx.listener(move |app, _, window, cx| {
+                        // The asking bot answers in its own chat. The reply
+                        // quotes the ask, and settles only it where the
+                        // server can.
+                        if !here {
+                            app.open_bot(bot, window, cx);
+                        }
+                        let settles = app.caps.as_ref().is_some_and(|caps| caps.answers_notice);
+                        let quote = super::reply::Quote::ask(id, summary.clone(), settles);
+                        app.add_quote(bot, quote, window, cx);
                     }),
-                ),
-            );
-        Some(
-            super::action_card::card(IconName::TriangleAlert, title, subtitle)
-                .meta(since)
-                .child(
-                    div()
-                        .text_sm()
-                        .whitespace_normal()
-                        .child(notice.summary.clone()),
                 )
-                .children(notice.tried.as_ref().map(|tried| {
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(format!("Tried · {tried}"))
-                }))
-                .footer(actions)
-                .into_any_element(),
-        )
+            });
+        super::action_card::card(IconName::TriangleAlert, title, subtitle)
+            .meta(since)
+            .child(
+                div()
+                    .text_sm()
+                    .whitespace_normal()
+                    .child(notice.summary.clone()),
+            )
+            .children(notice.tried.as_ref().map(|tried| {
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("Tried · {tried}"))
+            }))
+            .footer(actions)
+            .into_any_element()
     }
 }

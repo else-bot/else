@@ -52,6 +52,8 @@ pub struct SendRequest {
     pub reaction: Option<Reaction>,
     pub parts: Vec<crate::attachments::MessagePart>,
     pub open_draft: Option<crate::model::DraftAttachment>,
+    /// The owner ask this message replies to.
+    pub answers_notice: Option<Uuid>,
 }
 
 /// What the owner does with a bot's request to take over its computer.
@@ -147,6 +149,10 @@ pub struct Capabilities {
     pub onboarding_required: bool,
     #[serde(default)]
     pub bot_avatar_on_create: bool,
+    /// The server settles only the ask a message names; older servers
+    /// refuse the field, so the app sends it only when this is set.
+    #[serde(default)]
+    pub answers_notice: bool,
     /// Absent from servers that do not keep a name.
     #[serde(default)]
     pub server: Option<ServerInfo>,
@@ -246,6 +252,9 @@ pub enum SidebarStatus {
         preview: String,
         #[serde(default)]
         since: Option<DateTime<Utc>>,
+        /// Absent from servers before #508.
+        #[serde(default)]
+        notice_id: Option<Uuid>,
     },
     NeedsCredentials {
         preview: String,
@@ -721,6 +730,7 @@ impl Client {
             reaction,
             parts,
             open_draft,
+            answers_notice,
         }: SendRequest,
     ) -> Result<Sent, ClientError> {
         let mut body =
@@ -736,6 +746,9 @@ impl Client {
         }
         if let Some(draft) = open_draft {
             body["open_draft"] = json!(draft);
+        }
+        if let Some(notice) = answers_notice {
+            body["answers_notice"] = json!(notice);
         }
         self.call(Method::POST, format!("/v1/bots/{bot}/turns"), Some(body))
             .await

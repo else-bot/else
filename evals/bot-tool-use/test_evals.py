@@ -416,11 +416,18 @@ def run(runner):
                                {"status": "pending"})],
                     "Drop @jwhh365: a promo and an NFT mint are not trading evidence. Build one per-candidate gate."),
                 "review-task-requester-applies-stays-quiet": (
-                    [], "Use A: it cites the Hyperliquid perp post from yesterday. B claims more than the evidence shows.",
+                    [self.call("notify_owner", {"kind": "nothing"}, {"status": "recorded"})],
+                    "Use A: it cites the Hyperliquid perp post from yesterday. B claims more than the evidence shows.",
                     "Use the first option."),
                 "routine-task-report-stays-quiet": (
-                    [], "0 new checkout errors in the last hour; this morning's 3 are resolved.",
+                    [self.call("notify_owner", {"kind": "nothing"}, {"status": "recorded"})],
+                    "0 new checkout errors in the last hour; this morning's 3 are resolved.",
                     "No new checkout errors in the last hour."),
+                "task-self-decided-declares-fyi": (
+                    [self.call("notify_owner", {"kind": "fyi", "summary": "Declined MIRAY's paid feature myself; no negotiation."},
+                               {"status": "recorded"})],
+                    "MIRAY: declined under the Scout rule. The decline went out at 08:52; nothing else to send.",
+                    "Declined it."),
                 "routine-task-drafts-post-for-approval": (
                     [self.call("draft_message", {"platform": "x",
                                                  "body": "A whale just opened a $40M BTC short on Hyperliquid at 10x."},

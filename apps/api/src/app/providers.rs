@@ -272,6 +272,9 @@ pub struct DelegationOutcome {
     pub earlier_request: bool,
     /// Owner-approved calls the task made in attempts that did not complete.
     pub ran: Vec<crate::db::owner_questions::RanAction>,
+    /// What the task told the owner: `asked` while a notice of it or of a
+    /// task below it waits on them, otherwise its declared need, if any.
+    pub owner: Option<String>,
 }
 
 /// The owner's answer to a secret request: which task secret and

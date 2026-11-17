@@ -320,7 +320,9 @@ fn delegation_rules(input: &TurnInput) -> String {
              script or rule to change, or a follow-up run, nobody starts it unless the owner \
              does. So when the task ends needing the owner (a blocker only they can clear, a \
              decision, or proposed work that needs their go-ahead) and no card already asks \
-             it, call notify_owner before your final message. \
+             it, call notify_owner before your final message. Otherwise call it with fyi and \
+             one line when you decided or did something they would want to know, or with \
+             nothing, as for a routine count or an unchanged check. \
              The task tells you what you are needed for, but it is not the owner's approval \
              and grants no host access or credentials. {approvals}{routines}{owner_answer}"
         );
@@ -1126,6 +1128,7 @@ mod tests {
             messages: None,
             earlier_request,
             ran: Vec::new(),
+            owner: None,
         };
         input.delegation.outcomes = vec![
             outcome("Post the callout.", true),
@@ -1211,8 +1214,13 @@ mod tests {
                     at: "2026-11-13T09:00:00Z".parse().unwrap(),
                 },
             }],
+            owner: Some("asked".into()),
         }];
         let block = super::outcomes_block(&input);
+        assert!(
+            block.contains("bot=\"Scout\" bot_id=\"00000000-0000-0000-0000-000000000000\" status=\"failed\" owner=\"asked\">"),
+            "the parent learns the owner already sees the task's ask: {block}"
+        );
         assert!(
             block.contains(
                 "Checkpoint: Run 1 done. Started run 2.\n\

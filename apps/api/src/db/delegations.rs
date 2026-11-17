@@ -56,6 +56,20 @@ pub const MAX_DEPTH: u8 = 2;
 pub const PER_ATTEMPT: i64 = 1;
 pub const MAX_COUNCIL_BOTS: usize = 32;
 pub const MAX_TASK_BYTES: usize = 8_000;
+/// Characters of a task's title; a longer one is cut there.
+pub const MAX_TITLE_CHARS: usize = 80;
+
+/// A task's title as stored: one trimmed line of at most
+/// [`MAX_TITLE_CHARS`], or `None` when blank.
+pub fn title(raw: Option<&str>) -> Option<String> {
+    let line = raw?.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut title: String = line.chars().take(MAX_TITLE_CHARS).collect();
+    if title.len() < line.len() {
+        title = title.trim_end().to_owned();
+        title.push('…');
+    }
+    (!title.is_empty()).then_some(title)
+}
 
 /// SQL over a delegation `d`: its outcome is unread and its batch has
 /// settled. A batch is what one provider attempt sent, an individual task
@@ -180,11 +194,22 @@ pub async fn create(
     turn_id: Uuid,
     target: Uuid,
     task: &str,
+    title: Option<&str>,
     files: &[OutputFile],
     owner_answer: Option<Uuid>,
 ) -> Result<Accepted, DelegateError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let accepted = create_in(&mut tx, turn_id, target, task, files, owner_answer, false).await?;
+    let accepted = create_in(
+        &mut tx,
+        turn_id,
+        target,
+        task,
+        title,
+        files,
+        owner_answer,
+        false,
+    )
+    .await?;
     tx.commit().await?;
     Ok(accepted)
 }
@@ -194,6 +219,7 @@ pub async fn council(
     turn_id: Uuid,
     targets: &[Uuid],
     task: &str,
+    title: Option<&str>,
 ) -> Result<Vec<Accepted>, DelegateError> {
     let mut targets = targets.to_vec();
     targets.sort_unstable();
@@ -211,7 +237,7 @@ pub async fn council(
     let parked = super::turns::attempt_parked(&mut tx, turn_id, attempt).await?;
     let mut accepted = Vec::with_capacity(count);
     for target in targets {
-        let result = create_in(&mut tx, turn_id, target, task, &[], None, true).await?;
+        let result = create_in(&mut tx, turn_id, target, task, title, &[], None, true).await?;
         if parked && result.created {
             return Err(DelegateError::AttemptParked);
         }
@@ -221,11 +247,13 @@ pub async fn council(
     Ok(accepted)
 }
 
+#[allow(clippy::too_many_arguments)] // One accepted delegation's whole input, shared by delegate and council.
 async fn create_in(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
     target: Uuid,
     task: &str,
+    title: Option<&str>,
     files: &[OutputFile],
     owner_answer: Option<Uuid>,
     council: bool,
@@ -466,8 +494,8 @@ async fn create_in(
     .await?;
     sqlx::query(
         "INSERT INTO delegations (id, root_turn_id, parent_attempt, parent_bot_id, target_bot_id,
-             task, task_hash, conversation_id, child_turn_id, owner_question_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             task, task_hash, conversation_id, child_turn_id, owner_question_id, title)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )
     .bind(delegation_id)
     .bind(turn_id)
@@ -479,6 +507,7 @@ async fn create_in(
     .bind(conversation_id)
     .bind(child_turn)
     .bind(owner_answer)
+    .bind(self::title(title))
     .execute(&mut *conn)
     .await?;
     let sender: String = sqlx::query_scalar("SELECT name FROM bots WHERE id = ?1")
@@ -956,12 +985,24 @@ pub async fn undelivered(
         earlier_request: bool,
         conversation_id: Uuid,
         takeover_turn_id: Option<Uuid>,
+        owner: Option<String>,
     }
     let rows: Vec<OutcomeRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT d.id, d.parent_bot_id, coalesce(d.takeover_turn_id, d.child_turn_id) AS turn,
                 d.conversation_id, d.takeover_turn_id,
                 d.target_bot_id, b.name AS target_name, d.task, d.status, d.result, d.error,
-                d.parent_attempt = 0 AS earlier_request
+                d.parent_attempt = 0 AS earlier_request,
+                CASE WHEN EXISTS (
+                    SELECT 1 FROM owner_notices n WHERE n.status = 'pending'
+                      AND n.turn_id IN (
+                          SELECT t.id FROM turns t WHERE t.conversation_id = d.conversation_id
+                          UNION SELECT d.takeover_turn_id
+                          UNION SELECT gt.id FROM delegations g
+                              JOIN turns gt ON gt.conversation_id = g.conversation_id
+                          WHERE g.root_turn_id = d.takeover_turn_id
+                             OR g.root_turn_id IN (SELECT t.id FROM turns t
+                                                   WHERE t.conversation_id = d.conversation_id)))
+                THEN 'asked' ELSE d.owner_need END AS owner
              FROM delegations d JOIN bots b ON b.id = d.target_bot_id
              WHERE d.root_turn_id = ?1 AND {READY}
              ORDER BY d.created_at"
@@ -994,6 +1035,7 @@ pub async fn undelivered(
             messages,
             earlier_request: row.earlier_request,
             ran,
+            owner: row.owner,
         });
     }
     Ok(outcomes)

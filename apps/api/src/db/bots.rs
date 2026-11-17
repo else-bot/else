@@ -121,7 +121,7 @@ const SELECT_BOT: &str = concat!(
         'Install skill ' || install.name AS skill_install_title,
         install.created_at AS skill_install_at,
         draft.content AS draft_content, draft.created_at AS draft_at,
-        notice.summary AS notice_summary, notice.created_at AS notice_at,
+        notice.id AS notice_id, notice.summary AS notice_summary, notice.created_at AS notice_at,
         (SELECT t.status FROM turns t WHERE t.conversation_id = c.id
             ORDER BY t.turn_no DESC LIMIT 1) AS latest_turn_status,
         coalesce((SELECT (i.seq, length(CAST(i.text AS BLOB)))

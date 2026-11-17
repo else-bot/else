@@ -152,6 +152,54 @@ struct BotAttention {
     head: Option<ReplyPosition>,
     due: bool,
     announcement: Option<Announcement>,
+    ask: AskAlert,
+}
+
+/// A task of the bot that ended needing the owner (`NeedsYou`). It is
+/// announced once, whether or not the bot's reply is unread, and taken down
+/// when the owner settles it.
+#[derive(Debug, Default)]
+struct AskAlert {
+    /// The ask last seen open. A named one survives another card showing in
+    /// the sidebar for a while, so the same ask is not announced again after.
+    seen: Option<AskKey>,
+    due: bool,
+    shown: bool,
+}
+
+/// The bot's open ask. A server that names it keys it by its ID, which a
+/// rewrite of its text keeps; older ones by its time and text.
+fn open_ask(bot: &Bot) -> Option<AskKey> {
+    match &bot.sidebar_status {
+        Some(SidebarStatus::NeedsYou {
+            notice_id: Some(id),
+            ..
+        }) => Some(AskKey::Notice(*id)),
+        Some(SidebarStatus::NeedsYou { preview, since, .. }) => {
+            Some(AskKey::Legacy(format!("{since:?} {preview}")))
+        }
+        _ => None,
+    }
+}
+
+/// Whether the sidebar shows a card it ranks above an ask, so an open ask
+/// may be behind it.
+fn masks_an_ask(bot: &Bot) -> bool {
+    matches!(
+        bot.sidebar_status,
+        Some(
+            SidebarStatus::WaitingForAnswer { .. }
+                | SidebarStatus::NeedsApproval { .. }
+                | SidebarStatus::NeedsTakeover { .. }
+                | SidebarStatus::NeedsCredentials { .. }
+        )
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AskKey {
+    Notice(Uuid),
+    Legacy(String),
 }
 
 #[derive(Debug, Default)]
@@ -248,6 +296,23 @@ impl Inbox {
         self.baseline = true;
         let mut due = false;
         for bot in bots.iter().filter(|bot| bot.is_active()) {
+            let attention = self.bots.entry(bot.id).or_default();
+            match open_ask(bot) {
+                Some(ask) if attention.ask.seen.as_ref() != Some(&ask) => {
+                    attention.ask.due = !first;
+                    attention.ask.seen = Some(ask);
+                }
+                Some(_) => {}
+                // Without an ID, the same text could be a new ask later, so
+                // the key goes once the ask is settled: no card the sidebar
+                // ranks above it could be hiding it.
+                None => {
+                    if matches!(attention.ask.seen, Some(AskKey::Legacy(_))) && !masks_an_ask(bot) {
+                        attention.ask.seen = None;
+                    }
+                }
+            }
+            due |= attention.ask.due;
             let Some(latest) = bot
                 .read_state
                 .as_ref()
@@ -255,7 +320,6 @@ impl Inbox {
             else {
                 continue;
             };
-            let attention = self.bots.entry(bot.id).or_default();
             let before = attention.head.replace(latest.position);
             let announced = attention
                 .announcement
@@ -280,6 +344,17 @@ impl Inbox {
             let Some(attention) = self.bots.get_mut(&bot.id) else {
                 continue;
             };
+            if std::mem::take(&mut attention.ask.due)
+                && let Some(SidebarStatus::NeedsYou { preview, .. }) = &bot.sidebar_status
+                && !viewing(bot.id)
+            {
+                attention.ask.shown = true;
+                alerts.push(Alert {
+                    bot: bot.id,
+                    title: format!("{} needs you", bot.name),
+                    body: preview.clone(),
+                });
+            }
             let Some(latest) = bot
                 .read_state
                 .as_ref()
@@ -291,6 +366,11 @@ impl Inbox {
                 continue;
             }
             attention.due = false;
+            // The reply shares the ask's notification, so its prose would
+            // replace what the owner has to act on.
+            if matches!(bot.sidebar_status, Some(SidebarStatus::NeedsYou { .. })) {
+                continue;
+            }
             if !unread(Some(&attention.read), bot) || viewing(bot.id) {
                 continue;
             }
@@ -327,6 +407,13 @@ impl Inbox {
                 alert.shown = false;
                 gone.push(*id);
             }
+            let asking = live.get(id).is_some_and(|bot| open_ask(bot).is_some());
+            if attention.ask.shown && !asking {
+                attention.ask.shown = false;
+                if !gone.contains(id) {
+                    gone.push(*id);
+                }
+            }
             live.contains_key(id) || attention.read.inflight.is_some()
         });
         self.opening = self.opening.filter(|id| live.contains_key(id));
@@ -339,8 +426,9 @@ impl Inbox {
             attention
                 .announcement
                 .as_ref()
-                .filter(|alert| alert.shown)
-                .map(|_| *id)
+                .is_some_and(|alert| alert.shown)
+                .then_some(*id)
+                .or(attention.ask.shown.then_some(*id))
         })
     }
 }
@@ -534,16 +622,154 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_owner_notice_keeps_later_progress_replies_quiet() {
+    fn a_pending_owner_notice_is_announced_once_and_keeps_progress_replies_quiet() {
         let mut inbox = Inbox::default();
         inbox.observe(&[busy(bot(1, None, at(0, 0)), "working")]);
         let mut working = busy(bot(1, Some((1, at(2, 7))), at(0, 0)), "working");
         working.sidebar_status = Some(SidebarStatus::NeedsYou {
             preview: "Choose another bot".into(),
             since: None,
+            notice_id: None,
         });
-        inbox.observe(std::slice::from_ref(&working));
-        assert!(inbox.alerts(&[working], nobody).is_empty());
+        assert!(inbox.observe(std::slice::from_ref(&working)));
+        let alerts = inbox.alerts(std::slice::from_ref(&working), nobody);
+        assert_eq!(
+            alerts,
+            [Alert {
+                bot: working.id,
+                title: format!("{} needs you", working.name),
+                body: "Choose another bot".into(),
+            }],
+            "the ask, not the progress reply"
+        );
+        let mut later = busy(bot(1, Some((1, at(3, 7))), at(0, 0)), "working");
+        later.sidebar_status = working.sidebar_status.clone();
+        inbox.observe(std::slice::from_ref(&later));
+        assert!(
+            inbox
+                .alerts(std::slice::from_ref(&later), nobody)
+                .is_empty(),
+            "the same ask is not announced again"
+        );
+
+        let mut handled = later;
+        handled.sidebar_status = None;
+        assert_eq!(inbox.settle(std::slice::from_ref(&handled)), [handled.id]);
+    }
+
+    #[test]
+    fn an_ask_is_not_announced_while_its_chat_is_open_or_on_the_first_list() {
+        let asking = |since: u32| {
+            let mut bot = bot(1, None, at(0, 0));
+            bot.sidebar_status = Some(SidebarStatus::NeedsYou {
+                preview: "Approve the Romow DM".into(),
+                since: chrono::DateTime::from_timestamp(i64::from(since), 0),
+                notice_id: None,
+            });
+            bot
+        };
+        let mut inbox = Inbox::default();
+        assert!(
+            !inbox.observe(&[asking(1)]),
+            "an ask open at startup stays quiet"
+        );
+        assert!(inbox.observe(&[asking(2)]), "a new ask is due");
+        assert!(inbox.alerts(&[asking(2)], |_| true).is_empty());
+        assert!(inbox.shown().next().is_none());
+    }
+
+    #[test]
+    fn an_ask_keeps_its_notification_over_the_reply_and_is_announced_once() {
+        let with = |status: SidebarStatus| {
+            let mut bot = bot(1, Some((1, at(2, 9))), at(0, 0));
+            bot.sidebar_status = Some(status);
+            bot
+        };
+        let first = Uuid::from_u128(1);
+        let ask_of = |id: Uuid, preview: &str| SidebarStatus::NeedsYou {
+            preview: preview.into(),
+            since: chrono::DateTime::from_timestamp(5, 0),
+            notice_id: Some(id),
+        };
+        let ask = |preview: &str| ask_of(first, preview);
+        let mut inbox = Inbox::default();
+        inbox.observe(&[bot(1, None, at(0, 0))]);
+        let asking = with(ask("Approve the Romow DM"));
+        assert!(inbox.observe(std::slice::from_ref(&asking)));
+        let alerts = inbox.alerts(std::slice::from_ref(&asking), nobody);
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].title, format!("{} needs you", asking.name));
+        for _ in 0..2 {
+            inbox.observe(std::slice::from_ref(&asking));
+            assert!(
+                inbox
+                    .alerts(std::slice::from_ref(&asking), nobody)
+                    .is_empty(),
+                "the reply's prose does not replace the ask"
+            );
+        }
+
+        let rewritten = with(ask("Approve the Romow DM, now with the fee"));
+        inbox.observe(std::slice::from_ref(&rewritten));
+        assert!(
+            inbox
+                .alerts(std::slice::from_ref(&rewritten), nobody)
+                .is_empty()
+        );
+        let masked = with(SidebarStatus::NeedsApproval {
+            preview: "Run the migration".into(),
+            since: None,
+        });
+        inbox.observe(std::slice::from_ref(&masked));
+        inbox.alerts(std::slice::from_ref(&masked), nobody);
+        inbox.observe(std::slice::from_ref(&rewritten));
+        assert!(
+            inbox
+                .alerts(std::slice::from_ref(&rewritten), nobody)
+                .is_empty(),
+            "the same ask showing again after another card is not new"
+        );
+
+        let same_time = with(ask_of(Uuid::from_u128(2), "Approve the Romow DM"));
+        assert!(inbox.observe(std::slice::from_ref(&same_time)));
+        assert_eq!(
+            inbox.alerts(std::slice::from_ref(&same_time), nobody).len(),
+            1,
+            "another ask raised in the same instant is new"
+        );
+    }
+
+    #[test]
+    fn an_older_server_announces_the_same_text_again_once_its_ask_settled() {
+        let legacy = |asking: bool| {
+            let mut bot = bot(1, None, at(0, 0));
+            bot.sidebar_status = asking.then(|| SidebarStatus::NeedsYou {
+                preview: "Approve the Romow DM".into(),
+                since: None,
+                notice_id: None,
+            });
+            bot
+        };
+        let mut inbox = Inbox::default();
+        inbox.observe(&[legacy(false)]);
+        assert!(inbox.observe(&[legacy(true)]));
+        assert_eq!(inbox.alerts(&[legacy(true)], nobody).len(), 1);
+        inbox.observe(&[legacy(false)]);
+        assert!(inbox.observe(&[legacy(true)]));
+        assert_eq!(inbox.alerts(&[legacy(true)], nobody).len(), 1);
+
+        let mut masked = legacy(false);
+        masked.sidebar_status = Some(SidebarStatus::NeedsApproval {
+            preview: "Run the migration".into(),
+            since: None,
+        });
+        inbox.observe(std::slice::from_ref(&masked));
+        inbox.alerts(std::slice::from_ref(&masked), nobody);
+        inbox.observe(&[legacy(true)]);
+        assert!(
+            inbox.alerts(&[legacy(true)], nobody).is_empty(),
+            "a card above the ask does not make it new"
+        );
     }
 
     #[test]

@@ -1,7 +1,9 @@
 use super::action_card::{Disclosure, EventEnd};
 use super::conversation::{ReplyLayout, TranscriptRow};
 use super::{ElseApp, RowKey};
-use crate::model::{BotCreated, BotReplyStatus, Conversation, Item};
+use crate::model::{
+    BotCreated, BotReplyStatus, Conversation, ExchangeAsk, Item, OwnerNeed, OwnerNoticeStatus,
+};
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -17,7 +19,8 @@ pub(super) struct BotActivity {
     pub(super) answers: Vec<Uuid>,
     failed: Vec<Uuid>,
     stopped: Vec<Uuid>,
-    /// Its turn has a notice still waiting on the owner.
+    /// Its turn, or a task it delegated, has a notice still waiting on the
+    /// owner.
     needs_owner: bool,
 }
 
@@ -39,6 +42,49 @@ fn outcome(item: &Item, conversation: Option<&Conversation>) -> Option<BotReplyS
         "interrupted" => Some(BotReplyStatus::Cancelled),
         _ => None,
     }
+}
+
+/// The owner notices an exchange carries, each in its latest state, oldest
+/// first. A received task has none here: its card shows beside it.
+fn exchange_asks<'a>(items: impl IntoIterator<Item = &'a Item>) -> Vec<&'a ExchangeAsk> {
+    let mut asks: Vec<&ExchangeAsk> = Vec::new();
+    for ask in items
+        .into_iter()
+        .filter_map(|item| item.bot_reply.as_ref())
+        .flat_map(|reply| &reply.asks)
+    {
+        match asks
+            .iter_mut()
+            .find(|known| known.notice.id == ask.notice.id)
+        {
+            Some(known) => *known = ask,
+            None => asks.push(ask),
+        }
+    }
+    asks
+}
+
+fn has_pending_ask(item: &Item) -> bool {
+    exchange_asks([item])
+        .iter()
+        .any(|ask| ask.notice.status == OwnerNoticeStatus::Pending)
+}
+
+/// What the task behind `item` declared it needs from the owner.
+fn declared_need(item: &Item) -> Option<&OwnerNeed> {
+    item.bot_reply
+        .as_ref()
+        .map(|reply| &reply.declared)
+        .or_else(|| item.bot_task.as_ref().map(|task| &task.declared))?
+        .0
+        .as_ref()
+}
+
+fn task_title(item: &Item) -> Option<&str> {
+    item.bot_reply
+        .as_ref()
+        .and_then(|reply| reply.title.as_deref())
+        .or_else(|| item.bot_task.as_ref()?.title.as_deref())
 }
 
 fn waits_on_owner(conversation: Option<&Conversation>, turn: Uuid) -> bool {
@@ -84,7 +130,7 @@ pub(super) fn group_activity(
                 .then_some(item.id)
                 .into_iter()
                 .collect(),
-            needs_owner: waits_on_owner(conversation, item.turn_id),
+            needs_owner: waits_on_owner(conversation, item.turn_id) || has_pending_ask(item),
         };
         if !row.unread_start
             && let Some(previous) = grouped.last_mut()
@@ -95,6 +141,7 @@ pub(super) fn group_activity(
             group.answers.extend(activity.answers);
             group.failed.extend(activity.failed);
             group.stopped.extend(activity.stopped);
+            group.needs_owner |= activity.needs_owner;
             previous.footer_stamp = row.footer_stamp;
             if let (Some(previous), Some(current)) = (previous.routine.as_mut(), row.routine) {
                 previous.last = current.last;
@@ -167,6 +214,15 @@ impl ElseApp {
         } else {
             others.join(" & ")
         };
+        // A row of several tasks has no one title.
+        let title = match activity.items.as_slice() {
+            [only] => conversation.item(*only).and_then(task_title),
+            _ => None,
+        };
+        let object = match title {
+            Some(title) => format!("{object} · {title}"),
+            None => object,
+        };
         let verb = if conversation.item(anchor)?.bot_task.is_some() {
             "Task from"
         } else {
@@ -178,7 +234,7 @@ impl ElseApp {
                 participants.iter().map(|(id, _)| *id),
             ))
             .child(super::action_card::event_verb(&theme, verb))
-            .child(super::action_card::event_object(&theme, object))
+            .child(super::action_card::event_object(&theme, object.clone()))
             .child(super::action_card::event_end(
                 &theme,
                 EventEnd::Meta(format!("{} · {messages}", status.label()).into()),
@@ -188,7 +244,7 @@ impl ElseApp {
         let mut card = v_flex().w_full().min_w_0().child(
             super::action_card::event_button(SharedString::from(format!("bot-activity-{anchor}")))
                 .accessibility_label(format!(
-                    "Open conversation between {names}, {messages}, {}. {last_sender}: {last_text}",
+                    "Open conversation between {names}, {object}, {messages}, {}. {last_sender}: {last_text}",
                     status.label()
                 ))
                 .child(header)
@@ -241,6 +297,43 @@ impl ElseApp {
                 );
             }
         }
+        let items: Vec<&Item> = activity
+            .items
+            .iter()
+            .filter_map(|id| conversation.item(*id))
+            .collect();
+        for item in &items {
+            let Some(OwnerNeed::Fyi(line)) = declared_need(item) else {
+                continue;
+            };
+            let declarer = match (&item.bot_task, me) {
+                (Some(_), Some(me)) => me.name.as_str(),
+                _ => exchange_sender(item)?.1,
+            };
+            noted = true;
+            notes = notes.child(
+                div()
+                    .text_xs()
+                    .truncate()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("{declarer}: \u{201c}{line}\u{201d}")),
+            );
+        }
+        let asks: Vec<ExchangeAsk> = exchange_asks(items.iter().copied())
+            .into_iter()
+            .cloned()
+            .collect();
+        for ask in &asks {
+            let via = items
+                .iter()
+                .filter_map(|item| item.bot_reply.as_ref())
+                .find(|reply| reply.asks.iter().any(|a| a.notice.id == ask.notice.id))
+                .filter(|reply| reply.sender_bot_id != ask.notice.bot_id)
+                .map_or_else(String::new, |reply| format!("Via {}", reply.sender_name));
+            let open = Some((anchor, names.clone(), "Open reply"));
+            noted = true;
+            notes = notes.child(self.ask_card(&ask.notice, &ask.bot_name, via, open, cx));
+        }
         if noted {
             card = card.child(notes);
         }
@@ -271,6 +364,10 @@ enum ActivityStatus {
     NeedsYou,
     Failed(usize),
     Stopped(usize),
+    /// Replied, and the task declared one line for the owner.
+    Fyi,
+    /// Replied, and the task declared it needs nothing from the owner.
+    NothingForYou,
     Replied,
     Received,
     Uncertain,
@@ -284,6 +381,8 @@ impl ActivityStatus {
             Self::NeedsYou => "Needs you".into(),
             Self::Failed(count) => format!("{count} failed"),
             Self::Stopped(count) => format!("{count} stopped"),
+            Self::Fyi => "FYI".into(),
+            Self::NothingForYou => "Nothing for you".into(),
             Self::Replied => "Replied".into(),
             Self::Received => "Task received".into(),
             Self::Uncertain => "Unknown result".into(),
@@ -309,7 +408,12 @@ fn activity_status(activity: &BotActivity, last: &Item, c: &Conversation) -> Act
         .and_then(|_| c.turn(last.turn_id))
         .map(|turn| turn.status.as_str());
     if last.bot_reply.is_some() || task_status == Some("completed") {
-        return ActivityStatus::Replied;
+        return match declared_need(last) {
+            Some(OwnerNeed::Fyi(_)) => ActivityStatus::Fyi,
+            Some(OwnerNeed::Nothing) => ActivityStatus::NothingForYou,
+            // A settled or superseded ask, or nothing declared.
+            _ => ActivityStatus::Replied,
+        };
     }
     match task_status {
         None | Some("queued") => ActivityStatus::Received,
@@ -441,9 +545,10 @@ impl ElseApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivityStatus, BotActivity, activity_status, note_lines, received_note, waits_on_owner,
+        ActivityStatus, BotActivity, activity_status, exchange_asks, has_pending_ask, note_lines,
+        received_note, task_title, waits_on_owner,
     };
-    use crate::model::Conversation;
+    use crate::model::{Conversation, OwnerNoticeStatus};
     use serde_json::{Value, json};
     use uuid::Uuid;
 
@@ -585,5 +690,97 @@ mod tests {
             (None, Some("Half of the form"))
         );
         assert_eq!(note_lines(None, " "), (None, Some("No reply text.")));
+    }
+
+    fn ask(id: u128, status: &str) -> serde_json::Value {
+        json!({"id": Uuid::from_u128(id), "bot_id": Uuid::from_u128(90), "bot_name": "Marketing",
+            "turn_id": Uuid::from_u128(11), "kind": "decision",
+            "summary": "Approve the Romow DM before I send it.", "tried": null, "status": status,
+            "created_at": "2026-11-01T00:00:01Z", "settled_at": null})
+    }
+
+    /// The delegating chat after Marketing replied to its task.
+    fn replied(extra: serde_json::Value) -> Conversation {
+        let mut reply = json!({"sender_bot_id": Uuid::from_u128(90), "sender_name": "Marketing",
+            "prompt": "Context: run 8f3. Sort the DMs.", "status": "completed"});
+        reply
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        Conversation::from_snapshot(serde_json::from_value(json!({
+            "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+            "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+            "items": [{"id": Uuid::from_u128(1), "seq": 1, "turn_id": Uuid::from_u128(10),
+                "kind": "status", "text": "MIRAY is the only item that needs a decision.",
+                "bot_reply": reply}],
+            "turns": [{"id": Uuid::from_u128(10), "request_id": Uuid::from_u128(110), "turn_no": 1,
+                "provider_id": "codex", "status": "completed", "effect_uncertain": false}],
+            "activity": {"phase": "idle", "active_turn_id": null, "queued_count": 0}
+        })).unwrap()).unwrap()
+    }
+
+    fn status_of(c: &Conversation) -> ActivityStatus {
+        let item = c.item(Uuid::from_u128(1)).unwrap();
+        let activity = BotActivity {
+            turn: item.turn_id,
+            items: vec![item.id],
+            answers: vec![],
+            failed: vec![],
+            stopped: vec![],
+            needs_owner: waits_on_owner(Some(c), item.turn_id) || has_pending_ask(item),
+        };
+        activity_status(&activity, item, c)
+    }
+
+    #[test]
+    fn a_reply_shows_what_its_task_declared_and_never_guesses() {
+        for (extra, expected) in [
+            (json!({}), ActivityStatus::Replied),
+            (
+                json!({"owner_need": "nothing"}),
+                ActivityStatus::NothingForYou,
+            ),
+            (
+                json!({"owner_need": "fyi", "owner_line": "Declined MIRAY myself."}),
+                ActivityStatus::Fyi,
+            ),
+            (json!({"owner_need": "fyi"}), ActivityStatus::Replied),
+            (json!({"owner_need": "someday"}), ActivityStatus::Replied),
+            (
+                json!({"owner_need": "decision", "asks": [ask(400, "pending")]}),
+                ActivityStatus::NeedsYou,
+            ),
+            (
+                json!({"owner_need": "decision", "asks": [ask(400, "dismissed")]}),
+                ActivityStatus::Replied,
+            ),
+        ] {
+            let c = replied(extra.clone());
+            assert_eq!(status_of(&c), expected, "{extra}");
+        }
+        assert_eq!(ActivityStatus::NothingForYou.label(), "Nothing for you");
+        assert_eq!(ActivityStatus::Fyi.label(), "FYI");
+    }
+
+    #[test]
+    fn an_exchange_shows_each_ask_once_in_its_latest_state() {
+        let first = replied(json!({"title": "Sort the overnight DMs",
+            "asks": [ask(400, "pending"), ask(401, "pending")]}));
+        let later = replied(json!({"asks": [ask(400, "replied")]}));
+        let a = first.item(Uuid::from_u128(1)).unwrap();
+        let b = later.item(Uuid::from_u128(1)).unwrap();
+        assert_eq!(task_title(a), Some("Sort the overnight DMs"));
+        assert_eq!(task_title(b), None);
+        let asks: Vec<_> = exchange_asks([a, b])
+            .into_iter()
+            .map(|ask| (ask.notice.id, ask.notice.status))
+            .collect();
+        assert_eq!(
+            asks,
+            [
+                (Uuid::from_u128(400), OwnerNoticeStatus::Replied),
+                (Uuid::from_u128(401), OwnerNoticeStatus::Pending),
+            ]
+        );
     }
 }

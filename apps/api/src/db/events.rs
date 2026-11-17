@@ -152,6 +152,42 @@ pub async fn turn_changed(
     reply_drafts_changed(conn, turn_id).await
 }
 
+/// `task_turn`'s declared need or one of its asks changed: republish the
+/// rows that show them, its receipt in its bot's chat, its reply in the
+/// delegating chat, and the reply one hop further up, which carries the asks
+/// of the tasks below it.
+pub async fn exchange_changed(
+    conn: &mut SqliteConnection,
+    task_turn: Uuid,
+) -> Result<(), sqlx::Error> {
+    let shown: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        // The task whose attempt (or takeover) `task_turn` is, and the task
+        // that delegated it, whichever of their attempts did.
+        "WITH task AS (
+             SELECT d.* FROM delegations d
+             WHERE d.conversation_id = (SELECT conversation_id FROM turns WHERE id = ?1)
+                OR d.takeover_turn_id = ?1)
+         SELECT t.bot_id, i.id FROM items i JOIN turns t ON t.id = i.turn_id
+         JOIN conversations c ON c.id = i.conversation_id AND c.kind = 'owner'
+         WHERE i.turn_id = ?1 AND i.kind = 'status' AND EXISTS (SELECT 1 FROM task)
+         UNION
+         SELECT task.parent_bot_id, task.id FROM task
+         WHERE EXISTS (SELECT 1 FROM items WHERE id = task.id)
+         UNION
+         SELECT a.parent_bot_id, a.id FROM task JOIN delegations a
+             ON a.conversation_id = (SELECT conversation_id FROM turns WHERE id = task.root_turn_id)
+             OR a.takeover_turn_id = task.root_turn_id
+         WHERE EXISTS (SELECT 1 FROM items WHERE id = a.id)",
+    )
+    .bind(task_turn)
+    .fetch_all(&mut *conn)
+    .await?;
+    for (bot_id, item_id) in shown {
+        item_upsert(conn, bot_id, item_id).await?;
+    }
+    Ok(())
+}
+
 /// Republish the turns showing drafts handed to `reply_turn`, so each card
 /// follows the reply that holds it until that reply closes it.
 async fn reply_drafts_changed(

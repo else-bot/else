@@ -100,7 +100,18 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> O
             })
         })
         .collect();
-    match delegations::create(&state.db, grant.turn_id, target, task, &files, owner_answer).await {
+    let title = args["title"].as_str();
+    match delegations::create(
+        &state.db,
+        grant.turn_id,
+        target,
+        task,
+        title,
+        &files,
+        owner_answer,
+    )
+    .await
+    {
         Ok(accepted) if !matches!(accepted.status.as_str(), "queued" | "running") => {
             let log = format!("already {} {}", accepted.status, accepted.delegation_id);
             let result = json!({
@@ -262,6 +273,8 @@ pub(super) async fn cancel(state: &AppState, grant: &Grant, args: &Value) -> Out
 struct CouncilArgs {
     target_bot_ids: Vec<Uuid>,
     task: String,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 pub(super) async fn council(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
@@ -276,6 +289,7 @@ pub(super) async fn council(state: &AppState, grant: &Grant, args: &Value) -> Ou
         grant.turn_id,
         &parsed.target_bot_ids,
         &parsed.task,
+        parsed.title.as_deref(),
     )
     .await
     {

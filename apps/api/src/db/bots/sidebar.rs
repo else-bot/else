@@ -19,6 +19,7 @@ pub struct SidebarRow {
     skill_install_at: Option<DateTime<Utc>>,
     draft_content: Option<Json<Content>>,
     draft_at: Option<DateTime<Utc>>,
+    notice_id: Option<uuid::Uuid>,
     notice_summary: Option<String>,
     notice_at: Option<DateTime<Utc>>,
     latest_turn_status: Option<TurnStatus>,
@@ -51,6 +52,8 @@ pub enum SidebarStatus {
     NeedsYou {
         preview: String,
         since: DateTime<Utc>,
+        /// The ask shown, so a desktop announces each ask once.
+        notice_id: uuid::Uuid,
     },
     Failed,
     Stopped,
@@ -92,10 +95,13 @@ impl SidebarRow {
                 since,
             });
         }
-        if let (Some(summary), Some(since)) = (&self.notice_summary, self.notice_at) {
+        if let (Some(notice_id), Some(summary), Some(since)) =
+            (self.notice_id, &self.notice_summary, self.notice_at)
+        {
             return Some(SidebarStatus::NeedsYou {
                 preview: preview(summary),
                 since,
+                notice_id,
             });
         }
         if busy || self.latest_turn_read {

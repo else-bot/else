@@ -388,6 +388,7 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
     Json(json!({
         "api_version": "v1",
         "bot_avatar_on_create": true,
+        "answers_notice": true,
         "server_instance_id": state.server_instance_id,
         "server": server,
         "default_provider_id": default_id,

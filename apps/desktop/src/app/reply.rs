@@ -76,6 +76,8 @@ pub(super) struct Quote {
     /// The quoted span in the source row's rendered text, for highlighting.
     pub(super) highlight: Option<Range<usize>>,
     pub(super) comment: String,
+    /// The owner ask this reply answers, so sending settles that ask only.
+    pub(super) answers: Option<Uuid>,
 }
 
 impl Quote {
@@ -87,6 +89,20 @@ impl Quote {
         Self::new(QuoteKind::Passage, source, highlight)
     }
 
+    /// A reply to the bot's ask `notice`, quoting its text so the bot knows
+    /// which ask the answer is for. `settles` is false for servers that
+    /// cannot settle one ask.
+    pub(super) fn ask(notice: Uuid, text: String, settles: bool) -> Self {
+        Self {
+            answers: settles.then_some(notice),
+            ..Self::reply(MessageReference {
+                item: notice,
+                author: Author::Bot,
+                text,
+            })
+        }
+    }
+
     fn new(kind: QuoteKind, source: MessageReference, highlight: Option<Range<usize>>) -> Self {
         Self {
             id: Uuid::new_v4(),
@@ -94,11 +110,28 @@ impl Quote {
             source,
             highlight,
             comment: String::new(),
+            answers: None,
         }
     }
 
     pub(super) fn excerpt(&self) -> String {
         flatten(&self.source.text)
+    }
+}
+
+/// The quotes a sent message was written with, kept so an edit of a
+/// rejected send gets them back as quotes, with the ask a reply answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Quoted {
+    pub(super) quotes: Vec<Quote>,
+    /// Bytes of the message the quotes take before the owner's own text.
+    pub(super) prefix: usize,
+}
+
+impl Quoted {
+    /// The ask the reply answers, if it replies to one.
+    pub(super) fn answers(&self) -> Option<Uuid> {
+        self.quotes.iter().find_map(|quote| quote.answers)
     }
 }
 
@@ -127,6 +160,15 @@ impl Draft {
             Some(existing) => *existing = reply,
             None => self.quotes.push(reply),
         }
+    }
+
+    /// The draft's quotes as sent with `message`, which starts with their
+    /// text and ends with the composer's own.
+    pub(super) fn quoted(&self, message: &str) -> Option<Quoted> {
+        (!self.quotes.is_empty()).then(|| Quoted {
+            quotes: self.quotes.clone(),
+            prefix: message.len() - self.content.text().len(),
+        })
     }
 
     pub(super) fn has_unsaved_work(&self) -> bool {
@@ -699,5 +741,43 @@ mod tests {
         assert!(too_long(&message, 1024).is_some());
         assert_eq!(too_long("ok", 1024), None);
         assert_eq!(too_long(&"a".repeat(1024), 1024), None);
+    }
+
+    #[test]
+    fn a_reply_to_an_ask_quotes_it_and_comes_back_from_its_text() {
+        let notice = Uuid::new_v4();
+        let mut answer = draft("Approve it.", None);
+        answer.set_reply(Quote::ask(notice, "Approve the Romow DM?".into(), true));
+        let message = answer.message().unwrap();
+        let quoted = answer.quoted(&message).unwrap();
+        assert_eq!(quoted.answers(), Some(notice));
+        assert_eq!(&message[quoted.prefix..], "Approve it.");
+        let quoted = QuotedReply::parse(&message).unwrap();
+        assert_eq!(quoted.author, Author::Bot);
+        assert_eq!(quoted.original(), "Approve the Romow DM?");
+        assert_eq!(quoted.body, "Approve it.");
+
+        let mut legacy = draft("Approve it.", None);
+        legacy.set_reply(Quote::ask(notice, "Approve the Romow DM?".into(), false));
+        let legacy_message = legacy.message().unwrap();
+        assert_eq!(
+            legacy.quoted(&legacy_message).unwrap().answers(),
+            None,
+            "an older server settles by itself"
+        );
+        assert_eq!(legacy_message, message);
+    }
+
+    #[test]
+    fn an_ask_reply_with_a_cited_passage_keeps_its_quotes_and_target() {
+        let notice = Uuid::new_v4();
+        let mut answer = passages("Ship it.", &[(Author::Bot, "Retries persist.", "Why?")]);
+        answer.set_reply(Quote::ask(notice, "Approve the migration?".into(), true));
+        let message = answer.message().unwrap();
+        assert!(message.starts_with("Replying to 2 passages:"), "{message}");
+        let quoted = answer.quoted(&message).unwrap();
+        assert_eq!(quoted.answers(), Some(notice));
+        assert_eq!(quoted.quotes, answer.quotes);
+        assert_eq!(&message[quoted.prefix..], "Ship it.");
     }
 }

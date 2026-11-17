@@ -154,6 +154,12 @@ pub struct BotTask {
     pub sender_bot_id: Uuid,
     pub sender_name: String,
     pub prompt: String,
+    /// The delegating bot's short name for the task. Absent from older
+    /// servers and older tasks.
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(flatten)]
+    pub declared: Declared,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -166,6 +172,59 @@ pub struct BotReply {
     /// from older servers.
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(flatten)]
+    pub declared: Declared,
+    /// The owner notices of the task and of the tasks it delegated, oldest
+    /// first.
+    #[serde(default)]
+    pub asks: Vec<ExchangeAsk>,
+}
+
+/// What a delegated task declared it needs from the owner. The bot's
+/// judgment, shown as its words, never an approval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerNeed {
+    Nothing,
+    /// Done, with the bot's one line for the owner.
+    Fyi(String),
+    Decision,
+    Blocked,
+}
+
+/// A task's declared need. `None` when it declared nothing: an older
+/// server or task, or a bot that forgot. Never read as "nothing".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(from = "DeclaredNeed")]
+pub struct Declared(pub Option<OwnerNeed>);
+
+#[derive(Deserialize)]
+struct DeclaredNeed {
+    #[serde(default)]
+    owner_need: Option<String>,
+    #[serde(default)]
+    owner_line: Option<String>,
+}
+
+impl From<DeclaredNeed> for Declared {
+    fn from(raw: DeclaredNeed) -> Self {
+        Self(match (raw.owner_need.as_deref(), raw.owner_line) {
+            (Some("nothing"), _) => Some(OwnerNeed::Nothing),
+            (Some("fyi"), Some(line)) => Some(OwnerNeed::Fyi(line)),
+            (Some("decision"), _) => Some(OwnerNeed::Decision),
+            (Some("blocked"), _) => Some(OwnerNeed::Blocked),
+            _ => None,
+        })
+    }
+}
+
+/// An owner notice shown on an exchange, with the name of the bot asking.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ExchangeAsk {
+    #[serde(flatten)]
+    pub notice: OwnerNotice,
+    pub bot_name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

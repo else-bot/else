@@ -747,6 +747,7 @@ impl ElseApp {
                 return;
             }
         };
+        let quoted = draft.quoted(&message);
         if !parts.is_empty() {
             let prefix = message.len() - draft.content.text().len();
             if prefix > 0 {
@@ -758,7 +759,14 @@ impl ElseApp {
                 );
             }
         }
-        if !self.enqueue(bot, message, parts, None, window, cx) {
+        if !self.enqueue(
+            bot,
+            message,
+            parts,
+            SendKind::Message { quoted },
+            window,
+            cx,
+        ) {
             return;
         }
         self.composer
@@ -772,7 +780,7 @@ impl ElseApp {
         bot: Uuid,
         text: String,
         parts: Vec<crate::attachments::MessagePart>,
-        reaction: Option<Reaction>,
+        kind: SendKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -788,12 +796,16 @@ impl ElseApp {
             cx.notify();
             return false;
         }
+        let (reaction, quoted) = match kind {
+            SendKind::Message { quoted } => (None, quoted),
+            SendKind::Reaction(reaction) => (Some(reaction), None),
+        };
         let open_draft = if reaction.is_none() {
             self.outgoing_attachment(cx)
         } else {
             None
         };
-        let pending = PendingSend::new(text, parts, reaction, open_draft);
+        let pending = PendingSend::new(text, parts, reaction, open_draft, quoted);
         let request = pending.request();
         self.notice = None;
         self.pending.entry(bot).or_default().push(pending);
@@ -941,7 +953,21 @@ impl ElseApp {
         let pending = list.remove(ix);
         if restore {
             let current = self.composer.read(cx).content();
-            let restored = crate::attachments::input_content(&pending.text, &pending.parts);
+            // Quotes come back as quotes, a reply to an ask still
+            // answering it, and the composer gets only the owner's text.
+            let (text, parts) = match &pending.quoted {
+                Some(quoted) => {
+                    for quote in &quoted.quotes {
+                        self.add_quote(bot, quote.clone(), window, cx);
+                    }
+                    (
+                        pending.text[quoted.prefix..].to_owned(),
+                        without_prefix(&pending.parts, quoted.prefix),
+                    )
+                }
+                None => (pending.text.clone(), pending.parts.clone()),
+            };
+            let restored = crate::attachments::input_content(&text, &parts);
             for part in &pending.parts {
                 if let crate::attachments::MessagePart::File { file } = part {
                     self.drafts
@@ -986,5 +1012,64 @@ impl ElseApp {
             });
         })
         .detach();
+    }
+}
+
+/// What an owner message is besides its text.
+#[derive(Debug, Clone)]
+enum SendKind {
+    /// Typed in the composer, with the quotes it was written with.
+    Message {
+        quoted: Option<reply::Quoted>,
+    },
+    Reaction(Reaction),
+}
+
+/// `parts` without the quoted prefix `send` laid before the owner's own
+/// text, as its first text part.
+fn without_prefix(
+    parts: &[crate::attachments::MessagePart],
+    prefix: usize,
+) -> Vec<crate::attachments::MessagePart> {
+    use crate::attachments::MessagePart;
+    match parts.split_first() {
+        Some((MessagePart::Text { text }, rest)) if text.len() <= prefix => rest.to_vec(),
+        Some((MessagePart::Text { text }, rest)) => {
+            let mut kept = vec![MessagePart::Text {
+                text: text[prefix..].to_owned(),
+            }];
+            kept.extend_from_slice(rest);
+            kept
+        }
+        _ => parts.to_vec(),
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::without_prefix;
+    use crate::attachments::MessagePart;
+
+    #[test]
+    fn a_restored_reply_drops_only_its_quoted_prefix() {
+        let text = |t: &str| MessagePart::Text { text: t.into() };
+        assert_eq!(without_prefix(&[], 9), Vec::<MessagePart>::new());
+        assert_eq!(
+            without_prefix(&[text("> quoted\n\n"), text("hi")], 10),
+            [text("hi")]
+        );
+        assert_eq!(without_prefix(&[text("> quoted\n\nhi")], 10), [text("hi")]);
+        let file = MessagePart::File {
+            file: crate::attachments::Attachment {
+                id: uuid::Uuid::nil(),
+                name: "plan.md".into(),
+                media_type: "text/markdown".into(),
+                size: 3,
+            },
+        };
+        assert_eq!(
+            without_prefix(&[text("> quoted\n\n"), text("see "), file.clone()], 10),
+            [text("see "), file]
+        );
     }
 }
