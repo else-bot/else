@@ -2232,6 +2232,17 @@ async fn an_owner_reply_saying_always_approves_a_delegated_chat_always() {
         "another chat still waits for the owner: {}",
         other.body
     );
+    let other: Uuid = tool_text(&other)["draft"]["draft_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait(&app, reply, "waiting").await;
+    let discarded = owner_action(&app, &leaf, other, "discard", json!({})).await;
+    assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
+    wait(&app, reply, "running").await;
+    let token = grant(&app, reply).await;
+
     let stop = format!("/v1/bots/{leaf}/outgoing-drafts/{same}/always");
     let stopped = app.owner("DELETE", &stop, None).await;
     assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);

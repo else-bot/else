@@ -388,6 +388,19 @@ def run(runner):
                      self.call("use_tool", {"name": "send_draft", "arguments": {
                          "draft_id": "62eae6f1-1fbe-4313-8817-c1d1406abf13"}})],
                     "Sent the v0.94.35 note to @proliquid_updates."),
+                "chat-always-approves-whatsapp-chat": (
+                    [self.call("use_tool", {"name": "confirm_draft_approval", "arguments": {
+                        "draft_id": "18b797a4-325c-436b-8ca5-da901704b084",
+                        "always": "Always approve posting messages"}}),
+                     self.call("use_tool", {"name": "send_draft", "arguments": {
+                         "draft_id": "18b797a4-325c-436b-8ca5-da901704b084"}})],
+                    "Posted. Later posts to Ecole Paola go out without a card; Stop approving always on the card ends it."),
+                "chat-approval-without-always-approves-once": (
+                    [self.call("use_tool", {"name": "confirm_draft_approval", "arguments": {
+                        "draft_id": "18b797a4-325c-436b-8ca5-da901704b084"}}),
+                     self.call("use_tool", {"name": "send_draft", "arguments": {
+                         "draft_id": "18b797a4-325c-436b-8ca5-da901704b084"}})],
+                    "Sent to the Ecole Paola group."),
                 "task-reports-computer-sent-x-post": (
                     [self.call("use_tool", {"name": "report_draft_send", "arguments": {
                         "draft_id": "8ef560c9-cd32-46a6-96b5-5f20240a104c", "status": "sent"}})],

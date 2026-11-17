@@ -386,7 +386,7 @@ pub enum Gate {
     Denied(QuestionInfo),
 }
 
-async fn owner_message_quotes(
+pub(crate) async fn owner_message_quotes(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
     quote: &str,

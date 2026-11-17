@@ -538,9 +538,11 @@ fn drafts_block(input: &TurnInput) -> String {
             (status @ (Status::Pending | Status::Failed | Status::Uncertain), _, true) => {
                 let mut next = format!(
                     "The owner's latest message was sent with this draft open (status {}). If \
-                     their words clearly say to send it as it is, call confirm_draft_approval \
-                     with draft_id \"{id}\", then send it. If they ask for changes, call \
-                     {redraft} with replaces \"{id}\". Otherwise do not send it.",
+                     their words clearly say to send it as it is, or to always approve drafts \
+                     like it (this one included), call confirm_draft_approval with draft_id \
+                     \"{id}\", plus always with their exact words for the latter, then send it. \
+                     If they ask for changes, call {redraft} with replaces \"{id}\". Otherwise \
+                     do not send it.",
                     status.as_str()
                 );
                 if status == Status::Uncertain {

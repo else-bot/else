@@ -146,7 +146,13 @@ pub(super) fn schemas() -> Vec<Value> {
                 or approved_draft, then report_draft_send.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "draft_id": draft_id() },
+                "properties": {
+                    "draft_id": draft_id(),
+                    "always": { "type": "string", "minLength": 1, "maxLength": 1000,
+                                "description": "Only when the owner asks to always approve drafts \
+                                    like this: their exact words from that message. Grants what the \
+                                    card's Approve always would; rules grant nothing." },
+                },
                 "required": ["draft_id"],
                 "additionalProperties": false,
             },
@@ -437,24 +443,40 @@ fn send_next(row: &OutgoingDraft) -> String {
 }
 
 async fn confirm(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
-    only(args, &["draft_id"])?;
+    only(args, &["draft_id", "always"])?;
     let id = id_arg(args, "draft_id")?;
-    let row = outgoing_drafts::confirm(&state.db, grant.turn_id, id)
+    let always = match &args["always"] {
+        Value::Null => None,
+        Value::String(words) => Some(words.as_str()),
+        _ => return Err((tool_error("always is the owner's exact words."), None)),
+    };
+    let row = outgoing_drafts::confirm(&state.db, grant.turn_id, id, always)
         .await
         .map_err(refused)?;
-    Ok((
-        tool_result(json!({
-            "status": "approved",
-            "draft": draft_json(&row),
-            "next": send_next(&row),
-        })),
-        Some(format!(
-            "owner message approved {} {} version {}",
-            row.content.noun(),
-            row.id,
-            row.version
-        )),
-    ))
+    let mut result = json!({ "status": "approved", "draft": draft_json(&row) });
+    let next = send_next(&row);
+    let log = format!(
+        "owner message approved {} {} version {}",
+        row.content.noun(),
+        row.id,
+        row.version
+    );
+    let (next, log) = match (always, &row.kind) {
+        (Some(_), Some(kind)) => {
+            result["always"] = json!(kind);
+            (
+                format!(
+                    "The owner now approves drafts matching always (same platform, account, and \
+                     destination or task) as you propose them, except drafts with files. Tell \
+                     them what it covers and that Stop approving always on the card ends it. {next}"
+                ),
+                format!("{log}, always"),
+            )
+        }
+        _ => (next, log),
+    };
+    result["next"] = json!(next);
+    Ok((tool_result(result), Some(log)))
 }
 
 async fn start(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
