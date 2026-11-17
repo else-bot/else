@@ -99,6 +99,37 @@ mod tests {
     }
 }
 
+/// How a mutating mail command that failed settles, logged at warn with
+/// its phase and reason. A send that stopped before the server had the
+/// whole message sent nothing; any other failed change may have happened.
+fn failure_receipt(
+    account_id: Uuid,
+    action_id: Uuid,
+    error: &MailError,
+) -> (store::ActionStatus, Value) {
+    let reason = error.reason();
+    let phase = error.phase.map(SendPhase::as_str);
+    tracing::warn!(
+        %account_id,
+        %action_id,
+        phase,
+        code = error.code,
+        %reason,
+        "mail action failed"
+    );
+    if error.phase.is_some() && !error.may_have_sent() {
+        (
+            store::ActionStatus::Failed,
+            json!({"action_id":action_id,"status":"failed","error":error.code,"phase":phase,"reason":reason,"instruction":"Nothing was sent. The owner may approve sending it again."}),
+        )
+    } else {
+        (
+            store::ActionStatus::Uncertain,
+            json!({"action_id":action_id,"status":"uncertain","error":error.code,"phase":phase,"reason":reason,"instruction":"Inspect the mailbox before starting a different action. This action will not be retried."}),
+        )
+    }
+}
+
 struct Command {
     bot_id: Uuid,
     turn_id: Uuid,
@@ -475,10 +506,7 @@ impl ConnectorManager {
                 store::ActionStatus::Succeeded,
                 json!({"action_id":action_id,"status":"succeeded","result":value}),
             ),
-            Err(error) => (
-                store::ActionStatus::Uncertain,
-                json!({"action_id":action_id,"status":"uncertain","error":error.code,"instruction":"Inspect the mailbox before starting a different action. This action will not be retried."}),
-            ),
+            Err(error) => failure_receipt(id, action_id, &error),
         };
         store::finish_action(&self.db, id, action_id, status, &receipt)
             .await

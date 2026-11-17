@@ -596,6 +596,7 @@ async fn smtp_fixture_send(start_tls: bool) {
         body: "Hello\n.hidden\n".into(),
         attachments: Vec::new(),
         reply_to: None,
+        message_id: None,
     };
     let bytes = compose("owner@example.org", &draft, None).unwrap();
     client
@@ -630,6 +631,7 @@ fn an_exact_reply_draft_joins_the_thread_without_taking_its_recipients() {
         body: "approved text".into(),
         attachments: Vec::new(),
         reply_to: None,
+        message_id: None,
     };
     let bytes = compose("owner@example.org", &draft, Some(thread(&message))).unwrap();
     let parsed = MessageParser::default().parse(&bytes).unwrap();
@@ -718,6 +720,7 @@ fn attachments_round_trip_and_forward_preserves_the_original_message() {
             data_base64: STANDARD.encode(b"original attachment"),
         }],
         reply_to: None,
+        message_id: None,
     };
     let raw = compose("owner@example.org", &draft, None).unwrap();
     let parsed = MessageParser::default().parse(&raw).unwrap();
@@ -813,4 +816,202 @@ async fn a_tls_write_reaches_the_peer_before_the_reply_is_awaited() {
         .await
         .expect("the peer never received the end of the write")
         .unwrap();
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Ending {
+    RejectRecipient,
+    CloseAfterMessage,
+    HangAfterMessage,
+    RejectMessage,
+    Accept,
+}
+
+async fn send_until(ending: Ending, draft: &Draft) -> (Result<(), MailError>, String) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = Endpoint {
+        host: "localhost".into(),
+        port: listener.local_addr().unwrap().port(),
+        start_tls: false,
+    };
+    let (acceptor, connector) = tls();
+    let task = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let socket = acceptor.accept(socket).await.unwrap();
+        let (read, mut write) = tokio::io::split(socket);
+        let mut reader = BufReader::new(read);
+        write.write_all(b"220 fixture ESMTP\r\n").await.unwrap();
+        let mut line = String::new();
+        let mut message = String::new();
+        loop {
+            line.clear();
+            if !matches!(reader.read_line(&mut line).await, Ok(1..)) {
+                return message;
+            }
+            let response: &[u8] = if line.starts_with("EHLO ") {
+                b"250-fixture\r\n250 AUTH PLAIN XOAUTH2\r\n"
+            } else if line.starts_with("AUTH PLAIN ") {
+                b"235 authenticated\r\n"
+            } else if line.starts_with("MAIL FROM:") {
+                b"250 sender accepted\r\n"
+            } else if line.starts_with("RCPT TO:") {
+                if ending == Ending::RejectRecipient {
+                    b"550 5.1.1 no such mailbox\r\n"
+                } else {
+                    b"250 recipient accepted\r\n"
+                }
+            } else if line == "DATA\r\n" {
+                write.write_all(b"354 send message\r\n").await.unwrap();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).await.unwrap();
+                    if line == ".\r\n" {
+                        break;
+                    }
+                    message.push_str(&line);
+                }
+                match ending {
+                    Ending::CloseAfterMessage => return message,
+                    Ending::HangAfterMessage => std::future::pending().await,
+                    Ending::RejectMessage => b"552 5.3.4 refused: private body text\r\n",
+                    _ => b"250 queued\r\n",
+                }
+            } else {
+                panic!("unexpected SMTP fixture command");
+            };
+            write.write_all(response).await.unwrap();
+        }
+    });
+    let mut client = Smtp::connect(&endpoint, &auth(), &connector).await.unwrap();
+    let recipients = draft
+        .to
+        .iter()
+        .map(|a| smtp_address(a).unwrap().into())
+        .collect();
+    let mut phase = SendPhase::Connect;
+    let result = timeout(
+        Duration::from_secs(2),
+        client.transmit(
+            smtp_address("owner@example.org").unwrap().into(),
+            recipients,
+            compose("owner@example.org", draft, None).unwrap(),
+            &mut phase,
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| Err(SmtpClientError::Io(io::ErrorKind::TimedOut.into())))
+    .map_err(|error| smtp_failure(error).at(phase));
+    drop(client);
+    if ending == Ending::HangAfterMessage {
+        task.abort();
+        return (result, String::new());
+    }
+    (result, task.await.unwrap())
+}
+
+fn private_draft() -> Draft {
+    Draft {
+        to: vec!["recipient@example.org".into()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "fixture".into(),
+        body: "private body text".into(),
+        attachments: Vec::new(),
+        reply_to: None,
+        message_id: Some("draft-1234@example.org".into()),
+    }
+}
+
+#[tokio::test]
+async fn a_send_failing_before_the_whole_message_is_written_sent_nothing() {
+    let (result, message) = send_until(Ending::RejectRecipient, &private_draft()).await;
+    let error = result.unwrap_err();
+    assert_eq!(error.phase, Some(SendPhase::Envelope));
+    assert!(!error.may_have_sent());
+    assert_eq!(
+        error.reason(),
+        "the mail server refused a recipient with code 550 while naming the sender and \
+         recipients"
+    );
+    assert!(message.is_empty());
+
+    let (result, message) = send_until(Ending::RejectMessage, &private_draft()).await;
+    let error = result.unwrap_err();
+    assert_eq!(error.phase, Some(SendPhase::Refused));
+    assert!(!error.may_have_sent(), "a refused message was not accepted");
+    assert_eq!(
+        error.reason(),
+        "the mail server refused the message with code 552 after the whole message was sent",
+        "the reply text can quote the message, so only its code is kept"
+    );
+    assert!(message.contains("private body text"));
+}
+
+#[tokio::test]
+async fn a_send_losing_the_reply_after_the_whole_message_may_have_gone_out() {
+    let (result, message) = send_until(Ending::CloseAfterMessage, &private_draft()).await;
+    let error = result.unwrap_err();
+    assert_eq!(error.phase, Some(SendPhase::Reply));
+    assert!(error.may_have_sent());
+    assert_eq!(
+        error.reason(),
+        "the mail server closed the connection while waiting for the server's reply after the \
+         whole message was sent"
+    );
+    assert!(
+        message.contains("Message-ID: <draft-1234@example.org>"),
+        "{message}"
+    );
+
+    let capture = Arc::new(Mutex::new(Vec::new()));
+    let writer = capture.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || LogWriter(writer.clone()))
+        .finish();
+    let (status, receipt) = tracing::subscriber::with_default(subscriber, || {
+        super::super::failure_receipt(uuid::Uuid::nil(), uuid::Uuid::nil(), &error)
+    });
+    assert_eq!(status, super::super::store::ActionStatus::Uncertain);
+    assert_eq!(receipt["phase"], "reply");
+    let logged = String::from_utf8(capture.lock().unwrap().clone()).unwrap();
+    assert!(logged.contains("WARN"), "{logged}");
+    assert!(logged.contains("closed the connection"), "{logged}");
+    assert!(logged.contains("phase=\"reply\""), "{logged}");
+    for private in [
+        "private body text",
+        "fixture-password",
+        "recipient@example.org",
+    ] {
+        assert!(!logged.contains(private), "{logged}");
+    }
+}
+
+#[tokio::test]
+async fn a_send_cancelled_while_awaiting_the_reply_may_have_gone_out() {
+    let (result, _) = send_until(Ending::HangAfterMessage, &private_draft()).await;
+    let error = result.unwrap_err();
+    assert_eq!(error.phase, Some(SendPhase::Reply), "{}", error.reason());
+    assert!(error.may_have_sent());
+}
+
+#[tokio::test]
+async fn an_accepted_send_carries_its_message_id() {
+    let (result, message) = send_until(Ending::Accept, &private_draft()).await;
+    result.unwrap();
+    assert!(
+        message.contains("Message-ID: <draft-1234@example.org>"),
+        "{message}"
+    );
+}
+
+struct LogWriter(Arc<Mutex<Vec<u8>>>);
+impl std::io::Write for LogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }

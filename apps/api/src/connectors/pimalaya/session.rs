@@ -60,7 +60,12 @@ impl Socket {
         };
         let name = ServerName::try_from(host.to_owned()).map_err(failure)?;
         Ok(Self::Tls(Box::new(
-            connector.connect(name, socket).await.map_err(failure)?,
+            connector.connect(name, socket).await.map_err(|error| {
+                MailError::new("mail_tls_failed").cause(format!(
+                    "the secure connection failed ({})",
+                    safe_text(&error)
+                ))
+            })?,
         )))
     }
 }
@@ -281,7 +286,7 @@ impl Smtp {
                         socket = Some(Socket::Plain(
                             TcpStream::connect((host.as_str(), port))
                                 .await
-                                .map_err(failure)?,
+                                .map_err(io_failure)?,
                         ))
                     }
                     SmtpSessionOpenYield::WantsTlsConnect { host, port } => {
@@ -289,7 +294,7 @@ impl Smtp {
                             Socket::Plain(
                                 TcpStream::connect((host.as_str(), port))
                                     .await
-                                    .map_err(failure)?,
+                                    .map_err(io_failure)?,
                             )
                             .upgrade(connector, &host)
                             .await?,
@@ -313,7 +318,7 @@ impl Smtp {
                             .ok_or_else(|| MailError::new("mail_tls_failed"))?
                             .read(&mut bytes)
                             .await
-                            .map_err(failure)?;
+                            .map_err(io_failure)?;
                         budget = budget
                             .checked_sub(n)
                             .ok_or_else(|| MailError::new("mail_response_too_large"))?;
@@ -324,14 +329,52 @@ impl Smtp {
                         .ok_or_else(|| MailError::new("mail_tls_failed"))?
                         .write(&bytes)
                         .await
-                        .map_err(failure)?,
+                        .map_err(io_failure)?,
                 },
             }
         }
     }
 }
-impl SmtpClientAsync for Smtp {
-    async fn run<C, T, E>(&mut self, mut coroutine: C) -> Result<T, SmtpClientError>
+impl Smtp {
+    /// MAIL FROM, one RCPT TO per recipient, then DATA. `phase` reaches
+    /// `Reply` once the whole message is written, and `Refused` when the
+    /// server then refuses it.
+    pub(super) async fn transmit(
+        &mut self,
+        from: SmtpReversePath<'static>,
+        recipients: Vec<SmtpForwardPath<'static>>,
+        message: Vec<u8>,
+        phase: &mut SendPhase,
+    ) -> Result<(), SmtpClientError> {
+        *phase = SendPhase::Envelope;
+        self.mail(from, Vec::new()).await?;
+        for recipient in recipients {
+            self.rcpt(recipient, Vec::new()).await?;
+        }
+        *phase = SendPhase::Data;
+        // SmtpData writes its command, then the whole message in one write.
+        // The phase moves as that write completes, so a caller that times
+        // this out still sees it.
+        let mut writes = 0;
+        let result = self
+            .pump(SmtpData::new(message), || {
+                writes += 1;
+                if writes == 2 {
+                    *phase = SendPhase::Reply;
+                }
+            })
+            .await;
+        if let Err(SmtpClientError::Data(SmtpDataError::BodyRejected { .. })) = &result {
+            *phase = SendPhase::Refused;
+        }
+        result
+    }
+
+    async fn pump<C, T, E>(
+        &mut self,
+        mut coroutine: C,
+        mut written: impl FnMut() + Send,
+    ) -> Result<T, SmtpClientError>
     where
         C: SmtpCoroutine<Yield = SmtpYield, Return = Result<T, E>> + Send,
         T: Send,
@@ -348,7 +391,8 @@ impl SmtpClientAsync for Smtp {
                 match state {
                     SmtpCoroutineState::Complete(r) => return r.map_err(Into::into),
                     SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
-                        self.socket.write(&bytes).await?
+                        self.socket.write(&bytes).await?;
+                        written();
                     }
                     SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                         let n = self.socket.read(&mut bytes).await?;
@@ -360,5 +404,16 @@ impl SmtpClientAsync for Smtp {
         })
         .await
         .map_err(|_| SmtpClientError::Io(io::Error::new(io::ErrorKind::TimedOut, "mail timeout")))?
+    }
+}
+impl SmtpClientAsync for Smtp {
+    async fn run<C, T, E>(&mut self, coroutine: C) -> Result<T, SmtpClientError>
+    where
+        C: SmtpCoroutine<Yield = SmtpYield, Return = Result<T, E>> + Send,
+        T: Send,
+        E: Send,
+        SmtpClientError: From<E>,
+    {
+        self.pump(coroutine, || {}).await
     }
 }

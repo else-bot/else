@@ -697,8 +697,12 @@ impl Email {
     }
 
     /// The mail command that sends exactly this email from its account,
-    /// with the bytes of its attachments in order.
-    pub fn send_command(&self, files: Vec<OutgoingAttachment>) -> MailCommand {
+    /// with the bytes of its attachments in order and its Message-ID.
+    pub fn send_command(
+        &self,
+        files: Vec<OutgoingAttachment>,
+        message_id: Option<String>,
+    ) -> MailCommand {
         MailCommand::Send {
             draft: Draft {
                 to: self.to.clone(),
@@ -708,12 +712,23 @@ impl Email {
                 body: self.body.clone(),
                 attachments: files,
                 reply_to: self.reply_to.clone(),
+                message_id,
             },
         }
     }
 
+    /// The Message-ID every send of draft `draft_id` carries, at the
+    /// sender's domain, so a retry can find an earlier copy in Sent.
+    pub fn message_id(&self, draft_id: Uuid) -> String {
+        let domain = self
+            .from
+            .rsplit_once('@')
+            .map_or("else.bot", |(_, domain)| domain);
+        format!("draft-{}@{domain}", draft_id.simple())
+    }
+
     fn connectable(self) -> Result<Self, &'static str> {
-        if self.account_id.is_some() && self.send_command(Vec::new()).validate().is_err() {
+        if self.account_id.is_some() && self.send_command(Vec::new(), None).validate().is_err() {
             return Err(
                 "an email from a connected account has 1 to 50 bare addresses \
                         (name@example.com) and a body of at most 32000 bytes",
@@ -1009,7 +1024,7 @@ mod tests {
         assert_eq!(email.from, "owner@example.com");
         assert_eq!(email.account_id, Some(account));
         assert_eq!(email.reply_to.as_ref().map(|m| m.uid), Some(42));
-        let MailCommand::Send { draft } = email.send_command(Vec::new()) else {
+        let MailCommand::Send { draft } = email.send_command(Vec::new(), None) else {
             panic!("a send");
         };
         assert_eq!(

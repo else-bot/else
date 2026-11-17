@@ -208,6 +208,10 @@ pub struct Draft {
     /// its recipients or subject.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<MessageRef>,
+    /// The Message-ID header, without angle brackets. An approved draft
+    /// keeps one across retries, so its Sent copy can be found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,6 +288,11 @@ pub enum MailCommand {
     DeleteFolder {
         folder: String,
     },
+    /// Whether the Sent folder holds a message with this Message-ID. Only
+    /// the server calls it, before it sends an uncertain draft again.
+    FindSent {
+        message_id: String,
+    },
 }
 /// `send: true`, the only value reply and forward accept: they send at once,
 /// and a draft for the owner goes to a `draft_email` card, not the mailbox.
@@ -319,7 +328,11 @@ impl MailCommand {
     pub fn mutates(&self) -> bool {
         !matches!(
             self,
-            Self::Folders | Self::Search { .. } | Self::Read { .. } | Self::OpenAttachments { .. }
+            Self::Folders
+                | Self::Search { .. }
+                | Self::Read { .. }
+                | Self::OpenAttachments { .. }
+                | Self::FindSent { .. }
         )
     }
     pub fn sends(&self) -> bool {
@@ -350,21 +363,105 @@ pub struct Scan {
     pub more: bool,
 }
 
+/// How far a send got. Only a send that wrote the whole message and then
+/// lost the server's reply may have gone out; every earlier failure, and a
+/// refusal of the written message, sent nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum SendPhase {
+    /// Composing the message, or reading the one it answers.
+    Prepare,
+    /// Connecting, TLS, and signing in.
+    Connect,
+    /// MAIL FROM and RCPT TO.
+    Envelope,
+    /// The DATA command and writing the message.
+    Data,
+    /// The whole message was written; waiting for the server's reply.
+    Reply,
+    /// The server refused the written message.
+    Refused,
+}
+
+impl SendPhase {
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+
+    pub fn may_have_sent(self) -> bool {
+        self == Self::Reply
+    }
+
+    fn during(self) -> &'static str {
+        match self {
+            Self::Prepare => "while preparing the message",
+            Self::Connect => "while connecting and signing in",
+            Self::Envelope => "while naming the sender and recipients",
+            Self::Data => "while sending the message",
+            Self::Reply => "while waiting for the server's reply after the whole message was sent",
+            Self::Refused => "after the whole message was sent",
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("{code}{}", .detail.map(|d| format!(": {d}")).unwrap_or_default())]
 pub struct MailError {
     pub code: &'static str,
     /// Which field failed and its allowed values, for the bot to correct.
     pub detail: Option<&'static str>,
+    /// Set on a failed send: how far it got.
+    pub phase: Option<SendPhase>,
+    /// What went wrong, in words safe to log and show the owner: never
+    /// message content or credentials.
+    pub cause: Option<String>,
 }
 impl MailError {
     pub fn new(code: &'static str) -> Self {
-        Self { code, detail: None }
+        Self {
+            code,
+            detail: None,
+            phase: None,
+            cause: None,
+        }
     }
     pub fn detail(self, detail: &'static str) -> Self {
         Self {
             detail: Some(detail),
             ..self
+        }
+    }
+    pub fn cause(self, cause: impl Into<String>) -> Self {
+        Self {
+            cause: Some(cause.into()),
+            ..self
+        }
+    }
+    pub fn at(self, phase: SendPhase) -> Self {
+        Self {
+            phase: Some(phase),
+            ..self
+        }
+    }
+    /// A send that failed this way may still have reached its recipients.
+    pub fn may_have_sent(&self) -> bool {
+        self.phase.is_some_and(SendPhase::may_have_sent)
+    }
+    /// Why it failed, for the owner: "the server closed the connection
+    /// while waiting for the server's reply after the whole message was sent".
+    pub fn reason(&self) -> String {
+        let cause = self.cause.as_deref().unwrap_or(match self.code {
+            "mail_timeout" => "the mail server timed out",
+            AUTHENTICATION_FAILED => "the mail server rejected the sign-in",
+            REAUTHENTICATION_REQUIRED => "the account needs a new sign-in",
+            "mail_tls_failed" => "the secure connection failed",
+            "mail_transport_failed" => "the connection to the mail server failed",
+            code => code,
+        });
+        match self.phase {
+            Some(phase) => format!("{cause} {}", phase.during()),
+            None => cause.to_owned(),
         }
     }
 }

@@ -46,6 +46,7 @@ pub(super) fn reply(
             body: body.to_owned(),
             attachments: Vec::new(),
             reply_to: None,
+            message_id: None,
         },
         thread(parsed),
     ))
@@ -142,6 +143,9 @@ fn build(
         .text_body(draft.body.clone());
     if !draft.cc.is_empty() {
         builder = builder.cc(draft.cc.clone());
+    }
+    if let Some(id) = &draft.message_id {
+        builder = builder.message_id(id.clone());
     }
     let mut attachment_bytes = 0;
     if draft.attachments.len() > 10 {

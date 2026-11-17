@@ -46,6 +46,9 @@ async fn harness_in(mail: Option<Arc<FakeMail>>, projects: Option<&std::path::Pa
 struct FakeMail {
     commands: std::sync::Mutex<Vec<MailCommand>>,
     connection_lost: std::sync::atomic::AtomicBool,
+    fail_at: std::sync::Mutex<Option<SendPhase>>,
+    in_sent: std::sync::atomic::AtomicBool,
+    search_fails: std::sync::atomic::AtomicBool,
 }
 
 impl FakeMail {
@@ -59,6 +62,22 @@ impl FakeMail {
                 _ => None,
             })
             .collect()
+    }
+
+    fn searches(&self) -> Vec<String> {
+        self.commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                MailCommand::FindSent { message_id } => Some(message_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn fail_at(&self, phase: Option<SendPhase>) {
+        *self.fail_at.lock().unwrap() = phase;
     }
 }
 
@@ -74,11 +93,20 @@ impl MailTransport for FakeMail {
         command: &MailCommand,
     ) -> Result<Value, MailError> {
         self.commands.lock().unwrap().push(command.clone());
-        if self
-            .connection_lost
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        let flag = |f: &std::sync::atomic::AtomicBool| f.load(std::sync::atomic::Ordering::SeqCst);
+        if let MailCommand::FindSent { .. } = command {
+            if flag(&self.search_fails) {
+                return Err(MailError::new("mail_timeout"));
+            }
+            return Ok(json!({ "found": flag(&self.in_sent), "folder": "Sent" }));
+        }
+        if flag(&self.connection_lost) {
             return Err(MailError::new("connection_lost"));
+        }
+        if let Some(phase) = *self.fail_at.lock().unwrap() {
+            return Err(MailError::new("mail_transport_failed")
+                .cause("the mail server closed the connection")
+                .at(phase));
         }
         Ok(json!({ "sent": true }))
     }
@@ -1447,19 +1475,22 @@ async fn uncertain_revoked_and_revised_connected_emails_never_send_twice() {
     permit(&app, account, &main, false).await;
     let revoked = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
     let revoked = tool_text(&revoked);
-    assert_eq!(revoked["status"], "failed", "{revoked}");
+    assert_eq!(
+        revoked["status"], "uncertain",
+        "the earlier send stays uncertain: {revoked}"
+    );
     assert!(
         revoked["detail"]
             .as_str()
             .unwrap()
-            .contains("Nothing was sent"),
+            .contains("was not searched: mail_forbidden. Nothing was sent again"),
         "{revoked}"
     );
     assert_eq!(mail.sends().len(), 1, "a revoked account sends nothing");
     wait(&app, second, "completed").await;
 
     permit(&app, account, &main, true).await;
-    let (third, token) = running(
+    let (_, token) = running(
         &app,
         &main,
         "[synthetic:slow] Make it shorter.",
@@ -1480,20 +1511,13 @@ async fn uncertain_revoked_and_revised_connected_emails_never_send_twice() {
     let mut revision = connected_reply(account);
     revision["body"] = json!("Friday works.");
     revision["replaces"] = json!(id);
-    let revised = draft(&app, &token, revision).await;
-    wait(&app, third, "waiting").await;
-    let card = shown(&app, &main, third).await[0].clone();
-    assert_eq!(card["id"], revised.to_string());
-    assert_eq!(card["status"], "pending", "a revision is approved afresh");
-    assert_eq!(card["content"]["account_id"], account.to_string());
-    owner_action(&app, &main, revised, "approve", json!({ "version": 1 })).await;
-    wait(&app, third, "running").await;
-    let token = grant(&app, third).await;
-    let sent = tool(&app, &token, "send_draft", json!({ "draft_id": revised })).await;
-    assert_eq!(tool_text(&sent)["status"], "sent", "{}", sent.body);
-    let sends = mail.sends();
-    assert_eq!(sends.len(), 2);
-    assert_eq!(sends[1].body, "Friday works.");
+    let revised = tool(&app, &token, "draft_email", revision).await;
+    assert_eq!(
+        refusal(&revised),
+        "DRAFT_SETTLED: the draft is uncertain",
+        "an email that may have gone out is never revised into a second send"
+    );
+    assert_eq!(mail.sends().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1543,7 +1567,7 @@ async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_e
                 bot,
                 turn,
                 action_id,
-                &email.send_command(Vec::new()),
+                &email.send_command(Vec::new(), None),
             )
             .await
             .unwrap();
@@ -2739,4 +2763,386 @@ async fn a_chat_approval_of_a_draft_with_files_needs_the_files_the_owner_saw() {
     let sent = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
     assert_eq!(tool_text(&sent)["status"], "sent", "{}", sent.body);
     assert_eq!(mail.sends()[0].attachments.len(), 1);
+}
+
+/// Starts a request whose owner message approves the open draft `id`, and
+/// confirms that approval.
+async fn approve_again(app: &TestApp, bot: &str, id: Uuid) -> (Uuid, String) {
+    let (turn, token) = running(
+        app,
+        bot,
+        "[synthetic:slow] Send it again.",
+        Some(json!({ "id": id, "version": 1 })),
+    )
+    .await;
+    let confirmed = tool(
+        app,
+        &token,
+        "confirm_draft_approval",
+        json!({ "draft_id": id }),
+    )
+    .await;
+    assert_eq!(
+        tool_text(&confirmed)["status"],
+        "approved",
+        "{}",
+        confirmed.body
+    );
+    (turn, token)
+}
+
+/// A connected reply, approved on its card and claimed by a running request.
+async fn approved_connected_reply(app: &TestApp, bot: &str, account: Uuid) -> (Uuid, Uuid, String) {
+    let (turn, token) = running(app, bot, SLOW, None).await;
+    let id = draft(app, &token, connected_reply(account)).await;
+    wait(app, turn, "waiting").await;
+    owner_action(app, bot, id, "approve", json!({ "version": 1 })).await;
+    wait(app, turn, "running").await;
+    (id, turn, grant(app, turn).await)
+}
+
+async fn action_statuses(app: &TestApp, account: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT status FROM connector_actions WHERE account_id = ?1 ORDER BY created_at, rowid",
+    )
+    .bind(account)
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_that_stops_before_the_message_is_written_fails_with_its_reason() {
+    let mail = Arc::new(FakeMail::default());
+    mail.fail_at(Some(SendPhase::Envelope));
+    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let main = app.main_bot().await;
+    let account = connect(&app, &main, "main@owner.example", true).await;
+    let (id, first, token) = approved_connected_reply(&app, &main, account).await;
+
+    let refused = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    assert_eq!(refused["status"], "failed", "{refused}");
+    assert_eq!(
+        refused["detail"],
+        "Nothing was sent: the mail server closed the connection while naming the sender and \
+         recipients.",
+    );
+    assert_eq!(refused["sends"][0]["phase"], "envelope", "{refused}");
+    assert_eq!(action_statuses(&app, account).await, ["failed"]);
+    wait(&app, first, "completed").await;
+
+    mail.fail_at(None);
+    let (_, token) = approve_again(&app, &main, id).await;
+    let sent = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    assert_eq!(sent["status"], "sent", "{sent}");
+    assert!(
+        mail.searches().is_empty(),
+        "nothing was sent, so Sent is not searched"
+    );
+    let sends = mail.sends();
+    assert_eq!(sends.len(), 2);
+    let message_id = format!("draft-{}@owner.example", id.simple());
+    assert_eq!(sends[0].message_id.as_deref(), Some(message_id.as_str()));
+    assert_eq!(
+        sends[1].message_id, sends[0].message_id,
+        "a retry keeps its Message-ID"
+    );
+    assert_eq!(sent["sends"].as_array().unwrap().len(), 2, "{sent}");
+    assert_eq!(
+        action_statuses(&app, account).await,
+        ["failed", "succeeded"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_uncertain_send_found_in_sent_is_never_sent_again() {
+    let mail = Arc::new(FakeMail::default());
+    mail.fail_at(Some(SendPhase::Reply));
+    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let main = app.main_bot().await;
+    let account = connect(&app, &main, "main@owner.example", true).await;
+    let (id, first, token) = approved_connected_reply(&app, &main, account).await;
+
+    let lost = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    assert_eq!(lost["status"], "uncertain", "{lost}");
+    assert!(
+        lost["detail"].as_str().unwrap().starts_with(
+            "It may have been sent: the mail server closed the connection while waiting for the \
+             server's reply after the whole message was sent."
+        ),
+        "{lost}"
+    );
+    wait(&app, first, "completed").await;
+
+    mail.fail_at(None);
+    mail.search_fails
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (second, token) = approve_again(&app, &main, id).await;
+    let unsearched = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    assert_eq!(unsearched["status"], "uncertain", "{unsearched}");
+    assert!(
+        unsearched["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("Its Sent folder was not searched: the mail server timed out."),
+        "{unsearched}"
+    );
+    assert_eq!(mail.sends().len(), 1, "a failed search sends nothing");
+    wait(&app, second, "completed").await;
+
+    mail.search_fails
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    mail.in_sent
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (_, token) = approve_again(&app, &main, id).await;
+    let found = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    assert_eq!(found["status"], "sent", "{found}");
+    assert!(
+        found["detail"]
+            .as_str()
+            .unwrap()
+            .contains("already holds it"),
+        "{found}"
+    );
+    let message_id = format!("draft-{}@owner.example", id.simple());
+    assert_eq!(mail.searches(), [message_id.clone(), message_id]);
+    assert_eq!(mail.sends().len(), 1, "found in Sent, so never sent again");
+    assert_eq!(action_statuses(&app, account).await, ["succeeded"]);
+    let receipt = journaled(&app, &main, id).await;
+    assert_eq!(receipt["status"], "sent");
+    assert_eq!(
+        receipt["delivery"]["action_id"], found["sends"][0]["action_id"],
+        "the card names the send that went out"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_uncertain_send_missing_from_sent_waits_for_a_new_approval() {
+    let mail = Arc::new(FakeMail::default());
+    mail.fail_at(Some(SendPhase::Reply));
+    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let main = app.main_bot().await;
+    let account = connect(&app, &main, "main@owner.example", true).await;
+    let (id, first, token) = approved_connected_reply(&app, &main, account).await;
+    let lost = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    assert_eq!(lost["status"], "uncertain", "{lost}");
+    wait(&app, first, "completed").await;
+
+    mail.fail_at(None);
+    let (second, token) = approve_again(&app, &main, id).await;
+    let absent = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    assert_eq!(absent["status"], "uncertain", "{absent}");
+    assert!(
+        absent["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("Its Sent folder does not hold it"),
+        "{absent}"
+    );
+    let again = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    assert_eq!(
+        again["status"], "uncertain",
+        "the same approval never sends it"
+    );
+    let reconfirmed = tool(
+        &app,
+        &token,
+        "confirm_draft_approval",
+        json!({ "draft_id": id }),
+    )
+    .await;
+    assert_eq!(
+        refusal(&reconfirmed),
+        "DRAFT_SETTLED: the draft is uncertain",
+        "the owner message that led to the search cannot approve it again"
+    );
+    let earlier: Uuid = absent["sends"][0]["action_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let stale = else_api::db::outgoing_drafts::record_sent_check(
+        &app.db.pool,
+        id,
+        Uuid::new_v4(),
+        &[earlier],
+        Ok(else_api::db::outgoing_drafts::SentCheck::Found),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stale.status.as_str(),
+        "uncertain",
+        "a search for another claim changes nothing"
+    );
+    assert_eq!(action_statuses(&app, account).await, ["uncertain"]);
+    assert_eq!(mail.sends().len(), 1);
+    assert_eq!(mail.searches().len(), 1);
+    wait(&app, second, "completed").await;
+
+    let (_, token) = approve_again(&app, &main, id).await;
+    let sent = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    assert_eq!(sent["status"], "sent", "{sent}");
+    assert_eq!(
+        mail.searches().len(),
+        1,
+        "the owner approved after the search"
+    );
+    let sends = mail.sends();
+    assert_eq!(sends.len(), 2);
+    assert_eq!(
+        sends[1].message_id, sends[0].message_id,
+        "a duplicate is recognisable"
+    );
+    let attempts = sent["sends"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2, "{sent}");
+    assert_eq!(
+        (
+            &attempts[0]["status"],
+            &attempts[0]["phase"],
+            &attempts[0]["sent_check"]
+        ),
+        (&json!("uncertain"), &json!("reply"), &json!("absent"))
+    );
+    assert_eq!(attempts[1]["status"], "succeeded");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsent_retry_keeps_the_earlier_send_uncertain() {
+    let mail = Arc::new(FakeMail::default());
+    mail.fail_at(Some(SendPhase::Reply));
+    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let main = app.main_bot().await;
+    let account = connect(&app, &main, "main@owner.example", true).await;
+    let (id, first, token) = approved_connected_reply(&app, &main, account).await;
+    let lost = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    assert_eq!(lost["status"], "uncertain", "{lost}");
+    wait(&app, first, "completed").await;
+
+    let (second, _) = approve_again(&app, &main, id).await;
+    wait(&app, second, "completed").await;
+    let receipt = journaled(&app, &main, id).await;
+    assert_eq!(receipt["status"], "uncertain", "{receipt}");
+    assert_eq!(
+        receipt["delivery"]["action_id"], lost["sends"][0]["action_id"],
+        "the card names the send that may have gone out"
+    );
+
+    let (_, token) = running(
+        &app,
+        &main,
+        "[synthetic:slow] Make it shorter.",
+        Some(json!({ "id": id, "version": 1 })),
+    )
+    .await;
+    let mut revision = connected_reply(account);
+    revision["replaces"] = json!(id);
+    let revised = tool(&app, &token, "draft_email", revision).await;
+    assert_eq!(refusal(&revised), "DRAFT_SETTLED: the draft is uncertain");
+    assert_eq!(mail.sends().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_uncertain_send_without_a_message_id_is_never_sent_again() {
+    let mail = Arc::new(FakeMail::default());
+    mail.fail_at(Some(SendPhase::Reply));
+    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let main = app.main_bot().await;
+    let account = connect(&app, &main, "main@owner.example", true).await;
+    let (id, first, token) = approved_connected_reply(&app, &main, account).await;
+    let lost = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    assert_eq!(lost["status"], "uncertain", "{lost}");
+    wait(&app, first, "completed").await;
+    sqlx::query("UPDATE draft_mail_sends SET message_id = NULL")
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+
+    mail.fail_at(None);
+    for _ in 0..2 {
+        let (turn, token) = approve_again(&app, &main, id).await;
+        let blocked = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+        assert_eq!(blocked["status"], "uncertain", "{blocked}");
+        assert!(
+            blocked["detail"].as_str().unwrap().starts_with(
+                "Its Sent folder was not searched: an earlier send carried no Message-ID"
+            ),
+            "{blocked}"
+        );
+        wait(&app, turn, "completed").await;
+    }
+    assert!(mail.searches().is_empty());
+    assert_eq!(mail.sends().len(), 1, "no approval sends it again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_failing_before_its_send_keeps_the_earlier_send_uncertain() {
+    use else_api::app::outgoing::Delivery;
+    use else_api::db::outgoing_drafts;
+    let mail = Arc::new(FakeMail::default());
+    mail.fail_at(Some(SendPhase::Reply));
+    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let main = app.main_bot().await;
+    let account = connect(&app, &main, "main@owner.example", true).await;
+    let (id, first, token) = approved_connected_reply(&app, &main, account).await;
+    let lost = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    let earlier = lost["sends"][0]["action_id"].clone();
+    wait(&app, first, "completed").await;
+
+    let (second, _) = approve_again(&app, &main, id).await;
+    let delivery = Delivery::Mail {
+        account_id: account,
+        action_id: Uuid::new_v4(),
+    };
+    outgoing_drafts::claim(&app.db.pool, second, id, &delivery)
+        .await
+        .unwrap();
+    let failed = outgoing_drafts::fail_unsent(
+        &app.db.pool,
+        id,
+        "An approved file changed. Nothing was sent.",
+    )
+    .await
+    .unwrap();
+    assert_eq!(failed.status.as_str(), "uncertain");
+    assert_eq!(
+        failed.result_detail.as_deref(),
+        Some(
+            "An approved file changed. Nothing was sent. An earlier send of it may have gone out."
+        )
+    );
+    assert_eq!(
+        json!(failed.delivery.unwrap().0)["action_id"],
+        earlier,
+        "the draft names the send that may have gone out"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_after_the_earlier_send_succeeded_sends_nothing() {
+    let mail = Arc::new(FakeMail::default());
+    mail.fail_at(Some(SendPhase::Reply));
+    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let main = app.main_bot().await;
+    let account = connect(&app, &main, "main@owner.example", true).await;
+    let (id, first, token) = approved_connected_reply(&app, &main, account).await;
+    let lost = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    assert_eq!(lost["status"], "uncertain", "{lost}");
+    wait(&app, first, "completed").await;
+
+    mail.fail_at(None);
+    let (_, token) = approve_again(&app, &main, id).await;
+    sqlx::query("UPDATE connector_actions SET status = 'succeeded' WHERE account_id = ?1")
+        .bind(account)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let sent = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    assert_eq!(sent["status"], "sent", "{sent}");
+    assert_eq!(
+        sent["detail"],
+        "An earlier send of it went out. It was not sent again."
+    );
+    assert_eq!(mail.sends().len(), 1);
+    assert!(mail.searches().is_empty());
 }

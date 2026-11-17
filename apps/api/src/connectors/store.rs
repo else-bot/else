@@ -1384,6 +1384,43 @@ pub async fn event_account(pool: &SqlitePool, turn_id: Uuid) -> Result<Option<Uu
     )
 }
 
+/// A send whose message was found in the account's Sent folder went out.
+/// An uncertain action becomes succeeded. Returns whether the action now
+/// stands as sent: also true when it already succeeded or is still
+/// dispatching, false when it failed.
+pub async fn found_in_sent(
+    conn: &mut SqliteConnection,
+    account_id: Uuid,
+    action_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let receipt = serde_json::json!({
+        "action_id": action_id,
+        "status": "succeeded",
+        "result": {"sent": true, "found_in_sent": true},
+    });
+    sqlx::query(
+        "UPDATE connector_actions SET status = 'succeeded',
+             result = json_set(?3, '$.earlier', json(coalesce(result, 'null')))
+         WHERE account_id = ?1 AND action_id = ?2 AND status = 'uncertain'",
+    )
+    .bind(account_id)
+    .bind(action_id)
+    .bind(receipt.to_string())
+    .execute(&mut *conn)
+    .await?;
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM connector_actions WHERE account_id = ?1 AND action_id = ?2",
+    )
+    .bind(account_id)
+    .bind(action_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(matches!(
+        status.as_deref(),
+        Some("succeeded" | "dispatching")
+    ))
+}
+
 async fn uncertain_in(conn: &mut SqliteConnection) -> Result<u64, sqlx::Error> {
     Ok(sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE connector_actions SET status = 'uncertain', finished_at = {NOW} WHERE status = 'dispatching'"

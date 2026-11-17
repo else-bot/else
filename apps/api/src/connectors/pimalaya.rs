@@ -34,6 +34,7 @@ use io_imap::types::{
 use io_sasl::{mechanism::Sasl, rfc4616::plain::SaslPlainCreds, xoauth2::SaslXoauth2Creds};
 use io_smtp::client::{SmtpClientAsync, SmtpClientError};
 use io_smtp::coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield};
+use io_smtp::rfc5321::data::{SmtpData, SmtpDataError};
 use io_smtp::rfc5321::{
     SmtpDomain, SmtpEhloDomain, SmtpForwardPath, SmtpLocalPart, SmtpMailbox, SmtpReversePath,
 };
@@ -411,9 +412,18 @@ impl MailTransport for Pimalaya {
         auth: &Auth,
         command: &MailCommand,
     ) -> Result<Value, MailError> {
-        timeout(Duration::from_secs(120), execute(config, auth, command))
-            .await
-            .map_err(|_| MailError::new("mail_timeout"))?
+        let mut phase = SendPhase::Prepare;
+        let result = timeout(
+            Duration::from_secs(120),
+            execute(config, auth, command, &mut phase),
+        )
+        .await
+        .unwrap_or_else(|_| Err(MailError::new("mail_timeout")));
+        if command.sends() {
+            result.map_err(|error| error.at(phase))
+        } else {
+            result
+        }
     }
     async fn scan(
         &self,
@@ -555,15 +565,18 @@ async fn scan(client: &mut Imap, cursor: Option<&Cursor>) -> Result<Scan, MailEr
     })
 }
 
+/// Runs one command. A send advances `phase` as it goes, so a caller that
+/// times it out still knows how far it got.
 async fn execute(
     config: &MailConfig,
     auth: &Auth,
     command: &MailCommand,
+    phase: &mut SendPhase,
 ) -> Result<Value, MailError> {
     if let MailCommand::Send { draft } = command
         && draft.reply_to.is_none()
     {
-        return send(config, auth, draft, None).await;
+        return send(config, auth, draft, None, phase).await;
     }
     let mut client = Imap::open(&config.imap, auth).await?;
     match command {
@@ -620,7 +633,7 @@ async fn execute(
                 }
                 None => None,
             };
-            send(config, auth, draft, thread).await
+            send(config, auth, draft, thread, phase).await
         }
         MailCommand::Reply {
             message,
@@ -633,7 +646,7 @@ async fn execute(
                 .parse(&raw)
                 .ok_or_else(|| MailError::new("invalid_email_message"))?;
             let (draft, headers) = reply(&parsed, &config.address, body, *all)?;
-            send(config, auth, &draft, Some(headers)).await
+            send(config, auth, &draft, Some(headers), phase).await
         }
         MailCommand::Forward {
             message,
@@ -651,6 +664,7 @@ async fn execute(
                 bcc: Vec::new(),
                 attachments: Vec::new(),
                 reply_to: None,
+                message_id: None,
                 subject: format!("Fwd: {}", parsed.subject().unwrap_or_default()),
                 body: format!(
                     "{body}\n\n---------- Forwarded message ----------\nFrom: {}\nSubject: {}\n\n{}",
@@ -660,7 +674,7 @@ async fn execute(
                 ),
             };
             let bytes = compose_forward(&config.address, &draft, &raw)?;
-            send_prepared(config, auth, &draft, bytes).await
+            send_prepared(config, auth, &draft, bytes, phase).await
         }
         MailCommand::CreateFolder { folder } => {
             client.create(mailbox(folder)?).await.map_err(failure)?;
@@ -676,6 +690,24 @@ async fn execute(
         MailCommand::DeleteFolder { folder } => {
             client.delete(mailbox(folder)?).await.map_err(failure)?;
             Ok(json!({"deleted":true}))
+        }
+        MailCommand::FindSent { message_id } => {
+            client
+                .examine(mailbox(&config.sent_folder)?, Default::default())
+                .await
+                .map_err(failure)?;
+            let key = SearchKey::Header(
+                "Message-ID".try_into().map_err(invalid)?,
+                message_id.clone().try_into().map_err(invalid)?,
+            );
+            let found = client
+                .search(
+                    Vec1::try_from(vec![key]).expect("one search key"),
+                    ImapMessageSearchOptions { uid: true },
+                )
+                .await
+                .map_err(failure)?;
+            Ok(json!({"found": !found.is_empty(), "folder": config.sent_folder}))
         }
     }
 }
@@ -755,9 +787,10 @@ async fn send(
     auth: &Auth,
     draft: &Draft,
     reply: Option<ThreadHeaders>,
+    phase: &mut SendPhase,
 ) -> Result<Value, MailError> {
     let message = compose(&config.address, draft, reply)?;
-    send_prepared(config, auth, draft, message).await
+    send_prepared(config, auth, draft, message, phase).await
 }
 
 async fn send_prepared(
@@ -765,6 +798,7 @@ async fn send_prepared(
     auth: &Auth,
     draft: &Draft,
     message: Vec<u8>,
+    phase: &mut SendPhase,
 ) -> Result<Value, MailError> {
     let from = SmtpReversePath::SmtpMailbox(smtp_address(&config.address)?);
     let recipients = draft
@@ -774,11 +808,12 @@ async fn send_prepared(
         .chain(&draft.bcc)
         .map(|a| smtp_address(a).map(SmtpForwardPath))
         .collect::<Result<Vec<_>, _>>()?;
+    *phase = SendPhase::Connect;
     let mut client = Smtp::open(&config.smtp, auth).await?;
     client
-        .send(from, recipients, message.clone(), Default::default())
+        .transmit(from, recipients, message.clone(), phase)
         .await
-        .map_err(failure)?;
+        .map_err(smtp_failure)?;
     let sent_copy_saved = if matches!(config.provider, Provider::Gmail | Provider::Microsoft) {
         None
     } else {
@@ -802,6 +837,69 @@ async fn send_prepared(
         )
     };
     Ok(json!({"sent":true, "sent_copy_saved":sent_copy_saved}))
+}
+
+/// Error text with no line breaks or control bytes, bounded. Only for
+/// errors that never quote a message: TLS and I/O.
+fn safe_text(error: &impl std::fmt::Display) -> String {
+    error
+        .to_string()
+        .chars()
+        .map(|c| if c.is_ascii_graphic() { c } else { ' ' })
+        .take(160)
+        .collect()
+}
+
+/// A connection failure, with its kind as the cause.
+fn io_failure(error: io::Error) -> MailError {
+    let (code, cause) = match error.kind() {
+        io::ErrorKind::TimedOut => ("mail_timeout", "the mail server stopped responding"),
+        io::ErrorKind::ConnectionRefused => (
+            "mail_transport_failed",
+            "the mail server refused the connection",
+        ),
+        io::ErrorKind::UnexpectedEof
+        | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::BrokenPipe => (
+            "mail_transport_failed",
+            "the mail server closed the connection",
+        ),
+        io::ErrorKind::NotFound
+        | io::ErrorKind::HostUnreachable
+        | io::ErrorKind::NetworkUnreachable => (
+            "mail_transport_failed",
+            "the mail server could not be reached",
+        ),
+        _ => (
+            "mail_transport_failed",
+            "the connection to the mail server failed",
+        ),
+    };
+    MailError::new(code).cause(cause)
+}
+
+/// An SMTP failure. A refusal keeps only the server's reply code: its
+/// text can quote the message.
+fn smtp_failure(error: SmtpClientError) -> MailError {
+    use io_smtp::rfc5321::{mail::SmtpMailError, rcpt::SmtpRcptError};
+    let refused = |what: &str, code: u16| {
+        MailError::new("mail_rejected")
+            .cause(format!("the mail server refused {what} with code {code}"))
+    };
+    match error {
+        SmtpClientError::Io(error) => io_failure(error),
+        SmtpClientError::Mail(SmtpMailError::Rejected { code, .. }) => refused("the sender", code),
+        SmtpClientError::Rcpt(SmtpRcptError::Rejected { code, .. }) => refused("a recipient", code),
+        SmtpClientError::Data(SmtpDataError::CommandRejected { code, .. }) => {
+            refused("to take the message", code)
+        }
+        SmtpClientError::Data(SmtpDataError::BodyRejected { code, .. }) => {
+            refused("the message", code)
+        }
+        _ => MailError::new("mail_transport_failed")
+            .cause("the mail server's reply was not understood"),
+    }
 }
 
 #[cfg(test)]

@@ -248,6 +248,18 @@ fn draft(d: &Draft) -> Rule {
     body(&d.body)
 }
 
+/// A Message-ID this server generates: `left@domain`, printable ASCII
+/// with no brackets, quotes or spaces.
+fn message_id(id: &str) -> bool {
+    id.len() <= 255
+        && id
+            .split_once('@')
+            .is_some_and(|(l, r)| !l.is_empty() && !r.is_empty())
+        && id
+            .bytes()
+            .all(|b| (33..=126).contains(&b) && !b"<>\"\\".contains(&b))
+}
+
 impl MailCommand {
     pub fn validate(&self) -> Result<(), MailError> {
         self.rule()
@@ -298,6 +310,10 @@ impl MailCommand {
             }
             Self::Send { draft: d } => {
                 draft(d)?;
+                ensure(
+                    d.message_id.as_deref().is_none_or(message_id),
+                    "message_id must be an addr-spec of at most 255 bytes",
+                )?;
                 d.reply_to.as_ref().map_or(Ok(()), message_ref)
             }
             Self::Reply {
@@ -322,6 +338,10 @@ impl MailCommand {
                 folder_name(f)?;
                 ensure(folder(name), "name must be 1 to 512 bytes of text")
             }
+            Self::FindSent { message_id: id } => ensure(
+                message_id(id),
+                "message_id must be an addr-spec of at most 255 bytes",
+            ),
         }
     }
 }
@@ -351,6 +371,7 @@ mod tests {
             body: String::new(),
             attachments: vec![],
             reply_to: None,
+            message_id: None,
         };
         assert_eq!(
             MailCommand::Send { draft }
@@ -414,7 +435,8 @@ mod tests {
                     subject: "hello".into(),
                     body: String::new(),
                     attachments: vec![],
-                    reply_to: None
+                    reply_to: None,
+                    message_id: None,
                 }
             }
             .allowed(&Permissions {
