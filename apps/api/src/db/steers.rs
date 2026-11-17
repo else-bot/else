@@ -115,8 +115,51 @@ pub async fn place(
     provider_id: &str,
 ) -> Result<Placement, sqlx::Error> {
     super::delegations::lock_targets_of_bot(&mut *conn, bot_id).await?;
-    let reply: Option<(Uuid, String, TurnStatus)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT t.id, t.provider_id, t.status FROM turns t
+    let Some(target) = target(conn, bot_id, conversation_id, turn_no, provider_id).await? else {
+        return Ok(Placement::Queued);
+    };
+    sqlx::query("INSERT INTO turn_steers (turn_id, into_turn_id) VALUES (?1, ?2)")
+        .bind(turn_id)
+        .bind(target.id)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query(
+        "UPDATE owner_questions SET status = 'skipped',
+             settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE turn_id = ?1 AND status = 'pending'",
+    )
+    .bind(target.id)
+    .execute(&mut *conn)
+    .await?;
+    super::computer_handoffs::skip_pending(&mut *conn, bot_id).await?;
+    if target.status == TurnStatus::Waiting {
+        super::turns::continue_waiting(&mut *conn, target.id).await?;
+    }
+    super::events::turn_changed(&mut *conn, target.bot_id, target.id).await?;
+    Ok(Placement::Joined {
+        into: target.id,
+        status: target.status,
+    })
+}
+
+/// The unfinished turn a new owner message joins, as [`place`] orders them.
+#[derive(sqlx::FromRow)]
+struct Target {
+    id: Uuid,
+    bot_id: Uuid,
+    status: TurnStatus,
+    provider_id: String,
+}
+
+async fn target(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+    conversation_id: Uuid,
+    turn_no: i64,
+    provider_id: &str,
+) -> Result<Option<Target>, sqlx::Error> {
+    let reply: Option<Target> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT t.id, t.bot_id, t.status, t.provider_id FROM turns t
          JOIN items i ON i.id = t.owner_item_id AND i.kind = 'user' AND NOT i.hidden
          WHERE t.conversation_id = ?1 AND t.turn_no < ?2 AND NOT t.deferred AND NOT {STEERED}
            AND t.status IN ('queued', 'preparing', 'sending', 'running', 'waiting')
@@ -126,53 +169,21 @@ pub async fn place(
     .bind(turn_no)
     .fetch_optional(&mut *conn)
     .await?;
-    let into = match reply {
-        Some((into, provider, status)) if provider == provider_id => Some((into, status)),
-        Some(_) => None,
-        None => {
-            let tasks: Vec<(Uuid, TurnStatus)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-                "SELECT t.id, t.status FROM delegations d JOIN turns t ON t.id = d.child_turn_id
-                     WHERE d.target_bot_id = ?1 AND d.status IN ('queued', 'running')
-                       AND d.takeover_turn_id IS NULL AND NOT {STEERED}
-                       AND t.status IN ('preparing', 'sending', 'running', 'waiting')
-                       AND {WAITS_ON_OWNER}
-                     LIMIT 2"
-            )))
-            .bind(bot_id)
-            .fetch_all(&mut *conn)
-            .await?;
-            match tasks[..] {
-                [only] => Some(only),
-                _ => None,
-            }
-        }
-    };
-    let Some((into, status)) = into else {
-        return Ok(Placement::Queued);
-    };
-    sqlx::query("INSERT INTO turn_steers (turn_id, into_turn_id) VALUES (?1, ?2)")
-        .bind(turn_id)
-        .bind(into)
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query(
-        "UPDATE owner_questions SET status = 'skipped',
-             settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE turn_id = ?1 AND status = 'pending'",
-    )
-    .bind(into)
-    .execute(&mut *conn)
-    .await?;
-    super::computer_handoffs::skip_pending(&mut *conn, bot_id).await?;
-    if status == TurnStatus::Waiting {
-        super::turns::continue_waiting(&mut *conn, into).await?;
+    if let Some(reply) = reply {
+        return Ok((reply.provider_id == provider_id).then_some(reply));
     }
-    let into_bot: Uuid = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
-        .bind(into)
-        .fetch_one(&mut *conn)
-        .await?;
-    super::events::turn_changed(&mut *conn, into_bot, into).await?;
-    Ok(Placement::Joined { into, status })
+    let mut tasks: Vec<Target> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT t.id, t.bot_id, t.status, t.provider_id FROM delegations d JOIN turns t ON t.id = d.child_turn_id
+         WHERE d.target_bot_id = ?1 AND d.status IN ('queued', 'running')
+           AND d.takeover_turn_id IS NULL AND NOT {STEERED}
+           AND t.status IN ('preparing', 'sending', 'running', 'waiting')
+           AND {WAITS_ON_OWNER}
+         LIMIT 2"
+    )))
+    .bind(bot_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok((tasks.len() == 1).then(|| tasks.remove(0)))
 }
 
 /// The pending messages steered into running turn `into`, oldest first,
