@@ -1221,3 +1221,22 @@ fn an_unfinished_turn_keeps_its_status_row_after_a_notice() {
         );
     }
 }
+
+#[test]
+fn a_message_the_reply_took_adds_no_reply_of_its_own() {
+    let mut joined = turn(11, "completed");
+    joined["steered_into"] = json!(id(10));
+    joined["steer_status"] = json!("delivered");
+    let c = conversation(
+        vec![
+            item(1, 10, "user"),
+            item(2, 11, "user"),
+            item(3, 10, "assistant"),
+        ],
+        vec![turn(10, "completed"), joined],
+    );
+    assert!(
+        !task_replies(&c).contains_key(&id(11)),
+        "the reply that took it answers both"
+    );
+}

@@ -573,6 +573,10 @@ pub struct Turn {
     /// The running reply this message joined. Absent from older servers.
     #[serde(default)]
     pub steered_into: Option<Uuid>,
+    /// How far this message got into that reply: `pending`, `sending`, or
+    /// `delivered`.
+    #[serde(default)]
+    pub steer_status: Option<String>,
     #[serde(default)]
     pub secret_requests: Vec<SecretRequest>,
     #[serde(default)]
