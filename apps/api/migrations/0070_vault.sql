@@ -1,7 +1,3 @@
--- The Vault: task secrets gain what an owner and a bot need to find the
--- right login (a description and the website it signs in to) and a record
--- of which bot used each one, when, and how. Values stay encrypted in
--- ciphertext; nothing here holds or derives from a value.
 ALTER TABLE task_secrets ADD COLUMN description TEXT NOT NULL DEFAULT ''
     CHECK (length(CAST(description AS BLOB)) <= 200);
 ALTER TABLE task_secrets ADD COLUMN website TEXT

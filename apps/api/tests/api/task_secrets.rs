@@ -158,6 +158,10 @@ impl ComputerRuntime for Guest {
                     "value": format!("({} characters)", typed.len()),
                     "added": [format!("Signed in as {typed}")] })
             .to_string()
+        } else if script.contains("else-browser") && args.contains(&"text") {
+            json!({ "url": "https://mobile.x.com/home", "title": "Home",
+                    "text": format!("Signed in as me@example.com with {PASSWORD}") })
+            .to_string()
         } else if script.contains("else-browser") && args.contains(&"snapshot") {
             json!({ "url": "https://example.com/", "title": "Projects",
                     "snapshot": "heading \"Projects\"\nbutton \"Delete project\" @kqvzb5" })
@@ -1164,7 +1168,28 @@ async fn a_vault_login_is_typed_from_stdin_only_into_its_website_and_never_shown
             .ends_with(&["type-secret".into(), "#password".into(), "x.com".into()])
     );
 
+    let later = tool(
+        &app,
+        &token,
+        "computer_browser",
+        json!({ "action": "text" }),
+    )
+    .await;
+    assert_eq!(
+        later["text"], "Signed in as [secret USERNAME] with [secret PASSWORD]",
+        "a later read of the same site hides what was filled: {later}"
+    );
+    let put = app
+        .owner(
+            "PUT",
+            "/v1/task-secrets/pin",
+            Some(json!({ "env": { "PIN": "123", "CODE": "4567" }, "website": "bank.example" })),
+        )
+        .await;
+    assert_eq!(put.status, StatusCode::CREATED);
+
     for (args, code) in [
+        (typed("pin", Some("PIN")), "SECRET_TOO_SHORT"),
         (typed("no-site", Some("PASSWORD")), "SECRET_NO_WEBSITE"),
         (typed("x-login", Some("TOTP")), "SECRET_FIELD"),
         (typed("x-login", None), "secret needs field"),
@@ -1195,7 +1220,14 @@ async fn a_vault_login_is_typed_from_stdin_only_into_its_website_and_never_shown
     )
     .await;
     let listed = app.owner("GET", "/v1/task-secrets", None).await;
-    assert_eq!(listed.body["secrets"][1]["last_used"]["use"], "command");
+    let entry = listed.body["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "x-login")
+        .unwrap()
+        .clone();
+    assert_eq!(entry["last_used"]["use"], "command", "{entry}");
     let mut conn = app.db.pool.acquire().await.unwrap();
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",

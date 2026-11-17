@@ -234,6 +234,11 @@ fn approval_card(name: &str, args: &Value, label: Option<&RefLabel>) -> (String,
             let action = text("action");
             let selector = browser_target(text("selector"), label);
             let step = match action {
+                "type" if !text("secret").is_empty() => format!(
+                    "Browser: type {}.{} from the Vault into {selector}",
+                    text("secret"),
+                    text("field")
+                ),
                 "type" => format!(
                     "Browser: type {} characters into {selector}",
                     text("text").chars().count()
@@ -533,6 +538,14 @@ mod tests {
         assert_eq!(
             context,
             "Browser: type 12 characters into textbox \"Email\" (@kqvzb7)"
+        );
+
+        let vault = json!({ "action": "type", "selector": "@kqvzb7", "secret": "x-login",
+                            "field": "PASSWORD", "effect": "external" });
+        let (_, context) = approval_card("computer_browser", &vault, Some(&email));
+        assert_eq!(
+            context,
+            "Browser: type x-login.PASSWORD from the Vault into textbox \"Email\" (@kqvzb7)"
         );
 
         let docs = label("link", "Docs", Some("/docs"));

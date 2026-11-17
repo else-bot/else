@@ -703,6 +703,34 @@ struct VaultFill {
     redaction: Vec<task_secrets::Redact>,
 }
 
+/// The Vault values a page on the result's host might show, since a page
+/// keeps what an earlier call filled. Fails closed: when the Vault cannot
+/// be read, the whole result is withheld rather than shown unredacted.
+async fn page_redaction(
+    state: &AppState,
+    result: &Value,
+) -> Result<Vec<task_secrets::Redact>, Outcome> {
+    let Some(host) = result["url"]
+        .as_str()
+        .and_then(|url| reqwest::Url::parse(url).ok())
+        .and_then(|url| url.host_str().map(str::to_owned))
+    else {
+        return Ok(Vec::new());
+    };
+    task_secrets::redaction_for_host(&state.db, state.secret_key.as_deref(), &host)
+        .await
+        .map_err(|err| {
+            tracing::warn!(error = %err, "vault redaction unavailable");
+            (
+                tool_error(
+                    "VAULT_UNAVAILABLE: the page may show a Vault value and the Vault could \
+                     not be read, so the result is withheld. The action itself ran.",
+                ),
+                None,
+            )
+        })
+}
+
 /// Look up the value `computer_browser` types for `secret` and `field`.
 /// An entry without a website cannot be typed into a page: the guest
 /// refuses every page outside the website, so a page that asks for the
@@ -717,52 +745,44 @@ async fn vault_fill(
     let Some(field) = field else {
         return refused("secret needs field, the variable to type, such as PASSWORD.".into());
     };
-    let entry = match state.db.acquire().await {
-        Ok(mut conn) => task_secrets::get(&mut conn, name).await,
-        Err(err) => Err(err),
-    };
-    let entry = match entry {
-        Ok(Some(entry)) => entry,
-        Ok(None) => {
-            return refused(format!(
-                "SECRET_UNKNOWN: there is no Vault entry named {name}; search computer_secrets."
-            ));
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, "reading a vault entry failed");
-            return refused("SECRET_UNAVAILABLE: the Vault could not be read.".into());
-        }
-    };
-    let Some(site) = entry.website else {
+    let (website, mut env) =
+        match task_secrets::login(&state.db, state.secret_key.as_deref(), name).await {
+            Ok(found) => found,
+            Err(task_secrets::SecretError::Unknown(_)) => {
+                return refused(format!(
+                    "SECRET_UNKNOWN: there is no Vault entry named {name}; search computer_secrets."
+                ));
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "vault entry unavailable");
+                return refused("SECRET_UNAVAILABLE: the Vault could not be read.".into());
+            }
+        };
+    let Some(site) = website else {
         return refused(format!(
             "SECRET_NO_WEBSITE: {name} has no website, so it is typed into no page. Ask the \
              owner to set its website in Settings > Vault."
         ));
     };
-    let mut env = match task_secrets::resolve(
-        &state.db,
-        state.secret_key.as_deref(),
-        std::slice::from_ref(&entry.name),
-    )
-    .await
-    {
-        Ok(env) => env,
-        Err(err) => {
-            tracing::warn!(error = %err, "vault entry unavailable");
-            return refused("SECRET_UNAVAILABLE: the Vault could not be read.".into());
-        }
-    };
     let redaction = env.redaction();
     let Some(at) = env.vars.iter().position(|(var, _)| *var == field) else {
+        let fields: Vec<&str> = env.vars.iter().map(|(var, _)| var.as_str()).collect();
         return refused(format!(
             "SECRET_FIELD: {name} has no field {field}; it has {}.",
-            entry.env.join(", ")
+            fields.join(", ")
         ));
     };
     let (_, value) = env.vars.swap_remove(at);
+    if value.len() < task_secrets::MIN_REDACTED {
+        return refused(format!(
+            "SECRET_TOO_SHORT: {name}.{field} is under {} bytes, so a page could show it \
+             unredacted; it is not typed. Ask the owner to sign in with computer_handoff.",
+            task_secrets::MIN_REDACTED
+        ));
+    }
     task_secrets::record_use(
         &state.db,
-        std::slice::from_ref(&entry.name),
+        &[name.to_owned()],
         grant.bot_id,
         Some(grant.turn_id),
         task_secrets::Use::Browser,
@@ -1219,11 +1239,19 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                 Ok(out) => {
                     let mut parsed: Value = serde_json::from_str(out.stdout.trim())
                         .unwrap_or_else(|_| json!({ "error": slice(&out.stderr, 0, 500).1 }));
-                    let mut log = format!("browser {action}");
-                    if let Some(fill) = &fill {
-                        parsed = task_secrets::redact_json(parsed, &fill.redaction);
-                        log = format!("browser type {} from the Vault", fill.label);
+                    let mut redaction = match fill {
+                        Some(ref fill) => fill.redaction.clone(),
+                        None => Vec::new(),
+                    };
+                    match page_redaction(state, &parsed).await {
+                        Ok(more) => redaction.extend(more),
+                        Err(outcome) => return outcome,
                     }
+                    parsed = task_secrets::redact_json(parsed, &redaction);
+                    let log = match &fill {
+                        Some(fill) => format!("browser type {} from the Vault", fill.label),
+                        None => format!("browser {action}"),
+                    };
                     if parsed.get("error").is_some() {
                         (
                             tool_error(&format!("BROWSER_ERROR: {}", parsed["error"])),

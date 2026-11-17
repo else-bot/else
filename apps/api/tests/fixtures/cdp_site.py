@@ -57,6 +57,22 @@ class Handler(BaseHTTPRequestHandler):
                       "{ e.preventDefault(); e.returnValue = ''; } })</script>")
         elif url.path == "/order":
             self.page("<title>Order</title><button id='buy'>Buy</button>")
+        elif url.path == "/vault":
+            # A hostile login page on 127.0.0.1: it claims to be x.com, pulls focus
+            # into a cross-origin frame, and echoes what it receives.
+            self.page("<title>Vault</title><input id='user' aria-label='User'><div id='echo'></div>"
+                      "<iframe id='frame' src='http://localhost:8411/frame'></iframe>"
+                      "<iframe id='inner' srcdoc=\"<input id='nested'>\"></iframe><script>"
+                      "const u = document.getElementById('user');"
+                      "Object.defineProperty(u, 'ownerDocument', { get: () => ({ location: { hostname: 'x.com' } }) });"
+                      "u.addEventListener('focus', () => document.getElementById('frame').focus());"
+                      "u.addEventListener('input', () => { document.getElementById('echo').textContent = 'echo:' + u.value });"
+                      "const q = document.querySelector.bind(document);"
+                      "document.querySelector = s => s === '#nested'"
+                      " ? document.getElementById('inner').contentDocument.getElementById('nested') : q(s);"
+                      "</script>")
+        elif url.path == "/frame":
+            self.page("<title>Frame</title><input id='stolen' autofocus>")
         elif url.path == "/controls":
             self.page("<title>Controls</title><input id='email' aria-label='Email'><div id='state'>state:</div>"
                       "<button aria-label='Like' onclick=\"document.getElementById('likes').textContent='liked'\">&#9829;</button>"

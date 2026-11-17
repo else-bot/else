@@ -231,6 +231,7 @@ impl Env {
     }
 }
 
+#[derive(Clone)]
 pub struct Redact {
     pub name: String,
     pub value: Zeroizing<String>,
@@ -662,6 +663,52 @@ pub async fn resolve(
         }
     }
     Ok(env)
+}
+
+/// An entry's website and values, read together so the website checked is
+/// the one stored with these values.
+pub async fn login(
+    pool: &SqlitePool,
+    key: Option<&SecretKey>,
+    name: &str,
+) -> Result<(Option<Website>, Env), SecretError> {
+    let row: Option<(Option<String>, Vec<u8>, Vec<u8>)> =
+        sqlx::query_as("SELECT website, salt, ciphertext FROM task_secrets WHERE name = ?1")
+            .bind(name)
+            .fetch_optional(pool)
+            .await?;
+    let (website, salt, cipher) = row.ok_or_else(|| SecretError::Unknown(name.to_owned()))?;
+    let vars = decrypt(key.ok_or(SecretError::NoKey)?, &salt, &cipher)?;
+    Ok((
+        Website::stored(website),
+        Env {
+            vars: vars.into_iter().collect(),
+        },
+    ))
+}
+
+/// What to redact from a page on `host`: the values of every entry whose
+/// website covers it, since an earlier fill may still show on the page.
+pub async fn redaction_for_host(
+    pool: &SqlitePool,
+    key: Option<&SecretKey>,
+    host: &str,
+) -> Result<Vec<Redact>, SecretError> {
+    let Some(key) = key else {
+        return Ok(Vec::new());
+    };
+    let rows: Vec<(String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT website, salt, ciphertext FROM task_secrets WHERE website IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut env = Env::default();
+    for (website, salt, cipher) in rows {
+        if Website(website).covers(host) {
+            env.vars.extend(decrypt(key, &salt, &cipher)?);
+        }
+    }
+    Ok(env.redaction())
 }
 
 /// One entry's values, for the owner only.

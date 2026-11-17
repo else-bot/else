@@ -231,8 +231,9 @@ fn settled(state: &AppState, settled: Settled) -> Json<Value> {
     Json(json!({ "request": settled.request, "requeued": settled.requeued }))
 }
 
-/// Answer a bot's secret request: store exactly the requested variables as
-/// a task secret every bot can use and continue the waiting turn. Values are never returned.
+/// Answer a bot's secret request: store the requested variables, and any the
+/// owner added, as a Vault entry and continue the waiting turn. Values are
+/// never returned.
 async fn fulfill(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, request_id)): ApiPath<(Uuid, Uuid)>,
