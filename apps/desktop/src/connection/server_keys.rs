@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use super::*;
 
 /// How long the modifier stays down alone before the hints show.
-pub(super) const HOLD: Duration = Duration::from_secs(1);
+pub(super) const HOLD: Duration = Duration::from_millis(300);
 
 /// The platform's command modifier held alone.
 const PRIMARY: Modifiers = Modifiers {
