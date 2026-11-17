@@ -1,6 +1,7 @@
 //! The server rail on the window's edge: one icon per saved server with a
 //! short name under it, in the order the user drags them into.
 
+use super::server_keys;
 use super::servers::{Editor, Health, ReleaseStatus};
 use super::*;
 use crate::attention::Attention;
@@ -66,7 +67,15 @@ impl RailCard {
 }
 
 const ICON_SIZE: f32 = 40.;
+const LABEL_FADE: std::time::Duration = std::time::Duration::from_millis(120);
 pub(super) const LABEL_WIDTH: f32 = 60.;
+
+/// A rail row's keyboard shortcut and whether its hint replaces the label.
+#[derive(Clone, Copy)]
+struct Keys {
+    slot: Option<usize>,
+    hints: bool,
+}
 
 /// What a server's icon is drawn from.
 #[derive(Clone)]
@@ -108,16 +117,22 @@ pub(super) fn rail_background(theme: &gpui_kit::component::Theme) -> Hsla {
 
 impl Shell {
     /// The window body: the rail, then `app`.
-    pub(super) fn render_with_rail(&self, app: AnyView, cx: &mut Context<Self>) -> Div {
+    pub(super) fn render_with_rail(
+        &self,
+        app: AnyView,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let hints = self.hold.shows(window.modifiers());
         h_flex()
             .flex_1()
             .min_h_0()
             .w_full()
-            .child(self.render_server_rail(cx))
+            .child(self.render_server_rail(hints, cx))
             .child(div().flex_1().min_w_0().h_full().child(app))
     }
 
-    fn render_server_rail(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_server_rail(&self, hints: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let fill = rail_background(&theme);
         let order: Vec<Uuid> = self.registry.servers.iter().map(|s| s.id).collect();
@@ -132,8 +147,12 @@ impl Shell {
             .px(px(6.))
             .pt_2()
             .gap_1();
-        for saved in &self.registry.servers {
-            list = list.child(self.render_rail_item(saved, &order, fill, cx));
+        for (at, saved) in self.registry.servers.iter().enumerate() {
+            let keys = Keys {
+                slot: (at < 9).then_some(at),
+                hints,
+            };
+            list = list.child(self.render_rail_item(saved, &order, fill, keys, cx));
         }
         let add = v_flex()
             .id("server-rail-add")
@@ -183,6 +202,7 @@ impl Shell {
         saved: &crate::config::SavedServer,
         order: &[Uuid],
         fill: Hsla,
+        keys: Keys,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -251,6 +271,9 @@ impl Shell {
             .rounded(px(10.))
             .cursor_pointer()
             .tab_index(0)
+            .when_some(keys.slot, |item, slot| {
+                item.aria_keyshortcuts(server_keys::aria(slot))
+            })
             .map(|item| {
                 if selected {
                     item.bg(theme.foreground.opacity(0.08))
@@ -271,7 +294,17 @@ impl Shell {
                         theme.muted_foreground
                     })
                     .when(selected, |label| label.font_weight(FontWeight::SEMIBOLD))
-                    .child(name),
+                    .map(|label| {
+                        let (text, fade) = match keys.slot.filter(|_| keys.hints) {
+                            Some(slot) => (server_keys::hint(slot), format!("rail-hint-{id}")),
+                            None => (name, format!("rail-name-{id}")),
+                        };
+                        label.child(text).with_animation(
+                            SharedString::from(fade),
+                            Animation::new(LABEL_FADE),
+                            |label, t| label.opacity(t),
+                        )
+                    }),
             )
             .children(card)
             .on_hover(cx.listener(move |shell, hovered: &bool, _, cx| {
