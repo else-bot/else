@@ -421,13 +421,15 @@ async fn a_parked_reply_keeps_a_delivered_message_for_its_continuation() {
     assert_eq!(status(pool, later).await.0, "queued");
     assert_eq!(rows(pool).await, 1);
     let input = else_api::db::turns::input(pool, first).await.unwrap();
+    assert_eq!(
+        input.steered,
+        ["After the job finishes, upload the report."]
+    );
+    let request = else_api::providers::prompt::request_text(&input);
     assert!(
-        input.text.starts_with("Patch the sender script.")
-            && input
-                .text
-                .ends_with("After the job finishes, upload the report."),
-        "the continuation carries the added message: {}",
-        input.text
+        request.starts_with("Patch the sender script.")
+            && request.ends_with("After the job finishes, upload the report."),
+        "the continuation asks for the added message too: {request}"
     );
     let claimed = else_api::db::turns::claim_next(pool, &[], true)
         .await

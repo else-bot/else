@@ -16,6 +16,7 @@ pub(crate) fn input() -> TurnInput {
         bot_name: "Work".into(),
         text: "latest".into(),
         parts: Vec::new(),
+        steered: Vec::new(),
         files: Vec::new(),
         profile: None,
         history: [

@@ -641,6 +641,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         bot_name: "GitHub".into(),
         text: "Clean up the stale branches.".into(),
         parts: Vec::new(),
+        steered: Vec::new(),
         files: Vec::new(),
         profile: Some(Profile {
             model: DEFINITION.catalog.models[0].into(),

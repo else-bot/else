@@ -129,6 +129,9 @@ pub struct TurnInput {
     /// The owner message's ordered parts; empty for plain text. `text` is
     /// their flattening.
     pub parts: Vec<MessagePart>,
+    /// Newer owner messages an earlier attempt of this turn took in as
+    /// steers, oldest first; part of the request when it continues.
+    pub steered: Vec<String>,
     /// Bytes of the files this turn's packet may name: the message's own,
     /// then those of missed history within a budget, newest first.
     pub files: Vec<InputFile>,

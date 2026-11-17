@@ -353,15 +353,9 @@ impl Protocol for Tracker {
     /// next tool boundary, or as one more native turn after the current
     /// result, and echoes it either way.
     fn steer_line(&self, steer: &Steer) -> Option<String> {
-        let text = format!(
-            "[else.bot] The owner sent this while you were working. It adds to the work in \
-             progress and cancels nothing: finish everything still asked, including this, unless \
-             it says to stop.\n\n{}",
-            steer.text
-        );
         Some(super::user_message(
             &steer.turn_id.to_string(),
-            Value::String(text),
+            Value::String(crate::providers::prompt::steer_text(&steer.text)),
         ))
     }
 

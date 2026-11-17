@@ -96,6 +96,7 @@ pub fn export(turn: Turn) -> Value {
         },
         text: "Help me with my tasks.".into(),
         parts: vec![],
+        steered: Vec::new(),
         files: vec![],
         profile: None,
         history: vec![],

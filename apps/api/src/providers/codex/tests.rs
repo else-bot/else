@@ -31,6 +31,7 @@ fn input(history: Vec<(i64, &str, &str)>) -> TurnInput {
         bot_name: "Work".into(),
         text: "latest".into(),
         parts: Vec::new(),
+        steered: Vec::new(),
         files: Vec::new(),
         profile: None,
         history: history

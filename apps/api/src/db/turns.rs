@@ -1168,23 +1168,13 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         .bind(turn.bot_id)
         .fetch_one(&mut *conn)
         .await?;
-    let (mut text, Json(mut parts)): (String, Json<Vec<MessagePart>>) = sqlx::query_as(
+    let (text, Json(parts)): (String, Json<Vec<MessagePart>>) = sqlx::query_as(
         "SELECT text, coalesce(parts, '[]') FROM items WHERE id = ?1 AND kind IN ('user', 'routine', 'connector')",
     )
     .bind(turn.source_item_id)
     .fetch_one(&mut *conn)
     .await?;
     let steered = crate::db::steers::delivered(&mut conn, turn_id).await?;
-    if !steered.is_empty() {
-        let added = format!(
-            "\n\n[else.bot] The owner added while you worked on this:\n{}",
-            steered.join("\n\n")
-        );
-        text.push_str(&added);
-        if !parts.is_empty() {
-            parts.push(MessagePart::Text { text: added });
-        }
-    }
     let history: Vec<HistoryEntry> = sqlx::query_as::<
         _,
         (
@@ -1303,6 +1293,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         turn_no: turn.turn_no,
         bot_name,
         text,
+        steered,
         parts,
         files,
         profile: turn.profile.map(|Json(profile)| profile),
