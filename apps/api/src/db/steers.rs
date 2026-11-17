@@ -98,8 +98,8 @@ impl Placement {
 /// 1. the conversation's newest unfinished reply to an owner message, when
 ///    it runs on the same provider (another provider queues the message:
 ///    the owner chose a different one for it);
-/// 2. with no such reply, the one delegated task of this bot whose card
-///    waits on the owner in this chat;
+/// 2. with no such reply, the one delegated task of this bot on the same
+///    provider whose card waits on the owner;
 /// 3. otherwise it queues.
 ///
 /// Joining skips the target's pending questions and the bot's pending
@@ -176,11 +176,12 @@ async fn target(
         "SELECT t.id, t.bot_id, t.status, t.provider_id FROM delegations d JOIN turns t ON t.id = d.child_turn_id
          WHERE d.target_bot_id = ?1 AND d.status IN ('queued', 'running')
            AND d.takeover_turn_id IS NULL AND NOT {STEERED}
-           AND t.status IN ('preparing', 'sending', 'running', 'waiting')
-           AND {WAITS_ON_OWNER}
+           AND t.status IN ('queued', 'preparing', 'sending', 'running', 'waiting')
+           AND t.provider_id = ?2 AND {WAITS_ON_OWNER}
          LIMIT 2"
     )))
     .bind(bot_id)
+    .bind(provider_id)
     .fetch_all(&mut *conn)
     .await?;
     Ok((tasks.len() == 1).then(|| tasks.remove(0)))

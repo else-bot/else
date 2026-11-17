@@ -2849,17 +2849,19 @@ async fn steered_into(db: &TestDb, turn: Uuid) -> Option<Uuid> {
 }
 
 async fn follow_up(db: &TestDb, bot: Uuid) -> Uuid {
-    follow_up_with(db, bot, else_api::db::turns::Admission::Open).await
+    follow_up_with(db, bot, "synthetic", else_api::db::turns::Admission::Open).await
 }
 
 async fn follow_up_with(
     db: &TestDb,
     bot: Uuid,
+    provider: &str,
     preemption: else_api::db::turns::Admission,
 ) -> Uuid {
     sqlx::query(
-        "UPDATE conversations SET last_turn_no = (SELECT max(turn_no) FROM turns t
-             WHERE t.conversation_id = conversations.id) WHERE bot_id = ?1 AND kind = 'owner'",
+        "UPDATE conversations SET last_turn_no = coalesce((SELECT max(turn_no) FROM turns t
+             WHERE t.conversation_id = conversations.id), last_turn_no)
+         WHERE bot_id = ?1 AND kind = 'owner'",
     )
     .bind(bot)
     .execute(&db.pool)
@@ -2874,8 +2876,8 @@ async fn follow_up_with(
             hidden: false,
             parts: &[],
             reaction: None,
-            requested_provider: Some("synthetic"),
-            provider_id: "synthetic",
+            requested_provider: Some(provider),
+            provider_id: provider,
             uses_profile: false,
             open_draft: None,
             answers_notice: None,
@@ -2894,6 +2896,60 @@ async fn set_status(db: &TestDb, turn: Uuid, status: &str) {
         .execute(&db.pool)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn owner_messages_join_a_task_waiting_on_its_card_only_on_its_provider() {
+    let db = TestDb::migrated().await;
+    let (_main, _root, child, _outbound) = seed(&db).await;
+    set_status(&db, child, "waiting").await;
+    sqlx::query("UPDATE turns SET provider_id = 'synthetic' WHERE id = ?1")
+        .bind(child)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let target: Uuid = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
+        .bind(child)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO secret_requests (id, bot_id, turn_id, attempt, name, reason, env_names)
+         VALUES (?1, ?2, ?3, 1, 'api_key', 'To post.', '[\"API_KEY\"]')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(target)
+    .bind(child)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let open = else_api::db::turns::Admission::Open;
+
+    let first = follow_up_with(&db, target, "synthetic", open).await;
+    assert_eq!(steered_into(&db, first).await, Some(child));
+    let child_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+        .bind(child)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        child_status, "queued",
+        "the task continues with the message"
+    );
+
+    let second = follow_up_with(&db, target, "synthetic", open).await;
+    assert_eq!(
+        steered_into(&db, second).await,
+        Some(child),
+        "the task still waits on its card before it is claimed again"
+    );
+
+    let other = follow_up_with(&db, target, "codex", open).await;
+    assert_eq!(
+        steered_into(&db, other).await,
+        None,
+        "a message for another provider queues"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3322,7 +3378,13 @@ async fn a_message_sent_during_a_pause_joins_only_once_it_ends() {
     let db = TestDb::migrated().await;
     let (main, root, child, delegation) = seed(&db).await;
     owner_reply(&db, root).await;
-    let follow = follow_up_with(&db, main, else_api::db::turns::Admission::Deferred).await;
+    let follow = follow_up_with(
+        &db,
+        main,
+        "synthetic",
+        else_api::db::turns::Admission::Deferred,
+    )
+    .await;
     let state = || async {
         sqlx::query_as::<_, (Uuid, String, String, bool)>(
             "SELECT d.root_turn_id, r.status, f.status, f.deferred
