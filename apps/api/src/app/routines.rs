@@ -484,10 +484,10 @@ fn squash(text: &str) -> String {
 /// name ignoring case, spaces, dots, and dashes, with or without the
 /// vendor's first word ("GPT 6.1 Sol", "6.1 sol", "Opus 5.5"). `None` when
 /// nothing or more than one model matches; never a nearest guess.
-pub fn match_model(
+pub fn match_model<'a>(
     query: &str,
-    catalogs: &[(&'static str, &'static [&'static str])],
-) -> Option<(&'static str, &'static str)> {
+    catalogs: &[(&'a str, Vec<&'a str>)],
+) -> Option<(&'a str, &'a str)> {
     let query = query.trim();
     let all = || {
         catalogs
@@ -754,9 +754,9 @@ mod tests {
 
     #[test]
     fn model_names_match_one_catalog_entry_or_none() {
-        let catalogs: &[(&str, &[&str])] = &[
-            ("codex", &["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"]),
-            ("claude", &["claude-opus-5-5", "claude-fable-5-1"]),
+        let catalogs = &[
+            ("codex", vec!["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"]),
+            ("claude", vec!["claude-opus-5-5", "claude-fable-5-1"]),
         ];
         let found = |q| match_model(q, catalogs);
         assert_eq!(found("gpt-6.1-sol"), Some(("codex", "gpt-6.1-sol")));

@@ -24,9 +24,10 @@ use super::cli::session::{self, Identity, Opened, PreparedTurn};
 use super::cli::stream::{Interrupt, StreamAttempt};
 use super::definitions::Definition;
 use super::host::{BotDirs, Host, LaunchSpec};
+use super::models::{Listed, Models};
 use super::{attachments, grok_home, prompt};
 use crate::app::providers::{
-    Availability, Catalog, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
+    Availability, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
 };
 use protocol::Tracker;
 
@@ -36,12 +37,10 @@ const PROMPT_VERSION: &str = "else-grok-v4";
 pub static DEFINITION: Definition = Definition {
     id: ID,
     label: "Grok",
-    catalog: Catalog {
-        models: &["grok-4.7", "grok-4.7-build-fast", "grok-4.6"],
-        featured_models: &[],
-        efforts: &["low", "medium", "high", "xhigh"],
-        tiers: &["default"],
-    },
+    fallback: &["grok-4.7", "grok-4.7-build-fast", "grok-4.6"],
+    efforts: &["low", "medium", "high", "xhigh"],
+    tiers: &["default"],
+    pinned: super::definitions::any_id,
     model_note: "",
     effort_note: "",
     tier_note: " Choose grok-4.7-build-fast for its fast model.",
@@ -52,6 +51,7 @@ fn build(wiring: &super::Wiring) -> super::Built {
     let home = grok_home::host_home();
     let program = lookup(wiring.config.grok_bin.as_deref(), home.as_deref());
     let grok = Grok {
+        models: Models::new(&DEFINITION),
         ready: Grok::ready(Some(wiring.host.clone()), program, home),
         tool_url: None,
     }
@@ -60,6 +60,20 @@ fn build(wiring: &super::Wiring) -> super::Built {
         provider: std::sync::Arc::new(grok),
         summarizer: None,
     }
+}
+
+/// The models `grok models` prints under "Available models:", one per
+/// `* id (default)` or `- id` line. Grok names no efforts per model.
+fn listed_models(printed: &str) -> Vec<Listed> {
+    printed
+        .lines()
+        .skip_while(|line| !line.trim_start().starts_with("Available models"))
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix(['*', '-'])?;
+            let id = rest.split_whitespace().next()?;
+            Some(Listed::id(id))
+        })
+        .collect()
 }
 
 /// The binary Grok's installers keep in the host's `GROK_HOME` (curl's
@@ -114,6 +128,7 @@ struct Ready {
 }
 
 pub struct Grok {
+    models: Models,
     ready: Result<Ready, String>,
     tool_url: Option<String>,
 }
@@ -121,6 +136,7 @@ pub struct Grok {
 impl Grok {
     pub fn detect(host: Option<Host>, program: Option<PathBuf>, login: Option<PathBuf>) -> Self {
         Self {
+            models: Models::new(&DEFINITION),
             ready: Self::ready(host, Ok(program), login),
             tool_url: None,
         }
@@ -268,10 +284,19 @@ impl Provider for Grok {
         true
     }
     fn validate_profile(&self, profile: &Profile) -> Result<(), String> {
-        DEFINITION.validate(profile)
+        self.models.validate(profile)
     }
-    fn catalog(&self) -> Catalog {
-        DEFINITION.catalog
+    fn models(&self) -> Option<&Models> {
+        Some(&self.models)
+    }
+    async fn list_models(&self) -> Result<Vec<Listed>, String> {
+        let ready = self.ready.as_ref().map_err(Clone::clone)?;
+        let printed = ready
+            .host
+            .output(&ready.program, &["models"], &[], 1024 * 1024)
+            .await
+            .map_err(|why| format!("`grok models` failed: {why}"))?;
+        Ok(listed_models(&printed))
     }
 
     async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
@@ -285,7 +310,7 @@ impl Provider for Grok {
                 "No execution profile was snapshotted.",
             );
         };
-        if let Err(reason) = DEFINITION.validate(profile) {
+        if let Err(reason) = self.models.validate(profile) {
             return failed("invalid_profile", reason);
         }
         if stop.is_requested() {

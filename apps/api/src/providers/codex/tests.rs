@@ -7,6 +7,7 @@ use uuid::Uuid;
 impl Codex {
     fn offline(tool_url: Option<&str>) -> Self {
         Self {
+            models: Models::new(&DEFINITION),
             ready: Ok(Ready {
                 host: Host::new(std::path::Path::new("/data"), std::path::Path::new("/bots")),
                 program: PathBuf::new(),
@@ -285,25 +286,28 @@ fn reported_settings_are_checked_field_by_field() {
 #[test]
 fn catalog_offers_current_and_legacy_models_as_exact_profiles() {
     let codex = Codex::detect(None, None, None);
+    let catalog = codex.catalog();
+    let featured: Vec<&str> = catalog
+        .models
+        .iter()
+        .filter(|model| model.featured)
+        .map(|model| model.id.as_str())
+        .collect();
     assert_eq!(
-        codex.catalog().featured_models,
-        &["gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra", "gpt-6-luna"]
+        featured,
+        [
+            "gpt-6.2-sol",
+            "gpt-6.2-astra",
+            "gpt-6.1-terra",
+            "gpt-6-luna"
+        ]
     );
-    for model in [
-        "gpt-6.1-sol",
-        "gpt-6-astra",
-        "gpt-6.1-terra",
-        "gpt-6-luna",
-        "gpt-6-sol",
-        "gpt-5.6-sol",
-        "gpt-5.6-terra",
-        "gpt-5.6-luna",
-    ] {
-        assert!(codex.catalog().models.contains(&model), "missing {model}");
-        for effort in codex.catalog().efforts {
-            for tier in codex.catalog().tiers {
+    for model in DEFINITION.fallback {
+        assert!(catalog.model(model).is_some(), "missing {model}");
+        for effort in DEFINITION.efforts {
+            for tier in DEFINITION.tiers {
                 let profile = Profile {
-                    model: model.into(),
+                    model: (*model).into(),
                     reasoning_effort: (*effort).into(),
                     service_tier: (*tier).into(),
                 };
@@ -416,7 +420,7 @@ fn fake_codex_with(
     let account_failures = dir.join("account-failures");
     let mcp_failures = dir.join("mcp-failures");
     let catalog = json!({
-        "models": MODELS.iter().chain(&["hidden-model"]).map(|slug| json!({
+        "models": DEFINITION.fallback.iter().chain(&["hidden-model"]).map(|slug| json!({
             "slug": slug,
             "context_window": 272000,
             "base_instructions": "kept",
@@ -517,7 +521,7 @@ fn elsebot_server() -> Value {
 fn turn_from(origin: crate::app::providers::Origin) -> TurnInput {
     let mut turn = TurnInput {
         profile: Some(Profile {
-            model: MODELS[0].into(),
+            model: DEFINITION.fallback[0].into(),
             reasoning_effort: "medium".into(),
             service_tier: "default".into(),
         }),
@@ -582,7 +586,7 @@ async fn a_connector_event_launches_without_host_tools_but_keeps_elsebot_tools()
             assert_eq!(launches, vec![vec!["app-server".to_owned()]], "{origin:?}");
             assert!(!dir.path().join("loaded-catalog.json").exists());
         } else {
-            assert_no_native_catalog(dir.path(), &launches, MODELS[0]);
+            assert_no_native_catalog(dir.path(), &launches, DEFINITION.fallback[0]);
         }
     }
 }
@@ -876,7 +880,7 @@ async fn a_warm_thread_receives_only_changed_memory_and_default_skills() {
         bot_name: "GitHub".into(),
         text: "Clean up the stale branches.".into(),
         profile: Some(Profile {
-            model: MODELS[0].into(),
+            model: DEFINITION.fallback[0].into(),
             reasoning_effort: "medium".into(),
             service_tier: "default".into(),
         }),
@@ -999,7 +1003,7 @@ async fn files_reach_codex_in_order_with_images_as_local_images() {
         parts,
         files: vec![image.clone(), notes.clone()],
         profile: Some(Profile {
-            model: MODELS[0].into(),
+            model: DEFINITION.fallback[0].into(),
             reasoning_effort: "medium".into(),
             service_tier: "default".into(),
         }),
@@ -1259,4 +1263,31 @@ fn context_compaction_is_reported_once_per_signal() {
     ));
     let other = note("thread/compacted", json!({ "threadId": "elsewhere" }));
     assert!(events.on(&other).unwrap().is_empty());
+}
+
+#[test]
+fn debug_models_lists_shown_models_in_priority_order() {
+    let exported = json!({ "models": [
+        { "slug": "gpt-6.1-sol", "visibility": "list", "priority": 3,
+          "supported_reasoning_levels": [{ "effort": "low" }, { "effort": "ultra" }],
+          "service_tiers": [{ "id": "priority" }] },
+        { "slug": "gpt-reserve", "visibility": "hide", "priority": 1,
+          "supported_reasoning_levels": [{ "effort": "low" }], "service_tiers": [] },
+        { "slug": "gpt-6.2-sol", "visibility": "list", "priority": 2,
+          "supported_reasoning_levels": [{ "effort": "high" }], "service_tiers": [] },
+    ] })
+    .to_string();
+    let listed = codex_home::listed_models(exported.as_bytes()).unwrap();
+    let ids: Vec<&str> = listed.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["gpt-6.2-sol", "gpt-6.1-sol"]);
+    assert_eq!(
+        listed[1].tiers.as_deref(),
+        Some(&["default".to_owned(), "priority".to_owned()][..])
+    );
+    let codex = Codex::detect(None, None, None);
+    codex.models.listed(listed, chrono::Utc::now()).unwrap();
+    let sol = codex.catalog().model("gpt-6.1-sol").cloned().unwrap();
+    assert_eq!(sol.efforts, ["low"], "ultra is not offered");
+    assert_eq!(sol.upgrade.as_deref(), Some("gpt-6.2-sol"));
+    assert!(codex_home::listed_models(b"[]").is_err());
 }

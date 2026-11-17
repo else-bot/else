@@ -6,7 +6,7 @@ use gpui_kit::component::FocusableExt as _;
 use std::collections::HashMap;
 
 use crate::api::socials::Provider;
-use crate::api::{Bot, BotProfile, ProfileChoice};
+use crate::api::{Bot, BotProfile, Capabilities, ModelInfo, ProfileChoice};
 use crate::avatar::{Avatar, AvatarPicker, bot_avatar};
 use crate::model::{Conversation, LastRun, Routine};
 use crate::profile_picker::{ProfilePicker, effort_label, model_label};
@@ -160,6 +160,12 @@ enum ModelState {
     Loading(Uuid),
     Failed(String),
     Ready(Option<BotProfile>),
+}
+
+/// A one-click switch of a bot to the newer model of its family.
+pub(super) enum ModelUpgrade {
+    Saving { bot: Uuid },
+    Failed { bot: Uuid, error: String },
 }
 
 pub(super) struct ModelDialog {
@@ -843,7 +849,9 @@ impl ElseApp {
                 _ => None,
             })
         });
-        let picker = cx.new(|_| ProfilePicker::new(&caps, initial));
+        let initial = initial.cloned();
+        let picker = self.profile_picker(&caps, initial.as_ref(), cx);
+        let picker = cx.new(|_| picker);
         let observer = cx.observe_in(&picker, window, |_, _, window, _| window.refresh());
         let holder = cx.new(|_| ModelDialog {
             bot,
@@ -1415,7 +1423,7 @@ impl ElseApp {
                 };
                 v_flex()
                     .gap_0p5()
-                    .child(item_name(model_label(&choice.model)))
+                    .child(item_name(self.model_name(choice)))
                     .child(meta(
                         format!(
                             "{} · {} reasoning · {speed}",
@@ -1426,6 +1434,7 @@ impl ElseApp {
                     ))
             }
         };
+        let upgrade = saved.and_then(|saved| self.render_model_upgrade(bot, &saved.choice, cx));
         // The warning sits under the button: a button keeps its label on one
         // line, which would clip the sentence.
         let unavailable = saved
@@ -1469,7 +1478,141 @@ impl ElseApp {
             .w_full()
             .child(button)
             .children(unavailable)
+            .children(upgrade)
             .into_any_element()
+    }
+
+    /// The catalog entry of a saved choice, when its provider lists it.
+    fn model_info(&self, choice: &ProfileChoice) -> Option<&ModelInfo> {
+        self.caps
+            .as_ref()?
+            .providers
+            .iter()
+            .find(|provider| provider.id == choice.provider_id)?
+            .catalog
+            .model(&choice.model)
+    }
+
+    /// The provider's name for a model, else one read from its ID.
+    pub(super) fn model_name(&self, choice: &ProfileChoice) -> String {
+        self.model_info(choice)
+            .map_or_else(|| model_label(&choice.model), |model| model.label.clone())
+    }
+
+    /// "Claude Fable 5.2 available" with a Switch button, when the saved
+    /// model's family has a newer model. Never switches on its own.
+    fn render_model_upgrade(
+        &self,
+        bot: Uuid,
+        choice: &ProfileChoice,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let newer = self.model_info(choice)?.upgrade.clone()?;
+        let target = ProfileChoice {
+            model: newer,
+            ..choice.clone()
+        };
+        let label = self.model_info(&target)?.label.clone();
+        let saving =
+            matches!(self.model_upgrade, Some(ModelUpgrade::Saving { bot: b }) if b == bot);
+        let error = match &self.model_upgrade {
+            Some(ModelUpgrade::Failed { bot: b, error }) if *b == bot => Some(error.clone()),
+            _ => None,
+        };
+        let connected = self.connection == Connection::Connected;
+        Some(
+            v_flex()
+                .w_full()
+                .gap_1()
+                .pt_2()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            Icon::new(IconName::ArrowUp)
+                                .size_3p5()
+                                .flex_none()
+                                .text_color(cx.theme().primary),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .child(format!("{label} available")),
+                        )
+                        .child(
+                            Button::new("upgrade-model")
+                                .control(Tier::Secondary, Scale::Compact, !connected || saving, cx)
+                                .label("Switch")
+                                .loading(saving)
+                                .accessibility_label(format!("Switch to {label}"))
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.upgrade_model(bot, target.clone(), cx)
+                                })),
+                        ),
+                )
+                .children(error.map(|error| {
+                    alert(format!("Couldn't switch. {error}"), cx.theme().danger, cx)
+                })),
+        )
+    }
+
+    /// Save `target`, the newer model with the bot's effort and speed where
+    /// it takes them.
+    fn upgrade_model(&mut self, bot: Uuid, target: ProfileChoice, cx: &mut Context<Self>) {
+        let Some(provider) = self
+            .caps
+            .as_ref()
+            .and_then(|caps| caps.providers.iter().find(|p| p.id == target.provider_id))
+        else {
+            return;
+        };
+        let Some(choice) = crate::profile_picker::catalog_choice(provider, Some(&target)) else {
+            return;
+        };
+        self.model_upgrade = Some(ModelUpgrade::Saving { bot });
+        cx.notify();
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let result = client.set_bot_profile(bot, choice).await;
+            let _ = this.update(cx, |app, cx| {
+                if !matches!(app.model_upgrade, Some(ModelUpgrade::Saving { bot: b }) if b == bot) {
+                    return;
+                }
+                app.model_upgrade = match result {
+                    Ok(saved) => {
+                        if let Some(entry) = app.settings.get_mut(&bot)
+                            && matches!(entry.model, ModelState::Ready(_))
+                        {
+                            entry.model = ModelState::Ready(Some(saved));
+                        }
+                        None
+                    }
+                    Err(err) => Some(ModelUpgrade::Failed {
+                        bot,
+                        error: err.to_string(),
+                    }),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// A model picker that badges models listed since the owner last
+    /// opened one.
+    pub(super) fn profile_picker(
+        &mut self,
+        caps: &Capabilities,
+        initial: Option<&ProfileChoice>,
+        cx: &mut Context<Self>,
+    ) -> ProfilePicker {
+        let new = self.preferences.see_models(caps);
+        self.save_preferences(cx);
+        ProfilePicker::new(caps, initial).with_new(new)
     }
 
     fn model_available(&self, choice: &ProfileChoice) -> bool {
@@ -1477,9 +1620,7 @@ impl ElseApp {
             caps.providers.iter().any(|provider| {
                 provider.id == choice.provider_id
                     && provider.cli_available
-                    && provider.catalog.models.contains(&choice.model)
-                    && provider.catalog.efforts.contains(&choice.reasoning_effort)
-                    && provider.catalog.tiers.contains(&choice.service_tier)
+                    && provider.catalog.applies(choice)
             })
         })
     }
@@ -1787,8 +1928,8 @@ impl ElseApp {
                 })
         });
         let model_title = match (&routine.model, choice) {
-            (Some(choice), _) => model_label(&choice.model),
-            (None, Some(choice)) => format!("Bot model · {}", model_label(&choice.model)),
+            (Some(choice), _) => self.model_name(choice),
+            (None, Some(choice)) => format!("Bot model · {}", self.model_name(choice)),
             (None, None) => "Bot model".to_owned(),
         };
         let model_details = choice
@@ -1848,7 +1989,7 @@ impl ElseApp {
         ];
         if let Some(choice) = routine.model.as_ref().filter(|_| routine.run_at.is_none()) {
             tokens.push(
-                meta(model_label(&choice.model), cx)
+                meta(self.model_name(choice), cx)
                     .flex_none()
                     .whitespace_nowrap()
                     .into_any_element(),

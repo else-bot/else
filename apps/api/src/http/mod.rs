@@ -369,7 +369,7 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
         .iter()
         .map(|provider| {
             let mut view = provider_view(provider.as_ref(), configured.as_deref(), false);
-            view["catalog"] = json!(provider.catalog());
+            view["catalog"] = json!(provider.catalog().as_ref());
             view
         })
         .collect();

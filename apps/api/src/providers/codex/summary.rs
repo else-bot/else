@@ -1,6 +1,6 @@
 use super::super::codex_rpc::{AppServer, Incoming};
 use super::policy::Reported;
-use super::{Codex, DEFINITION, ID, LaunchSpec, Profile, RPC_TIMEOUT, codex_home, prompt};
+use super::{Codex, ID, LaunchSpec, Profile, RPC_TIMEOUT, codex_home, prompt};
 use async_trait::async_trait;
 use serde_json::json;
 use std::ffi::OsString;
@@ -44,7 +44,7 @@ impl Codex {
     ) -> Result<String, String> {
         let ready = self.ready.as_ref().map_err(Clone::clone)?;
         let host = &ready.host;
-        DEFINITION.validate(profile)?;
+        self.models.validate(profile)?;
         let dirs = host
             .bot_dirs(bot_id, "codex-summary")
             .map_err(|e| e.to_string())?;

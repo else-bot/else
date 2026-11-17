@@ -253,6 +253,9 @@ pub enum Connection {
     InvalidCredentials(String),
 }
 
+/// How often an open connection re-reads the server's model lists.
+const CATALOG_REFRESH: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 pub struct ElseApp {
     client: Arc<Client>,
     connection: Connection,
@@ -292,6 +295,7 @@ pub struct ElseApp {
     _welcome_enter: Option<Subscription>,
     category_form: Option<Entity<CategoryFormHolder>>,
     model_dialog: Option<Entity<ModelDialog>>,
+    model_upgrade: Option<settings::ModelUpgrade>,
     _category_enter: Option<Subscription>,
     moving: HashSet<Uuid>,
     category_notice: Option<String>,
@@ -313,6 +317,9 @@ pub struct ElseApp {
     pause: pause::PauseStrip,
     live: Option<crate::api::LiveCommands>,
     _live: Option<Task<()>>,
+    /// Re-reads capabilities so model lists the server refreshed reach
+    /// an open connection.
+    _catalog_refresh: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -399,6 +406,7 @@ impl ElseApp {
             _welcome_enter: None,
             category_form: None,
             model_dialog: None,
+            model_upgrade: None,
             _category_enter: None,
             moving: HashSet::new(),
             category_notice: None,
@@ -418,6 +426,7 @@ impl ElseApp {
             pause: Default::default(),
             live: None,
             _live: None,
+            _catalog_refresh: None,
             _subscriptions: vec![
                 subscription,
                 composer_observer,
@@ -432,6 +441,24 @@ impl ElseApp {
 
     fn start_live(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let client = self.client.clone();
+        let catalogs = client.clone();
+        self._catalog_refresh = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(CATALOG_REFRESH).await;
+                let Ok(connected) =
+                    this.update(cx, |app, _| app.connection == Connection::Connected)
+                else {
+                    return;
+                };
+                if connected {
+                    let caps = catalogs.clone().capabilities().await;
+                    if caps.is_ok() {
+                        let _ =
+                            this.update_in(cx, |app, window, cx| app.apply_caps(caps, window, cx));
+                    }
+                }
+            }
+        }));
         let Live {
             commands,
             mut events,

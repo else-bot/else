@@ -613,8 +613,15 @@ fn run_serve() -> anyhow::Result<()> {
         if requeued + uncertain > 0 {
             tracing::info!(requeued, uncertain, "reconciled unfinished turns");
         }
-        let scheduler = Scheduler::new(pool.clone(), registry, config.max_active_turns);
+        let model_cache = else_api::providers::models::cache_path(&config.data_dir);
+        else_api::providers::models::restore(&registry, &model_cache);
         let stop_scheduler = CancellationToken::new();
+        let model_refresh = tokio::spawn(else_api::providers::models::run(
+            registry.clone(),
+            model_cache,
+            stop_scheduler.clone(),
+        ));
+        let scheduler = Scheduler::new(pool.clone(), registry, config.max_active_turns);
         let scheduler_task = tokio::spawn(
             scheduler
                 .clone()
@@ -707,6 +714,7 @@ fn run_serve() -> anyhow::Result<()> {
         }
         let _ = tokio::join!(
             scheduler_task,
+            model_refresh,
             mcp_waits,
             async {
                 if let Some(task) = social_task {

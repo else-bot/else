@@ -14,15 +14,78 @@ use uuid::Uuid;
 
 use super::messages::{Attachment, MessagePart};
 
-/// The models, reasoning efforts, and service tiers an adapter applies
-/// exactly. `priority` is the Fast tier.
-#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+/// One model an adapter applies exactly, with the efforts and tiers it
+/// takes on that model. `priority` is the Fast tier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Model {
+    pub id: String,
+    pub label: String,
+    pub efforts: Vec<String>,
+    pub tiers: Vec<String>,
+    /// The newest model of its family, shown before the picker expands.
+    pub featured: bool,
+    /// The newest model of the same family, when this one is older.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upgrade: Option<String>,
+}
+
+/// The models an adapter applies exactly: what the installed CLI last
+/// listed, else the bundled list. Empty for a provider without profiles.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Catalog {
-    pub models: &'static [&'static str],
-    /// Models shown before expanding the picker. Empty shows the full catalog.
-    pub featured_models: &'static [&'static str],
-    pub efforts: &'static [&'static str],
-    pub tiers: &'static [&'static str],
+    /// Featured models first, then older ones, newest first per family.
+    pub models: Vec<Model>,
+    /// When the CLI listed these; `None` for the bundled list.
+    pub listed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Why the latest ask failed, while an older or bundled list is shown.
+    pub refresh_error: Option<String>,
+}
+
+impl Catalog {
+    pub fn model(&self, id: &str) -> Option<&Model> {
+        self.models.iter().find(|model| model.id == id)
+    }
+
+    pub fn ids(&self) -> Vec<&str> {
+        self.models.iter().map(|model| model.id.as_str()).collect()
+    }
+}
+
+/// Older desktops read the flat lists and apply every effort and tier to
+/// every model, so they get the first model's efforts and tiers and only
+/// the models that take all of them. `details` carries each model's own.
+impl Serialize for Catalog {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let (efforts, tiers): (&[String], &[String]) = self
+            .models
+            .first()
+            .map_or((&[], &[]), |first| (&first.efforts, &first.tiers));
+        let legacy: Vec<&Model> = self
+            .models
+            .iter()
+            .filter(|model| {
+                efforts.iter().all(|e| model.efforts.contains(e))
+                    && tiers.iter().all(|t| model.tiers.contains(t))
+            })
+            .collect();
+        let ids = |featured_only: bool| -> Vec<&str> {
+            legacy
+                .iter()
+                .filter(|model| !featured_only || model.featured)
+                .map(|model| model.id.as_str())
+                .collect()
+        };
+        let mut out = serializer.serialize_struct("Catalog", 7)?;
+        out.serialize_field("models", &ids(false))?;
+        out.serialize_field("featured_models", &ids(true))?;
+        out.serialize_field("efforts", efforts)?;
+        out.serialize_field("tiers", tiers)?;
+        out.serialize_field("details", &self.models)?;
+        out.serialize_field("listed_at", &self.listed_at)?;
+        out.serialize_field("refresh_error", &self.refresh_error)?;
+        out.end()
+    }
 }
 
 /// An execution profile: a provider's saved default, or a bot's own.
@@ -676,10 +739,20 @@ pub trait Provider: Send + Sync {
     fn uses_profile(&self) -> bool;
     /// Reject a profile the adapter cannot apply exactly. No substitution.
     fn validate_profile(&self, profile: &Profile) -> Result<(), String>;
+    /// The models this provider's CLI lists, kept current by
+    /// [`crate::providers::models::run`]. `None` without profiles.
+    fn models(&self) -> Option<&crate::providers::models::Models> {
+        None
+    }
+    /// Ask the installed CLI which models it runs now.
+    async fn list_models(&self) -> Result<Vec<crate::providers::models::Listed>, String> {
+        Err(format!("{} does not list its models", self.label()))
+    }
     /// The exact values `validate_profile` accepts, for the owner's
     /// pickers. Empty for a provider without profiles.
-    fn catalog(&self) -> Catalog {
-        Catalog::default()
+    fn catalog(&self) -> Arc<Catalog> {
+        self.models()
+            .map_or_else(Arc::default, crate::providers::models::Models::current)
     }
     /// A checkpoint of recorded history with no tools: only when the adapter
     /// can enforce and verify that nothing but text is produced. Errors mean
