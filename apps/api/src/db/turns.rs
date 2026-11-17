@@ -639,11 +639,7 @@ pub async fn settle_deferred(pool: &SqlitePool) -> Result<(usize, Vec<Uuid>), sq
         let placement =
             crate::db::steers::place(&mut tx, bot_id, conversation_id, turn_no, id, &provider_id)
                 .await?;
-        if let crate::db::steers::Placement::Joined { into, status } = placement
-            && status.is_active()
-        {
-            woken.push(into);
-        }
+        woken.extend(placement.wakes());
         crate::db::events::turn_changed(&mut tx, bot_id, id).await?;
         tx.commit().await?;
         settled += 1;

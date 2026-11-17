@@ -242,9 +242,7 @@ async fn accept_send(
                 .map_err(|err| with_id(err.into()))?
         }
     };
-    if let Some(turns::Placement::Joined { into, status }) = accepted.placement
-        && status.is_active()
-    {
+    if let Some(into) = accepted.placement.and_then(turns::Placement::wakes) {
         state.scheduler.steer(into).await;
     }
     if accepted.created {

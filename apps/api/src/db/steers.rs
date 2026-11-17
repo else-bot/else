@@ -81,6 +81,17 @@ pub enum Placement {
     Queued,
 }
 
+impl Placement {
+    /// The running reply to wake so it takes the message now. A parked one
+    /// reads it when it continues.
+    pub fn wakes(self) -> Option<Uuid> {
+        match self {
+            Self::Joined { into, status } if status.is_active() => Some(into),
+            _ => None,
+        }
+    }
+}
+
 /// The new owner message `turn_id` (number `turn_no` of `conversation_id`,
 /// bound to `provider_id`) joins the work under way, in order:
 ///
