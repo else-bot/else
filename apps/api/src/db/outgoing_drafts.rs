@@ -79,12 +79,15 @@ pub struct OutgoingDraft {
 /// The [`DraftKind`] of draft `d` as JSON, or NULL when it has none: the one
 /// definition both granting and matching use. A platform that sends as the
 /// owner ([`Platform::sends_as_owner`]) never has a task kind, only its
-/// destination's.
+/// destination's, and none without the account it sends from.
 ///
 /// [`Platform::sends_as_owner`]: crate::app::outgoing::Platform::sends_as_owner
 macro_rules! kind {
     () => {
-        "CASE WHEN json_extract(d.content, '$.channel') = 'message'
+        "CASE WHEN json_extract(d.content, '$.platform') = 'whatsapp'
+            AND json_extract(d.content, '$.account_id') IS NULL
+            AND json_extract(d.content, '$.account') IS NULL THEN NULL
+        WHEN json_extract(d.content, '$.channel') = 'message'
             AND json_extract(d.content, '$.task') IS NOT NULL
             AND json_extract(d.content, '$.platform') <> 'whatsapp'
         THEN json_object('platform', json_extract(d.content, '$.platform'),

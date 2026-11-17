@@ -2060,12 +2060,37 @@ async fn a_whatsapp_draft_is_approved_always_for_its_chat_only() {
                 "body": body })
     };
     let family = "120363041234567890@g.us";
+    let unsigned = draft(
+        &app,
+        &token,
+        json!({ "platform": "whatsapp", "destination": family, "body": "Bonjour" }),
+    )
+    .await;
+    wait(&app, turn, "waiting").await;
+    assert_eq!(shown(&app, &main, turn).await[0]["kind"], Value::Null);
+    let refused = owner_action(
+        &app,
+        &main,
+        unsigned,
+        "approve",
+        json!({ "version": 1, "always": true }),
+    )
+    .await;
+    assert_eq!(
+        refused.body["error"]["code"], "no_kind",
+        "without its sending account, consent could outlive a switch of account: {}",
+        refused.body
+    );
+    let discarded = owner_action(&app, &main, unsigned, "discard", json!({})).await;
+    assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
+    wait(&app, turn, "running").await;
+    let token = grant(&app, turn).await;
     let first = draft(&app, &token, to(family, "Nouvel article sur le blog.")).await;
     wait(&app, turn, "waiting").await;
     let kind = json!({ "platform": "whatsapp", "account_id": null, "account": "+33612345678",
                        "destination": family });
     assert_eq!(
-        shown(&app, &main, turn).await[0]["kind"],
+        shown(&app, &main, turn).await[1]["kind"],
         kind,
         "a WhatsApp card offers Approve always for its one chat"
     );
