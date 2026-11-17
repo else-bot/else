@@ -98,9 +98,17 @@ impl Hold {
         Self::Idle
     }
 
-    /// Whether the hints show while the window holds `modifiers`. A release
-    /// while a dialog has focus never reaches the shell, so the live
-    /// modifiers decide too.
+    /// The hold once focus returns to the shell. A release while a dialog
+    /// had focus never reached the shell, so the live modifiers decide.
+    pub(super) fn refocused(self, modifiers: Modifiers) -> Self {
+        if modifiers.modified() {
+            self
+        } else {
+            Self::Idle
+        }
+    }
+
+    /// Whether the hints show while the window holds `modifiers`.
     pub(super) fn shows(self, modifiers: Modifiers) -> bool {
         self == Self::Shown && modifiers == PRIMARY
     }
@@ -136,7 +144,7 @@ impl Shell {
         else {
             return;
         };
-        if !self.rail_shown() || window.has_active_dialog(cx) || self.composing(window, cx) {
+        if !self.rail_shown() || !self.owns_focus(window, cx) || composing(window, cx) {
             return;
         }
         cx.stop_propagation();
@@ -159,13 +167,33 @@ impl Shell {
         self.active.is_some() && !onboarding
     }
 
-    /// Whether an input method is composing text in the chat composer.
-    fn composing(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(app) = self.active.as_ref().map(|active| active.app.clone()) else {
-            return false;
-        };
-        app.update(cx, |app, cx| app.composing(window, cx))
+    /// Whether focus is in the chat or in settings, not in a dialog such
+    /// as a confirmation that a switch would bypass.
+    fn owns_focus(&self, window: &Window, cx: &App) -> bool {
+        let settings = self
+            .setup
+            .as_ref()
+            .filter(|_| self.settings_section().is_some())
+            .is_some_and(|setup| setup.focus.contains_focused(window, cx));
+        window.focused(cx).is_none() || settings || self.settings_focus.contains_focused(window, cx)
     }
+}
+
+/// Whether an input method is composing text in the focused input.
+fn composing(window: &mut Window, cx: &mut App) -> bool {
+    use gpui_kit::component::input::AnyInputState;
+    match window.focused_input(cx) {
+        Some(AnyInputState::Input(state)) => marked(&state, window, cx),
+        Some(AnyInputState::Textarea(state)) => marked(&state, window, cx),
+        Some(AnyInputState::Editor(state)) => marked(&state, window, cx),
+        Some(AnyInputState::Otp(_)) | None => false,
+    }
+}
+
+fn marked<T: EntityInputHandler>(state: &Entity<T>, window: &mut Window, cx: &mut App) -> bool {
+    state.update(cx, |state, cx| {
+        state.marked_text_range(window, cx).is_some()
+    })
 }
 
 #[cfg(test)]
@@ -230,6 +258,22 @@ mod tests {
         assert!(!timer);
         assert_eq!(hold, Hold::Idle, "release hides the hints");
         assert_eq!(Hold::Shown.blurred(), Hold::Idle, "blur hides the hints");
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_release_missed_in_a_dialog_does_not_block_the_next_hold() {
+        let t0 = Instant::now();
+        let (armed, _) = Hold::Idle.modifiers(PRIMARY, t0);
+        let spoiled = armed.key(&primary(","));
+        assert_eq!(
+            spoiled.refocused(PRIMARY),
+            Hold::Spoiled,
+            "still held when focus returns"
+        );
+        let back = spoiled.refocused(NONE);
+        let (rearmed, timer) = back.modifiers(PRIMARY, t0 + HOLD);
+        assert!(timer);
+        assert!(rearmed.elapsed(t0 + HOLD).shows(PRIMARY));
     }
 
     #[::core::prelude::v1::test]

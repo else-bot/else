@@ -402,6 +402,9 @@ impl Shell {
         v_flex()
             .id("app-settings")
             .track_focus(&setup.focus)
+            .on_modifiers_changed(cx.listener(|shell, event: &ModifiersChangedEvent, _, cx| {
+                shell.modifiers_changed(event.modifiers, cx)
+            }))
             .w_full()
             .h(sheet_size(section, window.viewport_size()).height)
             .overflow_hidden()

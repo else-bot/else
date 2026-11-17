@@ -581,12 +581,6 @@ impl ElseApp {
         self.check_reading(window, cx);
     }
 
-    pub(crate) fn composing(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.composer.update(cx, |composer, cx| {
-            composer.marked_text_range(window, cx).is_some()
-        })
-    }
-
     pub(crate) fn selected_bot_id(&self) -> Option<Uuid> {
         self.selected
     }

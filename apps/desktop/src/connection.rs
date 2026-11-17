@@ -180,7 +180,7 @@ pub struct Shell {
     server_editor: Option<servers::Editor>,
     rail: server_rail::Rail,
     hold: server_keys::Hold,
-    _server_keys: [Subscription; 2],
+    _server_keys: [Subscription; 3],
     switch_attempt: Option<Uuid>,
     notification_target: Option<(Uuid, Uuid, Uuid)>,
     _switch: Option<Task<()>>,
@@ -250,6 +250,7 @@ impl Shell {
         let (rail, rail_error) = server_rail::Rail::load(&launch.store);
         let this = cx.weak_entity();
         let shell_window = window.window_handle();
+        let settings_focus = cx.focus_handle();
         let server_keys = [
             cx.intercept_keystrokes(move |event, window, cx| {
                 if window.window_handle() == shell_window {
@@ -262,6 +263,10 @@ impl Shell {
                 if !window.is_window_active() {
                     shell.move_hold(server_keys::Hold::blurred, cx);
                 }
+            }),
+            cx.on_focus_in(&settings_focus, window, |shell, window, cx| {
+                let modifiers = window.modifiers();
+                shell.move_hold(|hold| hold.refocused(modifiers), cx);
             }),
         ];
         let mut shell = Self {
@@ -288,7 +293,7 @@ impl Shell {
             editor_name: String::new(),
             server_update_target: None,
             setup: None,
-            settings_focus: cx.focus_handle(),
+            settings_focus,
             updates,
             backups: None,
             mcp: None,
