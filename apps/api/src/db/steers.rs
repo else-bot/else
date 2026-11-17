@@ -10,7 +10,8 @@
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use super::turns::{ACTIVE_STATUSES, TurnStatus, UNFINISHED_STATUSES};
+use super::turns::{ACTIVE_STATUSES, SendRequest, TurnStatus, UNFINISHED_STATUSES};
+use crate::app::messages::MessagePart;
 use crate::app::providers::Steer;
 
 /// How far the message got into the running reply.
@@ -30,21 +31,38 @@ pub enum Status {
 /// the scheduler must not claim it.
 pub const STEERED: &str = "EXISTS (SELECT 1 FROM turn_steers s WHERE s.turn_id = t.id)";
 
-/// The running turn a new owner message (turn `turn_no` of
-/// `conversation_id`, bound to `provider_id` with profile `revision`) can
-/// join. Only a plain owner request qualifies: it runs on the same provider
-/// and profile, is the conversation's only unfinished work apart from
-/// messages already steered into it, waits on no owner card, and the bot
-/// runs no delegated task an owner message would take over.
-pub async fn target(
+/// Join owner message `req`, accepted as turn `turn_id` (number `turn_no`
+/// of `conversation_id`, with profile `revision`), to the conversation's
+/// running reply instead of stopping it. Returns that reply, or `None` when
+/// the message must stop it as before.
+///
+/// Only a plain request on a provider that steers joins: no files,
+/// reaction, open draft, answer to an ask, or setup flag. The reply must run
+/// on the same provider and profile, be the conversation's only unfinished
+/// work apart from messages already steered into it, wait on no owner
+/// card, and the bot must run no delegated task an owner message would
+/// take over.
+pub async fn join(
     conn: &mut SqliteConnection,
-    bot_id: Uuid,
+    req: &SendRequest<'_>,
     conversation_id: Uuid,
     turn_no: i64,
-    provider_id: &str,
+    turn_id: Uuid,
     revision: Option<i64>,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+    let plain = req.steers
+        && !req.hidden
+        && req.reaction.is_none()
+        && req.open_draft.is_none()
+        && req.answers_notice.is_none()
+        && req
+            .parts
+            .iter()
+            .all(|part| matches!(part, MessagePart::Text { .. }));
+    if !plain {
+        return Ok(None);
+    }
+    let into: Option<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT t.id FROM turns t
          JOIN items i ON i.id = t.owner_item_id AND i.kind = 'user' AND NOT i.hidden
          WHERE t.conversation_id = ?1 AND t.turn_no < ?2 AND t.status = 'running'
@@ -64,25 +82,19 @@ pub async fn target(
     )))
     .bind(conversation_id)
     .bind(turn_no)
-    .bind(provider_id)
+    .bind(req.provider_id)
     .bind(revision)
-    .bind(bot_id)
+    .bind(req.bot_id)
     .fetch_optional(&mut *conn)
-    .await
-}
-
-/// Record that queued turn `turn_id` joins running turn `into`.
-pub async fn record(
-    conn: &mut SqliteConnection,
-    turn_id: Uuid,
-    into: Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO turn_steers (turn_id, into_turn_id) VALUES (?1, ?2)")
-        .bind(turn_id)
-        .bind(into)
-        .execute(&mut *conn)
-        .await?;
-    Ok(())
+    .await?;
+    if let Some(into) = into {
+        sqlx::query("INSERT INTO turn_steers (turn_id, into_turn_id) VALUES (?1, ?2)")
+            .bind(turn_id)
+            .bind(into)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(into)
 }
 
 /// The pending messages steered into running turn `into`, oldest first,

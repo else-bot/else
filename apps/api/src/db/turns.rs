@@ -586,40 +586,30 @@ pub async fn accept(
                 AnswerError::Db(err) => AcceptError::Db(err),
             })?;
     }
-    // A plain request joins the reply still running; anything the running
-    // attempt cannot take as text (files, a reaction, an open draft, an
-    // answer to an ask, a setup message) stops it as before.
-    let steerable = preemption == Preemption::Cancel
-        && req.steers
-        && !req.hidden
-        && req.reaction.is_none()
-        && req.open_draft.is_none()
-        && req.answers_notice.is_none()
-        && files.is_empty();
-    let steered_into = if steerable {
-        crate::db::steers::target(
-            &mut tx,
-            req.bot_id,
-            conversation_id,
-            turn_no,
-            req.provider_id,
-            profile.as_ref().map(|(revision, _)| *revision),
-        )
-        .await?
-    } else {
-        None
-    };
-    let preempted = match (steered_into, preemption) {
-        (Some(into), _) => {
-            crate::db::steers::record(&mut tx, turn_id, into).await?;
-            Vec::new()
-        }
-        (None, Preemption::Cancel) => {
-            take_conversation(&mut tx, req.bot_id, conversation_id, turn_no, turn_id).await?
+    let revision = profile.as_ref().map(|(revision, _)| *revision);
+    let (preempted, steered_into) = match preemption {
+        Preemption::Cancel => {
+            match crate::db::steers::join(
+                &mut tx,
+                &req,
+                conversation_id,
+                turn_no,
+                turn_id,
+                revision,
+            )
+            .await?
+            {
+                Some(into) => (Vec::new(), Some(into)),
+                None => (
+                    take_conversation(&mut tx, req.bot_id, conversation_id, turn_no, turn_id)
+                        .await?,
+                    None,
+                ),
+            }
         }
         // Running turns finish first; settle_deferred takes over once the
         // pause ends.
-        (None, Preemption::Defer) => Vec::new(),
+        Preemption::Defer => (Vec::new(), None),
     };
     // Show the tasks carried from the turns this message ended.
     crate::db::events::turn_changed(&mut tx, req.bot_id, turn_id).await?;
