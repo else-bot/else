@@ -321,6 +321,8 @@ pub enum AcceptError {
     Busy,
     #[error("no saved profile for provider {0}")]
     ProfileMissing(String),
+    #[error("the answered notice is not one of this bot's")]
+    InvalidNotice,
     #[error("the open draft: {0}")]
     OpenDraft(crate::db::outgoing_drafts::DraftError),
     #[error(transparent)]
@@ -355,6 +357,8 @@ pub struct SendRequest<'a> {
     /// The outgoing draft open in the app when the owner sent this
     /// message, with their unsaved edits (part of the request hash).
     pub open_draft: Option<&'a crate::db::outgoing_drafts::Attachment>,
+    /// The owner ask this message replies to (part of the request hash).
+    pub answers_notice: Option<Uuid>,
 }
 
 /// Text holds no NUL, so it is always the tail after the last separator.
@@ -369,6 +373,11 @@ pub fn request_hash(req: &SendRequest<'_>) -> Vec<u8> {
     if let Some(draft) = req.open_draft {
         hasher.update(b"open-draft\0");
         hasher.update(serde_json::to_vec(draft).expect("draft attachment serializes"));
+        hasher.update(b"\0");
+    }
+    if let Some(notice) = req.answers_notice {
+        hasher.update(b"answers-notice\0");
+        hasher.update(notice.hyphenated().to_string().as_bytes());
         hasher.update(b"\0");
     }
     if !req.parts.is_empty() {
@@ -548,7 +557,16 @@ pub async fn accept(
     }
     crate::db::events::turn_accepted(&mut tx, req.bot_id, turn_id).await?;
     if !req.hidden {
-        crate::db::owner_notices::reply_pending(&mut tx, req.bot_id).await?;
+        use crate::db::owner_notices::{Answer, AnswerError, answer};
+        let target = req
+            .answers_notice
+            .map_or(Answer::Untargeted, Answer::Notice);
+        answer(&mut tx, req.bot_id, target)
+            .await
+            .map_err(|err| match err {
+                AnswerError::NotThisBots => AcceptError::InvalidNotice,
+                AnswerError::Db(err) => AcceptError::Db(err),
+            })?;
     }
     let preempted = match preemption {
         Preemption::Cancel => {
@@ -1531,7 +1549,20 @@ mod tests {
             provider_id: "synthetic",
             uses_profile: false,
             open_draft: None,
+            answers_notice: None,
         }
+    }
+
+    #[test]
+    fn the_answered_notice_is_part_of_the_request_hash() {
+        let hash = |notice| {
+            request_hash(&SendRequest {
+                answers_notice: Some(notice),
+                ..request(None)
+            })
+        };
+        assert_ne!(hash(Uuid::nil()), request_hash(&request(None)));
+        assert_ne!(hash(Uuid::nil()), hash(Uuid::max()));
     }
 
     #[test]

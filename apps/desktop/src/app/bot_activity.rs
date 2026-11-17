@@ -314,7 +314,7 @@ impl ElseApp {
             notes = notes.child(
                 div()
                     .text_xs()
-                    .line_clamp(2)
+                    .truncate()
                     .text_color(theme.muted_foreground)
                     .child(format!("{declarer}: \u{201c}{line}\u{201d}")),
             );

@@ -339,21 +339,69 @@ async fn record_ask(
     Ok(notice(row))
 }
 
-/// Mark the bot's pending notices replied, when the owner messages it.
-pub async fn reply_pending(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<(), sqlx::Error> {
-    let replied: Vec<Uuid> = sqlx::query_scalar(
-        "UPDATE owner_notices SET status = 'replied',
-             settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE bot_id = ?1 AND status = 'pending' RETURNING turn_id",
-    )
-    .bind(bot_id)
-    .fetch_all(&mut *conn)
-    .await?;
+/// What an owner message to a bot answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// The ask the owner replied to from its card.
+    Notice(Uuid),
+    /// A message without a target answers the bot's ask only when exactly
+    /// one is pending; with several, it cannot tell which, so all stay.
+    Untargeted,
+}
+
+/// Mark the ask the owner's message answers replied. A target already
+/// settled stays as it is: the message still goes to the bot.
+pub async fn answer(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+    answer: Answer,
+) -> Result<(), AnswerError> {
+    let replied: Vec<Uuid> = match answer {
+        Answer::Notice(id) => {
+            let owner: Option<Uuid> =
+                sqlx::query_scalar("SELECT bot_id FROM owner_notices WHERE id = ?1")
+                    .bind(id)
+                    .fetch_optional(&mut *conn)
+                    .await?;
+            if owner != Some(bot_id) {
+                return Err(AnswerError::NotThisBots);
+            }
+            sqlx::query_scalar(
+                "UPDATE owner_notices SET status = 'replied',
+                     settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                 WHERE id = ?1 AND status = 'pending' RETURNING turn_id",
+            )
+            .bind(id)
+            .fetch_all(&mut *conn)
+            .await?
+        }
+        Answer::Untargeted => {
+            sqlx::query_scalar(
+                "UPDATE owner_notices SET status = 'replied',
+                     settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                 WHERE bot_id = ?1 AND status = 'pending'
+                   AND (SELECT count(*) FROM owner_notices
+                        WHERE bot_id = ?1 AND status = 'pending') = 1
+                 RETURNING turn_id",
+            )
+            .bind(bot_id)
+            .fetch_all(&mut *conn)
+            .await?
+        }
+    };
     for turn_id in replied {
         events::turn_changed(conn, bot_id, turn_id).await?;
         events::exchange_changed(conn, turn_id).await?;
     }
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AnswerError {
+    #[error("the answered notice is not one of this bot's")]
+    NotThisBots,
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
 }
 
 /// Supersede the turn's pending notice when the attempt ending now left a

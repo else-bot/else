@@ -4,11 +4,80 @@ use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{OwnerNotice, OwnerNoticeKind, OwnerNoticeStatus};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::FocusableExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::{Icon, Sizable as _, h_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
+/// The ask the owner's next message to its bot answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ReplyTarget {
+    pub(super) notice: Uuid,
+    pub(super) summary: String,
+}
+
 impl ElseApp {
+    /// The ask the composer's message answers, above the text, with a way
+    /// to send it as a plain message instead.
+    pub(super) fn render_reply_target(
+        &self,
+        bot: Uuid,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let target = self.reply_targets.get(&bot)?;
+        let theme = cx.theme();
+        Some(
+            h_flex()
+                .id("reply-target")
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .gap_1p5()
+                .pl_2()
+                .pr_1()
+                .py_1()
+                .rounded(theme.radius)
+                .border_l_2()
+                .border_color(theme.primary)
+                .bg(theme.muted)
+                .text_sm()
+                .child(
+                    Icon::new(IconName::Reply)
+                        .xsmall()
+                        .flex_none()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.muted_foreground)
+                        .child("Answering"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(target.summary.clone()),
+                )
+                .child(
+                    Button::new("reply-target-remove")
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .accessibility_label("Send as a plain message")
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.reply_targets.remove(&bot);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn dismiss_owner_notice(
         &mut self,
         bot: Uuid,
@@ -140,17 +209,30 @@ impl ElseApp {
                     app.dismiss_owner_notice(bot, id, window, cx);
                 })),
             )
-            .child(
+            .child({
+                let summary = notice.summary.clone();
                 button("reply", format!("Reply to {name}"), Tier::Primary, false).on_click(
                     cx.listener(move |app, _, window, cx| {
+                        // The message answers this ask only; older servers
+                        // settle every ask of the bot instead.
+                        if app.caps.as_ref().is_some_and(|caps| caps.answers_notice) {
+                            app.reply_targets.insert(
+                                bot,
+                                ReplyTarget {
+                                    notice: id,
+                                    summary: summary.clone(),
+                                },
+                            );
+                        }
                         // The asking bot answers in its own chat.
                         if !here {
                             app.open_bot(bot, window, cx);
                         }
                         app.composer.read(cx).focus_handle(cx).focus(window, cx);
+                        cx.notify();
                     }),
-                ),
-            );
+                )
+            });
         super::action_card::card(IconName::TriangleAlert, title, subtitle)
             .meta(since)
             .child(

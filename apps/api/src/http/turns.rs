@@ -80,6 +80,10 @@ impl From<AcceptError> for ApiError {
                 "provider_unavailable",
                 format!("Provider {provider} has no saved execution profile; run else-api setup."),
             ),
+            AcceptError::InvalidNotice => ApiError::bad_request(
+                "invalid_notice",
+                "answers_notice must be one of this bot's owner notices.",
+            ),
             AcceptError::OpenDraft(err) => super::outgoing_drafts::draft_error(err),
             AcceptError::Db(err) => err.into(),
         }
@@ -104,6 +108,9 @@ struct SendBody {
     /// The IANA time zone of the owner's device; new routines use it.
     #[serde(default)]
     timezone: Option<String>,
+    /// The owner ask this message replies to, from its card's Reply.
+    #[serde(default)]
+    answers_notice: Option<Uuid>,
 }
 
 async fn send(
@@ -155,6 +162,7 @@ pub(super) async fn introduce(
             reaction: None,
             open_draft: None,
             timezone: None,
+            answers_notice: None,
         },
         true,
         turns::Preemption::Cancel,
@@ -201,6 +209,7 @@ async fn accept_send(
         provider_id: requested.or(chosen).or(registry.default_id()).unwrap_or(""),
         uses_profile: false,
         open_draft: body.open_draft.as_ref(),
+        answers_notice: body.answers_notice,
     };
     let accepted = match turns::existing_send(&state.db, &request)
         .await

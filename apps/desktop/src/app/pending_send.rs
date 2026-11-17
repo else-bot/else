@@ -14,6 +14,7 @@ pub(super) struct PendingSend {
     pub(super) sent_at: DateTime<Utc>,
     pub(super) reaction: Option<Reaction>,
     pub(super) open_draft: Option<DraftAttachment>,
+    pub(super) answers_notice: Option<Uuid>,
     delivery: Delivery,
 }
 
@@ -48,6 +49,7 @@ impl PendingSend {
         parts: Vec<MessagePart>,
         reaction: Option<Reaction>,
         open_draft: Option<DraftAttachment>,
+        answers_notice: Option<Uuid>,
     ) -> Self {
         Self {
             request_id: Uuid::new_v4(),
@@ -56,6 +58,7 @@ impl PendingSend {
             sent_at: Utc::now(),
             reaction,
             open_draft,
+            answers_notice,
             delivery: Delivery::Sending,
         }
     }
@@ -85,6 +88,7 @@ impl PendingSend {
             reaction: self.reaction,
             parts: self.parts.clone(),
             open_draft: self.open_draft.clone(),
+            answers_notice: self.answers_notice,
         }
     }
 
@@ -138,7 +142,7 @@ mod tests {
     use super::*;
 
     fn uncertain() -> PendingSend {
-        let mut pending = PendingSend::new("hello".into(), Vec::new(), None, None);
+        let mut pending = PendingSend::new("hello".into(), Vec::new(), None, None, None);
         pending.on_send_failure(Failure::Unknown("connection reset".into()));
         pending
     }
@@ -179,7 +183,7 @@ mod tests {
 
     #[test]
     fn only_a_settled_failure_is_dismissible() {
-        let mut pending = PendingSend::new("hello".into(), Vec::new(), None, None);
+        let mut pending = PendingSend::new("hello".into(), Vec::new(), None, None, None);
         assert!(!pending.is_dismissible());
         pending.on_send_failure(Failure::Unknown("paused".into()));
         assert!(pending.is_dismissible());
@@ -193,11 +197,19 @@ mod tests {
 
     #[test]
     fn a_rejected_message_is_never_resent() {
-        let mut pending = PendingSend::new("hello".into(), Vec::new(), None, None);
+        let mut pending = PendingSend::new("hello".into(), Vec::new(), None, None, None);
         pending.on_send_failure(Failure::Rejected("too long".into()));
         assert!(!pending.begin_resolution());
         assert!(pending.retry().is_none());
         pending.on_send_failure(Failure::Unknown("late".into()));
         assert!(pending.is_rejected());
+    }
+
+    #[test]
+    fn a_retry_answers_the_same_ask() {
+        let notice = Uuid::new_v4();
+        let pending = PendingSend::new("hotfix it".into(), Vec::new(), None, None, Some(notice));
+        assert_eq!(pending.request().answers_notice, Some(notice));
+        assert_eq!(pending.request().request_id, pending.request().request_id);
     }
 }

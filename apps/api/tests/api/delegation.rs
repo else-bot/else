@@ -2822,6 +2822,7 @@ async fn follow_up_with(
             provider_id: "synthetic",
             uses_profile: false,
             open_draft: None,
+            answers_notice: None,
         },
         preemption,
     )

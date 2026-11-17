@@ -436,3 +436,104 @@ fn a_title_is_one_short_line() {
     assert!(long.ends_with('…'), "{long}");
     assert!(long.chars().count() <= 81, "{long}");
 }
+
+/// A second pending ask of the task's bot, so a message has two to choose
+/// from. Settling reads only the bot, so any other turn will do.
+async fn second_ask(app: &TestApp, task: &Delegated) -> Uuid {
+    let id = Uuid::new_v4();
+    let root: Uuid =
+        sqlx::query_scalar("SELECT root_turn_id FROM delegations WHERE child_turn_id = ?1")
+            .bind(task.child)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO owner_notices (id, bot_id, turn_id, kind, summary)
+         VALUES (?1, ?2, ?3, 'decision', 'Renew the Sentry plan?')",
+    )
+    .bind(id)
+    .bind(task.target.parse::<Uuid>().unwrap())
+    .bind(root)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    id
+}
+
+async fn status_of(app: &TestApp, id: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM owner_notices WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
+}
+
+async fn reply(
+    app: &TestApp,
+    bot: &str,
+    request: Uuid,
+    text: &str,
+    notice: Option<Uuid>,
+) -> common::Reply {
+    let mut body = json!({ "request_id": request, "text": text, "provider_id": "synthetic" });
+    if let Some(notice) = notice {
+        body["answers_notice"] = json!(notice);
+    }
+    app.owner("POST", &format!("/v1/bots/{bot}/turns"), Some(body))
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_settles_only_the_ask_it_answers() {
+    let app = app().await;
+    let task = delegated(&app).await;
+    let (failed, flagged) = tool(
+        &app,
+        &task.child_token,
+        "notify_owner",
+        json!({ "kind": "decision", "summary": "Roll back the deploy or hotfix it?" }),
+    )
+    .await;
+    assert!(!failed, "{flagged}");
+    let first: Uuid = flagged["notice_id"].as_str().unwrap().parse().unwrap();
+    let other = second_ask(&app, &task).await;
+
+    // With two asks pending, a message without a target cannot tell which
+    // it answers, so both stay.
+    let plain = reply(&app, &task.target, Uuid::new_v4(), "one moment", None).await;
+    assert_eq!(plain.status, StatusCode::ACCEPTED, "{}", plain.body);
+    assert_eq!(status_of(&app, first).await, "pending");
+    assert_eq!(status_of(&app, other).await, "pending");
+
+    // Another bot's ask is refused, and the message is not stored.
+    let foreign = reply(&app, &task.main, Uuid::new_v4(), "hotfix it", Some(first)).await;
+    assert_eq!(foreign.status, StatusCode::BAD_REQUEST, "{}", foreign.body);
+    assert_eq!(foreign.body["error"]["code"], "invalid_notice");
+    assert_eq!(status_of(&app, first).await, "pending");
+
+    let request = Uuid::new_v4();
+    let targeted = reply(&app, &task.target, request, "hotfix it", Some(first)).await;
+    assert_eq!(targeted.status, StatusCode::ACCEPTED, "{}", targeted.body);
+    assert_eq!(status_of(&app, first).await, "replied");
+    assert_eq!(status_of(&app, other).await, "pending");
+
+    // A retry returns the stored message; the same ID with another target
+    // is a different request.
+    let retry = reply(&app, &task.target, request, "hotfix it", Some(first)).await;
+    assert_eq!(retry.status, StatusCode::OK, "{}", retry.body);
+    assert_eq!(retry.body["turn"]["id"], targeted.body["turn"]["id"]);
+    let conflict = reply(&app, &task.target, request, "hotfix it", Some(other)).await;
+    assert_eq!(conflict.status, StatusCode::CONFLICT, "{}", conflict.body);
+    assert_eq!(status_of(&app, other).await, "pending");
+
+    // Answering a settled ask still delivers the message and changes nothing.
+    let late = reply(&app, &task.target, Uuid::new_v4(), "also this", Some(first)).await;
+    assert_eq!(late.status, StatusCode::ACCEPTED, "{}", late.body);
+    assert_eq!(status_of(&app, first).await, "replied");
+    assert_eq!(status_of(&app, other).await, "pending");
+
+    // With one ask left, a plain message answers it, as before.
+    let last = reply(&app, &task.target, Uuid::new_v4(), "yes renew", None).await;
+    assert_eq!(last.status, StatusCode::ACCEPTED, "{}", last.body);
+    assert_eq!(status_of(&app, other).await, "replied");
+}

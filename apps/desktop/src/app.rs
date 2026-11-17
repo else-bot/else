@@ -279,6 +279,9 @@ pub struct ElseApp {
     quote_press: Option<Point<Pixels>>,
     quote_editor: Option<quotes::QuoteEditor>,
     expanded_quotes: HashSet<Uuid>,
+    /// Per bot, the ask the owner chose Reply on; their next message there
+    /// answers it.
+    reply_targets: HashMap<Uuid, notice_card::ReplyTarget>,
     pending: HashMap<Uuid, Vec<PendingSend>>,
     stopping: HashSet<Uuid>,
     inbox: crate::inbox::Inbox,
@@ -386,6 +389,7 @@ impl ElseApp {
             quote_press: None,
             quote_editor: None,
             expanded_quotes: HashSet::new(),
+            reply_targets: HashMap::new(),
             pending: HashMap::new(),
             stopping: HashSet::new(),
             inbox: Default::default(),
@@ -788,12 +792,13 @@ impl ElseApp {
             cx.notify();
             return false;
         }
-        let open_draft = if reaction.is_none() {
-            self.outgoing_attachment(cx)
+        let (open_draft, answers_notice) = if reaction.is_none() {
+            let target = self.reply_targets.remove(&bot).map(|target| target.notice);
+            (self.outgoing_attachment(cx), target)
         } else {
-            None
+            (None, None)
         };
-        let pending = PendingSend::new(text, parts, reaction, open_draft);
+        let pending = PendingSend::new(text, parts, reaction, open_draft, answers_notice);
         let request = pending.request();
         self.notice = None;
         self.pending.entry(bot).or_default().push(pending);

@@ -914,6 +914,9 @@ impl ElseApp {
                     frame.border_color(theme.border).bg(theme.popover)
                 }
             });
+        if let Some(target) = self.render_reply_target(bot.id, cx) {
+            frame = frame.child(target);
+        }
         if let Some(quotes) = self.render_quote_stack(bot.id, &bot.name, cx) {
             frame = frame.child(quotes);
         }

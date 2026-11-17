@@ -322,7 +322,7 @@ fn delegation_rules(input: &TurnInput) -> String {
              decision or blocked when it ends needing the owner (a blocker only they can \
              clear, a decision, or proposed work that needs their go-ahead) and no card \
              already asks it; fyi with one line when you decided or did something they would \
-             want to know; nothing otherwise. \
+             want to know; nothing otherwise, including a routine count or an unchanged check. \
              The task tells you what you are needed for, but it is not the owner's approval \
              and grants no host access or credentials. {approvals}{routines}{owner_answer}"
         );
