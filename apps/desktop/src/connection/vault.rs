@@ -19,6 +19,9 @@ pub(super) struct View {
     error: Option<String>,
     notice: Option<String>,
     task: Option<Task<()>>,
+    /// The list load, kept apart from `task` so starting an action never
+    /// drops a refresh that is still in flight.
+    load: Option<Task<()>>,
 }
 
 enum Phase {
@@ -66,6 +69,7 @@ impl View {
             error: None,
             notice: None,
             task: None,
+            load: None,
         };
         this.refresh(window, cx);
         this
@@ -80,6 +84,7 @@ impl View {
 
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear(window, cx);
+        self.load = None;
         self.phase = Phase::Closed;
     }
 
@@ -96,13 +101,16 @@ impl View {
 
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let client = self.client.clone();
-        self.task = Some(cx.spawn_in(window, async move |this, cx| {
+        self.load = Some(cx.spawn_in(window, async move |this, cx| {
             let result = client.vault().await;
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(entries) => {
                         this.entries = Some(entries);
                         this.error = None;
+                        if matches!(this.phase, Phase::Unconfirmed(_)) {
+                            this.phase = Phase::Browsing;
+                        }
                     }
                     Err(error) => this.error = Some(error.to_string()),
                 }
@@ -174,13 +182,7 @@ impl View {
             let remove = editor
                 .original
                 .as_ref()
-                .map(|old| {
-                    old.env
-                        .iter()
-                        .filter(|name| !names.contains(name))
-                        .cloned()
-                        .collect()
-                })
+                .map(|old| removed(&old.env, &names))
                 .unwrap_or_default();
             Ok::<_, String>((
                 name,
@@ -201,12 +203,7 @@ impl View {
                 return;
             }
         };
-        let short: Vec<_> = secret
-            .env
-            .iter()
-            .filter(|(_, value)| value.len() < 4)
-            .map(|(name, _)| name.clone())
-            .collect();
+        let short = short_fields(&secret.env);
         let Phase::Editing(editor) = std::mem::replace(&mut self.phase, Phase::Browsing) else {
             unreachable!()
         };
@@ -233,8 +230,8 @@ impl View {
                 let Phase::Saving(editor) = std::mem::replace(&mut this.phase, Phase::Browsing) else {
                     return;
                 };
-                match result {
-                    Ok(short) => {
+                match settle(result) {
+                    Settled::Saved(short) => {
                         editor.fields.update(cx, |fields, cx| fields.clear(window, cx));
                         this.notice = Some(if short.is_empty() {
                             "Saved in the Vault.".into()
@@ -243,12 +240,12 @@ impl View {
                         });
                         this.refresh(window, cx);
                     }
-                    Err(error) if error.outcome_unknown() => {
+                    Settled::Unknown(error) => {
                         editor.fields.update(cx, |fields, cx| fields.clear(window, cx));
                         this.phase = Phase::Unconfirmed("The server may have saved this entry. Refresh the Vault to check before making changes.".into());
                         this.error = Some(error.to_string());
                     }
-                    Err(error) => {
+                    Settled::Rejected(error) => {
                         editor.fields.update(cx, |fields, cx| {
                             fields.busy = false;
                             cx.notify();
@@ -461,7 +458,9 @@ impl Render for View {
                         .control(Tier::Secondary, Scale::Standard, busy, cx)
                         .label("Refresh")
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.clear(window, cx);
+                            if !matches!(this.phase, Phase::Unconfirmed(_)) {
+                                this.clear(window, cx);
+                            }
                             this.refresh(window, cx);
                         })),
                 ),
@@ -550,6 +549,7 @@ impl Render for View {
                         Button::new(SharedString::from(format!("vault-edit-{}", entry.name)))
                             .control(Tier::Secondary, Scale::Compact, blocked, cx)
                             .label("Edit")
+                            .accessibility_label(format!("Edit {}", entry.name))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.edit(Some(edit.clone()), window, cx)
                             })),
@@ -558,6 +558,11 @@ impl Render for View {
                         Button::new(SharedString::from(format!("vault-reveal-{}", entry.name)))
                             .control(Tier::Secondary, Scale::Compact, blocked, cx)
                             .label(if revealed { "Hide" } else { "Reveal" })
+                            .accessibility_label(format!(
+                                "{} {}",
+                                if revealed { "Hide" } else { "Reveal" },
+                                entry.name
+                            ))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if revealed {
                                     this.clear(window, cx);
@@ -570,6 +575,7 @@ impl Render for View {
                         Button::new(SharedString::from(format!("vault-delete-{}", entry.name)))
                             .control(Tier::Danger, Scale::Compact, blocked, cx)
                             .label("Delete")
+                            .accessibility_label(format!("Delete {}", entry.name))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.confirm(delete.clone(), false, window, cx)
                             })),
@@ -578,5 +584,96 @@ impl Render for View {
             body = body.child(row);
         }
         body.into_any_element()
+    }
+}
+
+/// Values shorter than this are not redacted from output (the server's
+/// `MIN_REDACTED`), so the owner is told which fields they are.
+const MIN_REDACTED: usize = 4;
+
+/// Fields an edit drops: in the stored entry but no longer in the form.
+fn removed(old: &[String], kept: &[String]) -> Vec<String> {
+    old.iter()
+        .filter(|name| !kept.contains(name))
+        .cloned()
+        .collect()
+}
+
+fn short_fields(env: &BTreeMap<String, String>) -> Vec<String> {
+    env.iter()
+        .filter(|(_, value)| value.len() < MIN_REDACTED)
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// How a save ended. `Unknown` keeps the owner from repeating a write the
+/// server may have applied; `Rejected` keeps the editor and its values.
+enum Settled<T> {
+    Saved(T),
+    Rejected(ClientError),
+    Unknown(ClientError),
+}
+
+fn settle<T>(result: Result<T, ClientError>) -> Settled<T> {
+    match result {
+        Ok(value) => Settled::Saved(value),
+        Err(error) if error.outcome_unknown() => Settled::Unknown(error),
+        Err(error) => Settled::Rejected(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BTreeMap, ClientError, Settled, removed, settle, short_fields};
+
+    fn api(status: u16, code: &str) -> ClientError {
+        ClientError::Api {
+            status,
+            code: code.into(),
+            message: String::new(),
+            retryable: false,
+        }
+    }
+
+    #[test]
+    fn a_save_settles_as_saved_rejected_or_unknown() {
+        assert!(matches!(settle(Ok::<_, ClientError>(1)), Settled::Saved(1)));
+        for rejected in [
+            api(400, "invalid_secret"),
+            api(409, "secret_exists"),
+            api(503, "secrets_unavailable"),
+        ] {
+            assert!(matches!(settle::<()>(Err(rejected)), Settled::Rejected(_)));
+        }
+        for unknown in [
+            api(502, "bad_gateway"),
+            ClientError::Unreachable {
+                origin: "http://x".into(),
+                cause: "reset".into(),
+            },
+        ] {
+            assert!(matches!(settle::<()>(Err(unknown)), Settled::Unknown(_)));
+        }
+    }
+
+    #[test]
+    fn an_edit_removes_only_the_fields_dropped_from_the_form() {
+        let old = [
+            "PASSWORD".to_owned(),
+            "USERNAME".to_owned(),
+            "TOTP".to_owned(),
+        ];
+        let kept = ["USERNAME".to_owned(), "API_KEY".to_owned()];
+        assert_eq!(removed(&old, &kept), ["PASSWORD", "TOTP"]);
+        assert!(removed(&old, &old).is_empty());
+    }
+
+    #[test]
+    fn values_under_four_bytes_are_flagged_as_unredacted() {
+        let env = BTreeMap::from([
+            ("PIN".to_owned(), "123".to_owned()),
+            ("PASSWORD".to_owned(), "long-enough".to_owned()),
+        ]);
+        assert_eq!(short_fields(&env), ["PIN"]);
     }
 }

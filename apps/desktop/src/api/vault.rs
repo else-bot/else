@@ -41,7 +41,7 @@ impl VaultUseKind {
     }
 }
 
-// Value-bearing payloads deliberately do not implement Debug or Deserialize.
+// Value-bearing payloads deliberately do not implement Debug.
 #[derive(Serialize)]
 pub struct SaveSecret {
     pub env: BTreeMap<String, String>,

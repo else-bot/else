@@ -492,7 +492,11 @@ impl ClientError {
     pub fn outcome_unknown(&self) -> bool {
         match self {
             Self::Unreachable { .. } | Self::Protocol(_) => true,
-            Self::Api { code, .. } if code == "provider_unavailable" => false,
+            Self::Api { code, .. }
+                if code == "provider_unavailable" || code == "secrets_unavailable" =>
+            {
+                false
+            }
             Self::Api { status, .. } => *status >= 500,
             Self::Unauthorized | Self::Transport(_) => false,
         }
