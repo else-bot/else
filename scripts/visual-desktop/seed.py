@@ -110,6 +110,18 @@ with db:
         db.execute("UPDATE items SET conversation_id=?,seq=1 WHERE id=?",(task_conv,blob(uid('item/delegate/' + name + '/user'))))
         db.execute("UPDATE items SET conversation_id=?,seq=2 WHERE id=?",(task_conv,blob(uid('item/delegate/' + name + '/reply'))))
         db.execute('UPDATE delegations SET conversation_id=? WHERE id=?',(task_conv,did))
+    # What each task declared it needs from the owner (#508): Research's one
+    # line, and Code Reviewer's pending decision, which its reply row carries.
+    for name, title, need, line in [
+        ('Research', 'Proration migration vs support reports', 'fyi', 'Ran the comparison myself; no dry-run changes needed.'),
+        ('Code Reviewer', 'Retry queue release blockers', 'decision', None)]:
+        db.execute('UPDATE delegations SET title=?,owner_need=?,owner_line=? WHERE id=?',
+            (title, need, line, blob(uid('delegation/' + name))))
+    insert('owner_notices',id=blob(uid('notice/retry-queue')),bot_id=blob(bots['Code Reviewer']),
+        turn_id=blob(uid('turn/delegate/Code Reviewer')),kind='decision',
+        summary='Persisting retry state changes the webhook schema. Approve the migration before Thursday, or ship without durable retries.',
+        tried='Checked whether retries fit the current schema; they do not.',
+        created_at='2026-11-13T14:17:00+00:00')
     item('created', root, main, 'status', 'Created Release Monitor', bot_created=js({
         'bot_id':bots['Release Monitor'],'name':'Release Monitor','creator_bot_id':main,
         'creator_name':'Development Assistant','purpose':'Watch billing deploys and summarize changes in error rates.'}))

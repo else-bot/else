@@ -152,6 +152,26 @@ struct BotAttention {
     head: Option<ReplyPosition>,
     due: bool,
     announcement: Option<Announcement>,
+    ask: AskAlert,
+}
+
+/// A task of the bot that ended needing the owner (`NeedsYou`). It is
+/// announced once, whether or not the bot's reply is unread, and taken down
+/// when the owner settles it.
+#[derive(Debug, Default)]
+struct AskAlert {
+    /// The ask last seen, so the same one is not announced again.
+    seen: Option<String>,
+    due: bool,
+    shown: bool,
+}
+
+/// The bot's open ask, as a key that changes when a new one replaces it.
+fn open_ask(bot: &Bot) -> Option<String> {
+    match &bot.sidebar_status {
+        Some(SidebarStatus::NeedsYou { preview, since }) => Some(format!("{since:?} {preview}")),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Default)]
@@ -248,6 +268,13 @@ impl Inbox {
         self.baseline = true;
         let mut due = false;
         for bot in bots.iter().filter(|bot| bot.is_active()) {
+            let attention = self.bots.entry(bot.id).or_default();
+            let ask = open_ask(bot);
+            if ask != attention.ask.seen {
+                attention.ask.due = ask.is_some() && !first;
+                attention.ask.seen = ask;
+            }
+            due |= attention.ask.due;
             let Some(latest) = bot
                 .read_state
                 .as_ref()
@@ -255,7 +282,6 @@ impl Inbox {
             else {
                 continue;
             };
-            let attention = self.bots.entry(bot.id).or_default();
             let before = attention.head.replace(latest.position);
             let announced = attention
                 .announcement
@@ -280,6 +306,18 @@ impl Inbox {
             let Some(attention) = self.bots.get_mut(&bot.id) else {
                 continue;
             };
+            if std::mem::take(&mut attention.ask.due)
+                && let Some(SidebarStatus::NeedsYou { preview, .. }) = &bot.sidebar_status
+                && !viewing(bot.id)
+            {
+                attention.ask.shown = true;
+                alerts.push(Alert {
+                    bot: bot.id,
+                    title: format!("{} needs you", bot.name),
+                    body: preview.clone(),
+                });
+                continue;
+            }
             let Some(latest) = bot
                 .read_state
                 .as_ref()
@@ -327,6 +365,13 @@ impl Inbox {
                 alert.shown = false;
                 gone.push(*id);
             }
+            let asking = live.get(id).is_some_and(|bot| open_ask(bot).is_some());
+            if attention.ask.shown && !asking {
+                attention.ask.shown = false;
+                if !gone.contains(id) {
+                    gone.push(*id);
+                }
+            }
             live.contains_key(id) || attention.read.inflight.is_some()
         });
         self.opening = self.opening.filter(|id| live.contains_key(id));
@@ -339,8 +384,9 @@ impl Inbox {
             attention
                 .announcement
                 .as_ref()
-                .filter(|alert| alert.shown)
-                .map(|_| *id)
+                .is_some_and(|alert| alert.shown)
+                .then_some(*id)
+                .or(attention.ask.shown.then_some(*id))
         })
     }
 }
@@ -534,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_owner_notice_keeps_later_progress_replies_quiet() {
+    fn a_pending_owner_notice_is_announced_once_and_keeps_progress_replies_quiet() {
         let mut inbox = Inbox::default();
         inbox.observe(&[busy(bot(1, None, at(0, 0)), "working")]);
         let mut working = busy(bot(1, Some((1, at(2, 7))), at(0, 0)), "working");
@@ -542,8 +588,50 @@ mod tests {
             preview: "Choose another bot".into(),
             since: None,
         });
-        inbox.observe(std::slice::from_ref(&working));
-        assert!(inbox.alerts(&[working], nobody).is_empty());
+        assert!(inbox.observe(std::slice::from_ref(&working)));
+        let alerts = inbox.alerts(std::slice::from_ref(&working), nobody);
+        assert_eq!(
+            alerts,
+            [Alert {
+                bot: working.id,
+                title: format!("{} needs you", working.name),
+                body: "Choose another bot".into(),
+            }],
+            "the ask, not the progress reply"
+        );
+        let mut later = busy(bot(1, Some((1, at(3, 7))), at(0, 0)), "working");
+        later.sidebar_status = working.sidebar_status.clone();
+        inbox.observe(std::slice::from_ref(&later));
+        assert!(
+            inbox
+                .alerts(std::slice::from_ref(&later), nobody)
+                .is_empty(),
+            "the same ask is not announced again"
+        );
+
+        let mut handled = later;
+        handled.sidebar_status = None;
+        assert_eq!(inbox.settle(std::slice::from_ref(&handled)), [handled.id]);
+    }
+
+    #[test]
+    fn an_ask_is_not_announced_while_its_chat_is_open_or_on_the_first_list() {
+        let asking = |since: u32| {
+            let mut bot = bot(1, None, at(0, 0));
+            bot.sidebar_status = Some(SidebarStatus::NeedsYou {
+                preview: "Approve the Romow DM".into(),
+                since: chrono::DateTime::from_timestamp(i64::from(since), 0),
+            });
+            bot
+        };
+        let mut inbox = Inbox::default();
+        assert!(
+            !inbox.observe(&[asking(1)]),
+            "an ask open at startup stays quiet"
+        );
+        assert!(inbox.observe(&[asking(2)]), "a new ask is due");
+        assert!(inbox.alerts(&[asking(2)], |_| true).is_empty());
+        assert!(inbox.shown().next().is_none());
     }
 
     #[test]

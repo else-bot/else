@@ -2,17 +2,21 @@
 //! right, the bots it talked to on the left, one bubble per message. A reply
 //! carries the task it answers, so the task shows as this bot's bubble just
 //! before the reply. A task this bot received is followed by its own reply.
+//! A task folds to its title until the owner opens it: tasks are long and
+//! machine-written, and the reply is what the owner reads.
 
 use super::{ElseApp, RowKey};
 use crate::avatar::bot_avatar;
+use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{Conversation, Item};
 use chrono::{DateTime, Utc};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::text::TextViewState;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use uuid::Uuid;
 
@@ -36,6 +40,18 @@ pub(super) struct Bubble {
     pub(super) at: Option<DateTime<Utc>>,
     pub(super) mine: bool,
     pub(super) body: Body,
+    /// For a task, its fold: the delegating bot's title, if it gave one.
+    pub(super) task: Option<Option<String>>,
+}
+
+impl Bubble {
+    /// The item the bubble shows, which keys a task's fold.
+    fn item(&self) -> Option<Uuid> {
+        match &self.body {
+            Body::Item(id) | Body::Prompt { item: id, .. } => Some(*id),
+            Body::Empty => None,
+        }
+    }
 }
 
 pub(super) fn bubbles(items: &[&Item], me: Uuid, my_name: &str) -> Vec<Bubble> {
@@ -53,6 +69,7 @@ pub(super) fn bubbles(items: &[&Item], me: Uuid, my_name: &str) -> Vec<Bubble> {
                 } else {
                     Body::Item(item.id)
                 },
+                task: Some(task.title.clone()),
             });
         } else if item.kind == "assistant" {
             bubbles.push(Bubble {
@@ -66,6 +83,7 @@ pub(super) fn bubbles(items: &[&Item], me: Uuid, my_name: &str) -> Vec<Bubble> {
                 } else {
                     Body::Item(item.id)
                 },
+                task: None,
             });
         } else if let Some(reply) = &item.bot_reply {
             if !reply.prompt.trim().is_empty() {
@@ -79,6 +97,7 @@ pub(super) fn bubbles(items: &[&Item], me: Uuid, my_name: &str) -> Vec<Bubble> {
                         item: item.id,
                         text: reply.prompt.clone(),
                     },
+                    task: Some(reply.title.clone()),
                 });
             }
             bubbles.push(Bubble {
@@ -92,6 +111,7 @@ pub(super) fn bubbles(items: &[&Item], me: Uuid, my_name: &str) -> Vec<Bubble> {
                 } else {
                     Body::Item(item.id)
                 },
+                task: None,
             });
         }
     }
@@ -99,6 +119,8 @@ pub(super) fn bubbles(items: &[&Item], me: Uuid, my_name: &str) -> Vec<Bubble> {
 }
 
 type Prompts = Rc<RefCell<HashMap<Uuid, Entity<TextViewState>>>>;
+/// The tasks the owner opened in this dialog.
+type Opened = Rc<RefCell<HashSet<Uuid>>>;
 
 impl ElseApp {
     pub(super) fn open_bot_exchange(
@@ -110,6 +132,7 @@ impl ElseApp {
     ) {
         let owner = cx.entity().downgrade();
         let prompts: Prompts = Rc::default();
+        let opened: Opened = Rc::default();
         window.open_dialog(cx, move |dialog, _, cx| {
             let dialog = dialog.title(title.clone()).w(px(680.));
             let Some(app) = owner.upgrade() else {
@@ -132,10 +155,9 @@ impl ElseApp {
                 }
             }
             let app = app.read(cx);
-            let messages = bubbles
-                .iter()
-                .enumerate()
-                .map(|(ix, bubble)| app.render_bubble(ix, me, bubble, &prompts.borrow(), cx));
+            let messages = bubbles.iter().enumerate().map(|(ix, bubble)| {
+                app.render_bubble(ix, me, bubble, &prompts.borrow(), &opened, cx)
+            });
             dialog.child(
                 v_flex()
                     .id("bot-exchange")
@@ -179,9 +201,41 @@ impl ElseApp {
         me: Uuid,
         bubble: &Bubble,
         prompts: &HashMap<Uuid, Entity<TextViewState>>,
+        opened: &Opened,
         cx: &App,
     ) -> AnyElement {
         let theme = cx.theme();
+        let fold = bubble
+            .task
+            .as_ref()
+            .zip(bubble.item())
+            .map(|(title, item)| {
+                let open = opened.borrow().contains(&item);
+                let opened = opened.clone();
+                let label = if open { "Hide task" } else { "Show task" };
+                let line = title.clone().unwrap_or_else(|| "Task details".to_owned());
+                let toggle = Button::new(SharedString::from(format!("exchange-task-{ix}")))
+                    .control(Tier::Ghost, Scale::Compact, false, cx)
+                    .label(label)
+                    .accessibility_label(format!("{label}: {line}"))
+                    .on_click(move |_, window, _| {
+                        let mut opened = opened.borrow_mut();
+                        if !opened.remove(&item) {
+                            opened.insert(item);
+                        }
+                        window.refresh();
+                    });
+                let row = h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().truncate().text_sm().child(line))
+                    .child(toggle);
+                (open, row)
+            });
+        if let Some((false, row)) = fold {
+            return self.bubble_frame(ix, me, bubble, row.into_any_element(), cx);
+        }
         let body = match &bubble.body {
             Body::Item(id) => self
                 .view
@@ -200,6 +254,22 @@ impl ElseApp {
                 .child("Finished without a reply.")
                 .into_any_element()
         });
+        let body = match fold {
+            Some((_, row)) => v_flex().gap_2().child(row).child(body).into_any_element(),
+            None => body,
+        };
+        self.bubble_frame(ix, me, bubble, body, cx)
+    }
+
+    fn bubble_frame(
+        &self,
+        ix: usize,
+        me: Uuid,
+        bubble: &Bubble,
+        body: AnyElement,
+        cx: &App,
+    ) -> AnyElement {
+        let theme = cx.theme();
         let mine = bubble.mine || bubble.sender == me;
         let avatar = self
             .bots
@@ -303,6 +373,11 @@ mod tests {
             }}),
         );
         let bubbles = bubbles(&[&reply, &task], me, "Tech Manager");
+        assert_eq!(
+            bubbles.iter().map(|b| b.task.clone()).collect::<Vec<_>>(),
+            [Some(None), None, Some(None)],
+            "both tasks fold, untitled; the reply stays open"
+        );
         let shape: Vec<_> = bubbles
             .iter()
             .map(|b| (b.name.as_str(), b.kind, b.mine))
