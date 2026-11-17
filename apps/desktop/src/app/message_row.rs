@@ -676,7 +676,13 @@ impl ElseApp {
         if row.routine.is_some() {
             return None;
         }
-        if row.activity.is_some() || matches!(row.key, RowKey::Handoff(_)) {
+        if let Some(activity) = &row.activity {
+            // An exchange showing its reply spaces like a message.
+            return self
+                .exchange_is_line(activity)
+                .then_some(EventKind::Exchange);
+        }
+        if matches!(row.key, RowKey::Handoff(_)) {
             return Some(EventKind::Exchange);
         }
         let RowKey::Item(id) = row.key else {

@@ -918,28 +918,6 @@ pub(super) fn card_markdown_view(
         .selectable(true)
 }
 
-/// A read-only markdown view for text outside the transcript's rows.
-pub(super) fn markdown_view(state: &Entity<TextViewState>, cx: &App) -> TextView {
-    TextView::new(state)
-        .style(TextViewStyle::from_theme(&gpui_kit::base::Theme::global(
-            cx,
-        )))
-        .w_full()
-        .text_sm()
-        .line_height(rems(1.375))
-        .scrollable(false)
-        .selectable(true)
-        .markdown_extensions(MarkdownExtensions::default().plugin(UnavailableImage))
-        .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
-        .on_link_click(|url, event, _, cx| {
-            if activates_link(event)
-                && let Some(target) = LinkTarget::parse(url)
-            {
-                target.open(cx);
-            }
-        })
-}
-
 fn file_map(parts: &[MessagePart]) -> HashMap<Uuid, Attachment> {
     parts
         .iter()

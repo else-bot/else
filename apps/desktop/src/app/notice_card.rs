@@ -63,31 +63,28 @@ impl ElseApp {
         let sender = receipt
             .and_then(|item| item.bot_task.as_ref())
             .map(|task| &task.sender_name);
-        let subtitle = sender.map_or_else(String::new, |sender| format!("From {sender}'s task"));
-        let anchor = receipt.and_then(|receipt| {
-            view.rows.iter().find_map(|row| {
-                let activity = row.activity.as_ref()?;
-                activity
-                    .contains(receipt.id)
-                    .then(|| activity.items.first().copied())
-                    .flatten()
-            })
-        });
-        let exchange_title =
-            sender.map_or_else(|| name.to_owned(), |sender| format!("{sender} & {name}"));
-        let open = anchor.map(|anchor| (anchor, exchange_title, "Open task"));
-        Some(self.ask_card(notice, name, subtitle, open, cx))
+        // A received task's ask is its own row. Right under its exchange,
+        // the exchange's header names the task; further down, the card does.
+        let here = view.row_index(super::RowKey::OwnerNotice(id));
+        let exchange =
+            receipt.and_then(|r| Some((r.id, view.row_index(super::RowKey::Item(r.id))?)));
+        let below = exchange.is_some_and(|(_, ix)| here == Some(ix + 1));
+        let subtitle = sender
+            .filter(|_| !below)
+            .map_or_else(String::new, |sender| format!("From {sender}'s task"));
+        let task = exchange.filter(|_| !below).map(|(item, _)| item);
+        Some(self.ask_card(notice, name, subtitle, task, cx))
     }
 
     /// An owner notice as a card: the bot's ask in its own words with the
-    /// owner's actions, or one muted line once settled. `open` names the
-    /// exchange its button opens.
+    /// owner's actions, or one muted line once settled. `task` is the
+    /// exchange item whose task its "Show task" button reveals.
     pub(super) fn ask_card(
         &self,
         notice: &OwnerNotice,
         name: &str,
         subtitle: String,
-        open: Option<(Uuid, String, &'static str)>,
+        task: Option<Uuid>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
@@ -122,12 +119,10 @@ impl ElseApp {
                 .label(label)
         };
         let actions = super::action_card::footer()
-            .children(open.map(|(anchor, exchange, label)| {
-                button("open", label.into(), Tier::Ghost, false).on_click(cx.listener(
-                    move |app, _, window, cx| {
-                        app.open_bot_exchange(anchor, exchange.clone(), window, cx);
-                    },
-                ))
+            .children(task.map(|item| {
+                button("task", "Show task".into(), Tier::Ghost, false).on_click(
+                    cx.listener(move |app, _, window, cx| app.show_exchange_task(item, window, cx)),
+                )
             }))
             .child(
                 button(
