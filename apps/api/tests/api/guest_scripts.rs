@@ -318,6 +318,7 @@ async fn a_jobs_output_file_never_holds_a_secret() {
             bot,
             None,
             "echo \"token is $API_TOKEN\"; printf 'split %s' \"$API_TOKEN\"; exit 3",
+            None,
             Duration::from_secs(60),
             &secrets,
             &["api".to_owned()],
@@ -371,6 +372,7 @@ async fn a_job_masks_a_secret_in_the_guest_without_a_host_pass() {
             r#"printf 'out %s\n' "$ELSE_GITHUB_TOKEN"
 t="$ELSE_GITHUB_TOKEN"; printf 'err %s' "${t%????????????}" >&2; sleep 0.3
 printf '%s\n' "${t#"${t%????????????}"}" >&2; exit 3"#,
+            None,
             Duration::from_secs(60),
             &secrets,
             &[],

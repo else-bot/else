@@ -349,7 +349,8 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
         &app,
         &token,
         "computer_run",
-        json!({ "command": "./send.sh", "secrets": ["smtp"], "effect": "local" }),
+        json!({ "command": "./send.sh", "secrets": ["smtp"], "effect": "local",
+                "purpose": "Send the report" }),
     )
     .await;
     assert_eq!(
@@ -381,7 +382,8 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
         &app,
         &token,
         "computer_job_start",
-        json!({ "command": "./send.sh", "secrets": ["smtp"], "effect": "local" }),
+        json!({ "command": "./send.sh", "secrets": ["smtp"], "effect": "local",
+                "purpose": "Send the report" }),
     )
     .await;
     let id: Uuid = job["job_id"].as_str().unwrap().parse().unwrap();
@@ -403,7 +405,8 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
         &app,
         &token,
         "computer_job_start",
-        json!({ "command": "LAUNCH_ERROR", "secrets": ["smtp"], "effect": "local" }),
+        json!({ "command": "LAUNCH_ERROR", "secrets": ["smtp"], "effect": "local",
+                "purpose": "Send the report" }),
     )
     .await;
     let id: Uuid = failed["job_id"].as_str().unwrap().parse().unwrap();
@@ -733,7 +736,7 @@ async fn shell_commands_run_while_the_desktop_fails_to_start() {
         &app,
         &token,
         "computer_job_start",
-        json!({ "command": "chromium --version", "effect": "local" }),
+        json!({ "command": "chromium --version", "effect": "local", "purpose": "Chromium version" }),
     )
     .await;
     assert!(job["job_id"].is_string(), "{job}");

@@ -70,6 +70,34 @@ fn declares_effect(name: &str) -> bool {
     )
 }
 
+const PURPOSE_REQUIRED: &str = "PURPOSE_REQUIRED: computer_job_start needs purpose, what the \
+    job does or waits for in plain words, e.g. CI checks on PR #482. Nothing was done.";
+
+/// A job's purpose titles the owner's view of a wait on it, so every job
+/// needs one; for the other tools it only titles an approval card.
+fn checked_purpose(name: &str, args: &Value) -> Result<(), String> {
+    let required = name == "computer_job_start";
+    let malformed = || format!("purpose is at most {MAX_PURPOSE} bytes of text.");
+    let text = match args.get("purpose") {
+        None | Some(Value::Null) if !required => return Ok(()),
+        Some(Value::String(text)) => text,
+        _ if required => return Err(PURPOSE_REQUIRED.into()),
+        _ => return Err(malformed()),
+    };
+    if required {
+        if let Some(error) = crate::http::shared_mcp::oversized_purpose(text) {
+            return Err(error);
+        }
+        if text.trim().is_empty() {
+            return Err(PURPOSE_REQUIRED.into());
+        }
+    }
+    if text.len() > MAX_PURPOSE || text.contains('\0') {
+        return Err(malformed());
+    }
+    Ok(())
+}
+
 fn declared_effect(name: &str, args: &Value) -> Result<Option<Effect>, String> {
     if !declares_effect(name) && args.get("effect").is_some_and(|e| !e.is_null()) {
         return Err(format!("{name} takes no effect. Nothing was done."));
@@ -89,11 +117,7 @@ fn declared_effect(name: &str, args: &Value) -> Result<Option<Effect>, String> {
             return Err("effect is local, destructive, or external. Nothing was done.".into());
         }
     };
-    match args.get("purpose") {
-        None | Some(Value::Null) => {}
-        Some(Value::String(text)) if text.len() <= MAX_PURPOSE && !text.contains('\0') => {}
-        Some(_) => return Err(format!("purpose is at most {MAX_PURPOSE} bytes of text.")),
-    }
+    checked_purpose(name, args)?;
     match args.get("context") {
         None | Some(Value::Null) => {}
         Some(Value::String(text))
@@ -375,6 +399,39 @@ mod tests {
             let declared = tool["inputSchema"]["properties"].get("effect").is_some();
             assert_eq!(declares_effect(name), declared, "{name}");
         }
+    }
+
+    #[test]
+    fn every_job_needs_a_short_purpose() {
+        let job = |purpose: Value| {
+            declared_effect(
+                "computer_job_start",
+                &json!({ "command": "./crawl.sh", "effect": "local", "purpose": purpose }),
+            )
+        };
+        assert_eq!(job(json!("CI checks on PR #482")), Ok(Some(Effect::Local)));
+        for missing in [Value::Null, json!("  "), json!(7)] {
+            assert!(job(missing).unwrap_err().starts_with("PURPOSE_REQUIRED"));
+        }
+        assert!(
+            declared_effect(
+                "computer_job_start",
+                &json!({ "command": "./crawl.sh", "effect": "local" })
+            )
+            .unwrap_err()
+            .starts_with("PURPOSE_REQUIRED")
+        );
+        assert_eq!(
+            job(json!("p".repeat(940))).unwrap_err(),
+            "purpose is 940 bytes; the limit is 300. Give a short label for the job."
+        );
+        assert_eq!(
+            declared_effect(
+                "computer_run",
+                &json!({ "command": "ls", "effect": "local" })
+            ),
+            Ok(Some(Effect::Local))
+        );
     }
 
     #[test]

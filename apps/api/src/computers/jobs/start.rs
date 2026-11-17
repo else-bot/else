@@ -45,6 +45,7 @@ impl ComputerManager {
             bot_id,
             turn_id,
             command,
+            None,
             max_duration,
             &Env::default(),
             &[],
@@ -57,12 +58,14 @@ impl ComputerManager {
     /// the job at launch over stdin, its output filtered in the guest. The
     /// job records which secrets it used (names), never their values. A
     /// job linked to one of the bot's live webhooks fires it when it exits 0.
+    /// `purpose` is the bot's label for the job, the title of a wait on it.
     #[allow(clippy::too_many_arguments)]
     pub async fn start_job_with(
         &self,
         bot_id: Uuid,
         turn_id: Option<Uuid>,
         command: &str,
+        purpose: Option<&str>,
         max_duration: Duration,
         env: &Env,
         secret_names: &[String],
@@ -101,6 +104,7 @@ impl ComputerManager {
                     bot_id,
                     turn_id,
                     command,
+                    purpose,
                     duration,
                     secret_names,
                     webhook,
@@ -130,6 +134,7 @@ impl ComputerManager {
         bot_id: Uuid,
         turn_id: Option<Uuid>,
         command: &str,
+        purpose: Option<&str>,
         duration: Duration,
         secret_names: &[String],
         webhook: Option<Uuid>,
@@ -159,9 +164,9 @@ impl ComputerManager {
         .execute(&mut *conn)
         .await?;
         sqlx::query(
-            "INSERT INTO guest_jobs (id, bot_id, turn_id, command, deadline, secrets, webhook_id)
+            "INSERT INTO guest_jobs (id, bot_id, turn_id, command, deadline, secrets, webhook_id, purpose)
              VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', ?5)), ?6,
-                     (SELECT id FROM webhooks WHERE id = ?7 AND bot_id = ?2 AND deleted_at IS NULL))",
+                     (SELECT id FROM webhooks WHERE id = ?7 AND bot_id = ?2 AND deleted_at IS NULL), ?8)",
         )
         .bind(id)
         .bind(bot_id)
@@ -170,6 +175,7 @@ impl ComputerManager {
         .bind(duration.as_secs_f64())
         .bind(sqlx::types::Json(secret_names))
         .bind(webhook)
+        .bind(purpose)
         .execute(&mut *conn)
         .await?;
         Ok(Some(id))

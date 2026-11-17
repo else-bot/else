@@ -94,7 +94,8 @@ async fn start_job(app: &TestApp, token: &str) -> Uuid {
             app,
             token,
             "computer_job_start",
-            json!({ "command": "./crawl.sh", "effect": "local" }),
+            json!({ "command": "./crawl.sh", "effect": "local",
+                     "purpose": "Nightly crawl" }),
         )
         .await,
     );
@@ -403,6 +404,7 @@ async fn stop_keeps_a_waited_job_and_the_owner_stops_that_wait_and_its_job() {
 
     let shown = shown_waits(&app, &bot, turn).await;
     assert_eq!(shown[0]["command"], "./crawl.sh", "{shown}");
+    assert_eq!(shown[0]["purpose"], "Nightly crawl", "{shown}");
     let wait = shown[0]["id"].as_str().unwrap();
     let cancel = app
         .owner("POST", &format!("/v1/bots/{bot}/waits/{wait}/cancel"), None)
