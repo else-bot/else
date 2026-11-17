@@ -842,11 +842,6 @@ pub async fn find_by_request(
     }
 }
 
-const TASK_OR_NO_WAITING_OWNER: &str = "(EXISTS (SELECT 1 FROM conversations k
-                                 WHERE k.id = t.conversation_id AND k.kind = 'task')
-          OR NOT EXISTS (SELECT 1 FROM turns w
-                         WHERE w.conversation_id = t.conversation_id AND w.status = 'waiting'))";
-
 /// Whether turn `t` is background work: a routine run or connector event, or
 /// a task delegated, directly or through another task, from one. Matches
 /// `delegations::origin`: the source item of the owner conversation turn at
@@ -891,8 +886,14 @@ pub struct Claimed {
 /// turns, so the steer is not left behind. The owner's other messages come
 /// next, ahead of queued tasks, so an aside waits only for the running one.
 /// A bot is eligible when it is active, not stopping work, and has no turn
-/// in an active status. A waiting owner turn holds only owner
-/// work, and a waiting task holds nothing. The claimed turn moves to
+/// in an active status. A `waiting` turn holds nothing, whatever it waits
+/// on (a task, an MCP or computer job, a card or draft): the bot is idle, so
+/// its routine runs, connector events and other continuations go ahead, and
+/// the waiting turn's continuation queues behind them by turn number. Its
+/// holds stay on it. Only an owner message takes them over, and it always
+/// does so when accepted ([`take_conversation`], or [`settle_deferred`] for
+/// one sent during a pause), so no owner request ever queues behind a
+/// waiting turn. The claimed turn moves to
 /// `preparing` and is returned; the caller must start it before claiming
 /// again, so a later failure never strands an already committed claim. A
 /// turn in `busy` still has a task finishing its previous attempt, whose
@@ -925,7 +926,6 @@ pub async fn claim_next(
               AND b.status = 'active' AND NOT b.cancel_pending
               AND NOT EXISTS (SELECT 1 FROM turns a
                               WHERE a.bot_id = t.bot_id AND a.status IN {ACTIVE_STATUSES})
-              AND {TASK_OR_NO_WAITING_OWNER}
               AND (?2 OR (NOT {BACKGROUND}
                    AND NOT EXISTS (SELECT 1 FROM turns q
                                    WHERE q.conversation_id = t.conversation_id
@@ -957,8 +957,7 @@ pub async fn claim_next(
                  attempt = attempt + 1
              WHERE id = ?1 AND status = 'queued' AND NOT deferred
                AND NOT EXISTS (SELECT 1 FROM turns a
-                               WHERE a.bot_id = ?2 AND a.status IN {ACTIVE_STATUSES})
-               AND (SELECT {TASK_OR_NO_WAITING_OWNER} FROM turns t WHERE t.id = ?1)"
+                               WHERE a.bot_id = ?2 AND a.status IN {ACTIVE_STATUSES})"
         )))
         .bind(turn_id)
         .bind(bot_id)

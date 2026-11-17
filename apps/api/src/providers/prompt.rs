@@ -1037,7 +1037,15 @@ pub(super) fn turn_content<'a>(
              Before you finish, check that every link, limit and owner action from earlier \
              replies that still applies is in this reply."
         };
-        if considered >= input.turn_no {
+        if considered > input.turn_no {
+            // Background turns ran in this session while the request waited.
+            segments = vec![Segment::Text(format!(
+                "[else.bot continued request] Newer turns ran in this session since this \
+                 request paused. These results belong to this earlier request, not the latest \
+                 turn:\n> {}\n\n{outcomes}{reader}",
+                input.text.trim().replace('\n', "\n> ")
+            ))];
+        } else if considered == input.turn_no {
             segments = vec![Segment::Text(format!("{outcomes}{reader}"))];
         } else if input.attempt > 1 {
             // A fresh session never saw this turn's earlier replies, which
@@ -1143,6 +1151,11 @@ mod tests {
         assert!(
             !packet.contains(&input.text),
             "a resumed session already has the message"
+        );
+        let (packet, _) = super::turn_packet(&input, input.turn_no + 1, None, &skills, &context);
+        assert!(
+            packet.contains(&format!("not the latest turn:\n> {}", input.text.trim())),
+            "a later turn in the session must not take the results: {packet}"
         );
         input.delegation.task_depth = 1;
         let (packet, _) = super::turn_packet(&input, input.turn_no, None, &skills, &context);

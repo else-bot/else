@@ -248,7 +248,7 @@ impl Provider for Synthetic {
         }
         state.default_skills = skills.applied;
         state.context = context.applied;
-        state.considered_through_turn = input.turn_no;
+        state.considered_through_turn = state.considered_through_turn.max(input.turn_no);
         let _ = sink.session(&state).await;
         if input.text.contains("[synthetic:fail]") {
             let _ = sink.text("Partial output before failure. ").await;

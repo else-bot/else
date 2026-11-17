@@ -100,6 +100,8 @@ pub enum CreateError {
     AttemptParked,
     #[error("the owner already controls your computer for an earlier request")]
     OwnerInControl,
+    #[error("an earlier request is still waiting for the owner on your computer")]
+    OwnerAsked,
     #[error("database error")]
     Db,
 }
@@ -112,8 +114,8 @@ impl From<sqlx::Error> for CreateError {
 }
 
 /// Record a request from the running attempt of `turn_id`, which then
-/// waits on it. It replaces the bot's earlier pending request, so the owner
-/// sees only the latest; a request the owner already took over stays.
+/// waits on it. Another request's pending card stays: only the owner, by
+/// answering it or sending a message, settles it.
 pub async fn create(
     pool: &SqlitePool,
     turn_id: Uuid,
@@ -138,6 +140,17 @@ pub async fn create(
     if taken {
         return Err(CreateError::OwnerInControl);
     }
+    let asked: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM computer_handoffs
+                        WHERE bot_id = ?1 AND status = 'pending' AND turn_id <> ?2)",
+    )
+    .bind(caller.bot_id)
+    .bind(turn_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if asked {
+        return Err(CreateError::OwnerAsked);
+    }
     skip_pending(&mut tx, caller.bot_id).await?;
     let row: Row = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "INSERT INTO computer_handoffs (id, bot_id, turn_id, attempt, reason)
@@ -155,8 +168,8 @@ pub async fn create(
     Ok(handoff(row))
 }
 
-/// Withdraw the bot's pending request, when the owner messages it or it
-/// asks again. The turn that waits on it continues and learns it was
+/// Withdraw the bot's pending request, when the owner messages it or the
+/// same request asks again. The turn that waits on it continues and learns it was
 /// skipped. A request the owner already took over stays theirs.
 pub async fn skip_pending(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<(), sqlx::Error> {
     let skipped: Option<Uuid> = sqlx::query_scalar(

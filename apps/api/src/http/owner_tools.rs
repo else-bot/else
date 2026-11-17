@@ -288,6 +288,7 @@ pub(super) async fn computer_handoff(state: &AppState, grant: &Grant, args: &Val
                 CreateError::NotRunning => "NOT_RUNNING",
                 CreateError::AttemptParked => "ATTEMPT_PARKED",
                 CreateError::OwnerInControl => "OWNER_IN_CONTROL",
+                CreateError::OwnerAsked => "HANDOFF_PENDING",
                 CreateError::Db => "UNAVAILABLE",
             };
             (

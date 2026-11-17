@@ -1708,6 +1708,187 @@ async fn restart_reconciliation_ends_the_children_of_an_ended_root() {
     assert_eq!(delegation_status, "cancelled");
 }
 
+/// A bot waiting on a task is idle: a mail event or routine run in the same
+/// chat runs at once, and the waiting request continues after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn background_work_in_a_waiting_chat_runs_and_the_request_continues_after_it() {
+    for kind in ["connector", "routine"] {
+        let db = TestDb::migrated().await;
+        let (main, root, child, _) = seed(&db).await;
+        sqlx::query("UPDATE turns SET status = 'waiting' WHERE id = ?1")
+            .bind(root)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
+            .bind(child)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let event = Uuid::new_v4();
+        let item = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
+                 owner_item_id, provider_id)
+             SELECT ?1, bot_id, conversation_id, ?2, ?3, 2, ?4, 'synthetic' FROM turns WHERE id = ?5",
+        )
+        .bind(event)
+        .bind(Uuid::new_v4())
+        .bind(vec![0u8; 32])
+        .bind(item)
+        .bind(root)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+             SELECT ?1, conversation_id, 1000, id, ?2, 'New mail arrived.' FROM turns WHERE id = ?3",
+        )
+        .bind(item)
+        .bind(kind)
+        .bind(event)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let claimed = else_api::db::turns::claim_next(&db.pool, &[], true)
+            .await
+            .unwrap()
+            .map(|c| (c.id, c.background));
+        assert_eq!(
+            claimed,
+            Some((event, true)),
+            "{kind} runs while {main} waits"
+        );
+
+        sqlx::query(
+            "UPDATE turns SET status = 'completed',
+                 finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
+        )
+        .bind(child)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let root_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+            .bind(root)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            root_status, "queued",
+            "the task's result continues the request"
+        );
+        assert!(
+            else_api::db::turns::claim_next(&db.pool, &[], true)
+                .await
+                .unwrap()
+                .is_none(),
+            "one active turn per bot"
+        );
+
+        sqlx::query(
+            "UPDATE turns SET status = 'completed',
+                 finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
+        )
+        .bind(event)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let next = else_api::db::turns::claim_next(&db.pool, &[], true)
+            .await
+            .unwrap()
+            .map(|c| c.id);
+        assert_eq!(
+            next,
+            Some(root),
+            "the continuation runs after the {kind} turn"
+        );
+    }
+}
+
+/// Background work running beside a waiting request cannot settle the
+/// cards that request waits on: only the owner does.
+#[tokio::test(flavor = "multi_thread")]
+async fn background_work_leaves_a_waiting_requests_cards_to_the_owner() {
+    use else_api::app::outgoing::{Content, Email};
+    use else_api::db::{computer_handoffs, outgoing_drafts};
+    let db = TestDb::migrated().await;
+    let (_, root, _, _) = seed(&db).await;
+    let email = |body: &str| {
+        Content::Email(Email {
+            from: "me@example.com".into(),
+            to: vec!["ada@example.com".into()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Lunch".into(),
+            body: body.into(),
+            account_id: None,
+            reply_to: None,
+        })
+    };
+    sqlx::query("UPDATE turns SET attempt = 2 WHERE id = ?1")
+        .bind(root)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let draft = outgoing_drafts::propose(&db.pool, root, &email("Friday?"), None)
+        .await
+        .unwrap();
+    let handoff = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO computer_handoffs (id, bot_id, turn_id, attempt, reason)
+         SELECT ?1, bot_id, id, attempt, 'Log in to the mail account.' FROM turns WHERE id = ?2",
+    )
+    .bind(handoff)
+    .bind(root)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    set_status(&db, root, "waiting").await;
+    let event = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
+             owner_item_id, provider_id, status, attempt)
+         SELECT ?1, bot_id, conversation_id, ?2, ?3, 2, ?4, 'synthetic', 'running', 1
+         FROM turns WHERE id = ?5",
+    )
+    .bind(event)
+    .bind(Uuid::new_v4())
+    .bind(vec![0u8; 32])
+    .bind(Uuid::new_v4())
+    .bind(root)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let revised =
+        outgoing_drafts::propose(&db.pool, event, &email("Saturday?"), Some(draft.id)).await;
+    assert!(
+        matches!(revised, Err(outgoing_drafts::DraftError::Held)),
+        "{revised:?}"
+    );
+    let asked = computer_handoffs::create(&db.pool, event, "Log in again.").await;
+    assert_eq!(
+        asked.err(),
+        Some(computer_handoffs::CreateError::OwnerAsked)
+    );
+    let state: (String, String, String) = sqlx::query_as(
+        "SELECT t.status, d.status, h.status FROM turns t, outgoing_drafts d, computer_handoffs h
+         WHERE t.id = ?1 AND d.id = ?2 AND h.id = ?3",
+    )
+    .bind(root)
+    .bind(draft.id)
+    .bind(handoff)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        state,
+        ("waiting".into(), "pending".into(), "pending".into()),
+        "the request keeps waiting on its own cards"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_same_task_to_another_bot_is_a_different_child() {
     let db = TestDb::migrated().await;

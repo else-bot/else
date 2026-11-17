@@ -149,6 +149,8 @@ pub enum DraftError {
     NotInContext,
     #[error("this draft was approved for another request")]
     OtherRequest,
+    #[error("an earlier request still waits on the owner for this draft; make a new draft instead")]
+    Held,
     #[error(
         "this email goes from its connected account: send it with send_draft, which records its receipt"
     )]
@@ -176,6 +178,7 @@ impl DraftError {
             Self::NotRunning => "NOT_RUNNING",
             Self::NotInContext => "NOT_IN_CONTEXT",
             Self::OtherRequest => "OTHER_REQUEST",
+            Self::Held => "DRAFT_HELD",
             Self::Connected => "CONNECTED_ACCOUNT",
             Self::NotConnected => "NOT_CONNECTED",
             Self::Db(_) => "UNAVAILABLE",
@@ -294,6 +297,20 @@ pub async fn propose(
             }
             if !matches!(old.status, Status::Pending | Status::Failed) {
                 return Err(DraftError::Settled(old.status));
+            }
+            // Superseding it would leave that request waiting on a card
+            // only this turn's revision can settle.
+            let held: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT EXISTS (SELECT 1 FROM turns WHERE id = ?1 AND id <> ?2
+                                  AND status IN {})",
+                turns::UNFINISHED_STATUSES
+            )))
+            .bind(old.turn_id)
+            .bind(turn_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if held {
+                return Err(DraftError::Held);
             }
             sqlx::query(
                 "UPDATE outgoing_drafts SET status = 'superseded', superseded_by = ?2,

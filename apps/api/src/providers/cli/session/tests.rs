@@ -154,6 +154,24 @@ async fn a_fresh_session_gets_all_history_and_memory_and_advances_once_on_accept
 }
 
 #[tokio::test]
+async fn a_continuation_after_newer_turns_keeps_their_history_considered() {
+    let input = input();
+    let sink = Log::default();
+    let resumed = SessionState {
+        native_id: "n1".into(),
+        fingerprint: "fp".into(),
+        considered_through_turn: input.turn_no + 2,
+        memory_revision: None,
+        default_skills: BTreeMap::new(),
+        context: BTreeMap::new(),
+    };
+    let mut turn = PreparedTurn::new(&input, "fp".into(), Opened::Resumed(&resumed));
+    turn.accept(&sink, &json!({}), "t").await.unwrap();
+    let accepted = sink.sessions.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(accepted.considered_through_turn, input.turn_no + 2);
+}
+
+#[tokio::test]
 async fn compaction_makes_the_next_turn_resend_what_the_session_was_given() {
     let mut input = input();
     input.delegation.origin = crate::app::providers::Origin::OwnerRequest;
