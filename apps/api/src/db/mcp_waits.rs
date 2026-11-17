@@ -6,7 +6,7 @@
 //! and settles the wait once the status leaves those values, the checks
 //! keep failing or report no status, or the deadline passes; settling
 //! requeues the turn as a continuation that receives the last result.
-//! A new owner message carries the wait to its own turn ([`carry_forward`]);
+//! A new owner message joins the waiting turn and keeps the wait on it;
 //! the owner may stop it ([`stop_by_owner`]), which the bot receives like
 //! any other result; any other end of the turn withdraws a pending wait (a
 //! trigger), except the owner's Stop of the attempt alone.
@@ -292,33 +292,6 @@ pub async fn expire(pool: &SqlitePool) -> Result<usize, sqlx::Error> {
     }
     tx.commit().await?;
     Ok(expired.len())
-}
-
-/// The owner's new message `turn_id` takes the waits of the earlier active
-/// turns of `conversation_id` that are pending or settled and unseen, so
-/// superseding a turn never drops a job's result. They get attempt 0: no
-/// attempt of the new turn parked on them, so each may still ask or wait.
-pub async fn carry_forward(
-    conn: &mut SqliteConnection,
-    conversation_id: Uuid,
-    turn_no: i64,
-    turn_id: Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE mcp_waits SET turn_id = ?3, attempt = 0
-         WHERE turn_id IN (SELECT id FROM turns WHERE conversation_id = ?1 AND turn_no < ?2
-                           AND {})
-           AND (status = 'pending'
-                OR (delivered_attempt IS NULL
-                    AND status IN ('finished', 'failed', 'expired', 'stopped')))",
-        super::turns::HOLDS_CARRY
-    )))
-    .bind(conversation_id)
-    .bind(turn_no)
-    .bind(turn_id)
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
 }
 
 /// The pending waits of `turn_id`, oldest first, for the bot's context.

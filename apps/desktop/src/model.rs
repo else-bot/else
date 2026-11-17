@@ -59,6 +59,16 @@ pub struct Item {
     pub attempt: Option<i64>,
 }
 
+/// How far a joined message got into the reply it joined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SteerStatus {
+    Pending,
+    Sending,
+    /// The reply took it and answers it.
+    Delivered,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleChange {
@@ -573,6 +583,9 @@ pub struct Turn {
     /// The running reply this message joined. Absent from older servers.
     #[serde(default)]
     pub steered_into: Option<Uuid>,
+    /// How far this message got into that reply.
+    #[serde(default)]
+    pub steer_status: Option<SteerStatus>,
     #[serde(default)]
     pub secret_requests: Vec<SecretRequest>,
     #[serde(default)]
@@ -685,6 +698,11 @@ impl Wait<'_> {
 }
 
 impl Turn {
+    /// The reply this message joined took it, so that reply answers it.
+    pub fn taken_by_reply(&self) -> bool {
+        self.steer_status == Some(SteerStatus::Delivered)
+    }
+
     /// Whether the turn waits on work of its own rather than on the owner.
     pub fn waits_on_job(&self) -> bool {
         !self.mcp_waits.is_empty() || !self.computer_job_waits.is_empty()

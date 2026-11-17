@@ -304,6 +304,16 @@ async fn without_computers_a_check_is_skipped_as_unavailable_and_update_can_remo
         (Some("check_unavailable"), None)
     );
 
+    // A new message would join the setup reply; let it end first so the
+    // update runs in a request of its own.
+    let setup: Uuid = sqlx::query_scalar(
+        "SELECT id FROM turns WHERE bot_id = ?1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(s.bot.parse::<Uuid>().unwrap())
+    .fetch_one(&s.app.db.pool)
+    .await
+    .unwrap();
+    s.app.wait_turn(&setup.to_string(), &["completed"]).await;
     let token = owner_turn(&s.app, &s.bot).await;
     let updated = tool(
         &s.app,

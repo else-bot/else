@@ -262,7 +262,7 @@ async fn a_cancelled_job_also_continues_the_request_and_an_ended_job_returns_at_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_second_wait_is_refused_and_a_follow_up_carries_the_wait() {
+async fn a_second_wait_is_refused_and_a_follow_up_continues_the_waiting_reply() {
     let Setup {
         app,
         guest,
@@ -314,34 +314,28 @@ async fn a_second_wait_is_refused_and_a_follow_up_carries_the_wait() {
     );
     settle(&app, turn, "waiting").await;
 
-    let follow_up = app
-        .send(
-            &bot,
-            Uuid::new_v4(),
-            "Also summarize the crawl when it ends.",
-            Some("synthetic"),
-        )
-        .await;
-    assert_eq!(follow_up.status, StatusCode::ACCEPTED, "{}", follow_up.body);
-    let next: Uuid = follow_up.body["turn"]["id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
-    settle(&app, turn, "interrupted").await;
-    settle(&app, next, "waiting").await;
-    assert_eq!(wait_row(&app, next).await, ("pending".into(), None));
+    let next = joined(
+        &app,
+        &bot,
+        turn,
+        "Also summarize the crawl when it ends.",
+        2,
+    )
+    .await;
+    settle(&app, turn, "waiting").await;
+    assert_eq!(wait_row(&app, turn).await, ("pending".into(), None));
+    assert_eq!(turn_status(&app, next).await, "queued");
 
     guest.report("done 0\n");
     manager.job(bot.parse().unwrap(), job).await.unwrap();
+    settle(&app, turn, "completed").await;
     settle(&app, next, "completed").await;
-    assert_eq!(wait_row(&app, next).await, ("settled".into(), Some(2)));
+    assert_eq!(wait_row(&app, turn).await, ("settled".into(), Some(3)));
     assert_eq!(
-        attempts(&app, next).await,
-        2,
-        "the latest request continued"
+        attempts(&app, turn).await,
+        3,
+        "the message and the job's end continued the same reply"
     );
-    assert_eq!(attempts(&app, turn).await, 1, "the superseded one did not");
 }
 
 async fn job_status(app: &TestApp, job: Uuid) -> String {
@@ -419,19 +413,38 @@ async fn stop_keeps_a_waited_job_and_the_owner_stops_that_wait_and_its_job() {
     assert!(packet.contains("Cancelled by owner"), "{packet}");
 }
 
-async fn follow_up(app: &TestApp, bot: &str, before: Uuid) -> (Uuid, String) {
-    let sent = app.send(bot, Uuid::new_v4(), SLOW, Some("synthetic")).await;
+/// Send `text` while `into` waits: it joins that reply, which continues
+/// with it as attempt `attempt`. Returns the message's own turn.
+async fn joined(app: &TestApp, bot: &str, into: Uuid, text: &str, attempt: i32) -> Uuid {
+    let sent = app.send(bot, Uuid::new_v4(), text, Some("synthetic")).await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
-    let turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    settle(app, before, "interrupted").await;
-    app.wait_turn(&turn.to_string(), &["running"]).await;
+    assert_eq!(sent.body["turn"]["steered_into"], into.to_string());
+    let deadline = std::time::Instant::now() + common::SETTLE;
+    while attempts(app, into).await < attempt {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the message continues the reply"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    sent.body["turn"]["id"].as_str().unwrap().parse().unwrap()
+}
+
+async fn turn_status(app: &TestApp, turn: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+        .bind(turn)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
+}
+
+async fn grant(app: &TestApp, bot: &str, turn: Uuid) -> String {
     let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    let token = app
-        .scheduler
+    app.scheduler
         .grants()
         .issue(
             bot.parse().unwrap(),
@@ -440,8 +453,7 @@ async fn follow_up(app: &TestApp, bot: &str, before: Uuid) -> (Uuid, String) {
             vec![Tool::Computer, Tool::AskOwner],
             DEFAULT_TTL,
         )
-        .await;
-    (turn, token)
+        .await
 }
 
 async fn waits(app: &TestApp, turn: Uuid) -> Vec<(i32, String, Option<i32>)> {
@@ -468,38 +480,17 @@ async fn wait_job(app: &TestApp, token: &str, job: Uuid) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_carried_job_that_ends_wakes_the_bot_unless_an_owner_question_is_pending() {
+async fn a_joined_reply_keeps_its_job_and_a_question_it_then_asks_still_blocks() {
     let Setup { app, manager, .. } = setup().await;
     let bot = app.create_bot("Scout").await;
-    let (first, token) = running(&app, &bot).await;
+    let (turn, token) = running(&app, &bot).await;
     let crawl = start_job(&app, &token).await;
     wait_job(&app, &token, crawl).await;
-    settle(&app, first, "waiting").await;
-    let (second, token) = follow_up(&app, &bot, first).await;
-    let index = start_job(&app, &token).await;
-    wait_job(&app, &token, index).await;
-    settle(&app, second, "waiting").await;
+    settle(&app, turn, "waiting").await;
 
-    manager
-        .cancel_job(bot.parse().unwrap(), crawl)
-        .await
-        .unwrap();
-    let deadline = std::time::Instant::now() + common::SETTLE;
-    while attempts(&app, second).await < 2 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the carried job's end continues the request"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    settle(&app, second, "waiting").await;
-    assert_eq!(
-        waits(&app, second).await,
-        vec![(0, "settled".into(), Some(2)), (1, "pending".into(), None)],
-        "the carried job's end woke the bot while its own job still runs"
-    );
-
-    let (latest, token) = follow_up(&app, &bot, second).await;
+    let next = joined(&app, &bot, turn, "Index the archive too.", 2).await;
+    settle(&app, turn, "running").await;
+    let token = grant(&app, &bot, turn).await;
     let asked = tool(
         &app,
         &token,
@@ -512,18 +503,19 @@ async fn a_carried_job_that_ends_wakes_the_bot_unless_an_owner_question_is_pendi
         .unwrap()
         .parse()
         .unwrap();
-    settle(&app, latest, "waiting").await;
+    settle(&app, turn, "waiting").await;
     manager
-        .cancel_job(bot.parse().unwrap(), index)
+        .cancel_job(bot.parse().unwrap(), crawl)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(
-        attempts(&app, latest).await,
-        1,
+        attempts(&app, turn).await,
+        2,
         "a pending question still blocks"
     );
-    assert_eq!(waits(&app, latest).await, vec![(0, "settled".into(), None)]);
+    assert_eq!(waits(&app, turn).await, vec![(1, "settled".into(), None)]);
+    assert_eq!(turn_status(&app, next).await, "queued");
 
     let chosen = app
         .owner(
@@ -533,10 +525,11 @@ async fn a_carried_job_that_ends_wakes_the_bot_unless_an_owner_question_is_pendi
         )
         .await;
     assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.body);
-    settle(&app, latest, "completed").await;
-    assert_eq!(attempts(&app, latest).await, 2);
+    settle(&app, turn, "completed").await;
+    settle(&app, next, "completed").await;
+    assert_eq!(attempts(&app, turn).await, 3);
     assert_eq!(
-        waits(&app, latest).await,
-        vec![(0, "settled".into(), Some(2))]
+        waits(&app, turn).await,
+        vec![(1, "settled".into(), Some(3))]
     );
 }

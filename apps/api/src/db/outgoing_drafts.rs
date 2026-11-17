@@ -731,17 +731,22 @@ pub async fn confirm(
     {
         return Err(DraftError::NotQuoted);
     }
-    let source: Option<Uuid> = sqlx::query_scalar(
+    // The owner message that saw this draft: the request's own, or one the
+    // reply has already been given while it worked.
+    let source: Option<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT i.id FROM turns t JOIN items i ON i.id = t.owner_item_id
-         WHERE t.id = ?1 AND i.kind = 'user'",
-    )
+         WHERE t.id = ?2 AND i.kind = 'user'
+           AND (t.id = ?1 OR t.id IN ({}))",
+        super::steers::delivered_into("?1")
+    )))
     .bind(turn_id)
+    .bind(draft.context_turn_id)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(source) = source else {
         return Err(DraftError::NotInContext);
     };
-    if draft.context_turn_id != Some(turn_id) || draft.context_version != Some(draft.version) {
+    if draft.context_version != Some(draft.version) {
         return Err(DraftError::NotInContext);
     }
     // This message approved it before and the send may have gone out: only
@@ -1237,21 +1242,29 @@ pub async fn after_social_send(
 }
 
 /// What a turn must know about drafts: owner decisions on its cards not yet
-/// given to an attempt, and the draft open when its owner message was sent.
+/// given to an attempt, and the draft open when one of its owner messages
+/// was sent.
 pub async fn notes(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
 ) -> Result<Vec<outgoing::Note>, sqlx::Error> {
+    let joined = super::steers::joined_into("?1");
     let rows: Vec<OutgoingDraft> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "{SELECT} WHERE (d.turn_id = ?1 AND d.delivered_attempt IS NULL
                           AND d.status IN ('approved', 'discarded')
                           AND d.approval_source IS NOT 'message')
-                     OR (d.context_turn_id = ?1 AND d.status <> 'superseded')
+                     OR ((d.context_turn_id = ?1 OR d.context_turn_id IN ({joined}))
+                         AND d.status <> 'superseded')
          ORDER BY d.created_at, d.id"
     )))
     .bind(turn_id)
     .fetch_all(&mut *conn)
     .await?;
+    let mut context: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(joined))
+        .bind(turn_id)
+        .fetch_all(&mut *conn)
+        .await?;
+    context.push(turn_id);
     Ok(rows
         .into_iter()
         .map(|row| outgoing::Note {
@@ -1261,7 +1274,7 @@ pub async fn notes(
             content: row.content.0.clone(),
             status: row.status,
             version: row.version,
-            in_context: row.context_turn_id == Some(turn_id)
+            in_context: row.context_turn_id.is_some_and(|c| context.contains(&c))
                 && row.context_version == Some(row.version),
             decided: row.turn_id == turn_id
                 && row.approval_source != Some(ApprovalSource::Message)

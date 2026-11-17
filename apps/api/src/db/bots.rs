@@ -139,7 +139,9 @@ const SELECT_BOT: &str = concat!(
             AND u.seq >= c.read_item_seq
             AND (u.seq > c.read_item_seq OR length(CAST(u.text AS BLOB)) > c.read_text_bytes))
             AS unread_count,
-        (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued') AS queued_count,
+        (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued'
+            AND NOT EXISTS (SELECT 1 FROM turn_steers s
+                            WHERE s.turn_id = q.id AND s.status <> 'pending')) AS queued_count,
         (SELECT m.created_at FROM items m WHERE m.conversation_id = c.id
             AND m.kind IN ('user', 'assistant') AND NOT m.hidden ORDER BY m.seq DESC LIMIT 1) AS last_message_at,
         (SELECT CASE WHEN count(*) > 0 THEN json_object('since', min(g.since),

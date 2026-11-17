@@ -774,7 +774,7 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
         .and_then(|e| e.message.clone())
         .unwrap_or_default();
     match turn.status.as_str() {
-        "queued" if turn.steered_into.is_some() => (String::new(), false),
+        "queued" if turn.taken_by_reply() => (String::new(), false),
         "queued" => ("Queued".into(), false),
         "preparing" | "sending" | "running" => ("Working".into(), false),
         "waiting" if turn.waits_on_job() => {
@@ -1040,8 +1040,8 @@ mod tests {
     }
 
     #[test]
-    fn a_message_that_joined_the_running_reply_is_not_shown_as_queued() {
-        let queued = |steered_into: serde_json::Value| {
+    fn a_joined_message_is_queued_until_the_reply_takes_it() {
+        let queued = |steer_status: serde_json::Value| {
             serde_json::from_value(serde_json::json!({
                 "id": uuid::Uuid::nil(),
                 "request_id": uuid::Uuid::nil(),
@@ -1050,16 +1050,19 @@ mod tests {
                 "status": "queued",
                 "error": null,
                 "effect_uncertain": false,
-                "steered_into": steered_into,
+                "steered_into": uuid::Uuid::nil(),
+                "steer_status": steer_status,
             }))
             .unwrap()
         };
+        for status in ["pending", "sending"] {
+            assert_eq!(
+                turn_label(&queued(serde_json::json!(status))),
+                ("Queued".into(), false)
+            );
+        }
         assert_eq!(
-            turn_label(&queued(serde_json::json!(null))),
-            ("Queued".into(), false)
-        );
-        assert_eq!(
-            turn_label(&queued(serde_json::json!(uuid::Uuid::nil()))),
+            turn_label(&queued(serde_json::json!("delivered"))),
             (String::new(), false)
         );
     }

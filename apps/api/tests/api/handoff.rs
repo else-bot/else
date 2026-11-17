@@ -429,7 +429,7 @@ async fn a_profile_provider_is_unavailable_until_an_explicit_profile_is_saved() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_switch_stops_the_other_providers_active_turn_and_carries_job_records() {
+async fn a_switch_waits_for_the_other_providers_turn_and_carries_job_records() {
     let Two { app, a, b } = two().await;
     let bot = app.create_bot("Planner").await;
     let bot_id: Uuid = bot.parse().unwrap();
@@ -452,16 +452,19 @@ async fn a_switch_stops_the_other_providers_active_turn_and_carries_job_records(
     .await
     .unwrap();
     let reply = app
-        .send(&bot, Uuid::new_v4(), "Working [synthetic:hang]", Some(A))
+        .send(&bot, Uuid::new_v4(), "Working [synthetic:slow]", Some(A))
         .await;
-    let hung = reply.body["turn"]["id"].as_str().unwrap().to_owned();
-    app.wait_turn(&hung, &["running"]).await;
+    let first = reply.body["turn"]["id"].as_str().unwrap().to_owned();
     let (_, status) = say(&app, &bot, B, "Switching to B.").await;
     assert_eq!(status, "completed");
-    assert_eq!(app.wait_turn(&hung, &["interrupted"]).await, "interrupted");
+    assert_eq!(
+        app.wait_turn(&first, &["completed"]).await,
+        "completed",
+        "the switch waits for the other provider's reply instead of stopping it"
+    );
     let packet = last(&b.packets().await);
     assert!(
-        packet.contains("[turn 1, interrupted] Owner: Working [synthetic:hang]"),
+        packet.contains("Owner: Working [synthetic:slow]"),
         "{packet}"
     );
     assert!(

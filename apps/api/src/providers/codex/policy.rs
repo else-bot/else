@@ -4,9 +4,10 @@ use serde_json::{Value, json};
 
 use super::super::codex_rpc::{AppServer, Incoming};
 use super::{Codex, RPC_TIMEOUT, failed};
-use crate::app::providers::{LimitWindow, Profile, TurnOutcome};
+use crate::app::providers::{LimitWindow, Profile, Steer, TurnOutcome};
 use crate::app::tools::{SERVER_NAME, TOOL_NAMES};
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
+use crate::providers::prompt;
 
 const FORBIDDEN_ITEMS: &[&str] = &[
     "dynamicToolCall",
@@ -150,6 +151,10 @@ pub(super) struct TurnEvents<'a> {
     pub host_tools: bool,
     pub elsebot_tools: bool,
     pub current_message: Option<String>,
+    /// Where a steered message's files are staged.
+    pub project: &'a std::path::Path,
+    /// Steered messages given to the turn and not echoed yet.
+    pub steers: std::collections::HashSet<uuid::Uuid>,
 }
 
 impl TurnEvents<'_> {
@@ -244,6 +249,18 @@ impl Protocol for TurnEvents<'_> {
             {
                 events.push(Event::Parked);
             }
+            // `turn/steer` input comes back as a user message carrying the
+            // `clientUserMessageId` it was given, once started and once
+            // completed.
+            "item/started" | "item/completed" if params["item"]["type"] == "userMessage" => {
+                if let Some(turn) = params["item"]["clientId"]
+                    .as_str()
+                    .and_then(|id| id.parse().ok())
+                    .filter(|turn| self.steers.remove(turn))
+                {
+                    events.push(Event::Steered(turn));
+                }
+            }
             "item/started" => self.check_item(&params["item"])?,
             "thread/compacted" => events.push(Event::Compacted),
             "item/completed" if params["item"]["type"] == "contextCompaction" => {
@@ -300,6 +317,20 @@ impl Protocol for TurnEvents<'_> {
             _ => {}
         }
         Ok(events)
+    }
+
+    /// The turn's own `turn/steer` request; it fails once the turn ended.
+    fn steer_input(&self, steer: &Steer) -> Option<Value> {
+        Some(json!({
+            "threadId": self.thread_id,
+            "expectedTurnId": self.native_turn,
+            "clientUserMessageId": steer.turn_id,
+            "input": super::turn::turn_input(&prompt::steer_segments(steer), self.project),
+        }))
+    }
+
+    fn steer_sent(&mut self, steer: &Steer) {
+        self.steers.insert(steer.turn_id);
     }
 
     fn outcome(&self, completed: Completed, _: Option<StopCause>, _: bool) -> TurnOutcome {

@@ -3,7 +3,7 @@
 //!
 //! The reply echoes the owner's text in small chunks, including multi-byte
 //! characters to exercise UTF-8 handling. Directives in the message change
-//! behavior for tests:
+//! behavior for tests, from the request or any owner message that joined it:
 //!
 //! - `[synthetic:slow]` streams one chunk every 200 ms.
 //! - `[synthetic:hang]` acknowledges, then waits until cancelled and takes
@@ -179,13 +179,17 @@ impl Provider for Synthetic {
 
     async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
         let cancel = stop.token();
-        if input.text.contains("[synthetic:policy]") {
+        let directives = std::iter::once(input.text.as_str())
+            .chain(input.steered.iter().map(|s| s.message.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if directives.contains("[synthetic:policy]") {
             return TurnOutcome::Failed {
                 code: "policy_violation".into(),
                 message: "The synthetic provider attempted a forbidden tool.".into(),
             };
         }
-        if input.text.contains("[synthetic:refuse]") {
+        if directives.contains("[synthetic:refuse]") {
             return TurnOutcome::Failed {
                 code: "provider_refused".into(),
                 message: "The synthetic provider refused the message.".into(),
@@ -237,7 +241,7 @@ impl Provider for Synthetic {
                 state.packets.push_back(packet);
             })
             .await;
-        if input.text.contains("[synthetic:stall-send]") {
+        if directives.contains("[synthetic:stall-send]") {
             cancel.cancelled().await;
             return TurnOutcome::Uncertain {
                 message: "Stopped before the synthetic provider acknowledged.".into(),
@@ -250,20 +254,20 @@ impl Provider for Synthetic {
         state.context = context.applied;
         state.considered_through_turn = state.considered_through_turn.max(input.turn_no);
         let _ = sink.session(&state).await;
-        if input.text.contains("[synthetic:fail]") {
+        if directives.contains("[synthetic:fail]") {
             let _ = sink.text("Partial output before failure. ").await;
             return TurnOutcome::Failed {
                 code: "provider_failed".into(),
                 message: "The synthetic provider failed.".into(),
             };
         }
-        if input.text.contains("[synthetic:ignore-cancel]") {
+        if directives.contains("[synthetic:ignore-cancel]") {
             stop.escalated().await;
             return TurnOutcome::Uncertain {
                 message: "The synthetic provider did not stop after being interrupted.".into(),
             };
         }
-        if input.text.contains("[synthetic:hang]") {
+        if directives.contains("[synthetic:hang]") {
             cancel.cancelled().await;
             let mut held = self.state.call(|state| state.hangs_held.subscribe()).await;
             // The actor's state owns the sender, so the channel stays open.
@@ -271,7 +275,7 @@ impl Provider for Synthetic {
             tokio::time::sleep(Duration::from_millis(200)).await;
             return TurnOutcome::Interrupted;
         }
-        let delay = if input.text.contains("[synthetic:slow]") {
+        let delay = if directives.contains("[synthetic:slow]") {
             Duration::from_millis(200)
         } else {
             self.chunk_delay
@@ -285,7 +289,7 @@ impl Provider for Synthetic {
                 return TurnOutcome::Interrupted;
             }
         }
-        if input.text.contains("[synthetic:usage]") {
+        if directives.contains("[synthetic:usage]") {
             for output in [10, 20] {
                 sink.usage(crate::app::providers::Usage {
                     input: 1000,
@@ -303,7 +307,7 @@ impl Provider for Synthetic {
             }])
             .await;
         }
-        if input.text.contains("[synthetic:messages]")
+        if directives.contains("[synthetic:messages]")
             && (sink.end_message().await.is_err() || sink.text(SECOND_MESSAGE).await.is_err())
         {
             return TurnOutcome::Interrupted;

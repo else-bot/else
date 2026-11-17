@@ -1317,11 +1317,13 @@ pub(crate) async fn queue_saved_task(
     prompt: &str,
     run_on: RunOn<'_>,
 ) -> Result<Result<Uuid, QueueRefusal>, sqlx::Error> {
-    let queued: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM turns WHERE bot_id = ?1 AND status = 'queued'")
-            .bind(bot_id)
-            .fetch_one(&mut *conn)
-            .await?;
+    let queued: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT {}",
+        super::steers::queued_runs("?1")
+    )))
+    .bind(bot_id)
+    .fetch_one(&mut *conn)
+    .await?;
     if queued >= MAX_QUEUED_TURNS {
         return Ok(Err(QueueRefusal::QueueFull));
     }

@@ -10,7 +10,7 @@ use super::super::codex_rpc::{AppServer, Incoming, RpcError};
 use super::policy::{Refusal, Reported, TurnEvents};
 use super::{Codex, RPC_TIMEOUT, Ready, codex_home, failed, prompt, skills};
 use crate::app::providers::{Profile, Stop, TurnInput, TurnOutcome, TurnSink};
-use crate::providers::cli::attempt::{self, Channel, Ended};
+use crate::providers::cli::attempt::{self, Channel, Ended, SendError};
 use crate::providers::cli::session::{Opened, PreparedTurn};
 
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -48,6 +48,29 @@ impl Channel for Running<'_> {
             .server
             .request("turn/interrupt", params, INTERRUPT_TIMEOUT)
             .await;
+    }
+
+    /// `turn/steer`. An error answer means Codex took nothing: its turn
+    /// ended, or is a kind it does not steer. Anything else, including a
+    /// success naming another turn, may have delivered it.
+    async fn send(&mut self, input: &Value) -> Result<(), SendError> {
+        match self
+            .server
+            .request("turn/steer", input.clone(), INTERRUPT_TIMEOUT)
+            .await
+        {
+            Ok(response) if response["turnId"].as_str() == Some(self.native_turn) => Ok(()),
+            Ok(response) => Err(SendError::Unknown(format!(
+                "Codex steered turn {} instead",
+                response["turnId"]
+            ))),
+            Err(RpcError::Remote { message, .. }) => Err(SendError::Refused(message)),
+            Err(err) => Err(SendError::Unknown(err.to_string())),
+        }
+    }
+
+    fn project(&self) -> Option<&std::path::Path> {
+        Some(std::path::Path::new(&self.server.cwd))
     }
 }
 
@@ -288,6 +311,8 @@ impl Codex {
             host_tools: input.delegation.host_tools(),
             elsebot_tools: self.tool_url.is_some(),
             current_message: None,
+            project: &project,
+            steers: Default::default(),
         };
         let mut running = Running {
             server,

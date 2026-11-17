@@ -226,6 +226,53 @@ async fn running(app: &TestApp, bot: &str, text: &str, draft: Option<Value>) -> 
     (turn, grant(app, turn).await)
 }
 
+async fn attempt(app: &TestApp, turn: Uuid) -> i32 {
+    sqlx::query_scalar("SELECT attempt FROM turns WHERE id = ?1")
+        .bind(turn)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
+}
+
+/// Send `text` with `draft` open while `into` is unfinished: the message
+/// joins that reply, which runs its next attempt with it. Returns the
+/// message's own turn and a grant for the continued reply.
+async fn joined(
+    app: &TestApp,
+    bot: &str,
+    into: Uuid,
+    text: &str,
+    draft: Option<Value>,
+) -> (Uuid, String) {
+    let before = attempt(app, into).await;
+    let sent = send(app, bot, text, draft).await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    assert_eq!(
+        sent.body["turn"]["steered_into"],
+        into.to_string(),
+        "{}",
+        sent.body
+    );
+    let turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    let deadline = std::time::Instant::now() + common::SETTLE;
+    while attempt(app, into).await <= before || status(app, into).await != "running" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the message never continued the reply"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    (turn, grant(app, into).await)
+}
+
+fn card_of(cards: &[Value], id: Uuid) -> Value {
+    cards
+        .iter()
+        .find(|c| c["id"] == id.to_string())
+        .unwrap_or_else(|| panic!("no card {id} in {cards:?}"))
+        .clone()
+}
+
 async fn tool(app: &TestApp, token: &str, name: &str, args: Value) -> common::Reply {
     app.call(
         "POST",
@@ -606,7 +653,7 @@ async fn discarding_continues_the_turn_and_nothing_can_send_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_follow_up_carries_the_owners_edits_and_a_revision_replaces_the_card() {
+async fn a_joined_message_carries_the_owners_edits_and_a_revision_replaces_the_card() {
     let Harness { app, synthetic } = harness().await;
     let main = app.main_bot().await;
     let (first, token) = running(&app, &main, SLOW, None).await;
@@ -635,14 +682,15 @@ async fn a_follow_up_carries_the_owners_edits_and_a_revision_replaces_the_card()
     );
 
     let follow_up = "[synthetic:slow] Make it warmer and mention the new place.";
-    let (second, token) = running(
+    let (second, token) = joined(
         &app,
         &main,
+        first,
         follow_up,
         Some(json!({ "id": id, "version": 1, "body": "Hi Ada, lunch Friday? My treat." })),
     )
     .await;
-    assert_eq!(status(&app, first).await, "interrupted");
+    assert_eq!(status(&app, second).await, "queued");
     let old = shown(&app, &main, first).await[0].clone();
     assert_eq!(old["status"], "pending");
     assert_eq!(
@@ -650,13 +698,7 @@ async fn a_follow_up_carries_the_owners_edits_and_a_revision_replaces_the_card()
         "the owner's edits were saved with the message"
     );
     assert_eq!(old["content"]["body"], "Hi Ada, lunch Friday? My treat.");
-    assert_eq!(old["can_approve"], false);
-    let button = owner_action(&app, &main, id, "approve", json!({ "version": 2 })).await;
-    assert_eq!(
-        button.body["error"]["code"], "draft_inactive",
-        "{}",
-        button.body
-    );
+    assert_eq!(old["in_reply"], true, "{old}");
     let packet = synthetic.packets().await.last().unwrap().clone();
     assert!(packet.contains("in_context=\"true\""), "{packet}");
     assert!(
@@ -678,12 +720,12 @@ async fn a_follow_up_carries_the_owners_edits_and_a_revision_replaces_the_card()
         .unwrap();
     assert_eq!(drafted["draft"]["lineage_id"], old["lineage_id"]);
 
-    let old = shown(&app, &main, first).await[0].clone();
+    let cards = shown(&app, &main, first).await;
+    let old = card_of(&cards, id);
     assert_eq!(old["status"], "superseded");
     assert_eq!(old["superseded_by"], new_id.to_string());
-    let card = shown(&app, &main, second).await[0].clone();
-    assert_eq!(card["id"], new_id.to_string());
-    assert_eq!(card["status"], "pending");
+    assert_eq!(card_of(&cards, new_id)["status"], "pending");
+    assert!(shown(&app, &main, second).await.is_empty());
     assert_eq!(journaled(&app, &main, id).await["status"], "superseded");
     let obsolete = send(
         &app,
@@ -716,9 +758,10 @@ async fn a_clear_chat_approval_confirms_exactly_the_open_version() {
     let id = draft(&app, &token, lunch()).await;
     wait(&app, first, "waiting").await;
 
-    let (second, token) = running(
+    let (second, token) = joined(
         &app,
         &main,
+        first,
         "[synthetic:slow] Looks good, send it.",
         Some(json!({ "id": id, "version": 1 })),
     )
@@ -751,10 +794,10 @@ async fn a_clear_chat_approval_confirms_exactly_the_open_version() {
     assert_eq!(tool_text(&replay)["status"], "approved", "{}", replay.body);
 
     assert!(
-        shown(&app, &main, first).await.is_empty(),
-        "the card moved under the follow-up"
+        shown(&app, &main, second).await.is_empty(),
+        "the card stays with the reply the message joined"
     );
-    let card = shown(&app, &main, second).await[0].clone();
+    let card = shown(&app, &main, first).await[0].clone();
     assert_eq!(card["status"], "approved");
     assert_eq!(card["approval_source"], "message");
     assert_eq!(card["approved_version"], 1);
@@ -802,7 +845,7 @@ async fn only_the_message_sent_with_the_unchanged_draft_can_approve_it() {
     let id = draft(&app, &token, lunch()).await;
     wait(&app, first, "waiting").await;
 
-    let (_, plain) = running(&app, &main, "[synthetic:slow] Send it.", None).await;
+    let (_, plain) = joined(&app, &main, first, "[synthetic:slow] Send it.", None).await;
     let unbound = tool(
         &app,
         &plain,
@@ -815,9 +858,10 @@ async fn only_the_message_sent_with_the_unchanged_draft_can_approve_it() {
         "a message without the draft"
     );
 
-    let (_, token) = running(
+    let (_, token) = joined(
         &app,
         &main,
+        first,
         "[synthetic:slow] Send it.",
         Some(json!({ "id": id, "version": 1 })),
     )
@@ -851,6 +895,56 @@ async fn only_the_message_sent_with_the_unchanged_draft_can_approve_it() {
     .await;
     assert!(refusal(&unknown).starts_with("NOT_FOUND"));
     assert_eq!(journaled(&app, &main, id).await["status"], "pending");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_sent_with_a_message_the_reply_has_not_taken_yet_cannot_be_approved() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (first, token) = running(&app, &main, SLOW, None).await;
+    let id = draft(&app, &token, lunch()).await;
+    let sent = send(
+        &app,
+        &main,
+        "Send it.",
+        Some(json!({ "id": id, "version": 1 })),
+    )
+    .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    assert_eq!(sent.body["turn"]["steered_into"], first.to_string());
+    assert_eq!(
+        attempt(&app, first).await,
+        1,
+        "the attempt is still running"
+    );
+    let early = else_api::db::outgoing_drafts::confirm(&app.db.pool, first, id, None).await;
+    assert!(
+        matches!(
+            early,
+            Err(else_api::db::outgoing_drafts::DraftError::NotInContext)
+        ),
+        "the reply has not read the message yet: {early:?}"
+    );
+
+    let deadline = std::time::Instant::now() + common::SETTLE;
+    while attempt(&app, first).await < 2 || status(&app, first).await != "running" {
+        assert!(std::time::Instant::now() < deadline, "never continued");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let token = grant(&app, first).await;
+    let confirmed = tool(
+        &app,
+        &token,
+        "confirm_draft_approval",
+        json!({ "draft_id": id }),
+    )
+    .await;
+    assert_eq!(
+        tool_text(&confirmed)["status"],
+        "approved",
+        "{}",
+        confirmed.body
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1082,9 +1176,10 @@ async fn a_telegram_message_keeps_its_channel_and_owner_edits_across_revisions()
         "the message was refused"
     );
 
-    let (second, token) = running(
+    let (_, token) = joined(
         &app,
         &main,
+        first,
         "[synthetic:slow] Make it 9 and ask who brings dessert.",
         Some(json!({ "id": id, "version": 1, "body": "Dinner at 9 on Friday?" })),
     )
@@ -1135,11 +1230,9 @@ async fn a_telegram_message_keeps_its_channel_and_owner_edits_across_revisions()
         .unwrap()
         .parse()
         .unwrap();
-    assert_eq!(shown(&app, &main, first).await[0]["status"], "superseded");
-    assert_eq!(
-        shown(&app, &main, second).await[0]["id"],
-        new_id.to_string()
-    );
+    let cards = shown(&app, &main, first).await;
+    assert_eq!(card_of(&cards, id)["status"], "superseded");
+    assert_eq!(card_of(&cards, new_id)["status"], "pending");
     let obsolete = send(
         &app,
         &main,
@@ -1166,10 +1259,11 @@ async fn a_telegram_message_keeps_its_channel_and_owner_edits_across_revisions()
     .await;
     assert!(to_email.is_err(), "a revision's channel is fixed");
 
-    wait(&app, second, "waiting").await;
-    let (third, token) = running(
+    wait(&app, first, "waiting").await;
+    let (_, token) = joined(
         &app,
         &main,
+        first,
         "[synthetic:slow] Perfect, send it.",
         Some(json!({ "id": new_id, "version": 1 })),
     )
@@ -1190,9 +1284,9 @@ async fn a_telegram_message_keeps_its_channel_and_owner_edits_across_revisions()
             .unwrap()
             .contains("Telegram message")
     );
-    let card = shown(&app, &main, third).await[0].clone();
-    assert_eq!(card["approval_source"], "message");
-    assert_eq!(card["approved_version"], 1);
+    let approved = card_of(&shown(&app, &main, first).await, new_id);
+    assert_eq!(approved["approval_source"], "message");
+    assert_eq!(approved["approved_version"], 1);
     let started = tool_text(
         &tool(
             &app,
@@ -1233,9 +1327,10 @@ async fn a_chat_approval_binds_the_open_message_version_only() {
     let id = draft(&app, &token, family_message()).await;
     wait(&app, first, "waiting").await;
 
-    let (_, token) = running(
+    let (_, token) = joined(
         &app,
         &main,
+        first,
         "[synthetic:slow] Send it.",
         Some(json!({ "id": id, "version": 1 })),
     )
@@ -1669,22 +1764,18 @@ async fn a_chat_approval_before_the_task_parks_still_answers_the_delegating_requ
 
 async fn chat_approval_of_a_delegated_draft(parked: bool) {
     let Harness { app, .. } = harness().await;
-    // A hanging task never ends its attempt by itself, so only the owner's
-    // reply can stop it before it parks.
-    let work = if parked {
-        SLOW
-    } else {
-        "[synthetic:hang] email Ada about lunch"
-    };
-    let (leaf, root, task, child) = delegated_task(&app, work).await;
+    let (leaf, root, task, child) = delegated_task(&app, SLOW).await;
     let id = draft(&app, &grant(&app, child).await, lunch()).await;
     if parked {
         wait(&app, child, "waiting").await;
     }
 
-    let (reply, token) = running(
+    // Before it parks, the message waits for the task's attempt to end,
+    // which then continues at once instead of parking.
+    let (reply, token) = joined(
         &app,
         &leaf,
+        child,
         "[synthetic:slow] Looks good, send it.",
         Some(json!({ "id": id, "version": 1 })),
     )
@@ -1695,12 +1786,8 @@ async fn chat_approval_of_a_delegated_draft(parked: bool) {
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
-    assert_eq!(
-        takeover,
-        Some(reply),
-        "the owner's reply took over the task"
-    );
-    assert_eq!(status(&app, child).await, "interrupted");
+    assert_eq!(takeover, None, "the task keeps its own turn");
+    assert_eq!(attempt(&app, child).await, 2);
 
     let confirmed = tool(
         &app,
@@ -1715,6 +1802,7 @@ async fn chat_approval_of_a_delegated_draft(parked: bool) {
         "{}",
         confirmed.body
     );
+    wait(&app, child, "completed").await;
     wait(&app, reply, "completed").await;
     let outcome: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
         .bind(task)
@@ -1730,16 +1818,17 @@ async fn chat_approval_of_a_delegated_draft(parked: bool) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_reply_that_moves_on_closes_the_draft_it_was_sent_with() {
+async fn stopping_a_continued_reply_ends_the_message_then_the_reply_closes_its_card() {
     let Harness { app, .. } = harness().await;
     let main = app.main_bot().await;
     let (first, token) = running(&app, &main, SLOW, None).await;
     let id = draft(&app, &token, family_message()).await;
     wait(&app, first, "waiting").await;
 
-    let (reply, _) = running(
+    let (reply, _) = joined(
         &app,
         &main,
+        first,
         "[synthetic:slow] Offer me a choice of channels instead.",
         Some(json!({ "id": id, "version": 1 })),
     )
@@ -1757,35 +1846,56 @@ async fn a_reply_that_moves_on_closes_the_draft_it_was_sent_with() {
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
     wait(&app, reply, "interrupted").await;
-    let card = journaled(&app, &main, id).await;
-    assert_eq!(card["status"], "discarded", "{card}");
+    wait(&app, first, "waiting").await;
+    let card = shown(&app, &main, first).await[0].clone();
+    assert_eq!(
+        card["status"], "pending",
+        "Stop ends the attempt, not its card"
+    );
     assert_eq!(card["in_reply"], false, "{card}");
 
+    let stop = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/cancel"),
+            Some(json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert!(stop.status.is_success(), "{}", stop.body);
+    wait(&app, first, "interrupted").await;
+    let card = journaled(&app, &main, id).await;
+    assert_eq!(
+        card["status"], "discarded",
+        "once the reply and its message have both ended, the card closes: {card}"
+    );
+    assert_eq!(card["can_approve"], false, "{card}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_that_moves_on_keeps_its_card_for_the_owner() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
     let (first, token) = running(&app, &main, SLOW, None).await;
     let id = draft(&app, &token, family_message()).await;
     wait(&app, first, "waiting").await;
-    let done = send(
+    let (done, _) = joined(
         &app,
         &main,
+        first,
         "Make it a poll instead.",
         Some(json!({ "id": id, "version": 1 })),
     )
     .await;
-    assert_eq!(done.status, StatusCode::ACCEPTED, "{}", done.body);
-    let done: Uuid = done.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    wait(&app, done, "completed").await;
+    wait(&app, first, "waiting").await;
+    assert_eq!(status(&app, done).await, "queued", "it ends with its reply");
     let card = shown(&app, &main, first).await[0].clone();
-    assert_eq!(card["status"], "discarded", "{card}");
-    assert_eq!(card["can_approve"], false);
-    assert_eq!(journaled(&app, &main, id).await["status"], "discarded");
-    let late = send(
-        &app,
-        &main,
-        "Send it.",
-        Some(json!({ "id": id, "version": 1 })),
-    )
-    .await;
-    assert_eq!(late.body["error"]["code"], "draft_settled", "{}", late.body);
+    assert_eq!(card["status"], "pending", "{card}");
+    assert_eq!(card["can_approve"], true, "the reply still waits on it");
+
+    let discarded = owner_action(&app, &main, id, "discard", json!({})).await;
+    assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
+    wait(&app, first, "completed").await;
+    wait(&app, done, "completed").await;
 }
 
 async fn granted(app: &TestApp, bot: &str) -> Value {
@@ -2179,9 +2289,11 @@ async fn an_owner_reply_saying_always_approves_a_delegated_chat_always() {
     .await;
     wait(&app, child, "waiting").await;
 
-    let (reply, token) = running(
+    let reply = child;
+    let (_, token) = joined(
         &app,
         &leaf,
+        child,
         "[synthetic:slow] Always approve posting messages",
         Some(json!({ "id": first, "version": 1 })),
     )
@@ -2740,9 +2852,10 @@ async fn a_chat_approval_of_a_draft_with_files_needs_the_files_the_owner_saw() {
     .await;
     assert_eq!(unseen.status, StatusCode::CONFLICT, "{}", unseen.body);
     assert_eq!(unseen.body["error"]["code"], "attachments_unseen");
-    let (_, token) = running(
+    let (_, token) = joined(
         &app,
         &main,
+        turn,
         "[synthetic:slow] Send it.",
         Some(json!({ "id": id, "version": 1, "attachments": [file_id] })),
     )

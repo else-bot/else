@@ -214,7 +214,7 @@ async fn chat_can_preapprove_a_routine_before_its_first_run() {
     let run = run_of(&fire(app, due).await, prune);
     let (_, token) = h.started(run).await;
     runs_without_asking(app, &token, delete_args("feature-a")).await;
-    let (_, choices) = asks(app, &token, send_args()).await;
+    let (send_question, choices) = asks(app, &token, send_args()).await;
     assert_eq!(choices, ["approve", "deny"]);
     h.release(run).await;
     wait(app, run, "waiting").await;
@@ -231,6 +231,10 @@ async fn chat_can_preapprove_a_routine_before_its_first_run() {
     wait(app, manual, "waiting").await;
     answer(app, &main, question, "deny").await;
     wait(app, manual, "completed").await;
+    // An owner message leaves the waiting run alone; it must end before the
+    // next occurrence, which would otherwise be skipped as overlapping.
+    answer(app, &main, send_question, "deny").await;
+    wait(app, run, "completed").await;
 
     set_prompt(app, &main, prune, &format!("{GATE} Delete all branches.")).await;
     assert!(

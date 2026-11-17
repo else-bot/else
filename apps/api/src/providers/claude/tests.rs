@@ -512,8 +512,10 @@ fn a_steered_message_is_its_own_line_and_its_echo_names_its_turn() {
     let steer = crate::app::providers::Steer {
         turn_id: uuid::Uuid::new_v4(),
         text: "If they agreed, send the deal.".into(),
+        parts: Vec::new(),
+        files: Vec::new(),
     };
-    let sent: Value = serde_json::from_str(&t.steer_line(&steer).unwrap()).unwrap();
+    let sent = t.steer_input(&steer).unwrap();
     let key = steer.turn_id.to_string();
     assert_eq!(
         (&sent["type"], &sent["uuid"]),

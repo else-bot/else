@@ -125,6 +125,9 @@ impl TurnSink for Log {
     async fn steer_sending(&self, turn_id: Uuid) -> Result<bool, Fenced> {
         self.push(format!("steer-sending:{turn_id}")).map(|()| true)
     }
+    async fn steer_refused(&self, turn_id: Uuid) {
+        let _ = self.push(format!("steer-refused:{turn_id}"));
+    }
     async fn steered(&self, turn_id: Uuid) -> Result<(), Fenced> {
         self.push(format!("steered:{turn_id}"))
     }

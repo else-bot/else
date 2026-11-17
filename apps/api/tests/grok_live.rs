@@ -290,3 +290,38 @@ async fn grok_conversations_stream_resume_use_host_and_mcp_tools_and_cancel() {
     );
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_newer_owner_message_joins_a_running_grok_reply() {
+    if std::env::var("ELSE_LIVE_GROK").as_deref() != Ok("1") {
+        eprintln!("SKIPPED: set ELSE_LIVE_GROK=1 to run live Grok checks");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().canonicalize().unwrap();
+    let host = Host::new(&data, &data.join("projects"));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/tools/v1/mcp", listener.local_addr().unwrap());
+    let db = Arc::new(TestDb::migrated().await);
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let app = TestApp::with_registry(
+        db,
+        2,
+        Registry::new(vec![Arc::new(grok(&data, &host, &url))]),
+    );
+    let router = app.router.clone();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let saved = app
+        .owner(
+            "PATCH",
+            "/v1/settings/providers/grok",
+            Some(json!({
+                "model":"grok-4.7", "reasoning_effort":"low", "service_tier":"default"
+            })),
+        )
+        .await;
+    assert!(saved.status.is_success(), "{}", saved.body);
+    // Grok takes nothing mid-turn: the message joins the reply's next
+    // continuation in the same native session.
+    common::steer::joins_mid_tool_and_mid_text(&app, "grok", false).await;
+}

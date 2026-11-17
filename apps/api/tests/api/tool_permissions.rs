@@ -48,6 +48,26 @@ async fn setup() -> (Harness, String, uuid::Uuid, String) {
     (h, bot, turn, token)
 }
 
+/// Stop `turn` with the owner's Stop, so the next message starts a request
+/// of its own instead of joining it.
+async fn stop(h: &Harness, bot: &str, turn: uuid::Uuid) {
+    let stopped = h
+        .app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{bot}/cancel"),
+            Some(json!({ "request_id": uuid::Uuid::new_v4() })),
+        )
+        .await;
+    assert!(stopped.status.is_success(), "{}", stopped.body);
+    h.app
+        .wait_turn(
+            &turn.to_string(),
+            &["completed", "failed", "interrupted", "uncertain"],
+        )
+        .await;
+}
+
 fn executed(called: &recorder::Called, title: &str) {
     assert_eq!(called.status, StatusCode::OK, "{}", called.body);
     assert!(!called.error, "{}", called.body);
@@ -113,6 +133,7 @@ async fn always_allow_survives_new_requests_and_is_revocable_without_regrant_on_
     h.app
         .wait_turn(&turn.to_string(), &["waiting", "running", "completed"])
         .await;
+    stop(&h, &bot, turn).await;
     let authorization = "Always approve ticket creation.";
     let (next, token) = h.running(&bot, &format!("{GATE} {authorization}")).await;
     executed(
@@ -170,7 +191,16 @@ async fn chat_can_remember_ticket_creation_after_a_skipped_card_without_approvin
     )
     .await;
     let authorization = "You remember to approve all tasks creations that's fine";
-    let (next, token) = h.running(&bot, &format!("{GATE} {authorization}")).await;
+    let next = h.send(&bot, &format!("{GATE} {authorization}")).await;
+    let steered_into: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT into_turn_id FROM turn_steers WHERE turn_id = ?1")
+            .bind(next)
+            .fetch_optional(&h.app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(steered_into, Some(turn), "the message joins the reply");
+    h.release(turn).await;
+    let token = h.continued(turn, &token).await;
     let remembered = tool(
         &h.app,
         &token,
@@ -212,12 +242,12 @@ async fn chat_can_remember_ticket_creation_after_a_skipped_card_without_approvin
     let blocked = tool(&h.app, &token, "mcp_request", deletion).await;
     assert_eq!(blocked.result["status"], "pending");
     h.release(turn).await;
-    h.release(next).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_grants_require_current_owner_words_and_do_not_cover_other_bots_or_effects() {
     let (h, bot, turn, _) = setup().await;
+    stop(&h, &bot, turn).await;
     let authorization = "Always approve ticket creation.";
     let (next, token) = h.running(&bot, &format!("{GATE} {authorization}")).await;
     let forged = tool(
@@ -258,7 +288,7 @@ async fn tool_grants_require_current_owner_words_and_do_not_cover_other_bots_or_
     )
     .await;
     assert_eq!(blocked.result["status"], "pending");
-    for turn in [turn, next, other_turn] {
+    for turn in [next, other_turn] {
         h.release(turn).await;
     }
 }
@@ -266,6 +296,7 @@ async fn tool_grants_require_current_owner_words_and_do_not_cover_other_bots_or_
 #[tokio::test(flavor = "multi_thread")]
 async fn a_task_grant_for_mcp_work_redirects_to_the_tool_grant() {
     let (h, bot, turn, _) = setup().await;
+    stop(&h, &bot, turn).await;
     let authorization = "Always allow creating tickets with the Tickets MCP.";
     let (first, token) = h.running(&bot, &format!("{GATE} {authorization}")).await;
     let task = |covers: Value| {
@@ -318,6 +349,7 @@ async fn a_task_grant_for_mcp_work_redirects_to_the_tool_grant() {
         "a task grant never matches an MCP call: {}",
         uncovered.body
     );
+    stop(&h, &bot, first).await;
     let (second, token) = h.running(&bot, &format!("{GATE} {authorization}")).await;
     let confirmed = tool(
         &h.app,
@@ -335,9 +367,7 @@ async fn a_task_grant_for_mcp_work_redirects_to_the_tool_grant() {
     deletion["params"]["name"] = json!("delete_ticket");
     let other = tool(&h.app, &token, "mcp_request", deletion).await;
     assert_eq!(other.result["status"], "pending", "{}", other.body);
-    for turn in [turn, first, second] {
-        h.release(turn).await;
-    }
+    h.release(second).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -445,6 +475,7 @@ async fn approval_cards_keep_tool_identity_visible_with_a_maximum_length_context
 #[tokio::test(flavor = "multi_thread")]
 async fn removing_an_integration_revokes_its_saved_tool_permissions() {
     let (h, bot, turn, _) = setup().await;
+    stop(&h, &bot, turn).await;
     let authorization = "Always approve ticket creation.";
     let (next, token) = h.running(&bot, &format!("{GATE} {authorization}")).await;
     let confirmed = tool(
@@ -467,7 +498,6 @@ async fn removing_an_integration_revokes_its_saved_tool_permissions() {
         .owner("GET", &format!("/v1/bots/{bot}/permissions"), None)
         .await;
     assert_eq!(listed.body["permissions"], json!([]));
-    h.release(turn).await;
     h.release(next).await;
 }
 

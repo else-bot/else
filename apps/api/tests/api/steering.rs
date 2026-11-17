@@ -7,16 +7,18 @@ use common::{TestApp, TestDb};
 use else_api::app::providers::{
     Availability, Profile, Provider, SessionState, Stop, TurnInput, TurnOutcome, TurnSink,
 };
+use else_api::db::steers::Placement;
 use else_api::providers::synthetic::Synthetic;
 use uuid::Uuid;
 
 /// The synthetic provider, except that a message naming a `[steer:...]`
-/// script stays running until an owner message is steered into it:
-/// `take` takes it and completes, `fail` takes it and fails, `ignore`
-/// completes without taking it, and `hold` takes it and keeps running.
+/// script stays running until an owner message joins it: `take` takes it
+/// and completes, `fail` takes it and fails, `ignore` completes without
+/// taking it (a provider that takes no input mid-turn), `drop` fails
+/// without taking it, and `hold` takes it and keeps running. A
+/// continuation that carries joined messages says which.
 struct Steering {
     inner: Synthetic,
-    steers: bool,
 }
 
 #[async_trait::async_trait]
@@ -36,16 +38,20 @@ impl Provider for Steering {
     fn validate_profile(&self, profile: &Profile) -> Result<(), String> {
         self.inner.validate_profile(profile)
     }
-    fn steers(&self) -> bool {
-        self.steers
-    }
     async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
-        let script = ["take", "fail", "ignore", "hold"]
+        let joined: Vec<String> = input
+            .steered
+            .iter()
+            .filter(|steered| !steered.seen)
+            .map(|steered| steered.message.text.clone())
+            .collect();
+        let script = ["take", "fail", "ignore", "drop", "hold"]
             .into_iter()
-            .find(|script| input.text.contains(&format!("[steer:{script}]")));
-        let Some(script) = script else {
+            .find(|script| input.text.contains(&format!("[steer:{script}]")))
+            .filter(|_| joined.is_empty());
+        if script.is_none() && joined.is_empty() {
             return self.inner.run(input, sink, stop).await;
-        };
+        }
         let session = SessionState {
             native_id: Uuid::new_v4().to_string(),
             fingerprint: "steering".into(),
@@ -60,6 +66,12 @@ impl Provider for Steering {
         {
             return TurnOutcome::Interrupted;
         }
+        let Some(script) = script else {
+            let _ = sink
+                .text(&format!("Continued with: {}", joined.join(" | ")))
+                .await;
+            return TurnOutcome::Completed;
+        };
         let _ = sink.text("Working on the first request.").await;
         loop {
             tokio::select! {
@@ -67,20 +79,17 @@ impl Provider for Steering {
                 () = stop.steered() => {}
             }
             for steer in sink.steers().await {
-                if script == "ignore" {
-                    return TurnOutcome::Completed;
+                match script {
+                    "ignore" => return TurnOutcome::Completed,
+                    "drop" => return failed(),
+                    _ => {}
                 }
                 assert!(matches!(sink.steer_sending(steer.turn_id).await, Ok(true)));
                 let _ = sink.steered(steer.turn_id).await;
                 let _ = sink.text(&format!("Also handled: {}", steer.text)).await;
                 match script {
                     "take" => return TurnOutcome::Completed,
-                    "fail" => {
-                        return TurnOutcome::Failed {
-                            code: "provider_failed".into(),
-                            message: "The scripted provider failed.".into(),
-                        };
-                    }
+                    "fail" => return failed(),
                     _ => {}
                 }
             }
@@ -88,7 +97,14 @@ impl Provider for Steering {
     }
 }
 
-async fn app(steers: bool) -> TestApp {
+fn failed() -> TurnOutcome {
+    TurnOutcome::Failed {
+        code: "provider_failed".into(),
+        message: "The scripted provider failed.".into(),
+    }
+}
+
+async fn app() -> TestApp {
     let db = TestDb::migrated().await;
     else_api::db::installation::setup(&db.pool).await.unwrap();
     sqlx::query("UPDATE installation SET default_provider_id = 'synthetic'")
@@ -97,7 +113,6 @@ async fn app(steers: bool) -> TestApp {
         .unwrap();
     let provider = Arc::new(Steering {
         inner: Synthetic::new(Duration::from_millis(5)),
-        steers,
     });
     TestApp::with_registry(
         Arc::new(db),
@@ -120,11 +135,15 @@ async fn status(pool: &sqlx::SqlitePool, turn: Uuid) -> (String, Option<String>)
         .unwrap()
 }
 
+/// Steers whose message still waits on its reply.
 async fn rows(pool: &sqlx::SqlitePool) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM turn_steers")
-        .fetch_one(pool)
-        .await
-        .unwrap()
+    sqlx::query_scalar(
+        "SELECT count(*) FROM turn_steers s JOIN turns t ON t.id = s.turn_id
+         WHERE t.status = 'queued'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 /// Item kinds and turn order of the conversation, as the chat shows them.
@@ -140,20 +159,27 @@ async fn transcript(app: &TestApp, bot: &str) -> Vec<(String, String)> {
     .unwrap()
 }
 
+/// Until the running reply has written its first text, so the chat order
+/// is fixed before the next message.
+async fn wait_for_reply_text(app: &TestApp, bot: &str) {
+    for _ in 0..400 {
+        if transcript(app, bot).await.len() == 2 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the reply wrote no text");
+}
+
 const ENDED: &[&str] = &["completed", "failed", "interrupted", "uncertain"];
 
 #[tokio::test]
 async fn a_newer_owner_message_joins_the_running_reply() {
-    let app = app(true).await;
+    let app = app().await;
     let bot = app.main_bot().await;
     let first = send(&app, &bot, "Patch the sender script. [steer:take]").await;
     app.wait_turn(&first, &["running"]).await;
-    for _ in 0..400 {
-        if transcript(&app, &bot).await.len() == 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    wait_for_reply_text(&app, &bot).await;
 
     let second = send(&app, &bot, "If they agreed, send the deal.").await;
 
@@ -164,6 +190,17 @@ async fn a_newer_owner_message_joins_the_running_reply() {
         ("completed".into(), None)
     );
     assert_eq!(rows(&app.db.pool).await, 0);
+    let link: (Uuid, String) =
+        sqlx::query_as("SELECT into_turn_id, status FROM turn_steers WHERE turn_id = ?1")
+            .bind(second.parse::<Uuid>().unwrap())
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        link,
+        (first.parse().unwrap(), "delivered".into()),
+        "the message stays part of the reply that answered it"
+    );
     assert_eq!(
         transcript(&app, &bot).await,
         [
@@ -181,30 +218,54 @@ async fn a_newer_owner_message_joins_the_running_reply() {
     );
 }
 
+/// Grok takes no input mid-turn: its reply finishes its work, then
+/// continues in the same reply with the message, never stopped by it.
 #[tokio::test]
-async fn a_provider_that_cannot_steer_is_still_stopped_by_a_newer_message() {
-    let app = app(false).await;
-    let bot = app.main_bot().await;
-    let first = send(&app, &bot, "Patch the sender script. [steer:take]").await;
-    app.wait_turn(&first, &["running"]).await;
-
-    let second = send(&app, &bot, "If they agreed, send the deal.").await;
-
-    assert_eq!(app.wait_turn(&first, ENDED).await, "interrupted");
-    assert_eq!(app.wait_turn(&second, ENDED).await, "completed");
-    assert_eq!(rows(&app.db.pool).await, 0);
-}
-
-#[tokio::test]
-async fn a_steered_message_the_reply_never_took_runs_on_its_own() {
-    let app = app(true).await;
+async fn a_reply_that_takes_no_input_mid_turn_continues_with_the_message() {
+    let app = app().await;
     let bot = app.main_bot().await;
     let first = send(&app, &bot, "Patch the sender script. [steer:ignore]").await;
     app.wait_turn(&first, &["running"]).await;
+    wait_for_reply_text(&app, &bot).await;
 
     let second = send(&app, &bot, "If they agreed, send the deal.").await;
 
     assert_eq!(app.wait_turn(&first, ENDED).await, "completed");
+    assert_eq!(app.wait_turn(&second, ENDED).await, "completed");
+    let attempt: i64 = sqlx::query_scalar("SELECT attempt FROM turns WHERE id = ?1")
+        .bind(first.parse::<Uuid>().unwrap())
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(attempt, 2, "the reply continued once");
+    assert_eq!(
+        transcript(&app, &bot).await,
+        [
+            (
+                "user".into(),
+                "Patch the sender script. [steer:ignore]".into()
+            ),
+            ("assistant".into(), "Working on the first request.".into()),
+            ("user".into(), "If they agreed, send the deal.".into()),
+            (
+                "assistant".into(),
+                "Continued with: If they agreed, send the deal.".into()
+            ),
+        ]
+    );
+    assert_eq!(rows(&app.db.pool).await, 0);
+}
+
+#[tokio::test]
+async fn a_message_a_failed_reply_never_took_runs_on_its_own() {
+    let app = app().await;
+    let bot = app.main_bot().await;
+    let first = send(&app, &bot, "Patch the sender script. [steer:drop]").await;
+    app.wait_turn(&first, &["running"]).await;
+
+    let second = send(&app, &bot, "If they agreed, send the deal.").await;
+
+    assert_eq!(app.wait_turn(&first, ENDED).await, "failed");
     assert_eq!(app.wait_turn(&second, ENDED).await, "completed");
     let answered: i64 =
         sqlx::query_scalar("SELECT count(*) FROM items WHERE turn_id = ?1 AND kind = 'assistant'")
@@ -216,9 +277,22 @@ async fn a_steered_message_the_reply_never_took_runs_on_its_own() {
     assert_eq!(rows(&app.db.pool).await, 0);
 }
 
+/// The owner picked another provider for this message: it queues behind
+/// the reply instead of joining or stopping it.
+#[tokio::test]
+async fn a_message_for_another_provider_queues_without_stopping_the_reply() {
+    let (db, bot, first) = setup_running().await;
+    let pool = &db.pool;
+    let (later, into) = accept_on(pool, bot, "Ask the other model.", "other").await;
+    assert_eq!(into, Some(Placement::Queued));
+    assert_eq!(status(pool, first).await.0, "running");
+    assert_eq!(status(pool, later).await.0, "queued");
+    assert_eq!(rows(pool).await, 0);
+}
+
 #[tokio::test]
 async fn a_steered_message_ends_with_the_reply_that_took_it() {
-    let app = app(true).await;
+    let app = app().await;
     let bot = app.main_bot().await;
     let first = send(&app, &bot, "Patch the sender script. [steer:fail]").await;
     app.wait_turn(&first, &["running"]).await;
@@ -235,7 +309,7 @@ async fn a_steered_message_ends_with_the_reply_that_took_it() {
 
 #[tokio::test]
 async fn stop_ends_the_reply_and_every_message_steered_into_it() {
-    let app = app(true).await;
+    let app = app().await;
     let bot = app.main_bot().await;
     let first = send(&app, &bot, "Patch the sender script. [steer:hold]").await;
     app.wait_turn(&first, &["running"]).await;
@@ -271,12 +345,22 @@ async fn stop_ends_the_reply_and_every_message_steered_into_it() {
     assert_eq!(rows(&app.db.pool).await, 0);
 }
 
-async fn accept(
+/// Accept `text` on the synthetic provider; the reply it joined, if any.
+async fn accept(pool: &sqlx::SqlitePool, bot: Uuid, text: &str) -> (Uuid, Option<Uuid>) {
+    let (turn, placement) = accept_on(pool, bot, text, "synthetic").await;
+    let into = match placement {
+        Some(Placement::Joined { into, .. }) => Some(into),
+        _ => None,
+    };
+    (turn, into)
+}
+
+async fn accept_on(
     pool: &sqlx::SqlitePool,
     bot: Uuid,
     text: &str,
-    steers: bool,
-) -> (Uuid, Option<Uuid>) {
+    provider_id: &str,
+) -> (Uuid, Option<Placement>) {
     let accepted = else_api::db::turns::accept(
         pool,
         else_api::db::turns::SendRequest {
@@ -287,18 +371,16 @@ async fn accept(
             parts: &[],
             reaction: None,
             requested_provider: None,
-            provider_id: "synthetic",
+            provider_id,
             uses_profile: false,
-            steers,
             open_draft: None,
             answers_notice: None,
         },
-        else_api::db::turns::Preemption::Cancel,
+        else_api::db::turns::Admission::Open,
     )
     .await
     .unwrap();
-    assert!(accepted.preempted.is_empty());
-    (accepted.turn.id, accepted.steered_into)
+    (accepted.turn.id, accepted.placement)
 }
 
 async fn setup_running() -> (TestDb, Uuid, Uuid) {
@@ -308,7 +390,7 @@ async fn setup_running() -> (TestDb, Uuid, Uuid) {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    let (first, _) = accept(&db.pool, bot, "Patch the sender script.", false).await;
+    let (first, _) = accept(&db.pool, bot, "Patch the sender script.").await;
     sqlx::query("UPDATE turns SET status = 'running', attempt = 1 WHERE id = ?1")
         .bind(first)
         .execute(&db.pool)
@@ -327,7 +409,7 @@ async fn a_restart_settles_each_steer_by_how_far_it_got() {
         "Schedule it too.",
         "What is this?",
     ] {
-        let (turn, into) = accept(pool, bot, text, true).await;
+        let (turn, into) = accept(pool, bot, text).await;
         assert_eq!(into, Some(first), "each message joins the same reply");
         steered.push(turn);
     }
@@ -383,13 +465,7 @@ async fn a_restart_settles_each_steer_by_how_far_it_got() {
 async fn a_parked_reply_keeps_a_delivered_message_for_its_continuation() {
     let (db, bot, first) = setup_running().await;
     let pool = &db.pool;
-    let (later, _) = accept(
-        pool,
-        bot,
-        "After the job finishes, upload the report.",
-        true,
-    )
-    .await;
+    let (later, _) = accept(pool, bot, "After the job finishes, upload the report.").await;
     assert!(
         else_api::db::steers::sending(pool, later, first)
             .await
@@ -413,9 +489,14 @@ async fn a_parked_reply_keeps_a_delivered_message_for_its_continuation() {
     assert_eq!(status(pool, later).await.0, "queued");
     assert_eq!(rows(pool).await, 1);
     let input = else_api::db::turns::input(pool, first).await.unwrap();
+    let steered: Vec<_> = input
+        .steered
+        .iter()
+        .map(|s| (s.message.text.as_str(), s.seen))
+        .collect();
     assert_eq!(
-        input.steered,
-        ["After the job finishes, upload the report."]
+        steered,
+        [("After the job finishes, upload the report.", true)]
     );
     let request = else_api::providers::prompt::request_text(&input);
     assert!(
@@ -442,4 +523,182 @@ async fn a_parked_reply_keeps_a_delivered_message_for_its_continuation() {
     drop(conn);
     assert_eq!(status(pool, later).await, ("completed".into(), None));
     assert_eq!(rows(pool).await, 0);
+}
+
+/// A message to a reply that waits on the owner continues it at once. The
+/// question it types over is skipped; every other hold stays pending. The
+/// next request carries the message, which counts as delivered once that
+/// request is sent, and only once.
+#[tokio::test]
+async fn a_message_continues_a_waiting_reply_and_keeps_its_holds() {
+    let (db, bot, first) = setup_running().await;
+    let pool = &db.pool;
+    sqlx::query("UPDATE turns SET status = 'waiting' WHERE id = ?1")
+        .bind(first)
+        .execute(pool)
+        .await
+        .unwrap();
+    let question = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, choices)
+         VALUES (?1, ?2, ?3, 1, 'choice', 'Which file?', '[]')",
+    )
+    .bind(question)
+    .bind(bot)
+    .bind(first)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO secret_requests (id, bot_id, turn_id, attempt, name, reason, env_names)
+         VALUES (?1, ?2, ?3, 1, 'deploy_key', 'To deploy.', '[\"DEPLOY_KEY\"]')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(bot)
+    .bind(first)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let (later, into) = accept(pool, bot, "Use the staging key.").await;
+
+    assert_eq!(into, Some(first));
+    assert_eq!(
+        status(pool, first).await.0,
+        "queued",
+        "it continues at once"
+    );
+    let holds: (String, String) = sqlx::query_as(
+        "SELECT q.status, s.status FROM owner_questions q, secret_requests s
+         WHERE q.turn_id = ?1 AND s.turn_id = ?1",
+    )
+    .bind(first)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(holds, ("skipped".into(), "pending".into()));
+
+    let claimed = else_api::db::turns::claim_next(pool, &[], true)
+        .await
+        .unwrap();
+    assert_eq!(claimed.map(|c| c.id), Some(first), "only the reply runs");
+    let input = else_api::db::turns::input(pool, first).await.unwrap();
+    let steered: Vec<_> = input
+        .steered
+        .iter()
+        .map(|s| (s.message.text.as_str(), s.seen))
+        .collect();
+    assert_eq!(steered, [("Use the staging key.", false)]);
+    let steer_status = || async {
+        sqlx::query_scalar::<_, String>("SELECT status FROM turn_steers WHERE turn_id = ?1")
+            .bind(later)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(steer_status().await, "pending", "not sent yet");
+
+    let sink = else_api::db::turn_sink::SqliteSink::new(pool.clone(), &input, "synthetic", None);
+    else_api::app::providers::TurnSink::sending(&sink)
+        .await
+        .unwrap();
+
+    assert_eq!(steer_status().await, "delivered");
+    let input = else_api::db::turns::input(pool, first).await.unwrap();
+    assert!(input.steered[0].seen, "a later attempt has seen it");
+    sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
+        .bind(first)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(
+        !else_api::db::steers::refuse(pool, later, first)
+            .await
+            .unwrap(),
+        "a delivered message cannot be refused back to pending"
+    );
+    assert!(
+        else_api::db::steers::pending(pool, first)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nor written into the reply again"
+    );
+}
+
+/// The provider answered that it took nothing (Codex after its turn
+/// ended): the message is pending again and the parked reply continues
+/// with it.
+#[tokio::test]
+async fn a_refused_message_waits_for_the_reply_to_continue() {
+    let (db, bot, first) = setup_running().await;
+    let pool = &db.pool;
+    let (later, _) = accept(pool, bot, "Schedule it too.").await;
+    assert!(
+        else_api::db::steers::sending(pool, later, first)
+            .await
+            .unwrap()
+    );
+    assert!(
+        else_api::db::steers::refuse(pool, later, first)
+            .await
+            .unwrap()
+    );
+
+    sqlx::query("UPDATE turns SET status = 'queued' WHERE id = ?1")
+        .bind(first)
+        .execute(pool)
+        .await
+        .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    else_api::db::steers::settle(&mut conn).await.unwrap();
+    drop(conn);
+
+    assert_eq!(status(pool, later).await.0, "queued");
+    let input = else_api::db::turns::input(pool, first).await.unwrap();
+    assert!(!input.steered[0].seen, "the next request carries it");
+}
+
+#[tokio::test]
+async fn a_message_the_reply_took_is_history_of_that_reply() {
+    let (db, bot, first) = setup_running().await;
+    let pool = &db.pool;
+    let (taken, _) = accept(pool, bot, "Schedule it too.").await;
+    assert!(
+        else_api::db::steers::sending(pool, taken, first)
+            .await
+            .unwrap()
+    );
+    assert!(
+        else_api::db::steers::deliver(pool, taken, first)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE turns SET status = 'completed' WHERE id = ?1")
+        .bind(first)
+        .execute(pool)
+        .await
+        .unwrap();
+    else_api::db::steers::settle(&mut pool.acquire().await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(status(pool, taken).await.0, "completed");
+
+    let (next, into) = accept(pool, bot, "What did they say?").await;
+    assert_eq!(into, None);
+    let first_no: i64 = sqlx::query_scalar("SELECT turn_no FROM turns WHERE id = ?1")
+        .bind(first)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let input = else_api::db::turns::input(pool, next).await.unwrap();
+    let entry = input
+        .history
+        .iter()
+        .find(|entry| entry.text == "Schedule it too.")
+        .expect("the taken message is history");
+    assert_eq!(
+        entry.turn_no, first_no,
+        "a session that considered the reply has seen it"
+    );
 }

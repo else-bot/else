@@ -246,6 +246,23 @@ async fn grant(app: &TestApp, bot: &str) -> (Uuid, String) {
     (turn, token)
 }
 
+/// Stop the bot's work, so the next message starts a turn of its own.
+async fn stop(app: &TestApp, bot: &str, turn: Uuid) {
+    let stop = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{bot}/cancel"),
+            Some(json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert!(stop.status.is_success(), "{:?}", stop.body);
+    app.wait_turn(
+        &turn.to_string(),
+        &["interrupted", "completed", "failed", "uncertain"],
+    )
+    .await;
+}
+
 async fn tool(app: &TestApp, token: &str, name: &str, arguments: Value) -> Value {
     let reply = app
         .call(
@@ -949,18 +966,23 @@ async fn upgrading_keeps_every_bots_secrets_under_distinct_shared_names() {
 async fn a_browser_approval_card_names_the_control_a_snapshot_ref_points_at() {
     let Setup { app, .. } = setup().await;
     let bot = app.create_bot("Browser").await;
-    // A pending card parks its attempt, so each call gets a fresh turn.
+    // A pending card parks its attempt, so each call gets a fresh turn,
+    // stopped once its card is read.
     let card = |args: Value| {
         let (app, bot) = (&app, &bot);
         async move {
-            let (_, token) = grant(app, bot).await;
+            let (turn, token) = grant(app, bot).await;
             let question = tool(app, &token, "computer_browser", args).await;
             let id: Uuid = question["question_id"].as_str().unwrap().parse().unwrap();
-            sqlx::query_scalar::<_, String>("SELECT context FROM owner_questions WHERE id = ?1")
-                .bind(id)
-                .fetch_one(&app.db.pool)
-                .await
-                .unwrap()
+            let context = sqlx::query_scalar::<_, String>(
+                "SELECT context FROM owner_questions WHERE id = ?1",
+            )
+            .bind(id)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+            stop(app, bot, turn).await;
+            context
         }
     };
     let click = |selector: &str| json!({ "action": "click", "selector": selector, "effect": "destructive" });
@@ -969,7 +991,7 @@ async fn a_browser_approval_card_names_the_control_a_snapshot_ref_points_at() {
         "Browser: click @kqvzb5",
         "before a snapshot the ref is shown as given"
     );
-    let (_, token) = grant(&app, &bot).await;
+    let (turn, token) = grant(&app, &bot).await;
     let snapshot = tool(
         &app,
         &token,
@@ -981,6 +1003,7 @@ async fn a_browser_approval_card_names_the_control_a_snapshot_ref_points_at() {
         snapshot["snapshot"].as_str().unwrap().contains("@kqvzb5"),
         "{snapshot}"
     );
+    stop(&app, &bot, turn).await;
     assert_eq!(
         card(click("@kqvzb5")).await,
         "Browser: click button \"Delete project\" (@kqvzb5)"

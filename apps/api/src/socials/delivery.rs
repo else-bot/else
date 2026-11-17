@@ -25,12 +25,13 @@ pub async fn admit_pending(
     if limit <= 0 {
         return Ok(0);
     }
+    let queued = crate::db::steers::queued_runs("d.bot_id");
     let ready: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT d.bot_id, d.connection_id FROM social_deliveries d
          JOIN bots b ON b.id = d.bot_id JOIN social_connections a ON a.id = d.connection_id
          WHERE d.status = 'pending' AND b.status = 'active' AND NOT b.cancel_pending
            AND a.state = 'active'
-           AND (SELECT count(*) FROM turns t WHERE t.bot_id = d.bot_id AND t.status = 'queued') < ?2
+           AND {queued} < ?2
            AND NOT EXISTS (SELECT 1 FROM social_deliveries x JOIN turns t ON t.id = x.turn_id
                            WHERE x.bot_id = d.bot_id AND x.connection_id = d.connection_id
                              AND t.status IN {UNFINISHED_STATUSES})
@@ -112,10 +113,11 @@ async fn admit(
         tx.commit().await?;
         return Ok(false);
     };
+    let queued = crate::db::steers::queued_runs("?1");
     let busy: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT EXISTS (SELECT 1 FROM social_deliveries x JOIN turns t ON t.id = x.turn_id
                         WHERE x.bot_id = ?1 AND x.connection_id = ?2 AND t.status IN {UNFINISHED_STATUSES})
-             OR (SELECT count(*) FROM turns WHERE bot_id = ?1 AND status = 'queued') >= ?3"
+             OR {queued} >= ?3"
     )))
     .bind(bot_id)
     .bind(connection_id)
