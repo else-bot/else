@@ -698,6 +698,11 @@ impl Wait<'_> {
 }
 
 impl Turn {
+    /// The reply this message joined took it, so that reply answers it.
+    pub fn taken_by_reply(&self) -> bool {
+        self.steer_status == Some(SteerStatus::Delivered)
+    }
+
     /// Whether the turn waits on work of its own rather than on the owner.
     pub fn waits_on_job(&self) -> bool {
         !self.mcp_waits.is_empty() || !self.computer_job_waits.is_empty()

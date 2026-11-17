@@ -246,8 +246,6 @@ impl Scheduler {
             tracing::warn!(orphaned, "settled turns without a running provider task");
         }
         if let Some(_admission) = self.gate.enter() {
-            // Messages sent during a pause are placed before anything is
-            // claimed.
             match turns::settle_deferred(&self.pool).await {
                 Ok((0, _)) => {}
                 Ok((_, woken)) => {

@@ -403,8 +403,6 @@ pub async fn settle(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
             (TurnStatus::Queued, Status::Delivered, true) => Fate::EndsWithReply,
             _ => Fate::Released,
         };
-        // A delivered message stays part of its reply for good, so the chat
-        // shows one answer to both.
         if fate != Fate::EndsWithReply {
             sqlx::query("DELETE FROM turn_steers WHERE turn_id = ?1")
                 .bind(turn_id)

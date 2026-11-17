@@ -632,7 +632,6 @@ pub async fn settle_deferred(pool: &SqlitePool) -> Result<(usize, Vec<Uuid>), sq
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
-        // Stopped or settled since the scan: nothing to do.
         let Some((bot_id, conversation_id, turn_no, provider_id)) = turn else {
             continue;
         };

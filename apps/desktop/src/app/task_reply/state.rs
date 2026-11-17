@@ -206,8 +206,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
         .turns_in_order()
         .into_iter()
         .filter(|turn| conversation.reaction_in(turn.id).is_none() && !delegated.contains(&turn.id))
-        // A message the running reply took is answered by that reply.
-        .filter(|turn| turn.steer_status != Some(crate::model::SteerStatus::Delivered))
+        .filter(|turn| !turn.taken_by_reply())
         .filter_map(|turn| {
             let state = match turn.status.as_str() {
                 "queued" => ReplyState::Queued,
