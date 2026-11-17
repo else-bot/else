@@ -227,7 +227,7 @@ impl View {
                 }).await
                     .map(|_| short)
             } else {
-                client.put_secret(name, secret).await.map(|saved| saved.not_redacted)
+                client.create_secret(name, secret).await.map(|saved| saved.not_redacted)
             };
             let _ = this.update_in(cx, |this, window, cx| {
                 let Phase::Saving(editor) = std::mem::replace(&mut this.phase, Phase::Browsing) else {

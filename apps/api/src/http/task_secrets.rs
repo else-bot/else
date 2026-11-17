@@ -18,14 +18,17 @@ use uuid::Uuid;
 use super::AppState;
 use super::error::{ApiError, ApiPath, SecretJson};
 use crate::db::secret_requests::{self, SettleError, Settled};
-use crate::db::task_secrets::{self, Meta, Patch, SecretError, Website};
+use crate::db::task_secrets::{self, Meta, Mode, Patch, SecretError, Website};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/task-secrets", get(list))
         .route(
             "/task-secrets/{name}",
-            axum::routing::put(store).patch(edit).delete(remove),
+            axum::routing::put(replace)
+                .post(create)
+                .patch(edit)
+                .delete(remove),
         )
         .route("/task-secrets/{name}/reveal", post(reveal))
         .route(
@@ -88,6 +91,9 @@ pub(super) fn error(err: SecretError) -> ApiError {
         ),
         SecretError::Db(err) => err.into(),
         SecretError::Unknown(_) => ApiError::not_found(),
+        err @ SecretError::Exists(_) => {
+            ApiError::new(StatusCode::CONFLICT, "secret_exists", err.to_string())
+        }
         other => {
             tracing::warn!(error = %other, "task secret operation failed");
             ApiError::unavailable(
@@ -103,17 +109,36 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiErro
     Ok(Json(json!({ "secrets": secrets })))
 }
 
-async fn store(
+/// Create or replace an entry.
+async fn replace(
     State(state): State<Arc<AppState>>,
     ApiPath(name): ApiPath<String>,
     SecretJson(body): SecretJson<Body>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    store(&state, &name, body, Mode::CreateOrReplace).await
+}
+
+/// Create an entry; a name already taken is a conflict, never overwritten.
+async fn create(
+    State(state): State<Arc<AppState>>,
+    ApiPath(name): ApiPath<String>,
+    SecretJson(body): SecretJson<Body>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    store(&state, &name, body, Mode::CreateOnly).await
+}
+
+async fn store(
+    state: &AppState,
+    name: &str,
+    body: Body,
+    mode: Mode,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let key = state
         .secret_key
         .as_deref()
         .ok_or_else(|| error(SecretError::NoKey))?;
     let meta = meta(body.description, body.website)?;
-    let created = task_secrets::put(&state.db, key, &name, &body.env, &meta)
+    let created = task_secrets::put(&state.db, key, name, &body.env, &meta, mode)
         .await
         .map_err(error)?;
     let short: Vec<&String> = body

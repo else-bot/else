@@ -78,13 +78,14 @@ impl Client {
             .map(|(_, list)| list.secrets)
     }
 
-    pub async fn put_secret(
+    /// Create an entry; the server refuses a taken name with a conflict.
+    pub async fn create_secret(
         self: Arc<Self>,
         name: String,
         body: SaveSecret,
     ) -> Result<SavedSecret, ClientError> {
         self.call(
-            Method::PUT,
+            Method::POST,
             format!("/v1/task-secrets/{name}"),
             Some(serde_json::json!(body)),
         )

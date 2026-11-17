@@ -1080,6 +1080,26 @@ async fn the_vault_is_searched_edited_and_revealed_to_the_owner_only() {
         let reply = app.owner("PATCH", path, Some(body.clone())).await;
         assert_eq!(reply.status, status, "{body}: {:?}", reply.body);
     }
+    let taken = app
+        .owner(
+            "POST",
+            path,
+            Some(json!({ "env": { "PASSWORD": "other-Pa55word" } })),
+        )
+        .await;
+    assert_eq!(
+        taken.status,
+        StatusCode::CONFLICT,
+        "adding never overwrites"
+    );
+    let added = app
+        .owner(
+            "POST",
+            "/v1/task-secrets/gmail",
+            Some(json!({ "env": { "PASSWORD": "gm-Pa55word" }, "website": "gmail.com" })),
+        )
+        .await;
+    assert_eq!(added.status, StatusCode::CREATED, "{:?}", added.body);
     let missing = app
         .owner(
             "PATCH",

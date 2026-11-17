@@ -54,6 +54,8 @@ pub enum SecretError {
     Crypto(String),
     #[error("no task secret named {0}")]
     Unknown(String),
+    #[error("a task secret named {0} already exists")]
+    Exists(String),
 }
 
 /// The host a Vault entry signs in to, lowercase with no leading `www.`.
@@ -417,16 +419,28 @@ pub async fn write_in(
     Ok(!exists)
 }
 
-/// Store (create or replace) a secret. Returns whether it was new.
+/// Whether a write may replace an existing secret of the same name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    CreateOrReplace,
+    CreateOnly,
+}
+
+/// Store a secret. Returns whether it was new; `CreateOnly` refuses a
+/// name already taken with `Exists` and changes nothing.
 pub async fn put(
     pool: &SqlitePool,
     key: &SecretKey,
     name: &str,
     env: &BTreeMap<String, String>,
     meta: &Meta,
+    mode: Mode,
 ) -> Result<bool, SecretError> {
     let sealed = seal_env(key, name, env)?;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    if mode == Mode::CreateOnly && get(&mut tx, name).await?.is_some() {
+        return Err(SecretError::Exists(name.to_owned()));
+    }
     let created = write_in(&mut tx, name, &sealed, meta).await?;
     tx.commit().await?;
     Ok(created)

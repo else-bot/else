@@ -1268,7 +1268,7 @@ pub(crate) mod tests {
             let entry = json!({"name": "x_login", "description": "X, @owner", "website": "x.com", "env": ["PASSWORD"], "updated_at": "2026-11-17T12:00:00Z", "last_used": null});
             match (method.as_str(), path.as_str()) {
                 ("GET", "/v1/task-secrets") => axum::Json(json!({"secrets": [entry]})).into_response(),
-                ("PUT", _) => (StatusCode::CREATED, axum::Json(json!({"name": "x_login", "env": ["PASSWORD"], "not_redacted": ["PASSWORD"]}))).into_response(),
+                ("POST", "/v1/task-secrets/x_login") => (StatusCode::CREATED, axum::Json(json!({"name": "x_login", "env": ["PASSWORD"], "not_redacted": ["PASSWORD"]}))).into_response(),
                 ("PATCH", _) => axum::Json(entry).into_response(),
                 ("POST", "/v1/task-secrets/x_login/reveal") => axum::Json(json!({"env": {"PASSWORD": "test-only-value"}})).into_response(),
                 ("POST", _) => axum::Json(json!({})).into_response(),
@@ -1304,14 +1304,14 @@ pub(crate) mod tests {
         };
         let saved = client
             .clone()
-            .put_secret("x_login".into(), secret())
+            .create_secret("x_login".into(), secret())
             .await
             .unwrap();
         assert_eq!(saved.not_redacted, ["PASSWORD"]);
         let (method, path, body) = received.recv().await.unwrap();
         assert_eq!(
             (method.as_str(), path.as_str()),
-            ("PUT", "/v1/task-secrets/x_login")
+            ("POST", "/v1/task-secrets/x_login")
         );
         assert_eq!(body["env"]["TOTP_SECRET"], "seed");
         client
