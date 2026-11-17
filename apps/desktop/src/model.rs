@@ -235,16 +235,6 @@ pub enum BotReplyStatus {
     Cancelled,
 }
 
-impl BotReplyStatus {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Completed => "Reply",
-            Self::Failed => "Reply · Failed",
-            Self::Cancelled => "Reply · Stopped",
-        }
-    }
-}
-
 /// The owner's reaction to one of the bot's messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reaction {

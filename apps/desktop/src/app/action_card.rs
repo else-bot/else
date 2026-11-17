@@ -19,6 +19,8 @@ use gpui_kit::*;
 
 /// The icon column every activity row leads with.
 const LEAD: f32 = 20.;
+/// Where an activity row's words start: content under the row aligns here.
+pub(super) const EVENT_INDENT: f32 = LEAD + 8.;
 /// The line height of a card title; the icon centres on it.
 const TITLE_LINE: f32 = 22.;
 /// The disclosure column of an activity row that expands.
@@ -319,6 +321,12 @@ pub(super) fn event_button(id: impl Into<ElementId>) -> Button {
 pub(super) enum EventEnd {
     /// Status, count or time.
     Meta(SharedString),
+    /// A status in its own color, led by a dot when it asks for the owner.
+    Status {
+        label: SharedString,
+        color: Hsla,
+        dot: bool,
+    },
     /// At most two [`event_action`]s.
     Actions(Vec<Button>),
 }
@@ -348,6 +356,20 @@ pub(super) fn event_end(theme: &Theme, end: EventEnd, disclosure: Disclosure) ->
                 .text_size(px(12.5))
                 .text_color(super::message_row::meta_color(theme))
                 .child(meta),
+        ),
+        EventEnd::Status { label, color, dot } => h_flex().child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .when(chevron.is_some(), |meta| meta.mr_2())
+                .text_size(px(12.5))
+                .text_color(color)
+                .when(dot, |status| {
+                    status
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(div().size(px(6.)).rounded_full().bg(color))
+                })
+                .child(label),
         ),
         EventEnd::Actions(actions) => h_flex()
             .gap_1()

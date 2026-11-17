@@ -387,6 +387,10 @@ pub(super) struct ConversationView {
     /// Delegation groups whose task details are expanded.
     pub(super) expanded_councils: HashSet<Uuid>,
     pub(super) expanded_events: HashSet<Uuid>,
+    /// Bot exchanges the owner opened from their one-line form.
+    pub(super) opened_exchanges: HashSet<Uuid>,
+    /// Exchange replies shown in full instead of their excerpt.
+    pub(super) full_replies: HashSet<Uuid>,
     /// The waiting tray lists its waits instead of only its header.
     pub(super) tray_expanded: bool,
     /// Waits in the tray whose details are open.
@@ -501,6 +505,8 @@ impl ConversationView {
             expanded_tasks: HashSet::new(),
             expanded_councils: HashSet::new(),
             expanded_events: HashSet::new(),
+            opened_exchanges: HashSet::new(),
+            full_replies: HashSet::new(),
             tray_expanded: true,
             expanded_waits: HashSet::new(),
             stopping_waits: HashSet::new(),
@@ -661,6 +667,28 @@ impl ElseApp {
                     })
             })
             .map(|item| item.id);
+        // A quoted exchange reply may be folded or cut to an excerpt: show
+        // it whole, then look again.
+        let folded = target.filter(|target| {
+            !view.full_replies.contains(target)
+                && view.rows.iter().any(|row| {
+                    row.activity
+                        .as_ref()
+                        .is_some_and(|activity| activity.answers.contains(target))
+                })
+        });
+        if let Some(target) = folded {
+            if let Some(receipt) = conversation
+                .item(target)
+                .and_then(|item| conversation.task_receipt(item.turn_id))
+            {
+                view.opened_exchanges.insert(receipt.id);
+            }
+            view.full_replies.insert(target);
+            self.sync_rows(window, cx);
+            self.reveal_quoted(bot, from, author, original, window, cx);
+            return;
+        }
         if let Some(target) = target
             && let Some(ix) = view.row_index(RowKey::Item(target))
         {
@@ -873,6 +901,15 @@ impl ElseApp {
                 (Some(task), _) => (task.prompt.clone(), item.parts.clone()),
                 (None, Some(shown)) => shown,
                 (None, None) => (item.text.clone(), item.parts.clone()),
+            };
+            // A bot exchange's reply reads inline as an excerpt until the
+            // owner asks for all of it.
+            let exchange_reply = item.bot_reply.is_some()
+                || (item.kind == "assistant" && delegated.contains(&item.turn_id));
+            let text = if exchange_reply && !view.full_replies.contains(&item.id) {
+                super::bot_activity::excerpt(&text).unwrap_or(text)
+            } else {
+                text
             };
             texts.push((RowKey::Item(item.id), text, format, parts));
             if tasks
