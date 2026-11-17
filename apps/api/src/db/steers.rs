@@ -61,6 +61,17 @@ pub fn delivered_into(turn: &str) -> String {
     )
 }
 
+/// SQL subquery: the turns of the owner messages joined to the turn that
+/// the SQL expression `turn` names and still part of it, whether given to
+/// the provider yet or not.
+pub fn joined_into(turn: &str) -> String {
+    format!(
+        "SELECT s.turn_id FROM turn_steers s JOIN turns m ON m.id = s.turn_id
+         WHERE s.into_turn_id = {turn} AND s.status IN ('pending', 'delivered')
+           AND m.status = 'queued'"
+    )
+}
+
 /// Where a new owner message goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
@@ -157,46 +168,17 @@ pub async fn place(
 /// whose turns are still queued, with their files.
 pub async fn pending(pool: &SqlitePool, into: Uuid) -> Result<Vec<Steer>, sqlx::Error> {
     let mut conn = pool.acquire().await?;
-    let rows: Vec<Row> = sqlx::query_as(
-        "SELECT t.id AS turn_id, t.bot_id, i.text, coalesce(i.parts, '[]') AS parts, s.status
-         FROM turn_steers s
-         JOIN turns t ON t.id = s.turn_id AND t.status = 'queued'
-         JOIN items i ON i.id = t.owner_item_id
-         JOIN turns a ON a.id = s.into_turn_id AND a.status = 'running'
-         WHERE s.into_turn_id = ?1 AND s.status = 'pending'
-         ORDER BY t.turn_no",
-    )
-    .bind(into)
-    .fetch_all(&mut *conn)
-    .await?;
+    let rows = joined(&mut conn, into).await?;
     let mut steers = Vec::with_capacity(rows.len());
     for row in rows {
+        if row.status != Status::Pending || !row.reply_running {
+            continue;
+        }
         let ids: Vec<Uuid> = file_ids(&row.parts.0).collect();
         let files = super::attachments::load(&mut conn, row.bot_id, &ids).await?;
-        steers.push(Steer {
-            turn_id: row.turn_id,
-            text: row.text,
-            parts: row.parts.0,
-            files,
-        });
+        steers.push(row.into_steer(files));
     }
     Ok(steers)
-}
-
-#[derive(sqlx::FromRow)]
-struct Row {
-    turn_id: Uuid,
-    bot_id: Uuid,
-    text: String,
-    parts: Json<Vec<MessagePart>>,
-    status: Status,
-}
-
-fn file_ids(parts: &[MessagePart]) -> impl Iterator<Item = Uuid> + '_ {
-    parts.iter().filter_map(|part| match part {
-        MessagePart::File { file } => Some(file.id),
-        MessagePart::Text { .. } => None,
-    })
 }
 
 /// The messages joined to `into` that its next request carries, oldest
@@ -207,29 +189,61 @@ pub async fn for_request(
     conn: &mut SqliteConnection,
     into: Uuid,
 ) -> Result<Vec<crate::app::providers::Steered>, sqlx::Error> {
-    let rows: Vec<Row> = sqlx::query_as(
-        "SELECT t.id AS turn_id, t.bot_id, i.text, coalesce(i.parts, '[]') AS parts, s.status
+    Ok(joined(conn, into)
+        .await?
+        .into_iter()
+        .map(|row| crate::app::providers::Steered {
+            seen: row.status == Status::Delivered,
+            message: row.into_steer(Vec::new()),
+        })
+        .collect())
+}
+
+/// The messages joined to `into` and not sent yet or taken ([`joined_into`]),
+/// oldest first.
+async fn joined(conn: &mut SqliteConnection, into: Uuid) -> Result<Vec<Row>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT t.id AS turn_id, t.bot_id, i.text, coalesce(i.parts, '[]') AS parts, s.status,
+                a.status = 'running' AS reply_running
          FROM turn_steers s
          JOIN turns t ON t.id = s.turn_id AND t.status = 'queued'
          JOIN items i ON i.id = t.owner_item_id
+         JOIN turns a ON a.id = s.into_turn_id
          WHERE s.into_turn_id = ?1 AND s.status IN ('pending', 'delivered')
          ORDER BY t.turn_no",
     )
     .bind(into)
     .fetch_all(&mut *conn)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| crate::app::providers::Steered {
-            seen: row.status == Status::Delivered,
-            message: Steer {
-                turn_id: row.turn_id,
-                text: row.text,
-                parts: row.parts.0,
-                files: Vec::new(),
-            },
-        })
-        .collect())
+    .await
+}
+
+#[derive(sqlx::FromRow)]
+struct Row {
+    turn_id: Uuid,
+    bot_id: Uuid,
+    text: String,
+    parts: Json<Vec<MessagePart>>,
+    status: Status,
+    reply_running: bool,
+}
+
+impl Row {
+    fn into_steer(self, files: Vec<crate::app::providers::InputFile>) -> Steer {
+        Steer {
+            turn_id: self.turn_id,
+            text: self.text,
+            parts: self.parts.0,
+            files,
+        }
+    }
+}
+
+/// The files a message's `parts` name.
+pub fn file_ids(parts: &[MessagePart]) -> impl Iterator<Item = Uuid> + '_ {
+    parts.iter().filter_map(|part| match part {
+        MessagePart::File { file } => Some(file.id),
+        MessagePart::Text { .. } => None,
+    })
 }
 
 /// The request of `into` that carries the pending messages `turn_ids` is

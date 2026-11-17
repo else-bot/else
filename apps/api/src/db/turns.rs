@@ -1194,12 +1194,11 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
                 .flat_map(|outcome| outcome.files.iter().chain(&outcome.messages))
                 .map(|file| file.id),
         )
-        .chain(steered.iter().flat_map(|steered| {
-            steered.message.parts.iter().filter_map(|part| match part {
-                MessagePart::File { file } => Some(file.id),
-                MessagePart::Text { .. } => None,
-            })
-        }))
+        .chain(
+            steered
+                .iter()
+                .flat_map(|steered| crate::db::steers::file_ids(&steered.message.parts)),
+        )
         .filter(|id| !files.iter().any(|staged| staged.attachment.id == *id))
         .collect();
     files.extend(crate::db::attachments::load(&mut conn, turn.bot_id, &extra).await?);

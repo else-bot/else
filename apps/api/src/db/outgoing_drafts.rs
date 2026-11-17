@@ -1241,10 +1241,6 @@ pub async fn after_social_send(
     Ok(updated)
 }
 
-/// Owner messages that joined a reply and are given to it.
-const JOINED: &str = "SELECT s.turn_id FROM turn_steers s JOIN turns m ON m.id = s.turn_id
-     WHERE s.into_turn_id = ?1 AND s.status IN ('pending', 'delivered') AND m.status = 'queued'";
-
 /// What a turn must know about drafts: owner decisions on its cards not yet
 /// given to an attempt, and the draft open when one of its owner messages
 /// was sent.
@@ -1252,18 +1248,19 @@ pub async fn notes(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
 ) -> Result<Vec<outgoing::Note>, sqlx::Error> {
+    let joined = super::steers::joined_into("?1");
     let rows: Vec<OutgoingDraft> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "{SELECT} WHERE (d.turn_id = ?1 AND d.delivered_attempt IS NULL
                           AND d.status IN ('approved', 'discarded')
                           AND d.approval_source IS NOT 'message')
-                     OR ((d.context_turn_id = ?1 OR d.context_turn_id IN ({JOINED}))
+                     OR ((d.context_turn_id = ?1 OR d.context_turn_id IN ({joined}))
                          AND d.status <> 'superseded')
          ORDER BY d.created_at, d.id"
     )))
     .bind(turn_id)
     .fetch_all(&mut *conn)
     .await?;
-    let mut context: Vec<Uuid> = sqlx::query_scalar(JOINED)
+    let mut context: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(joined))
         .bind(turn_id)
         .fetch_all(&mut *conn)
         .await?;
