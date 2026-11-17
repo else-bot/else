@@ -145,6 +145,19 @@ def run(runner):
                                                               "body": "The review is ready for Friday."})], "Draft ready."),
                 "mental-arithmetic": ([], "84"),
                 "missing-api-key": ([self.call("request_secret", {"name": "openweather", "reason": "Weather data", "env": ["OPENWEATHER_API_KEY"]})], "Private form opened."),
+                "vault-login-before-handoff": ([
+                    self.call("use_tool", {"name": "computer_secrets", "arguments": {"query": "x.com"}}),
+                    self.call("computer_browser", {"action": "open", "url": "https://x.com/login", "effect": "local"}),
+                    self.call("computer_browser", {"action": "type", "selector": "@u1", "secret": "x-login", "field": "USERNAME", "effect": "local"}),
+                    self.call("computer_browser", {"action": "type", "selector": "@p1", "secret": "x-login", "field": "PASSWORD", "effect": "local"}),
+                    self.call("computer_browser", {"action": "click", "selector": "@b1", "effect": "local"})],
+                    "Signed in; the page is Home / X."),
+                "vault-missing-login-asks-with-website": ([
+                    self.call("use_tool", {"name": "computer_secrets", "arguments": {"query": "portal.acme-supply.com"}}),
+                    self.call("request_secret", {"name": "acme-portal", "reason": "Download last month's invoice.",
+                                                 "env": ["USERNAME", "PASSWORD"], "website": "portal.acme-supply.com"},
+                              {"status": "pending", "parked": True})],
+                    "I opened a private card for the Acme portal login."),
                 "installed-mcp-has-id": (mcp_calls, "#17 Fix digest retry"),
                 "mcp-index-then-schema": (mcp_calls, "#17 Fix digest retry"),
                 "mcp-connection-failure-is-read": (

@@ -503,10 +503,10 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          job with computer_job instead of rerunning it; wait with wait true, not polling. \
          Link result files \
          and say where the source is. Credentials come only from \
-         stored task secrets (computer_secrets lists them): name them in the secrets argument \
-         and read them from the environment; never print them or put them in arguments, \
-         files, or source. When needed credentials are not stored, call request_secret; never \
-         ask for credentials in chat. A script with side effects (sending, posting, paying) \
+         the Vault, shared by every bot: before asking for a login or a takeover, search \
+         computer_secrets by site. Never print values or put them in arguments, files, \
+         memory, or source. Only when nothing matches, call request_secret; never ask for \
+         credentials in chat. A script with side effects (sending, posting, paying) \
          records a receipt per item as it goes: sent only after the server confirmed it, \
          failed when it refused, uncertain when the outcome is unknown. Before running it \
          again, read the receipts and skip what was sent, never resend an uncertain item \
