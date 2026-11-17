@@ -317,7 +317,7 @@ pub(super) fn notice_schema() -> Value {
             "type": "object",
             "properties": {
                 "kind": { "type": "string", "enum": ["nothing", "fyi", "decision", "blocked"],
-                          "description": "nothing: no owner attention. fyi: done, one line worth knowing. decision: waits on the owner's choice, including proposed work. blocked: only the owner can clear it." },
+                          "description": "decision: waits on the owner's choice, incl. whether to start work you propose. blocked: only they can clear it. fyi: you decided something they'd want to know. nothing: anything else." },
                 "summary": { "type": "string", "minLength": 1, "maxLength": MAX_SUMMARY,
                              "description": "Required unless nothing. For the owner, one or two sentences: the ask, e.g. Approve the Romow DM before I send it; for fyi one line, e.g. Declined MIRAY myself." },
                 "tried": { "type": "string", "minLength": 1, "maxLength": MAX_TRIED,
