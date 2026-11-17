@@ -95,6 +95,12 @@ while kill -0 "$pid" 2>/dev/null; do
     sleep 0.1
 done"#;
 
+/// `--absolute-names` keeps tar from deferring absolute or `..` symlinks
+/// (Bun's cache is full of them). A deferred symlink makes tar recheck its
+/// parent directory's inode number at the end, and the guest's overlayfs
+/// renumbers a directory once it is evicted from cache, so tar fails with
+/// "Directory renamed" and leaves those directories owned by root. The archive
+/// comes from the bot's own computer, and the bot already has root here.
 const UNPACK: &str = r#"set -e
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 cd /
@@ -104,8 +110,8 @@ need=$(( $(stat -c %s "$2") / 1024 + 65536 ))
 free=$(df -Pk / | awk 'NR == 2 {print $4}')
 [ "$free" -ge "$need" ] || { echo "not enough free disk to unpack: ${need} KiB needed, ${free} KiB free" >&2; exit 5; }
 echo "$1  $2" | sha256sum -c --quiet
-tar --numeric-owner -xpf "$2" --anchored --exclude=usr/local --exclude=opt
-tar --numeric-owner --skip-old-files -xpf "$2" --anchored --exclude=home/elsebot --exclude=var/lib/elsebot
+tar --numeric-owner --absolute-names -xpf "$2" --anchored --exclude=usr/local --exclude=opt
+tar --numeric-owner --absolute-names --skip-old-files -xpf "$2" --anchored --exclude=home/elsebot --exclude=var/lib/elsebot
 rm -f "$2"
 rmdir "$(dirname "$2")" 2>/dev/null || true
 trap - EXIT
