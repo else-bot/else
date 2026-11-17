@@ -285,6 +285,119 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
     assert!(text.contains("ZETA-9"), "{text}");
 }
 
+/// Wait until `turn` has streamed more than `chars` characters.
+async fn wait_for_text(app: &TestApp, turn: &str, chars: i64) {
+    for _ in 0..1200 {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT coalesce(sum(length(text)), 0) FROM items WHERE turn_id = ?1 AND kind = 'assistant'",
+        )
+        .bind(turn.parse::<Uuid>().unwrap())
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+        if n > chars {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("turn {turn} streamed no text");
+}
+
+/// Send `first`, then `second` once `ready` holds, and return both turns'
+/// statuses and the whole reply.
+async fn steer(
+    app: &TestApp,
+    bot: &str,
+    first: &str,
+    second: &str,
+    ready: impl std::future::Future<Output = ()>,
+) -> (String, String, String) {
+    let reply = app.send(bot, Uuid::new_v4(), first, Some("claude")).await;
+    let one = reply.body["turn"]["id"].as_str().unwrap().to_owned();
+    app.wait_turn_for(&one, &["running"], Duration::from_secs(120))
+        .await;
+    ready.await;
+    let reply = app.send(bot, Uuid::new_v4(), second, Some("claude")).await;
+    let two = reply.body["turn"]["id"].as_str().unwrap().to_owned();
+    let ended = ["completed", "failed", "interrupted", "uncertain"];
+    let one_status = app
+        .wait_turn_for(&one, &ended, Duration::from_secs(240))
+        .await;
+    let two_status = app
+        .wait_turn_for(&two, &ended, Duration::from_secs(240))
+        .await;
+    let text: String = sqlx::query_scalar(
+        "SELECT coalesce(group_concat(text, char(10)), '') FROM (
+             SELECT i.text FROM items i JOIN turns t ON t.id = i.turn_id
+             WHERE t.bot_id = ?1 AND i.kind = 'assistant' ORDER BY i.seq)",
+    )
+    .bind(bot.parse::<Uuid>().unwrap())
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    eprintln!("steer -> {one_status}/{two_status}: {text}");
+    (one_status, two_status, text)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_newer_owner_message_joins_a_running_claude_reply() {
+    if !live() {
+        eprintln!("SKIPPED: set ELSE_LIVE_CLAUDE=1 to run live Claude checks");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let data = private_dir(dir.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/tools/v1/mcp",
+        listener.local_addr().unwrap().port()
+    );
+    let db = Arc::new(TestDb::migrated().await);
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    save_claude_profile(&db).await;
+    let app = TestApp::with_registry(db, 2, Registry::new(vec![Arc::new(claude(&data, &url))]));
+    serve(&app, listener).await;
+
+    let tool = app.create_bot("Tool").await;
+    let (one, two, text) = steer(
+        &app,
+        &tool,
+        "Synthetic test. Use your shell tool to run `sleep 15 && echo FIRST-DONE`, then \
+         reply with its output.",
+        "Synthetic test. Also reply with the word BANANA.",
+        tokio::time::sleep(Duration::from_secs(6)),
+    )
+    .await;
+    assert_eq!((one.as_str(), two.as_str()), ("completed", "completed"));
+    assert!(text.contains("FIRST-DONE"), "{text}");
+    assert!(text.contains("BANANA"), "{text}");
+
+    let prose = app.create_bot("Prose").await;
+    let bot = prose.clone();
+    let (one, two, text) = steer(
+        &app,
+        &prose,
+        "Synthetic test. Count from 1 to 300, one number per line, then write DONE-COUNTING.",
+        "Synthetic test. When you finish, also reply with the word BANANA.",
+        async {
+            let turn: String = sqlx::query_scalar(
+                "SELECT lower(hex(id)) FROM turns WHERE bot_id = ?1 ORDER BY turn_no DESC LIMIT 1",
+            )
+            .bind(bot.parse::<Uuid>().unwrap())
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+            wait_for_text(&app, &Uuid::parse_str(&turn).unwrap().to_string(), 20).await;
+        },
+    )
+    .await;
+    assert_eq!((one.as_str(), two.as_str()), ("completed", "completed"));
+    assert!(text.contains("DONE-COUNTING"), "{text}");
+    assert!(text.contains("BANANA"), "{text}");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(provider_processes(), 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_claude_checkpoint_runs_with_no_tools() {
     if !live() {
