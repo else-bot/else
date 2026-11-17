@@ -643,11 +643,6 @@ impl ElseApp {
             });
         }
         self.ensure_settings(window, cx);
-        if self.settings_open
-            && let Some(id) = id
-        {
-            self.load_bot_usage(id, window, cx);
-        }
         if id.is_some() {
             self.sync_rows(window, cx);
             self.load_conversation(window, cx);
