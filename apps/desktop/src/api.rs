@@ -252,6 +252,9 @@ pub enum SidebarStatus {
         preview: String,
         #[serde(default)]
         since: Option<DateTime<Utc>>,
+        /// Absent from servers before #508.
+        #[serde(default)]
+        notice_id: Option<Uuid>,
     },
     NeedsCredentials {
         preview: String,

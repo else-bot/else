@@ -183,7 +183,7 @@ impl ElseApp {
             bot,
             kind.message(&reference),
             Vec::new(),
-            Some(reaction),
+            super::SendKind::Reaction(reaction),
             window,
             cx,
         );

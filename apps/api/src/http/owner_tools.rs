@@ -308,11 +308,11 @@ pub(super) fn notice_schema() -> Value {
     use crate::db::owner_notices::{MAX_SUMMARY, MAX_TRIED};
     json!({
         "name": "notify_owner",
-        "description": "In a delegated task, call once before your final message to declare what \
-            the task needs from the owner. The owner sees it on the exchange in both chats; \
-            decision and blocked also show a Needs you card. Not for what a card asks \
-            (ask_owner, ask_permission, request_secret, drafts, computer_handoff). Still give \
-            the full result in your final message.",
+        "description": "In a delegated task, flag before your final message that it ends needing the \
+            owner: a decision, or a blocker only they can clear. Shows a Needs you card in both \
+            chats. Otherwise declare fyi or nothing. Not for what a card asks (ask_owner, \
+            ask_permission, request_secret, drafts, computer_handoff) or work the owner already \
+            chose for another bot. Calling again rewrites it. Still give the full result.",
         "inputSchema": {
             "type": "object",
             "properties": {

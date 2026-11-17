@@ -89,7 +89,14 @@ impl ElseApp {
         if !open || text.is_empty() {
             return;
         }
-        if self.enqueue(view.bot_id, text, Vec::new(), None, window, cx) {
+        if self.enqueue(
+            view.bot_id,
+            text,
+            Vec::new(),
+            super::super::SendKind::Message { answers: None },
+            window,
+            cx,
+        ) {
             input.update(cx, |state, cx| state.set_value("", window, cx));
         }
     }

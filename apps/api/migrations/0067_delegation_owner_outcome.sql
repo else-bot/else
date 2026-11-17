@@ -7,3 +7,7 @@ ALTER TABLE delegations ADD COLUMN title TEXT;
 ALTER TABLE delegations ADD COLUMN owner_need TEXT
     CHECK (owner_need IN ('nothing', 'fyi', 'decision', 'blocked'));
 ALTER TABLE delegations ADD COLUMN owner_line TEXT;
+
+-- A task's asks are read across every attempt in its task conversation,
+-- and a turn is mapped back to its task through that conversation.
+CREATE INDEX delegations_conversation ON delegations (conversation_id);

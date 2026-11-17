@@ -279,9 +279,6 @@ pub struct ElseApp {
     quote_press: Option<Point<Pixels>>,
     quote_editor: Option<quotes::QuoteEditor>,
     expanded_quotes: HashSet<Uuid>,
-    /// Per bot, the ask the owner chose Reply on; their next message there
-    /// answers it.
-    reply_targets: HashMap<Uuid, notice_card::ReplyTarget>,
     pending: HashMap<Uuid, Vec<PendingSend>>,
     stopping: HashSet<Uuid>,
     inbox: crate::inbox::Inbox,
@@ -389,7 +386,6 @@ impl ElseApp {
             quote_press: None,
             quote_editor: None,
             expanded_quotes: HashSet::new(),
-            reply_targets: HashMap::new(),
             pending: HashMap::new(),
             stopping: HashSet::new(),
             inbox: Default::default(),
@@ -743,6 +739,7 @@ impl ElseApp {
         let Some(message) = draft.message() else {
             return;
         };
+        let answers = draft.answers();
         let mut parts = match attachments::parts(&draft.content, &draft.files) {
             Ok(parts) => parts,
             Err(error) => {
@@ -762,7 +759,14 @@ impl ElseApp {
                 );
             }
         }
-        if !self.enqueue(bot, message, parts, None, window, cx) {
+        if !self.enqueue(
+            bot,
+            message,
+            parts,
+            SendKind::Message { answers },
+            window,
+            cx,
+        ) {
             return;
         }
         self.composer
@@ -776,7 +780,7 @@ impl ElseApp {
         bot: Uuid,
         text: String,
         parts: Vec<crate::attachments::MessagePart>,
-        reaction: Option<Reaction>,
+        kind: SendKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -792,11 +796,14 @@ impl ElseApp {
             cx.notify();
             return false;
         }
-        let (open_draft, answers_notice) = if reaction.is_none() {
-            let target = self.reply_targets.remove(&bot).map(|target| target.notice);
-            (self.outgoing_attachment(cx), target)
+        let (reaction, answers_notice) = match kind {
+            SendKind::Message { answers } => (None, answers),
+            SendKind::Reaction(reaction) => (Some(reaction), None),
+        };
+        let open_draft = if reaction.is_none() {
+            self.outgoing_attachment(cx)
         } else {
-            (None, None)
+            None
         };
         let pending = PendingSend::new(text, parts, reaction, open_draft, answers_notice);
         let request = pending.request();
@@ -946,7 +953,23 @@ impl ElseApp {
         let pending = list.remove(ix);
         if restore {
             let current = self.composer.read(cx).content();
-            let restored = crate::attachments::input_content(&pending.text, &pending.parts);
+            // A reply to an ask comes back as that reply, so the resend
+            // still answers it; other quotes come back as text.
+            let (text, parts) = match pending
+                .answers_notice
+                .zip(reply::QuotedReply::parse(&pending.text))
+            {
+                Some((notice, quoted)) if quoted.author == reply::Author::Bot => {
+                    let quote = reply::Quote::ask(notice, quoted.original(), true);
+                    let body = quoted.body.to_owned();
+                    let prefix = pending.text.len() - body.len();
+                    let parts = without_prefix(&pending.parts, prefix);
+                    self.add_quote(bot, quote, window, cx);
+                    (body, parts)
+                }
+                _ => (pending.text.clone(), pending.parts.clone()),
+            };
+            let restored = crate::attachments::input_content(&text, &parts);
             for part in &pending.parts {
                 if let crate::attachments::MessagePart::File { file } = part {
                     self.drafts
@@ -991,5 +1014,52 @@ impl ElseApp {
             });
         })
         .detach();
+    }
+}
+
+/// What an owner message is besides its text.
+#[derive(Debug, Clone, Copy)]
+enum SendKind {
+    /// Typed in the composer; `answers` is the ask its reply quote answers.
+    Message {
+        answers: Option<Uuid>,
+    },
+    Reaction(Reaction),
+}
+
+/// `parts` without the quoted prefix `send` laid before the owner's own
+/// text, as its first text part.
+fn without_prefix(
+    parts: &[crate::attachments::MessagePart],
+    prefix: usize,
+) -> Vec<crate::attachments::MessagePart> {
+    use crate::attachments::MessagePart;
+    match parts.split_first() {
+        Some((MessagePart::Text { text }, rest)) if text.len() <= prefix => rest.to_vec(),
+        Some((MessagePart::Text { text }, rest)) => {
+            let mut kept = vec![MessagePart::Text {
+                text: text[prefix..].to_owned(),
+            }];
+            kept.extend_from_slice(rest);
+            kept
+        }
+        _ => parts.to_vec(),
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::without_prefix;
+    use crate::attachments::MessagePart;
+
+    #[test]
+    fn a_restored_reply_drops_only_its_quoted_prefix() {
+        let text = |t: &str| MessagePart::Text { text: t.into() };
+        assert_eq!(without_prefix(&[], 9), Vec::<MessagePart>::new());
+        assert_eq!(
+            without_prefix(&[text("> quoted\n\n"), text("hi")], 10),
+            [text("hi")]
+        );
+        assert_eq!(without_prefix(&[text("> quoted\n\nhi")], 10), [text("hi")]);
     }
 }

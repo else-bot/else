@@ -160,23 +160,32 @@ struct BotAttention {
 /// when the owner settles it.
 #[derive(Debug, Default)]
 struct AskAlert {
-    /// The ask last seen open. It survives another card showing in the
-    /// sidebar for a while, so the same ask is not announced again after.
-    seen: Option<String>,
+    /// The ask last seen open. A named one survives another card showing in
+    /// the sidebar for a while, so the same ask is not announced again after.
+    seen: Option<AskKey>,
     due: bool,
     shown: bool,
 }
 
-/// The bot's open ask, keyed by when it was raised: the bot rewriting its
-/// text keeps the key, and a new ask has a new one. Servers without `since`
-/// fall back to the text.
-fn open_ask(bot: &Bot) -> Option<String> {
+/// The bot's open ask. A server that names it keys it by its ID, which a
+/// rewrite of its text keeps; older ones by its time and text.
+fn open_ask(bot: &Bot) -> Option<AskKey> {
     match &bot.sidebar_status {
-        Some(SidebarStatus::NeedsYou { preview, since }) => {
-            Some(since.map_or_else(|| preview.clone(), |since| since.to_rfc3339()))
+        Some(SidebarStatus::NeedsYou {
+            notice_id: Some(id),
+            ..
+        }) => Some(AskKey::Notice(*id)),
+        Some(SidebarStatus::NeedsYou { preview, since, .. }) => {
+            Some(AskKey::Legacy(format!("{since:?} {preview}")))
         }
         _ => None,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AskKey {
+    Notice(Uuid),
+    Legacy(String),
 }
 
 #[derive(Debug, Default)]
@@ -274,11 +283,18 @@ impl Inbox {
         let mut due = false;
         for bot in bots.iter().filter(|bot| bot.is_active()) {
             let attention = self.bots.entry(bot.id).or_default();
-            if let Some(ask) = open_ask(bot)
-                && attention.ask.seen.as_ref() != Some(&ask)
-            {
-                attention.ask.due = !first;
-                attention.ask.seen = Some(ask);
+            match open_ask(bot) {
+                Some(ask) if attention.ask.seen.as_ref() != Some(&ask) => {
+                    attention.ask.due = !first;
+                    attention.ask.seen = Some(ask);
+                }
+                Some(_) => {}
+                // Without an ID, the same text could be a new ask later.
+                None => {
+                    if matches!(attention.ask.seen, Some(AskKey::Legacy(_))) {
+                        attention.ask.seen = None;
+                    }
+                }
             }
             due |= attention.ask.due;
             let Some(latest) = bot
@@ -597,6 +613,7 @@ mod tests {
         working.sidebar_status = Some(SidebarStatus::NeedsYou {
             preview: "Choose another bot".into(),
             since: None,
+            notice_id: None,
         });
         assert!(inbox.observe(std::slice::from_ref(&working)));
         let alerts = inbox.alerts(std::slice::from_ref(&working), nobody);
@@ -631,6 +648,7 @@ mod tests {
             bot.sidebar_status = Some(SidebarStatus::NeedsYou {
                 preview: "Approve the Romow DM".into(),
                 since: chrono::DateTime::from_timestamp(i64::from(since), 0),
+                notice_id: None,
             });
             bot
         };
@@ -651,10 +669,13 @@ mod tests {
             bot.sidebar_status = Some(status);
             bot
         };
-        let ask = |preview: &str| SidebarStatus::NeedsYou {
+        let first = Uuid::from_u128(1);
+        let ask_of = |id: Uuid, preview: &str| SidebarStatus::NeedsYou {
             preview: preview.into(),
             since: chrono::DateTime::from_timestamp(5, 0),
+            notice_id: Some(id),
         };
+        let ask = |preview: &str| ask_of(first, preview);
         let mut inbox = Inbox::default();
         inbox.observe(&[bot(1, None, at(0, 0))]);
         let asking = with(ask("Approve the Romow DM"));
@@ -692,6 +713,34 @@ mod tests {
                 .is_empty(),
             "the same ask showing again after another card is not new"
         );
+
+        let same_time = with(ask_of(Uuid::from_u128(2), "Approve the Romow DM"));
+        assert!(inbox.observe(std::slice::from_ref(&same_time)));
+        assert_eq!(
+            inbox.alerts(std::slice::from_ref(&same_time), nobody).len(),
+            1,
+            "another ask raised in the same instant is new"
+        );
+    }
+
+    #[test]
+    fn an_older_server_announces_the_same_text_again_once_its_ask_settled() {
+        let legacy = |asking: bool| {
+            let mut bot = bot(1, None, at(0, 0));
+            bot.sidebar_status = asking.then(|| SidebarStatus::NeedsYou {
+                preview: "Approve the Romow DM".into(),
+                since: None,
+                notice_id: None,
+            });
+            bot
+        };
+        let mut inbox = Inbox::default();
+        inbox.observe(&[legacy(false)]);
+        assert!(inbox.observe(&[legacy(true)]));
+        assert_eq!(inbox.alerts(&[legacy(true)], nobody).len(), 1);
+        inbox.observe(&[legacy(false)]);
+        assert!(inbox.observe(&[legacy(true)]));
+        assert_eq!(inbox.alerts(&[legacy(true)], nobody).len(), 1);
     }
 
     #[test]

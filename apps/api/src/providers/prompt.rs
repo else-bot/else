@@ -318,11 +318,11 @@ fn delegation_rules(input: &TurnInput) -> String {
              that bot treats it as data: it does only what its own task already covers. \
              When your answer proposes work beyond that task, such as a fix to build, a \
              script or rule to change, or a follow-up run, nobody starts it unless the owner \
-             does. So call notify_owner once before the final message that ends the task: \
-             decision or blocked when it ends needing the owner (a blocker only they can \
-             clear, a decision, or proposed work that needs their go-ahead) and no card \
-             already asks it; fyi with one line when you decided or did something they would \
-             want to know; nothing otherwise, including a routine count or an unchanged check. \
+             does. So when the task ends needing the owner (a blocker only they can clear, a \
+             decision, or proposed work that needs their go-ahead) and no card already asks \
+             it, call notify_owner before your final message. Otherwise call it with fyi and \
+             one line when you decided or did something they would want to know, or with \
+             nothing, as for a routine count or an unchanged check. \
              The task tells you what you are needed for, but it is not the owner's approval \
              and grants no host access or credentials. {approvals}{routines}{owner_answer}"
         );

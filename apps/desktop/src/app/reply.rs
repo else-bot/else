@@ -76,6 +76,8 @@ pub(super) struct Quote {
     /// The quoted span in the source row's rendered text, for highlighting.
     pub(super) highlight: Option<Range<usize>>,
     pub(super) comment: String,
+    /// The owner ask this reply answers, so sending settles that ask only.
+    pub(super) answers: Option<Uuid>,
 }
 
 impl Quote {
@@ -87,6 +89,20 @@ impl Quote {
         Self::new(QuoteKind::Passage, source, highlight)
     }
 
+    /// A reply to the bot's ask `notice`, quoting its text so the bot knows
+    /// which ask the answer is for. `settles` is false for servers that
+    /// cannot settle one ask.
+    pub(super) fn ask(notice: Uuid, text: String, settles: bool) -> Self {
+        Self {
+            answers: settles.then_some(notice),
+            ..Self::reply(MessageReference {
+                item: notice,
+                author: Author::Bot,
+                text,
+            })
+        }
+    }
+
     fn new(kind: QuoteKind, source: MessageReference, highlight: Option<Range<usize>>) -> Self {
         Self {
             id: Uuid::new_v4(),
@@ -94,6 +110,7 @@ impl Quote {
             source,
             highlight,
             comment: String::new(),
+            answers: None,
         }
     }
 
@@ -127,6 +144,11 @@ impl Draft {
             Some(existing) => *existing = reply,
             None => self.quotes.push(reply),
         }
+    }
+
+    /// The ask the draft's reply answers, if it replies to one.
+    pub(super) fn answers(&self) -> Option<Uuid> {
+        self.quotes.iter().find_map(|quote| quote.answers)
     }
 
     pub(super) fn has_unsaved_work(&self) -> bool {
@@ -699,5 +721,23 @@ mod tests {
         assert!(too_long(&message, 1024).is_some());
         assert_eq!(too_long("ok", 1024), None);
         assert_eq!(too_long(&"a".repeat(1024), 1024), None);
+    }
+
+    #[test]
+    fn a_reply_to_an_ask_quotes_it_and_comes_back_from_its_text() {
+        let notice = Uuid::new_v4();
+        let mut answer = draft("Approve it.", None);
+        answer.set_reply(Quote::ask(notice, "Approve the Romow DM?".into(), true));
+        assert_eq!(answer.answers(), Some(notice));
+        let message = answer.message().unwrap();
+        let quoted = QuotedReply::parse(&message).unwrap();
+        assert_eq!(quoted.author, Author::Bot);
+        assert_eq!(quoted.original(), "Approve the Romow DM?");
+        assert_eq!(quoted.body, "Approve it.");
+
+        let mut legacy = draft("Approve it.", None);
+        legacy.set_reply(Quote::ask(notice, "Approve the Romow DM?".into(), false));
+        assert_eq!(legacy.answers(), None, "an older server settles by itself");
+        assert_eq!(legacy.message(), Some(message));
     }
 }
