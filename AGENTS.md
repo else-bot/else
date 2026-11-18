@@ -22,6 +22,7 @@
 - Make a test's wait-until deadline a hang guard, such as `common::SETTLE` in the API tests, because several suites share this machine and slow each step; keep short deadlines only for asserting that something does not happen.
 - Give a test server its port by binding it (port 0, then read the address back, or a bound `TcpSocket`), never by choosing a free port and binding it later.
 - Scope process scans in tests, such as `pgrep -f`, to a value unique to the run, because another worktree may run the same test at the same time.
+- Keep a test only if it guards intended behavior: it should fail when that behavior regresses, and only then.
 - Add each offline else-api integration test file as a module in `apps/api/tests/api/` and declare it in its `main.rs`, so all of them link into one `api` binary; keep `*_live`, `replication`, and tests that arm `else_api::faults` (`backup`, `recovery`) as their own files in `apps/api/tests/`, because fault points are process-global.
 - On Linux, run focused tests with `scripts/dev.py test --test api -- MODULE::`; read the printed `.else-dev/tests/` results before repeating a run after a restart.
 - Fetch `origin/main` before adding a migration in `apps/api/migrations`, choose the next contiguous `NNNN_` prefix, and run `python3 scripts/check_migrations.py` after rebasing; never renumber a shipped migration.
