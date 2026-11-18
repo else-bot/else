@@ -1,8 +1,10 @@
+mod cache;
 mod config;
 pub mod delivery;
 pub mod documents;
 pub mod oauth;
 pub mod pimalaya;
+mod readers;
 pub mod store;
 pub mod types;
 
@@ -130,19 +132,18 @@ fn failure_receipt(
     }
 }
 
-/// Who asks for a mail command.
+/// Who asks for a mail command: a bot's running turn, limited by the
+/// bot's grant on the account. The owner's reader never queues commands.
 #[derive(Clone, Copy)]
 enum Caller {
-    /// A bot's running turn, limited by the bot's grant on the account.
     Bot { bot_id: Uuid, turn_id: Uuid },
-    /// The owner's reader, which only views messages.
-    Owner,
 }
 
 struct Command {
     caller: Caller,
     action_id: Option<Uuid>,
     command: MailCommand,
+    queued: tokio::time::Instant,
     deadline: tokio::time::Instant,
     reply: oneshot::Sender<Result<Value, MailError>>,
 }
@@ -167,6 +168,11 @@ pub struct ConnectorManager {
     scheduler: Arc<Scheduler>,
     transport: Arc<dyn MailTransport>,
     workers: Actor<HashMap<Uuid, Worker>>,
+    messages: Actor<cache::Messages>,
+    readers: readers::Readers,
+    /// One sign-in refresh at a time per account, so the owner's reader
+    /// and the worker never spend the same OAuth refresh token twice.
+    refreshes: Actor<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
     pub oauth: oauth::OAuth,
 }
 
@@ -186,6 +192,9 @@ impl ConnectorManager {
             scheduler,
             transport,
             workers: Actor::default(),
+            messages: Actor::default(),
+            readers: readers::Readers::default(),
+            refreshes: Actor::default(),
             oauth: oauth::OAuth::default(),
         }
     }
@@ -224,7 +233,20 @@ impl ConnectorManager {
             .await
     }
 
+    /// Drops what the owner's reader kept for the account, so a paused,
+    /// reconfigured or rejected inbox serves nothing from before.
+    async fn drop_reads(&self, id: Uuid, removed: bool) {
+        self.messages
+            .call(move |messages| messages.forget(id))
+            .await;
+        self.readers.close(id, removed).await;
+        if removed {
+            self.refreshes.call(move |locks| locks.remove(&id)).await;
+        }
+    }
+
     pub async fn changed(self: &Arc<Self>, id: Uuid) {
+        self.drop_reads(id, false).await;
         // A worker this call starts reads the changed account itself; a
         // notification would restart its first watch for nothing.
         if let Ok((worker, false)) = self.worker_or_start(id).await {
@@ -241,6 +263,7 @@ impl ConnectorManager {
                 }
             }
         }
+        self.drop_reads(id, true).await;
     }
 
     pub async fn replace_credential(
@@ -334,19 +357,108 @@ impl ConnectorManager {
         .await
     }
 
-    /// One message for the owner's reader. It never marks the message read.
+    /// One message for the owner's reader. It never marks the message read
+    /// and never waits behind the account's queued commands: a message read
+    /// recently comes from the cache, and any other on the owner's own
+    /// session.
     pub async fn view(
         self: &Arc<Self>,
         account_id: Uuid,
         message: MessageRef,
     ) -> Result<Value, MailError> {
-        self.submit(
-            account_id,
-            Caller::Owner,
-            None,
-            MailCommand::View { message },
-        )
-        .await
+        let started = tokio::time::Instant::now();
+        MailCommand::View {
+            message: message.clone(),
+        }
+        .validate()?;
+        // Before the account loads, so a pause that lands after this read
+        // saw the inbox active keeps the read from storing anything.
+        let epoch = self
+            .messages
+            .call(move |messages| messages.epoch(account_id))
+            .await;
+        let account = store::account(&self.db, account_id)
+            .await
+            .map_err(|_| MailError::new("mail_unavailable"))?
+            .ok_or_else(|| MailError::new("mail_forbidden"))?;
+        if account.state != "active" {
+            return Err(MailError::new("mail_account_paused"));
+        }
+        let _admission = self
+            .scheduler
+            .gate()
+            .enter()
+            .ok_or_else(|| MailError::new("maintenance_in_progress"))?;
+        let ms = |at: Duration| at.as_millis() as u64;
+        if let Some(fetched) = self.cached(&account, &message).await {
+            tracing::info!(
+                %account_id,
+                path = "cached",
+                total_ms = ms(started.elapsed()),
+                "owner viewed a message"
+            );
+            return pimalaya::view(&fetched, &message);
+        }
+        let signed_in = std::sync::Mutex::new(None);
+        let read = self.readers.read(account.id, &message, || async {
+            let at = tokio::time::Instant::now();
+            let auth = self.auth(&account).await?;
+            let session = self.transport.reader(&account.config, &auth).await;
+            *signed_in.lock().expect("unpoisoned") = Some(at.elapsed());
+            session
+        });
+        let (fetched, path) = tokio::time::timeout(Duration::from_secs(120), read)
+            .await
+            .unwrap_or((Err(MailError::new("mail_timeout")), readers::Path::Cold));
+        let signed_in = signed_in.into_inner().expect("unpoisoned");
+        tracing::info!(
+            %account_id,
+            path = path.as_str(),
+            sign_in_ms = signed_in.map(ms),
+            total_ms = ms(started.elapsed()),
+            "owner viewed a message"
+        );
+        let fetched = match fetched {
+            Ok(fetched) => fetched,
+            Err(error) => {
+                if matches!(
+                    error.code,
+                    AUTHENTICATION_FAILED | REAUTHENTICATION_REQUIRED
+                ) {
+                    self.health(account.id, account.generation, error.code)
+                        .await;
+                    // The watch signed in before the rejection; restart it
+                    // so it stops reporting new mail on that sign-in.
+                    self.changed(account.id).await;
+                }
+                return Err(error);
+            }
+        };
+        let key = Self::cache_key(&account, &message);
+        let stored = fetched.clone();
+        self.messages.call(move |m| m.put(key, stored, epoch)).await;
+        pimalaya::view(&fetched, &message)
+    }
+
+    fn cache_key(account: &Account, message: &MessageRef) -> cache::Key {
+        cache::Key {
+            account_id: account.id,
+            generation: account.generation,
+            message: message.clone(),
+        }
+    }
+
+    /// The cached message, unless the server is known to reject the saved
+    /// sign-in, so the reader still says to reconnect.
+    async fn cached(&self, account: &Account, message: &MessageRef) -> Option<Fetched> {
+        if matches!(
+            account.health,
+            Health::CredentialRejected | Health::ReauthenticationRequired
+        ) {
+            return None;
+        }
+        let key = Self::cache_key(account, message);
+        self.messages.call(move |messages| messages.get(&key)).await
     }
 
     async fn submit(
@@ -362,11 +474,13 @@ impl ConnectorManager {
             return Err(MailError::new("action_id_required"));
         }
         let (reply, result) = oneshot::channel();
+        let queued = tokio::time::Instant::now();
         let command = Command {
             caller,
             action_id,
             command,
-            deadline: tokio::time::Instant::now() + Duration::from_secs(120),
+            queued,
+            deadline: queued + Duration::from_secs(120),
             reply,
         };
         let account = store::account(&self.db, account_id)
@@ -428,17 +542,16 @@ impl ConnectorManager {
             )
             .await
             .map_err(|_| MailError::new("mail_forbidden")),
-            Caller::Owner if !matches!(command.command, MailCommand::View { .. }) => {
-                Err(MailError::new("mail_forbidden"))
-            }
-            Caller::Owner if account.state != "active" => {
-                Err(MailError::new("mail_account_paused"))
-            }
-            Caller::Owner => Ok(()),
         }
     }
 
     async fn auth(&self, account: &Account) -> Result<Auth, MailError> {
+        let id = account.id;
+        let refresh = self
+            .refreshes
+            .call(move |locks| locks.entry(id).or_default().clone())
+            .await;
+        let _refresh = refresh.lock().await;
         let _admission = self
             .scheduler
             .gate()
@@ -511,6 +624,7 @@ impl ConnectorManager {
             .map_err(|_| MailError::new("mail_unavailable"))?
             .ok_or_else(|| MailError::new("mail_forbidden"))?;
         self.authorization(&account, command).await?;
+        let started = tokio::time::Instant::now();
         let auth = self.auth(&account).await.inspect_err(|error| {
             if error.code == REAUTHENTICATION_REQUIRED {
                 *rejected = Some((account.generation, REAUTHENTICATION_REQUIRED));
@@ -519,7 +633,6 @@ impl ConnectorManager {
         self.authorization(&account, command).await?;
         let action_id = match (command.command.mutates(), command.caller) {
             (false, _) => None,
-            (true, Caller::Owner) => return Err(MailError::new("mail_forbidden")),
             (true, Caller::Bot { bot_id, turn_id }) => {
                 let action_id = command.action_id.expect("validated action ID");
                 match store::begin_action(
@@ -539,12 +652,44 @@ impl ConnectorManager {
                 }
             }
         };
-        let result = self
-            .transport
-            .execute(&account.config, &auth, &command.command)
-            .await;
+        // A bot always reads the mailbox itself, so a message moved or
+        // deleted elsewhere is gone for it at once; its read fills the
+        // owner's cache.
+        let result = match &command.command {
+            MailCommand::Read { message } => {
+                let epoch = self.messages.call(move |m| m.epoch(id)).await;
+                let signed_in = started.elapsed();
+                let fetched = self.transport.fetch(&account.config, &auth, message).await;
+                log_read(id, command, started, signed_in);
+                match fetched {
+                    Ok(fetched) => {
+                        let key = Self::cache_key(&account, message);
+                        let stored = fetched.clone();
+                        self.messages.call(move |m| m.put(key, stored, epoch)).await;
+                        pimalaya::read(&fetched, message)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            _ => {
+                self.transport
+                    .execute(&account.config, &auth, &command.command)
+                    .await
+            }
+        };
         if matches!(&result, Err(error) if error.code == AUTHENTICATION_FAILED) {
             *rejected = Some((account.generation, AUTHENTICATION_FAILED));
+        }
+        if let (
+            Ok(_),
+            MailCommand::Move { message, .. }
+            | MailCommand::Archive { message }
+            | MailCommand::Trash { message }
+            | MailCommand::Delete { message },
+        ) = (&result, &command.command)
+        {
+            let key = Self::cache_key(&account, message);
+            self.messages.call(move |m| m.remove(&key)).await;
         }
         let Some(action_id) = action_id else {
             return result;
@@ -624,6 +769,9 @@ impl ConnectorManager {
     async fn health(&self, id: Uuid, generation: i64, code: &str) {
         if code == "mail_account_paused" {
             return;
+        }
+        if matches!(code, AUTHENTICATION_FAILED | REAUTHENTICATION_REQUIRED) {
+            self.drop_reads(id, false).await;
         }
         if let Some(_admission) = self.scheduler.gate().enter() {
             let health = Health::from(code.to_owned());
@@ -713,6 +861,19 @@ impl ConnectorManager {
         }
         stop_watch(&mut watching).await;
     }
+}
+
+/// Where a bot's read spent its time: waiting in the account's queue,
+/// refreshing the sign-in, and connecting and fetching the message.
+fn log_read(account_id: Uuid, command: &Command, started: tokio::time::Instant, auth: Duration) {
+    let ms = |at: Duration| at.as_millis() as u64;
+    tracing::info!(
+        %account_id,
+        queue_ms = ms(started - command.queued),
+        auth_ms = ms(auth),
+        fetch_ms = ms(started.elapsed() - auth),
+        "bot read a message"
+    );
 }
 
 struct Watching {

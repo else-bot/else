@@ -51,6 +51,18 @@ async fn imap_fixture_options(start_tls: bool, uid_next: u32) -> ImapFixture {
     imap_fixture_serving(start_tls, uid_next, RAW.to_vec()).await
 }
 
+async fn read_from(client: &mut Imap, message: &MessageRef) -> Value {
+    let (raw, received_at) = client.fetch_message(message).await.unwrap();
+    read(
+        &Fetched {
+            raw: raw.into(),
+            received_at,
+        },
+        message,
+    )
+    .unwrap()
+}
+
 /// The window `<origin.length>` of a `BODY.PEEK[]` fetch, or the whole.
 fn partial(command: &str, len: usize) -> (usize, usize) {
     let Some((_, window)) = command.split_once("BODY.PEEK[]<") else {
@@ -145,17 +157,14 @@ async fn imap_fixture_serving(start_tls: bool, uid_next: u32, raw: Vec<u8>) -> I
                          * 3 FETCH (UID 13 FLAGS () INTERNALDATE \"15-Nov-2026 08:00:00 +0000\" ENVELOPE (\"sometime last week\" \"Moved in\" ((NIL NIL \"c\" \"example.org\")) NIL NIL NIL NIL NIL NIL NIL))\r\n\
                          {tag} OK fetch\r\n"
                     )
-                } else if upper.starts_with("UID FETCH ") && upper.contains("RFC822.SIZE") {
-                    let received = if upper.contains("INTERNALDATE") {
-                        " INTERNALDATE \"16-Nov-2026 09:00:00 +0000\""
-                    } else {
-                        ""
-                    };
-                    format!(
-                        "* 1 FETCH (UID 11 RFC822.SIZE {}{received})\r\n{tag} OK size\r\n",
-                        raw.len()
-                    )
                 } else if upper.starts_with("UID FETCH ") && upper.contains("BODY.PEEK[]") {
+                    let mut items = String::new();
+                    if upper.contains("RFC822.SIZE") {
+                        items.push_str(&format!(" RFC822.SIZE {}", raw.len()));
+                    }
+                    if upper.contains("INTERNALDATE") {
+                        items.push_str(" INTERNALDATE \"16-Nov-2026 09:00:00 +0000\"");
+                    }
                     let (start, end) = partial(&upper, raw.len());
                     let origin = if upper.contains("BODY.PEEK[]<") {
                         format!("<{start}>")
@@ -164,8 +173,11 @@ async fn imap_fixture_serving(start_tls: bool, uid_next: u32, raw: Vec<u8>) -> I
                     };
                     write
                         .write_all(
-                            format!("* 1 FETCH (UID 11 BODY[]{origin} {{{}}}\r\n", end - start)
-                                .as_bytes(),
+                            format!(
+                                "* 1 FETCH (UID 11{items} BODY[]{origin} {{{}}}\r\n",
+                                end - start
+                            )
+                            .as_bytes(),
                         )
                         .await
                         .unwrap();
@@ -270,6 +282,55 @@ async fn uid_identity_peek_flags_move_and_bounded_arrivals() {
 }
 
 #[tokio::test]
+async fn a_small_message_arrives_in_one_fetch_and_stays_unread() {
+    let fixture = imap_fixture().await;
+    let mut client = Imap::connect(&fixture.endpoint, &auth(), &fixture.connector)
+        .await
+        .unwrap();
+    let message = MessageRef {
+        folder: "INBOX".into(),
+        uid_validity: 77,
+        uid: 11,
+    };
+    let (raw, received_at) = client.fetch_message(&message).await.unwrap();
+    assert_eq!(raw, RAW);
+    assert_eq!(received_at.as_deref(), Some("2026-11-16T09:00:00Z"));
+    assert_eq!(
+        *fixture.commands.lock().unwrap(),
+        [
+            "SELECT INBOX",
+            "UID FETCH 11 (UID RFC822.SIZE INTERNALDATE BODY.PEEK[]<0.1048576>)"
+        ]
+    );
+    fixture.task.abort();
+}
+
+#[tokio::test]
+async fn a_kept_session_reads_again_without_signing_in() {
+    let fixture = imap_fixture().await;
+    let mut session: Box<dyn MailReader> = Box::new(
+        Imap::connect(&fixture.endpoint, &auth(), &fixture.connector)
+            .await
+            .unwrap(),
+    );
+    let message = MessageRef {
+        folder: "INBOX".into(),
+        uid_validity: 77,
+        uid: 11,
+    };
+    for _ in 0..2 {
+        assert_eq!(&session.read_message(&message).await.unwrap().raw[..], RAW);
+    }
+    let fetch = "UID FETCH 11 (UID RFC822.SIZE INTERNALDATE BODY.PEEK[]<0.1048576>)";
+    assert_eq!(
+        *fixture.commands.lock().unwrap(),
+        ["SELECT INBOX", fetch, "SELECT INBOX", fetch],
+        "the fixture accepts one connection, so the second read reused it"
+    );
+    fixture.task.abort();
+}
+
+#[tokio::test]
 async fn search_and_read_return_sender_date_and_received_time_newest_first() {
     let fixture = imap_fixture().await;
     let mut client = Imap::connect(&fixture.endpoint, &auth(), &fixture.connector)
@@ -305,14 +366,15 @@ async fn search_and_read_return_sender_date_and_received_time_newest_first() {
         ],
         "newest received first; a missing Date is null and an unparsable one stays raw"
     );
-    let read = client
-        .read_message(&MessageRef {
+    let read = read_from(
+        &mut client,
+        &MessageRef {
             folder: "INBOX".into(),
             uid_validity: 77,
             uid: 11,
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await;
     assert_eq!(read["date"], "2026-11-16T10:00:00+01:00");
     assert_eq!(read["received_at"], "2026-11-16T09:00:00Z");
     fixture.task.abort();
@@ -344,7 +406,7 @@ async fn an_email_over_the_old_limit_reads_in_chunks_and_lists_its_attachments()
         uid_validity: 77,
         uid: 11,
     };
-    let read = client.read_message(&message).await.unwrap();
+    let read = read_from(&mut client, &message).await;
     assert!(read["body"].as_str().unwrap().contains("annual report"));
     let listed: Vec<_> = read["attachments"]
         .as_array()
@@ -1023,7 +1085,7 @@ fn reader(raw: &str) -> Value {
         uid_validity: 1,
         uid: 9,
     };
-    view(&parsed, &message, None)
+    mime::view(&parsed, &message, None)
 }
 
 #[test]

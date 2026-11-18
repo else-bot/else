@@ -757,6 +757,12 @@ impl MailTransport for QuietInbox {
         self.signs_in(auth)?;
         Ok(json!({"folders":[]}))
     }
+    async fn fetch(&self, _: &MailConfig, _: &Auth, _: &MessageRef) -> Result<Fetched, MailError> {
+        Err(MailError::new("message_not_found"))
+    }
+    async fn reader(&self, _: &MailConfig, _: &Auth) -> Result<Box<dyn MailReader>, MailError> {
+        Err(MailError::new("mail_transport_failed"))
+    }
     async fn scan(
         &self,
         _: &MailConfig,
@@ -901,6 +907,12 @@ impl MailTransport for Transport {
         } else {
             Ok(json!({"sent":true}))
         }
+    }
+    async fn fetch(&self, _: &MailConfig, _: &Auth, _: &MessageRef) -> Result<Fetched, MailError> {
+        Err(MailError::new("message_not_found"))
+    }
+    async fn reader(&self, _: &MailConfig, _: &Auth) -> Result<Box<dyn MailReader>, MailError> {
+        Err(MailError::new("mail_transport_failed"))
     }
     async fn scan(&self, _: &MailConfig, _: &Auth, _: Option<&Cursor>) -> Result<Scan, MailError> {
         Ok(Scan {

@@ -1,7 +1,7 @@
 mod mime;
 mod session;
 
-use mime::{ThreadHeaders, addresses, compose, compose_forward, reply, smtp_address, thread, view};
+use mime::{ThreadHeaders, addresses, compose, compose_forward, reply, smtp_address, thread};
 use session::{Imap, Smtp};
 
 use std::borrow::Cow;
@@ -101,7 +101,9 @@ impl Imap {
     async fn body(&mut self, message: &MessageRef) -> Result<Vec<u8>, MailError> {
         self.fetch_message(message).await.map(|(bytes, _)| bytes)
     }
-    /// The raw message and when the server received it.
+    /// The raw message and when the server received it. The first command
+    /// asks for the size, the date and the first chunk together, so a
+    /// message under `FETCH_CHUNK` takes one round trip after `SELECT`.
     async fn fetch_message(
         &mut self,
         message: &MessageRef,
@@ -111,20 +113,31 @@ impl Imap {
             uid: true,
             ..Default::default()
         };
-        let meta = self
+        let chunk = |offset: usize| -> Result<MessageDataItemName<'static>, MailError> {
+            Ok(MessageDataItemName::BodyExt {
+                section: None,
+                partial: Some((
+                    u32::try_from(offset).map_err(invalid)?,
+                    NonZeroU32::new(FETCH_CHUNK).expect("nonzero chunk"),
+                )),
+                peek: true,
+            })
+        };
+        let first = self
             .fetch(
                 sequence(message.uid)?,
                 items(vec![
                     MessageDataItemName::Uid,
                     MessageDataItemName::Rfc822Size,
                     MessageDataItemName::InternalDate,
+                    chunk(0)?,
                 ]),
                 opts.clone(),
             )
             .await
             .map_err(failure)?;
-        let meta_items = || meta.values().flat_map(|row| row.as_ref().iter());
-        let size = meta_items()
+        let first_items = || first.values().flat_map(|row| row.as_ref().iter());
+        let size = first_items()
             .find_map(|i| {
                 if let MessageDataItem::Rfc822Size(n) = i {
                     Some(*n as usize)
@@ -133,48 +146,44 @@ impl Imap {
                 }
             })
             .ok_or_else(|| MailError::new("message_not_found"))?;
-        let received_at = meta_items().find_map(internal_date).map(rfc3339);
-        if size > MESSAGE_LIMIT {
-            return Err(MailError::new("mail_message_too_large").detail(
+        let received_at = first_items().find_map(internal_date).map(rfc3339);
+        let too_large = || {
+            MailError::new("mail_message_too_large").detail(
                 "the message is over 64 MiB, so neither its body nor its attachments can be read",
-            ));
+            )
+        };
+        if size > MESSAGE_LIMIT {
+            return Err(too_large());
         }
         let mut bytes = Vec::with_capacity(size);
+        let mut chunk_bytes = body_chunk(&first, message.uid)
+            .ok_or_else(|| MailError::new("message_not_found"))?
+            .to_vec();
         loop {
+            // Servers may count RFC822.SIZE slightly differently, so only a
+            // chunk that stops dead short of it is treated as a cut-off read.
+            if chunk_bytes.is_empty() && bytes.len() < size {
+                return Err(MailError::new("mail_message_incomplete")
+                    .detail("the server stopped sending the message; try again"));
+            }
+            if bytes.len() + chunk_bytes.len() > MESSAGE_LIMIT {
+                return Err(too_large());
+            }
+            bytes.extend_from_slice(&chunk_bytes);
+            if chunk_bytes.len() < FETCH_CHUNK as usize {
+                return Ok((bytes, received_at));
+            }
             let data = self
                 .fetch(
                     sequence(message.uid)?,
-                    items(vec![
-                        MessageDataItemName::Uid,
-                        MessageDataItemName::BodyExt {
-                            section: None,
-                            partial: Some((
-                                u32::try_from(bytes.len()).map_err(invalid)?,
-                                NonZeroU32::new(FETCH_CHUNK).expect("nonzero chunk"),
-                            )),
-                            peek: true,
-                        },
-                    ]),
+                    items(vec![MessageDataItemName::Uid, chunk(bytes.len())?]),
                     opts.clone(),
                 )
                 .await
                 .map_err(failure)?;
-            let chunk = body_chunk(&data, message.uid)
-                .ok_or_else(|| MailError::new("message_not_found"))?;
-            // Servers may count RFC822.SIZE slightly differently, so only a
-            // chunk that stops dead short of it is treated as a cut-off read.
-            if chunk.is_empty() && bytes.len() < size {
-                return Err(MailError::new("mail_message_incomplete")
-                    .detail("the server stopped sending the message; try again"));
-            }
-            if bytes.len() + chunk.len() > MESSAGE_LIMIT {
-                return Err(MailError::new("mail_message_too_large")
-                    .detail("the message is over 64 MiB, so neither its body nor its attachments can be read"));
-            }
-            bytes.extend_from_slice(chunk);
-            if chunk.len() < FETCH_CHUNK as usize {
-                return Ok((bytes, received_at));
-            }
+            chunk_bytes = body_chunk(&data, message.uid)
+                .ok_or_else(|| MailError::new("message_not_found"))?
+                .to_vec();
         }
     }
     async fn search_messages(
@@ -293,24 +302,6 @@ impl Imap {
         let messages: Vec<_> = messages.into_iter().map(|(_, _, value)| value).collect();
         Ok(json!({"messages":messages,"truncated":truncated,"source":"external_email"}))
     }
-    async fn read_message(&mut self, message: &MessageRef) -> Result<Value, MailError> {
-        let (bytes, received_at) = self.fetch_message(message).await?;
-        let parsed = MessageParser::default()
-            .parse(&bytes)
-            .ok_or_else(|| MailError::new("invalid_email_message"))?;
-        let body = parsed.body_text(0).unwrap_or_default();
-        let text: String = body.chars().take(32000).collect();
-        Ok(
-            json!({"message":message,"source":"external_email","date":header_date(parsed.header_raw("Date")),"received_at":received_at,"subject":parsed.subject(),"from":addresses(parsed.from()),"to":addresses(parsed.to()),"cc":addresses(parsed.cc()),"reply_to":addresses(parsed.reply_to()),"body":text,"truncated":body.chars().count()>32000,"attachments":parsed.attachments().enumerate().map(|(part,a)|json!({"part":part,"name":a.attachment_name(),"media_type":media_type(a),"size":a.contents().len()})).collect::<Vec<_>>()}),
-        )
-    }
-    async fn view_message(&mut self, message: &MessageRef) -> Result<Value, MailError> {
-        let (bytes, received_at) = self.fetch_message(message).await?;
-        let parsed = MessageParser::default()
-            .parse(&bytes)
-            .ok_or_else(|| MailError::new("invalid_email_message"))?;
-        Ok(view(&parsed, message, received_at))
-    }
     /// Each requested attachment's name, type and size, with its bytes
     /// unless it is missing or over `ATTACHMENT_LIMIT`.
     async fn open_attachments(
@@ -405,6 +396,16 @@ impl Imap {
     }
 }
 #[async_trait::async_trait]
+impl MailReader for Imap {
+    async fn read_message(&mut self, message: &MessageRef) -> Result<Fetched, MailError> {
+        let (raw, received_at) = self.fetch_message(message).await?;
+        Ok(Fetched {
+            raw: raw.into(),
+            received_at,
+        })
+    }
+}
+#[async_trait::async_trait]
 impl MailTransport for Pimalaya {
     async fn verify(&self, config: &MailConfig, auth: &Auth) -> Result<(), MailError> {
         tokio::try_join!(
@@ -431,6 +432,38 @@ impl MailTransport for Pimalaya {
         } else {
             result
         }
+    }
+    async fn fetch(
+        &self,
+        config: &MailConfig,
+        auth: &Auth,
+        message: &MessageRef,
+    ) -> Result<Fetched, MailError> {
+        timeout(Duration::from_secs(120), async {
+            let started = tokio::time::Instant::now();
+            let mut client = Imap::open(&config.imap, auth).await?;
+            let signed_in = started.elapsed();
+            let (raw, received_at) = client.fetch_message(message).await?;
+            tracing::debug!(
+                sign_in_ms = signed_in.as_millis() as u64,
+                fetch_ms = (started.elapsed() - signed_in).as_millis() as u64,
+                bytes = raw.len(),
+                "fetched a message"
+            );
+            Ok(Fetched {
+                raw: raw.into(),
+                received_at,
+            })
+        })
+        .await
+        .unwrap_or_else(|_| Err(MailError::new("mail_timeout")))
+    }
+    async fn reader(
+        &self,
+        config: &MailConfig,
+        auth: &Auth,
+    ) -> Result<Box<dyn MailReader>, MailError> {
+        Ok(Box::new(Imap::open(&config.imap, auth).await?))
     }
     async fn scan(
         &self,
@@ -605,8 +638,9 @@ async fn execute(
                 .search_messages(folder, query.as_deref(), *limit)
                 .await
         }
-        MailCommand::Read { message } => client.read_message(message).await,
-        MailCommand::View { message } => client.view_message(message).await,
+        MailCommand::Read { .. } | MailCommand::View { .. } => {
+            Err(MailError::new("invalid_mail_request"))
+        }
         MailCommand::OpenAttachments { message, parts } => {
             client.open_attachments(message, parts).await
         }
@@ -718,6 +752,29 @@ async fn execute(
             Ok(json!({"found": !found.is_empty(), "folder": config.sent_folder}))
         }
     }
+}
+
+fn parse(fetched: &Fetched) -> Result<mail_parser::Message<'_>, MailError> {
+    MessageParser::default()
+        .parse(&fetched.raw[..])
+        .ok_or_else(|| MailError::new("invalid_email_message"))
+}
+
+/// A message as a bot reads it: headers, up to 32,000 characters of text,
+/// and its attachments by part index.
+pub fn read(fetched: &Fetched, message: &MessageRef) -> Result<Value, MailError> {
+    let parsed = parse(fetched)?;
+    let body = parsed.body_text(0).unwrap_or_default();
+    let text: String = body.chars().take(32000).collect();
+    Ok(
+        json!({"message":message,"source":"external_email","date":header_date(parsed.header_raw("Date")),"received_at":fetched.received_at,"subject":parsed.subject(),"from":addresses(parsed.from()),"to":addresses(parsed.to()),"cc":addresses(parsed.cc()),"reply_to":addresses(parsed.reply_to()),"body":text,"truncated":body.chars().count()>32000,"attachments":parsed.attachments().enumerate().map(|(part,a)|json!({"part":part,"name":a.attachment_name(),"media_type":media_type(a),"size":a.contents().len()})).collect::<Vec<_>>()}),
+    )
+}
+
+/// A message as the owner's reader shows it.
+pub fn view(fetched: &Fetched, message: &MessageRef) -> Result<Value, MailError> {
+    let parsed = parse(fetched)?;
+    Ok(mime::view(&parsed, message, fetched.received_at.clone()))
 }
 
 /// The body bytes one partial fetch returned for `uid`. A part the server

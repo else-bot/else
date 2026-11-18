@@ -19,11 +19,16 @@ fn sasl(auth: &Auth) -> Sasl {
         .into()
     }
 }
+/// One client configuration for the process, so each connection skips
+/// loading the platform's roots and can resume an earlier TLS session.
 pub(super) fn tls_connector() -> Result<TlsConnector, MailError> {
+    static CONFIG: std::sync::OnceLock<Arc<ClientConfig>> = std::sync::OnceLock::new();
+    if let Some(config) = CONFIG.get() {
+        return Ok(TlsConnector::from(config.clone()));
+    }
     let _ = rustls::crypto::ring::default_provider().install_default();
-    Ok(TlsConnector::from(Arc::new(
-        ClientConfig::with_platform_verifier().map_err(failure)?,
-    )))
+    let config = Arc::new(ClientConfig::with_platform_verifier().map_err(failure)?);
+    Ok(TlsConnector::from(CONFIG.get_or_init(|| config).clone()))
 }
 
 pub(super) enum Socket {
