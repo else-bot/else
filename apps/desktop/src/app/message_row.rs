@@ -96,6 +96,22 @@ impl ElseApp {
         let Some(body) = body else {
             return div().into_any_element();
         };
+        let banner = self
+            .view
+            .as_ref()
+            .and_then(|view| view.conversation.as_ref())
+            .and_then(|c| super::conversation::opened_mail(c, row.opens_turn))
+            .and_then(|turn| super::email_reader::mail_banner(turn, cx));
+        let body = match banner {
+            Some(banner) => gpui_kit::component::v_flex()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .child(banner)
+                .child(body)
+                .into_any_element(),
+            None => body,
+        };
         let sender = self
             .view
             .as_ref()
@@ -339,13 +355,6 @@ impl ElseApp {
                 // are aligned to the bubble's side.
                 let mut column = gpui_kit::component::v_flex().w_full().min_w_0().gap_1();
                 let card = card(text, user).id(SharedString::from(format!("message-{id}")));
-                if !user
-                    && row.starts_run
-                    && let Some(banner) =
-                        turn.and_then(|turn| super::email_reader::mail_banner(turn, cx))
-                {
-                    column = column.child(banner);
-                }
                 if !user
                     && row.starts_run
                     && turn.and_then(|t| t.routine.as_ref()).is_none()
