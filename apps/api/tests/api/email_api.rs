@@ -1175,6 +1175,121 @@ async fn mail_event_origin_removes_computer_and_delegation_authority() {
     h.app.wait_turn(&turn.to_string(), &["completed"]).await;
 }
 
+/// An inbox bot passes a notice on as its trigger says (issue #518). The
+/// task runs on email content, so it sees only the task: never the other
+/// bot's memory or mail, which the email could then have read back.
+#[tokio::test]
+async fn a_mail_event_hands_a_notice_to_another_bot_without_its_memory_or_mail() {
+    let h = recorder::harness(4).await;
+    let inbox: Uuid = h.app.main_bot().await.parse().unwrap();
+    let marketing = h.app.create_bot("Marketing Manager").await;
+    let marketing_id: Uuid = marketing.parse().unwrap();
+    let mut tx = h.app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    else_api::db::memory::append(
+        &mut tx,
+        marketing_id,
+        &else_api::db::memory::NewEntry {
+            request_key: "budget",
+            kind: else_api::db::memory::Kind::OwnerMessage,
+            body: "The ad budget for Q4 is 40k.",
+            source: json!({}),
+            supersedes_seq: None,
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    else_api::memory_worker::drain(&h.app.db.pool)
+        .await
+        .unwrap();
+    let account = account(&h.app).await;
+    store::set_permissions(&h.app.db.pool, account.id, inbox, &permissions())
+        .await
+        .unwrap();
+    let turn = mail_event(
+        &h,
+        &account,
+        &format!("INBOX {GATE}"),
+        "Pass X Ads emails to the Marketing Manager bot.",
+    )
+    .await;
+    let (_, token) = h.started(turn).await;
+    let registry = &h.inputs(turn).await[0].delegation.registry;
+    assert!(
+        registry.iter().any(|(id, _)| *id == marketing_id),
+        "{registry:?}"
+    );
+    let with_files = tool(
+        &h.app,
+        &token,
+        "delegate",
+        json!({ "target_bot_id": marketing, "task": "Read the notes.",
+                "title": "X Ads notes", "files": ["notes.md"] }),
+    )
+    .await;
+    assert!(with_files.error, "{}", with_files.body);
+    let pending = tool(
+        &h.app,
+        &token,
+        "delegate",
+        json!({ "target_bot_id": marketing,
+                "task": format!("{GATE} X Ads: your October invoice is ready."),
+                "title": "X Ads invoice notice" }),
+    )
+    .await;
+    assert_eq!(pending.result["status"], "pending", "{}", pending.body);
+    let child: Uuid =
+        sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
+            .bind(turn)
+            .fetch_one(&h.app.db.pool)
+            .await
+            .unwrap();
+    h.release(turn).await;
+    h.app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    let (_, child_token) = h.started(child).await;
+    let grant = h
+        .app
+        .scheduler
+        .grants()
+        .resolve(&child_token)
+        .await
+        .unwrap();
+    assert!(grant.allows(Tool::ReadHistory));
+    for forbidden in [
+        Tool::ReadMemory,
+        Tool::Mail,
+        Tool::DraftEmail,
+        Tool::Delegate,
+        Tool::Computer,
+        Tool::Mcp,
+    ] {
+        assert!(!grant.allows(forbidden), "{forbidden:?}");
+    }
+    let input = &h.inputs(child).await[0];
+    assert_eq!(
+        input.delegation.origin,
+        else_api::app::providers::Origin::ConnectorEvent
+    );
+    assert!(input.memory.is_none(), "{:?}", input.memory);
+    let onward = tool(
+        &h.app,
+        &child_token,
+        "delegate",
+        json!({ "target_bot_id": inbox.to_string(), "task": "Reply to X Ads.", "title": "Reply" }),
+    )
+    .await;
+    assert!(
+        onward.error || onward.status == StatusCode::FORBIDDEN,
+        "{}",
+        onward.body
+    );
+    h.release(child).await;
+    h.app.wait_turn(&child.to_string(), &["completed"]).await;
+    let (_, _) = h.started(turn).await;
+    h.release(turn).await;
+    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+}
+
 #[tokio::test]
 async fn a_mail_event_drafts_a_reply_the_owner_approves_in_a_card() {
     let transport = Arc::new(Transport {
