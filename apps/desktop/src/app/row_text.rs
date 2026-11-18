@@ -447,6 +447,11 @@ impl RowText {
         }
     }
 
+    /// Whether the row shows all of its text, so its height is final.
+    pub(super) fn laid_out(&self, cx: &App) -> bool {
+        self.rendered_bytes(cx) == Some(self.source.len())
+    }
+
     pub(super) fn rendered_bytes(&self, cx: &App) -> Option<usize> {
         match &self.widget {
             Widget::Plain(_) => Some(self.source.len()),
