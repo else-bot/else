@@ -206,6 +206,7 @@ pub(super) async fn resize(
         }
         Err(err) => return crate::http::owner_tools::question_refused(err),
     };
+    let shown = standing.is_none() || card_shown(state, grant, &spec).await;
     let resized = match computers
         .resize_memory(grant.bot_id, Some(memory_mib))
         .await
@@ -239,7 +240,7 @@ pub(super) async fn resize(
         ));
         return (tool_result(value), Some(log));
     };
-    if standing.is_some() {
+    if !shown && standing.is_some() {
         // The owner saw no card, so no command runs that they did not see.
         let mut value = done;
         value["next"] = json!(format!(
@@ -259,6 +260,24 @@ pub(super) async fn resize(
         log,
     )
     .await
+}
+
+/// Whether this attempt ran this exact call on a card the owner approved,
+/// which "Always allow" also does while saving its grant.
+async fn card_shown(state: &AppState, grant: &Grant, spec: &Spec) -> bool {
+    let Some(approval) = &spec.approval else {
+        return false;
+    };
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM owner_questions q JOIN turns t ON t.id = q.turn_id
+                        WHERE q.turn_id = ?1 AND q.action_hash = ?2
+                          AND q.consumed_attempt = t.attempt)",
+    )
+    .bind(grant.turn_id)
+    .bind(approval.hash.as_slice())
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(false)
 }
 
 /// The saved grant this size would use: the smallest "up to" size at or above

@@ -414,3 +414,27 @@ async fn always_allow_covers_smaller_sizes_without_a_card_but_reruns_nothing_uns
         "a computer not created yet takes its size at creation"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn always_allow_on_the_card_still_reruns_the_job_the_card_showed() {
+    let setup = setup().await;
+    let app = &setup.app;
+    let bot = app.create_bot("Indexer").await;
+    let (turn, token) = running(app, &bot).await;
+    let (job, _) = ended_job(&setup, &bot, &token, "done 137 1\nKilled\n").await;
+    let args = json!({ "memory_mib": 2048, "retry_job": job, "reason": "the build was killed" });
+    let pending = text(&tool(app, &token, "computer_resize", args.clone()).await);
+    settle(app, turn, "waiting").await;
+    answer(app, &bot, &pending["question_id"], "approve_task").await;
+    settle(app, turn, "completed").await;
+    let token = resumed(app, &bot, turn).await;
+    setup.guest.report("running\n");
+    let retried = text(&tool(app, &token, "computer_resize", args).await);
+    assert_eq!(retried["resized"]["memory_mib"], 2048, "{retried}");
+    assert_eq!(retried["status"], "waiting", "{retried}");
+    assert_ne!(
+        retried["job_id"],
+        json!(job),
+        "the job re-runs as a new one"
+    );
+}
