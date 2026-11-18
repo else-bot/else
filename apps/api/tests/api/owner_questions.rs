@@ -1350,7 +1350,7 @@ async fn delegated_task(app: &TestApp) -> (String, Uuid) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn delegated_tasks_ask_for_approval_in_their_bot_chat_but_cannot_record_standing_grants() {
+async fn delegated_tasks_ask_for_approval_in_their_bot_chat_but_cannot_record_a_bot_grant() {
     let Harness { app, .. } = harness().await;
     let (leaf, child) = delegated_task(&app).await;
     let child_token = grant(&app, child, owner_tools()).await;

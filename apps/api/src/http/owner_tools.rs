@@ -225,6 +225,7 @@ pub(super) async fn confirm_permission(state: &AppState, grant: &Grant, args: &V
                 ConfirmError::NotAuthorized => "NOT_AUTHORIZED",
                 ConfirmError::RoutineChanged => "ROUTINE_CHANGED",
                 ConfirmError::AuthorizationUsed => "AUTHORIZATION_USED",
+                ConfirmError::NoSkippedCard => "NO_SKIPPED_CARD",
                 ConfirmError::Request(_) => unreachable!(),
             };
             (

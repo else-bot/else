@@ -273,6 +273,17 @@ def run(runner):
                         "kind": "destructive", "covers": "host"},
                         "authorization": "Always allow managing Tailscale over SSH on omarchy-m1"}})],
                     "Saved: managing Tailscale over SSH on omarchy-m1 no longer needs a card."),
+                "delegated-skipped-card-always-allow-saves-task-grant": ([self.call("use_tool", {
+                    "name": "confirm_permission", "arguments": {"target": {
+                        "scope": "task", "task": "Squash merge Dev-ready PRs into main",
+                        "target": "proliquid/ex-aggr main via host gh CLI", "kind": "external", "covers": "host"},
+                        "authorization": "Always allow"}}),
+                    self.call("ask_permission", {
+                        "kind": "external",
+                        "action": "gh pr merge 52 -R proliquid/ex-aggr --squash --match-head-commit 8634b495",
+                        "task_scope": {"task": "Squash merge Dev-ready PRs into main",
+                                       "target": "proliquid/ex-aggr main via host gh CLI"}})],
+                    "Merged PR #52 into ex-aggr main; later merges with this task scope need no card."),
                 "link-project-files": ([], "[CSV](hypertracker-evidence/cloudflare-only/daily_counts_utc.csv) · "
                                            "[Report](~/work/hypertracker-evidence/cloudflare-only/report.md)",
                                        "Both are in your artifact store: `daily_counts_utc.csv` and `report.md`."),

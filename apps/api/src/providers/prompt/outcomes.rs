@@ -8,6 +8,7 @@ use super::file_reference;
 use crate::app::providers::TurnInput;
 use crate::app::questions::{
     APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, Action, DENY,
+    GrantReach, Status,
 };
 
 /// Recorded child outcomes and the owner's answers to secret requests and
@@ -476,6 +477,30 @@ fn questions_block(input: &TurnInput) -> String {
                     (DENY, _) => format!(
                         "Denied: do not do this {kind} action or an equivalent; continue without it or ask what the owner wants."
                     ),
+                    (
+                        _,
+                        Action::Host {
+                            task_scope: Some(_),
+                            ..
+                        }
+                        | Action::Tool {
+                            task_scope: Some(_),
+                            ..
+                        },
+                    ) if question.status == Status::Skipped
+                        && input.grant_reach() != GrantReach::Nothing =>
+                    {
+                        let covers = match action {
+                            Action::Host { .. } => "host",
+                            _ => "computer",
+                        };
+                        format!(
+                            "Skipped: the owner sent a message instead of choosing. If it says to \
+                             always allow this, call confirm_permission with this task scope, kind \
+                             {kind}, covers {covers}, and their exact words, then make this call \
+                             again once. Otherwise follow their message; this action is not approved."
+                        )
+                    }
                     _ => format!("Not approved: this {kind} action was not allowed; do not do it."),
                 };
                 let tag = match action {
