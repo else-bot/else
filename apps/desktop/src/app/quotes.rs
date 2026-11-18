@@ -1,4 +1,6 @@
+use super::bot_mention::BotMention;
 use super::conversation::{ConversationView, Reveal, Spot};
+use super::mentions::{MentionAction, mention_keys};
 use super::reply::{Author, MessageReference, Quote, QuoteKind};
 use super::row_text::RowText;
 use super::{APP_CONTEXT, CiteSelection, ElseApp, RowKey};
@@ -47,8 +49,16 @@ pub(super) struct QuoteEditor {
     input: Entity<TextareaState>,
     at: Point<Pixels>,
     below: bool,
+    /// The bot picker opens above the note in the window's lower half.
+    picker_above: bool,
     full_quote: bool,
-    _events: Subscription,
+    _events: [Subscription; 2],
+}
+
+impl QuoteEditor {
+    pub(super) fn input(&self) -> &Entity<TextareaState> {
+        &self.input
+    }
 }
 
 // Past these, a card's one-line quote or three-line comment may be cut off.
@@ -201,11 +211,25 @@ impl ElseApp {
             state.set_value(quote.comment.clone(), window, cx);
             state.focus_handle(cx).focus(window, cx);
         });
-        let _events = cx.subscribe_in(&input, window, |app, _, event: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { shift: false, .. } = event {
-                app.save_quote_comment(window, cx);
-            }
-        });
+        BotMention::chip_input(&input, &self.mention_bots, cx);
+        let _events = [
+            cx.subscribe_in(
+                &input,
+                window,
+                |app, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { shift: false, .. } => {
+                        app.save_quote_comment(window, cx)
+                    }
+                    InputEvent::Focus | InputEvent::Blur => app.sync_mentions(window, cx),
+                    _ => {}
+                },
+            ),
+            // Edits and caret moves both notify.
+            cx.observe_in(&input, window, |app, input, window, cx| {
+                BotMention::chip_input(&input, &app.mention_bots, cx);
+                app.sync_mentions(window, cx);
+            }),
+        ];
         self.quote_editor = Some(QuoteEditor {
             bot,
             quote,
@@ -213,6 +237,7 @@ impl ElseApp {
             input,
             at,
             below: !existing,
+            picker_above: at.y > window.viewport_size().height / 2.,
             full_quote: false,
             _events,
         });
@@ -348,7 +373,7 @@ impl ElseApp {
         if self.selected != Some(editor.bot) {
             return None;
         }
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let excerpt = editor.quote.source.text.clone();
         let long = excerpt.chars().count() > LONG_COMMENT || excerpt.lines().count() > 3;
         let quote = div()
@@ -386,79 +411,94 @@ impl ElseApp {
                     ))
                     .snap_to_window_with_margin(px(8.))
                     .child(
-                        v_flex()
-                            .id("quote-editor")
-                            .occlude()
-                            .key_context("QuoteEditor")
-                            .capture_action(cx.listener(|app, _: &Escape, window, cx| {
+                        mention_keys(
+                            v_flex()
+                                .id("quote-editor")
+                                .occlude()
+                                .key_context("QuoteEditor"),
+                            cx,
+                        )
+                        .capture_action(cx.listener(|app, _: &Escape, window, cx| {
+                            if !app.mention_action(MentionAction::Dismiss, window, cx) {
                                 app.cancel_quote_comment(window, cx);
-                                cx.stop_propagation();
-                            }))
-                            .w(px(380.))
-                            .gap_2()
-                            .p_2p5()
-                            .rounded(theme.radius_lg)
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.popover)
-                            .text_color(theme.popover_foreground)
-                            .shadow_lg()
-                            .child(quote)
-                            .when(long, |column| {
-                                column.child(
-                                    Button::new("quote-editor-more")
+                            }
+                            cx.stop_propagation();
+                        }))
+                        .w(px(380.))
+                        .gap_2()
+                        .p_2p5()
+                        .rounded(theme.radius_lg)
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.popover)
+                        .text_color(theme.popover_foreground)
+                        .shadow_lg()
+                        .child(quote)
+                        .when(long, |column| {
+                            column.child(
+                                Button::new("quote-editor-more")
+                                    .control(Tier::Ghost, Scale::Compact, false, cx)
+                                    .self_start()
+                                    .label(if editor.full_quote {
+                                        "Collapse quote"
+                                    } else {
+                                        "Show full quote"
+                                    })
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        if let Some(editor) = app.quote_editor.as_mut() {
+                                            editor.full_quote.toggle();
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                        })
+                        .child(
+                            div()
+                                .relative()
+                                .px_2()
+                                .py_1()
+                                .rounded(theme.radius)
+                                .border_1()
+                                .border_color(theme.input)
+                                .bg(theme.background)
+                                .child(BotMention::chips(
+                                    Textarea::new(&editor.input)
+                                        .appearance(false)
+                                        .aria_label("Comment on the quote"),
+                                    BotMention::find(
+                                        &editor.input.read(cx).value(),
+                                        &self.mention_bots,
+                                    ),
+                                ))
+                                .children(self.render_mentions(
+                                    &editor.input,
+                                    editor.picker_above,
+                                    cx,
+                                )),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .justify_end()
+                                .child(
+                                    Button::new("quote-editor-cancel")
                                         .control(Tier::Ghost, Scale::Compact, false, cx)
-                                        .self_start()
-                                        .label(if editor.full_quote {
-                                            "Collapse quote"
-                                        } else {
-                                            "Show full quote"
-                                        })
-                                        .on_click(cx.listener(|app, _, _, cx| {
-                                            if let Some(editor) = app.quote_editor.as_mut() {
-                                                editor.full_quote.toggle();
-                                                cx.notify();
-                                            }
+                                        .label("Cancel")
+                                        .child(shortcut("Esc"))
+                                        .on_click(cx.listener(|app, _, window, cx| {
+                                            app.cancel_quote_comment(window, cx)
                                         })),
                                 )
-                            })
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded(theme.radius)
-                                    .border_1()
-                                    .border_color(theme.input)
-                                    .bg(theme.background)
-                                    .child(
-                                        Textarea::new(&editor.input)
-                                            .appearance(false)
-                                            .aria_label("Comment on the quote"),
-                                    ),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .justify_end()
-                                    .child(
-                                        Button::new("quote-editor-cancel")
-                                            .control(Tier::Ghost, Scale::Compact, false, cx)
-                                            .label("Cancel")
-                                            .child(shortcut("Esc"))
-                                            .on_click(cx.listener(|app, _, window, cx| {
-                                                app.cancel_quote_comment(window, cx)
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("quote-editor-save")
-                                            .control(Tier::Primary, Scale::Compact, false, cx)
-                                            .label("Save")
-                                            .child(shortcut("Enter"))
-                                            .on_click(cx.listener(|app, _, window, cx| {
-                                                app.save_quote_comment(window, cx)
-                                            })),
-                                    ),
-                            ),
+                                .child(
+                                    Button::new("quote-editor-save")
+                                        .control(Tier::Primary, Scale::Compact, false, cx)
+                                        .label("Save")
+                                        .child(shortcut("Enter"))
+                                        .on_click(cx.listener(|app, _, window, cx| {
+                                            app.save_quote_comment(window, cx)
+                                        })),
+                                ),
+                        ),
                     ),
             )
             .with_priority(2)
@@ -470,6 +510,7 @@ impl ElseApp {
         &self,
         bot: Uuid,
         bot_name: &str,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let quotes = &self.drafts.get(&bot)?.quotes;
@@ -517,14 +558,37 @@ impl ElseApp {
                     .into_any_element()
             };
             let comment = (!quote.comment.is_empty()).then(|| {
-                let text = div().text_color(theme.foreground);
-                if expanded {
-                    text.child(quote.comment.clone())
+                let text = if expanded {
+                    quote.comment.clone()
                 } else {
-                    text.line_clamp(3)
-                        .text_ellipsis()
-                        .child(super::reply::flatten(&quote.comment))
+                    super::reply::flatten(&quote.comment)
+                };
+                let mentions = BotMention::find(&text, &self.mention_bots);
+                let content = BotMention::content(&text, &mentions);
+                let state = window.use_keyed_state(
+                    SharedString::from(format!("quote-comment-{id}-{expanded}")),
+                    cx,
+                    |window, cx| {
+                        TextareaState::new(window, cx).auto_grow(1, if expanded { 1000 } else { 3 })
+                    },
+                );
+                if state.read(cx).content() != content {
+                    state.update(cx, |state, cx| state.set_value(content, window, cx));
                 }
+                // Cancels the read-only textarea's own padding, so the note
+                // sits under the quote line's icon as plain text did.
+                div()
+                    .mx(px(-8.))
+                    .my(px(-8.))
+                    .text_color(theme.foreground)
+                    .child(BotMention::chips(
+                        Textarea::new(&state)
+                            .readonly(true)
+                            .appearance(false)
+                            .bordered(false)
+                            .aria_label("Comment"),
+                        mentions,
+                    ))
             });
             h_flex()
                 .id(SharedString::from(format!("quote-{id}")))
@@ -624,6 +688,7 @@ impl ElseApp {
                         ),
                 )
         });
+        let cards: Vec<_> = cards.collect();
         Some(
             v_flex()
                 .pt_1()

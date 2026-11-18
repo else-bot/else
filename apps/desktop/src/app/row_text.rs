@@ -663,7 +663,7 @@ impl RowText {
                         .iter()
                         .find(|mention| mention.token_id() == token.token().id().as_ref())
                         .expect("row token belongs to its matched bot")
-                        .token_element(token.line_height(), token.is_selected(), cx)
+                        .token_element(token.line_height(), token.is_selected(), true, cx)
                 })
                 .on_token_click(move |event, window, cx| {
                     let id = event.token().id();

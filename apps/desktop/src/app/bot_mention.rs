@@ -4,7 +4,8 @@ use gpui_kit::base::text::{
     InlineElement, InlineRenderContext, MarkdownNode, MarkdownParseContext, MarkdownPlugin,
 };
 use gpui_kit::component::h_flex;
-use gpui_kit::component::input::{InlineToken, InputContent};
+use gpui_kit::component::input::{InlineToken, InputContent, Textarea, TextareaState};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use markdown::mdast::Node;
 use uuid::Uuid;
@@ -181,8 +182,54 @@ impl BotMention {
             })
     }
 
-    pub(super) fn token_element(&self, height: Pixels, selected: bool, cx: &App) -> AnyElement {
-        let element = self.element(height).into_any_element();
+    /// The mentions in text being edited, leaving out a name that touches
+    /// the selection: it may still be typed into a longer name.
+    fn settled(text: &str, selection: Range<usize>, bots: &MentionRegistry) -> Vec<Self> {
+        let mut mentions = Self::find(text, bots);
+        mentions.retain(|mention| {
+            mention.range.end < selection.start || mention.range.start >= selection.end
+        });
+        mentions
+    }
+
+    /// Turns the settled bot names in `input`'s text into chips, keeping its
+    /// text, caret and undo history.
+    pub(super) fn chip_input(input: &Entity<TextareaState>, bots: &MentionRegistry, cx: &mut App) {
+        input.update(cx, |state, cx| {
+            let text = state.value();
+            let mentions = Self::settled(&text, state.selected_range(), bots);
+            // Rejected while composing or when another caret cuts a name;
+            // the next change or caret move chips it.
+            let _ = state.set_tokens(Self::content(&text, &mentions), cx);
+        });
+    }
+
+    /// Draws the tokens of `textarea` as the chips of `mentions`.
+    pub(super) fn chips(textarea: Textarea, mentions: Vec<Self>) -> Textarea {
+        textarea.token(move |token, _, cx| {
+            match mentions
+                .iter()
+                .find(|mention| mention.token_id() == token.token().id().as_ref())
+            {
+                Some(mention) => {
+                    mention.token_element(token.line_height(), token.is_selected(), false, cx)
+                }
+                None => div().child(token.token().text().clone()).into_any_element(),
+            }
+        })
+    }
+
+    pub(super) fn token_element(
+        &self,
+        height: Pixels,
+        selected: bool,
+        clickable: bool,
+        cx: &App,
+    ) -> AnyElement {
+        let element = self
+            .element(height)
+            .when(clickable, |chip| chip.cursor_pointer())
+            .into_any_element();
         if selected {
             use gpui_kit::component::ActiveTheme as _;
             div()
@@ -208,7 +255,6 @@ impl BotMention {
                 "bot-mention-{}-{}",
                 self.id, self.range.start
             )))
-            .cursor_pointer()
             .h(height)
             .gap_1()
             .items_center()
@@ -312,6 +358,7 @@ impl MarkdownPlugin for MentionPlugin {
         Some(InlineElement::new(
             mention
                 .element(context.line_height())
+                .cursor_pointer()
                 // Keeps the press from starting a text selection.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, window, cx| {
@@ -412,6 +459,19 @@ mod tests {
         assert_eq!(display.source_bytes(display.text.len()), source.len());
         let plain = MentionDisplay::new("no mentions ✓", &[], &[], &[]);
         assert_eq!(plain.source_bytes(plain.text.len()), "no mentions ✓".len());
+    }
+
+    #[test]
+    fn a_name_touching_the_caret_stays_text_until_the_owner_moves_on() {
+        let bots = MentionRegistry::new(&[bot(1, "Tech"), bot(2, "Tech Manager")]);
+        let typing = "Report to @Tech";
+        assert!(BotMention::settled(typing, 15..15, &bots).is_empty());
+        let picked = "Report to @Tech Manager now";
+        let settled = BotMention::settled(picked, 24..24, &bots);
+        assert_eq!(settled.len(), 1);
+        assert_eq!(&picked[settled[0].range.clone()], "@Tech Manager");
+        assert_eq!(BotMention::settled(picked, 0..0, &bots).len(), 1);
+        assert!(BotMention::settled(picked, 12..12, &bots).is_empty());
     }
 
     #[test]
