@@ -691,6 +691,61 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn upgrades_copy_more_data_than_either_disk_has_free() {
+    if !live() {
+        eprintln!("SKIPPED: set ELSE_LIVE_VM=1 to boot real Microsandbox VMs");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("microsandbox");
+    std::fs::create_dir_all(&home).unwrap();
+    let _cleanup = Cleanup { home: home.clone() };
+    assert!(
+        std::process::Command::new("docker")
+            .args(["tag", "else-guest:2", "else-guest:2-next"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    load(&home, dir.path(), "else-guest:2");
+    load(&home, dir.path(), "else-guest:2-next");
+    let app = TestApp::installed().await;
+    let manager = manager(&app, dir.path(), "else-guest:2").await;
+    let bot: Uuid = app.create_bot("Hoarder").await.parse().unwrap();
+
+    let before = run(
+        &manager,
+        bot,
+        "head -c 2400M /dev/urandom > big && sha256sum big | cut -c1-64 && \
+         df -Pk / | awk 'NR == 2 {print $4}'",
+        300,
+    )
+    .await;
+    let (sum, free) = before.split_once('\n').unwrap();
+    assert!(
+        free.parse::<u64>().unwrap() < 2400 * 1024,
+        "the data must not fit twice: {free} KiB free"
+    );
+    release_all(&app, &manager, bot).await;
+    manager
+        .upgrade_image(bot, "else-guest:2-next", None)
+        .await
+        .unwrap();
+
+    assert_eq!(runtime_name(&app, bot).await.1, "else-guest:2-next");
+    assert_eq!(
+        run(
+            &manager,
+            bot,
+            "sha256sum big | cut -c1-64; stat -c %U big",
+            300
+        )
+        .await,
+        format!("{sum}\nelsebot")
+    );
+}
+
 /// A desktop bot installs as root with sudo; an upgrade carries its APT
 /// packages, `/usr/local`, and `/opt`, and reports the package the new
 /// computer could not install again (one built locally, not in any archive).
