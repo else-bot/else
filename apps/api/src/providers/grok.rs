@@ -280,8 +280,10 @@ impl Provider for Grok {
     }
     fn availability(&self) -> Availability {
         match &self.ready {
-            Ok(ready) if grok_home::signed_in(&ready.login) => Availability::Available,
-            Ok(_) => Availability::Unavailable(SIGNED_OUT.into()),
+            Ok(ready) if grok_home::signed_out(&ready.login) => {
+                Availability::Unavailable(SIGNED_OUT.into())
+            }
+            Ok(_) => Availability::Available,
             Err(reason) => Availability::Unavailable(reason.clone()),
         }
     }
@@ -309,7 +311,7 @@ impl Provider for Grok {
             Ok(ready) => ready,
             Err(reason) => return failed("provider_unavailable", reason.clone()),
         };
-        if !grok_home::signed_in(&ready.login) {
+        if grok_home::signed_out(&ready.login) {
             return failed("provider_unavailable", SIGNED_OUT);
         }
         let Some(profile) = &input.profile else {
@@ -369,12 +371,20 @@ impl Provider for Grok {
             self.tool_url.is_some(),
         );
         let ended = attempt.drive(&mut tracker, &mut turn, sink, &stop).await;
-        match attempt.conclude(ended, sink).await {
-            TurnOutcome::Failed { .. } if !grok_home::signed_in(&ready.login) => {
-                failed("provider_unavailable", SIGNED_OUT)
-            }
-            outcome => outcome,
+        let outcome = attempt.conclude(ended, sink).await;
+        // Grok clears the host login in the run it fails for want of one,
+        // before it acknowledges the prompt, so nothing of the turn ran.
+        let unacknowledged = !turn.accepted()
+            && match &outcome {
+                TurnOutcome::Failed { code, .. } => code == "provider_failed",
+                TurnOutcome::Uncertain { .. } => true,
+                _ => false,
+            };
+        if unacknowledged && grok_home::signed_out(&ready.login) {
+            tracing::info!(turn = %input.turn_id, ?outcome, "Grok failed for want of a login");
+            return failed("provider_unavailable", SIGNED_OUT);
         }
+        outcome
     }
 }
 

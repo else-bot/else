@@ -30,25 +30,27 @@ pub fn host_home() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".grok")))
 }
 
-/// The host login's entries, one per signed-in account. Grok rewrites
-/// `auth.json` to `{}` when its login stops working, through a bot's linked
-/// copy too, and `grok login` fills it again.
-fn logins(login: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
-    let text = fs::read_to_string(login.join("auth.json")).ok()?;
-    match serde_json::from_str(&text).ok()? {
-        serde_json::Value::Object(entries) => Some(entries),
-        _ => None,
+/// Whether the host has no Grok login: no `auth.json`, or the `{}` Grok
+/// leaves in it when its login stops working (through a bot's linked copy
+/// too) until `grok login` fills it again. Text that does not parse, such as
+/// a write read halfway, is left for the run to judge.
+pub fn signed_out(login: &Path) -> bool {
+    match fs::read_to_string(login.join("auth.json")) {
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        Ok(text) => matches!(
+            serde_json::from_str(&text),
+            Ok(serde_json::Value::Object(entries)) if entries.is_empty()
+        ),
     }
-}
-
-pub fn signed_in(login: &Path) -> bool {
-    logins(login).is_some_and(|entries| !entries.is_empty())
 }
 
 /// A stable, non-secret identity of the host login (its users and teams),
 /// used only inside session fingerprints.
 pub fn host_account(login: &Path) -> String {
-    let Some(entries) = logins(login) else {
+    let Ok(text) = fs::read_to_string(login.join("auth.json")) else {
+        return String::new();
+    };
+    let Ok(serde_json::Value::Object(entries)) = serde_json::from_str(&text) else {
         return String::new();
     };
     let mut accounts: Vec<String> = entries

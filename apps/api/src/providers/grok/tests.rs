@@ -514,3 +514,48 @@ fn hashed_session_groups_resume_only_their_original_directory() {
     std::fs::write(group.join(".cwd"), "/other/project").unwrap();
     assert!(!grok_home::session_exists(root.path(), &project, &id));
 }
+
+#[tokio::test]
+async fn a_turn_on_a_signed_out_host_fails_before_grok_launches() {
+    let root = tempfile::tempdir().unwrap();
+    let login = root.path().join("login");
+    std::fs::create_dir(&login).unwrap();
+    let grok = Grok {
+        models: Models::new(&DEFINITION),
+        ready: Ok(Ready {
+            host: Host::new(&root.path().join("data"), &root.path().join("bots")),
+            program: root.path().join("missing-grok"),
+            version: "grok 1.0".into(),
+            login: login.clone(),
+        }),
+        tool_url: None,
+    };
+    let signed_out = "Grok isn't signed in on this server. Run `grok login --device-code` there, \
+                      or switch this bot to another model.";
+    let run = || async {
+        let sink = crate::providers::recording::Recorded::default();
+        let input = crate::providers::cli::session::tests::input();
+        grok.run(input, &sink, Stop::new(Default::default())).await
+    };
+
+    std::fs::write(login.join("auth.json"), "{}").unwrap();
+    assert_eq!(
+        grok.availability(),
+        Availability::Unavailable(signed_out.into())
+    );
+    assert_eq!(
+        run().await,
+        TurnOutcome::Failed {
+            code: "provider_unavailable".into(),
+            message: signed_out.into(),
+        },
+        "refused before launching the missing binary"
+    );
+
+    std::fs::write(login.join("auth.json"), r#"{"https://auth.x.ai::id": {"us"#).unwrap();
+    assert_eq!(
+        grok.availability(),
+        Availability::Available,
+        "a login read mid-write is not a sign-out"
+    );
+}
