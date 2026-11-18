@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::{get, patch};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use serde::{Deserialize, Deserializer};
@@ -35,6 +35,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/bots/{bot_id}/routines/{routine_id}",
             patch(owner_update).delete(owner_delete),
         )
+        .route(
+            "/bots/{bot_id}/routines/{routine_id}/retry",
+            post(owner_retry),
+        )
 }
 
 impl From<RoutineError> for ApiError {
@@ -44,9 +48,17 @@ impl From<RoutineError> for ApiError {
             RoutineError::BotDeleted => super::turns::bot_deleted(),
             RoutineError::Invalid(err) => ApiError::bad_request("invalid_input", err.to_string()),
             RoutineError::Db(err) => err.into(),
-            other => ApiError::new(StatusCode::CONFLICT, "conflict", other.to_string()),
+            RoutineError::NotPaused => conflict("not_paused", err),
+            RoutineError::AlreadyRunning => conflict("already_running", err),
+            RoutineError::ProviderUnavailable => conflict("provider_unavailable", err),
+            RoutineError::QueueFull => conflict("queue_full", err),
+            other => conflict("conflict", other),
         }
     }
+}
+
+fn conflict(code: &'static str, err: RoutineError) -> ApiError {
+    ApiError::new(StatusCode::CONFLICT, code, err.to_string())
 }
 
 fn code(err: &RoutineError) -> &'static str {
@@ -61,6 +73,7 @@ fn code(err: &RoutineError) -> &'static str {
         RoutineError::AlreadyRunning => "ALREADY_RUNNING",
         RoutineError::QueueFull => "QUEUE_FULL",
         RoutineError::ProviderUnavailable => "PROVIDER_UNAVAILABLE",
+        RoutineError::NotPaused => "NOT_PAUSED",
         RoutineError::Invalid(_) => "INVALID_ROUTINE",
         RoutineError::Db(_) => "UNAVAILABLE",
     }
@@ -137,6 +150,40 @@ async fn owner_update(
     )
     .await?;
     Ok(Json(json!({ "routine": routine_json(&routine) })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetryRequest {
+    request_id: Uuid,
+}
+
+/// Run a paused routine now; a success switches it back on. Repeating a
+/// request returns its run.
+async fn owner_retry(
+    State(state): State<Arc<AppState>>,
+    ApiPath((bot_id, routine_id)): ApiPath<(Uuid, Uuid)>,
+    ApiJson(body): ApiJson<RetryRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let by = routines::RunNow::Resume {
+        bot_id,
+        request_id: body.request_id,
+    };
+    let (routine, queued) = routines::run_now(
+        &state.db,
+        state.scheduler.registry(),
+        by,
+        routine_id,
+        Utc::now(),
+    )
+    .await
+    .map_err(|err| ApiError::from(err).with_request_id(body.request_id))?;
+    if queued {
+        state.scheduler.wake();
+    }
+    Ok(Json(
+        json!({ "routine": routine_json(&routine), "queued": queued }),
+    ))
 }
 
 async fn owner_delete(
@@ -875,7 +922,7 @@ pub async fn run(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     match routines::run_now(
         &state.db,
         state.scheduler.registry(),
-        caller(grant),
+        routines::RunNow::Turn(caller(grant)),
         args.routine_id,
         Utc::now(),
     )

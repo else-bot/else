@@ -183,5 +183,6 @@ pub fn routine_json(routine: &Routine) -> Value {
         "last_run": last_run,
         "failed_runs": routine.failed_runs,
         "paused_reason": routine.paused_reason,
+        "retrying": routine.retrying,
     })
 }
