@@ -8,9 +8,11 @@
 //! A joined message keeps its own turn, `queued` but never claimed while it
 //! has a steer row. It reaches the reply one of two ways. A running attempt
 //! whose provider takes input mid-turn marks it `sending` before it writes
-//! it ([`sending`]) and `delivered` on the provider's echo ([`deliver`]); a
-//! provider that answered that it took nothing returns it to `pending`
-//! ([`refuse`]). Otherwise it waits `pending` until the reply's next
+//! it ([`sending`]) and `delivered` on the provider's echo ([`deliver`]),
+//! unless the attempt has parked by then; a provider that answered that it
+//! took nothing returns it to `pending` ([`refuse`]). A parked attempt
+//! refuses every tool call, so it takes no message: none is written into
+//! it, and one echoed after the park returns to `pending`. Otherwise it waits `pending` until the reply's next
 //! attempt, whose request carries it ([`fold`]). A delivered message stays
 //! part of that reply for good: it ends with the reply's outcome
 //! ([`settle`]) and keeps its row, so the chat shows one answer to both.
