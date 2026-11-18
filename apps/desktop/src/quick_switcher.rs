@@ -6,7 +6,11 @@
 //! offline server's bots still show. A match on the start of the name beats
 //! one on the start of a word, which beats one inside a word, which beats
 //! letters spread out from a word start. A bot also matches on its server's name,
-//! at a lower weight. Recently opened items rank higher.
+//! at a lower weight. A query of several words can also name a server and then
+//! a bot on it ("pro tech" or "p tm" finds Proliquid's Tech Manager) when each
+//! part starts a word or spells word initials. Such a reading ranks first,
+//! after only a name that starts with the whole query, and prefers a recently
+//! used server. Recently opened items rank higher.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -104,13 +108,23 @@ impl Index {
     /// items, or every bot of the scoped server with recent ones first.
     /// `scope` limits results to one server's bots.
     pub fn search(&self, query: &str, scope: Option<Uuid>, recents: &[Target]) -> Vec<Hit> {
-        let recency = |target: Target| {
-            recents
-                .iter()
-                .position(|r| *r == target)
-                .map_or(0, |rank| (RECENTS - rank.min(RECENTS)) as i32 * 8)
+        let bonus =
+            |seen: Option<usize>| seen.map_or(0, |rank| (RECENTS - rank.min(RECENTS)) as i32 * 8);
+        let recency = |target: Target| bonus(recents.iter().position(|r| *r == target));
+        let server_recency =
+            |server: Uuid| bonus(recents.iter().position(|r| r.server() == server));
+        let words: Vec<&str> = query.split_whitespace().collect();
+        let query = words.join(" ");
+        let query = query.as_str();
+        let named = |text: &str| {
+            let (tier, at) = find(query, text)?;
+            let lead = if words.len() > 1 && tier == Tier::Prefix {
+                SPLIT_TOP
+            } else {
+                0
+            };
+            Some((tier.points(text) + lead, at))
         };
-        let query = query.trim();
         let servers = self
             .servers
             .iter()
@@ -122,7 +136,7 @@ impl Index {
                 let candidate = if query.is_empty() {
                     recents.contains(&target).then(|| (0, Vec::new()))
                 } else {
-                    score(query, &server.name)
+                    named(&server.name)
                 };
                 if let Some((points, name)) = candidate {
                     scored.push((
@@ -145,16 +159,21 @@ impl Index {
                     (scope.is_some() || recents.contains(&target))
                         .then(|| (0, Vec::new(), Vec::new()))
                 } else {
-                    let by_name = score(query, &bot.name).map(|(p, at)| (p, at, Vec::new()));
+                    let by_name = named(&bot.name).map(|(p, at)| (p, at, Vec::new()));
                     let by_server = scope
                         .is_none()
                         .then(|| score(query, &server.name))
                         .flatten()
                         .map(|(p, at)| (p * 3 / 5, Vec::new(), at));
-                    match (by_name, by_server) {
-                        (Some(a), Some(b)) => Some(if b.0 > a.0 { b } else { a }),
-                        (a, b) => a.or(b),
-                    }
+                    let by_both = scope
+                        .is_none()
+                        .then(|| split(&words, &server.name, &bot.name))
+                        .flatten()
+                        .map(|(p, at, server_at)| (p + server_recency(server.id), at, server_at));
+                    [by_name, by_server, by_both]
+                        .into_iter()
+                        .flatten()
+                        .reduce(|best, next| if next.0 > best.0 { next } else { best })
                 };
                 if let Some((points, name, server_at)) = candidate {
                     scored.push((
@@ -174,9 +193,66 @@ impl Index {
     }
 }
 
+/// More than any split reading scores, so a name that starts with the whole
+/// query, such as a server whose name is still being typed, stays first.
+const SPLIT_TOP: i32 = 4000;
+
+/// The best reading of `words` as a server's name followed by a bot's name:
+/// its points and the matched chars of the bot's and the server's names.
+/// Each part must start a word or spell word initials; any such reading
+/// outranks a match on a single name.
+fn split(words: &[&str], server: &str, bot: &str) -> Option<(i32, Vec<usize>, Vec<usize>)> {
+    let weight = |tier: Tier| match tier {
+        Tier::Prefix => Some(1000),
+        Tier::WordStart => Some(800),
+        Tier::Initials(points) => Some(points),
+        Tier::Inside | Tier::Spread(_) => None,
+    };
+    (1..words.len())
+        .filter_map(|at| {
+            let (s_tier, s_at) = find(&words[..at].join(" "), server)?;
+            let (b_tier, b_at) = find(&words[at..].join(" "), bot)?;
+            Some((1000 + weight(s_tier)? + weight(b_tier)?, b_at, s_at))
+        })
+        .max_by_key(|(points, ..)| *points)
+}
+
+/// How a query's letters sit in a name, best first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tier {
+    /// The name starts with the query.
+    Prefix,
+    /// A word in the name starts with the query.
+    WordStart,
+    /// The query appears inside a word.
+    Inside,
+    /// Every letter starts a word, with the placement's points.
+    Initials(i32),
+    /// The letters are spread out from a word start, with the placement's
+    /// points.
+    Spread(i32),
+}
+
+impl Tier {
+    fn points(self, text: &str) -> i32 {
+        let len = text.chars().count() as i32;
+        match self {
+            Self::Prefix => 1000 - len,
+            Self::WordStart => 800 - len,
+            Self::Inside => 500 - len,
+            Self::Initials(points) | Self::Spread(points) => points,
+        }
+    }
+}
+
 /// How well `query` matches `text`, and which chars matched; `None` when it
 /// does not. Case-insensitive.
 pub fn score(query: &str, text: &str) -> Option<(i32, Vec<usize>)> {
+    let (tier, at) = find(query, text)?;
+    Some((tier.points(text), at))
+}
+
+fn find(query: &str, text: &str) -> Option<(Tier, Vec<usize>)> {
     let lower = |s: &str| -> Vec<char> {
         s.chars()
             .map(|c| c.to_lowercase().next().unwrap_or(c))
@@ -186,20 +262,19 @@ pub fn score(query: &str, text: &str) -> Option<(i32, Vec<usize>)> {
     if query.is_empty() || query.len() > text.len() {
         return None;
     }
-    let len = text.len() as i32;
     let word_start = |i: usize| i == 0 || !text[i - 1].is_alphanumeric();
     let run = |at: usize| (at..at + query.len()).collect::<Vec<_>>();
     let found: Vec<usize> = (0..=text.len() - query.len())
         .filter(|&at| text[at..at + query.len()] == query[..])
         .collect();
     if found.first() == Some(&0) {
-        return Some((1000 - len, run(0)));
+        return Some((Tier::Prefix, run(0)));
     }
     if let Some(&at) = found.iter().find(|&&at| word_start(at)) {
-        return Some((800 - len, run(at)));
+        return Some((Tier::WordStart, run(at)));
     }
     if let Some(&at) = found.first() {
-        return Some((500 - len, run(at)));
+        return Some((Tier::Inside, run(at)));
     }
     // Letters spread out: the first must start a word. Of every way to
     // place the letters, keep the best scoring: word starts and adjacent
@@ -241,7 +316,12 @@ pub fn score(query: &str, text: &str) -> Option<(i32, Vec<usize>)> {
         at[i - 1] = j;
     }
     let points = 200 + points;
-    (points >= 150).then_some((points, at))
+    let tier = if at.iter().all(|&j| word_start(j)) {
+        Tier::Initials(points)
+    } else {
+        Tier::Spread(points)
+    };
+    (points >= 150).then_some((tier, at))
 }
 
 /// A key the open switcher handles before its search field sees it.
@@ -494,6 +574,130 @@ mod tests {
             .expect("bots match on their server's name");
         assert_eq!(research.server, vec![0, 1, 2, 3]);
         assert!(research.name.is_empty());
+    }
+
+    fn owners_index() -> Index {
+        Index {
+            servers: vec![
+                server(
+                    "Proliquid",
+                    &[
+                        "Proliquid",
+                        "Tech Manager",
+                        "Sentry",
+                        "Dev",
+                        "Auto",
+                        "Release",
+                        "Telegram",
+                        "Discord",
+                        "Twitter",
+                        "Inbox",
+                        "DevOps",
+                        "Marketing Manager",
+                        "Bento",
+                        "Scout",
+                        "Spy",
+                        "Canvas Manager",
+                    ],
+                ),
+                server(
+                    "Home",
+                    &[
+                        "Jarvis",
+                        "Fleet",
+                        "Else",
+                        "Inbox",
+                        "AliExpress",
+                        "WhatsApp",
+                        "Amazon",
+                        "Quant",
+                    ],
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn several_words_name_a_server_then_a_bot_on_it() {
+        let index = owners_index();
+        for query in ["pro tech", "p t", "p tm", "Proliquid tech man"] {
+            let hits = index.search(query, None, &[]);
+            assert_eq!(names(&index, &hits)[0], "Tech Manager", "{query}");
+            assert_eq!(hits[0].target.server(), index.servers[0].id, "{query}");
+        }
+        let hits = index.search("pro tech", None, &[]);
+        assert_eq!(hits[0].server, vec![0, 1, 2]);
+        assert_eq!(hits[0].name, vec![0, 1, 2, 3]);
+        let hits = index.search("p tm", None, &[]);
+        assert_eq!(hits[0].name, vec![0, 5]);
+        let hits = index.search("  pro   tech ", None, &[]);
+        assert_eq!(names(&index, &hits)[0], "Tech Manager");
+    }
+
+    #[test]
+    fn a_split_needs_each_part_on_a_word_start() {
+        let index = owners_index();
+        for query in ["liquid tech", "pd tech", "pro anager"] {
+            assert!(
+                !index
+                    .search(query, None, &[])
+                    .iter()
+                    .any(|hit| !hit.server.is_empty() && !hit.name.is_empty()),
+                "{query}"
+            );
+        }
+        let index = Index {
+            servers: vec![
+                server("Team Chat", &["Main"]),
+                server("Home", &["Tech Manager"]),
+            ],
+        };
+        let hits = index.search("tech man", None, &[]);
+        assert_eq!(names(&index, &hits)[0], "Tech Manager");
+    }
+
+    #[test]
+    fn a_name_starting_with_the_whole_query_beats_a_split() {
+        let index = index();
+        for query in ["this c", "studio m"] {
+            let hits = index.search(query, None, &[]);
+            assert!(
+                matches!(hits[0].target, Target::Server { .. }),
+                "{query}: {:?}",
+                names(&index, &hits)
+            );
+        }
+    }
+
+    #[test]
+    fn several_words_still_match_within_one_name() {
+        let index = owners_index();
+        let hits = index.search("tech  man", None, &[]);
+        assert_eq!(names(&index, &hits)[0], "Tech Manager");
+        let hits = index.search("pro tech", Some(index.servers[0].id), &[]);
+        assert!(
+            hits.is_empty(),
+            "a scope matches the whole query to the bot"
+        );
+        let hits = index.search("tech man", Some(index.servers[0].id), &[]);
+        assert_eq!(names(&index, &hits), ["Tech Manager"]);
+    }
+
+    #[test]
+    fn a_server_word_prefers_the_recent_server() {
+        let mut index = owners_index();
+        index.servers.push(server("Personal", &["Tasks"]));
+        let plain = index.search("p t", None, &[]);
+        assert_eq!(names(&index, &plain)[..2], ["Tasks", "Tech Manager"]);
+        let sentry = Target::Bot {
+            server: index.servers[0].id,
+            bot: index.servers[0].bots[2].id,
+        };
+        let warm = index.search("p t", None, &[sentry]);
+        assert_eq!(
+            names(&index, &warm)[..4],
+            ["Tech Manager", "Telegram", "Twitter", "Tasks"]
+        );
     }
 
     #[test]
