@@ -1,6 +1,6 @@
 use super::*;
 use crate::app::providers::Origin;
-use crate::providers::cli::attempt::{Event, Protocol, StopCause};
+use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 use protocol::Terminal;
 use serde_json::{Value, json};
 
@@ -158,6 +158,26 @@ fn inventories_models_subagents_and_sessions_are_checked() {
     let mut t = tracker(true);
     t.on(&init(true)).unwrap();
     assert!(t.on(&init(true)).is_err(), "a second inventory is refused");
+}
+
+#[test]
+fn an_inventory_without_some_allowed_tools_opens_and_only_extras_are_named() {
+    let grok_1_0_44 = json!({"type":"system","subtype":"init","session_id":"session","model":"grok-4.7",
+        "tools":["grep","list_dir","read_file","run_terminal_command","search_replace","search_tool","use_tool","write"],
+        "mcp_servers":[{"name":"elsebot","status":"connected"}]});
+    assert_eq!(tracker(true).on(&grok_1_0_44), Ok(vec![]));
+
+    let mut extra = init(true);
+    extra["tools"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("spawn_subagent"));
+    assert_eq!(
+        tracker(true).on(&extra),
+        Err(Violation::policy(
+            "Grok offered tools outside --tools: [\"spawn_subagent\"]"
+        ))
+    );
 }
 
 #[test]
