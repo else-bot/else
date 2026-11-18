@@ -197,7 +197,9 @@ async fn target(
 }
 
 /// The pending messages steered into running turn `into`, oldest first,
-/// whose turns are still queued, with their files.
+/// whose turns are still queued, with their files. None while its attempt
+/// is parked: that attempt refuses every tool call, so the message waits
+/// for the next attempt, which starts as soon as the parked one ends.
 pub async fn pending(pool: &SqlitePool, into: Uuid) -> Result<Vec<Steer>, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     let rows = joined(&mut conn, into).await?;
@@ -234,16 +236,17 @@ pub async fn for_request(
 /// The messages joined to `into` and not sent yet or taken ([`joined_into`]),
 /// oldest first.
 async fn joined(conn: &mut SqliteConnection, into: Uuid) -> Result<Vec<Row>, sqlx::Error> {
-    sqlx::query_as(
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT t.id AS turn_id, t.bot_id, i.text, coalesce(i.parts, '[]') AS parts, s.status,
-                a.status = 'running' AS reply_running
+                a.status = 'running' AND NOT {} AS reply_running
          FROM turn_steers s
          JOIN turns t ON t.id = s.turn_id AND t.status = 'queued'
          JOIN items i ON i.id = t.owner_item_id
          JOIN turns a ON a.id = s.into_turn_id
          WHERE s.into_turn_id = ?1 AND s.status IN ('pending', 'delivered')
          ORDER BY t.turn_no",
-    )
+        super::turns::parked("a.id", "a.attempt")
+    )))
     .bind(into)
     .fetch_all(&mut *conn)
     .await
@@ -317,7 +320,8 @@ async fn changed(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<(), sqlx:
 
 /// Record, before writing it, that message `turn_id` goes to running turn
 /// `into`. From here a crash leaves its delivery unknown. False when it is
-/// no longer pending there (the owner stopped it, or the reply ended).
+/// no longer pending there (the owner stopped it, or the reply ended) or
+/// the reply's attempt has parked.
 pub async fn sending(pool: &SqlitePool, turn_id: Uuid, into: Uuid) -> Result<bool, sqlx::Error> {
     advance(pool, turn_id, into, Status::Pending, Status::Sending).await
 }
@@ -343,12 +347,14 @@ async fn advance(
     to: Status,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let updated = sqlx::query(
+    let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE turn_steers SET status = ?4
          WHERE turn_id = ?1 AND into_turn_id = ?2 AND status = ?3
            AND EXISTS (SELECT 1 FROM turns WHERE id = ?1 AND status = 'queued')
-           AND EXISTS (SELECT 1 FROM turns WHERE id = ?2 AND status = 'running')",
-    )
+           AND EXISTS (SELECT 1 FROM turns a WHERE a.id = ?2 AND a.status = 'running'
+                       AND (?4 <> 'sending' OR NOT {}))",
+        super::turns::parked("a.id", "a.attempt")
+    )))
     .bind(turn_id)
     .bind(into)
     .bind(from)

@@ -758,16 +758,23 @@ pub async fn may_ask_owner(
         ))
 }
 
-/// Whether the current `attempt` of `turn_id` already delegated, asked for
-/// a secret, or asked the owner: it must end, and asks nothing more.
+/// SQL condition: attempt `attempt` of turn `turn` (SQL expressions)
+/// delegated, waits on a job, asked for a secret, or asked the owner. It
+/// must end and asks nothing more.
+pub fn parked(turn: &str, attempt: &str) -> String {
+    format!("EXISTS (SELECT 1 FROM turn_holds WHERE turn_id = {turn} AND attempt = {attempt})")
+}
+
+/// Whether the current `attempt` of `turn_id` is [`parked`].
 pub async fn attempt_parked(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
     attempt: i32,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM turn_holds WHERE turn_id = ?1 AND attempt = ?2)",
-    )
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT {}",
+        parked("?1", "?2")
+    )))
     .bind(turn_id)
     .bind(attempt)
     .fetch_one(&mut *conn)
