@@ -803,6 +803,49 @@ impl Client {
         self.call(Method::GET, path, None).await.map(|(_, s)| s)
     }
 
+    /// The owner messages and bot replies of `bot` that show `query`.
+    pub async fn search(
+        self: Arc<Self>,
+        bot: Uuid,
+        query: String,
+    ) -> Result<crate::model::SearchHits, ClientError> {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("q", &query)
+            .finish();
+        self.call(
+            Method::GET,
+            format!("/v1/bots/{bot}/conversation/search?{query}"),
+            None,
+        )
+        .await
+        .map(|(_, hits)| hits)
+    }
+
+    /// Up to `older` shown items at or before `anchor_seq` and `newer` after
+    /// it, strictly between the loaded items `below` and `above`.
+    pub async fn window(
+        self: Arc<Self>,
+        bot: Uuid,
+        anchor_seq: i64,
+        (older, newer): (i64, i64),
+        (below, above): (Option<i64>, Option<i64>),
+    ) -> Result<crate::model::Window, ClientError> {
+        let mut query = format!("anchor_seq={anchor_seq}&older={older}&newer={newer}");
+        if let Some(below) = below {
+            query.push_str(&format!("&after_seq={below}"));
+        }
+        if let Some(above) = above {
+            query.push_str(&format!("&before_seq={above}"));
+        }
+        self.call(
+            Method::GET,
+            format!("/v1/bots/{bot}/conversation/window?{query}"),
+            None,
+        )
+        .await
+        .map(|(_, window)| window)
+    }
+
     pub async fn send(
         self: Arc<Self>,
         bot: Uuid,

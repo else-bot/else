@@ -26,6 +26,8 @@ pub(super) enum RowKey {
     Handoff(Uuid),
     ComputerHandoff(Uuid),
     OwnerNotice(Uuid),
+    /// Unloaded messages just below the loaded item with this seq.
+    Gap(i64),
 }
 
 impl RowKey {
@@ -176,7 +178,7 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
             | RowKey::Handoff(_)
             | RowKey::ComputerHandoff(_)
             | RowKey::OwnerNotice(_) => turns.get(key).copied(),
-            RowKey::Task(_) | RowKey::Pending(_) => None,
+            RowKey::Task(_) | RowKey::Pending(_) | RowKey::Gap(_) => None,
         })
         .collect();
     turns
@@ -215,6 +217,9 @@ pub(super) fn transcript_rows(
         .collect();
     let folded = folded_no_news(c);
     for item in c.items().filter(|item| !folded.contains(&item.id)) {
+        if c.gap_below(item.seq).is_some() {
+            rows.push(RowKey::Gap(item.seq));
+        }
         if item.kind == "assistant" && answered.get(&item.turn_id) == Some(&item.id) {
             rows.extend(
                 c.task_receipt(item.turn_id)
@@ -391,6 +396,7 @@ fn card_state(c: &Conversation, key: RowKey) -> Option<String> {
             .and_then(|i| c.turn(i.turn_id))
             .map(|t| t.status.clone()),
         RowKey::Task(id) => c.turn(id).map(|t| t.status.clone()),
+        RowKey::Gap(above) => c.gap_below(above).map(|count| count.to_string()),
         RowKey::Pending(_) => None,
     }
 }
@@ -505,6 +511,11 @@ pub(super) struct ConversationView {
     _reveal_clock: Option<Task<()>>,
     /// A quoted message to find once older history arrives.
     pending_reveal: Option<(RowKey, Author, String)>,
+    /// The open find bar.
+    pub(super) find: Option<super::find::Find>,
+    /// The gap row whose messages are loading, by the seq above it.
+    pub(super) loading_gap: Option<i64>,
+    pub(super) _gap: Option<Task<()>>,
     pub(super) _load: Option<Task<()>>,
     pub(super) _older: Option<Task<()>>,
 }
@@ -617,6 +628,9 @@ impl ConversationView {
             revealed: None,
             _reveal_clock: None,
             pending_reveal: None,
+            find: None,
+            loading_gap: None,
+            _gap: None,
             _load: None,
             _older: None,
         }
@@ -767,43 +781,14 @@ impl ElseApp {
                     })
             })
             .map(|item| item.id);
-        // A quoted exchange reply may be folded or cut to an excerpt: show
-        // it whole, then look again.
-        let folded = target.filter(|target| {
-            !view.full_replies.contains(target)
-                && view.rows.iter().any(|row| {
-                    row.activity
-                        .as_ref()
-                        .is_some_and(|activity| activity.answers.contains(target))
-                })
-        });
-        if let Some(target) = folded {
-            if let Some(receipt) = conversation
-                .item(target)
-                .and_then(|item| conversation.task_receipt(item.turn_id))
-            {
-                view.exchange_folds
-                    .insert(receipt.id, super::bot_activity::Fold::Open);
-            }
-            view.full_replies.insert(target);
-            self.sync_rows(window, cx);
-            self.reveal_quoted(bot, from, author, original, window, cx);
+        let older = conversation.older_before_seq.is_some();
+        let found = target.and_then(|target| Some((target, self.unfold_item(target, window, cx)?)));
+        let Some(view) = self.view.as_mut() else {
             return;
-        }
-        if let Some(target) = target
-            && let Some(ix) = view.row_index(RowKey::Item(target))
+        };
+        if let Some((target, ix)) = found
+            && let Some(conversation) = view.conversation.as_ref()
         {
-            let row = &view.rows[ix];
-            if let Some(task) = &row.task
-                && (task.history.contains(&target)
-                    || (task.kept.contains(&target) && task.reply_superseded(conversation, target))
-                    || (task.latest == Some(target)
-                        && !task.latest_kept
-                        && matches!(task.state, ReplyState::Queued | ReplyState::Working)))
-            {
-                view.expanded_tasks.insert(task.turn);
-                view.list.remeasure_items(ix..ix + 1);
-            }
             view.list.scroll_to(ListOffset {
                 item_ix: ix,
                 offset_in_item: px(0.),
@@ -821,9 +806,9 @@ impl ElseApp {
             } else {
                 Spot::Row
             };
-            let row = row.key;
+            let row = view.rows[ix].key;
             self.start_reveal(Reveal::new(row, spot), cx);
-        } else if conversation.older_before_seq.is_some() {
+        } else if older {
             view.pending_reveal = Some((from, author, original.to_owned()));
             self.load_older(window, cx);
         } else {
@@ -832,6 +817,50 @@ impl ElseApp {
                 cx,
             );
         }
+    }
+
+    /// Shows item `target` whole, opening a folded bot exchange or a task's
+    /// earlier replies, and returns the index of the row that holds it.
+    pub(super) fn unfold_item(
+        &mut self,
+        target: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let view = self.view.as_mut()?;
+        let conversation = view.conversation.as_ref()?;
+        // An exchange reply may be folded or cut to an excerpt.
+        let folded = !view.full_replies.contains(&target)
+            && view.rows.iter().any(|row| {
+                row.activity
+                    .as_ref()
+                    .is_some_and(|activity| activity.answers.contains(&target))
+            });
+        if folded {
+            if let Some(receipt) = conversation
+                .item(target)
+                .and_then(|item| conversation.task_receipt(item.turn_id))
+            {
+                view.exchange_folds
+                    .insert(receipt.id, super::bot_activity::Fold::Open);
+            }
+            view.full_replies.insert(target);
+            self.sync_rows(window, cx);
+        }
+        let view = self.view.as_mut()?;
+        let conversation = view.conversation.as_ref()?;
+        let ix = view.row_index(RowKey::Item(target))?;
+        if let Some(task) = &view.rows[ix].task
+            && (task.history.contains(&target)
+                || (task.kept.contains(&target) && task.reply_superseded(conversation, target))
+                || (task.latest == Some(target)
+                    && !task.latest_kept
+                    && matches!(task.state, ReplyState::Queued | ReplyState::Working)))
+        {
+            view.expanded_tasks.insert(task.turn);
+            view.list.remeasure_items(ix..ix + 1);
+        }
+        Some(ix)
     }
 
     /// Flashes `reveal` until it fades out, painting its passage on each
@@ -1049,7 +1078,8 @@ impl ElseApp {
                 | RowKey::SocialSetup(_)
                 | RowKey::Handoff(_)
                 | RowKey::ComputerHandoff(_)
-                | RowKey::OwnerNotice(_) => (None, None),
+                | RowKey::OwnerNotice(_)
+                | RowKey::Gap(_) => (None, None),
             })
             .collect();
         let unread_start =

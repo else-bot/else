@@ -925,6 +925,34 @@ pub struct Snapshot {
     pub rules_version: i64,
 }
 
+/// Shown items loaded around one message, between two the owner already
+/// has.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Window {
+    pub items: Vec<Item>,
+    pub turns: Vec<Turn>,
+    /// Shown items still missing below the first item.
+    pub older_gap: i64,
+    /// Shown items still missing above the last item.
+    pub newer_gap: i64,
+}
+
+/// The messages a search found, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SearchHits {
+    /// Matches in all of them.
+    pub total: usize,
+    pub hits: Vec<SearchHit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct SearchHit {
+    pub item_id: Uuid,
+    pub seq: i64,
+    /// Matches in this message.
+    pub count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reset {
     Gap { expected: i64, got: i64 },
@@ -951,6 +979,9 @@ pub struct Conversation {
     seq_of: HashMap<Uuid, i64>,
     turns: HashMap<Uuid, Turn>,
     pub older_before_seq: Option<i64>,
+    /// Unloaded stretches between loaded items, keyed by the seq of the
+    /// loaded item just above each, with how many shown items each holds.
+    gaps: BTreeMap<i64, i64>,
     pub selected_provider_id: Option<String>,
     pub activity: Option<Activity>,
     routines: Vec<Routine>,
@@ -976,6 +1007,7 @@ impl Conversation {
             seq_of: HashMap::new(),
             turns: HashMap::new(),
             older_before_seq: snapshot.older_before_seq,
+            gaps: BTreeMap::new(),
             selected_provider_id: snapshot.selected_provider_id,
             activity: Some(snapshot.activity),
             routines: snapshot.routines,
@@ -1110,6 +1142,49 @@ impl Conversation {
             self.turns.entry(turn.id).or_insert(turn);
         }
         self.older_before_seq = page.older_before_seq;
+    }
+
+    /// Merge a window loaded strictly between the loaded items `below` and
+    /// `above`, recording what is still missing on each side. An empty
+    /// window changes nothing.
+    pub fn merge_window(&mut self, window: Window, below: Option<i64>, above: Option<i64>) {
+        let Some(first) = window.items.first().map(|item| item.seq) else {
+            return;
+        };
+        if let Some(above) = above {
+            self.gaps.remove(&above);
+            if window.newer_gap > 0 {
+                self.gaps.insert(above, window.newer_gap);
+            }
+        }
+        match below {
+            Some(_) if window.older_gap > 0 => {
+                self.gaps.insert(first, window.older_gap);
+            }
+            Some(_) => {}
+            None => self.older_before_seq = (window.older_gap > 0).then_some(first),
+        }
+        for item in window.items {
+            if !self.seq_of.contains_key(&item.id) {
+                self.upsert_item(item);
+            }
+        }
+        for turn in window.turns {
+            self.turns.entry(turn.id).or_insert(turn);
+        }
+    }
+
+    /// How many shown items are missing just below the loaded item `seq`.
+    pub fn gap_below(&self, seq: i64) -> Option<i64> {
+        self.gaps.get(&seq).copied()
+    }
+
+    /// The loaded items just below and just above `seq`.
+    pub fn loaded_around(&self, seq: i64) -> (Option<i64>, Option<i64>) {
+        (
+            self.items.range(..seq).next_back().map(|(seq, _)| *seq),
+            self.items.range(seq + 1..).next().map(|(seq, _)| *seq),
+        )
     }
 
     /// Show the canonical owner item from a send response before its event
@@ -1547,6 +1622,58 @@ mod tests {
             "item.delta",
             json!({ "item_id": Uuid::from_u128(id), "offset_utf8": offset, "text": text }),
         )
+    }
+
+    fn window(items: Vec<serde_json::Value>, older_gap: i64, newer_gap: i64) -> Window {
+        serde_json::from_value(json!({
+            "items": items, "turns": [], "older_gap": older_gap, "newer_gap": newer_gap,
+        }))
+        .unwrap()
+    }
+
+    fn loaded(c: &Conversation) -> Vec<i64> {
+        c.items().map(|item| item.seq).collect()
+    }
+
+    #[test]
+    fn a_window_below_the_tail_leaves_gaps_that_close_when_loaded() {
+        let tail = vec![item(90, 90, "user", "latest")];
+        let mut c = Conversation::from_snapshot(snapshot(5, tail, Some(90))).unwrap();
+        let found = vec![item(40, 40, "user", "a"), item(41, 41, "assistant", "b")];
+        c.merge_window(window(found, 12, 30), None, Some(90));
+        assert_eq!(loaded(&c), [40, 41, 90]);
+        assert_eq!(c.older_before_seq, Some(40));
+        assert_eq!(c.gap_below(90), Some(30));
+        assert_eq!(c.cursor(), format!("{PREFIX}:5"), "the live cursor stays");
+
+        let between = vec![item(60, 60, "user", "c"), item(70, 70, "user", "d")];
+        c.merge_window(window(between, 3, 0), Some(41), Some(90));
+        assert_eq!(loaded(&c), [40, 41, 60, 70, 90]);
+        assert_eq!(c.gap_below(90), None);
+        assert_eq!(c.gap_below(60), Some(3));
+
+        let rest = vec![item(50, 50, "user", "e")];
+        c.merge_window(window(rest, 0, 0), Some(41), Some(60));
+        assert_eq!(c.gap_below(60), None);
+
+        let oldest = vec![item(1, 1, "user", "first")];
+        c.merge_window(window(oldest, 0, 0), None, Some(40));
+        assert_eq!(c.older_before_seq, None);
+        assert_eq!(c.loaded_around(45), (Some(41), Some(50)));
+    }
+
+    #[test]
+    fn an_empty_window_keeps_the_gap() {
+        let tail = vec![item(90, 90, "user", "latest")];
+        let mut c = Conversation::from_snapshot(snapshot(5, tail, Some(90))).unwrap();
+        c.merge_window(
+            window(vec![item(40, 40, "user", "a")], 0, 30),
+            None,
+            Some(90),
+        );
+        c.merge_window(window(vec![], 30, 0), Some(40), Some(90));
+        assert_eq!(c.gap_below(90), Some(30));
+        assert_eq!(c.older_before_seq, None);
     }
 
     #[test]

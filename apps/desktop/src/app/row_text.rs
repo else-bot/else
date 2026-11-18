@@ -503,6 +503,19 @@ impl RowText {
         }
     }
 
+    /// Where `needle` shows in the rendered text; nothing for plain text or
+    /// before the Markdown has parsed.
+    pub(super) fn find(
+        &self,
+        needle: &else_plain_text::find::Needle,
+        cx: &App,
+    ) -> Vec<Range<usize>> {
+        let Widget::Markdown { state, .. } = &self.widget else {
+            return Vec::new();
+        };
+        needle.find(state.read(cx).rendered_text().as_str())
+    }
+
     /// Asks the enclosing list to scroll to `range` of the rendered text.
     /// Returns whether the request was taken.
     pub(super) fn reveal(&self, range: &Range<usize>, cx: &mut App) -> bool {

@@ -1,9 +1,9 @@
 use super::layout::{CategoryDrag, SidebarEdge};
 use super::mentions::{MentionAction, mention_keys};
 use super::{
-    APP_CONTEXT, COMPOSER_CONTEXT, CiteSelection, Connection, DeleteBot, ElseApp, FocusComposer,
-    FocusSidebar, LoadOlder, MoveBot, NewBot, NewCategory, SIDEBAR_CONTEXT, SelectNext, SelectPrev,
-    StopWork, TakeOverComputer, ToggleSettings,
+    APP_CONTEXT, COMPOSER_CONTEXT, CiteSelection, Connection, DeleteBot, ElseApp,
+    FindInConversation, FocusComposer, FocusSidebar, LoadOlder, MoveBot, NewBot, NewCategory,
+    SIDEBAR_CONTEXT, SelectNext, SelectPrev, StopWork, TakeOverComputer, ToggleSettings,
 };
 use crate::ambient::looping;
 use crate::api::Bot;
@@ -614,7 +614,21 @@ impl ElseApp {
             .and_then(|conversation| conversation.latest_unshown_turn())
             .filter(|_| bot.waiting().is_none())
             .and_then(|turn| self.render_turn_status(turn, bot.id, cx));
-        let mut actions = h_flex().flex_none().gap_1().items_center();
+        let mut actions = h_flex().flex_none().gap_1().items_center().child(
+            Button::new("find-in-conversation")
+                .focus_ring(false)
+                .cursor_pointer()
+                .icon(IconName::Search)
+                .small()
+                .ghost()
+                .accessibility_label("Find in conversation")
+                .tooltip_with_action(
+                    "Find in conversation",
+                    &FindInConversation,
+                    Some(APP_CONTEXT),
+                )
+                .on_click(cx.listener(|app, _, window, cx| app.open_find(window, cx))),
+        );
         if !self.settings_open {
             actions = actions.child(
                 Button::new("toggle-settings")
@@ -795,7 +809,9 @@ impl ElseApp {
                                 ),
                         );
                     }
-                    column.child(transcript).into_any_element()
+                    column
+                        .child(transcript.children(self.render_find_bar(cx)))
+                        .into_any_element()
                 }
             }
             _ => div()
@@ -1177,6 +1193,9 @@ impl Render for ElseApp {
                 }
             }))
             .on_action(cx.listener(|app, _: &LoadOlder, window, cx| app.load_older(window, cx)))
+            .on_action(
+                cx.listener(|app, _: &FindInConversation, window, cx| app.open_find(window, cx)),
+            )
             .on_action(cx.listener(|app, _: &NewCategory, window, cx| {
                 if app.connection == Connection::Connected {
                     app.open_category_dialog(None, window, cx);
