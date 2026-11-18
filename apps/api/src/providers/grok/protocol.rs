@@ -69,7 +69,6 @@ impl Tracker {
         if host {
             expected.extend(grok_home::HOST_TOOLS.iter().map(|(_, name)| (*name).into()));
         }
-        expected.sort();
         Self {
             model: model.into(),
             session: session.into(),
@@ -121,15 +120,31 @@ impl Tracker {
         if text(&event["model"], "model")?.is_none() {
             return Err(Violation::profile("Grok did not report its model."));
         }
-        let mut tools = list(&event["tools"], "tool inventory")?
+        // Grok 1.0.44 leaves get_command_or_subagent_output and
+        // kill_command_or_subagent out of the inventory; only a tool outside
+        // --tools breaks the policy.
+        let tools = list(&event["tools"], "tool inventory")?
             .iter()
-            .map(|tool| required(tool, "tool inventory").map(str::to_owned))
+            .map(|tool| required(tool, "tool inventory"))
             .collect::<Result<Vec<_>, _>>()?;
-        tools.retain(|tool| self.mcp_tool(tool).is_none());
-        tools.sort();
-        if tools != self.expected {
+        let extra: Vec<_> = tools
+            .iter()
+            .filter(|tool| {
+                self.mcp_tool(tool).is_none() && !self.expected.iter().any(|t| t == *tool)
+            })
+            .collect();
+        if !extra.is_empty() {
             return Err(Violation::policy(format!(
-                "Grok offered unexpected tools: {tools:?}"
+                "Grok offered tools else.bot does not allow: {extra:?}"
+            )));
+        }
+        let missing: Vec<_> = grok_home::MCP_TOOLS
+            .iter()
+            .filter(|tool| self.mcp && !tools.contains(tool))
+            .collect();
+        if !missing.is_empty() {
+            return Err(Violation::policy(format!(
+                "Grok did not offer the tools that reach else.bot: {missing:?}"
             )));
         }
         let servers = list(&event["mcp_servers"], "MCP inventory")?

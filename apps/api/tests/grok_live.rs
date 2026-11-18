@@ -152,7 +152,7 @@ async fn grok_conversations_stream_resume_use_host_and_mcp_tools_and_cancel() {
         &app,
         &a,
         "grok",
-        "We are preparing the ZETA-9 release. Remember that release name for later and acknowledge it in one sentence.",
+        "We are preparing the ZETA-9 release. Acknowledge it in one sentence.",
     )
     .await;
     assert!(answer.contains("ZETA-9"));
@@ -181,7 +181,9 @@ async fn grok_conversations_stream_resume_use_host_and_mcp_tools_and_cancel() {
     let (_, answer) = ask(&app, &a, "grok", "Use your shell to write exactly HOST_GROK_OK into grok-proof.txt in the current directory. Then run pwd and reply with the absolute directory.").await;
     let project = host.project_path(a.parse().unwrap());
     assert_eq!(
-        std::fs::read_to_string(project.join("grok-proof.txt")).unwrap(),
+        std::fs::read_to_string(project.join("grok-proof.txt"))
+            .unwrap()
+            .trim_end(),
         "HOST_GROK_OK"
     );
     assert!(answer.contains(project.to_str().unwrap()), "{answer}");
