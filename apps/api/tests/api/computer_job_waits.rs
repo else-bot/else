@@ -169,6 +169,13 @@ async fn a_request_parked_on_a_job_continues_with_its_exit_status_when_it_fails(
         .unwrap();
     let shown = shown_waits(&app, &bot, turn).await;
     assert_eq!(shown[0]["job_id"], job.to_string(), "{shown}");
+    let waiting = app.waiting_on(&bot).await;
+    assert_eq!(
+        (&waiting["bots"], &waiting["jobs"]),
+        (&json!([]), &json!(1)),
+        "the bot list says it waits on its job: {waiting}"
+    );
+    assert!(waiting["since"].is_string(), "{waiting}");
 
     manager.job(bot.parse().unwrap(), job).await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -198,6 +205,7 @@ async fn a_request_parked_on_a_job_continues_with_its_exit_status_when_it_fails(
     assert_eq!(attempts(&app, turn).await, 2, "the same request continued");
     assert_eq!(wait_row(&app, turn).await, ("settled".into(), Some(2)));
     assert_eq!(shown_waits(&app, &bot, turn).await, json!([]));
+    assert_eq!(app.waiting_on(&bot).await, Value::Null, "the job ended");
     let packet = synthetic.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("[else.bot computer job results]"),

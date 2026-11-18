@@ -848,6 +848,19 @@ pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
     (format!("{label}. {note}"), error)
 }
 
+fn waiting_label(turn: &crate::model::Turn) -> String {
+    let open = turn.open_delegations();
+    let mut bots: Vec<(uuid::Uuid, &str)> = Vec::new();
+    for task in &open {
+        if !bots.iter().any(|(id, _)| *id == task.target_bot_id) {
+            bots.push((task.target_bot_id, &task.target_name));
+        }
+    }
+    let names: Vec<&str> = bots.into_iter().map(|(_, name)| name).collect();
+    let jobs = turn.mcp_waits.len() + turn.computer_job_waits.len();
+    crate::sidebar::status::waiting_for(&names, open.len(), jobs)
+}
+
 fn status_label(turn: &crate::model::Turn) -> (String, bool) {
     let detail = turn
         .error
@@ -858,17 +871,7 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
         "queued" if turn.taken_by_reply() => (String::new(), false),
         "queued" => ("Queued".into(), false),
         "preparing" | "sending" | "running" => ("Working".into(), false),
-        "waiting" if turn.waits_on_job() => {
-            let jobs = turn.mcp_waits.len() + turn.computer_job_waits.len();
-            (
-                if jobs == 1 {
-                    "Waiting on a job".into()
-                } else {
-                    format!("Waiting on {jobs} jobs")
-                },
-                false,
-            )
-        }
+        "waiting" if turn.waits_on_job() => (waiting_label(turn), false),
         "cancelling" => ("Stopping…".into(), false),
         "waiting"
             if turn
@@ -904,18 +907,7 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
         "waiting" if turn.social_setups.iter().any(|setup| setup.is_pending()) => {
             ("Waiting for you to connect an account…".into(), false)
         }
-        "waiting" => {
-            let open = turn.open_delegations();
-            let mut bots: Vec<(uuid::Uuid, &str)> = Vec::new();
-            for task in &open {
-                if !bots.iter().any(|(id, _)| *id == task.target_bot_id) {
-                    bots.push((task.target_bot_id, &task.target_name));
-                }
-            }
-            let names: Vec<&str> = bots.into_iter().map(|(_, name)| name).collect();
-            let label = crate::sidebar::status::waiting_for(&names, open.len());
-            (format!("{label}…"), false)
-        }
+        "waiting" => (format!("{}…", waiting_label(turn)), false),
         "interrupted" => (
             if turn.error.as_ref().is_some_and(|e| e.code == "cancelled") {
                 "Stopped before it ran".into()

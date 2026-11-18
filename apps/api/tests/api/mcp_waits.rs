@@ -164,12 +164,19 @@ async fn a_request_waiting_on_a_running_mcp_job_continues_by_itself_when_it_fini
     let shown = shown_waits(&app, &main, turn).await;
     assert_eq!(shown.as_array().map(Vec::len), Some(1), "{shown}");
     assert_eq!(shown[0]["mcp_id"], "t3-code", "{shown}");
+    let waiting = app.waiting_on(&main).await;
+    assert_eq!(
+        (&waiting["bots"], &waiting["jobs"]),
+        (&json!([]), &json!(1)),
+        "the bot list says it waits on its MCP job: {waiting}"
+    );
 
     std::fs::write(&state, "result_available").unwrap();
     check_now(&app).await;
     settle(&app, turn, "completed").await;
     assert_eq!(shown_waits(&app, &main, turn).await, json!([]));
     assert_eq!(attempts(&app, turn).await, 2, "the same request continued");
+    assert_eq!(app.waiting_on(&main).await, Value::Null, "the job ended");
     let (status, delivered, checks) = wait_row(&app, turn).await;
     assert_eq!((status.as_str(), delivered), ("finished", Some(2)));
     assert!(checks >= 3, "{checks}");
