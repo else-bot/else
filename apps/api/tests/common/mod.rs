@@ -289,6 +289,14 @@ impl TestApp {
         panic!("turn {turn_id} did not reach {statuses:?}; turns: {all:?}");
     }
 
+    /// What the bot list says the bot's active turn is parked on.
+    pub async fn waiting_on(&self, bot: &str) -> serde_json::Value {
+        self.owner("GET", &format!("/v1/bots/{bot}"), None)
+            .await
+            .body["bot"]["activity"]["waiting_on"]
+            .clone()
+    }
+
     pub async fn main_bot(&self) -> String {
         self.owner("GET", "/v1/bots", None).await.body["default_bot_id"]
             .as_str()

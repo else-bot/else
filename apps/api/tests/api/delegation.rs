@@ -1301,7 +1301,34 @@ async fn the_delegating_bot_shows_whom_it_waits_on_until_the_task_ends() {
         shown["bots"],
         json!([{ "id": target.to_string(), "name": "Target", "tasks": 1 }])
     );
+    assert_eq!(shown["jobs"], 0, "{shown}");
     assert!(shown["since"].is_string(), "{shown}");
+
+    sqlx::query(
+        "INSERT INTO mcp_waits (id, bot_id, turn_id, attempt, mcp_id, tool, arguments,
+             status_pointer, running_values, purpose, interval_seconds, deadline_at, next_check_at)
+         VALUES (?1, ?2, ?3, 1, 't3-code', 'task_status', '{}', '/workState', '[\"working\"]',
+             'Review the PR', 60, '2099-01-01T00:00:00.000+00:00', '2099-01-01T00:00:00.000+00:00')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(main)
+    .bind(root)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let both = waiting_on().await;
+    assert_eq!(
+        (&both["bots"][0]["name"], &both["jobs"]),
+        (&json!("Target"), &json!(1)),
+        "a turn waiting on a task and a job names both: {both}"
+    );
+    assert_eq!(both["since"], shown["since"], "the older task leads");
+    sqlx::query("UPDATE mcp_waits SET status = 'stopped' WHERE turn_id = ?1")
+        .bind(root)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(waiting_on().await, shown, "a stopped wait no longer counts");
 
     for status in ["running", "completed"] {
         sqlx::query("UPDATE turns SET status = ?1 WHERE id = ?2")
