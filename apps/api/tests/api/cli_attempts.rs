@@ -24,17 +24,30 @@ names = {"run_terminal_cmd": "run_terminal_command", "get_task_output": "get_com
          "kill_task": "kill_command_or_subagent"}
 tools = [names.get(t, t) for t in arg("--tools").split(",")]
 prompt = open(arg("--prompt-file")).read()
-with open(os.path.join(here, "launches.jsonl"), "a") as f:
-    f.write(json.dumps({"session": session, "resumed": resumed, "prompt": prompt}) + "\n")
 out = lambda e: print(json.dumps(e), flush=True)
-out({"type": "system", "subtype": "init", "session_id": session, "model": arg("--model"),
-     "tools": tools, "mcp_servers": [{"name": "elsebot", "status": "connected"}]})
 def once(name):
     path = os.path.join(here, name)
     if os.path.exists(path):
         return False
     open(path, "w").close()
     return True
+if "[signout]" in prompt and once("signed-out"):
+    open(os.path.join(os.environ["GROK_HOME"], "auth.json"), "w").write("{}")
+    out({"type": "system", "subtype": "init", "session_id": "", "model": "unknown", "tools": [], "mcp_servers": []})
+    out({"type": "result", "subtype": "error_during_execution", "is_error": True, "stop_reason": None,
+         "errors": ["Not signed in. To authenticate without a browser, run:\n  grok login --device-code"]})
+    sys.exit(1)
+if "[revoked]" in prompt and once("revoked"):
+    open(os.path.join(os.environ["GROK_HOME"], "auth.json"), "w").write("{}")
+    out({"type": "system", "subtype": "init", "session_id": session, "model": arg("--model"),
+         "tools": tools, "mcp_servers": [{"name": "elsebot", "status": "connected"}]})
+    out({"type": "result", "subtype": "error_during_execution", "is_error": True, "stop_reason": None,
+         "errors": ["Internal error: {\n  \"message\": \"Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: Invalid or expired credentials\",\n  \"http_status\": 401\n}"]})
+    sys.exit(1)
+with open(os.path.join(here, "launches.jsonl"), "a") as f:
+    f.write(json.dumps({"session": session, "resumed": resumed, "prompt": prompt}) + "\n")
+out({"type": "system", "subtype": "init", "session_id": session, "model": arg("--model"),
+     "tools": tools, "mcp_servers": [{"name": "elsebot", "status": "connected"}]})
 if "[stubborn]" in prompt:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -62,9 +75,12 @@ out({"type": "stream_event", "event": {"type": "message_stop"}})
 out({"type": "result", "subtype": "success", "is_error": False, "stop_reason": "end_turn"})
 "#;
 
+const SIGNED_IN: &str = r#"{"https://auth.x.ai::id": {"user_id": "u", "team_id": "t"}}"#;
+
 struct Fixture {
     _dir: tempfile::TempDir,
     fake: PathBuf,
+    login: PathBuf,
     host: Host,
     app: TestApp,
 }
@@ -80,9 +96,9 @@ async fn fixture() -> Fixture {
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
     let login = root.join("login");
     std::fs::create_dir(&login).unwrap();
-    std::fs::write(login.join("auth.json"), "{}").unwrap();
+    std::fs::write(login.join("auth.json"), SIGNED_IN).unwrap();
     let host = Host::new(&root.join("data"), &root.join("projects"));
-    let grok = Grok::detect(Some(host.clone()), Some(program), Some(login))
+    let grok = Grok::detect(Some(host.clone()), Some(program), Some(login.clone()))
         .with_tools("http://127.0.0.1:9/tools/v1/mcp".into());
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
@@ -105,6 +121,7 @@ async fn fixture() -> Fixture {
     Fixture {
         _dir: dir,
         fake,
+        login,
         host,
         app,
     }
@@ -258,4 +275,78 @@ async fn a_parked_parent_without_a_result_keeps_its_child_and_continues_in_a_new
     );
     assert_ne!(parent[0]["session"], parent[1]["session"]);
     assert!(fx.host.live_processes(root).is_empty());
+}
+
+async fn grok_capability(app: &TestApp) -> Value {
+    let caps = app.owner("GET", "/v1/capabilities", None).await;
+    caps.body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "grok")
+        .unwrap()
+        .clone()
+}
+
+/// Grok's two ways of failing for want of a login, as Grok 1.0.89 prints
+/// them: an expired login stops before opening a session, and a revoked one
+/// opens a session and gets a 401. Both clear the host `auth.json`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grok_that_signs_out_mid_turn_is_unavailable_until_the_host_signs_in_again() {
+    let signed_out = "Grok isn't signed in on this server. Run `grok login --device-code` there, \
+                      or switch this bot to another model.";
+    let fx = fixture().await;
+    let bot = fx.app.main_bot().await;
+    assert_eq!(grok_capability(&fx.app).await["available"], true);
+
+    for marker in ["[signout]", "[revoked]"] {
+        let turn = send(&fx.app, &bot, &format!("{marker} hello")).await;
+        let status = fx
+            .app
+            .wait_turn(&turn.to_string(), &["failed", "completed", "uncertain"])
+            .await;
+        let (code, message): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT error_code, error_message FROM turns WHERE id = ?1")
+                .bind(turn)
+                .fetch_one(&fx.app.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "failed", "{marker}: {message:?}");
+        assert_eq!(code.as_deref(), Some("provider_unavailable"), "{marker}");
+        assert_eq!(
+            message.as_deref(),
+            Some(signed_out),
+            "{marker}: not the CLI's raw login text"
+        );
+
+        let grok = grok_capability(&fx.app).await;
+        assert_eq!(grok["available"], false);
+        assert_eq!(grok["unavailable_reason"], signed_out);
+        let rejected = fx
+            .app
+            .send(&bot, Uuid::new_v4(), "again", Some("grok"))
+            .await;
+        assert_eq!(rejected.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(rejected.body["error"]["code"], "provider_unavailable");
+        assert_eq!(rejected.body["error"]["message"], signed_out);
+
+        std::fs::write(fx.login.join("auth.json"), SIGNED_IN).unwrap();
+        assert_eq!(
+            grok_capability(&fx.app).await["available"],
+            true,
+            "a host sign-in is picked up without a restart"
+        );
+    }
+    let turn = send(&fx.app, &bot, "hello again").await;
+    let status = fx
+        .app
+        .wait_turn(&turn.to_string(), &["failed", "completed", "uncertain"])
+        .await;
+    let error: Option<String> = sqlx::query_scalar("SELECT error_message FROM turns WHERE id = ?1")
+        .bind(turn)
+        .fetch_one(&fx.app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "completed", "{error:?}");
 }

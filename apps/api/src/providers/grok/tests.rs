@@ -398,9 +398,16 @@ fn profiles_reject_settings_the_cli_cannot_apply() {
 fn grok_models_prints_the_listed_models() {
     let printed = "You are logged in with grok.com.\n\nDefault model: grok-4.7\n\n\
                    Available models:\n  * grok-4.7 (default)\n  - grok-4.7-build-fast\n  - grok-4.5\n";
-    let ids: Vec<String> = listed_models(printed).into_iter().map(|m| m.id).collect();
+    let ids: Vec<String> = listed_models(printed)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
     assert_eq!(ids, ["grok-4.7", "grok-4.7-build-fast", "grok-4.5"]);
-    assert!(listed_models("Not logged in.").is_empty());
+    // Grok 1.0.89, signed out.
+    let signed_out = "You are not authenticated.\n\nDefault model: grok-4.6\n\n\
+                      Available models:\n  * grok-4.6 (default)\n  - grok-4.5\n";
+    assert_eq!(listed_models(signed_out).unwrap_err(), SIGNED_OUT);
 }
 
 #[test]
@@ -506,4 +513,49 @@ fn hashed_session_groups_resume_only_their_original_directory() {
     assert!(grok_home::session_exists(root.path(), &project, &id));
     std::fs::write(group.join(".cwd"), "/other/project").unwrap();
     assert!(!grok_home::session_exists(root.path(), &project, &id));
+}
+
+#[tokio::test]
+async fn a_turn_on_a_signed_out_host_fails_before_grok_launches() {
+    let root = tempfile::tempdir().unwrap();
+    let login = root.path().join("login");
+    std::fs::create_dir(&login).unwrap();
+    let grok = Grok {
+        models: Models::new(&DEFINITION),
+        ready: Ok(Ready {
+            host: Host::new(&root.path().join("data"), &root.path().join("bots")),
+            program: root.path().join("missing-grok"),
+            version: "grok 1.0".into(),
+            login: login.clone(),
+        }),
+        tool_url: None,
+    };
+    let signed_out = "Grok isn't signed in on this server. Run `grok login --device-code` there, \
+                      or switch this bot to another model.";
+    let run = || async {
+        let sink = crate::providers::recording::Recorded::default();
+        let input = crate::providers::cli::session::tests::input();
+        grok.run(input, &sink, Stop::new(Default::default())).await
+    };
+
+    std::fs::write(login.join("auth.json"), "{}").unwrap();
+    assert_eq!(
+        grok.availability(),
+        Availability::Unavailable(signed_out.into())
+    );
+    assert_eq!(
+        run().await,
+        TurnOutcome::Failed {
+            code: "provider_unavailable".into(),
+            message: signed_out.into(),
+        },
+        "refused before launching the missing binary"
+    );
+
+    std::fs::write(login.join("auth.json"), r#"{"https://auth.x.ai::id": {"us"#).unwrap();
+    assert_eq!(
+        grok.availability(),
+        Availability::Available,
+        "a login read mid-write is not a sign-out"
+    );
 }

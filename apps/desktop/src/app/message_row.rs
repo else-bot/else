@@ -241,7 +241,8 @@ impl ElseApp {
                             theme.muted_foreground
                         })
                         .child(label),
-                ),
+                )
+                .children(model_remedy(turn, bot, cx)),
         )
     }
 
@@ -483,7 +484,12 @@ impl ElseApp {
                         .control(Tier::Ghost, Scale::Compact, false, cx)
                         .label(label)
                 };
-                let failed = |status: &str, color: Hsla, reason: &str, retry: bool| {
+                let bot = view.bot_id;
+                let failed = |status: String,
+                              color: Hsla,
+                              reason: Option<&str>,
+                              retry: bool,
+                              switch: bool| {
                     h_flex()
                         .flex_wrap()
                         .justify_end()
@@ -491,16 +497,18 @@ impl ElseApp {
                         .gap_x_2()
                         .text_xs()
                         .child(div().flex_none().size(px(6.)).rounded_full().bg(color))
-                        .child({
-                            let reason = SharedString::from(reason.to_owned());
+                        .child(
                             div()
                                 .id(SharedString::from(format!("failure-{request_id}")))
                                 .text_color(color)
                                 .child(format!("{subject}{status}"))
-                                .tooltip(move |window, cx| {
-                                    Tooltip::new(reason.clone()).build(window, cx)
-                                })
-                        })
+                                .when_some(reason, |label, reason| {
+                                    let reason = SharedString::from(reason.to_owned());
+                                    label.tooltip(move |window, cx| {
+                                        Tooltip::new(reason.clone()).build(window, cx)
+                                    })
+                                }),
+                        )
                         .child(
                             h_flex()
                                 .flex_none()
@@ -512,6 +520,9 @@ impl ElseApp {
                                             app.retry_pending(request_id, window, cx)
                                         },
                                     ))
+                                }))
+                                .children(switch.then(|| {
+                                    switch_model(format!("switch-model-{request_id}"), bot, cx)
                                 }))
                                 .children((mark.is_none() && !retry).then(|| {
                                     action("restore", "Edit").on_click(cx.listener(
@@ -532,11 +543,26 @@ impl ElseApp {
                     Delivery::Resolving { .. } => {
                         note(format!("{subject}Checking delivery…"), false)
                     }
-                    Delivery::Unknown { reason } => {
-                        failed("Not confirmed", theme.warning, reason, true)
+                    Delivery::Unknown { reason } => failed(
+                        "Not confirmed".into(),
+                        theme.warning,
+                        Some(reason),
+                        true,
+                        false,
+                    ),
+                    Delivery::Rejected { reason, code }
+                        if code.as_deref() == Some(PROVIDER_UNAVAILABLE) =>
+                    {
+                        failed(
+                            format!("Not sent. {reason}"),
+                            theme.danger,
+                            None,
+                            false,
+                            true,
+                        )
                     }
-                    Delivery::Rejected { reason } => {
-                        failed("Not sent", theme.danger, reason, false)
+                    Delivery::Rejected { reason, .. } => {
+                        failed("Not sent".into(), theme.danger, Some(reason), false, false)
                     }
                 };
                 column = column.child(beside(true, line));
@@ -750,6 +776,32 @@ impl ElseApp {
                 )
             })
     }
+}
+
+/// The API's code for a bot whose provider cannot run now, such as a CLI
+/// that is signed out on the server.
+const PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
+
+/// A Switch model action for a turn that failed because its provider
+/// cannot run now.
+pub(super) fn model_remedy(
+    turn: &crate::model::Turn,
+    bot: uuid::Uuid,
+    cx: &Context<ElseApp>,
+) -> Option<Button> {
+    (turn.status == "failed"
+        && turn
+            .error
+            .as_ref()
+            .is_some_and(|e| e.code == PROVIDER_UNAVAILABLE))
+    .then(|| switch_model(format!("switch-model-{}", turn.id), bot, cx))
+}
+
+fn switch_model(id: String, bot: uuid::Uuid, cx: &Context<ElseApp>) -> Button {
+    Button::new(SharedString::from(id))
+        .control(Tier::Ghost, Scale::Compact, false, cx)
+        .label("Switch model")
+        .on_click(cx.listener(move |app, _, window, cx| app.switch_model(bot, window, cx)))
 }
 
 pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {

@@ -812,6 +812,32 @@ impl ElseApp {
         self.open_model_editor(bot, ModelTarget::Bot, saved, window, cx);
     }
 
+    /// Opens the bot's model picker with providers and the saved model read
+    /// again, so a provider that just became unavailable shows why.
+    pub(super) fn switch_model(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.settings_open {
+            self.toggle_settings(window, cx);
+        }
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let (caps, saved) =
+                futures_util::join!(client.clone().capabilities(), client.bot_profile(bot));
+            let _ = this.update_in(cx, |app, window, cx| {
+                if caps.is_ok() {
+                    app.apply_caps(caps, window, cx);
+                }
+                if app.selected != Some(bot) {
+                    return;
+                }
+                if let (Ok(saved), Some(entry)) = (saved, app.settings.get_mut(&bot)) {
+                    entry.model = ModelState::Ready(saved);
+                }
+                app.open_model_dialog(bot, window, cx);
+            });
+        })
+        .detach();
+    }
+
     fn open_routine_model_dialog(
         &mut self,
         bot: Uuid,

@@ -31,12 +31,16 @@ pub(super) enum Delivery {
     },
     Rejected {
         reason: String,
+        code: Option<String>,
     },
 }
 
 pub(super) enum Failure {
     Unknown(String),
-    Rejected(String),
+    Rejected {
+        reason: String,
+        code: Option<String>,
+    },
 }
 
 pub(super) enum Lookup {
@@ -99,7 +103,7 @@ impl PendingSend {
         }
         self.delivery = match failure {
             Failure::Unknown(reason) => Delivery::Unknown { reason },
-            Failure::Rejected(reason) => Delivery::Rejected { reason },
+            Failure::Rejected { reason, code } => Delivery::Rejected { reason, code },
         };
     }
 
@@ -199,7 +203,10 @@ mod tests {
     #[test]
     fn a_rejected_message_is_never_resent() {
         let mut pending = PendingSend::new("hello".into(), Vec::new(), None, None, None);
-        pending.on_send_failure(Failure::Rejected("too long".into()));
+        pending.on_send_failure(Failure::Rejected {
+            reason: "too long".into(),
+            code: None,
+        });
         assert!(!pending.begin_resolution());
         assert!(pending.retry().is_none());
         pending.on_send_failure(Failure::Unknown("late".into()));
