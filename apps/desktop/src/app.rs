@@ -736,7 +736,14 @@ impl ElseApp {
         if let Some(view) = &self.view {
             let this = cx.entity().downgrade();
             view.list.set_scroll_handler(move |_, window, cx| {
-                let _ = this.update(cx, |app, cx| app.check_reading(window, cx));
+                let _ = this.update(cx, |app, cx| {
+                    // The owner scrolled, so an exchange still laying out
+                    // no longer moves the view when it lands.
+                    if let Some(view) = app.view.as_mut() {
+                        view.landing = None;
+                    }
+                    app.check_reading(window, cx)
+                });
             });
         }
         self.ensure_settings(window, cx);

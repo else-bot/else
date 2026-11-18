@@ -402,8 +402,12 @@ pub(super) struct ConversationView {
     /// Delegation groups whose task details are expanded.
     pub(super) expanded_councils: HashSet<Uuid>,
     pub(super) expanded_events: HashSet<Uuid>,
-    /// Bot exchanges the owner opened from their one-line form.
-    pub(super) opened_exchanges: HashSet<Uuid>,
+    /// Bot exchanges the owner folded or unfolded, over how each shows by
+    /// default.
+    pub(super) exchange_folds: HashMap<Uuid, super::bot_activity::Fold>,
+    /// The exchange the owner just unfolded: once laid out, its header moves
+    /// to the top unless the whole exchange already shows.
+    pub(super) landing: Option<Uuid>,
     /// Exchange replies shown in full instead of their excerpt.
     pub(super) full_replies: HashSet<Uuid>,
     /// The waiting tray lists its waits instead of only its header.
@@ -520,7 +524,8 @@ impl ConversationView {
             expanded_tasks: HashSet::new(),
             expanded_councils: HashSet::new(),
             expanded_events: HashSet::new(),
-            opened_exchanges: HashSet::new(),
+            exchange_folds: HashMap::new(),
+            landing: None,
             full_replies: HashSet::new(),
             tray_expanded: true,
             expanded_waits: HashSet::new(),
@@ -697,7 +702,8 @@ impl ElseApp {
                 .item(target)
                 .and_then(|item| conversation.task_receipt(item.turn_id))
             {
-                view.opened_exchanges.insert(receipt.id);
+                view.exchange_folds
+                    .insert(receipt.id, super::bot_activity::Fold::Open);
             }
             view.full_replies.insert(target);
             self.sync_rows(window, cx);

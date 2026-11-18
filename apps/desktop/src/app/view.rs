@@ -1105,7 +1105,7 @@ fn subtitle(bot: &Bot, main: bool) -> String {
 pub(super) const HEADER_HEIGHT: Pixels = px(56.);
 /// The transcript list's padding, so a resting transcript starts and ends
 /// with room under the header and above the composer.
-const TRANSCRIPT_FADE: Pixels = px(24.);
+pub(super) const TRANSCRIPT_FADE: Pixels = px(24.);
 /// The fade over a scrolled transcript edge: an opaque band taller than a
 /// 22 px body line, so a line sliced at the edge is hidden whole, then a
 /// gradient.

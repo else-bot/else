@@ -1,7 +1,8 @@
 //! Bot-to-bot exchanges read inline. Each task is a block: a header naming
 //! who replied to whom, the reply as an excerpt, and the owner's asks. The
-//! header folds the task text, which is long and machine-written. A block
-//! that needs nothing from the owner sits on one line until opened.
+//! header folds the block to one line and back. The task text, long and
+//! machine-written, waits behind its own "Show task". A block that needs
+//! nothing from the owner sits on one line until opened.
 
 use super::action_card::{Disclosure, EVENT_INDENT, EventEnd};
 use super::conversation::{ReplyLayout, Reveal, Spot, TranscriptRow};
@@ -281,6 +282,14 @@ pub(super) fn group_activity(
     grouped
 }
 
+/// How an exchange shows: by default per [`Block::fold`], or as the owner
+/// set it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Fold {
+    Open,
+    Folded,
+}
+
 /// Which end of an exchange this chat's bot is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
@@ -331,14 +340,15 @@ impl<'a> Block<'a> {
         })
     }
 
-    /// Whether the block shows its reply until the owner folds it: it needs
-    /// the owner, went wrong, or is this bot's own finished reply.
-    fn opens(&self) -> bool {
-        match self.status {
+    /// How the block shows until the owner folds or unfolds it: open when
+    /// it needs the owner, went wrong, or is this bot's own finished reply.
+    fn fold(&self) -> Fold {
+        let open = match self.status {
             ActivityStatus::NeedsYou | ActivityStatus::Failed | ActivityStatus::Stopped => true,
             ActivityStatus::Fyi | ActivityStatus::Replied => self.side == Side::Received,
             _ => false,
-        }
+        };
+        if open { Fold::Open } else { Fold::Folded }
     }
 
     fn task(&self) -> &'a str {
@@ -493,11 +503,14 @@ impl ElseApp {
     }
 
     fn exchange_open(&self, block: &Block) -> bool {
-        block.opens()
-            || self
-                .view
-                .as_ref()
-                .is_some_and(|view| view.opened_exchanges.contains(&block.item.id))
+        match self
+            .view
+            .as_ref()
+            .and_then(|view| view.exchange_folds.get(&block.item.id))
+        {
+            Some(fold) => *fold == Fold::Open,
+            None => block.fold() == Fold::Open,
+        }
     }
 
     /// Whether every block of `activity` sits on one line, so the row
@@ -509,8 +522,25 @@ impl ElseApp {
     }
 
     /// Applies a fold change to the exchange holding `item`. Its row's
-    /// height changes, and so does the spacing of the row below.
+    /// height changes, and so does the spacing of the row below. The list
+    /// keeps its scroll anchor, so the header stays in place, except when
+    /// the row starts above the viewport and the exchange is its first:
+    /// then its header, off screen or partly so, comes to the top.
     fn refold_exchange(&mut self, item: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.view.as_ref()
+            && let Some(ix) = view.row_index(RowKey::Item(item))
+            && !view.list.is_following_tail()
+            && view.list.logical_scroll_top().item_ix == ix
+            && view.rows[ix]
+                .activity
+                .as_ref()
+                .is_some_and(|activity| activity.items.first() == Some(&item))
+        {
+            view.list.scroll_to(ListOffset {
+                item_ix: ix,
+                offset_in_item: px(0.),
+            });
+        }
         self.sync_rows(window, cx);
         if let Some(view) = self.view.as_ref()
             && let Some(ix) = view.row_index(RowKey::Item(item))
@@ -531,7 +561,7 @@ impl ElseApp {
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        view.opened_exchanges.insert(item);
+        view.exchange_folds.insert(item, Fold::Open);
         view.expanded_events.insert(item);
         self.refold_exchange(item, window, cx);
         let Some(view) = self.view.as_ref() else {
@@ -548,14 +578,90 @@ impl ElseApp {
         self.start_reveal(Reveal::new(row, Spot::Row), cx);
     }
 
+    /// Folds or unfolds the exchange holding `item`. Unfolded by hand, its
+    /// reply shows whole and its header lands at the top; folded, its task
+    /// hides again.
+    fn fold_exchange(
+        &mut self,
+        item: Uuid,
+        fold: Fold,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        let Some((default, replies)) = view.conversation.as_ref().and_then(|c| {
+            let block = Block::of(c.item(item)?, c)?;
+            let replies: Vec<Uuid> = block.replies.iter().map(|reply| reply.id).collect();
+            Some((block.fold(), replies))
+        }) else {
+            return;
+        };
+        match fold {
+            Fold::Open => {
+                // Opened by hand, it stays open once its ask settles.
+                view.exchange_folds.insert(item, Fold::Open);
+                view.full_replies.extend(replies);
+                view.landing = Some(item);
+            }
+            Fold::Folded => {
+                if default == Fold::Open {
+                    view.exchange_folds.insert(item, Fold::Folded);
+                } else {
+                    view.exchange_folds.remove(&item);
+                }
+                for reply in &replies {
+                    view.full_replies.remove(reply);
+                }
+                view.expanded_events.remove(&item);
+                view.landing.take_if(|id| *id == item);
+            }
+        }
+        self.refold_exchange(item, window, cx);
+    }
+
+    /// The exchange in `activity` to land, once its reply has finished
+    /// laying out: Markdown parses in the background, and only the full
+    /// height says whether the exchange fits on screen.
+    fn landing_ready(&self, activity: &BotActivity, cx: &App) -> Option<Uuid> {
+        let view = self.view.as_ref()?;
+        let id = view.landing.filter(|id| activity.items.contains(id))?;
+        let laid_out = activity.answers.iter().chain([&id]).all(|reply| {
+            view.texts
+                .get(&RowKey::Item(*reply))
+                .is_none_or(|text| text.laid_out(cx))
+        });
+        laid_out.then_some(id)
+    }
+
+    /// Ends the landing of `item`. When its exchange did not fit, the
+    /// list scrolls to it: `offset` into row `ix`, as far as it scrolls.
+    fn landed(&mut self, item: Uuid, ix: usize, offset: Option<Pixels>, window: &mut Window) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        if view.landing.take_if(|id| *id == item).is_none() {
+            return;
+        }
+        if let Some(offset) = offset {
+            view.list.scroll_to(ListOffset {
+                item_ix: ix,
+                offset_in_item: offset,
+            });
+            window.refresh();
+        }
+    }
+
     pub(super) fn render_bot_activity(
         &mut self,
         row: &TranscriptRow,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let activity = row.activity.as_ref()?;
+        let landing = self.landing_ready(activity, cx);
         let view = self.view.as_ref()?;
         let conversation = view.conversation.as_ref()?;
-        let activity = row.activity.as_ref()?;
         let me = self
             .bots
             .iter()
@@ -565,13 +671,30 @@ impl ElseApp {
         if blocks.is_empty() {
             return None;
         }
+        let landed = std::rc::Rc::new(std::cell::Cell::new(None));
         let mut column = v_flex().w_full().min_w_0().gap_1();
         for block in &blocks {
             column = column.child(if self.exchange_open(block) {
-                self.render_exchange_block(block, me, conversation, cx)
+                let open = self.render_exchange_block(block, me, conversation, cx);
+                if landing == Some(block.item.id) {
+                    let landed = landed.clone();
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .child(open)
+                        .on_prepaint(move |bounds, _, _| landed.set(Some(bounds)))
+                        .into_any_element()
+                } else {
+                    open
+                }
             } else {
                 self.render_exchange_line(block, me, cx)
             });
+        }
+        if let Some(item) = landing
+            && let Some(ix) = view.row_index(RowKey::Item(item))
+        {
+            column = land(column, item, ix, landed, cx.entity().downgrade());
         }
         if let Some(latest) = conversation
             .latest_reply()
@@ -645,31 +768,16 @@ impl ElseApp {
                 block.status.end(&theme),
                 Disclosure::Collapsed,
             ));
-        super::action_card::event_button(SharedString::from(format!("exchange-line-{id}")))
+        // The folded line and the open header share an id, so a header
+        // focused from the keyboard stays focused across the toggle.
+        super::action_card::event_button(SharedString::from(format!("exchange-toggle-{id}")))
             .accessibility_label(format!(
                 "{}. Show reply. {preview}",
                 Self::exchange_label(block, me)
             ))
             .child(row)
             .on_click(cx.listener(move |app, _, window, cx| {
-                let Some(view) = app.view.as_mut() else {
-                    return;
-                };
-                view.opened_exchanges.insert(id);
-                let replies: Vec<Uuid> = view
-                    .rows
-                    .iter()
-                    .filter_map(|row| row.activity.as_ref())
-                    .find(|activity| activity.items.contains(&id))
-                    .map(|activity| {
-                        let mut ids = activity.answers.clone();
-                        ids.push(id);
-                        ids
-                    })
-                    .unwrap_or_default();
-                // Opened by hand, the reply shows whole: the owner asked for it.
-                view.full_replies.extend(replies);
-                app.refold_exchange(id, window, cx);
+                app.fold_exchange(id, Fold::Open, window, cx);
             }))
             .into_any_element()
     }
@@ -688,6 +796,7 @@ impl ElseApp {
         let id = block.item.id;
         let ((speaker, speaker_name), verb) = Self::exchange_voice(block, me);
         let task_open = view.expanded_events.contains(&id);
+        let default = block.fold();
         let header = super::action_card::event_row(&theme)
             .child(self.event_faces(&format!("exchange-{id}"), [speaker]))
             .child(super::action_card::event_verb(&theme, verb))
@@ -698,36 +807,48 @@ impl ElseApp {
             .child(super::action_card::event_end(
                 &theme,
                 block.status.end(&theme),
-                if task_open {
-                    Disclosure::Expanded
-                } else {
-                    Disclosure::Collapsed
-                },
+                Disclosure::Expanded,
             ));
         let header =
-            super::action_card::event_button(SharedString::from(format!("exchange-task-{id}")))
-                .accessibility_label(format!(
-                    "{}. {} task",
-                    Self::exchange_label(block, me),
-                    if task_open { "Hide" } else { "Show" }
-                ))
+            super::action_card::event_button(SharedString::from(format!("exchange-toggle-{id}")))
+                .accessibility_label(format!("{}. Hide reply", Self::exchange_label(block, me)))
                 .child(header)
                 .on_click(cx.listener(move |app, _, window, cx| {
-                    if let Some(view) = app.view.as_mut()
-                        && !view.expanded_events.remove(&id)
-                    {
-                        view.expanded_events.insert(id);
-                        // What the owner opened stays open once its ask settles.
-                        view.opened_exchanges.insert(id);
-                    }
-                    app.refold_exchange(id, window, cx);
+                    app.fold_exchange(id, Fold::Folded, window, cx);
                 }));
         let mut body = v_flex()
             .w_full()
             .min_w_0()
             .gap_2()
             .pl(px(EVENT_INDENT))
-            .pb_2();
+            .pb_2()
+            .child(
+                Button::new(SharedString::from(format!("exchange-task-{id}")))
+                    .control(Tier::Ghost, Scale::Compact, false, cx)
+                    .self_start()
+                    // Its label lines up with the reply below.
+                    .ml(-Scale::Compact.padding())
+                    .accessibility_label(format!(
+                        "{} the task {}",
+                        if task_open { "Hide" } else { "Show" },
+                        match block.side {
+                            Side::Received => format!("from {}", block.peer.1),
+                            Side::Delegated => format!("sent to {}", block.peer.1),
+                        }
+                    ))
+                    .label(if task_open { "Hide task" } else { "Show task" })
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        let Some(view) = app.view.as_mut() else {
+                            return;
+                        };
+                        if !view.expanded_events.remove(&id) {
+                            view.expanded_events.insert(id);
+                            // What the owner opened stays open once its ask settles.
+                            view.exchange_folds.insert(id, Fold::Open);
+                        }
+                        app.refold_exchange(id, window, cx);
+                    })),
+            );
         if task_open {
             let task = block.task();
             let from = match block.side {
@@ -823,7 +944,7 @@ impl ElseApp {
             .iter()
             .any(|reply| excerpt(&reply.text).is_some());
         let full = reply_ids.iter().all(|id| view.full_replies.contains(id));
-        let by_hand = !block.opens();
+        let by_hand = default == Fold::Folded;
         if cut || by_hand {
             let less = by_hand || full;
             body = body.child(
@@ -839,18 +960,19 @@ impl ElseApp {
                     })
                     .label(if less { "Show less" } else { "Show more" })
                     .on_click(cx.listener(move |app, _, window, cx| {
+                        if by_hand {
+                            app.fold_exchange(id, Fold::Folded, window, cx);
+                            return;
+                        }
                         let Some(view) = app.view.as_mut() else {
                             return;
                         };
-                        if by_hand {
-                            view.opened_exchanges.remove(&id);
-                        }
                         if less {
                             for reply in &reply_ids {
                                 view.full_replies.remove(reply);
                             }
                         } else {
-                            view.opened_exchanges.insert(id);
+                            view.exchange_folds.insert(id, Fold::Open);
                             view.full_replies.extend(reply_ids.iter().copied());
                         }
                         app.refold_exchange(id, window, cx);
@@ -872,6 +994,32 @@ impl ElseApp {
             .child(body)
             .into_any_element()
     }
+}
+
+/// Brings the just-unfolded exchange `item`, laid out at `exchange` in
+/// the `column` of row `ix`, to the top of the transcript, as high as the
+/// list scrolls, unless the whole exchange already shows. The list scrolls
+/// after this frame: an autoscroll inside it would lay the row out twice
+/// in one frame.
+fn land(
+    column: Div,
+    item: Uuid,
+    ix: usize,
+    exchange: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    app: WeakEntity<ElseApp>,
+) -> Div {
+    column.on_prepaint(move |column, window, cx| {
+        let Some(exchange) = exchange.get() else {
+            return;
+        };
+        let viewport = window.content_mask().bounds;
+        let fits = exchange.top() >= viewport.top() + super::view::TRANSCRIPT_FADE
+            && exchange.bottom() <= viewport.bottom() - super::view::TRANSCRIPT_FADE;
+        let offset = (!fits).then(|| exchange.top() - column.top());
+        window.defer(cx, move |window, cx| {
+            let _ = app.update(cx, |app, _| app.landed(item, ix, offset, window));
+        });
+    })
 }
 
 impl ElseApp {
@@ -960,7 +1108,7 @@ impl ElseApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivityStatus, Block, Side, block_status, excerpt, excerpt_message, exchange_asks,
+        ActivityStatus, Block, Fold, Side, block_status, excerpt, excerpt_message, exchange_asks,
         task_title,
     };
     use crate::attachments::{Attachment, MessagePart};
@@ -1061,7 +1209,11 @@ mod tests {
         assert_eq!(block.side, Side::Received);
         assert_eq!(block.peer.1, "Marketing");
         assert_eq!(block.status, ActivityStatus::Stopped);
-        assert!(block.opens(), "a stopped task shows what it wrote");
+        assert_eq!(
+            block.fold(),
+            Fold::Open,
+            "a stopped task shows what it wrote"
+        );
         assert_eq!(block.task(), "Draft");
         assert_eq!(
             block.replies.iter().map(|r| r.id).collect::<Vec<_>>(),
@@ -1147,7 +1299,7 @@ mod tests {
             assert_eq!(status_of(&c), expected, "{extra}");
             let block = Block::of(c.item(Uuid::from_u128(1)).unwrap(), &c).unwrap();
             assert_eq!(block.side, Side::Delegated);
-            assert_eq!(block.opens(), opens, "{extra}");
+            assert_eq!(block.fold() == Fold::Open, opens, "{extra}");
         }
     }
 
