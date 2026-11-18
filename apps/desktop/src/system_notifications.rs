@@ -128,40 +128,60 @@ mod linux {
         *notifier(cx).callback.borrow_mut() = Some(Box::new(callback));
     }
 
-    /// The notification server's ID for each tag still showing. Posting a
-    /// tag again replaces that notification instead of adding another.
-    #[derive(Debug, Default)]
-    struct Showing(HashMap<SharedString, u32>);
+    /// What the notification server shows for each tag: its ID, and where on
+    /// the connection the post that got it was answered. Posting a tag again
+    /// replaces that notification instead of adding another.
+    #[derive(Debug)]
+    struct Showing<At> {
+        by_tag: HashMap<SharedString, (u32, At)>,
+    }
 
-    impl Showing {
+    impl<At: Ord + Copy> Default for Showing<At> {
+        fn default() -> Self {
+            Self {
+                by_tag: HashMap::new(),
+            }
+        }
+    }
+
+    impl<At: Ord + Copy> Showing<At> {
         /// The ID a post under `tag` replaces; 0 asks for a new one.
         fn replaces(&self, tag: &str) -> u32 {
-            self.0.get(tag).copied().unwrap_or(0)
+            self.by_tag.get(tag).map_or(0, |(id, _)| *id)
         }
 
-        fn posted(&mut self, tag: SharedString, id: u32) {
-            self.0.insert(tag, id);
+        fn posted(&mut self, tag: SharedString, id: u32, at: At) {
+            self.by_tag.insert(tag, (id, at));
         }
 
         fn take(&mut self, tag: &str) -> Option<u32> {
-            self.0.remove(tag)
+            self.by_tag.remove(tag).map(|(id, _)| id)
         }
 
         fn tag(&self, id: u32) -> Option<&SharedString> {
-            self.0
+            self.by_tag
                 .iter()
-                .find(|(_, shown)| **shown == id)
+                .find(|(_, (shown, _))| *shown == id)
                 .map(|(tag, _)| tag)
         }
 
-        /// The server closed it: the owner dismissed it, or it expired.
-        fn closed(&mut self, id: u32) {
-            self.0.retain(|_, shown| *shown != id);
+        /// The server closed `id`: the owner dismissed it, or it expired. A
+        /// close sent before a later post reused the ID ended the old card,
+        /// not the one now showing.
+        fn closed(&mut self, id: u32, at: At) {
+            self.by_tag
+                .retain(|_, (shown, posted)| *shown != id || *posted > at);
+        }
+
+        /// Another server took over; its IDs mean nothing to the old ones.
+        fn restarted(&mut self) {
+            self.by_tag.clear();
         }
     }
 
     /// Owns the session bus connection and what it has showing. Commands
-    /// and the server's signals are handled in order, one at a time.
+    /// and the server's signals are handled one at a time, the signals in the
+    /// order the server sent them, so a click is routed before its close.
     async fn post(
         mut commands: mpsc::Receiver<Command>,
         opened: mpsc::Sender<SharedString>,
@@ -174,8 +194,8 @@ mod linux {
             "org.freedesktop.Notifications",
         )
         .await?;
-        let mut invoked = server.receive_signal("ActionInvoked").await?;
-        let mut closed = server.receive_signal("NotificationClosed").await?;
+        let mut signals = server.receive_all_signals().await?;
+        let mut owners = server.receive_owner_changed().await?;
         let mut showing = Showing::default();
         loop {
             tokio::select! {
@@ -193,33 +213,43 @@ mod linux {
                             hints,
                             -1i32,
                         );
-                        match server.call::<_, _, u32>("Notify", &body).await {
-                            Ok(id) => showing.posted(notification.tag, id),
+                        let reply = server.call_method("Notify", &body).await;
+                        match reply.and_then(|reply| Ok((reply.body().deserialize::<u32>()?, reply))) {
+                            Ok((id, reply)) => {
+                                showing.posted(notification.tag, id, reply.recv_position())
+                            }
                             Err(error) => eprintln!("failed to show system notification: {error}"),
                         }
                     }
                     Some(Command::Dismiss(tag)) => {
                         if let Some(id) = showing.take(&tag)
-                            && let Err(error) = server.call::<_, _, ()>("CloseNotification", &id).await
+                            && let Err(error) = server.call_method("CloseNotification", &id).await
                         {
                             eprintln!("failed to close system notification: {error}");
                         }
                     }
                     None => return Ok(()),
                 },
-                Some(signal) = invoked.next() => {
-                    if let Ok((id, action)) = signal.body().deserialize::<(u32, String)>()
-                        && action == OPEN
-                        && let Some(tag) = showing.tag(id)
-                    {
-                        let _ = opened.try_send(tag.clone());
+                Some(signal) = signals.next() => {
+                    let body = signal.body();
+                    match signal.header().member().map(|member| member.as_str()) {
+                        Some("ActionInvoked") => {
+                            if let Ok((id, action)) = body.deserialize::<(u32, String)>()
+                                && action == OPEN
+                                && let Some(tag) = showing.tag(id)
+                            {
+                                let _ = opened.try_send(tag.clone());
+                            }
+                        }
+                        Some("NotificationClosed") => {
+                            if let Ok((id, _reason)) = body.deserialize::<(u32, u32)>() {
+                                showing.closed(id, signal.recv_position());
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                Some(signal) = closed.next() => {
-                    if let Ok((id, _reason)) = signal.body().deserialize::<(u32, u32)>() {
-                        showing.closed(id);
-                    }
-                }
+                Some(_) = owners.next() => showing.restarted(),
             }
         }
     }
@@ -232,17 +262,37 @@ mod linux {
         fn a_tag_posted_again_replaces_its_notification_until_it_closes() {
             let mut showing = Showing::default();
             assert_eq!(showing.replaces("bot-a"), 0);
-            showing.posted("bot-a".into(), 7);
-            showing.posted("bot-b".into(), 8);
+            showing.posted("bot-a".into(), 7, 1);
+            showing.posted("bot-b".into(), 8, 2);
             assert_eq!(showing.replaces("bot-a"), 7);
             assert_eq!(showing.tag(8).map(AsRef::as_ref), Some("bot-b"));
 
-            showing.closed(7);
+            showing.closed(7, 3);
             assert_eq!(showing.replaces("bot-a"), 0, "closed by the owner");
             assert_eq!(showing.tag(7), None);
 
             assert_eq!(showing.take("bot-b"), Some(8));
             assert_eq!(showing.take("bot-b"), None, "taken down once");
+        }
+
+        #[test]
+        fn a_close_sent_before_a_replacement_keeps_the_replacement() {
+            let mut showing = Showing::default();
+            showing.posted("bot-a".into(), 7, 1);
+            // The old card expired while the server handled the replacement,
+            // which kept its ID.
+            showing.posted("bot-a".into(), 7, 3);
+            showing.closed(7, 2);
+            assert_eq!(showing.replaces("bot-a"), 7);
+        }
+
+        #[test]
+        fn a_new_server_forgets_the_old_servers_notifications() {
+            let mut showing = Showing::default();
+            showing.posted("bot-a".into(), 1, 1);
+            showing.restarted();
+            assert_eq!(showing.replaces("bot-a"), 0);
+            assert_eq!(showing.tag(1), None, "ID 1 is another app's now");
         }
     }
 }
