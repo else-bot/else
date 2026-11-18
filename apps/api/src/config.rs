@@ -530,7 +530,7 @@ pub mod tests {
     #[test]
     fn defaults_bind_loopback() {
         let config = Config::load(&MapSource::new(&[("HOME", "/home/x")])).unwrap();
-        assert_eq!(config.bind.to_string(), DEFAULT_BIND);
+        assert_eq!(config.bind.to_string(), "127.0.0.1:7879");
         assert_eq!(config.data_dir, PathBuf::from("/home/x/.else"));
         assert_eq!(config.owner_token_file, config.data_dir.join("owner-token"));
         assert_eq!(config.bots_dir, PathBuf::from("/home/x/.else/projects"));

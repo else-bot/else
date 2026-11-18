@@ -1015,8 +1015,12 @@ async fn files_reach_codex_in_order_with_images_as_local_images() {
     assert_eq!(outcome, TurnOutcome::Completed);
 
     let project = dir.path().join(bot_id.to_string());
-    let staged =
-        |f: &InputFile| project.join(super::super::attachments::relative_path(&f.attachment));
+    let staged = |f: &InputFile| {
+        project
+            .join(".attachments")
+            .join(f.attachment.id.to_string())
+            .join(&f.attachment.name)
+    };
     assert_eq!(std::fs::read(staged(&image)).unwrap(), b"\x89PNG fake");
     assert_eq!(std::fs::read(staged(&notes)).unwrap(), b"line one\n");
     let sent: Value = serde_json::from_str(
@@ -1039,7 +1043,10 @@ async fn files_reach_codex_in_order_with_images_as_local_images() {
     assert!(context.starts_with("[else.bot bot registry]"));
     assert_eq!(
         message,
-        format!("Compare {}", prompt::file_reference(&image.attachment))
+        format!(
+            "Compare [File: shot.png (image/png, 9 bytes), saved at .attachments/{}/shot.png]",
+            image.attachment.id
+        )
     );
     assert_eq!(sent[1]["type"], "localImage");
     assert_eq!(
@@ -1048,7 +1055,10 @@ async fn files_reach_codex_in_order_with_images_as_local_images() {
     );
     assert_eq!(
         sent[2],
-        json!({ "type": "text", "text": format!(" with\n  {}", prompt::file_reference(&notes.attachment)) })
+        json!({ "type": "text", "text": format!(
+            " with\n  [File: notes.txt (text/plain, 9 bytes), saved at .attachments/{}/notes.txt]",
+            notes.attachment.id
+        ) })
     );
     assert_eq!(sent.as_array().unwrap().len(), 3);
 }
