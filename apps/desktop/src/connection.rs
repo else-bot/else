@@ -996,8 +996,13 @@ impl Render for Shell {
         let Some(active) = &self.active else {
             return root;
         };
+        // A pending server switch or the quick switcher owns the keys.
+        let commands = self.switch_attempt.is_none()
+            && self.switcher.is_none()
+            && active.app.read(cx).takes_commands(cx);
         // macOS draws its traffic lights over a title bar the app owns.
-        root.track_focus(&self.settings_focus)
+        root.when(commands, |root| crate::app::on_commands(root, &active.app))
+            .track_focus(&self.settings_focus)
             .when(cfg!(target_os = "macos"), |root| {
                 root.child(TitleBar::new())
             })

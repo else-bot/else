@@ -1,9 +1,9 @@
 use super::layout::{CategoryDrag, SidebarEdge};
 use super::mentions::{MentionAction, mention_keys};
 use super::{
-    APP_CONTEXT, COMPOSER_CONTEXT, CiteSelection, Connection, DeleteBot, ElseApp,
-    FindInConversation, FocusComposer, FocusSidebar, LoadOlder, MoveBot, NewBot, NewCategory,
-    SIDEBAR_CONTEXT, SelectNext, SelectPrev, StopWork, TakeOverComputer, ToggleSettings,
+    APP_CONTEXT, COMPOSER_CONTEXT, Connection, ElseApp, FindInConversation, FocusComposer,
+    FocusSidebar, NewBot, NewCategory, SIDEBAR_CONTEXT, SelectNext, SelectPrev, StopWork,
+    ToggleSettings,
 };
 use crate::ambient::looping;
 use crate::api::Bot;
@@ -1165,7 +1165,6 @@ impl Render for ElseApp {
         let theme = cx.theme();
         h_flex()
             .relative()
-            .key_context(APP_CONTEXT)
             .on_action(cx.listener(|app, _: &FocusComposer, window, cx| {
                 if app.selected.is_some() {
                     app.composer.read(cx).focus_handle(cx).focus(window, cx);
@@ -1174,44 +1173,6 @@ impl Render for ElseApp {
             .on_action(cx.listener(|app, _: &FocusSidebar, window, cx| {
                 app.sidebar_focus.focus(window, cx);
             }))
-            .on_action(cx.listener(|app, _: &NewBot, window, cx| {
-                if app.connection == Connection::Connected {
-                    app.open_create_dialog(window, cx);
-                }
-            }))
-            .on_action(cx.listener(|app, _: &TakeOverComputer, window, cx| {
-                app.take_over_computer(window, cx);
-            }))
-            .on_action(cx.listener(|app, _: &StopWork, window, cx| {
-                if app.selected_bot().is_some_and(|b| b.is_active()) {
-                    app.stop_work(window, cx);
-                }
-            }))
-            .on_action(cx.listener(|app, _: &DeleteBot, window, cx| {
-                if let Some(id) = app.selected {
-                    app.open_delete_dialog(id, window, cx);
-                }
-            }))
-            .on_action(cx.listener(|app, _: &LoadOlder, window, cx| app.load_older(window, cx)))
-            .on_action(
-                cx.listener(|app, _: &FindInConversation, window, cx| app.open_find(window, cx)),
-            )
-            .on_action(cx.listener(|app, _: &NewCategory, window, cx| {
-                if app.connection == Connection::Connected {
-                    app.open_category_dialog(None, window, cx);
-                }
-            }))
-            .on_action(cx.listener(|app, _: &MoveBot, window, cx| {
-                if app.connection == Connection::Connected {
-                    app.open_move_dialog(window, cx);
-                }
-            }))
-            .on_action(
-                cx.listener(|app, _: &ToggleSettings, window, cx| app.toggle_settings(window, cx)),
-            )
-            .on_action(
-                cx.listener(|app, _: &CiteSelection, window, cx| app.cite_selection(window, cx)),
-            )
             .capture_any_mouse_down(cx.listener(|app, event: &MouseDownEvent, _, _| {
                 if event.button == MouseButton::Left {
                     app.quote_press = Some(event.position);

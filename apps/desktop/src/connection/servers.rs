@@ -801,15 +801,19 @@ impl Shell {
                 verify(saved.profile.clone(), client).await
             };
             let _ = this.update_in(cx, |shell, window, cx| {
-                if shell.switch_attempt != Some(attempt)
-                    || !shell
-                        .registry
-                        .find(id)
-                        .is_some_and(|s| s.profile == saved.profile)
-                {
+                if shell.switch_attempt != Some(attempt) {
                     return;
                 }
                 shell.switch_attempt = None;
+                if !shell
+                    .registry
+                    .find(id)
+                    .is_some_and(|s| s.profile == saved.profile)
+                {
+                    shell.arrival = None;
+                    cx.notify();
+                    return;
+                }
                 let verified = match outcome {
                     Ok(verified) => verified,
                     Err(err) => {
