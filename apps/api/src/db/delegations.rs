@@ -1233,12 +1233,31 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
 #[cfg(test)]
 mod ready_tests {
     /// The `turns_continuable` view spells [`super::READY`] out in SQL;
-    /// keep the two the same rule.
+    /// keep the two the same rule. Later migrations recreate the view, so
+    /// compare against the newest definition.
     #[test]
     fn the_continuable_view_uses_the_ready_rule() {
         let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let view = words(include_str!("../../migrations/0065_waits_never_block.sql"));
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut migrations: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "sql"))
+            .collect();
+        migrations.sort();
+        let (path, sql) = migrations
+            .iter()
+            .rev()
+            .map(|path| (path, std::fs::read_to_string(path).unwrap()))
+            .find(|(_, sql)| sql.contains("CREATE VIEW turns_continuable"))
+            .expect("a migration creates turns_continuable");
+        let view = sql.split("CREATE VIEW turns_continuable").nth(1).unwrap();
+        let view = words(view.split(';').next().unwrap());
         let ready = words(super::READY);
-        assert!(view.contains(&ready), "{ready}");
+        assert!(
+            view.contains(&ready),
+            "{} drifted from READY",
+            path.display()
+        );
     }
 }
