@@ -46,7 +46,7 @@ async fn the_owner_sets_the_icon_every_desktop_shows_and_restart_keeps() {
         .unwrap();
     assert_eq!(
         digest,
-        else_api::app::server_icon::digest(&bytes),
+        hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes)),
         "the digest is the picture's SHA-256"
     );
     assert_eq!(

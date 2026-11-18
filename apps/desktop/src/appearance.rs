@@ -810,14 +810,7 @@ mod tests {
         assert_eq!(config.shadow, Some(true));
         let colors = &config.colors;
         assert_eq!(colors.border.as_deref(), Some("#ededf021"));
-        assert_eq!(
-            colors.primary.as_deref(),
-            Some(
-                accent_fill(QUIET_DARK.accent, ThemeMode::Dark)
-                    .hex()
-                    .as_str()
-            )
-        );
+        assert_eq!(colors.primary.as_deref(), Some("#0d6ff2"));
         assert_eq!(colors.sidebar.as_deref(), Some("#28282b"));
         assert_eq!(colors.list_active.as_deref(), Some("#353537"));
     }

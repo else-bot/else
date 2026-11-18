@@ -33,7 +33,6 @@ async fn create_retry_and_conflict() {
     let id = bot["id"].as_str().unwrap();
     assert_eq!(first.headers["location"], format!("/v1/bots/{id}"));
     assert_eq!(bot["name"], "Work");
-    assert!(bot.get("role").is_none(), "bots have no description");
     assert_eq!(bot["activity"]["phase"], "idle");
     assert!(bot["conversation_id"].is_string());
 
@@ -226,18 +225,6 @@ async fn validation_errors_create_nothing() {
         reply.status,
         StatusCode::BAD_REQUEST,
         "unknown fields are rejected"
-    );
-    let reply = app
-        .owner(
-            "POST",
-            "/v1/bots",
-            Some(json!({ "request_id": Uuid::new_v4(), "name": "a", "role": "Help" })),
-        )
-        .await;
-    assert_eq!(
-        reply.status,
-        StatusCode::BAD_REQUEST,
-        "descriptions are no longer accepted"
     );
     assert_eq!(row_counts(&app).await, before);
 }

@@ -1136,11 +1136,13 @@ mod tests {
         assert!(err.contains("unencrypted"), "{err}");
         let err = prepare(origin.as_str(), "short").err().unwrap();
         assert!(err.contains("malformed"), "{err}");
-        let before = draft.revision;
+        let pending = draft.begin();
         draft.fail(err);
         assert!(
-            draft.revision > before,
+            !draft.progress(pending, Phase::Waiting),
             "a failure also ends older attempts"
         );
+        assert!(draft.finish(pending, Err("late".into())).is_none());
+        assert!(matches!(&draft.check, Check::Failed(e) if e.contains("malformed")));
     }
 }

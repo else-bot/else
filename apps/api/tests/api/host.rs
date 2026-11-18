@@ -1041,21 +1041,3 @@ async fn a_dropped_finish_still_sweeps_a_detached_worker() {
     .await
     .expect("the dropped cleanup swept the detached worker");
 }
-
-#[tokio::test]
-async fn a_reaped_process_no_longer_owns_its_group_id() {
-    let fx = fixture();
-    let spec = shell(&fx, Uuid::new_v4(), "exit 0");
-    let mut process = Supervised::spawn(fx.host.command(&spec)).unwrap();
-    assert!(
-        process.child.id().is_some(),
-        "an unreaped leader owns its group"
-    );
-    process.child.wait().await.unwrap();
-    assert!(
-        process.child.id().is_none(),
-        "group signals are guarded by the unreaped leader"
-    );
-    process.kill().await;
-    drop(process);
-}

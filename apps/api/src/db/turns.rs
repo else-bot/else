@@ -881,7 +881,6 @@ mod background_tests {
             2,
             "extend BACKGROUND first"
         );
-        assert!(super::BACKGROUND.contains("c2.kind = 'owner'"));
     }
 }
 

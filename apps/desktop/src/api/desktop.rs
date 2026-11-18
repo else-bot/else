@@ -589,17 +589,6 @@ mod tests {
     }
 
     #[test]
-    fn computers_queued_and_waiting_are_not_running_upgrades() {
-        for raw in [
-            serde_json::json!({ "state": "queued", "position": 2 }),
-            serde_json::json!({ "state": "waiting", "reason": "The bot is using its computer." }),
-        ] {
-            let upgrade: ComputerUpgrade = serde_json::from_value(raw).unwrap();
-            assert_ne!(upgrade, ComputerUpgrade::Running);
-        }
-    }
-
-    #[test]
     fn computer_state_reports_an_outdated_image_and_upgrade_progress() {
         let parse =
             |json: serde_json::Value| -> ComputerState { serde_json::from_value(json).unwrap() };

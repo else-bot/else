@@ -421,10 +421,12 @@ async fn owner_message_reaches_the_task_with_its_files(updated: bool) {
         .find(|file| file.attachment.name == "whale.png")
         .expect("the task's file is staged for it");
     assert_eq!(*staged.data, *card);
-    let path = else_api::providers::attachments::relative_path(&staged.attachment);
     let packet = else_api::providers::prompt::packet(given, 0);
     assert!(
-        packet.contains(&format!("saved at {}", path.display())),
+        packet.contains(&format!(
+            "saved at .attachments/{}/whale.png",
+            staged.attachment.id
+        )),
         "{packet}"
     );
     let packet = else_api::providers::prompt::packet(task, 0);

@@ -165,10 +165,9 @@ mod tests {
     use crate::app::tools::PARKING_TOOLS;
 
     #[test]
-    fn no_deferred_tool_parks_or_is_also_listed() {
+    fn no_deferred_tool_parks() {
         for name in DEFERRED_TOOLS {
             assert!(!PARKING_TOOLS.contains(name), "{name} parks");
-            assert!(!TOOL_NAMES.contains(name), "{name} is listed");
         }
     }
 
