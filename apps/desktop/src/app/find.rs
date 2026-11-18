@@ -8,6 +8,7 @@ use crate::controls::{Control as _, Scale, Tier, text_field};
 use crate::model::SearchHit;
 use else_plain_text::find::Needle;
 use gpui_kit::assets::IconName;
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::base::input::InputEvent;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -27,6 +28,9 @@ const GAP_PAGE: i64 = 50;
 pub(super) struct Find {
     input: Entity<InputState>,
     phase: Phase,
+    /// The row to bring near the middle of the list once it is laid out,
+    /// and how far below the list's top to put it.
+    centering: Option<(usize, Pixels)>,
     _input: Subscription,
     _search: Option<Task<()>>,
     _window: Option<Task<()>>,
@@ -111,6 +115,7 @@ impl ElseApp {
                 view.find = Some(Find {
                     input: input.clone(),
                     phase: Phase::Empty,
+                    centering: None,
                     _input: subscription,
                     _search: None,
                     _window: None,
@@ -260,12 +265,16 @@ impl ElseApp {
 
     fn land_on(&mut self, item: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self.unfold_item(item, window, cx)
-            && let Some(view) = self.view.as_ref()
+            && let Some(view) = self.view.as_mut()
         {
             view.list.scroll_to(ListOffset {
                 item_ix: ix,
                 offset_in_item: px(0.),
             });
+            let lead = view.list.viewport_bounds().size.height * 0.4;
+            if let Some(find) = view.find.as_mut() {
+                find.centering = Some((ix, lead));
+            }
         }
         self.paint_quotes(cx);
         cx.notify();
@@ -338,6 +347,34 @@ impl ElseApp {
                     ),
             )
             .into_any_element()
+    }
+
+    /// Wraps row `ix` so that, the first time it is laid out as the row to
+    /// center, the list scrolls it about 40% down the viewport. The list
+    /// measures the rows above it as it walks back.
+    pub(super) fn center_row(&self, ix: usize, row: Div, cx: &mut Context<Self>) -> Div {
+        let Some((_, lead)) = self
+            .view
+            .as_ref()
+            .and_then(|view| view.find.as_ref()?.centering)
+            .filter(|(row, _)| *row == ix)
+        else {
+            return row;
+        };
+        let owner = cx.entity().downgrade();
+        row.on_prepaint(move |bounds, window, cx| {
+            window.request_autoscroll(Bounds::new(
+                point(bounds.origin.x, bounds.origin.y - lead),
+                size(bounds.size.width, px(1.)),
+            ));
+            window.defer(cx, move |_, cx| {
+                let _ = owner.update(cx, |app, _| {
+                    if let Some(find) = app.view.as_mut().and_then(|view| view.find.as_mut()) {
+                        find.centering.take_if(|(row, _)| *row == ix);
+                    }
+                });
+            });
+        })
     }
 
     pub(super) fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {

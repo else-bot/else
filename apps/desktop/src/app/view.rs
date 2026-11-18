@@ -745,12 +745,12 @@ impl ElseApp {
                         list(
                             view.list.clone(),
                             cx.processor(|app, ix, window, cx| {
-                                h_flex()
+                                let row = h_flex()
                                     .w_full()
                                     .min_w_0()
                                     .justify_center()
-                                    .child(app.render_row(ix, window, cx))
-                                    .into_any_element()
+                                    .child(app.render_row(ix, window, cx));
+                                app.center_row(ix, row, cx).into_any_element()
                             }),
                         )
                         .size_full()
