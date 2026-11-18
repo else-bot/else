@@ -809,12 +809,12 @@ async fn a_message_to_a_parked_attempt_runs_now_and_the_wait_still_reports() {
 async fn a_parked_attempt_takes_no_owner_message() {
     let (db, bot, first) = setup_running().await;
     let pool = &db.pool;
-    let steers = else_api::db::steers::sending;
+    let sending = else_api::db::steers::sending;
     let (before, _) = accept(pool, bot, "Use the staging key.").await;
     let (in_flight, _) = accept(pool, bot, "Also file the flaky test issue.").await;
     let (after, _) = accept(pool, bot, "And tag the release.").await;
     for turn in [before, in_flight] {
-        assert!(steers(pool, turn, first).await.unwrap());
+        assert!(sending(pool, turn, first).await.unwrap());
     }
     assert!(
         else_api::db::steers::deliver(pool, before, first)
@@ -833,7 +833,7 @@ async fn a_parked_attempt_takes_no_owner_message() {
     .unwrap();
 
     assert!(
-        !steers(pool, after, first).await.unwrap(),
+        !sending(pool, after, first).await.unwrap(),
         "nothing is written into a parked attempt"
     );
     assert!(
