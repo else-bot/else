@@ -410,7 +410,11 @@ mod tests {
         assert_eq!(upgrades.retry(a), None, "a bot is retried once per round");
         upgrades.end(a, Ended::Upgraded);
         assert_eq!(upgrades.next(), Step::Finished);
-        assert_eq!(upgrades.worker, Worker::Idle);
+        assert_eq!(
+            upgrades.enqueue(vec![a]),
+            (vec![a], true),
+            "a finished worker lets the next upgrade start one"
+        );
     }
 
     #[test]

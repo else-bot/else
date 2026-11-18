@@ -27,6 +27,7 @@
 - Delete a test that no code change can make fail: one that asserts what the type system or compiler already guarantees, asserts a mock standing in for the unit under test, or re-tests a dependency's own behavior.
 - Delete or rewrite a test that breaks on refactors without a behavior change: one that asserts private fields, internal call order, or which helper ran.
 - Write expected values as literals; never compute them with the same logic as the code under test.
+- When a test asserts internals but also covers behavior callers rely on, rewrite it against that public behavior instead of deleting it.
 - Add each offline else-api integration test file as a module in `apps/api/tests/api/` and declare it in its `main.rs`, so all of them link into one `api` binary; keep `*_live`, `replication`, and tests that arm `else_api::faults` (`backup`, `recovery`) as their own files in `apps/api/tests/`, because fault points are process-global.
 - On Linux, run focused tests with `scripts/dev.py test --test api -- MODULE::`; read the printed `.else-dev/tests/` results before repeating a run after a restart.
 - Fetch `origin/main` before adding a migration in `apps/api/migrations`, choose the next contiguous `NNNN_` prefix, and run `python3 scripts/check_migrations.py` after rebasing; never renumber a shipped migration.
