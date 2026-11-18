@@ -13,8 +13,15 @@ import uuid
 if '--version' in sys.argv:
     print('codex-cli desktop-fixture')
     raise SystemExit(0)
+if sys.argv[1:] == ['debug', 'models']:
+    levels = [{'effort': effort} for effort in ('low', 'medium', 'high', 'xhigh', 'max')]
+    print(json.dumps({'models': [
+        {'slug': slug, 'visibility': 'list', 'priority': priority,
+         'supported_reasoning_levels': levels, 'service_tiers': [{'id': 'priority'}]}
+        for priority, slug in enumerate(('gpt-6.2-sol', 'gpt-6.1-sol', 'gpt-6-luna'))]}))
+    raise SystemExit(0)
 if sys.argv[1:] != ['app-server']:
-    raise SystemExit('fixture accepts --version or app-server only')
+    raise SystemExit('fixture accepts --version, debug models, or app-server only')
 lock = threading.Lock()
 stopped = None
 thread_id = 'desktop-fixture-thread'
@@ -288,6 +295,11 @@ for line in sys.stdin:
         result = {'turn':{'id':turn_id}}
     elif method == 'turn/interrupt':
         pass
+    elif method == 'turn/steer':
+        if params.get('expectedTurnId') != turn_id or stopped is None or stopped.is_set():
+            send({'jsonrpc':'2.0','id':request['id'],'error':{'code':-32600,'message':'no running turn to steer'}})
+            continue
+        result = {'turnId': turn_id}
     elif method != 'initialize':
         send({'jsonrpc':'2.0','id':request['id'],'error':{'code':-32601,'message':'unsupported fixture method '+method}})
         continue
@@ -296,5 +308,10 @@ for line in sys.stdin:
         text = '\n'.join(item.get('text', '') for item in params.get('input', []))
         latest = text.rsplit("Owner's latest message:\n", 1)[-1].strip()
         threading.Thread(target=stream,args=(turn_id, latest, text, stopped),daemon=True).start()
+    elif method == 'turn/steer':
+        item = {'type': 'userMessage', 'id': 'steer-' + params['clientUserMessageId'],
+                'clientId': params['clientUserMessageId']}
+        for name in ('item/started', 'item/completed'):
+            event(name, {'threadId': thread_id, 'turnId': turn_id, 'item': item})
     elif method == 'turn/interrupt':
         finish(params['turnId'], stopped, 'interrupted')

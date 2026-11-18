@@ -3,15 +3,21 @@
 ## Sub-features
 
 - Send once and stream the assistant's UTF-8 reply.
-- Steer an owner conversation with a follow-up, withdrawing pending secret forms.
+- Join a follow-up to an unfinished reply (`turn.steered_into`) instead of
+  stopping it; pending owner questions and computer handoffs are skipped,
+  but secret forms stay pending.
 - Retry an unconfirmed send using its original request UUID.
 - Stop a running turn and wait for the cancellation receipt to finish.
 - Reconnect or restart without duplicated history.
 
 ## How to get to it (user POV)
 
-Select a bot, type in the composer and press Enter. Use Retry on an unconfirmed
-message, and Stop work or Ctrl+Shift+X for a running turn.
+Select a bot, type in the composer and press Enter. While a reply streams,
+it shows as a collapsed row ("{first words} · {seconds} · N updates"); a
+second message sent meanwhile joins it. Use **Retry** on an unconfirmed
+message. Stop a running reply with the composer's square stop button or
+Ctrl+Shift+X (Cmd+Shift+X on macOS); the reply then reads **Stopped**.
+Stop ends generation only; jobs and tasks keep their own stop rows.
 
 ## Driving it with verify-else
 
@@ -23,21 +29,28 @@ running, and retries one cancellation UUID until its receipt is `done` and
 the turn is `interrupted`. It restarts the real API against the same data and
 compares saved items/turns, including a changed process-bound event cursor.
 
-Run `verify.py --tests turns cancel ws` for steering, replay and socket behavior.
-The `ws` target starts real loopback WebSockets, but does not render GPUI.
+Run `verify.py --tests turns steering cancel ws` for joining, replay, stop
+receipts and socket behavior. The `ws` target starts real loopback
+WebSockets, but does not render GPUI.
 
 For native proof, use `--fixture-provider` with the private session in the
 [native desktop guide](../native-desktop.md). It supplies an offline Codex
 protocol fixture for actual composer input. Without that flag, the session's
-saved Codex provider is unavailable. The API driver always
-names Synthetic explicitly. If the UI cannot select it, record that missing
-precondition rather than starting a paid provider. For every native
-run, capture composer submission, visible intermediate chunks, Stop work,
-and the final persisted conversation through the probe.
+saved Codex provider is unavailable. The desktop never names a provider, so
+`[synthetic:*]` markers do nothing from the composer; use the fixture's
+`[ui:slow]` (one chunk every 4 s) and `[ui:hang]`. For every native run,
+capture composer submission, the streaming row, Ctrl+Shift+X, the
+**Stopped** reply, and the persisted conversation through the probe.
+
+To prove joining natively, send `[ui:slow]`, then type a follow-up and press
+Enter while the reply still streams. Both messages appear above one reply,
+and the probe shows the second turn's `steered_into` equal to the first.
+The fixture accepts `turn/steer` and echoes the message like Codex does.
 
 ## Gotchas
 
-- `keys` success is not proof a send landed. Confirm an item and turn ID.
+- `keys` success is not proof a send landed. Confirm the bubble left the
+  composer and the probe shows an item and turn ID before sending again.
 - Cancellation uses a fresh UUID once; reuse it when polling the receipt.
-- Synthetic is the production development-provider boundary, not model quality
-  or a proof of authenticated Codex/Claude continuation.
+- Synthetic and the fixture prove the production protocol boundaries, not
+  model quality or authenticated Codex/Claude continuation.
