@@ -139,7 +139,7 @@ impl MessageVisuals {
                 let result = match rendered {
                     Ok(rendered) => {
                         cx.background_executor()
-                            .spawn(async move { picture(rendered) })
+                            .spawn(async move { picture(rendered, else_visual::MAX_HEIGHT) })
                             .await
                     }
                     Err(error) => Err(error.to_string()),
@@ -167,8 +167,12 @@ impl MessageVisuals {
     }
 }
 
-fn picture(rendered: else_visual::Rendered) -> Result<(Arc<RenderImage>, u32), String> {
-    let height = rendered.content_height.min(else_visual::MAX_HEIGHT);
+/// The render as an image, and its height in CSS pixels up to `max_height`.
+pub(super) fn picture(
+    rendered: else_visual::Rendered,
+    max_height: u32,
+) -> Result<(Arc<RenderImage>, u32), String> {
+    let height = rendered.content_height.min(max_height);
     let mut bgra = image::RgbaImage::from_raw(rendered.width, rendered.height, rendered.rgba)
         .ok_or("The render has the wrong size.")?;
     for pixel in bgra.as_chunks_mut::<4>().0 {

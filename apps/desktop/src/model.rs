@@ -595,6 +595,9 @@ pub struct Turn {
     pub questions: Vec<Question>,
     #[serde(default)]
     pub routine: Option<RoutineRun>,
+    /// The emails whose arrival started this turn. Absent from older servers.
+    #[serde(default)]
+    pub mail: Vec<TurnMail>,
     #[serde(default)]
     pub outgoing_drafts: Vec<OutgoingDraft>,
     #[serde(default)]
@@ -613,6 +616,13 @@ pub struct Turn {
     pub computer_handoffs: Vec<ComputerHandoff>,
     #[serde(default)]
     pub owner_notices: Vec<OwnerNotice>,
+}
+
+/// An email that started a turn, which the owner can open in the reader.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TurnMail {
+    pub account_id: Uuid,
+    pub message: crate::api::MessageRef,
 }
 
 /// A job in an installed MCP that a waiting turn rechecks until it ends.

@@ -337,6 +337,13 @@ impl ElseApp {
                 let card = card(text, user).id(SharedString::from(format!("message-{id}")));
                 if !user
                     && run.first
+                    && let Some(banner) =
+                        turn.and_then(|turn| super::email_reader::mail_banner(turn, cx))
+                {
+                    column = column.child(banner);
+                }
+                if !user
+                    && run.first
                     && turn.and_then(|t| t.routine.as_ref()).is_none()
                     && let Some(bot) = self.bots.iter().find(|b| b.id == view.bot_id)
                 {

@@ -47,6 +47,75 @@ pub struct AppPasswordHelp {
     pub url: &'static str,
 }
 
+/// Where a message lives in a mailbox.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MessageRef {
+    pub folder: String,
+    pub uid_validity: u32,
+    pub uid: u32,
+}
+
+/// An email as the owner's reader shows it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EmailMessage {
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// The sender's Date header, RFC 3339 when it parsed.
+    #[serde(default)]
+    pub date: Option<String>,
+    #[serde(default)]
+    pub received_at: Option<String>,
+    #[serde(default)]
+    pub from: Vec<EmailPerson>,
+    #[serde(default)]
+    pub to: Vec<EmailPerson>,
+    #[serde(default)]
+    pub cc: Vec<EmailPerson>,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub text_truncated: bool,
+    /// The message's own HTML part, when it has one small enough to show.
+    #[serde(default)]
+    pub html: Option<String>,
+    /// Why an HTML part was left out: `too_large`.
+    #[serde(default)]
+    pub html_omitted: Option<String>,
+    /// The images the HTML part shows from the message itself.
+    #[serde(default)]
+    pub inline: Vec<else_visual::email::Inline>,
+    #[serde(default)]
+    pub attachments: Vec<EmailAttachment>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EmailPerson {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub address: Option<String>,
+}
+
+impl EmailPerson {
+    /// `Name <address>`, or whichever of the two the header has.
+    pub fn label(&self) -> String {
+        match (self.name.as_deref(), self.address.as_deref()) {
+            (Some(name), Some(address)) if !name.is_empty() => format!("{name} <{address}>"),
+            (_, Some(address)) => address.to_owned(),
+            (Some(name), None) => name.to_owned(),
+            (None, None) => String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EmailAttachment {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub media_type: String,
+    pub size: u64,
+}
+
 /// A bot's trigger on an inbox: whether new mail wakes it, and what to do
 /// then. A trigger the inbox sign-in card turned on has no instructions.
 #[derive(Debug, Clone, Deserialize)]
@@ -136,6 +205,27 @@ impl Client {
                 )
                 .await;
         });
+    }
+
+    /// One message for the owner's reader, fetched with the inbox's saved
+    /// sign-in. It stays unread on the server.
+    pub async fn view_email(
+        self: Arc<Self>,
+        account: Uuid,
+        message: MessageRef,
+    ) -> Result<EmailMessage, ClientError> {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("folder", &message.folder)
+            .append_pair("uid_validity", &message.uid_validity.to_string())
+            .append_pair("uid", &message.uid.to_string())
+            .finish();
+        self.call::<EmailMessage>(
+            Method::GET,
+            format!("/v1/connectors/email/accounts/{account}/messages?{query}"),
+            None,
+        )
+        .await
+        .map(|(_, body)| body)
     }
 
     pub async fn email_accounts(self: Arc<Self>) -> Result<Vec<EmailAccount>, ClientError> {
