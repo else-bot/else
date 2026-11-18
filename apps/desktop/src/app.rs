@@ -92,7 +92,10 @@ actions!(
 
 const SIDEBAR_CONTEXT: &str = "Sidebar";
 const COMPOSER_CONTEXT: &str = "Composer";
-const APP_CONTEXT: &str = "ElseApp";
+/// App commands bind at the shell, which runs them on the active app (see
+/// `on_commands`), so they resolve when focus rests on the shell's own
+/// elements, such as the server rail, or the shell root after Settings closes.
+const APP_CONTEXT: &str = crate::connection::SHELL_CONTEXT;
 
 /// The platform's command modifier: Cmd on macOS, Ctrl elsewhere.
 /// `KeyBinding::new` needs the literal modifier.
@@ -206,6 +209,57 @@ pub fn install_menus(cx: &mut App) {
             MenuItem::action("Close Window", CloseWindow),
         ]),
     ]);
+}
+
+/// Runs the app commands from a shell element on `app`.
+pub(crate) fn on_commands<E: InteractiveElement>(element: E, app: &Entity<ElseApp>) -> E {
+    fn on<A: Action, E: InteractiveElement>(
+        element: E,
+        app: &Entity<ElseApp>,
+        run: fn(&mut ElseApp, &mut Window, &mut Context<ElseApp>),
+    ) -> E {
+        let app = app.downgrade();
+        element.on_action(move |_: &A, window, cx| {
+            let _ = app.update(cx, |app, cx| run(app, window, cx));
+        })
+    }
+    let element = on::<NewBot, _>(element, app, |app, window, cx| {
+        if app.connection == Connection::Connected {
+            app.open_create_dialog(window, cx);
+        }
+    });
+    let element = on::<TakeOverComputer, _>(element, app, |app, window, cx| {
+        app.take_over_computer(window, cx)
+    });
+    let element = on::<StopWork, _>(element, app, |app, window, cx| {
+        if app.selected_bot().is_some_and(|b| b.is_active()) {
+            app.stop_work(window, cx);
+        }
+    });
+    let element = on::<DeleteBot, _>(element, app, |app, window, cx| {
+        if let Some(id) = app.selected {
+            app.open_delete_dialog(id, window, cx);
+        }
+    });
+    let element = on::<LoadOlder, _>(element, app, |app, window, cx| app.load_older(window, cx));
+    let element =
+        on::<FindInConversation, _>(element, app, |app, window, cx| app.open_find(window, cx));
+    let element = on::<NewCategory, _>(element, app, |app, window, cx| {
+        if app.connection == Connection::Connected {
+            app.open_category_dialog(None, window, cx);
+        }
+    });
+    let element = on::<MoveBot, _>(element, app, |app, window, cx| {
+        if app.connection == Connection::Connected {
+            app.open_move_dialog(window, cx);
+        }
+    });
+    let element = on::<ToggleSettings, _>(element, app, |app, window, cx| {
+        app.toggle_settings(window, cx)
+    });
+    on::<CiteSelection, _>(element, app, |app, window, cx| {
+        app.cite_selection(window, cx)
+    })
 }
 
 /// Deferred because a key binding dispatches while its window is updating.
@@ -677,6 +731,18 @@ impl ElseApp {
         if !self.hidden {
             self.sidebar_focus.focus(window, cx);
         }
+    }
+
+    /// Whether the conversation view is showing, the one `on_commands`
+    /// acts on. The welcome and expanded Computer views leave the keys to
+    /// their own inputs and the guest.
+    pub(crate) fn takes_commands(&self, cx: &App) -> bool {
+        !self.hidden
+            && self.welcome.is_none()
+            && !self
+                .computer
+                .as_ref()
+                .is_some_and(|view| view.read(cx).expanded)
     }
 
     pub(crate) fn sidebar_focus_handle(&self) -> FocusHandle {
