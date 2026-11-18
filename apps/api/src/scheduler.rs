@@ -552,12 +552,16 @@ fn turn_tools(delegation: &crate::app::providers::DelegationContext) -> Vec<Tool
     if delegation.origin == crate::app::providers::Origin::SocialEvent {
         return vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Social];
     }
+    if delegation.email_task() {
+        return vec![Tool::ReadHistory];
+    }
     if delegation.origin == crate::app::providers::Origin::ConnectorEvent {
         return vec![
             Tool::ReadHistory,
             Tool::ReadMemory,
             Tool::Mail,
             Tool::DraftEmail,
+            Tool::Delegate,
         ];
     }
     let mut tools = vec![

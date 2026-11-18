@@ -401,6 +401,20 @@ pub enum Origin {
     Other,
 }
 
+impl Origin {
+    /// Whether a turn `depth` delegations below its request may hand work
+    /// to another bot. An email turn may pass mail on as the owner's
+    /// standing instructions say, but its task may not hand it further; a
+    /// social event may not delegate at all.
+    pub fn delegates_at(self, depth: u8) -> bool {
+        match self {
+            Origin::SocialEvent => false,
+            Origin::ConnectorEvent => depth == 0,
+            _ => depth < crate::db::delegations::MAX_DEPTH,
+        }
+    }
+}
+
 /// What an attempt knows about delegation, all derived by the server.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DelegationContext {
@@ -453,11 +467,17 @@ impl DelegationContext {
         self.task_depth > 0
     }
 
-    /// A bot's own conversation, or a task above the depth limit, may hand
-    /// work to another bot; work an incoming event started may not.
+    /// Whether this turn may hand work to another bot. See
+    /// [`Origin::delegates_at`].
     pub fn can_delegate(&self) -> bool {
-        self.task_depth < crate::db::delegations::MAX_DEPTH
-            && !matches!(self.origin, Origin::ConnectorEvent | Origin::SocialEvent)
+        self.origin.delegates_at(self.task_depth)
+    }
+
+    /// A task an email turn handed on. Its task text came from email, so it
+    /// works with nothing of its own bot's but the task: no memory or mail
+    /// the email could read back through the reply.
+    pub fn email_task(&self) -> bool {
+        self.origin == Origin::ConnectorEvent && self.delegated_task()
     }
 
     /// Work done for the owner: the bot's own conversation, or a task another

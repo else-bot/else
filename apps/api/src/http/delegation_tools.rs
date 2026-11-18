@@ -55,6 +55,15 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> O
             );
         }
     };
+    if !paths.is_empty() && !grant.allows(crate::grants::Tool::Computer) {
+        return (
+            tool_error(
+                "files are unavailable here: this turn cannot read the project. Put what the \
+                 other bot needs in task.",
+            ),
+            Some("rejected NO_PROJECT".into()),
+        );
+    }
     let files = if paths.is_empty() {
         Vec::new()
     } else {

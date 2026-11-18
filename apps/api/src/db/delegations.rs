@@ -85,7 +85,7 @@ pub const READY: &str = "d.delivered_attempt IS NULL
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DelegateError {
     #[error(
-        "this turn cannot delegate: a task {MAX_DEPTH} hops deep, a council from a task, or an event"
+        "this turn cannot delegate: a task {MAX_DEPTH} hops deep, a council from a task, a social event, or a task an email turn handed on"
     )]
     NotAllowed,
     #[error("a bot cannot delegate to itself")]
@@ -289,14 +289,9 @@ async fn create_in(
         return Err(DelegateError::NotRunning);
     }
     let chain = chain(conn, turn_id).await?;
-    if chain.depth >= MAX_DEPTH
-        || (council && chain.depth > 0)
+    if (council && chain.depth > 0)
         || (kind != "owner" && chain.depth == 0)
-        || matches!(
-            origin(conn, turn_id).await?,
-            crate::app::providers::Origin::ConnectorEvent
-                | crate::app::providers::Origin::SocialEvent
-        )
+        || !origin(conn, turn_id).await?.delegates_at(chain.depth)
     {
         return Err(DelegateError::NotAllowed);
     }

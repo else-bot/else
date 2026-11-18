@@ -1061,7 +1061,7 @@ async fn mail_event(
 }
 
 #[tokio::test]
-async fn mail_event_origin_removes_computer_and_delegation_authority() {
+async fn mail_event_origin_removes_computer_authority() {
     let transport = Arc::new(Transport {
         sends: AtomicUsize::new(0),
         uncertain: false,
@@ -1098,7 +1098,6 @@ async fn mail_event_origin_removes_computer_and_delegation_authority() {
     );
     for forbidden in [
         Tool::Computer,
-        Tool::Delegate,
         Tool::CreateBot,
         Tool::RequestSecret,
         Tool::AskOwner,
