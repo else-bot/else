@@ -100,6 +100,15 @@ fn hmac(key: &[u8], data: &str) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
+/// The SigV4 signing key for one day, region and service.
+fn signing_key(secret: &str, date: &str, region: &str, service: &str) -> Zeroizing<Vec<u8>> {
+    let secret = Zeroizing::new(format!("AWS4{secret}"));
+    let k_date = Zeroizing::new(hmac(secret.as_bytes(), date));
+    let k_region = Zeroizing::new(hmac(&k_date, region));
+    let k_service = Zeroizing::new(hmac(&k_region, service));
+    Zeroizing::new(hmac(&k_service, "aws4_request"))
+}
+
 fn parse<T: DeserializeOwned>(xml: &str) -> Result<T, S3Error> {
     quick_xml::de::from_str(xml)
         .map_err(|err| S3Error::Protocol(format!("unreadable S3 response: {err}")))
@@ -313,11 +322,12 @@ impl S3 {
             "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
             hex::encode(Sha256::digest(canonical.as_bytes()))
         );
-        let secret = Zeroizing::new(format!("AWS4{}", self.config.secret_access_key.as_str()));
-        let k_date = Zeroizing::new(hmac(secret.as_bytes(), &date));
-        let k_region = Zeroizing::new(hmac(&k_date, &self.config.region));
-        let k_service = Zeroizing::new(hmac(&k_region, "s3"));
-        let k_signing = Zeroizing::new(hmac(&k_service, "aws4_request"));
+        let k_signing = signing_key(
+            self.config.secret_access_key.as_str(),
+            &date,
+            &self.config.region,
+            "s3",
+        );
         let signature = hex::encode(hmac(&k_signing, &to_sign));
         let authorization = format!(
             "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed_headers}, Signature={signature}",
@@ -702,13 +712,14 @@ mod tests {
     fn signing_matches_the_aws_reference_key_derivation() {
         // AWS SigV4 documentation example: the signing key for this date,
         // region, and service.
-        let secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
-        let k_date = hmac(format!("AWS4{secret}").as_bytes(), "20120215");
-        let k_region = hmac(&k_date, "us-east-1");
-        let k_service = hmac(&k_region, "iam");
-        let k_signing = hmac(&k_service, "aws4_request");
+        let k_signing = signing_key(
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            "20120215",
+            "us-east-1",
+            "iam",
+        );
         assert_eq!(
-            hex::encode(k_signing),
+            hex::encode(&*k_signing),
             "f4780e2d9f65fa895f9c67b32ce1baf0b0d8a43505a000a1a9e090d414db404d"
         );
     }
