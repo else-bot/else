@@ -881,7 +881,10 @@ impl ElseApp {
         let failure = if unknown {
             Failure::Unknown(err.to_string())
         } else {
-            Failure::Rejected(err.to_string())
+            Failure::Rejected {
+                reason: err.to_string(),
+                code: err.code().map(str::to_owned),
+            }
         };
         if let Some(pending) = self.pending_mut(bot, request_id) {
             pending.on_send_failure(failure);

@@ -326,10 +326,17 @@ impl ElseApp {
         // Earlier replies always read before the current one. A completed,
         // failed or uncertain turn closes on its meta row; others lead with it.
         card = if complete || error {
+            let remedy = super::message_row::model_remedy(turn, view.bot_id, cx);
             card.children(earlier)
                 .children(reply)
                 .children(explanation)
-                .children(status)
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .children(status)
+                        .children(remedy),
+                )
         } else {
             card.children(status).children(earlier).children(reply)
         };
