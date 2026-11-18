@@ -485,7 +485,11 @@ impl ElseApp {
                         .label(label)
                 };
                 let bot = view.bot_id;
-                let failed = |status: String, color: Hsla, reason: Option<&str>, retry: bool| {
+                let failed = |status: String,
+                              color: Hsla,
+                              reason: Option<&str>,
+                              retry: bool,
+                              switch: bool| {
                     h_flex()
                         .flex_wrap()
                         .justify_end()
@@ -517,7 +521,7 @@ impl ElseApp {
                                         },
                                     ))
                                 }))
-                                .children(reason.is_none().then(|| {
+                                .children(switch.then(|| {
                                     switch_model(format!("switch-model-{request_id}"), bot, cx)
                                 }))
                                 .children((mark.is_none() && !retry).then(|| {
@@ -539,16 +543,26 @@ impl ElseApp {
                     Delivery::Resolving { .. } => {
                         note(format!("{subject}Checking delivery…"), false)
                     }
-                    Delivery::Unknown { reason } => {
-                        failed("Not confirmed".into(), theme.warning, Some(reason), true)
-                    }
+                    Delivery::Unknown { reason } => failed(
+                        "Not confirmed".into(),
+                        theme.warning,
+                        Some(reason),
+                        true,
+                        false,
+                    ),
                     Delivery::Rejected { reason, code }
                         if code.as_deref() == Some(PROVIDER_UNAVAILABLE) =>
                     {
-                        failed(format!("Not sent. {reason}"), theme.danger, None, false)
+                        failed(
+                            format!("Not sent. {reason}"),
+                            theme.danger,
+                            None,
+                            false,
+                            true,
+                        )
                     }
                     Delivery::Rejected { reason, .. } => {
-                        failed("Not sent".into(), theme.danger, Some(reason), false)
+                        failed("Not sent".into(), theme.danger, Some(reason), false, false)
                     }
                 };
                 column = column.child(beside(true, line));

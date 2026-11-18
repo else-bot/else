@@ -826,6 +826,9 @@ impl ElseApp {
                 if caps.is_ok() {
                     app.apply_caps(caps, window, cx);
                 }
+                if app.selected != Some(bot) {
+                    return;
+                }
                 if let (Ok(saved), Some(entry)) = (saved, app.settings.get_mut(&bot)) {
                     entry.model = ModelState::Ready(saved);
                 }
