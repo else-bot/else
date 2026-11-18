@@ -1,5 +1,5 @@
 use super::layout::{CategoryDrag, SidebarEdge};
-use super::mentions::MentionAction;
+use super::mentions::{MentionAction, mention_keys};
 use super::{
     APP_CONTEXT, COMPOSER_CONTEXT, CiteSelection, Connection, DeleteBot, ElseApp, FocusComposer,
     FocusSidebar, LoadOlder, MoveBot, NewBot, NewCategory, SIDEBAR_CONTEXT, SelectNext, SelectPrev,
@@ -19,7 +19,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, Textarea};
+use gpui_kit::component::input::{Escape, Textarea};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
@@ -674,7 +674,7 @@ impl ElseApp {
     fn render_conversation(
         &self,
         bot: &Bot,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().clone();
@@ -866,8 +866,7 @@ impl ElseApp {
             (Some(_), Some(_)) => 2. * COMPOSER_ACTION + px(8. + 12.),
             _ => COMPOSER_ACTION + px(12.),
         };
-        let mut frame = v_flex()
-            .key_context(COMPOSER_CONTEXT)
+        let mut frame = mention_keys(v_flex().key_context(COMPOSER_CONTEXT), cx)
             .capture_action(
                 cx.listener(|app, _: &gpui_kit::base::input::Paste, window, cx| {
                     if app.paste_clipboard(window, cx) {
@@ -875,20 +874,6 @@ impl ElseApp {
                     }
                 }),
             )
-            .capture_action(cx.listener(|app, _: &MoveDown, window, cx| {
-                app.mention_action(MentionAction::Next, window, cx);
-            }))
-            .capture_action(cx.listener(|app, _: &MoveUp, window, cx| {
-                app.mention_action(MentionAction::Previous, window, cx);
-            }))
-            .capture_action(cx.listener(|app, action: &Enter, window, cx| {
-                if !action.shift && !action.secondary {
-                    app.mention_action(MentionAction::Accept, window, cx);
-                }
-            }))
-            .capture_action(cx.listener(|app, _: &IndentInline, window, cx| {
-                app.mention_action(MentionAction::Accept, window, cx);
-            }))
             .capture_action(cx.listener(|app, _: &Escape, window, cx| {
                 app.mention_action(MentionAction::Dismiss, window, cx);
             }))
@@ -914,7 +899,7 @@ impl ElseApp {
                     frame.border_color(theme.border).bg(theme.popover)
                 }
             });
-        if let Some(quotes) = self.render_quote_stack(bot.id, &bot.name, cx) {
+        if let Some(quotes) = self.render_quote_stack(bot.id, &bot.name, window, cx) {
             frame = frame.child(quotes);
         }
         frame = frame
@@ -991,12 +976,11 @@ impl ElseApp {
             .children(self.render_waiting_tray(cx))
             .children(self.render_question_bar(&bot.name, cx))
             .children(self.render_handoff_bar(bot, window, cx))
-            .child(
-                div()
-                    .relative()
-                    .child(frame)
-                    .children(self.render_mentions(cx)),
-            )
+            .child(div().relative().child(frame).children(self.render_mentions(
+                &self.composer,
+                true,
+                cx,
+            )))
             .child(
                 // The hint shows only while it helps: the composer is focused
                 // and empty. Its line stays reserved so the composer never
@@ -1016,7 +1000,7 @@ impl ElseApp {
             .child(footer)
     }
 
-    fn render_main(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_main(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         if let Some(bot) = self.selected_bot().filter(|b| b.is_active()).cloned() {
             return v_flex()
