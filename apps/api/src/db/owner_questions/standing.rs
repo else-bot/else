@@ -4,8 +4,8 @@ use uuid::Uuid;
 use super::{QuestionInfo, RequestError, find_same, info, insert, turns};
 use crate::app::providers::Origin;
 use crate::app::questions::{
-    APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, MAX_CONTEXT, PermissionTarget,
-    Spec,
+    APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, GrantReach, MAX_CONTEXT,
+    PermissionTarget, Spec,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -50,7 +50,17 @@ pub async fn confirm(
     let caller = turns::asking_caller(&mut tx, turn_id)
         .await?
         .ok_or(RequestError::NotRunning)?;
-    if !caller.owner_conversation {
+    // A delegated task may save only a task grant, which its own reach
+    // covers, from an owner message sent in its bot's chat and steered into it.
+    let task = matches!(target, PermissionTarget::Task { .. });
+    let allowed = if caller.owner_conversation {
+        !task
+            || (matches!(super::scope(&mut tx, turn_id).await?, super::Scope::Bot)
+                && crate::db::delegations::origin(&mut tx, turn_id).await? == Origin::OwnerRequest)
+    } else {
+        task && super::grant_reach(&mut tx, turn_id).await? == GrantReach::Tasks
+    };
+    if !allowed {
         return Err(RequestError::NotAllowed.into());
     }
     if !super::owner_message_quotes(&mut tx, turn_id, authorization).await? {
@@ -58,12 +68,6 @@ pub async fn confirm(
     }
     if matches!(target, PermissionTarget::McpTool { .. })
         && !matches!(super::scope(&mut tx, turn_id).await?, super::Scope::Bot)
-    {
-        return Err(RequestError::NotAllowed.into());
-    }
-    if matches!(target, PermissionTarget::Task { .. })
-        && (!matches!(super::scope(&mut tx, turn_id).await?, super::Scope::Bot)
-            || crate::db::delegations::origin(&mut tx, turn_id).await? != Origin::OwnerRequest)
     {
         return Err(RequestError::NotAllowed.into());
     }

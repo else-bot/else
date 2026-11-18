@@ -19,8 +19,8 @@
 //! ends it. A tool grant covers one MCP tool and effect, and a task grant
 //! one declared task, target, and effect of host actions and computer tool calls. A tool grant
 //! applies only in the bot's owner requests; a task grant also in tasks
-//! delegated to the bot for an owner request, whose cards approve once, and
-//! in scheduled runs of the bot's routines. Which scope a card offers and which grant applies
+//! delegated to the bot for an owner request or a routine run, whose cards
+//! offer no other grant, and in scheduled runs of the bot's routines. Which scope a card offers and which grant applies
 //! come from the turn's source in the database; a task grant matches the
 //! declared task and target exactly and never interprets the action.
 
@@ -387,7 +387,8 @@ pub enum Gate {
 }
 
 /// Whether the owner's chat message of `turn_id`, or one the provider took
-/// into that running turn as a steer, contains `quote`.
+/// into that turn as a steer, contains `quote`. Only messages in the owner's
+/// own chat count: a delegated task's request is another bot's text.
 pub(crate) async fn owner_message_quotes(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
@@ -395,10 +396,12 @@ pub(crate) async fn owner_message_quotes(
 ) -> Result<bool, sqlx::Error> {
     let sources: Vec<String> = sqlx::query_scalar(
         "SELECT i.text FROM turns t JOIN items i ON i.id = t.owner_item_id
+         JOIN conversations c ON c.id = t.conversation_id AND c.kind = 'owner'
          WHERE t.id = ?1 AND i.kind = 'user'
          UNION ALL
          SELECT i.text FROM turn_steers s
          JOIN turns t ON t.id = s.turn_id
+         JOIN conversations c ON c.id = t.conversation_id AND c.kind = 'owner'
          JOIN items i ON i.id = t.owner_item_id AND i.kind = 'user'
          WHERE s.into_turn_id = ?1 AND s.status = 'delivered'",
     )
@@ -516,9 +519,12 @@ pub async fn gate_host(
         _ => scope.offer(),
     };
     let spec = Spec {
-        // Work another bot delegated approves one call at a time: its card
-        // never offers a standing grant.
-        choices: approval_choices(spec.kind, offer.filter(|_| caller.owner_conversation)),
+        // Work another bot delegated may be offered only a task grant, which
+        // its reach already admitted as `target`.
+        choices: approval_choices(
+            spec.kind,
+            offer.filter(|offer| caller.owner_conversation || *offer == Standing::Task),
+        ),
         ..spec.clone()
     };
     let question = insert(&mut tx, turn_id, &caller, &spec).await?;
