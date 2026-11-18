@@ -96,9 +96,11 @@ impl ElseApp {
         let Some(body) = body else {
             return div().into_any_element();
         };
-        let banner = row
-            .opens_turn
-            .and_then(|turn| self.view.as_ref()?.conversation.as_ref()?.turn(turn))
+        let banner = self
+            .view
+            .as_ref()
+            .and_then(|view| view.conversation.as_ref())
+            .and_then(|c| super::conversation::opened_mail(c, row.opens_turn))
             .and_then(|turn| super::email_reader::mail_banner(turn, cx));
         let body = match banner {
             Some(banner) => gpui_kit::component::v_flex()

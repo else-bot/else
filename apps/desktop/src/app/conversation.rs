@@ -301,6 +301,11 @@ pub(super) fn opens_turns(c: Option<&Conversation>, rows: &[RowKey]) -> Vec<Opti
         .collect()
 }
 
+/// The mail-triggered turn a row opens, whose emails it offers to view.
+pub(super) fn opened_mail(c: &Conversation, opens: Option<Uuid>) -> Option<&crate::model::Turn> {
+    c.turn(opens?).filter(|turn| !turn.mail.is_empty())
+}
+
 #[cfg(test)]
 pub(super) fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
     turn_card_rows(c)
@@ -1339,8 +1344,8 @@ impl ElseApp {
 mod tests {
     use super::{
         ConversationView, REVEAL_FADE, REVEAL_HOLD, Reveal, RoutineRow, RowKey, Spot,
-        TranscriptRow, burst_tail_stamps, first_unread_row, folded_no_news, opens_turns,
-        request_rows, routine_rows, transcript_rows,
+        TranscriptRow, burst_tail_stamps, first_unread_row, folded_no_news, opened_mail,
+        opens_turns, request_rows, routine_rows, transcript_rows,
     };
     use std::collections::HashSet;
     use std::time::{Duration, Instant};
@@ -1885,9 +1890,10 @@ mod tests {
         );
     }
 
-    /// A turn the email in seq 1 started, with the bot's replies at `replies`
-    /// and owner messages joined into it at `joined`.
-    fn mail_turn(status: &str, replies: &[i64], joined: &[i64]) -> Conversation {
+    /// Turn 10 with the bot's replies at `replies` and owner messages joined
+    /// into it at `joined`. With `mail`, an email started it; the server
+    /// sends no item for the email itself.
+    fn mail_turn(mail: bool, status: &str, replies: &[i64], joined: &[i64]) -> Conversation {
         let message = |seq: i64, turn: u128, kind: &str| {
             json!({
                 "id": Uuid::from_u128(seq as u128), "seq": seq,
@@ -1901,13 +1907,15 @@ mod tests {
                 "effect_uncertain": false
             })
         };
-        let mut mail = turn(10, status);
-        mail["mail"] = json!([{
-            "account_id": Uuid::from_u128(50),
-            "message": { "folder": "INBOX", "uid_validity": 1, "uid": 7 }
-        }]);
-        let mut items = vec![message(1, 10, "user")];
-        let mut turns = vec![mail];
+        let mut opened = turn(10, status);
+        if mail {
+            opened["mail"] = json!([{
+                "account_id": Uuid::from_u128(50),
+                "message": { "folder": "INBOX", "uid_validity": 1, "uid": 7 }
+            }]);
+        }
+        let mut items = Vec::new();
+        let mut turns = vec![opened];
         for &seq in replies {
             items.push(message(seq, 10, "assistant"));
         }
@@ -1926,20 +1934,23 @@ mod tests {
         })).unwrap()).unwrap()
     }
 
-    /// The rows that show the mail turn's "View email" banner.
+    /// The rows that offer to view an email.
     fn mail_rows(c: &Conversation) -> Vec<RowKey> {
         let tasks = crate::app::task_reply::state::task_replies(c);
         let rows = transcript_rows(c, &tasks, Vec::new());
         rows.iter()
             .zip(opens_turns(Some(c), &rows))
-            .filter(|(_, opens)| *opens == Some(Uuid::from_u128(10)))
+            .filter(|(_, opens)| opened_mail(c, *opens).is_some())
             .map(|(key, _)| *key)
             .collect()
     }
 
     #[test]
     fn a_mail_turn_with_one_reply_shows_its_email_on_the_reply() {
-        assert_eq!(mail_rows(&mail_turn("completed", &[2], &[])), [item(2)]);
+        assert_eq!(
+            mail_rows(&mail_turn(true, "completed", &[2], &[])),
+            [item(2)]
+        );
     }
 
     #[test]
@@ -1952,7 +1963,7 @@ mod tests {
             ("interrupted", &[2][..]),
         ] {
             assert_eq!(
-                mail_rows(&mail_turn(status, replies, &[])),
+                mail_rows(&mail_turn(true, status, replies, &[])),
                 [task],
                 "a {status} turn with replies {replies:?}"
             );
@@ -1961,10 +1972,18 @@ mod tests {
 
     #[test]
     fn a_mail_turn_that_joined_owner_messages_shows_its_email_once() {
-        assert_eq!(
-            mail_rows(&mail_turn("completed", &[2, 4, 6], &[3, 5])),
-            [item(2)]
-        );
+        for status in ["completed", "running"] {
+            assert_eq!(
+                mail_rows(&mail_turn(true, status, &[2, 4, 6], &[3, 5])),
+                [item(2)],
+                "a {status} turn"
+            );
+        }
+    }
+
+    #[test]
+    fn a_turn_no_email_started_offers_none() {
+        assert_eq!(mail_rows(&mail_turn(false, "completed", &[2, 3], &[])), []);
     }
 
     fn transcript_row(key: RowKey) -> TranscriptRow {
