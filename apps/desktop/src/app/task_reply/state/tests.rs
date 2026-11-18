@@ -1240,3 +1240,74 @@ fn a_message_the_reply_took_adds_no_reply_of_its_own() {
         "the reply that took it answers both"
     );
 }
+
+/// #565: the owner sends three messages while a reply waits on a job, and
+/// the bot answers each one before the job's result ends the reply.
+fn joined_reply(status: &str, attempt: i64, replies: &[(u128, i64)]) -> Conversation {
+    let mut items = vec![item(1, 20, "user")];
+    for (number, joined) in [(3, 21), (5, 22), (7, 23)] {
+        items.push(item(number, joined, "user"));
+    }
+    for &(number, attempt) in replies {
+        let mut reply = item(number, 20, "assistant");
+        reply["attempt"] = json!(attempt);
+        items.push(reply);
+    }
+    let mut turns = vec![{
+        let mut reply = turn(20, status);
+        reply["attempt"] = json!(attempt);
+        reply
+    }];
+    for joined in [21, 22, 23] {
+        let mut message = turn(joined, "queued");
+        message["steered_into"] = json!(id(20));
+        message["steer_status"] = json!("delivered");
+        turns.push(message);
+    }
+    conversation(items, turns)
+}
+
+#[test]
+fn each_joined_message_keeps_the_answer_the_bot_gave_it() {
+    let c = joined_reply(
+        "completed",
+        5,
+        &[(2, 1), (4, 2), (6, 3), (8, 4), (9, 5), (10, 5)],
+    );
+    let task = &task_replies(&c)[&id(20)];
+    assert_eq!(
+        task.answers,
+        [id(2), id(4), id(6), id(8)],
+        "each message reads after the answer before it and before its own"
+    );
+    assert_eq!(task.latest, Some(id(10)), "the job's result ends the reply");
+    assert_eq!(task.anchor, Some(id(10)));
+    assert_eq!(task.history, [id(9)], "a status line still folds");
+    assert!(task.kept.is_empty(), "{:?}", task.kept);
+}
+
+#[test]
+fn a_reply_that_just_took_a_message_works_below_it() {
+    let c = joined_reply("running", 4, &[(2, 1), (4, 2), (6, 3)]);
+    let task = &task_replies(&c)[&id(20)];
+    assert_eq!(task.answers, [id(2), id(4), id(6)]);
+    assert_eq!(task.latest, None, "nothing answers the newest message yet");
+    assert_eq!(
+        task.anchor,
+        Some(id(7)),
+        "the work reads below that message"
+    );
+}
+
+#[test]
+fn a_message_taken_mid_attempt_folds_progress_before_its_answer() {
+    let c = joined_reply("completed", 1, &[(2, 1), (4, 1), (6, 1), (8, 1), (9, 1)]);
+    let task = &task_replies(&c)[&id(20)];
+    assert_eq!(task.answers, [id(2), id(4), id(6)]);
+    assert_eq!(task.latest, Some(id(9)));
+    assert_eq!(
+        task.history,
+        [id(8)],
+        "progress after the last message folds"
+    );
+}

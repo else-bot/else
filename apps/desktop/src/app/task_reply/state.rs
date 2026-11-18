@@ -51,6 +51,10 @@ pub(in crate::app) struct TaskReply {
     pub latest_kept: bool,
     pub summary: Option<String>,
     pub history: Vec<Uuid>,
+    /// Replies to owner messages joined into the turn, each read as a bot
+    /// message of its own at its place in the transcript, between the
+    /// message it answers and the next one.
+    pub answers: Vec<Uuid>,
     pub kept: Vec<Uuid>,
     /// Files of `kept` replies that a later reply delivers again; the kept
     /// reply shows its text without them, so a file appears once.
@@ -238,6 +242,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                     latest_kept: false,
                     summary: None,
                     history: Vec::new(),
+                    answers: Vec::new(),
                     kept: Vec::new(),
                     repeated_files: HashSet::new(),
                     cards: Vec::new(),
