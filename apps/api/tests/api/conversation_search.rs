@@ -37,7 +37,12 @@ async fn search_counts_rendered_matches_newest_first() {
     let app = TestApp::installed().await;
     let bot = app.main_bot().await;
     say(&app, &bot, "Plan the **Café** launch").await;
-    say(&app, &bot, "Nothing to see").await;
+    say(
+        &app,
+        &bot,
+        "Replying to my earlier message:\n> Plan the cafe launch\n\nNothing to see",
+    )
+    .await;
     say(
         &app,
         &bot,
@@ -61,7 +66,10 @@ async fn search_counts_rendered_matches_newest_first() {
         )
         .await;
     assert_eq!(found.status, StatusCode::OK, "{:?}", found.body);
-    assert_eq!(found.body["total"], 6);
+    assert_eq!(
+        found.body["total"], 7,
+        "the quote in the owner reply is folded away"
+    );
     let hits: Vec<(Value, i64)> = found.body["hits"]
         .as_array()
         .unwrap()
@@ -73,6 +81,7 @@ async fn search_counts_rendered_matches_newest_first() {
         [
             (id("Read [the notes]", "assistant"), 2),
             (id("Read [the notes]", "user"), 2),
+            (id("Replying to", "assistant"), 1),
             (id("Plan the", "assistant"), 1),
             (id("Plan the", "user"), 1),
         ]

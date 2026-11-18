@@ -128,8 +128,8 @@ pub async fn search(
     conversation_id: Uuid,
     needle: Needle,
 ) -> Result<Vec<Hit>, sqlx::Error> {
-    let rows: Vec<(Uuid, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT i.id, i.seq, i.text FROM items i
+    let rows: Vec<(Uuid, i64, String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT i.id, i.seq, i.kind, i.text FROM items i
          WHERE i.conversation_id = ?1 AND i.kind IN ('user','assistant') AND {SHOWN}
          ORDER BY i.seq DESC"
     )))
@@ -138,8 +138,12 @@ pub async fn search(
     .await?;
     let hits = tokio::task::spawn_blocking(move || {
         rows.into_iter()
-            .filter_map(|(item_id, seq, text)| {
-                let count = needle.count_in_markdown(&text);
+            .filter_map(|(item_id, seq, kind, text)| {
+                let shown = match kind.as_str() {
+                    "user" => quoted_reply_body(&text).unwrap_or(&text),
+                    _ => &text,
+                };
+                let count = needle.count_in_markdown(shown);
                 (count > 0).then_some(Hit {
                     item_id,
                     seq,
@@ -151,6 +155,24 @@ pub async fn search(
     .await
     .map_err(|err| sqlx::Error::Protocol(format!("search task failed: {err}")))?;
     Ok(hits)
+}
+
+/// The body of an owner reply that quotes one earlier message, which the
+/// app shows under a folded quote card. Matches the app's `QuotedReply`.
+fn quoted_reply_body(text: &str) -> Option<&str> {
+    let rest = [
+        "Replying to my earlier message:\n",
+        "Replying to your earlier message:\n",
+    ]
+    .into_iter()
+    .find_map(|prefix| text.strip_prefix(prefix))?;
+    let (quote, body) = rest.split_once("\n\n")?;
+    (!quote.is_empty()
+        && !body.trim().is_empty()
+        && quote
+            .lines()
+            .all(|line| line == ">" || line.starts_with("> ")))
+    .then_some(body)
 }
 
 /// A stretch of shown items to load between two the owner already has.

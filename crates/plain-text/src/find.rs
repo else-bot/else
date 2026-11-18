@@ -89,9 +89,30 @@ fn fold(text: &str, mut emit: impl FnMut(char, Range<usize>)) {
 /// HTML tags, and common entities. Inline marks are left to the fold.
 fn skim(markdown: &str) -> String {
     let mut out = String::with_capacity(markdown.len());
+    let mut fence = None;
     for line in markdown.lines() {
-        let line = line.trim_start();
-        if line.starts_with("```") || line.starts_with("~~~") || is_table_rule(line) {
+        let trimmed = line.trim_start();
+        let marker = ["```", "~~~"]
+            .into_iter()
+            .find(|marker| trimmed.starts_with(marker));
+        match (fence, marker) {
+            (None, Some(marker)) => {
+                fence = Some(marker);
+                continue;
+            }
+            (Some(open), Some(marker)) if open == marker => {
+                fence = None;
+                continue;
+            }
+            (Some(_), _) => {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            (None, None) => {}
+        }
+        let line = trimmed;
+        if is_table_rule(line) {
             continue;
         }
         skim_inline(strip_markers(line), &mut out);
@@ -138,6 +159,18 @@ fn skim_inline(line: &str, out: &mut String) {
     while let Some(c) = rest.chars().next() {
         let after = &rest[c.len_utf8()..];
         match c {
+            '`' => {
+                let ticks = rest.len() - rest.trim_start_matches('`').len();
+                let code = &rest[ticks..];
+                if let Some(close) = code.find(&rest[..ticks]) {
+                    out.push_str(&rest[..ticks * 2 + close]);
+                    rest = &code[close + ticks..];
+                } else {
+                    out.push_str(&rest[..ticks]);
+                    rest = code;
+                }
+                continue;
+            }
             '[' => {
                 opens.push(out.len());
                 out.push('[');
@@ -285,5 +318,8 @@ mod tests {
         assert_eq!(count("next shipped", "# Next\n- [x] shipped"), 1);
         assert_eq!(count("one two", "1. one\n> 2) two"), 1);
         assert_eq!(count("#563", "Fixes #563"), 1);
+        assert_eq!(count("string", "```rust\nlet v: Vec<String>\n```"), 1);
+        assert_eq!(count("div class", "Use `<div class=\"a\">` here"), 1);
+        assert_eq!(count("f[i](x)", "Call `f[i](x)` once"), 1);
     }
 }

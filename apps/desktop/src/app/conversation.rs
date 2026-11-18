@@ -216,9 +216,13 @@ pub(super) fn transcript_rows(
         .filter_map(|task| Some((task.anchor?, task.turn)))
         .collect();
     let folded = folded_no_news(c);
-    for item in c.items().filter(|item| !folded.contains(&item.id)) {
+    for item in c.items() {
+        // A gap row stays even when the item above it is folded away.
         if c.gap_below(item.seq).is_some() {
             rows.push(RowKey::Gap(item.seq));
+        }
+        if folded.contains(&item.id) {
+            continue;
         }
         if item.kind == "assistant" && answered.get(&item.turn_id) == Some(&item.id) {
             rows.extend(
@@ -513,9 +517,8 @@ pub(super) struct ConversationView {
     pending_reveal: Option<(RowKey, Author, String)>,
     /// The open find bar.
     pub(super) find: Option<super::find::Find>,
-    /// The gap row whose messages are loading, by the seq above it.
-    pub(super) loading_gap: Option<i64>,
-    pub(super) _gap: Option<Task<()>>,
+    /// The gap row being loaded, by the loaded item just above it.
+    pub(super) loading_gap: Option<(i64, Task<()>)>,
     pub(super) _load: Option<Task<()>>,
     pub(super) _older: Option<Task<()>>,
 }
@@ -630,7 +633,6 @@ impl ConversationView {
             pending_reveal: None,
             find: None,
             loading_gap: None,
-            _gap: None,
             _load: None,
             _older: None,
         }
@@ -674,6 +676,7 @@ impl ElseApp {
             Ok(Ok(conversation)) => {
                 let cursor = conversation.cursor();
                 view.conversation = Some(conversation);
+                view.loading_gap = None;
                 view.stream_problem = None;
                 self.sync_rows(window, cx);
                 self.ensure_rules(bot, window, cx);

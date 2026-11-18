@@ -1145,17 +1145,30 @@ impl Conversation {
     }
 
     /// Merge a window loaded strictly between the loaded items `below` and
-    /// `above`, recording what is still missing on each side. An empty
-    /// window changes nothing.
-    pub fn merge_window(&mut self, window: Window, below: Option<i64>, above: Option<i64>) {
-        let Some(first) = window.items.first().map(|item| item.seq) else {
-            return;
-        };
+    /// `above`, recording what is still missing on each side. Returns false
+    /// and changes nothing when that region no longer matches what is
+    /// loaded, because another load or a snapshot landed first.
+    pub fn merge_window(&mut self, window: Window, below: Option<i64>, above: Option<i64>) -> bool {
+        let still_loaded = |seq: Option<i64>| seq.is_none_or(|seq| self.items.contains_key(&seq));
+        let low = below.map_or(i64::MIN, |seq| seq.saturating_add(1));
+        let high = above.unwrap_or(i64::MAX);
+        if !still_loaded(below)
+            || !still_loaded(above)
+            || self.items.range(low..high).next().is_some()
+        {
+            return false;
+        }
         if let Some(above) = above {
             self.gaps.remove(&above);
-            if window.newer_gap > 0 {
-                self.gaps.insert(above, window.newer_gap);
+        }
+        let Some(first) = window.items.first().map(|item| item.seq) else {
+            if below.is_none() {
+                self.older_before_seq = None;
             }
+            return true;
+        };
+        if let Some(above) = above.filter(|_| window.newer_gap > 0) {
+            self.gaps.insert(above, window.newer_gap);
         }
         match below {
             Some(_) if window.older_gap > 0 => {
@@ -1172,6 +1185,7 @@ impl Conversation {
         for turn in window.turns {
             self.turns.entry(turn.id).or_insert(turn);
         }
+        true
     }
 
     /// How many shown items are missing just below the loaded item `seq`.
@@ -1640,40 +1654,56 @@ mod tests {
         let tail = vec![item(90, 90, "user", "latest")];
         let mut c = Conversation::from_snapshot(snapshot(5, tail, Some(90))).unwrap();
         let found = vec![item(40, 40, "user", "a"), item(41, 41, "assistant", "b")];
-        c.merge_window(window(found, 12, 30), None, Some(90));
+        assert!(c.merge_window(window(found, 12, 30), None, Some(90)));
         assert_eq!(loaded(&c), [40, 41, 90]);
         assert_eq!(c.older_before_seq, Some(40));
         assert_eq!(c.gap_below(90), Some(30));
         assert_eq!(c.cursor(), format!("{PREFIX}:5"), "the live cursor stays");
 
         let between = vec![item(60, 60, "user", "c"), item(70, 70, "user", "d")];
-        c.merge_window(window(between, 3, 0), Some(41), Some(90));
+        assert!(c.merge_window(window(between, 3, 0), Some(41), Some(90)));
         assert_eq!(loaded(&c), [40, 41, 60, 70, 90]);
         assert_eq!(c.gap_below(90), None);
         assert_eq!(c.gap_below(60), Some(3));
 
         let rest = vec![item(50, 50, "user", "e")];
-        c.merge_window(window(rest, 0, 0), Some(41), Some(60));
+        assert!(c.merge_window(window(rest, 0, 0), Some(41), Some(60)));
         assert_eq!(c.gap_below(60), None);
 
         let oldest = vec![item(1, 1, "user", "first")];
-        c.merge_window(window(oldest, 0, 0), None, Some(40));
+        assert!(c.merge_window(window(oldest, 0, 0), None, Some(40)));
         assert_eq!(c.older_before_seq, None);
         assert_eq!(c.loaded_around(45), (Some(41), Some(50)));
     }
 
     #[test]
-    fn an_empty_window_keeps_the_gap() {
+    fn an_empty_window_closes_the_gap_it_was_loaded_for() {
         let tail = vec![item(90, 90, "user", "latest")];
         let mut c = Conversation::from_snapshot(snapshot(5, tail, Some(90))).unwrap();
-        c.merge_window(
-            window(vec![item(40, 40, "user", "a")], 0, 30),
-            None,
-            Some(90),
-        );
-        c.merge_window(window(vec![], 30, 0), Some(40), Some(90));
-        assert_eq!(c.gap_below(90), Some(30));
+        let found = vec![item(40, 40, "user", "a")];
+        assert!(c.merge_window(window(found, 5, 30), None, Some(90)));
+        assert!(c.merge_window(window(vec![], 0, 0), Some(40), Some(90)));
+        assert_eq!(c.gap_below(90), None);
+        assert!(c.merge_window(window(vec![], 0, 0), None, Some(40)));
         assert_eq!(c.older_before_seq, None);
+    }
+
+    #[test]
+    fn a_window_for_a_region_that_changed_is_dropped() {
+        let tail = vec![item(90, 90, "user", "latest")];
+        let mut c = Conversation::from_snapshot(snapshot(5, tail, Some(90))).unwrap();
+        let found = vec![item(40, 40, "user", "a")];
+        assert!(c.merge_window(window(found, 5, 30), None, Some(90)));
+        let between = vec![item(60, 60, "user", "b")];
+        assert!(c.merge_window(window(between, 10, 19), Some(40), Some(90)));
+
+        let stale = vec![item(50, 50, "user", "c")];
+        assert!(!c.merge_window(window(stale, 0, 0), Some(40), Some(90)));
+        assert_eq!(loaded(&c), [40, 60, 90]);
+        assert_eq!(c.gap_below(90), Some(19));
+        assert_eq!(c.gap_below(60), Some(10));
+        let gone = vec![item(85, 85, "user", "d")];
+        assert!(!c.merge_window(window(gone, 0, 0), Some(80), Some(90)));
     }
 
     #[test]

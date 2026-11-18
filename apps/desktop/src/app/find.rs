@@ -32,15 +32,15 @@ pub(super) struct Find {
     /// and how far below the list's top to put it.
     centering: Option<(usize, Pixels)>,
     _input: Subscription,
-    _search: Option<Task<()>>,
-    _window: Option<Task<()>>,
 }
 
 enum Phase {
     /// Nothing to search for.
     Empty,
     /// Waiting for the typing to pause, then for the server.
-    Searching,
+    Searching {
+        _task: Task<()>,
+    },
     Found(Found),
     Failed,
 }
@@ -53,6 +53,8 @@ struct Found {
     current: usize,
     /// Whether the transcript has scrolled the current match into view.
     landed: bool,
+    /// Loading a window of messages around the current match.
+    _load: Option<Task<()>>,
 }
 
 /// The message holding match `index`, counted from the newest, and which of
@@ -117,8 +119,6 @@ impl ElseApp {
                     phase: Phase::Empty,
                     centering: None,
                     _input: subscription,
-                    _search: None,
-                    _window: None,
                 });
                 input
             }
@@ -155,40 +155,40 @@ impl ElseApp {
             return;
         };
         let query = find.input.read(cx).value().to_string();
-        find._window = None;
         let Some(needle) = Needle::new(&query) else {
             find.phase = Phase::Empty;
-            find._search = None;
             self.paint_quotes(cx);
             cx.notify();
             return;
         };
-        find.phase = Phase::Searching;
-        find._search = Some(cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(DEBOUNCE).await;
-            let hits = client.search(bot, query).await;
-            let _ = this.update_in(cx, |app, window, cx| {
-                let Some(find) = app
-                    .view
-                    .as_mut()
-                    .filter(|view| view.bot_id == bot)
-                    .and_then(|view| view.find.as_mut())
-                else {
-                    return;
-                };
-                find.phase = match hits {
-                    Ok(hits) => Phase::Found(Found {
-                        needle,
-                        hits: hits.hits,
-                        total: hits.total,
-                        current: 0,
-                        landed: false,
-                    }),
-                    Err(_) => Phase::Failed,
-                };
-                app.show_match(window, cx);
-            });
-        }));
+        find.phase = Phase::Searching {
+            _task: cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(DEBOUNCE).await;
+                let hits = client.search(bot, query).await;
+                let _ = this.update_in(cx, |app, window, cx| {
+                    let Some(find) = app
+                        .view
+                        .as_mut()
+                        .filter(|view| view.bot_id == bot)
+                        .and_then(|view| view.find.as_mut())
+                    else {
+                        return;
+                    };
+                    find.phase = match hits {
+                        Ok(hits) => Phase::Found(Found {
+                            needle,
+                            hits: hits.hits,
+                            total: hits.total,
+                            current: 0,
+                            landed: false,
+                            _load: None,
+                        }),
+                        Err(_) => Phase::Failed,
+                    };
+                    app.show_match(window, cx);
+                });
+            }),
+        };
         cx.notify();
     }
 
@@ -207,6 +207,7 @@ impl ElseApp {
         }
         found.current = step(found.current, found.total, older);
         found.landed = false;
+        found._load = None;
         self.show_match(window, cx);
     }
 
@@ -222,7 +223,7 @@ impl ElseApp {
         else {
             return;
         };
-        let Phase::Found(found) = &find.phase else {
+        let Phase::Found(found) = &mut find.phase else {
             self.paint_quotes(cx);
             cx.notify();
             return;
@@ -234,7 +235,7 @@ impl ElseApp {
         };
         if conversation.item(hit.item_id).is_none() {
             let around = conversation.loaded_around(hit.seq);
-            find._window = Some(cx.spawn_in(window, async move |this, cx| {
+            found._load = Some(cx.spawn_in(window, async move |this, cx| {
                 let loaded = client
                     .window(bot, hit.seq, (NEIGHBOURS, NEIGHBOURS), around)
                     .await;
@@ -244,8 +245,14 @@ impl ElseApp {
                     };
                     match loaded {
                         Ok(loaded) => {
-                            if let Some(conversation) = view.conversation.as_mut() {
-                                conversation.merge_window(loaded, around.0, around.1);
+                            let merged = view.conversation.as_mut().is_some_and(|conversation| {
+                                conversation.merge_window(loaded, around.0, around.1)
+                            });
+                            if !merged {
+                                // Another load changed what is loaded there;
+                                // ask again around the match.
+                                app.show_match(window, cx);
+                                return;
                             }
                             app.sync_rows(window, cx);
                             app.land_on(hit.item_id, window, cx);
@@ -295,8 +302,7 @@ impl ElseApp {
         }
         let bot = view.bot_id;
         let (below, _) = conversation.loaded_around(above);
-        view.loading_gap = Some(above);
-        view._gap = Some(cx.spawn_in(window, async move |this, cx| {
+        let task = cx.spawn_in(window, async move |this, cx| {
             let page = client
                 .window(bot, above - 1, (GAP_PAGE, 0), (below, Some(above)))
                 .await;
@@ -307,10 +313,15 @@ impl ElseApp {
                 view.loading_gap = None;
                 match page {
                     Ok(page) => {
-                        if let Some(conversation) = view.conversation.as_mut() {
-                            conversation.merge_window(page, below, Some(above));
+                        let Some(conversation) = view.conversation.as_mut() else {
+                            return;
+                        };
+                        if conversation.merge_window(page, below, Some(above)) {
+                            app.sync_rows(window, cx);
+                        } else if conversation.gap_below(above).is_some() {
+                            // Another load changed what is loaded there.
+                            app.load_gap(above, window, cx);
                         }
-                        app.sync_rows(window, cx);
                     }
                     Err(err) => {
                         app.notice = Some(format!("Could not load earlier messages: {err}"));
@@ -318,7 +329,8 @@ impl ElseApp {
                     }
                 }
             });
-        }));
+        });
+        view.loading_gap = Some((above, task));
         cx.notify();
     }
 
@@ -328,7 +340,8 @@ impl ElseApp {
             .and_then(|view| view.conversation.as_ref())
             .and_then(|c| c.gap_below(above))
             .unwrap_or_default();
-        let loading = view.is_some_and(|view| view.loading_gap == Some(above));
+        let loading =
+            view.is_some_and(|view| matches!(view.loading_gap, Some((at, _)) if at == above));
         let label = match (loading, count) {
             (true, _) => "Loading…".to_owned(),
             (false, 1) => "… 1 earlier message …".to_owned(),
@@ -382,7 +395,7 @@ impl ElseApp {
         let theme = cx.theme().clone();
         let (label, can_step) = match &find.phase {
             Phase::Empty => (String::new(), false),
-            Phase::Searching => ("…".into(), false),
+            Phase::Searching { .. } => ("…".into(), false),
             Phase::Found(found) => (found.label(), found.total > 0),
             Phase::Failed => ("Search failed".into(), false),
         };
@@ -472,7 +485,7 @@ pub(super) fn highlights(
     let current = found
         .target()
         .filter(|(hit, _)| key == RowKey::Item(hit.item_id))
-        .map(|(_, from_end)| ranges.len().saturating_sub(from_end + 1));
+        .and_then(|(_, from_end)| ranges.len().checked_sub(from_end + 1));
     let theme = cx.theme();
     let (soft, strong) = (theme.warning.opacity(0.28), theme.warning.opacity(0.65));
     let mut painted = Vec::with_capacity(ranges.len());
