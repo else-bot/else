@@ -140,9 +140,10 @@ pub async fn endpoint(
                     Tool::Social
                 }
                 Some("else_status") => Tool::Diagnose,
-                // Every turn may read its history; the tool itself admits
-                // only a running delegated task.
-                Some("notify_owner") => Tool::ReadHistory,
+                // Every turn may read its history; each tool itself admits
+                // only the turn it serves: a running delegated task or
+                // routine run.
+                Some("notify_owner" | super::routines::NO_NEWS) => Tool::ReadHistory,
                 _ => Tool::ReadMemory,
             };
             if matches!(name, Some("delegate" | "council"))
@@ -494,6 +495,7 @@ fn tool_list() -> Value {
         super::routines::delete_schema(),
         super::routines::run_schema(),
         super::routines::reminder_schema(),
+        super::routines::no_news_schema(),
         super::webhooks::create_schema(),
         super::webhooks::list_schema(),
         super::webhooks::update_schema(),
@@ -722,6 +724,7 @@ async fn dispatch(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
         "routine_delete" => super::routines::delete(state, grant, args).await,
         "routine_run" => super::routines::run(state, grant, args).await,
         "reminder_create" => super::routines::create_reminder(state, grant, args).await,
+        super::routines::NO_NEWS => super::routines::no_news(state, grant).await,
         "rules_update" => super::rules::update(state, grant, args).await,
         super::visual_tools::NAME => super::visual_tools::call(state, grant, args).await,
         "webhook_create" => super::webhooks::create(state, grant, args).await,

@@ -1145,10 +1145,32 @@ impl Client {
         routine: Uuid,
         enabled: bool,
     ) -> Result<Routine, ClientError> {
+        self.patch_routine(bot, routine, json!({ "enabled": enabled }))
+            .await
+    }
+
+    /// Let a routine's runs end with no news, or make each run report.
+    /// Setting its current value is a no-op, so a retry is safe.
+    pub async fn set_routine_quiet(
+        self: Arc<Self>,
+        bot: Uuid,
+        routine: Uuid,
+        quiet: bool,
+    ) -> Result<Routine, ClientError> {
+        self.patch_routine(bot, routine, json!({ "quiet": quiet }))
+            .await
+    }
+
+    async fn patch_routine(
+        self: Arc<Self>,
+        bot: Uuid,
+        routine: Uuid,
+        body: serde_json::Value,
+    ) -> Result<Routine, ClientError> {
         self.call::<RoutineEnvelope>(
             Method::PATCH,
             format!("/v1/bots/{bot}/routines/{routine}"),
-            Some(json!({ "enabled": enabled })),
+            Some(body),
         )
         .await
         .map(|(_, v)| v.routine)

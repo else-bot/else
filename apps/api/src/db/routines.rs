@@ -165,6 +165,8 @@ pub struct Routine {
     /// The last run is the owner's retry of the paused routine, not yet
     /// reviewed.
     pub retrying: bool,
+    /// Its runs may end with no news, which alerts no one.
+    pub quiet: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -190,8 +192,10 @@ struct Row {
     failed_runs: i64,
     paused_reason: Option<String>,
     retrying: bool,
+    quiet: bool,
     run_due_at: Option<DateTime<Utc>>,
     skip_reason: Option<Skip>,
+    report: Option<Report>,
     turn_id: Option<Uuid>,
     turn_status: Option<TurnStatus>,
     error_code: Option<String>,
@@ -206,14 +210,17 @@ enum RunState {
     Checking,
     Skipped(Skip),
     Turn(TurnStatus),
+    /// Its turn completed with nothing to report.
+    NoNews,
 }
 
 impl RunState {
-    fn of(turn: Option<TurnStatus>, skip: Option<Skip>) -> Self {
-        match (turn, skip) {
-            (Some(status), _) => Self::Turn(status),
-            (None, Some(skip)) => Self::Skipped(skip),
-            (None, None) => Self::Checking,
+    fn of(turn: Option<TurnStatus>, skip: Option<Skip>, report: Option<Report>) -> Self {
+        match (turn, skip, report) {
+            (Some(TurnStatus::Completed), _, Some(Report::NoNews)) => Self::NoNews,
+            (Some(status), _, _) => Self::Turn(status),
+            (None, Some(skip), _) => Self::Skipped(skip),
+            (None, None, _) => Self::Checking,
         }
     }
 
@@ -221,6 +228,7 @@ impl RunState {
         match self {
             Self::Checking => "checking",
             Self::Skipped(_) => "skipped",
+            Self::NoNews => "no_news",
             Self::Turn(status) => match status.phase() {
                 Phase::Active | Phase::Waiting => "running",
                 Phase::Queued | Phase::Ended => status.as_str(),
@@ -233,7 +241,7 @@ impl From<Row> for Routine {
     fn from(row: Row) -> Self {
         let last_run = row.run_due_at.map(|due_at| LastRun {
             due_at,
-            status: RunState::of(row.turn_status, row.skip_reason)
+            status: RunState::of(row.turn_status, row.skip_reason, row.report)
                 .label()
                 .to_owned(),
             skip_reason: row.skip_reason,
@@ -263,6 +271,7 @@ impl From<Row> for Routine {
             failed_runs: row.failed_runs,
             paused_reason: row.paused_reason,
             retrying: row.retrying,
+            quiet: row.quiet,
         }
     }
 }
@@ -310,8 +319,9 @@ const SELECT: &str =
     "SELECT r.id, r.bot_id, r.name, r.prompt, r.prompt_revision, r.check_command, r.cron, r.run_at, r.timezone,
         r.active_days, r.active_start, r.active_end, r.enabled,
         r.model, r.requested_model, r.next_due_at, r.created_at, r.updated_at, r.deleted_at,
-        r.failed_runs, r.paused_reason,
-        coalesce(lr.resumes AND NOT lr.reviewed, false) AS retrying, lr.due_at AS run_due_at, lr.skip_reason, lr.turn_id, t.status AS turn_status,
+        r.failed_runs, r.paused_reason, r.quiet,
+        coalesce(lr.resumes AND NOT lr.reviewed, false) AS retrying, lr.due_at AS run_due_at, lr.skip_reason,
+        lr.report, lr.turn_id, t.status AS turn_status,
         t.error_code, t.error_message, t.finished_at
     FROM routines r
     LEFT JOIN routine_runs lr ON lr.id = (SELECT x.id FROM routine_runs x
@@ -407,6 +417,7 @@ pub struct NewRoutine<'a> {
     /// A reminder's time as the bot sent it (`in_minutes` resolves against
     /// the clock, so a retry matches on the request).
     pub when_request: Option<&'a str>,
+    pub quiet: bool,
 }
 
 fn create_hash(routine: &NewRoutine<'_>) -> Vec<u8> {
@@ -429,6 +440,7 @@ fn create_hash(routine: &NewRoutine<'_>) -> Vec<u8> {
     .chain(check_key.as_deref())
     .chain(routine.model_request)
     .chain(routine.when_request)
+    .chain(routine.quiet.then_some("quiet"))
     {
         hasher.update(part.as_bytes());
         hasher.update([0]);
@@ -485,8 +497,8 @@ pub async fn create(
     sqlx::query(
         "INSERT INTO routines (id, bot_id, conversation_id, name, prompt, cron, timezone,
              next_due_at, created_turn_id, created_name, request_hash, model, requested_model,
-             active_days, active_start, active_end, run_at, check_command)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?4, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             active_days, active_start, active_end, run_at, check_command, quiet)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?4, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
     )
     .bind(id)
     .bind(caller.bot_id)
@@ -505,6 +517,7 @@ pub async fn create(
     .bind(active.active_end)
     .bind(routine.schedule.run_at().map(ts))
     .bind(routine.check.map(RoutineCheck::as_str))
+    .bind(routine.quiet)
     .execute(&mut *tx)
     .await?;
     events::bot_updated(&mut tx, caller.bot_id).await?;
@@ -526,6 +539,7 @@ pub struct Patch {
     pub active_hours: Option<Option<ActiveHours>>,
     pub enabled: Option<bool>,
     pub model: Option<ModelSetting>,
+    pub quiet: Option<bool>,
     /// Forget the routine's failed runs (the owner saw them).
     pub dismiss_failures: bool,
 }
@@ -544,6 +558,7 @@ struct RoutineSettings {
     next_due_at: Option<String>,
     model: Option<Json<RoutineModel>>,
     requested_model: Option<String>,
+    quiet: bool,
 }
 
 /// Apply `patch`. Setting values a routine already has changes nothing, so
@@ -562,7 +577,7 @@ pub async fn update(
     authorize_by(&mut tx, by).await?;
     let current: Option<RoutineSettings> = sqlx::query_as(
         "SELECT name, prompt, check_command, cron, run_at, timezone, active_days, active_start, active_end,
-             enabled, next_due_at, model, requested_model
+             enabled, next_due_at, model, requested_model, quiet
          FROM routines WHERE id = ?1 AND bot_id = ?2 AND deleted_at IS NULL",
     )
     .bind(id)
@@ -581,6 +596,7 @@ pub async fn update(
         next_due_at: next_due,
         model,
         requested_model: requested,
+        quiet,
     }) = current
     else {
         return Err(RoutineError::NotFound);
@@ -606,6 +622,10 @@ pub async fn update(
         .check
         .map_or(check_command, |c| c.map(|c| c.as_str().to_owned()));
     let new_enabled = patch.enabled.unwrap_or(enabled);
+    let new_quiet = patch.quiet.unwrap_or(quiet);
+    if new_quiet && run_at.is_some() {
+        return Err(InvalidRoutine::QuietReminder.into());
+    }
     let new_model = patch.model.unwrap_or_else(|| setting(model, requested));
     let (model, requested_model) = columns(&new_model);
     let rescheduled =
@@ -642,7 +662,7 @@ pub async fn update(
              prompt_revision = prompt_revision + (prompt IS NOT ?3 OR check_command IS NOT ?14),
              check_command = ?14,
              model = ?8, requested_model = ?9,
-             active_days = ?11, active_start = ?12, active_end = ?13,
+             active_days = ?11, active_start = ?12, active_end = ?13, quiet = ?15,
              failed_runs = CASE WHEN ?10 OR (?6 AND NOT enabled) THEN 0 ELSE failed_runs END,
              paused_reason = CASE WHEN ?10 OR ?6 THEN NULL ELSE paused_reason END,
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
@@ -650,7 +670,7 @@ pub async fn update(
              OR timezone IS NOT ?5 OR enabled IS NOT ?6 OR next_due_at IS NOT ?7
              OR model IS NOT ?8 OR requested_model IS NOT ?9
              OR active_days IS NOT ?11 OR active_start IS NOT ?12 OR active_end IS NOT ?13
-             OR check_command IS NOT ?14
+             OR check_command IS NOT ?14 OR quiet IS NOT ?15
              OR (?10 AND (failed_runs <> 0 OR paused_reason IS NOT NULL)))",
     )
     .bind(id)
@@ -667,6 +687,7 @@ pub async fn update(
     .bind(active.active_start)
     .bind(active.active_end)
     .bind(&new_check)
+    .bind(new_quiet)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -913,19 +934,23 @@ pub async fn run_of(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
 ) -> Result<Option<RoutineRun>, sqlx::Error> {
-    let row: Option<(Uuid, String, DateTime<Utc>, bool)> = sqlx::query_as(
-        "SELECT rr.routine_id, rr.name, rr.due_at, r.run_at IS NOT NULL
+    let row: Option<(Uuid, String, DateTime<Utc>, bool, bool)> = sqlx::query_as(
+        "SELECT rr.routine_id, rr.name, rr.due_at, r.run_at IS NOT NULL, r.quiet
          FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id WHERE rr.turn_id = ?1",
     )
     .bind(turn_id)
     .fetch_optional(conn)
     .await?;
-    Ok(row.map(|(routine_id, name, due_at, reminder)| RoutineRun {
-        routine_id,
-        name,
-        due_at,
-        reminder,
-    }))
+    Ok(
+        row.map(|(routine_id, name, due_at, reminder, quiet)| RoutineRun {
+            routine_id,
+            name,
+            due_at,
+            reminder,
+            quiet,
+            no_news: false,
+        }),
+    )
 }
 
 /// Ended routine runs reviewed per scheduler scan.
@@ -1310,6 +1335,84 @@ impl From<CheckSkip> for Skip {
             CheckSkip::Unavailable => Self::CheckUnavailable,
         }
     }
+}
+
+/// What a run's turn tells the owner, as `routine_runs.report` stores it.
+/// A run reports news unless its bot ended it with no news. Migration
+/// 0075's triggers turn no news back into news when the turn parks, or when
+/// it completes having involved the owner or acted outside the bot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum Report {
+    News,
+    NoNews,
+    /// A gated action ran in the run, so it reports whatever its bot says.
+    Acted,
+}
+
+/// Why a run cannot end with no news.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum NoNewsRefusal {
+    #[error("only a scheduled routine run can end with no news")]
+    NotARoutineRun,
+    #[error(
+        "this routine is not quiet, so its runs always report; the owner can mark it quiet in \
+         Bot details > Routines"
+    )]
+    NotQuiet,
+    #[error("an approved or allowed action ran in this run, so it reports to the owner")]
+    Acted,
+    #[error("the run is no longer running")]
+    NotRunning,
+}
+
+/// Record that the run `turn_id` executes has nothing to report. Repeating
+/// it changes nothing. Only a running run of a quiet routine moves from
+/// news to no news; one that acted never does.
+pub async fn report_no_news(
+    pool: &SqlitePool,
+    turn_id: Uuid,
+) -> Result<Result<Report, NoNewsRefusal>, sqlx::Error> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let run: Option<(bool, Report, TurnStatus)> = sqlx::query_as(
+        "SELECT r.quiet, rr.report, t.status FROM routine_runs rr
+         JOIN routines r ON r.id = rr.routine_id JOIN turns t ON t.id = rr.turn_id
+         WHERE rr.turn_id = ?1",
+    )
+    .bind(turn_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let refusal = match run {
+        None => NoNewsRefusal::NotARoutineRun,
+        Some((false, _, _)) => NoNewsRefusal::NotQuiet,
+        Some((_, Report::Acted, _)) => NoNewsRefusal::Acted,
+        Some((_, _, status)) if !status.serves_tools() => NoNewsRefusal::NotRunning,
+        Some((true, Report::News | Report::NoNews, _)) => {
+            let report: Report = sqlx::query_scalar(
+                "UPDATE routine_runs SET report = 'no_news'
+                 WHERE turn_id = ?1 AND report IN ('news', 'no_news') RETURNING report",
+            )
+            .bind(turn_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(Ok(report));
+        }
+    };
+    Ok(Err(refusal))
+}
+
+/// Record that a gated action is about to run in the turn, if it executes a
+/// routine run: the run then reports whatever its bot says. Repeating it
+/// changes nothing.
+pub async fn report_acted(pool: &SqlitePool, turn_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE routine_runs SET report = 'acted' WHERE turn_id = ?1 AND report <> 'acted'",
+    )
+    .bind(turn_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Why [`queue_saved_task`] queued no turn.

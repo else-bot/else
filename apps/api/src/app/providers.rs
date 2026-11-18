@@ -305,6 +305,12 @@ pub struct RoutineRun {
     pub due_at: chrono::DateTime<chrono::Utc>,
     /// The routine is a reminder, due once.
     pub reminder: bool,
+    /// The routine lets a run end with no news.
+    #[serde(default)]
+    pub quiet: bool,
+    /// The run completed with no news, so it alerts no one.
+    #[serde(default)]
+    pub no_news: bool,
 }
 
 /// A provider's native session for one conversation.

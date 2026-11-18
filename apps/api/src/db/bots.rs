@@ -131,7 +131,7 @@ const SELECT_BOT: &str = concat!(
                 ORDER BY t.turn_no DESC LIMIT 1)
             ORDER BY i.seq DESC LIMIT 1), false) AS latest_turn_read,
         (SELECT count(*) FROM items u JOIN turns t ON t.id = u.turn_id
-            WHERE u.conversation_id = c.id AND u.kind = 'assistant' AND ",
+            WHERE u.conversation_id = c.id AND u.kind = 'assistant' AND NOT u.silent AND ",
     handed_back!(),
     "
             AND NOT EXISTS (SELECT 1 FROM items v WHERE v.turn_id = u.turn_id
@@ -143,7 +143,8 @@ const SELECT_BOT: &str = concat!(
             AND NOT EXISTS (SELECT 1 FROM turn_steers s
                             WHERE s.turn_id = q.id AND s.status <> 'pending')) AS queued_count,
         (SELECT m.created_at FROM items m WHERE m.conversation_id = c.id
-            AND m.kind IN ('user', 'assistant') AND NOT m.hidden ORDER BY m.seq DESC LIMIT 1) AS last_message_at,
+            AND m.kind IN ('user', 'assistant') AND NOT m.hidden AND NOT m.silent
+            ORDER BY m.seq DESC LIMIT 1) AS last_message_at,
         (SELECT CASE WHEN count(*) > 0 THEN json_object('since', min(g.since),
                 'bots', json_group_array(json_object('id', g.id, 'name', g.name, 'tasks', g.tasks))) END
             FROM (SELECT lower(hex(d.target_bot_id)) AS id, t.name, count(*) AS tasks,
@@ -160,7 +161,7 @@ const SELECT_BOT: &str = concat!(
     FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
     LEFT JOIN items h ON h.id = (SELECT x.id FROM items x JOIN turns t ON t.id = x.turn_id
                                  WHERE x.conversation_id = c.id AND x.kind = 'assistant'
-                                 AND ",
+                                 AND NOT x.silent AND ",
     handed_back!(),
     " ORDER BY x.seq DESC LIMIT 1)
     LEFT JOIN owner_questions question ON question.id = (
