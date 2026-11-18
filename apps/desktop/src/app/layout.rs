@@ -200,6 +200,14 @@ impl ElseApp {
         .size_full()
     }
 
+    /// The bot details panel's laid-out width, as `render_settings` sizes it.
+    pub(super) fn details_panel_width(&self, window: &Window) -> f32 {
+        let viewport = self.width(window);
+        self.preferences
+            .details_width
+            .min((viewport - 360.).max(280.))
+    }
+
     /// Whether the sidebar must hide so the bot settings panel and the
     /// conversation keep their room.
     pub(super) fn crowded(&self, width: f32) -> bool {

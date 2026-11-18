@@ -14,6 +14,7 @@ use chrono::{DateTime, Utc};
 use gpui_kit::base::HoverCard;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, WindowExt as _, h_flex,
@@ -703,12 +704,17 @@ impl ElseApp {
                 let Some(entry) = current_change(&mut app.settings, bot, routine, attempt) else {
                     return;
                 };
-                if let Err(err) = result {
-                    entry.routines.insert(
-                        routine,
-                        RoutineSave::Failed(format!("Couldn't delete. {err}")),
-                    );
-                    cx.notify();
+                match result {
+                    Ok(()) => {
+                        app.expanded_routine_problems.remove(&routine);
+                    }
+                    Err(err) => {
+                        entry.routines.insert(
+                            routine,
+                            RoutineSave::Failed(format!("Couldn't delete. {err}")),
+                        );
+                        cx.notify();
+                    }
                 }
             });
         })
@@ -1119,7 +1125,7 @@ impl ElseApp {
     pub(super) fn render_settings(
         &self,
         bot: &Bot,
-        viewport: Pixels,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -1151,8 +1157,8 @@ impl ElseApp {
                     .child(self.render_bot_usage(cx))
                     .child(self.render_model(bot.id, &entry.model, cx))
                     .child(self.render_rules_section(bot.id, cx))
-                    .child(self.render_routines(bot.id, &entry.routines, cx))
-                    .child(self.render_reminders(bot.id, &entry.routines, cx))
+                    .child(self.render_routines(bot.id, &entry.routines, window, cx))
+                    .child(self.render_reminders(bot.id, &entry.routines, window, cx))
                     .child(self.render_triggers(bot.id, entry, cx));
             } else {
                 body = body.child(muted("Loading…", cx));
@@ -1167,7 +1173,7 @@ impl ElseApp {
         let mut panel = v_flex()
             .id("bot-settings")
             .relative()
-            .w(px(self.preferences.details_width).min((viewport - px(360.)).max(px(280.))))
+            .w(px(self.details_panel_width(window)))
             .on_drag_move(cx.listener(Self::resize_details))
             .flex_none()
             .h_full()
@@ -1835,6 +1841,7 @@ impl ElseApp {
         &self,
         bot: Uuid,
         saves: &HashMap<Uuid, RoutineSave>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let body = section("Routines", cx);
@@ -1864,7 +1871,9 @@ impl ElseApp {
         let connected = self.connection == Connection::Connected;
         let rows = routines
             .into_iter()
-            .map(|routine| self.render_routine(bot, routine, saves.get(&routine.id), connected, cx))
+            .map(|routine| {
+                self.render_routine(bot, routine, saves.get(&routine.id), connected, window, cx)
+            })
             .collect::<Vec<_>>();
         body.child(list_rows(rows)).into_any_element()
     }
@@ -1873,6 +1882,7 @@ impl ElseApp {
         &self,
         bot: Uuid,
         saves: &HashMap<Uuid, RoutineSave>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let body = section("Reminders", cx);
@@ -1903,7 +1913,14 @@ impl ElseApp {
         let rows = reminders
             .into_iter()
             .map(|reminder| {
-                self.render_routine(bot, reminder, saves.get(&reminder.id), connected, cx)
+                self.render_routine(
+                    bot,
+                    reminder,
+                    saves.get(&reminder.id),
+                    connected,
+                    window,
+                    cx,
+                )
             })
             .collect::<Vec<_>>();
         body.child(list_rows(rows)).into_any_element()
@@ -1915,6 +1932,7 @@ impl ElseApp {
         routine: &Routine,
         save: Option<&RoutineSave>,
         connected: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = routine.id;
@@ -1934,21 +1952,6 @@ impl ElseApp {
         .on_click(cx.listener(move |app, enabled: &bool, window, cx| {
             app.set_routine(bot, id, *enabled, window, cx)
         }));
-        let delete = Button::new(ElementId::Name(format!("routine-delete-{id}").into()))
-            .focus_ring(false)
-            .cursor_pointer()
-            .icon(gpui_kit::assets::IconName::Trash)
-            .ghost()
-            .opacity(0.)
-            .group_hover("automation-card", |style| style.opacity(1.))
-            .focus(|style| style.opacity(1.))
-            .xsmall()
-            .loading(matches!(save, Some(RoutineSave::Deleting { .. })))
-            .accessibility_label(format!("Delete {}", routine.name))
-            .disabled(busy || !connected)
-            .on_click(cx.listener(move |app, _, window, cx| {
-                app.open_routine_delete_dialog(bot, id, window, cx)
-            }));
         let retrying = routine.retrying || matches!(save, Some(RoutineSave::Retrying { .. }));
         let dismiss = (routine.failed_runs > 0 && !retrying).then(|| {
             Button::new(ElementId::Name(format!("routine-dismiss-{id}").into()))
@@ -1964,7 +1967,7 @@ impl ElseApp {
             (retrying || (!routine.enabled && routine.paused_reason.is_some())).then(|| {
                 Button::new(ElementId::Name(format!("routine-retry-{id}").into()))
                     .control(
-                        Tier::Ghost,
+                        Tier::Primary,
                         Scale::Compact,
                         busy || !connected || retrying,
                         cx,
@@ -1978,32 +1981,16 @@ impl ElseApp {
                         }),
                     )
             });
-        // Whole tokens, so a narrow panel wraps between them and never
-        // inside "Europe/Paris".
+        // Separate tokens, so a narrow panel wraps between them. Only a
+        // token wider than the row, like a long cron description, wraps
+        // inside itself.
         let when = match (routine.run_at, &routine.active_hours) {
-            (Some(at), _) => format!("Once · {}", local_time(at, &routine.timezone)),
-            (None, Some(hours)) => {
-                format!(
-                    "{} · {}",
-                    describe_cron(&routine.cron),
-                    describe_hours(hours)
-                )
-            }
-            (None, None) => describe_cron(&routine.cron),
+            (Some(at), _) => vec!["Once".to_owned(), local_time(at, &routine.timezone)],
+            (None, Some(hours)) => vec![describe_cron(&routine.cron), describe_hours(hours)],
+            (None, None) => vec![describe_cron(&routine.cron)],
         };
-        let schedule = format!("{when} · {}", routine.timezone);
+        let schedule = format!("{} · {}", when.join(" · "), routine.timezone);
         let last = last_run(routine);
-        let progress = last
-            .clone()
-            .filter(|_| routine.retrying)
-            .map(|(text, _)| text);
-        let problem = match save {
-            Some(RoutineSave::Failed(err)) => Some(err.clone()),
-            _ => last
-                .clone()
-                .filter(|(_, error)| *error)
-                .map(|(text, _)| text),
-        };
         let choice = routine.model.as_ref().or_else(|| {
             self.settings
                 .get(&bot)
@@ -2042,73 +2029,22 @@ impl ElseApp {
             .or_else(|| {
                 unavailable.then(|| "Saved model is unavailable. Choose another model.".to_owned())
             });
-        // The model is changed from the row's actions, beside Delete. The
-        // meta line names it only when the routine overrides the bot model
-        // shown above, so a routine reads as one line.
+        // The model is changed from the row's menu. The meta line names it
+        // only when the routine overrides the bot model shown above.
         let quiet = match save {
             Some(RoutineSave::Quieting { quiet, .. }) => *quiet,
             _ => routine.quiet,
         };
-        let quiet_control = routine.run_at.is_none().then(|| {
-            Button::new(ElementId::Name(format!("routine-quiet-{id}").into()))
-                .focus_ring(false)
-                .cursor_pointer()
-                .ghost()
-                .opacity(0.)
-                .group_hover("automation-card", |style| style.opacity(1.))
-                .focus(|style| style.opacity(1.))
-                .xsmall()
-                .icon(if quiet {
-                    gpui_kit::assets::IconName::BellOff
-                } else {
-                    gpui_kit::assets::IconName::Bell
-                })
-                .tooltip(if quiet {
-                    "Quiet: runs with nothing to report send no message. Click to report every run."
-                } else {
-                    "Reports every run. Click to make runs with nothing to report send no message."
-                })
-                .accessibility_label(if quiet {
-                    format!("Report every run of {}", routine.name)
-                } else {
-                    format!(
-                        "Make {} quiet: runs with nothing to report send no message",
-                        routine.name
-                    )
-                })
-                .loading(matches!(save, Some(RoutineSave::Quieting { .. })))
-                .disabled(busy || !connected)
-                .on_click(cx.listener(move |app, _, window, cx| {
-                    app.set_routine_quiet(bot, id, !quiet, window, cx)
-                }))
-        });
-        let model_control = routine.run_at.is_none().then(|| {
-            Button::new(ElementId::Name(format!("routine-model-{id}").into()))
-                .focus_ring(false)
-                .cursor_pointer()
-                .ghost()
-                .opacity(0.)
-                .group_hover("automation-card", |style| style.opacity(1.))
-                .focus(|style| style.opacity(1.))
-                .xsmall()
-                .icon(IconName::Cpu)
-                .accessibility_label(format!(
-                    "Change model for {}. {model_title}. {model_details}",
-                    routine.name
-                ))
-                .loading(matches!(save, Some(RoutineSave::Model { .. })))
-                .disabled(busy || !connected || self.caps.is_none())
-                .on_click(cx.listener(move |app, _, window, cx| {
-                    app.open_routine_model_dialog(bot, id, window, cx)
-                }))
-        });
-        let mut tokens = vec![
-            meta(when, cx).min_w_0().into_any_element(),
+        let mut tokens: Vec<AnyElement> = when
+            .into_iter()
+            .map(|token| meta(token, cx).min_w_0().into_any_element())
+            .collect();
+        tokens.push(
             meta(routine.timezone.clone(), cx)
                 .flex_none()
                 .whitespace_nowrap()
                 .into_any_element(),
-        ];
+        );
         if let Some(choice) = routine.model.as_ref().filter(|_| routine.run_at.is_none()) {
             tokens.push(
                 meta(self.model_name(choice), cx)
@@ -2125,12 +2061,14 @@ impl ElseApp {
                     .into_any_element(),
             );
         }
-        let summary = v_flex()
+        let summary = div()
             .id(ElementId::Name(format!("routine-pill-{id}").into()))
             .w_full()
-            .gap_0p5()
-            .child(item_name(routine.name.clone()))
-            .child(meta_line(tokens, cx));
+            .child(
+                item_name(routine.name.clone())
+                    .line_clamp(2)
+                    .text_ellipsis(),
+            );
         let model_line = routine
             .run_at
             .is_none()
@@ -2235,14 +2173,70 @@ impl ElseApp {
                     )
             })
             .into_any_element();
-        let theme = cx.theme();
-        v_flex()
+        let theme = cx.theme().clone();
+        let owner = cx.entity().downgrade();
+        let reminder = routine.run_at.is_some();
+        let no_models = self.caps.is_none();
+        let model_menu = model_title.clone();
+        // Quiet, the model and Delete sit in one menu, so the name and the
+        // schedule keep the row's width in a narrow panel.
+        let actions_menu = Button::new(ElementId::Name(format!("routine-more-{id}").into()))
+            .focus_ring(false)
+            .cursor_pointer()
+            .ghost()
+            .xsmall()
+            .icon(IconName::Ellipsis)
+            .accessibility_label(format!("Actions for {}", routine.name))
+            .loading(matches!(
+                save,
+                Some(
+                    RoutineSave::Quieting { .. }
+                        | RoutineSave::Model { .. }
+                        | RoutineSave::Deleting { .. }
+                )
+            ))
+            .disabled(busy || !connected)
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let act = |f: fn(&mut Self, Uuid, Uuid, &mut Window, &mut Context<Self>)| {
+                    let owner = owner.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let _ = owner.update(cx, |app, cx| f(app, bot, id, window, cx));
+                    }
+                };
+                let menu = if reminder {
+                    menu
+                } else {
+                    menu.item(
+                        PopupMenuItem::new("Quiet when there's no news")
+                            .checked(quiet)
+                            .on_click(if quiet {
+                                act(|app, bot, id, window, cx| {
+                                    app.set_routine_quiet(bot, id, false, window, cx)
+                                })
+                            } else {
+                                act(|app, bot, id, window, cx| {
+                                    app.set_routine_quiet(bot, id, true, window, cx)
+                                })
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(format!("Change model ({model_menu})…"))
+                            .disabled(no_models)
+                            .on_click(act(|app, bot, id, window, cx| {
+                                app.open_routine_model_dialog(bot, id, window, cx)
+                            })),
+                    )
+                };
+                menu.item(PopupMenuItem::new("Delete…").on_click(act(
+                    |app, bot, id, window, cx| app.open_routine_delete_dialog(bot, id, window, cx),
+                )))
+            });
+        // The switch lines up with the name; the schedule below it gets the
+        // row's whole width.
+        let header = v_flex()
             .w_full()
-            .py_0()
-            .gap_1()
-            .group("automation-card")
+            .gap_0p5()
             .child(
-                // The switch lines up with the name, the row's first line.
                 h_flex()
                     .w_full()
                     .gap_2()
@@ -2253,16 +2247,61 @@ impl ElseApp {
                             .flex_none()
                             .gap_1()
                             .items_center()
-                            .children(retry)
-                            .children(dismiss)
-                            .children(quiet_control)
-                            .children(model_control)
-                            .child(delete)
+                            .child(actions_menu)
                             .child(switch),
                     ),
             )
-            .children(progress.map(|text| meta(text, cx)))
-            .children(problem.map(|text| alert(text, theme.danger, cx)))
+            .child(meta_line(tokens, cx));
+        let banner = banner(routine, save);
+        let shown = banner.as_ref().map_or("", Banner::text).to_owned();
+        let problem = matches!(banner, Some(Banner::Problem(_)));
+        let expanded = banner.is_some() && self.expanded_routine_problems.get(&id) == Some(&shown);
+        // The panel's 1 px border and its sections' 16 px sides.
+        let column = px(self.details_panel_width(window) - 33.);
+        let width = if problem {
+            column - REASON_ICON
+        } else {
+            column
+        };
+        let long = banner.is_some() && reason_is_long(&shown, width, window, cx);
+        let opened = shown.clone();
+        let more = long.then(|| {
+            Button::new(ElementId::Name(format!("routine-reason-{id}").into()))
+                .control(Tier::Ghost, Scale::Compact, false, cx)
+                .flush_start(Scale::Compact)
+                .label(if expanded { "Show less" } else { "Show more" })
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    if expanded {
+                        app.expanded_routine_problems.remove(&id);
+                    } else {
+                        app.expanded_routine_problems.insert(id, opened.clone());
+                    }
+                    cx.notify();
+                }))
+        });
+        let actions = (retry.is_some() || dismiss.is_some()).then(|| {
+            h_flex()
+                .gap_1()
+                .items_center()
+                .children(retry)
+                .children(dismiss)
+        });
+        let color = if problem {
+            theme.danger
+        } else {
+            theme.muted_foreground
+        };
+        let banner = match banner {
+            Some(_) => Some(
+                reason(shown, color, problem, long && !expanded, more, actions).into_any_element(),
+            ),
+            None => actions.map(IntoElement::into_any_element),
+        };
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(header)
+            .children(banner)
             .children(warning.map(|warning| alert(warning, theme.warning, cx)))
             .into_any_element()
     }
@@ -2439,6 +2478,37 @@ fn describe_hours(hours: &crate::model::ActiveHours) -> String {
             .join(", ")
     };
     format!("{days} {} to {}", hours.start, hours.end)
+}
+
+/// What a routine shows under its schedule.
+#[derive(Debug, PartialEq, Eq)]
+enum Banner {
+    /// How a retry is going.
+    Progress(String),
+    /// Why the routine stopped, or why the owner's last change didn't hold.
+    Problem(String),
+}
+
+impl Banner {
+    fn text(&self) -> &str {
+        match self {
+            Self::Progress(text) | Self::Problem(text) => text,
+        }
+    }
+}
+
+/// A change that failed outranks a retry's progress: it explains why the
+/// switch or menu choice didn't hold.
+fn banner(routine: &Routine, save: Option<&RoutineSave>) -> Option<Banner> {
+    if let Some(RoutineSave::Failed(err)) = save {
+        return Some(Banner::Problem(err.clone()));
+    }
+    let (text, attention) = last_run(routine)?;
+    if routine.retrying {
+        Some(Banner::Progress(text))
+    } else {
+        attention.then_some(Banner::Problem(text))
+    }
 }
 
 fn last_run(routine: &Routine) -> Option<(String, bool)> {
@@ -2635,6 +2705,93 @@ fn alert(text: impl Into<SharedString>, color: Hsla, _cx: &App) -> Div {
         )
 }
 
+/// The lines a routine's banner shows before "Show more".
+const REASON_LINES: usize = 3;
+const REASON_SIZE: Pixels = px(12.5);
+/// The warning icon and its gap, beside the reason.
+const REASON_ICON: Pixels = px(18.);
+
+/// Whether `text` wraps past [`REASON_LINES`] at `width`, shaped as the
+/// text element shapes it.
+fn reason_is_long(text: &str, width: Pixels, window: &Window, cx: &App) -> bool {
+    let run = TextRun {
+        len: text.len(),
+        font: font(cx.theme().font_family.clone()),
+        color: Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_text(
+            SharedString::from(text.to_owned()),
+            REASON_SIZE,
+            &[run],
+            Some(width),
+            None,
+        )
+        .is_ok_and(|lines| {
+            lines
+                .iter()
+                .map(|line| line.wrap_boundaries().len() + 1)
+                .sum::<usize>()
+                > REASON_LINES
+        })
+}
+
+/// A routine's state under its name: why it stopped or how a retry is
+/// going, with the actions that answer it on the line below.
+fn reason(
+    text: String,
+    color: Hsla,
+    icon: bool,
+    clamped: bool,
+    more: Option<Button>,
+    actions: Option<Div>,
+) -> Div {
+    let body = v_flex()
+        .flex_1()
+        .min_w_0()
+        .items_start()
+        .child(
+            div()
+                .w_full()
+                .whitespace_normal()
+                .when(clamped, |body| {
+                    body.line_clamp(REASON_LINES).text_ellipsis()
+                })
+                .child(text),
+        )
+        .children(more);
+    v_flex()
+        .w_full()
+        .gap_1()
+        .child(
+            h_flex()
+                .pt_0p5()
+                .gap_1p5()
+                .items_start()
+                .text_size(REASON_SIZE)
+                .line_height(px(18.))
+                .text_color(color)
+                .when(icon, |row| {
+                    row.child(
+                        Icon::new(IconName::TriangleAlert)
+                            .size_3()
+                            .mt(px(3.))
+                            .flex_none(),
+                    )
+                })
+                .child(body),
+        )
+        .children(actions.map(|actions| {
+            h_flex()
+                .when(icon, |row| row.child(div().flex_none().w(REASON_ICON)))
+                .child(actions)
+        }))
+}
+
 pub(super) fn muted(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .text_xs()
@@ -2768,8 +2925,8 @@ fn still_pending(save: &TriggerSave, current: Option<bool>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Metadata, MetadataChange, MetadataSync, TriggerSave, describe_cron, describe_hours,
-        last_run, pace, parse_name, still_pending, trigger_cards,
+        Banner, Metadata, MetadataChange, MetadataSync, RoutineSave, TriggerSave, banner,
+        describe_cron, describe_hours, last_run, pace, parse_name, still_pending, trigger_cards,
     };
     use crate::api::socials::Trigger;
     use crate::avatar::{Avatar, AvatarColor, AvatarShape};
@@ -3005,6 +3162,29 @@ mod tests {
         ] {
             assert_eq!(describe_cron(cron), cron);
         }
+    }
+
+    #[test]
+    fn a_failed_change_shows_over_a_retry_in_progress() {
+        let retrying: crate::model::Routine = serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::nil(), "name": "Tickets", "prompt": "p",
+            "cron": "0 * * * *", "timezone": "Europe/Paris", "enabled": false,
+            "next_run_at": null, "updated_at": "2026-11-08T03:00:00Z",
+            "failed_runs": 1, "paused_reason": "needs_action", "retrying": true,
+            "last_run": { "due_at": "2026-11-08T02:00:00Z", "status": "running",
+                          "skip_reason": null, "error": null },
+        }))
+        .unwrap();
+        assert_eq!(
+            banner(&retrying, None),
+            Some(Banner::Progress("Retrying: running now".to_owned()))
+        );
+        let failed = RoutineSave::Failed("Couldn't save. offline".to_owned());
+        assert_eq!(
+            banner(&retrying, Some(&failed)),
+            Some(Banner::Problem("Couldn't save. offline".to_owned())),
+            "the owner learns why the switch snapped back"
+        );
     }
 
     #[test]
