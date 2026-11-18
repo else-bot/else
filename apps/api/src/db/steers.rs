@@ -326,8 +326,11 @@ pub async fn sending(pool: &SqlitePool, turn_id: Uuid, into: Uuid) -> Result<boo
     advance(pool, turn_id, into, Status::Pending, Status::Sending).await
 }
 
-/// The provider echoed message `turn_id` into running turn `into`. False
-/// when it was not `sending` there.
+/// The provider echoed message `turn_id` into running turn `into`. An
+/// attempt that has parked refuses every tool call, so it cannot act on
+/// the message: it returns to `pending`, and the next attempt, which starts
+/// as soon as this one ends, carries it again. False when it was not
+/// `sending` there.
 pub async fn deliver(pool: &SqlitePool, turn_id: Uuid, into: Uuid) -> Result<bool, sqlx::Error> {
     advance(pool, turn_id, into, Status::Sending, Status::Delivered).await
 }
@@ -347,13 +350,15 @@ async fn advance(
     to: Status,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    let parked = super::turns::parked("a.id", "a.attempt");
     let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE turn_steers SET status = ?4
+        "UPDATE turn_steers SET status = CASE
+             WHEN ?4 = 'delivered' AND (SELECT {parked} FROM turns a WHERE a.id = ?2)
+             THEN 'pending' ELSE ?4 END
          WHERE turn_id = ?1 AND into_turn_id = ?2 AND status = ?3
            AND EXISTS (SELECT 1 FROM turns WHERE id = ?1 AND status = 'queued')
            AND EXISTS (SELECT 1 FROM turns a WHERE a.id = ?2 AND a.status = 'running'
-                       AND (?4 <> 'sending' OR NOT {}))",
-        super::turns::parked("a.id", "a.attempt")
+                       AND (?4 <> 'sending' OR NOT {parked}))"
     )))
     .bind(turn_id)
     .bind(into)
