@@ -140,6 +140,79 @@ fn a_compact_boundary_reports_compaction() {
     assert_eq!(events, Ok(vec![Event::Compacted]));
 }
 
+/// Claude Code switches models on its own when the chosen one is busy,
+/// unavailable to the account, or refuses, and announces each switch.
+#[test]
+fn an_announced_model_fallback_keeps_the_turn_and_reports_the_model() {
+    let mut t = tracker();
+    t.on(&init(claude_home::tool_names(), connected())).unwrap();
+    t.on(&json!({"type":"user","uuid":"u-1","isReplay":true}))
+        .unwrap();
+    let events = t.on(&json!({"type":"system","subtype":"model_fallback",
+        "trigger":"model_not_found","original_model":"claude-haiku-5-5",
+        "fallback_model":"claude-haiku-4-8",
+        "content":"Switched to Haiku 4.8 because claude-haiku-5-5 is not available"}));
+    assert_eq!(
+        events,
+        Ok(vec![Event::Rerouted {
+            model: "claude-haiku-4-8".into(),
+            native_turn: "u-1".into(),
+        }])
+    );
+    t.on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-haiku-4-8"}}}))
+        .unwrap();
+    t.on(&json!({"type":"assistant","message":{"model":"claude-haiku-4-8","content":[]}}))
+        .unwrap();
+    t.on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-haiku-5-5"}}}))
+        .unwrap();
+    let refused = t
+        .on(
+            &json!({"type":"system","subtype":"model_refusal_fallback","direction":"retry",
+            "original_model":"claude-haiku-4-8","fallback_model":"claude-sonnet-5-5"}),
+        )
+        .unwrap();
+    assert_eq!(
+        refused,
+        vec![Event::Rerouted {
+            model: "claude-sonnet-5-5".into(),
+            native_turn: "u-1".into(),
+        }]
+    );
+    t.on(&json!({"type":"assistant","message":{"model":"claude-sonnet-5-5","content":[]}}))
+        .unwrap();
+}
+
+#[test]
+fn a_model_fallback_before_the_echo_is_the_accepted_model() {
+    let mut t = tracker();
+    t.on(
+        &json!({"type":"system","subtype":"model_fallback","trigger":"overloaded",
+        "original_model":"claude-haiku-5-5","fallback_model":"claude-haiku-4-8"}),
+    )
+    .unwrap();
+    assert_eq!(
+        t.on(&json!({"type":"user","uuid":"u-1","isReplay":true})),
+        Ok(vec![Event::Accepted {
+            model: "claude-haiku-4-8".into(),
+            native_turn: "u-1".into(),
+        }])
+    );
+}
+
+#[test]
+fn an_unannounced_model_fails_the_turn_with_what_the_owner_can_do() {
+    let violation = tracker()
+        .on(&json!({"type":"assistant","message":{"model":"claude-opus-4-8","content":[]}}))
+        .unwrap_err();
+    assert_eq!(violation.code, "profile_mismatch");
+    assert_eq!(
+        violation.message,
+        "Claude answered with claude-opus-4-8 instead of the chosen claude-haiku-5-5, \
+         so else.bot stopped the turn. Send the message again, or choose another model \
+         for this bot."
+    );
+}
+
 #[test]
 fn an_agent_tool_extra_server_or_malformed_inventory_is_refused() {
     let mut tools = claude_home::tool_names();

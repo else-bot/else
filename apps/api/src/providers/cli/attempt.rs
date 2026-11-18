@@ -195,6 +195,11 @@ pub enum Event<T> {
         model: String,
         native_turn: String,
     },
+    /// The provider switched to this model for the rest of the turn.
+    Rerouted {
+        model: String,
+        native_turn: String,
+    },
     Text(String),
     /// Later text starts a new assistant message.
     EndMessage,
@@ -295,6 +300,10 @@ async fn interrupt<C: Channel>(channel: &mut C, stop: &Stop) -> bool {
     }
 }
 
+fn reported(model: &str) -> serde_json::Value {
+    json!({ "model": model, "reasoning_effort": null, "service_tier": null })
+}
+
 /// Run an accepted or about-to-be-accepted turn to its end: report its
 /// messages to the sink in order, interrupt it on a stop request, a parked
 /// turn, or the deadline, and give up on it when it does not stop in time
@@ -358,14 +367,16 @@ where
         for event in events {
             let written = match event {
                 Event::Accepted { model, native_turn } => {
-                    let reported =
-                        json!({ "model": model, "reasoning_effort": null, "service_tier": null });
-                    let accepted = turn.accept(sink, &reported, &native_turn).await;
+                    let accepted = turn.accept(sink, &reported(&model), &native_turn).await;
                     if accepted.is_ok() && life.takes_steers() {
                         steering.give(channel, protocol, sink, stop).await;
                     }
                     accepted
                 }
+                Event::Rerouted { model, native_turn } if turn.accepted() => {
+                    sink.reported(&reported(&model), &native_turn).await
+                }
+                Event::Rerouted { .. } => Ok(()),
                 Event::Text(text) => sink.text(&text).await,
                 Event::EndMessage => sink.end_message().await,
                 Event::Parked => {
@@ -514,6 +525,10 @@ mod tests {
                     native_turn: "t".into(),
                 }],
                 "text" => vec![Event::Text(message["text"].as_str().unwrap().into())],
+                "reroute" => vec![Event::Rerouted {
+                    model: "f".into(),
+                    native_turn: "t".into(),
+                }],
                 "park" => vec![Event::Parked],
                 "end" => vec![Event::Finished(())],
                 _ => return Err(Violation::policy("bad")),
@@ -546,8 +561,10 @@ mod tests {
         let sink = Log::default();
         let mut turn = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n".into()));
         let mut channel = replay(&[
+            json!({"kind": "reroute"}),
             json!({"kind": "accept"}),
             json!({"kind": "text", "text": "a"}),
+            json!({"kind": "reroute"}),
             json!({"kind": "text", "text": "b"}),
             json!({"kind": "end"}),
         ]);
@@ -569,7 +586,14 @@ mod tests {
         );
         assert_eq!(
             sink.calls(),
-            ["running", "session", "reported:\"m\":t", "text:a", "text:b"]
+            [
+                "running",
+                "session",
+                "reported:\"m\":t",
+                "text:a",
+                "reported:\"f\":t",
+                "text:b"
+            ]
         );
         assert_eq!(channel.interrupts, 0);
     }
