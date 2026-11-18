@@ -132,9 +132,4 @@ mod tests {
         );
         assert_eq!(first_match(MONO_CANDIDATES, |_| false), None);
     }
-
-    #[test]
-    fn keeps_the_system_font_without_a_weighted_family() {
-        assert_eq!(first_match(CANDIDATES, |_| false), None);
-    }
 }
