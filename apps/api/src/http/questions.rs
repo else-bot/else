@@ -37,6 +37,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/bots/{bot_id}/permissions/routines/{routine_id}",
             axum::routing::delete(revoke_routine),
         )
+        .route(
+            "/bots/{bot_id}/permissions/routines/{routine_id}/{kind}",
+            axum::routing::delete(revoke_routine_kind),
+        )
 }
 
 async fn dismiss_notice(
@@ -130,8 +134,25 @@ async fn revoke_routine(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, routine_id)): ApiPath<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
-    active_bot(&state, bot_id).await?;
-    if owner_questions::revoke_routine_grant(&state.db, bot_id, routine_id).await? {
+    revoke_routine_grant(&state, bot_id, routine_id, None).await
+}
+
+async fn revoke_routine_kind(
+    State(state): State<Arc<AppState>>,
+    ApiPath((bot_id, routine_id, kind)): ApiPath<(Uuid, Uuid, String)>,
+) -> Result<StatusCode, ApiError> {
+    let kind = crate::app::questions::Kind::approval(&kind).ok_or_else(ApiError::not_found)?;
+    revoke_routine_grant(&state, bot_id, routine_id, Some(kind)).await
+}
+
+async fn revoke_routine_grant(
+    state: &AppState,
+    bot_id: Uuid,
+    routine_id: Uuid,
+    kind: Option<crate::app::questions::Kind>,
+) -> Result<StatusCode, ApiError> {
+    active_bot(state, bot_id).await?;
+    if owner_questions::revoke_routine_grant(&state.db, bot_id, routine_id, kind).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found())

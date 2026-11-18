@@ -92,13 +92,17 @@ fn decision(question: &Question, bot_name: &str) -> String {
             (true, Some(APPROVE_FOREVER)) => {
                 format!("Approved, and destructive actions are always allowed for {bot_name}.")
             }
-            (true, Some(APPROVE_ROUTINE)) => {
-                "Approved. Destructive actions are allowed for this routine's saved task on future runs."
-                    .into()
-            }
+            (true, Some(APPROVE_ROUTINE)) => format!(
+                "Approved. {} are allowed for this routine's saved task on future runs.",
+                if question.kind == "external" {
+                    "External computer and host actions"
+                } else {
+                    "Destructive actions"
+                }
+            ),
             (true, Some(APPROVE_TOOL)) => {
                 question.mcp_tool_scope().map_or_else(
-                    || "Approved. This tool and action type are allowed in future chat requests.".into(),
+                    || "Approved. This tool and action type are allowed from now on.".into(),
                     |(integration, tool)| format!("Always allowed for this bot: {integration} · {tool} for this action type."),
                 )
             }

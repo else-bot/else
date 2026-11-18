@@ -573,7 +573,7 @@ async fn work_delegated_for_an_owner_request_records_a_task_grant_only_from_the_
     assert_eq!(choices, ALWAYS);
     h.release(child).await;
     wait(app, child, "waiting").await;
-    const TYPED: &str = "Always allow";
+    const TYPED: &str = "Always allow docker cleanup on this host";
     let sent = app.send(&worker, Uuid::new_v4(), TYPED, None).await;
     assert_eq!(sent.body["turn"]["steered_into"], child.to_string());
     let child_token = h.continued(child, &child_token).await;

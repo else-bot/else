@@ -24,6 +24,8 @@ pub enum ConfirmError {
         "in a delegated task, save only the exact task scope, kind and covers of a card the owner's message skipped"
     )]
     NoSkippedCard,
+    #[error("this owner message already answered a card with its Always choice; save nothing more")]
+    CardAnswered,
 }
 
 impl From<sqlx::Error> for ConfirmError {
@@ -54,15 +56,17 @@ pub async fn confirm(
     let caller = turns::asking_caller(&mut tx, turn_id)
         .await?
         .ok_or(RequestError::NotRunning)?;
-    // A delegated task may save only a task grant, which its own reach
-    // covers, from an owner message sent in its bot's chat and steered into it.
+    // A delegated task may save only a task or tool grant, which its own
+    // reach covers, from an owner message sent in its bot's chat and steered
+    // into it.
     let task = matches!(target, PermissionTarget::Task { .. });
+    let reach = super::grant_reach(&mut tx, turn_id).await?;
     let allowed = if caller.owner_conversation {
         !task
             || (matches!(super::scope(&mut tx, turn_id).await?, super::Scope::Bot)
                 && crate::db::delegations::origin(&mut tx, turn_id).await? == Origin::OwnerRequest)
     } else {
-        task && super::grant_reach(&mut tx, turn_id).await? == GrantReach::Tasks
+        reach == GrantReach::Tasks && reach.covers(&target)
     };
     if !allowed {
         return Err(RequestError::NotAllowed.into());
@@ -70,8 +74,21 @@ pub async fn confirm(
     if !super::owner_message_quotes(&mut tx, turn_id, authorization).await? {
         return Err(ConfirmError::NotAuthorized);
     }
+    // A bare "Always allow" already saved exactly its card's grant.
+    let typed: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS (SELECT 1 FROM owner_questions
+         WHERE typed_turn_id = ?1 OR typed_turn_id IN ({}))",
+        crate::db::steers::delivered_into("?1")
+    )))
+    .bind(turn_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if typed {
+        return Err(ConfirmError::CardAnswered);
+    }
     // The owner's words in a delegated task answer a card they skipped by
     // typing, so they grant exactly that card's scope, never one the bot names.
+    // The card's turn offered it, since its reach covers `target`.
     if !caller.owner_conversation {
         let cards = super::for_turns(&mut tx, &[turn_id]).await?;
         let skipped = cards.get(&turn_id).into_iter().flatten().any(|card| {
@@ -86,8 +103,10 @@ pub async fn confirm(
             return Err(ConfirmError::NoSkippedCard);
         }
     }
-    if matches!(target, PermissionTarget::McpTool { .. })
-        && !matches!(super::scope(&mut tx, turn_id).await?, super::Scope::Bot)
+    if matches!(
+        target,
+        PermissionTarget::McpTool { .. } | PermissionTarget::ComputerTool { .. }
+    ) && !reach.covers(&target)
     {
         return Err(RequestError::NotAllowed.into());
     }
@@ -97,6 +116,7 @@ pub async fn confirm(
     if let PermissionTarget::Routine {
         routine_id,
         prompt_revision,
+        ..
     } = &target
     {
         let current: bool = sqlx::query_scalar(
@@ -127,6 +147,7 @@ pub async fn confirm(
         let active: bool = match &target {
             PermissionTarget::Bot
             | PermissionTarget::McpTool { .. }
+            | PermissionTarget::ComputerTool { .. }
             | PermissionTarget::Task { .. } => sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM bot_permissions WHERE bot_id = ?1 AND question_id = ?2)",
             )
@@ -134,11 +155,15 @@ pub async fn confirm(
             .bind(question.id)
             .fetch_one(&mut *tx)
             .await?,
-            PermissionTarget::Routine { routine_id, .. } => sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM routine_grants WHERE routine_id = ?1 AND question_id = ?2)",
+            PermissionTarget::Routine {
+                routine_id, kind, ..
+            } => sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM routine_grants
+                 WHERE routine_id = ?1 AND kind = ?3 AND question_id = ?2)",
             )
             .bind(routine_id)
             .bind(question.id)
+            .bind(kind.as_str())
             .fetch_one(&mut *tx)
             .await?,
         };
@@ -148,7 +173,7 @@ pub async fn confirm(
     let answer = match &target {
         PermissionTarget::Bot => APPROVE_FOREVER,
         PermissionTarget::Routine { .. } => APPROVE_ROUTINE,
-        PermissionTarget::McpTool { .. } => APPROVE_TOOL,
+        PermissionTarget::McpTool { .. } | PermissionTarget::ComputerTool { .. } => APPROVE_TOOL,
         PermissionTarget::Task { .. } => APPROVE_TASK,
     };
     let row = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -166,6 +191,7 @@ pub async fn confirm(
     match &target {
         PermissionTarget::Bot
         | PermissionTarget::McpTool { .. }
+        | PermissionTarget::ComputerTool { .. }
         | PermissionTarget::Task { .. } => {
             sqlx::query(
                 "INSERT INTO bot_permissions (bot_id, scope, question_id) VALUES (?1, ?2, ?3)
@@ -181,15 +207,18 @@ pub async fn confirm(
         PermissionTarget::Routine {
             routine_id,
             prompt_revision,
+            kind,
         } => {
             sqlx::query(
-                "INSERT INTO routine_grants (routine_id, prompt_revision, question_id) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (routine_id) DO UPDATE SET prompt_revision = excluded.prompt_revision,
+                "INSERT INTO routine_grants (routine_id, kind, prompt_revision, question_id)
+                 VALUES (?1, ?4, ?2, ?3)
+                 ON CONFLICT (routine_id, kind) DO UPDATE SET prompt_revision = excluded.prompt_revision,
                      question_id = excluded.question_id, granted_at = excluded.granted_at",
             )
             .bind(routine_id)
             .bind(prompt_revision)
             .bind(question.id)
+            .bind(kind.as_str())
             .execute(&mut *tx)
             .await?;
         }

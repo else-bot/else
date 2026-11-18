@@ -74,9 +74,10 @@ pub const DESTRUCTIVE_SCOPE: &str = "destructive";
 pub enum Standing {
     /// Every request of the bot except routine runs and their tasks.
     Bot,
-    /// Runs of one routine admitted with its current prompt.
+    /// One effect in runs of one routine admitted with its current prompt.
     Routine,
-    /// One MCP tool and effect in the bot's owner requests.
+    /// One MCP tool, or one computer tool's external calls, in the bot's
+    /// owner requests, routine runs and delegated tasks.
     Tool,
     /// One declared task on one target, with one effect, in the bot's owner
     /// requests and scheduled runs of its routines.
@@ -110,7 +111,12 @@ impl GrantReach {
     pub fn covers(self, target: &PermissionTarget) -> bool {
         match self {
             Self::OwnerChat => true,
-            Self::Tasks => matches!(target, PermissionTarget::Task { .. }),
+            Self::Tasks => matches!(
+                target,
+                PermissionTarget::Task { .. }
+                    | PermissionTarget::McpTool { .. }
+                    | PermissionTarget::ComputerTool { .. }
+            ),
             Self::Nothing => false,
         }
     }
@@ -179,7 +185,7 @@ pub fn approval_choices(kind: Kind, offer: Option<Standing>) -> Vec<Choice> {
             id: APPROVE_FOREVER.into(),
             label: "Always allow for this bot".into(),
         }),
-        (Kind::Destructive, Some(Standing::Routine)) => choices.push(Choice {
+        (Kind::Destructive | Kind::External, Some(Standing::Routine)) => choices.push(Choice {
             id: APPROVE_ROUTINE.into(),
             label: "Always allow for this routine".into(),
         }),
@@ -247,6 +253,57 @@ impl Action {
     pub fn broad_grants_cover(&self) -> bool {
         !matches!(self, Self::Tool { tool, .. } if tool == "computer_resize")
     }
+
+    /// Whether a routine's grant for `kind` covers this action. A destructive
+    /// grant covers what the bot-wide one does. An external grant covers only
+    /// host actions and computer tool calls: an MCP tool has its own grant,
+    /// and other external calls (replacing an MCP, a mail trigger, a webhook
+    /// pace, a social post) always ask.
+    pub fn routine_grant_covers(&self, kind: Kind) -> bool {
+        match kind {
+            Kind::Destructive => self.broad_grants_cover(),
+            Kind::External => match self {
+                Self::Host { .. } => true,
+                Self::Tool { tool, .. } => computer_tool(tool),
+                _ => false,
+            },
+            Kind::Choice => false,
+        }
+    }
+}
+
+/// A computer tool whose calls one standing grant per tool and effect may
+/// cover. A resize takes host memory, so only a grant for its size does.
+fn computer_tool(tool: &str) -> bool {
+    tool != "computer_resize" && crate::http::guest_tools::TOOL_NAMES.contains(&tool)
+}
+
+/// Whether an owner message says only to always allow the card it answers,
+/// such as "Always approve." or "yes, always allow it please". Any other
+/// words, a limit or a condition among them, are not this answer.
+pub fn says_always_allow(text: &str) -> bool {
+    let text = text.to_lowercase();
+    let words: Vec<&str> = text
+        .split(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | '!'))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let mut words = words.as_slice();
+    if let ["yes" | "ok" | "okay" | "sure", rest @ ..] = words {
+        words = rest;
+    }
+    if let ["please", rest @ ..] = words {
+        words = rest;
+    }
+    if let [rest @ .., "please"] = words {
+        words = rest;
+    }
+    if let [rest @ .., "it" | "this" | "that"] = words {
+        words = rest;
+    }
+    matches!(
+        words,
+        ["always", "allow" | "approve"] | ["allow" | "approve", "always"]
+    )
 }
 
 /// The recurring work a host action or computer tool call belongs to, as
@@ -409,10 +466,20 @@ pub enum PermissionTarget {
     Routine {
         routine_id: Uuid,
         prompt_revision: i64,
+        /// Grants saved before routine grants named their effect allow
+        /// destructive actions.
+        #[serde(default = "destructive")]
+        kind: Kind,
     },
     #[serde(rename = "mcp_tool")]
     McpTool {
         mcp_id: crate::mcp::PackageId,
+        tool: String,
+        kind: Kind,
+    },
+    /// One computer tool's external calls without a declared task scope.
+    #[serde(rename = "computer_tool")]
+    ComputerTool {
         tool: String,
         kind: Kind,
     },
@@ -424,20 +491,27 @@ pub enum PermissionTarget {
     },
 }
 
+fn destructive() -> Kind {
+    Kind::Destructive
+}
+
 impl PermissionTarget {
     pub fn standing(&self) -> Standing {
         match self {
             Self::Bot => Standing::Bot,
             Self::Routine { .. } => Standing::Routine,
-            Self::McpTool { .. } => Standing::Tool,
+            Self::McpTool { .. } | Self::ComputerTool { .. } => Standing::Tool,
             Self::Task { .. } => Standing::Task,
         }
     }
 
     pub fn kind(&self) -> Kind {
         match self {
-            Self::McpTool { kind, .. } | Self::Task { kind, .. } => *kind,
-            _ => Kind::Destructive,
+            Self::Bot => Kind::Destructive,
+            Self::Routine { kind, .. }
+            | Self::McpTool { kind, .. }
+            | Self::ComputerTool { kind, .. }
+            | Self::Task { kind, .. } => *kind,
         }
     }
 
@@ -449,8 +523,10 @@ impl PermissionTarget {
                     && tool.len() <= 128
                     && !tool.contains('\0')
             }
+            Self::ComputerTool { tool, kind } => *kind == Kind::External && computer_tool(tool),
             Self::Task { kind, .. } => *kind != Kind::Choice && self.task_scope().is_some(),
-            _ => true,
+            Self::Routine { kind, .. } => *kind != Kind::Choice,
+            Self::Bot => true,
         }
     }
 
@@ -497,6 +573,9 @@ impl PermissionTarget {
                 kind.as_str(),
                 hex::encode(tool),
             )),
+            Self::ComputerTool { tool, kind } => {
+                Some(format!("computer:{}:{}", kind.as_str(), hex::encode(tool)))
+            }
             Self::Task { kind, covers, .. } => Some(self.task_scope()?.key(*covers, *kind)),
         }
     }
@@ -531,7 +610,8 @@ impl PermissionTarget {
     }
 
     /// The standing grant that would cover this approved action: an MCP tool
-    /// call, or a host action or computer tool call declared with a task scope.
+    /// call, a host action or computer tool call declared with a task scope,
+    /// or a computer tool's external call without one.
     pub fn for_action(kind: Kind, action: &Action) -> Option<Self> {
         let declared = match action {
             Action::Host {
@@ -556,6 +636,12 @@ impl PermissionTarget {
         let Action::Tool { tool, args, .. } = action else {
             return None;
         };
+        if kind == Kind::External && computer_tool(tool) {
+            return Some(Self::ComputerTool {
+                tool: tool.clone(),
+                kind,
+            });
+        }
         if tool != "mcp_request" || args["method"] != "tools/call" {
             return None;
         }
@@ -756,10 +842,22 @@ impl Spec {
         let kind = target.kind();
         let permission_hash = match &target {
             PermissionTarget::Bot => hash(&[b"standing_permission", b"bot"]),
-            PermissionTarget::Routine { routine_id, .. } => {
-                hash(&[b"standing_permission", b"routine", routine_id.as_bytes()])
-            }
-            PermissionTarget::McpTool { .. } | PermissionTarget::Task { .. } => hash(&[
+            PermissionTarget::Routine {
+                routine_id,
+                kind: Kind::Destructive,
+                ..
+            } => hash(&[b"standing_permission", b"routine", routine_id.as_bytes()]),
+            PermissionTarget::Routine {
+                routine_id, kind, ..
+            } => hash(&[
+                b"standing_permission",
+                b"routine",
+                routine_id.as_bytes(),
+                kind.as_str().as_bytes(),
+            ]),
+            PermissionTarget::McpTool { .. }
+            | PermissionTarget::ComputerTool { .. }
+            | PermissionTarget::Task { .. } => hash(&[
                 b"standing_permission",
                 target.bot_scope().unwrap().as_bytes(),
             ]),
@@ -768,13 +866,16 @@ impl Spec {
             kind,
             title: match standing {
                 Standing::Bot => "Always allow destructive actions for this bot".into(),
-                Standing::Routine => "Allow destructive actions for this routine".into(),
+                Standing::Routine => format!("Allow {} actions for this routine", kind.as_str()),
                 Standing::Tool => match &target {
                     PermissionTarget::McpTool { mcp_id, tool, kind } => format!(
                         "Always allow {} actions with {}/{tool}",
                         kind.as_str(),
                         String::from(mcp_id.clone()),
                     ),
+                    PermissionTarget::ComputerTool { tool, kind } => {
+                        format!("Always allow {} actions with {tool}", kind.as_str())
+                    }
                     _ => unreachable!(),
                 },
                 Standing::Task => match &target {
@@ -983,12 +1084,37 @@ mod tests {
         let routine = PermissionTarget::Routine {
             routine_id: uuid::Uuid::nil(),
             prompt_revision: 1,
+            kind: Kind::Destructive,
         };
         assert!(
             !GrantReach::Tasks.covers(&routine)
                 && !GrantReach::Tasks.covers(&PermissionTarget::Bot),
             "a routine's destructive grant never carries over to its tasks"
         );
+    }
+
+    #[test]
+    fn only_a_bare_always_allow_reply_answers_a_card() {
+        for text in [
+            "Always approve.",
+            "always allow",
+            "Yes, always allow it please!",
+            "  Approve always ",
+            "ok always allow this",
+        ] {
+            assert!(says_always_allow(text), "{text}");
+        }
+        for text in [
+            "",
+            "always",
+            "Always allow, but not on main.",
+            "Don't always allow this",
+            "always allow deletes too",
+            "approve",
+            "Always allow for every bot",
+        ] {
+            assert!(!says_always_allow(text), "{text}");
+        }
     }
 
     #[test]

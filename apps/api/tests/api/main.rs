@@ -9,6 +9,7 @@
 mod common;
 
 mod admission_profiles;
+mod always_allow;
 mod assistant_backup;
 mod assistant_images;
 mod attachments;

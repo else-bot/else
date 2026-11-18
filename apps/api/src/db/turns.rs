@@ -603,6 +603,7 @@ pub async fn accept(
                 turn_no,
                 turn_id,
                 req.provider_id,
+                req.reaction.is_none() && req.open_draft.is_none() && req.answers_notice.is_none(),
             )
             .await?,
         ),
@@ -651,9 +652,18 @@ pub async fn settle_deferred(pool: &SqlitePool) -> Result<(usize, Vec<Uuid>), sq
         let Some((bot_id, conversation_id, turn_no, provider_id)) = turn else {
             continue;
         };
-        let placement =
-            crate::db::steers::place(&mut tx, bot_id, conversation_id, turn_no, id, &provider_id)
-                .await?;
+        // Whether a deferred message targeted a notice or a draft is not
+        // kept, so it answers no card by its words.
+        let placement = crate::db::steers::place(
+            &mut tx,
+            bot_id,
+            conversation_id,
+            turn_no,
+            id,
+            &provider_id,
+            false,
+        )
+        .await?;
         woken.extend(placement.wakes());
         crate::db::events::turn_changed(&mut tx, bot_id, id).await?;
         tx.commit().await?;

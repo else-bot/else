@@ -304,10 +304,10 @@ pub(crate) async fn approve_card(
         }) => Ok(Some("standing destructive permission")),
         Ok(Gate::Run {
             standing: Some(Standing::Routine),
-        }) => Ok(Some("standing destructive permission for this routine")),
+        }) => Ok(Some("standing permission for this routine")),
         Ok(Gate::Run {
             standing: Some(Standing::Tool),
-        }) => Ok(Some("standing permission for this MCP tool and effect")),
+        }) => Ok(Some("standing permission for this tool and effect")),
         Ok(Gate::Run {
             standing: Some(Standing::Task),
         }) => Ok(Some("standing permission for this task and target")),

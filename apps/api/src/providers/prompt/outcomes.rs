@@ -8,7 +8,7 @@ use super::file_reference;
 use crate::app::providers::TurnInput;
 use crate::app::questions::{
     APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, Action, DENY,
-    GrantReach, Status,
+    GrantReach, Kind, PermissionTarget, Status,
 };
 
 /// Recorded child outcomes and the owner's answers to secret requests and
@@ -418,14 +418,20 @@ fn questions_block(input: &TurnInput) -> String {
                         " The owner also allowed destructive actions of this bot from now on, \
                          outside routine runs."
                     }
+                    APPROVE_ROUTINE if question.kind == Kind::External => {
+                        " The owner also allowed external host actions and computer tool calls in \
+                         this routine's runs from now on, while its prompt stays unchanged; a tool \
+                         result says when that applies. MCP tools and drafted messages are not covered."
+                    }
                     APPROVE_ROUTINE => {
                         " The owner also allowed destructive actions in this routine's runs from \
                          now on, while its prompt stays unchanged; a tool result says when that \
                          applies."
                     }
                     APPROVE_TOOL => {
-                        " The owner also allowed this MCP tool and effect in future owner requests. \
-                         Other tools, effects, bots, routine runs, and delegated tasks are not covered."
+                        " The owner also allowed this tool and effect for this bot from now on, in \
+                         owner requests, routine runs, and tasks delegated for them. Other tools, \
+                         effects, and bots are not covered."
                     }
                     APPROVE_TASK => {
                         " The owner also allowed this task category, target and effect for this bot's \
@@ -517,6 +523,20 @@ fn questions_block(input: &TurnInput) -> String {
                              always allow this, call confirm_permission with this task scope, kind \
                              {kind}, covers {covers}, and their exact words, then make this call \
                              again once. Otherwise follow their message; this action is not approved."
+                        )
+                    }
+                    (_, Action::Tool { .. })
+                        if question.status == Status::Skipped
+                            && let Some(target) =
+                                PermissionTarget::for_action(question.kind, action)
+                                    .filter(|target| input.grant_reach().covers(target)) =>
+                    {
+                        format!(
+                            "Skipped: the owner sent a message instead of choosing. If it says to \
+                             always allow this, call confirm_permission with target {} and their \
+                             exact words, then make this call again once. Otherwise follow their \
+                             message; this action is not approved.",
+                            serde_json::to_string(&target).expect("permission serialization")
                         )
                     }
                     _ => format!("Not approved: this {kind} action was not allowed; do not do it."),

@@ -41,10 +41,20 @@ fn scope(choice: &QuestionChoice, question: &Question, bot: &str) -> (String, St
         ),
         APPROVE_TOOL => (
             question.mcp_tool_scope().map_or_else(
-                || "Always allow this tool".to_owned(),
+                || match question.action.as_ref().and_then(|a| a.tool.as_deref()) {
+                    Some(tool) => format!("Always allow {tool}"),
+                    None => "Always allow this tool".to_owned(),
+                },
                 |(integration, tool)| format!("Always allow {integration} · {tool}"),
             ),
-            format!("For this action type in {bot}'s chat requests."),
+            format!(
+                "For {} actions with this tool in {bot}'s chats, routine runs and tasks.",
+                question.kind
+            ),
+        ),
+        APPROVE_ROUTINE if question.kind == "external" => (
+            "Always for this routine".into(),
+            "Allows external computer and host actions for its saved task. Changing the task clears this.".into(),
         ),
         APPROVE_ROUTINE => (
             "Always for this routine".into(),
@@ -372,15 +382,28 @@ impl ElseApp {
                     _ => None,
                 })
         };
-        let mut footer = super::super::action_card::footer().note(if grants.len() > 1 {
-            "Sending a new message skips this."
-        } else if deletion.is_some() {
-            "Deletes only this bot, once. Sending a new message skips this."
-        } else if attachments.is_some() {
-            "Lets the bot read and search only these files. Sending a new message skips this."
-        } else {
-            "Covers exactly this action, once. Sending a new message skips this."
-        });
+        let mut footer = super::super::action_card::footer().note(
+            match selected.map(|choice| choice.id.as_str()) {
+                _ if deletion.is_some() => {
+                    "Deletes only this bot, once. Sending a new message skips this."
+                }
+                _ if attachments.is_some() => {
+                    "Lets the bot read and search only these files. Sending a new message skips this."
+                }
+                Some(APPROVE) | None => {
+                    "Covers exactly this action, once. Sending a new message skips this."
+                }
+                Some(APPROVE_ROUTINE) => {
+                    "Covers this routine until its task changes. Replying \"Always allow\" also chooses this."
+                }
+                Some(APPROVE_FOREVER) => {
+                    "Covers destructive actions from now on."
+                }
+                Some(_) => {
+                    "Covers this tool or task and effect from now on. Replying \"Always allow\" also chooses this."
+                }
+            },
+        );
         if question.choices.iter().any(|c| c.id == DENY) {
             footer = footer.child(
                 Button::new(SharedString::from(format!("question-{id}-{DENY}")))
