@@ -474,7 +474,6 @@ impl Shell {
                     )
                     .child(
                         div()
-                            .max_w(crate::panel_kit::PARAGRAPH)
                             .text_sm()
                             .text_color(theme.muted_foreground)
                             .child(description),
