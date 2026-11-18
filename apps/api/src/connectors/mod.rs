@@ -237,9 +237,6 @@ impl ConnectorManager {
     }
 
     pub async fn forget(&self, id: Uuid) {
-        self.messages
-            .call(move |messages| messages.forget(id))
-            .await;
         if let Some(mut worker) = self.workers.call(move |workers| workers.remove(&id)).await {
             worker.stop.cancel();
             while !*worker.done.borrow_and_update() {
@@ -248,6 +245,11 @@ impl ConnectorManager {
                 }
             }
         }
+        // After the worker stopped, so a fetch it was finishing cannot
+        // store the account's mail again.
+        self.messages
+            .call(move |messages| messages.forget(id))
+            .await;
     }
 
     pub async fn replace_credential(
@@ -361,7 +363,10 @@ impl ConnectorManager {
         if account.state != "active" {
             return Err(MailError::new("mail_account_paused"));
         }
-        if let Some(fetched) = self.cached(&account, &message).await {
+        let admission = self.scheduler.gate().enter();
+        if admission.is_some()
+            && let Some(fetched) = self.cached(&account, &message).await
+        {
             let view = pimalaya::view(&fetched, &message);
             tracing::info!(
                 %account_id,
@@ -388,7 +393,15 @@ impl ConnectorManager {
         }
     }
 
+    /// The cached message, unless the server is known to reject the saved
+    /// sign-in, so the reader still says to reconnect.
     async fn cached(&self, account: &Account, message: &MessageRef) -> Option<Fetched> {
+        if matches!(
+            account.health,
+            Health::CredentialRejected | Health::ReauthenticationRequired
+        ) {
+            return None;
+        }
         let key = Self::cache_key(account, message);
         self.messages.call(move |messages| messages.get(&key)).await
     }
@@ -563,7 +576,10 @@ impl ConnectorManager {
             MailCommand::View { message } => Some((message, pimalaya::view as Parse)),
             _ => None,
         };
+        // Bots always read the mailbox itself, so a message moved or
+        // deleted elsewhere is gone for them at once.
         if let Some((message, parse)) = read
+            && matches!(command.caller, Caller::Owner)
             && let Some(fetched) = self.cached(&account, message).await
         {
             log_read(id, command, started, None);
@@ -620,6 +636,17 @@ impl ConnectorManager {
         };
         if matches!(&result, Err(error) if error.code == AUTHENTICATION_FAILED) {
             *rejected = Some((account.generation, AUTHENTICATION_FAILED));
+        }
+        if let (
+            Ok(_),
+            MailCommand::Move { message, .. }
+            | MailCommand::Archive { message }
+            | MailCommand::Trash { message }
+            | MailCommand::Delete { message },
+        ) = (&result, &command.command)
+        {
+            let key = Self::cache_key(&account, message);
+            self.messages.call(move |m| m.remove(&key)).await;
         }
         let Some(action_id) = action_id else {
             return result;

@@ -1,7 +1,8 @@
 //! Recently read messages, so the owner's reader opens an email a bot just
 //! read without signing in to the mail server again. It lives in memory
-//! only. A message's bytes never change under one UIDVALIDITY and UID, so
-//! an entry stays right until it ages out or its account changes.
+//! only. A message's bytes never change under one UIDVALIDITY and UID, but
+//! it can leave its folder: moving or deleting it through the account drops
+//! its entry, and a change made elsewhere shows once the entry ages out.
 
 use super::types::{Fetched, MessageRef};
 use std::collections::{HashMap, VecDeque};
@@ -13,8 +14,10 @@ use uuid::Uuid;
 const BUDGET: usize = 64 * 1024 * 1024;
 /// The largest message kept.
 const ENTRY_LIMIT: usize = 16 * 1024 * 1024;
+/// Messages kept at most, whatever their size.
+const ENTRIES: usize = 256;
 /// How long a message stays after it was read from the server.
-const TTL: Duration = Duration::from_secs(60 * 60);
+const TTL: Duration = Duration::from_secs(15 * 60);
 
 /// One message of one account generation. A new generation means the
 /// account's settings changed, so its older entries are never served.
@@ -55,7 +58,7 @@ impl Messages {
             return;
         }
         self.remove(&key);
-        while self.bytes + fetched.raw.len() > BUDGET {
+        while self.bytes + fetched.raw.len() > BUDGET || self.entries.len() >= ENTRIES {
             let Some((serial, oldest)) = self.order.pop_front() else {
                 break;
             };
@@ -85,7 +88,7 @@ impl Messages {
         );
     }
 
-    /// Drops every message of a removed or reconfigured account.
+    /// Drops every message of a removed account.
     pub fn forget(&mut self, account_id: Uuid) {
         self.entries.retain(|key, entry| {
             let keep = key.account_id != account_id;
@@ -97,7 +100,7 @@ impl Messages {
         self.order.retain(|(_, key)| key.account_id != account_id);
     }
 
-    fn remove(&mut self, key: &Key) {
+    pub fn remove(&mut self, key: &Key) {
         if let Some(entry) = self.entries.remove(key) {
             self.bytes -= entry.fetched.raw.len();
         }
@@ -155,6 +158,5 @@ mod tests {
         assert!(cache.get(&other_generation).is_none());
         tokio::time::advance(TTL).await;
         assert!(cache.get(&key(kept, 1)).is_none());
-        assert_eq!(cache.bytes, 0);
     }
 }

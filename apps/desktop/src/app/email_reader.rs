@@ -29,7 +29,10 @@ const BODY_HEIGHT: Pixels = px(560.);
 const SLOW: Duration = Duration::from_secs(5);
 /// How long the body's width must hold before the HTML draws again.
 const RESIZE_SETTLE: Duration = Duration::from_millis(150);
-/// Emails the session keeps.
+/// How long a started fetch serves the reader, so a hover's fetch serves
+/// the click that follows it. The server caches the message for longer.
+const FETCH_REUSE: Duration = Duration::from_secs(30);
+/// Fetches the session keeps.
 const CACHED_EMAILS: usize = 16;
 /// Bytes of drawn pages the session keeps, one page per email at most.
 const CACHED_PAGE_BYTES: usize = 192 * 1024 * 1024;
@@ -42,27 +45,30 @@ enum Reading {
 
 type Fetch = Shared<Task<Result<Arc<EmailMessage>, String>>>;
 
-/// One email of one inbox.
+/// One email of one inbox on one server connection.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct MailKey {
+    client: usize,
     account_id: uuid::Uuid,
     message: crate::api::MessageRef,
 }
 
-impl From<&TurnMail> for MailKey {
-    fn from(mail: &TurnMail) -> Self {
+impl MailKey {
+    fn new(client: &Arc<Client>, mail: &TurnMail) -> Self {
         Self {
+            client: Arc::as_ptr(client) as usize,
             account_id: mail.account_id,
             message: mail.message.clone(),
         }
     }
 }
 
-/// Emails and drawn pages this session already loaded, so hovering View
-/// email starts the fetch and reopening an email shows it at once.
+/// Recent fetches and drawn pages, so hovering View email starts the
+/// fetch for the click and reopening an email redraws nothing. Each open
+/// still asks the server, which refuses a paused or removed inbox.
 #[derive(Default)]
 struct ReaderCache {
-    emails: HashMap<MailKey, Fetch>,
+    emails: HashMap<MailKey, (std::time::Instant, Fetch)>,
     order: VecDeque<MailKey>,
     /// Each email's last drawn page, oldest first.
     pages: VecDeque<(MailKey, Key, Arc<Page>)>,
@@ -71,11 +77,13 @@ struct ReaderCache {
 impl Global for ReaderCache {}
 
 impl ReaderCache {
-    /// The email's fetch: the cached one, the one under way, or a new one
-    /// when there is none or the last one failed.
-    fn fetch(client: &Arc<Client>, mail: &TurnMail, cx: &mut App) -> Fetch {
-        let key = MailKey::from(mail);
-        if let Some(fetch) = cx.default_global::<Self>().emails.get(&key)
+    /// The email's fetch: one started within `FETCH_REUSE` that has not
+    /// failed, or a new one. `fresh` always starts a new one.
+    fn fetch(client: &Arc<Client>, mail: &TurnMail, fresh: bool, cx: &mut App) -> Fetch {
+        let key = MailKey::new(client, mail);
+        if let Some((started, fetch)) = cx.default_global::<Self>().emails.get(&key)
+            && !fresh
+            && started.elapsed() < FETCH_REUSE
             && !matches!(fetch.peek(), Some(Err(_)))
         {
             return fetch.clone();
@@ -91,15 +99,12 @@ impl ReaderCache {
                     .map_err(|error| error.to_string())
             })
             .shared();
-        // `peek` sees a result only once a clone has polled it, and a
-        // prefetch has no reader awaiting it yet.
-        let polled = fetch.clone();
-        cx.spawn(async move |_| {
-            let _ = polled.await;
-        })
-        .detach();
         let cache = cx.global_mut::<Self>();
-        if cache.emails.insert(key.clone(), fetch.clone()).is_none() {
+        if cache
+            .emails
+            .insert(key.clone(), (std::time::Instant::now(), fetch.clone()))
+            .is_none()
+        {
             cache.order.push_back(key);
         }
         while cache.order.len() > CACHED_EMAILS {
@@ -107,7 +112,6 @@ impl ReaderCache {
                 break;
             };
             cache.emails.remove(&oldest);
-            cache.pages.retain(|(mail, _, _)| *mail != oldest);
         }
         fetch
     }
@@ -119,13 +123,22 @@ impl ReaderCache {
             .map(|(_, _, page)| page.clone())
     }
 
-    fn keep_page(&mut self, mail: MailKey, key: Key, page: Arc<Page>) {
-        self.pages.retain(|(m, _, _)| *m != mail);
-        self.pages.push_back((mail, key, page));
-        while self.pages.iter().map(|(_, _, p)| p.bytes).sum::<usize>() > CACHED_PAGE_BYTES
-            && self.pages.len() > 1
+    /// Keeps `page` as the email's only page and frees the textures of the
+    /// pages it pushes out.
+    fn keep_page(mail: MailKey, key: Key, page: Arc<Page>, cx: &mut App) {
+        let pages = &mut cx.default_global::<Self>().pages;
+        let mut evicted = Vec::new();
+        if let Some(ix) = pages.iter().position(|(m, _, _)| *m == mail) {
+            evicted.extend(pages.remove(ix));
+        }
+        pages.push_back((mail, key, page));
+        while pages.iter().map(|(_, _, p)| p.bytes).sum::<usize>() > CACHED_PAGE_BYTES
+            && pages.len() > 1
         {
-            self.pages.pop_front();
+            evicted.extend(pages.pop_front());
+        }
+        for (_, _, page) in evicted {
+            cx.drop_image(page.image.clone(), None);
         }
     }
 }
@@ -197,17 +210,17 @@ impl EmailReader {
             width: None,
             links_open: false,
         };
-        reader.load(0, cx);
+        reader.load(0, false, cx);
         reader
     }
 
-    /// Shows the turn's email at `index`, from the session's cache when it
-    /// is there.
-    fn load(&mut self, index: usize, cx: &mut Context<Self>) {
+    /// Shows the turn's email at `index`. `fresh` asks the server again
+    /// even when a recent fetch is still under way.
+    fn load(&mut self, index: usize, fresh: bool, cx: &mut Context<Self>) {
         let Some(mail) = self.mails.get(index) else {
             return;
         };
-        let fetch = ReaderCache::fetch(&self.client, mail, cx);
+        let fetch = ReaderCache::fetch(&self.client, mail, fresh, cx);
         self.index = index;
         self.html = None;
         self.links_open = false;
@@ -254,7 +267,9 @@ impl EmailReader {
     }
 
     fn mail_key(&self) -> Option<MailKey> {
-        self.mails.get(self.index).map(MailKey::from)
+        self.mails
+            .get(self.index)
+            .map(|mail| MailKey::new(&self.client, mail))
     }
 
     fn title(&self) -> SharedString {
@@ -270,8 +285,9 @@ impl EmailReader {
     }
 
     /// Starts a render when the HTML body is shown and none matches `key`.
-    /// A page this session drew at `key` shows at once. A new width waits
-    /// for `RESIZE_SETTLE` so a resize draws once, keeping the old page up.
+    /// A page this session drew at `key` shows at once. A draw that
+    /// replaces another waits for `RESIZE_SETTLE`, so a resize draws once,
+    /// keeping any drawn page up meanwhile.
     fn render_html(&mut self, message: &Arc<EmailMessage>, key: Key, cx: &mut Context<Self>) {
         let current = match &self.html {
             Some(Html::Rendering { key: k, .. } | Html::Ready { key: k, .. })
@@ -286,12 +302,13 @@ impl EmailReader {
             self.html = Some(Html::Ready { key, page });
             return;
         }
-        let stale = match self.html.take() {
+        let previous = self.html.take();
+        let settle = previous.is_some();
+        let stale = match previous {
             Some(Html::Ready { key, page }) => Some((key, page)),
             Some(Html::Rendering { stale, .. }) => stale,
             _ => None,
         };
-        let settle = stale.is_some();
         let source = else_visual::email::Source {
             html,
             inline: message.inline.clone(),
@@ -331,8 +348,7 @@ impl EmailReader {
                 if matches!(&this.html, Some(Html::Rendering { key: k, .. }) if *k == key) {
                     this.html = Some(match result {
                         Ok(page) => {
-                            cx.default_global::<ReaderCache>()
-                                .keep_page(mail, key, page.clone());
+                            ReaderCache::keep_page(mail, key, page.clone(), cx);
                             Html::Ready { key, page }
                         }
                         Err(error) => Html::Failed { key, error },
@@ -425,7 +441,9 @@ impl Render for EmailReader {
                     Button::new("email-previous")
                         .control(Tier::Ghost, Scale::Compact, index == 0, cx)
                         .label("Previous")
-                        .on_click(cx.listener(move |this, _, _, cx| this.load(index - 1, cx))),
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.load(index - 1, false, cx)),
+                        ),
                 )
                 .child(
                     div()
@@ -437,7 +455,9 @@ impl Render for EmailReader {
                     Button::new("email-next")
                         .control(Tier::Ghost, Scale::Compact, index + 1 == count, cx)
                         .label("Next")
-                        .on_click(cx.listener(move |this, _, _, cx| this.load(index + 1, cx))),
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.load(index + 1, false, cx)),
+                        ),
                 )
         });
         let message = match &self.reading {
@@ -470,9 +490,9 @@ impl Render for EmailReader {
                                     Button::new("email-retry")
                                         .control(Tier::Ghost, Scale::Compact, false, cx)
                                         .label("Try again")
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| this.load(retry, cx)),
-                                        ),
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.load(retry, true, cx)
+                                        })),
                                 ),
                         )
                     })
@@ -504,7 +524,9 @@ impl Render for EmailReader {
                         Button::new("email-retry")
                             .control(Tier::Secondary, Scale::Compact, false, cx)
                             .label("Try again")
-                            .on_click(cx.listener(move |this, _, _, cx| this.load(retry, cx))),
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.load(retry, true, cx)),
+                            ),
                     )
                     .into_any_element();
             }
@@ -776,7 +798,7 @@ pub(super) fn mail_banner(turn: &crate::model::Turn, cx: &mut Context<ElseApp>) 
         move |hovered, _, cx| {
             if let (true, Some(app)) = (*hovered, app.upgrade()) {
                 let client = app.read(cx).client.clone();
-                drop(ReaderCache::fetch(&client, &first, cx));
+                drop(ReaderCache::fetch(&client, &first, false, cx));
             }
         }
     })

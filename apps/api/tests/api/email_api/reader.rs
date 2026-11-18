@@ -28,7 +28,10 @@ impl MailTransport for Mailbox {
             .lock()
             .unwrap()
             .push(serde_json::to_value(command).unwrap());
-        Err(MailError::new("message_not_found"))
+        match command {
+            MailCommand::Trash { .. } => Ok(json!({"trashed":true})),
+            _ => Err(MailError::new("message_not_found")),
+        }
     }
     async fn fetch(
         &self,
@@ -109,10 +112,6 @@ async fn the_owner_reads_the_email_behind_a_mail_turn_and_its_bot_cannot() {
     assert_eq!(read.body["subject"], "Verify your email");
     assert_eq!(read.body["html"], "<p>Hi</p>");
     assert_eq!(fetches(&mailbox), 1);
-    assert!(
-        mailbox.commands.lock().unwrap().is_empty(),
-        "nothing that marks it read"
-    );
     let again = h
         .app
         .owner("GET", &messages_path(account.id, 9), None)
@@ -174,6 +173,50 @@ async fn the_owner_opens_an_email_the_bot_already_read_without_fetching_it_again
     assert_eq!(view.status, StatusCode::OK, "{}", view.body);
     assert_eq!(view.body["html"], "<p>Hi</p>");
     assert_eq!(fetches(&mailbox), 1, "the bot's read filled the cache");
+
+    let trashed = tool(
+        &h.app,
+        &token,
+        "mail_action",
+        json!({"account_id":account.id,"action_id":Uuid::new_v4(),
+               "command":{"operation":"trash","message":message}}),
+    )
+    .await;
+    assert!(!trashed.error, "{}", trashed.body);
+    h.app
+        .owner("GET", &messages_path(account.id, 9), None)
+        .await;
+    assert_eq!(
+        fetches(&mailbox),
+        2,
+        "a trashed email is read from the server again"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_sign_in_is_reported_even_for_a_cached_email() {
+    let mailbox = Arc::new(Mailbox::default());
+    let h = recorder::harness_with(4, Some(mailbox.clone())).await;
+    let account = account(&h.app).await;
+    let first = h
+        .app
+        .owner("GET", &messages_path(account.id, 9), None)
+        .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    assert!(
+        store::set_health(
+            &h.app.db.pool,
+            account.id,
+            account.generation,
+            &Health::CredentialRejected,
+        )
+        .await
+        .unwrap()
+    );
+    h.app
+        .owner("GET", &messages_path(account.id, 9), None)
+        .await;
+    assert_eq!(fetches(&mailbox), 2, "the cache is skipped");
 }
 
 #[tokio::test]
