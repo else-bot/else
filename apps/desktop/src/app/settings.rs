@@ -2177,9 +2177,43 @@ impl ElseApp {
         let owner = cx.entity().downgrade();
         let reminder = routine.run_at.is_some();
         let no_models = self.caps.is_none();
-        let model_menu = model_title.clone();
+        let (model_badge, model_hint) = match (&routine.model, choice) {
+            (Some(choice), _) => (
+                "Custom",
+                Hint {
+                    title: format!("{}, for this routine only", self.model_name(choice)).into(),
+                    body: format!("{model_details}. The bot's chats keep their own model.").into(),
+                },
+            ),
+            (None, Some(choice)) => (
+                "Bot",
+                Hint {
+                    title: format!("{}, from the bot", self.model_name(choice)).into(),
+                    body: format!(
+                        "{model_details}. Pick another model for this routine only; \
+                         the bot's chats keep theirs."
+                    )
+                    .into(),
+                },
+            ),
+            (None, None) => (
+                "Bot",
+                Hint {
+                    title: "No bot model yet".into(),
+                    body: model_details.clone().into(),
+                },
+            ),
+        };
+        let quiet_hint = Hint {
+            title: "Only post when there's news".into(),
+            body: "The routine still runs on schedule. If nothing changed since the last run, \
+                   it stays silent instead of saying so."
+                .into(),
+        };
+        let danger = theme.danger;
         // Quiet, the model and Delete sit in one menu, so the name and the
-        // schedule keep the row's width in a narrow panel.
+        // schedule keep the row's width in a narrow panel. Each setting
+        // explains itself in a card beside the menu.
         let actions_menu = Button::new(ElementId::Name(format!("routine-more-{id}").into()))
             .focus_ring(false)
             .cursor_pointer()
@@ -2203,11 +2237,26 @@ impl ElseApp {
                         let _ = owner.update(cx, |app, cx| f(app, bot, id, window, cx));
                     }
                 };
+                // Each item draws its own icon, so the hint card anchors at
+                // the menu's edge; the quiet check goes on the right.
+                let menu = menu.check_side(gpui_kit::component::Side::Right);
                 let menu = if reminder {
                     menu
                 } else {
-                    menu.item(
-                        PopupMenuItem::new("Quiet when there's no news")
+                    let quiet_hint = quiet_hint.clone();
+                    let model_hint = model_hint.clone();
+                    menu.item(menu_heading("Delivery"))
+                        .item(
+                            PopupMenuItem::element(move |_, cx| {
+                                hinted(
+                                    format!("routine-quiet-hint-{id}"),
+                                    gpui_kit::assets::IconName::BellOff,
+                                    "Quiet if no news",
+                                    None,
+                                    &quiet_hint,
+                                    cx,
+                                )
+                            })
                             .checked(quiet)
                             .on_click(if quiet {
                                 act(|app, bot, id, window, cx| {
@@ -2218,18 +2267,40 @@ impl ElseApp {
                                     app.set_routine_quiet(bot, id, true, window, cx)
                                 })
                             }),
-                    )
-                    .item(
-                        PopupMenuItem::new(format!("Change model ({model_menu})…"))
+                        )
+                        .item(menu_heading("Run with"))
+                        .item(
+                            PopupMenuItem::element(move |_, cx| {
+                                hinted(
+                                    format!("routine-model-hint-{id}"),
+                                    gpui_kit::assets::IconName::Cpu,
+                                    "Change model…",
+                                    Some(model_badge),
+                                    &model_hint,
+                                    cx,
+                                )
+                            })
                             .disabled(no_models)
-                            .on_click(act(|app, bot, id, window, cx| {
-                                app.open_routine_model_dialog(bot, id, window, cx)
-                            })),
-                    )
+                            .on_click(act(
+                                |app, bot, id, window, cx| {
+                                    app.open_routine_model_dialog(bot, id, window, cx)
+                                },
+                            )),
+                        )
+                        .separator()
                 };
-                menu.item(PopupMenuItem::new("Delete…").on_click(act(
-                    |app, bot, id, window, cx| app.open_routine_delete_dialog(bot, id, window, cx),
-                )))
+                menu.item(
+                    PopupMenuItem::element(move |_, _| {
+                        h_flex()
+                            .gap_2()
+                            .text_color(danger)
+                            .child(Icon::new(gpui_kit::assets::IconName::Trash).xsmall())
+                            .child("Delete…")
+                    })
+                    .on_click(act(|app, bot, id, window, cx| {
+                        app.open_routine_delete_dialog(bot, id, window, cx)
+                    })),
+                )
             });
         // The switch lines up with the name; the schedule below it gets the
         // row's whole width.
@@ -2640,6 +2711,84 @@ pub(super) fn meta(text: impl Into<SharedString>, cx: &App) -> Div {
         .text_color(cx.theme().muted_foreground)
         .whitespace_normal()
         .child(text.into())
+}
+
+/// What a menu item's side card says about the setting it changes.
+#[derive(Clone)]
+struct Hint {
+    title: SharedString,
+    body: SharedString,
+}
+
+/// A muted, unclickable heading over a group of menu items.
+fn menu_heading(title: &'static str) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| div().text_xs().child(title.to_uppercase())).disabled(true)
+}
+
+/// A menu item's label, an optional value badge, and a card beside the menu
+/// that explains the setting while the pointer rests on the item.
+fn hinted(
+    id: String,
+    icon: gpui_kit::assets::IconName,
+    label: &'static str,
+    badge: Option<&'static str>,
+    hint: &Hint,
+    cx: &App,
+) -> HoverCard {
+    let theme = cx.theme();
+    let badge = badge.map(|text| {
+        div()
+            .px_1p5()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child(text)
+    });
+    let hint = hint.clone();
+    HoverCard::new(ElementId::Name(id.into()))
+        .flex_1()
+        .anchor(Anchor::RightCenter)
+        .open_delay(Duration::from_millis(300))
+        .trigger(
+            h_flex()
+                .w_full()
+                .gap_2()
+                .child(Icon::new(icon).xsmall())
+                .child(div().flex_1().child(label))
+                .children(badge),
+        )
+        .content(move |_, _, cx| {
+            let theme = cx.theme();
+            let card = v_flex()
+                .w(px(240.))
+                .p_3()
+                .gap_1()
+                .rounded(theme.radius_lg)
+                .bg(theme.popover)
+                .text_color(theme.popover_foreground)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_lg()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .whitespace_normal()
+                        .child(hint.title.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .whitespace_normal()
+                        .text_color(theme.muted_foreground)
+                        .child(hint.body.clone()),
+                );
+            // The padding, not a margin, keeps the card clear of the menu's
+            // edge: the popup measures this row to place it.
+            h_flex().id("routine-hint").pr_5().child(card)
+        })
 }
 
 /// A row's one meta line: whole tokens joined by "·". The separator stays

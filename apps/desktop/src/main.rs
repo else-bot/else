@@ -71,6 +71,7 @@ gpui_kit::assets::icon_assets!(
         Mail,
         Zap,
         Clock,
+        Cpu,
         Circle,
         Search,
         ChevronUp,
