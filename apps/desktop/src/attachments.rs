@@ -26,6 +26,39 @@ impl Attachment {
     }
 }
 
+/// The name a pasted or dropped file arrives with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IncomingName {
+    /// A clipboard image, which carries only its format.
+    Unnamed { extension: String },
+    /// A file from disk, which keeps its name unless the message already
+    /// uses it.
+    Named(String),
+}
+
+impl IncomingName {
+    /// A name no earlier file in the message uses: `image_1.png`,
+    /// `image_2.png` for unnamed images, and `report_2.pdf` for a second
+    /// `report.pdf`.
+    pub fn unique(&self, taken: impl Fn(&str) -> bool) -> String {
+        let (stem, extension, first) = match self {
+            Self::Unnamed { extension } => ("image", Some(extension.as_str()), 1),
+            Self::Named(name) if !taken(name) => return name.clone(),
+            Self::Named(name) => match name.rsplit_once('.') {
+                Some((stem, extension)) if !stem.is_empty() => (stem, Some(extension), 2),
+                _ => (name.as_str(), None, 2),
+            },
+        };
+        (first..)
+            .map(|n| match extension {
+                Some(extension) => format!("{stem}_{n}.{extension}"),
+                None => format!("{stem}_{n}"),
+            })
+            .find(|name| !taken(name))
+            .expect("an unused suffix")
+    }
+}
+
 pub fn file_id(token_id: &str) -> Option<Uuid> {
     token_id
         .strip_prefix("file:")
@@ -105,6 +138,48 @@ pub fn byte_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn names(incoming: &[IncomingName], taken: &[&str]) -> Vec<String> {
+        let mut used: Vec<String> = taken.iter().map(|name| (*name).to_owned()).collect();
+        for name in incoming {
+            let name = name.unique(|candidate| used.iter().any(|used| used == candidate));
+            used.push(name);
+        }
+        used.split_off(taken.len())
+    }
+
+    #[test]
+    fn pasted_images_count_from_one_and_skip_names_in_use() {
+        let image = || IncomingName::Unnamed {
+            extension: "png".into(),
+        };
+        assert_eq!(names(&[image()], &[]), ["image_1.png"]);
+        assert_eq!(
+            names(&[image(), image()], &[]),
+            ["image_1.png", "image_2.png"]
+        );
+        assert_eq!(
+            names(&[image()], &["image_1.png", "image_3.png"]),
+            ["image_2.png"]
+        );
+    }
+
+    #[test]
+    fn named_files_keep_their_names_until_they_collide() {
+        let named = |name: &str| IncomingName::Named(name.into());
+        assert_eq!(
+            names(&[named("a.pdf"), named("a.pdf"), named("a.pdf")], &[]),
+            ["a.pdf", "a_2.pdf", "a_3.pdf"]
+        );
+        assert_eq!(names(&[named("image.png")], &[]), ["image.png"]);
+        assert_eq!(
+            names(
+                &[named("archive.tar.gz"), named("Makefile"), named(".env")],
+                &["archive.tar.gz", "Makefile", ".env"]
+            ),
+            ["archive.tar_2.gz", "Makefile_2", ".env_2"]
+        );
+    }
 
     #[test]
     fn byte_sizes_use_decimal_units() {

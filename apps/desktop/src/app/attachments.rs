@@ -5,7 +5,7 @@ pub(super) use view::{chip, draft_chip};
 
 use super::{Draft, ElseApp};
 use crate::api::ClientError;
-use crate::attachments::{Attachment, MAX_FILE_BYTES, MAX_FILES, MessagePart};
+use crate::attachments::{Attachment, IncomingName, MAX_FILE_BYTES, MAX_FILES, MessagePart};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::InputContent;
 use gpui_kit::component::{WindowExt as _, h_flex};
@@ -198,6 +198,24 @@ pub(super) fn active_file_ids(content: &InputContent) -> impl Iterator<Item = Uu
 }
 
 impl Draft {
+    /// Names for files joining the message, unique among every file it has
+    /// held. Removed files keep their names, so no reference is renumbered
+    /// and undo cannot bring back a duplicate.
+    fn new_file_names<'a>(
+        &self,
+        incoming: impl IntoIterator<Item = &'a IncomingName>,
+    ) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for name in incoming {
+            let name = name.unique(|candidate| {
+                names.iter().any(|name| name == candidate)
+                    || self.files.values().any(|file| file.name == candidate)
+            });
+            names.push(name);
+        }
+        names
+    }
+
     pub(super) fn set_content(&mut self, content: InputContent) -> bool {
         let changed = !active_file_ids(&content).eq(active_file_ids(&self.content));
         self.content = content;
@@ -381,7 +399,9 @@ impl ElseApp {
                     return true;
                 }
                 ClipboardEntry::Image(image) => incoming.push((
-                    format!("image.{}", image.format.extension()),
+                    IncomingName::Unnamed {
+                        extension: image.format.extension().to_owned(),
+                    },
                     image.format.mime_type().to_owned(),
                     PasteSource::Bytes(Arc::new(image.bytes.clone())),
                 )),
@@ -395,7 +415,11 @@ impl ElseApp {
                         let mime = mime_guess::from_path(path)
                             .first_or_octet_stream()
                             .to_string();
-                        incoming.push((name, mime, PasteSource::Path(path.clone())));
+                        incoming.push((
+                            IncomingName::Named(name),
+                            mime,
+                            PasteSource::Path(path.clone()),
+                        ));
                     }
                 }
                 _ => {}
@@ -435,7 +459,12 @@ impl ElseApp {
             cx.notify();
             return true;
         }
-        if incoming.iter().any(|(name, _, _)| {
+        let names = self
+            .drafts
+            .entry(bot)
+            .or_default()
+            .new_file_names(incoming.iter().map(|(name, ..)| name));
+        if names.iter().any(|name| {
             name.is_empty()
                 || name.len() > 255
                 || name
@@ -448,7 +477,7 @@ impl ElseApp {
             cx.notify();
             return true;
         }
-        for (name, media_type, source) in incoming {
+        for (name, (_, media_type, source)) in names.into_iter().zip(incoming) {
             let file = Attachment {
                 id: Uuid::new_v4(),
                 name,
@@ -631,7 +660,9 @@ impl ElseApp {
 #[cfg(test)]
 mod tests {
     use super::{DraftFile, PasteSource, UploadState, append, parts};
-    use crate::attachments::{Attachment, MAX_FILE_BYTES, MessagePart, input_content};
+    use crate::attachments::{
+        Attachment, IncomingName, MAX_FILE_BYTES, MessagePart, input_content,
+    };
     use gpui_kit::component::input::InputContent;
     use uuid::Uuid;
 
@@ -668,6 +699,40 @@ mod tests {
         assert_eq!(
             parts(&draft.content, &draft.files).unwrap(),
             vec![MessagePart::File { file }]
+        );
+    }
+
+    #[test]
+    fn removed_files_keep_their_names_so_new_pastes_never_reuse_them() {
+        let first = Attachment {
+            name: "image_1.png".into(),
+            ..file()
+        };
+        let second = Attachment {
+            name: "image_2.png".into(),
+            ..file()
+        };
+        let mut draft = crate::app::reply::Draft {
+            content: input_content(
+                &second.fallback(),
+                &[MessagePart::File {
+                    file: second.clone(),
+                }],
+            ),
+            files: [
+                (first.id, DraftFile::ready(first)),
+                (second.id, DraftFile::ready(second)),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        draft.set_content(InputContent::new(""));
+        let image = IncomingName::Unnamed {
+            extension: "png".into(),
+        };
+        assert_eq!(
+            draft.new_file_names([&image, &image]),
+            ["image_3.png", "image_4.png"]
         );
     }
 
