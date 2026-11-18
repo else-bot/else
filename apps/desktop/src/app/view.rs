@@ -1209,7 +1209,7 @@ impl Render for ElseApp {
             .child(Self::measure_width(cx))
             .children((!crowded).then(|| self.render_sidebar(window, cx)))
             .child(self.render_main(window, cx))
-            .children(settings.map(|bot| self.render_settings(&bot, px(width), cx)))
+            .children(settings.map(|bot| self.render_settings(&bot, window, cx)))
             .children(self.image_viewer.clone())
             .children(self.render_quote_prompt(window, cx))
             .children(self.render_quote_editor(cx))

@@ -282,6 +282,9 @@ pub struct ElseApp {
     quote_press: Option<Point<Pixels>>,
     quote_editor: Option<quotes::QuoteEditor>,
     expanded_quotes: HashSet<Uuid>,
+    /// Routines whose banner shows its whole reason, with the reason it was
+    /// opened on, so a new reason starts folded.
+    expanded_routine_problems: HashMap<Uuid, String>,
     pending: HashMap<Uuid, Vec<PendingSend>>,
     stopping: HashSet<Uuid>,
     inbox: crate::inbox::Inbox,
@@ -393,6 +396,7 @@ impl ElseApp {
             quote_press: None,
             quote_editor: None,
             expanded_quotes: HashSet::new(),
+            expanded_routine_problems: HashMap::new(),
             pending: HashMap::new(),
             stopping: HashSet::new(),
             inbox: Default::default(),
