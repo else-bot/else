@@ -306,6 +306,31 @@ async fn a_small_message_arrives_in_one_fetch_and_stays_unread() {
 }
 
 #[tokio::test]
+async fn a_kept_session_reads_again_without_signing_in() {
+    let fixture = imap_fixture().await;
+    let mut session: Box<dyn MailReader> = Box::new(
+        Imap::connect(&fixture.endpoint, &auth(), &fixture.connector)
+            .await
+            .unwrap(),
+    );
+    let message = MessageRef {
+        folder: "INBOX".into(),
+        uid_validity: 77,
+        uid: 11,
+    };
+    for _ in 0..2 {
+        assert_eq!(&session.read_message(&message).await.unwrap().raw[..], RAW);
+    }
+    let fetch = "UID FETCH 11 (UID RFC822.SIZE INTERNALDATE BODY.PEEK[]<0.1048576>)";
+    assert_eq!(
+        *fixture.commands.lock().unwrap(),
+        ["SELECT INBOX", fetch, "SELECT INBOX", fetch],
+        "the fixture accepts one connection, so the second read reused it"
+    );
+    fixture.task.abort();
+}
+
+#[tokio::test]
 async fn search_and_read_return_sender_date_and_received_time_newest_first() {
     let fixture = imap_fixture().await;
     let mut client = Imap::connect(&fixture.endpoint, &auth(), &fixture.connector)

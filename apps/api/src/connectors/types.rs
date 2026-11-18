@@ -486,6 +486,13 @@ pub struct Fetched {
     pub received_at: Option<String>,
 }
 
+/// A signed-in mail session that reads whole messages and leaves them
+/// unread.
+#[async_trait::async_trait]
+pub trait MailReader: Send {
+    async fn read_message(&mut self, message: &MessageRef) -> Result<Fetched, MailError>;
+}
+
 #[async_trait::async_trait]
 pub trait MailTransport: Send + Sync {
     /// Signs in to IMAP and SMTP once, so a rejected password fails before
@@ -505,6 +512,12 @@ pub trait MailTransport: Send + Sync {
         auth: &Auth,
         message: &MessageRef,
     ) -> Result<Fetched, MailError>;
+    /// A signed-in session for the owner's reads, kept open between them.
+    async fn reader(
+        &self,
+        config: &MailConfig,
+        auth: &Auth,
+    ) -> Result<Box<dyn MailReader>, MailError>;
     async fn scan(
         &self,
         config: &MailConfig,

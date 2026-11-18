@@ -396,6 +396,16 @@ impl Imap {
     }
 }
 #[async_trait::async_trait]
+impl MailReader for Imap {
+    async fn read_message(&mut self, message: &MessageRef) -> Result<Fetched, MailError> {
+        let (raw, received_at) = self.fetch_message(message).await?;
+        Ok(Fetched {
+            raw: raw.into(),
+            received_at,
+        })
+    }
+}
+#[async_trait::async_trait]
 impl MailTransport for Pimalaya {
     async fn verify(&self, config: &MailConfig, auth: &Auth) -> Result<(), MailError> {
         tokio::try_join!(
@@ -447,6 +457,13 @@ impl MailTransport for Pimalaya {
         })
         .await
         .unwrap_or_else(|_| Err(MailError::new("mail_timeout")))
+    }
+    async fn reader(
+        &self,
+        config: &MailConfig,
+        auth: &Auth,
+    ) -> Result<Box<dyn MailReader>, MailError> {
+        Ok(Box::new(Imap::open(&config.imap, auth).await?))
     }
     async fn scan(
         &self,

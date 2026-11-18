@@ -1,8 +1,9 @@
-//! Recently read messages, so the owner's reader opens an email a bot just
-//! read without signing in to the mail server again. It lives in memory
-//! only. A message's bytes never change under one UIDVALIDITY and UID, but
-//! it can leave its folder: moving or deleting it through the account drops
-//! its entry, and a change made elsewhere shows once the entry ages out.
+//! Recently read messages, so the owner's reader opens an email a bot read
+//! earlier that day without signing in to the mail server again. It lives
+//! in memory only. A message's bytes never change under one UIDVALIDITY and
+//! UID, but it can leave its folder: moving or deleting it through the
+//! account drops its entry, and a change made elsewhere shows once the
+//! entry ages out.
 
 use super::types::{Fetched, MessageRef};
 use std::collections::{HashMap, VecDeque};
@@ -17,7 +18,7 @@ const ENTRY_LIMIT: usize = 16 * 1024 * 1024;
 /// Messages kept at most, whatever their size.
 const ENTRIES: usize = 256;
 /// How long a message stays after it was read from the server.
-const TTL: Duration = Duration::from_secs(15 * 60);
+const TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// One message of one account generation. A new generation means the
 /// account's settings changed, so its older entries are never served.
@@ -34,7 +35,7 @@ struct Entry {
     serial: u64,
 }
 
-/// Evicts the oldest entry first.
+/// Evicts the least recently used entry first.
 #[derive(Default)]
 pub(super) struct Messages {
     entries: HashMap<Key, Entry>,
@@ -45,12 +46,26 @@ pub(super) struct Messages {
 
 impl Messages {
     pub fn get(&mut self, key: &Key) -> Option<Fetched> {
-        let entry = self.entries.get(key)?;
-        if entry.stored.elapsed() < TTL {
-            return Some(entry.fetched.clone());
+        let entry = self.entries.get_mut(key)?;
+        if entry.stored.elapsed() >= TTL {
+            self.remove(key);
+            return None;
         }
-        self.remove(key);
-        None
+        self.serial += 1;
+        entry.serial = self.serial;
+        let fetched = entry.fetched.clone();
+        self.order.push_back((self.serial, key.clone()));
+        self.compact();
+        Some(fetched)
+    }
+
+    /// Drops order slots left by entries that were read again or removed.
+    fn compact(&mut self) {
+        if self.order.len() > 2 * self.entries.len() + 16 {
+            let entries = &self.entries;
+            self.order
+                .retain(|(serial, key)| entries.get(key).is_some_and(|e| e.serial == *serial));
+        }
     }
 
     pub fn put(&mut self, key: Key, fetched: Fetched) {
@@ -70,11 +85,7 @@ impl Messages {
                 self.remove(&oldest);
             }
         }
-        if self.order.len() > 2 * self.entries.len() + 16 {
-            let entries = &self.entries;
-            self.order
-                .retain(|(serial, key)| entries.get(key).is_some_and(|e| e.serial == *serial));
-        }
+        self.compact();
         self.serial += 1;
         self.bytes += fetched.raw.len();
         self.order.push_back((self.serial, key.clone()));
@@ -130,14 +141,20 @@ mod tests {
     }
 
     #[test]
-    fn the_oldest_messages_leave_first_when_the_budget_is_full() {
+    fn the_least_recently_read_message_leaves_first_when_the_budget_is_full() {
         let account = Uuid::new_v4();
         let mut cache = Messages::default();
-        for uid in 1..=5 {
+        for uid in 1..=4 {
             cache.put(key(account, uid), fetched(15 * 1024 * 1024));
         }
-        assert!(cache.get(&key(account, 1)).is_none());
-        assert!((2..=5).all(|uid| cache.get(&key(account, uid)).is_some()));
+        assert!(cache.get(&key(account, 1)).is_some());
+        cache.put(key(account, 5), fetched(15 * 1024 * 1024));
+        assert!(cache.get(&key(account, 2)).is_none(), "least recently used");
+        assert!(
+            [1, 3, 4, 5]
+                .iter()
+                .all(|&uid| cache.get(&key(account, uid)).is_some())
+        );
         cache.put(key(account, 6), fetched(17 * 1024 * 1024));
         assert!(cache.get(&key(account, 6)).is_none(), "too large to keep");
     }
@@ -156,7 +173,9 @@ mod tests {
             ..key(kept, 1)
         };
         assert!(cache.get(&other_generation).is_none());
-        tokio::time::advance(TTL).await;
+        tokio::time::advance(Duration::from_secs(23 * 60 * 60)).await;
+        assert!(cache.get(&key(kept, 1)).is_some(), "kept for most of a day");
+        tokio::time::advance(Duration::from_secs(60 * 60)).await;
         assert!(cache.get(&key(kept, 1)).is_none());
     }
 }
