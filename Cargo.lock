@@ -2552,7 +2552,6 @@ dependencies = [
  "markdown",
  "mime_guess",
  "notify",
- "notify-rust",
  "proc-macro2",
  "qrcode",
  "rand 0.10.3",
@@ -2573,6 +2572,7 @@ dependencies = [
  "vte",
  "wl-clipboard-rs",
  "xkeysym",
+ "zbus",
 ]
 
 [[package]]

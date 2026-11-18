@@ -269,7 +269,7 @@ impl ElseApp {
 
     fn settle_alerts(&mut self, cx: &mut Context<Self>) {
         for bot in self.inbox.settle(&self.bots) {
-            cx.dismiss_system_notification(&crate::inbox::tag(self.scope, bot));
+            crate::system_notifications::dismiss(cx, &crate::inbox::tag(self.scope, bot));
         }
     }
 
@@ -292,7 +292,7 @@ impl ElseApp {
     /// Take down every notification this connection showed.
     pub fn dismiss_notifications(&mut self, cx: &mut Context<Self>) {
         for bot in self.inbox.shown() {
-            cx.dismiss_system_notification(&crate::inbox::tag(self.scope, bot));
+            crate::system_notifications::dismiss(cx, &crate::inbox::tag(self.scope, bot));
         }
     }
 
