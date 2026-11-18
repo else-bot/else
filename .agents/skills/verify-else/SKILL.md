@@ -141,7 +141,9 @@ Choose **Connect locally** to verify and save the connection in the session's
 evidence directory. The session
 helper creates a fresh usable installation and completes onboarding through
 `POST /v1/onboarding`. It saves a supported Codex profile but starts no Codex
-turn. `--probe` defaults to a read-only bot listing; `--path`, `--method`, and
+turn. Add `--fixture-provider` to give the composer the offline Codex fixture
+(needed for any turn), and `--welcome` to leave onboarding to the actual
+welcome card. `--probe` defaults to a read-only bot listing; `--path`, `--method`, and
 `--body` can drive this session's public API. Set `--expected 201` when creating
 a bot/category and `--expected 202` when sending a turn. Pass `--api-binary /absolute/path`
 to `--session` for another target directory. The session expires after an hour.

@@ -40,7 +40,9 @@ The generated server address and key are already loaded in the local card.
 `--fixture-provider` supplies [fake-codex.py](fake-codex.py) through the real
 Codex adapter. Its private auth file contains only `{}`. No provider account
 or network request is involved. It streams `Fixture reply ✓ from the desktop
-composer.`. Send `[ui:hang]` for a turn that waits until Stop work. The fixture
+composer.`; `[ui:slow]` spaces its chunks 4 s apart. It accepts `turn/steer`,
+so a follow-up joins a running reply, and answers `codex debug models` with a
+three-model catalog. Send `[ui:hang]` for a turn that waits until Stop work. The fixture
 also accepts `[ui:question]` for an A/B card, `[ui:single]` for five choices
 with exactly one answer, and `[ui:multiple]` for five checkbox choices.
 Click one option on the single-answer card to submit it immediately.
