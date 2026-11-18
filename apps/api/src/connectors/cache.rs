@@ -35,20 +35,29 @@ struct Entry {
     serial: u64,
 }
 
-/// Evicts the least recently used entry first.
+/// Evicts the least recently used entry first. Each account has an epoch
+/// that every invalidation raises, and a read stores its message only
+/// under the epoch it started at, so a fetch that was under way when the
+/// message moved or the inbox paused cannot bring it back.
 #[derive(Default)]
 pub(super) struct Messages {
     entries: HashMap<Key, Entry>,
     order: VecDeque<(u64, Key)>,
     bytes: usize,
     serial: u64,
+    epochs: HashMap<Uuid, u64>,
 }
 
 impl Messages {
+    /// The account's epoch, to pass to `put` after a fetch.
+    pub fn epoch(&self, account_id: Uuid) -> u64 {
+        self.epochs.get(&account_id).copied().unwrap_or_default()
+    }
+
     pub fn get(&mut self, key: &Key) -> Option<Fetched> {
         let entry = self.entries.get_mut(key)?;
         if entry.stored.elapsed() >= TTL {
-            self.remove(key);
+            self.evict(key);
             return None;
         }
         self.serial += 1;
@@ -68,11 +77,13 @@ impl Messages {
         }
     }
 
-    pub fn put(&mut self, key: Key, fetched: Fetched) {
-        if fetched.raw.len() > ENTRY_LIMIT {
+    /// Stores a message fetched since `epoch`, unless its account was
+    /// invalidated meanwhile.
+    pub fn put(&mut self, key: Key, fetched: Fetched, epoch: u64) {
+        if fetched.raw.len() > ENTRY_LIMIT || self.epoch(key.account_id) != epoch {
             return;
         }
-        self.remove(&key);
+        self.evict(&key);
         while self.bytes + fetched.raw.len() > BUDGET || self.entries.len() >= ENTRIES {
             let Some((serial, oldest)) = self.order.pop_front() else {
                 break;
@@ -82,7 +93,7 @@ impl Messages {
                 .get(&oldest)
                 .is_some_and(|e| e.serial == serial)
             {
-                self.remove(&oldest);
+                self.evict(&oldest);
             }
         }
         self.compact();
@@ -99,8 +110,9 @@ impl Messages {
         );
     }
 
-    /// Drops every message of a removed account.
+    /// Drops every message of the account.
     pub fn forget(&mut self, account_id: Uuid) {
+        *self.epochs.entry(account_id).or_default() += 1;
         self.entries.retain(|key, entry| {
             let keep = key.account_id != account_id;
             if !keep {
@@ -111,7 +123,13 @@ impl Messages {
         self.order.retain(|(_, key)| key.account_id != account_id);
     }
 
+    /// Drops a message that left its folder.
     pub fn remove(&mut self, key: &Key) {
+        *self.epochs.entry(key.account_id).or_default() += 1;
+        self.evict(key);
+    }
+
+    fn evict(&mut self, key: &Key) {
         if let Some(entry) = self.entries.remove(key) {
             self.bytes -= entry.fetched.raw.len();
         }
@@ -145,17 +163,17 @@ mod tests {
         let account = Uuid::new_v4();
         let mut cache = Messages::default();
         for uid in 1..=4 {
-            cache.put(key(account, uid), fetched(15 * 1024 * 1024));
+            cache.put(key(account, uid), fetched(15 * 1024 * 1024), 0);
         }
         assert!(cache.get(&key(account, 1)).is_some());
-        cache.put(key(account, 5), fetched(15 * 1024 * 1024));
+        cache.put(key(account, 5), fetched(15 * 1024 * 1024), 0);
         assert!(cache.get(&key(account, 2)).is_none(), "least recently used");
         assert!(
             [1, 3, 4, 5]
                 .iter()
                 .all(|&uid| cache.get(&key(account, uid)).is_some())
         );
-        cache.put(key(account, 6), fetched(17 * 1024 * 1024));
+        cache.put(key(account, 6), fetched(17 * 1024 * 1024), 0);
         assert!(cache.get(&key(account, 6)).is_none(), "too large to keep");
     }
 
@@ -163,8 +181,8 @@ mod tests {
     async fn a_message_ages_out_and_a_forgotten_account_leaves() {
         let (kept, gone) = (Uuid::new_v4(), Uuid::new_v4());
         let mut cache = Messages::default();
-        cache.put(key(kept, 1), fetched(10));
-        cache.put(key(gone, 1), fetched(10));
+        cache.put(key(kept, 1), fetched(10), 0);
+        cache.put(key(gone, 1), fetched(10), 0);
         cache.forget(gone);
         assert!(cache.get(&key(gone, 1)).is_none());
         assert!(cache.get(&key(kept, 1)).is_some());
@@ -177,5 +195,32 @@ mod tests {
         assert!(cache.get(&key(kept, 1)).is_some(), "kept for most of a day");
         tokio::time::advance(Duration::from_secs(60 * 60)).await;
         assert!(cache.get(&key(kept, 1)).is_none());
+    }
+
+    #[test]
+    fn a_fetch_under_way_when_its_message_moves_stores_nothing() {
+        let account = Uuid::new_v4();
+        let mut cache = Messages::default();
+        let started = cache.epoch(account);
+        cache.remove(&key(account, 1));
+        cache.put(key(account, 1), fetched(10), started);
+        assert!(cache.get(&key(account, 1)).is_none());
+        let paused = cache.epoch(account);
+        cache.forget(account);
+        cache.put(key(account, 2), fetched(10), paused);
+        assert!(cache.get(&key(account, 2)).is_none());
+        cache.put(key(account, 2), fetched(10), cache.epoch(account));
+        assert!(cache.get(&key(account, 2)).is_some());
+    }
+
+    #[test]
+    fn at_most_256_messages_stay_however_small() {
+        let account = Uuid::new_v4();
+        let mut cache = Messages::default();
+        for uid in 1..=257 {
+            cache.put(key(account, uid), fetched(1), 0);
+        }
+        assert!(cache.get(&key(account, 1)).is_none());
+        assert!((2..=257).all(|uid| cache.get(&key(account, uid)).is_some()));
     }
 }

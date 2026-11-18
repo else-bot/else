@@ -170,6 +170,9 @@ pub struct ConnectorManager {
     workers: Actor<HashMap<Uuid, Worker>>,
     messages: Actor<cache::Messages>,
     readers: readers::Readers,
+    /// One sign-in refresh at a time per account, so the owner's reader
+    /// and the worker never spend the same OAuth refresh token twice.
+    refreshes: Actor<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
     pub oauth: oauth::OAuth,
 }
 
@@ -191,6 +194,7 @@ impl ConnectorManager {
             workers: Actor::default(),
             messages: Actor::default(),
             readers: readers::Readers::default(),
+            refreshes: Actor::default(),
             oauth: oauth::OAuth::default(),
         }
     }
@@ -231,15 +235,18 @@ impl ConnectorManager {
 
     /// Drops what the owner's reader kept for the account, so a paused,
     /// reconfigured or rejected inbox serves nothing from before.
-    async fn drop_reads(&self, id: Uuid) {
+    async fn drop_reads(&self, id: Uuid, removed: bool) {
         self.messages
             .call(move |messages| messages.forget(id))
             .await;
-        self.readers.close(id).await;
+        self.readers.close(id, removed).await;
+        if removed {
+            self.refreshes.call(move |locks| locks.remove(&id)).await;
+        }
     }
 
     pub async fn changed(self: &Arc<Self>, id: Uuid) {
-        self.drop_reads(id).await;
+        self.drop_reads(id, false).await;
         // A worker this call starts reads the changed account itself; a
         // notification would restart its first watch for nothing.
         if let Ok((worker, false)) = self.worker_or_start(id).await {
@@ -256,9 +263,7 @@ impl ConnectorManager {
                 }
             }
         }
-        // After the worker stopped, so a fetch it was finishing cannot
-        // store the account's mail again.
-        self.drop_reads(id).await;
+        self.drop_reads(id, true).await;
     }
 
     pub async fn replace_credential(
@@ -366,6 +371,12 @@ impl ConnectorManager {
             message: message.clone(),
         }
         .validate()?;
+        // Before the account loads, so a pause that lands after this read
+        // saw the inbox active keeps the read from storing anything.
+        let epoch = self
+            .messages
+            .call(move |messages| messages.epoch(account_id))
+            .await;
         let account = store::account(&self.db, account_id)
             .await
             .map_err(|_| MailError::new("mail_unavailable"))?
@@ -389,16 +400,16 @@ impl ConnectorManager {
             return pimalaya::view(&fetched, &message);
         }
         let signed_in = std::sync::Mutex::new(None);
-        let (fetched, path) = self
-            .readers
-            .read(account.id, account.generation, &message, || async {
-                let at = tokio::time::Instant::now();
-                let auth = self.auth(&account).await?;
-                let session = self.transport.reader(&account.config, &auth).await;
-                *signed_in.lock().expect("unpoisoned") = Some(at.elapsed());
-                session
-            })
-            .await;
+        let read = self.readers.read(account.id, &message, || async {
+            let at = tokio::time::Instant::now();
+            let auth = self.auth(&account).await?;
+            let session = self.transport.reader(&account.config, &auth).await;
+            *signed_in.lock().expect("unpoisoned") = Some(at.elapsed());
+            session
+        });
+        let (fetched, path) = tokio::time::timeout(Duration::from_secs(120), read)
+            .await
+            .unwrap_or((Err(MailError::new("mail_timeout")), readers::Path::Cold));
         let signed_in = signed_in.into_inner().expect("unpoisoned");
         tracing::info!(
             %account_id,
@@ -416,13 +427,16 @@ impl ConnectorManager {
                 ) {
                     self.health(account.id, account.generation, error.code)
                         .await;
+                    // The watch signed in before the rejection; restart it
+                    // so it stops reporting new mail on that sign-in.
+                    self.changed(account.id).await;
                 }
                 return Err(error);
             }
         };
         let key = Self::cache_key(&account, &message);
         let stored = fetched.clone();
-        self.messages.call(move |m| m.put(key, stored)).await;
+        self.messages.call(move |m| m.put(key, stored, epoch)).await;
         pimalaya::view(&fetched, &message)
     }
 
@@ -532,6 +546,12 @@ impl ConnectorManager {
     }
 
     async fn auth(&self, account: &Account) -> Result<Auth, MailError> {
+        let id = account.id;
+        let refresh = self
+            .refreshes
+            .call(move |locks| locks.entry(id).or_default().clone())
+            .await;
+        let _refresh = refresh.lock().await;
         let _admission = self
             .scheduler
             .gate()
@@ -637,6 +657,7 @@ impl ConnectorManager {
         // owner's cache.
         let result = match &command.command {
             MailCommand::Read { message } => {
+                let epoch = self.messages.call(move |m| m.epoch(id)).await;
                 let signed_in = started.elapsed();
                 let fetched = self.transport.fetch(&account.config, &auth, message).await;
                 log_read(id, command, started, signed_in);
@@ -644,7 +665,7 @@ impl ConnectorManager {
                     Ok(fetched) => {
                         let key = Self::cache_key(&account, message);
                         let stored = fetched.clone();
-                        self.messages.call(move |m| m.put(key, stored)).await;
+                        self.messages.call(move |m| m.put(key, stored, epoch)).await;
                         pimalaya::read(&fetched, message)
                     }
                     Err(error) => Err(error),
@@ -750,7 +771,7 @@ impl ConnectorManager {
             return;
         }
         if matches!(code, AUTHENTICATION_FAILED | REAUTHENTICATION_REQUIRED) {
-            self.drop_reads(id).await;
+            self.drop_reads(id, false).await;
         }
         if let Some(_admission) = self.scheduler.gate().enter() {
             let health = Health::from(code.to_owned());

@@ -7,8 +7,9 @@ const RAW: &str = "From: Coupon Co <hello@coupons.test>\r\nSubject: Verify your 
     MIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Hi</p>";
 
 /// Holds messages 9 and 11, counting the sessions it signs in and the
-/// messages it serves. `folders` waits for `release`, standing in for a
-/// long bot command, and `reject` refuses new sign-ins.
+/// messages it serves. `folders` says it is `holding` and waits for
+/// `release`, standing in for a long bot command, and `reject` refuses new
+/// sign-ins and drops open sessions.
 #[derive(Default, Clone)]
 struct Mailbox(Arc<Inbox>);
 
@@ -18,6 +19,7 @@ struct Inbox {
     fetches: std::sync::atomic::AtomicUsize,
     sessions: std::sync::atomic::AtomicUsize,
     reject: std::sync::atomic::AtomicBool,
+    holding: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
 
@@ -70,6 +72,7 @@ impl MailTransport for Mailbox {
         match command {
             MailCommand::Trash { .. } => Ok(json!({"trashed":true})),
             MailCommand::Folders => {
+                self.holding.notify_one();
                 self.release.notified().await;
                 Ok(json!({"folders":[]}))
             }
@@ -235,10 +238,15 @@ async fn the_owner_reads_while_a_bot_command_holds_the_account() {
         json!({"account_id":account.id,"command":{"operation":"folders"}}),
     );
     let owner = async {
-        let view = h
-            .app
-            .owner("GET", &messages_path(account.id, 11), None)
-            .await;
+        tokio::time::timeout(common::SETTLE, mailbox.holding.notified())
+            .await
+            .expect("the bot command reached the mail server");
+        let view = tokio::time::timeout(
+            common::SETTLE,
+            h.app.owner("GET", &messages_path(account.id, 11), None),
+        )
+        .await
+        .expect("the owner's read did not wait for the bot's command");
         mailbox.release.notify_one();
         view
     };
