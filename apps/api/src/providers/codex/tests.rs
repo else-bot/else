@@ -1102,8 +1102,8 @@ pub(crate) fn pinned_fingerprints() -> [(crate::app::providers::Origin, &'static
         service_tier: "priority".into(),
     };
     [
-        (Origin::OwnerRequest, "b6081e432fd39930df3c7a743d96ee6d"),
-        (Origin::ConnectorEvent, "d55c6660982952c67484abbcd3b6db65"),
+        (Origin::OwnerRequest, "bbc412f704b5afd5fc05b5996595c9b0"),
+        (Origin::ConnectorEvent, "50a06f6d6b425d7df3c68cbd05496bca"),
     ]
     .map(|(origin, expected)| {
         input.delegation.origin = origin;
