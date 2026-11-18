@@ -473,9 +473,10 @@ impl DelegationContext {
         self.origin.delegates_at(self.task_depth)
     }
 
-    /// A task an email turn handed on. Its task text came from email, so it
-    /// works with nothing of its own bot's but the task: no memory or mail
-    /// the email could read back through the reply.
+    /// A task an email turn handed on. Its task text came from email and its
+    /// reply goes back to a turn that can send mail, so it gets no memory,
+    /// mail, computer records or tools beyond its own history. Its bot's
+    /// rules still apply to it.
     pub fn email_task(&self) -> bool {
         self.origin == Origin::ConnectorEvent && self.delegated_task()
     }

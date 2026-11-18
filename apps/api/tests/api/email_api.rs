@@ -1183,6 +1183,7 @@ async fn a_mail_event_hands_a_notice_to_another_bot_without_its_memory_or_mail()
     let inbox: Uuid = h.app.main_bot().await.parse().unwrap();
     let marketing = h.app.create_bot("Marketing Manager").await;
     let marketing_id: Uuid = marketing.parse().unwrap();
+    let finance = h.app.create_bot("Finance").await;
     let mut tx = h.app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     else_api::db::memory::append(
         &mut tx,
@@ -1227,6 +1228,19 @@ async fn a_mail_event_hands_a_notice_to_another_bot_without_its_memory_or_mail()
     )
     .await;
     assert!(with_files.error, "{}", with_files.body);
+    let council = tool(
+        &h.app,
+        &token,
+        "council",
+        json!({ "target_bot_ids": [marketing, finance], "task": "Review this ad.",
+                "title": "X Ads review" }),
+    )
+    .await;
+    assert!(
+        council.error && council.body.to_string().contains("COUNCIL_REFUSED"),
+        "{}",
+        council.body
+    );
     let pending = tool(
         &h.app,
         &token,
@@ -1274,17 +1288,25 @@ async fn a_mail_event_hands_a_notice_to_another_bot_without_its_memory_or_mail()
         &h.app,
         &child_token,
         "delegate",
-        json!({ "target_bot_id": inbox.to_string(), "task": "Reply to X Ads.", "title": "Reply" }),
+        json!({ "target_bot_id": finance, "task": "Pay the X Ads invoice.", "title": "Pay" }),
     )
     .await;
     assert!(
-        onward.error || onward.status == StatusCode::FORBIDDEN,
+        onward.error && onward.body.to_string().contains("handed on from email"),
         "{}",
         onward.body
     );
     h.release(child).await;
     h.app.wait_turn(&child.to_string(), &["completed"]).await;
-    let (_, _) = h.started(turn).await;
+    h.continued(turn, &token).await;
+    let inputs = h.inputs(turn).await;
+    let outcomes = &inputs.last().unwrap().delegation.outcomes;
+    assert!(
+        outcomes.iter().any(|o| o.target_bot_id == marketing_id
+            && o.status == "completed"
+            && o.result.is_some()),
+        "{outcomes:?}"
+    );
     h.release(turn).await;
     h.app.wait_turn(&turn.to_string(), &["completed"]).await;
 }

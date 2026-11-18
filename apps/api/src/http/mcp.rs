@@ -182,6 +182,19 @@ async fn task_cannot_delegate(state: &AppState, grant: &Grant) -> Option<Value> 
     .await
     .ok()?;
     let parent = parent?;
+    let mut conn = state.db.acquire().await.ok()?;
+    let origin = crate::db::delegations::origin(&mut conn, grant.turn_id)
+        .await
+        .ok()?;
+    if origin == crate::app::providers::Origin::ConnectorEvent {
+        return Some(tool_error(
+            &json!({
+                "error": "NOT_ALLOWED: a task handed on from email cannot delegate or start a council.",
+                "next": "Do not retry, and list no follow-ups for other bots. Reply with what you took from the task.",
+            })
+            .to_string(),
+        ));
+    }
     Some(tool_error(
         &json!({
             "error": "NOT_ALLOWED: a delegated task cannot delegate or start a council.",

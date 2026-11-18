@@ -1267,6 +1267,10 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
     let draft_tasks = crate::db::outgoing_drafts::always_approved(&mut conn, turn.bot_id).await?;
     drop(conn);
     let email_task = input.delegation.email_task();
+    if email_task {
+        input.jobs.clear();
+        input.computer_control = None;
+    }
     let (memory, permissions) = tokio::join!(
         async {
             if email_task {
