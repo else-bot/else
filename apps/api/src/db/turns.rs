@@ -1510,6 +1510,7 @@ mod tests {
                 earlier_request: false,
                 ran: Vec::new(),
                 owner: None,
+                choices: Vec::new(),
             }
         };
         let mut outcomes = vec![

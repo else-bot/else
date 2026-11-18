@@ -1619,10 +1619,10 @@ async fn a_hand_off_the_owner_chose_on_a_sub_tasks_card_goes_after_the_budget_ru
 
     let card = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, choices, status, answer)
+        "INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, choices, multiple, status, answer)
          VALUES (?1, ?2, ?3, 1, 'choice', 'Where should the changelog go?',
                  '[{\"id\":\"a\",\"label\":\"Telegram\"},{\"id\":\"b\",\"label\":\"Discord\"}]',
-                 'answered', '[\"a\",\"b\"]')",
+                 1, 'answered', '[\"a\",\"b\"]')",
     )
     .bind(card)
     .bind(third)
@@ -1630,6 +1630,26 @@ async fn a_hand_off_the_owner_chose_on_a_sub_tasks_card_goes_after_the_budget_ru
     .execute(&db.pool)
     .await
     .unwrap();
+    set_status(&db, grandchild, "running").await;
+    sqlx::query(
+        "UPDATE turns SET status = 'completed',
+             finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
+    )
+    .bind(grandchild)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let named: Vec<(Uuid, Vec<String>)> = delegation_context(&db, child)
+        .await
+        .outcomes
+        .iter()
+        .flat_map(|o| o.choices.iter().map(|c| (c.id, c.chosen.clone())))
+        .collect();
+    assert_eq!(
+        named,
+        vec![(card, vec!["Telegram".to_owned(), "Discord".to_owned()])],
+        "the sub-task's result carries the owner's card"
+    );
     for n in 0..6 {
         let sent = create(
             &db.pool,
@@ -1654,7 +1674,7 @@ async fn a_hand_off_the_owner_chose_on_a_sub_tasks_card_goes_after_the_budget_ru
     );
     assert_eq!(
         create(&db.pool, child, third, "one more", None, &[], Some(card)).await,
-        Err(DelegateError::BudgetExhausted),
+        Err(DelegateError::AnswerBudgetExhausted),
         "a card authorizes at most {MAX_CHILDREN} hand-offs"
     );
 }

@@ -313,10 +313,9 @@ fn tool_list() -> Value {
             "name": "delegate",
             "description": "Hand one subtask to another registered bot (the main bot included) \
                 from your registry or a create_bot result, by its exact bot_id. It is for work, not \
-                status reports. Not available in a delegated task. Returns status pending with a \
-                task_id at once. Then tell the owner briefly and end this attempt; the other bot's \
-                reply arrives later in a continuation. At most one per attempt and two per \
-                request.",
+                status reports. Returns status pending with a task_id at once. Then tell the owner \
+                briefly and end this attempt; the other bot's reply arrives later in a \
+                continuation. At most one per attempt.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -332,8 +331,9 @@ fn tool_list() -> Value {
                                    each. It gets exact copies, never your project. Its replies can \
                                    attach files back the same way you attach them for the owner." },
                     "owner_answer": { "type": "string", "format": "uuid",
-                                      "description": "ID of a choice card the owner answered in this request that \
-                                          decides this task. The other bot sees the answer as the owner's own words." },
+                                      "description": "ID of an answered choice card, yours or from a task you delegated, \
+                                          that decides this task. The other bot sees the answer as the owner's words. \
+                                          It does not use the request's delegate budget." },
                 },
                 "required": ["target_bot_id", "task", "title"],
                 "additionalProperties": false,

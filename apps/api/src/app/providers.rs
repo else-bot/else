@@ -344,6 +344,18 @@ pub struct DelegationOutcome {
     /// What the task told the owner: `asked` while a notice of it or of a
     /// task below it waits on them, otherwise its declared need, if any.
     pub owner: Option<String>,
+    /// Choice cards the owner answered in the task or a task below it,
+    /// oldest first. The delegating bot may hand on what one decides with
+    /// its ID as `owner_answer`.
+    pub choices: Vec<OwnerChoice>,
+}
+
+/// A choice card the owner answered, as a delegating bot reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerChoice {
+    pub id: Uuid,
+    pub question: String,
+    pub chosen: Vec<String>,
 }
 
 /// The owner's answer to a secret request: which task secret and

@@ -429,6 +429,12 @@ def run(runner):
                     "#updates with the follow-up: More reliable handling when moving Hyperliquid orders.",
                     "v0.94.30 is live. Posted More reliable handling when moving Hyperliquid orders to "
                     "@proliquid_updates and #updates."),
+                "owner-picked-follow-up-goes-with-its-card": (
+                    [self.call("delegate", {"target_bot_id": "00000000-0000-0000-0000-000000000005",
+                                            "task": "Post the v0.94.30 release note to @shop_updates.",
+                                            "owner_answer": "40000000-0000-0000-0000-000000000003"},
+                               {"status": "pending", "parked": True})],
+                    "v0.94.30 is live; GitHub is posting the release note."),
                 "task-sends-standing-approved-telegram-draft": (
                     [self.call("draft_message", {"platform": "telegram", "body": "Proliquid v0.94.35"}),
                      self.call("use_tool", {"name": "send_draft", "arguments": {
