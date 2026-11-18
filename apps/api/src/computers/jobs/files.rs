@@ -265,7 +265,7 @@ impl ComputerManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{READ_FILE, WRITE_FILE};
+    use super::READ_FILE;
     use base64::Engine;
     use std::path::Path;
     use std::process::Command;
@@ -284,9 +284,10 @@ mod tests {
         )
     }
 
+    #[cfg(target_os = "linux")]
     fn write(home: &Path, path: &str, content: &str) -> (bool, String) {
         let encoded = base64::engine::general_purpose::STANDARD.encode(content);
-        let (ok, _, err) = run(home, WRITE_FILE, &[path, &encoded]);
+        let (ok, _, err) = run(home, super::WRITE_FILE, &[path, &encoded]);
         (ok, err)
     }
 
@@ -302,6 +303,9 @@ mod tests {
         Ok(String::from_utf8(bytes).expect("utf-8"))
     }
 
+    // A successful read runs GNU `stat -c` and `base64 -w0`, as the Linux
+    // guest does; BSD userlands reject both.
+    #[cfg(target_os = "linux")]
     #[test]
     fn file_paths_resolve_relative_absolute_and_home_forms() {
         let home = tempfile::tempdir().unwrap();
