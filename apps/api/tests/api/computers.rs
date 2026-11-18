@@ -118,6 +118,66 @@ impl ComputerRuntime for Fake {
             .unwrap_or_default();
         std::fs::write(host, content).map_err(|e| RuntimeError::Unavailable(e.to_string()))
     }
+    async fn exec_to_file(
+        &self,
+        name: &str,
+        program: &str,
+        args: &[&str],
+        stdout: &std::path::Path,
+        _: Duration,
+    ) -> Result<ExecOutput, RuntimeError> {
+        assert_eq!(
+            self.computers.lock().unwrap()[name].state,
+            RuntimeState::Running
+        );
+        assert!(program == "/bin/bash" && args[1].contains("tar --numeric-owner"));
+        std::fs::write(stdout, "DATA").unwrap();
+        use sha2::Digest;
+        Ok(ExecOutput {
+            status: Some(0),
+            stdout: String::new(),
+            stderr: format!(
+                "{}\nwarn: runtime notice",
+                hex::encode(sha2::Sha256::digest(b"DATA"))
+            ),
+            truncated: false,
+        })
+    }
+    async fn exec_from_file(
+        &self,
+        name: &str,
+        program: &str,
+        args: &[&str],
+        stdin: &std::path::Path,
+        _: Duration,
+    ) -> Result<ExecOutput, RuntimeError> {
+        assert_eq!(
+            self.computers.lock().unwrap()[name].state,
+            RuntimeState::Running
+        );
+        assert!(program == "/bin/bash" && args[1].contains("tar --numeric-owner"));
+        assert_eq!(std::fs::read(stdin).unwrap(), b"DATA");
+        if self.fail_unpack.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(ExecOutput {
+                status: Some(4),
+                stdout: String::new(),
+                stderr: "the new image's elsebot user ID is not 1000".into(),
+                truncated: false,
+            });
+        }
+        let packages = &args[6..];
+        *self.reinstalled.lock().unwrap() = packages.iter().map(|p| (*p).to_owned()).collect();
+        let mut out = String::new();
+        for package in packages.iter().filter(|p| p.starts_with("gone-")) {
+            out += &format!("unrestored {package}\n");
+        }
+        Ok(ExecOutput {
+            status: Some(0),
+            stdout: out + "{\"image\":\"new\"}",
+            stderr: String::new(),
+            truncated: false,
+        })
+    }
     async fn start(&self, name: &str) -> Result<(), RuntimeError> {
         self.log(format!("start {name}"));
         self.set(name, RuntimeState::Running)
@@ -249,13 +309,8 @@ impl ComputerRuntime for Fake {
                 String::new()
             }
             "read" => files.get(args[0]).cloned().unwrap_or_default(),
-            "/bin/sh"
-                if args[1].contains("tar --numeric-owner --sparse --one-file-system -cpf") =>
-            {
-                files.insert("/var/tmp/else-upgrade.tar".into(), "DATA".into());
-                use sha2::Digest;
-                let mut report =
-                    format!("4\n{}\n1000\n", hex::encode(sha2::Sha256::digest(b"DATA")));
+            "/bin/sh" if args[1].contains("apt-mark showmanual") => {
+                let mut report = "1000\n".to_owned();
                 for package in self.packages.lock().unwrap().iter() {
                     report += &format!("{package}\n");
                 }
@@ -276,24 +331,6 @@ impl ComputerRuntime for Fake {
                     stderr: "Chromium did not exit within 10 seconds of SIGINT".into(),
                     truncated: false,
                 });
-            }
-            "/bin/sh" if args[1].contains("sha256sum -c") => {
-                if self.fail_unpack.load(std::sync::atomic::Ordering::SeqCst) {
-                    return Ok(ExecOutput {
-                        status: Some(4),
-                        stdout: String::new(),
-                        stderr: "the new image's elsebot user ID is not 1000".into(),
-                        truncated: false,
-                    });
-                }
-                let packages = &args[6..];
-                *self.reinstalled.lock().unwrap() =
-                    packages.iter().map(|p| (*p).to_owned()).collect();
-                let mut out = String::new();
-                for package in packages.iter().filter(|p| p.starts_with("gone-")) {
-                    out += &format!("unrestored {package}\n");
-                }
-                out + "{\"image\":\"new\"}"
             }
             _ => String::new(),
         };

@@ -166,6 +166,38 @@ pub trait ComputerRuntime: Send + Sync {
         ))
     }
 
+    /// Run a command with its standard output written to the host file
+    /// `stdout`, so the output can outgrow both memory and the guest's disk.
+    /// Only standard error is captured.
+    async fn exec_to_file(
+        &self,
+        name: &str,
+        program: &str,
+        args: &[&str],
+        stdout: &Path,
+        timeout: Duration,
+    ) -> Result<ExecOutput, RuntimeError> {
+        let _ = (name, program, args, stdout, timeout);
+        Err(RuntimeError::Unavailable(
+            "this runtime cannot stream a command's output".into(),
+        ))
+    }
+
+    /// Run a command with the host file `stdin` on its standard input.
+    async fn exec_from_file(
+        &self,
+        name: &str,
+        program: &str,
+        args: &[&str],
+        stdin: &Path,
+        timeout: Duration,
+    ) -> Result<ExecOutput, RuntimeError> {
+        let _ = (name, program, args, stdin, timeout);
+        Err(RuntimeError::Unavailable(
+            "this runtime cannot stream a command's input".into(),
+        ))
+    }
+
     /// Copy a guest file to a host path.
     async fn copy_out(&self, name: &str, guest: &str, host: &Path) -> Result<(), RuntimeError>;
 
@@ -360,25 +392,36 @@ impl Msb {
         args: &[&str],
         timeout: Duration,
     ) -> Result<ExecOutput, RuntimeError> {
-        self.run_input(operation, args, None, timeout).await
+        self.run_io(operation, args, Stdin::Null, None, timeout)
+            .await
     }
 
-    async fn run_input(
+    /// Run `msb` with `stdin` as its input and its standard output captured,
+    /// or written to `stdout` when given.
+    async fn run_io(
         &self,
         operation: &str,
         args: &[&str],
-        input: Option<&[u8]>,
+        stdin: Stdin<'_>,
+        stdout: Option<std::fs::File>,
         timeout: Duration,
     ) -> Result<ExecOutput, RuntimeError> {
+        use std::process::Stdio;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut command = self.command();
-        command
-            .args(args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        if input.is_some() {
-            command.stdin(std::process::Stdio::piped());
-        }
+        command.args(args).stderr(Stdio::piped());
+        command.stdout(stdout.map_or_else(Stdio::piped, Stdio::from));
+        let input = match stdin {
+            Stdin::Null => None,
+            Stdin::Bytes(input) => {
+                command.stdin(Stdio::piped());
+                Some(input)
+            }
+            Stdin::File(file) => {
+                command.stdin(Stdio::from(file));
+                None
+            }
+        };
         let mut child = command
             .spawn()
             .map_err(|e| RuntimeError::Unavailable(e.to_string()))?;
@@ -397,9 +440,12 @@ impl Msb {
                 });
             }
         }
-        async fn capture(mut stream: impl tokio::io::AsyncRead + Unpin) -> (Vec<u8>, bool) {
+        async fn capture(stream: Option<impl tokio::io::AsyncRead + Unpin>) -> (Vec<u8>, bool) {
             let mut kept = Vec::new();
             let mut truncated = false;
+            let Some(mut stream) = stream else {
+                return (kept, truncated);
+            };
             let mut chunk = [0u8; 8192];
             while let Ok(n) = stream.read(&mut chunk).await {
                 if n == 0 {
@@ -411,8 +457,8 @@ impl Msb {
             }
             (kept, truncated)
         }
-        let stdout = child.stdout.take().expect("piped");
-        let stderr = child.stderr.take().expect("piped");
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
         let work = async {
             let (out, err, status) = tokio::join!(capture(stdout), capture(stderr), child.wait());
             (out, err, status)
@@ -867,20 +913,8 @@ impl ComputerRuntime for Msb {
         args: &[&str],
         timeout: Duration,
     ) -> Result<ExecOutput, RuntimeError> {
-        // `--stream` keeps the runtime from buffering the whole output
-        // (it is bounded here, and by the guest scripts); `--timeout` kills
-        // the guest command itself.
-        let guest_timeout = format!("{}s", timeout.as_secs().max(1));
-        let mut all = vec![
-            "exec",
-            "--stream",
-            "--timeout",
-            &guest_timeout,
-            name,
-            "--",
-            program,
-        ];
-        all.extend_from_slice(args);
+        let guest_timeout = guest_timeout(timeout);
+        let all = exec_args(&guest_timeout, name, program, args);
         self.run("exec", &all, timeout).await
     }
 
@@ -892,19 +926,79 @@ impl ComputerRuntime for Msb {
         input: &[u8],
         timeout: Duration,
     ) -> Result<ExecOutput, RuntimeError> {
-        let guest_timeout = format!("{}s", timeout.as_secs().max(1));
-        let mut all = vec![
-            "exec",
-            "--stream",
-            "--timeout",
-            &guest_timeout,
-            name,
-            "--",
-            program,
-        ];
-        all.extend_from_slice(args);
-        self.run_input("exec", &all, Some(input), timeout).await
+        let guest_timeout = guest_timeout(timeout);
+        let all = exec_args(&guest_timeout, name, program, args);
+        self.run_io("exec", &all, Stdin::Bytes(input), None, timeout)
+            .await
     }
+
+    async fn exec_to_file(
+        &self,
+        name: &str,
+        program: &str,
+        args: &[&str],
+        stdout: &Path,
+        timeout: Duration,
+    ) -> Result<ExecOutput, RuntimeError> {
+        let file = std::fs::File::create(stdout).map_err(|e| RuntimeError::Failed {
+            operation: "exec".into(),
+            message: format!("{}: {e}", stdout.display()),
+        })?;
+        let guest_timeout = guest_timeout(timeout);
+        let all = exec_args(&guest_timeout, name, program, args);
+        self.run_io("exec", &all, Stdin::Null, Some(file), timeout)
+            .await
+    }
+
+    async fn exec_from_file(
+        &self,
+        name: &str,
+        program: &str,
+        args: &[&str],
+        stdin: &Path,
+        timeout: Duration,
+    ) -> Result<ExecOutput, RuntimeError> {
+        let file = std::fs::File::open(stdin).map_err(|e| RuntimeError::Failed {
+            operation: "exec".into(),
+            message: format!("{}: {e}", stdin.display()),
+        })?;
+        let guest_timeout = guest_timeout(timeout);
+        let all = exec_args(&guest_timeout, name, program, args);
+        self.run_io("exec", &all, Stdin::File(file), None, timeout)
+            .await
+    }
+}
+
+enum Stdin<'a> {
+    Null,
+    Bytes(&'a [u8]),
+    File(std::fs::File),
+}
+
+/// `--timeout` kills the guest command itself.
+fn guest_timeout(timeout: Duration) -> String {
+    format!("{}s", timeout.as_secs().max(1))
+}
+
+/// `msb exec` arguments. `--stream` keeps the runtime from buffering the
+/// whole output (it is bounded or written to a file here).
+fn exec_args<'a>(
+    guest_timeout: &'a str,
+    name: &'a str,
+    program: &'a str,
+    args: &[&'a str],
+) -> Vec<&'a str> {
+    let mut all = vec![
+        "exec",
+        "--stream",
+        "--timeout",
+        guest_timeout,
+        name,
+        "--",
+        program,
+    ];
+    all.extend_from_slice(args);
+    all
 }
 
 #[cfg(test)]

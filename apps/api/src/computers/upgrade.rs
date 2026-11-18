@@ -10,11 +10,13 @@
 //! without its desktop services to archive the user's data
 //! (`/home/elsebot`, including projects,
 //! package environments, caches, and the browser profile, and the job
-//! records in `/var/lib/elsebot`) with numeric owners, verifies the copy on
-//! the host by size and SHA-256, creates a new computer from the new image
-//! with that archive copied in, verifies and unpacks it there as the same
-//! user ID, and stops it. Only then does the bot switch to the new computer,
-//! inside an immediate transaction. The old computer is kept, stopped, so
+//! records in `/var/lib/elsebot`) with numeric owners. The archive streams
+//! to the host over the command's output and back into the new computer's
+//! tar over its input, so neither guest disk holds a copy; the host checks
+//! it against the old computer's SHA-256, and the new computer checks it
+//! again as it unpacks it as the same user ID and is stopped. Only then
+//! does the bot switch to the new computer, inside an immediate
+//! transaction. The old computer is kept, stopped, so
 //! [`ComputerManager::rollback_upgrade`] can switch back; it is never
 //! removed here. A failure before the switch removes only the replacement
 //! this upgrade created and leaves the bot on its old computer.
@@ -49,32 +51,30 @@ use super::upgrade_queue::Ended;
 use super::{ComputerError, ComputerManager, DESKTOP_GUEST_PORT, RuntimeState, Spec};
 
 const COPY_TIMEOUT: Duration = Duration::from_secs(1800);
-const GUEST_STAGING: &str = "/var/tmp/else-upgrade.tar";
-const GUEST_ARCHIVE: &str = "/var/lib/elsebot-upgrade/data.tar";
 
-const PACK: &str = r#"set -e
+/// Reports the old computer's `elsebot` user ID, then the APT packages
+/// marked manual beyond the image's own list.
+const INSPECT: &str = r#"set -e
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 cd /
-archive=/var/tmp/else-upgrade.tar
-trap 'rm -f "$archive"' EXIT
-paths=""
-for p in home/elsebot var/lib/elsebot; do [ -e "$p" ] && paths="$paths $p"; done
-[ -n "$paths" ] || { echo "no user data to copy" >&2; exit 3; }
-for p in usr/local opt; do [ -d "$p" ] && paths="$paths $p"; done
-rm -f "$archive"
-need=$(du -skx $paths | awk '{s += $1} END {print s + 65536}')
-free=$(df -Pk /var/tmp | awk 'NR == 2 {print $4}')
-[ "$free" -ge "$need" ] || { echo "not enough free disk for the archive: ${need} KiB needed, ${free} KiB free" >&2; exit 5; }
-tar --numeric-owner --sparse --one-file-system -cpf "$archive" $paths
-stat -c %s "$archive"
-sha256sum "$archive" | cut -d' ' -f1
+[ -e home/elsebot ] || [ -e var/lib/elsebot ] || { echo "no user data to copy" >&2; exit 3; }
 id -u elsebot 2>/dev/null || echo none
 if command -v jq >/dev/null && jq -e '.manual' /etc/elsebot/image.json >/dev/null 2>&1; then
     jq -r '.manual[]' /etc/elsebot/image.json | sort -u > /var/tmp/else-image-packages
     apt-mark showmanual | sort -u | comm -23 - /var/tmp/else-image-packages
     rm -f /var/tmp/else-image-packages
-fi
-trap - EXIT"#;
+fi"#;
+
+/// Writes the archive to standard output and its SHA-256 as the last line
+/// of standard error. The archive never touches the guest's disk, which
+/// may not have room for a second copy of the data.
+const PACK: &str = r#"set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+cd /
+paths=()
+for p in home/elsebot var/lib/elsebot usr/local opt; do [ -e "$p" ] && paths+=("$p"); done
+exec 3>&1
+tar --numeric-owner --sparse --one-file-system -cpf - "${paths[@]}" | tee /dev/fd/3 | sha256sum | cut -d' ' -f1 >&2"#;
 
 /// Close a running Chromium gracefully before the normal stop. SIGINT makes
 /// it commit its cookie store; images before `else-guest:3` stop it with
@@ -95,25 +95,32 @@ while kill -0 "$pid" 2>/dev/null; do
     sleep 0.1
 done"#;
 
+/// Unpacks the archive from standard input in one pass: the bot's data
+/// replaces the image's, while in `/usr/local` and `/opt` the image's own
+/// files win. It checks the SHA-256 of what it read after unpacking, so a
+/// damaged copy fails the upgrade and the replacement is discarded.
 /// `--absolute-names` keeps tar from deferring absolute or `..` symlinks
 /// (Bun's cache is full of them). A deferred symlink makes tar recheck its
 /// parent directory's inode number at the end, and the guest's overlayfs
 /// renumbers a directory once it is evicted from cache, so tar fails with
 /// "Directory renamed" and leaves those directories owned by root. The archive
 /// comes from the bot's own computer, and the bot already has root here.
-const UNPACK: &str = r#"set -e
+const UNPACK: &str = r#"set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 cd /
-trap 'rm -f "$2"' EXIT
 [ "$(id -u elsebot 2>/dev/null || echo none)" = "$3" ] || { echo "the new image's elsebot user ID is not $3" >&2; exit 4; }
-need=$(( $(stat -c %s "$2") / 1024 + 65536 ))
+need=$(( $2 / 1024 + 65536 ))
 free=$(df -Pk / | awk 'NR == 2 {print $4}')
 [ "$free" -ge "$need" ] || { echo "not enough free disk to unpack: ${need} KiB needed, ${free} KiB free" >&2; exit 5; }
-echo "$1  $2" | sha256sum -c --quiet
-tar --numeric-owner --absolute-names -xpf "$2" --anchored --exclude=usr/local --exclude=opt
-tar --numeric-owner --absolute-names --skip-old-files -xpf "$2" --anchored --exclude=home/elsebot --exclude=var/lib/elsebot
-rm -f "$2"
-rmdir "$(dirname "$2")" 2>/dev/null || true
+fifo=$(mktemp -d)
+trap 'rm -rf "$fifo"' EXIT
+mkfifo "$fifo/system"
+tar --numeric-owner --absolute-names --skip-old-files -xpf "$fifo/system" --anchored --exclude=home/elsebot --exclude=var/lib/elsebot &
+system=$!
+got=$( { tee "$fifo/system" /dev/fd/3 | tar --numeric-owner --absolute-names -xpf - --anchored --exclude=usr/local --exclude=opt >&2; } 3>&1 | sha256sum | cut -d' ' -f1 )
+wait "$system"
+[ "$got" = "$1" ] || { echo "the archive arrived damaged" >&2; exit 6; }
+rm -rf "$fifo"
 trap - EXIT
 shift 3
 present=""
@@ -403,23 +410,6 @@ impl ComputerManager {
         }
     }
 
-    async fn remove_guest_archive(&self, name: &str) {
-        if matches!(
-            self.runtime.state(name).await,
-            Ok(Some(RuntimeState::Running))
-        ) {
-            let _ = self
-                .runtime
-                .exec(
-                    name,
-                    "/bin/rm",
-                    &["-f", GUEST_STAGING],
-                    Duration::from_secs(60),
-                )
-                .await;
-        }
-    }
-
     async fn stop_confirmed(&self, name: &str) -> Result<(), ComputerError> {
         if self.runtime.state(name).await? != Some(RuntimeState::Stopped) {
             self.runtime.stop(name).await?;
@@ -573,7 +563,6 @@ impl ComputerManager {
         let copied = match copied {
             Ok(done) => done,
             Err(err) => {
-                self.remove_guest_archive(&row.runtime_name).await;
                 let _ = self.stop_confirmed(&row.runtime_name).await;
                 let discarded = self.discard_replacement(&to_runtime_name).await;
                 sqlx::query(
@@ -681,7 +670,32 @@ impl ComputerManager {
         self.runtime.start(&row.runtime_name).await?;
         let out = self
             .runtime
-            .exec(&row.runtime_name, "/bin/sh", &["-c", PACK], COPY_TIMEOUT)
+            .exec(&row.runtime_name, "/bin/sh", &["-c", INSPECT], COPY_TIMEOUT)
+            .await?;
+        if out.status != Some(0) {
+            return Err(refused(format!(
+                "inspecting the old computer failed: {}",
+                super::bounded(out.stderr.trim(), 500)
+            )));
+        }
+        let lines: Vec<&str> = out.stdout.lines().map(str::trim).collect();
+        let packages = lines.get(1..).unwrap_or_default();
+        let (Some(uid), true) = (
+            lines.first().map(|s| (*s).to_owned()),
+            packages.iter().all(|p| package_name(p)),
+        ) else {
+            return Err(refused("the old computer's report was unreadable"));
+        };
+        let archive: PathBuf = staging.join("data.tar");
+        let out = self
+            .runtime
+            .exec_to_file(
+                &row.runtime_name,
+                "/bin/bash",
+                &["-c", PACK],
+                &archive,
+                COPY_TIMEOUT,
+            )
             .await?;
         if out.status != Some(0) {
             return Err(refused(format!(
@@ -689,46 +703,21 @@ impl ComputerManager {
                 super::bounded(out.stderr.trim(), 500)
             )));
         }
-        let lines: Vec<&str> = out.stdout.lines().map(str::trim).collect();
-        let packages = lines.get(3..).unwrap_or_default();
-        let (Some(size), Some(sha256), Some(uid), true) = (
-            lines.first().and_then(|s| s.parse::<u64>().ok()),
-            lines
-                .get(1)
-                .filter(|s| s.len() == 64)
-                .map(|s| (*s).to_owned()),
-            lines.get(2).map(|s| (*s).to_owned()),
-            packages.iter().all(|p| package_name(p)),
-        ) else {
-            return Err(refused("the old computer's archive report was unreadable"));
-        };
-        let archive: PathBuf = staging.join("data.tar");
-        let mut copied = Err(super::RuntimeError::Unavailable("not attempted".into()));
-        for attempt in 1..=3 {
-            let _ = std::fs::remove_file(&archive);
-            copied = self
-                .runtime
-                .copy_out(&row.runtime_name, GUEST_STAGING, &archive)
-                .await;
-            match &copied {
-                Ok(()) => break,
-                Err(err) => {
-                    tracing::warn!(attempt, error = %err, "copying the upgrade archive failed")
-                }
-            }
-        }
-        self.remove_guest_archive(&row.runtime_name).await;
-        copied?;
         self.stop_confirmed(&row.runtime_name).await?;
-        let (host_size, host_sha) = sha256_file(&archive).map_err(io)?;
-        if (host_size, host_sha.as_str()) != (size, sha256.as_str()) {
+        let (size, sha256) = sha256_file(&archive).map_err(io)?;
+        let reported = out
+            .stderr
+            .lines()
+            .map(str::trim)
+            .rfind(|line| line.len() == 64 && line.bytes().all(|b| b.is_ascii_hexdigit()));
+        if reported != Some(sha256.as_str()) {
             return Err(refused(
-                "the copied archive does not match the old computer's (size or SHA-256)",
+                "the copied archive does not match the old computer's (SHA-256)",
             ));
         }
 
         let mut ports = Vec::new();
-        let mut files = vec![(archive.clone(), GUEST_ARCHIVE.to_owned())];
+        let mut files = Vec::new();
         if self.config.desktop {
             let port: Option<i32> =
                 sqlx::query_scalar("SELECT desktop_port FROM bot_computers WHERE bot_id = ?1")
@@ -758,11 +747,12 @@ impl ComputerManager {
                 mounts: self.project_mounts(bot_id)?,
             })
             .await?;
-        let mut args = vec!["-c", UNPACK, "sh", &sha256, GUEST_ARCHIVE, &uid];
+        let size_arg = size.to_string();
+        let mut args = vec!["-c", UNPACK, "bash", &sha256, &size_arg, &uid];
         args.extend(packages);
         let out = self
             .runtime
-            .exec(to_runtime_name, "/bin/sh", &args, COPY_TIMEOUT)
+            .exec_from_file(to_runtime_name, "/bin/bash", &args, &archive, COPY_TIMEOUT)
             .await?;
         if out.status != Some(0) {
             return Err(refused(format!(
