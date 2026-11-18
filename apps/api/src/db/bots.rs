@@ -106,6 +106,15 @@ macro_rules! handed_back {
     };
 }
 
+/// SQL over a turn `t`: it is a routine run that completed with no news,
+/// so its replies alert no one.
+macro_rules! no_news {
+    () => {
+        "(t.status = 'completed' AND EXISTS (SELECT 1 FROM routine_runs q
+            WHERE q.turn_id = t.id AND q.report = 'no_news'))"
+    };
+}
+
 const SELECT_BOT: &str = concat!(
     "SELECT b.id, b.name, c.id AS conversation_id, b.status,
         b.created_at, b.deleted_at, b.selected_provider_id, b.cancel_pending, b.category_id, b.muted,
@@ -133,6 +142,8 @@ const SELECT_BOT: &str = concat!(
         (SELECT count(*) FROM items u JOIN turns t ON t.id = u.turn_id
             WHERE u.conversation_id = c.id AND u.kind = 'assistant' AND ",
     handed_back!(),
+    " AND NOT ",
+    no_news!(),
     "
             AND NOT EXISTS (SELECT 1 FROM items v WHERE v.turn_id = u.turn_id
                             AND v.kind = 'assistant' AND v.seq > u.seq)
@@ -142,8 +153,11 @@ const SELECT_BOT: &str = concat!(
         (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued'
             AND NOT EXISTS (SELECT 1 FROM turn_steers s
                             WHERE s.turn_id = q.id AND s.status <> 'pending')) AS queued_count,
-        (SELECT m.created_at FROM items m WHERE m.conversation_id = c.id
-            AND m.kind IN ('user', 'assistant') AND NOT m.hidden ORDER BY m.seq DESC LIMIT 1) AS last_message_at,
+        (SELECT m.created_at FROM items m JOIN turns t ON t.id = m.turn_id
+            WHERE m.conversation_id = c.id AND m.kind IN ('user', 'assistant') AND NOT m.hidden
+            AND NOT ",
+    no_news!(),
+    " ORDER BY m.seq DESC LIMIT 1) AS last_message_at,
         (SELECT CASE WHEN count(*) > 0 THEN json_object('since', min(g.since),
                 'bots', json_group_array(json_object('id', g.id, 'name', g.name, 'tasks', g.tasks))) END
             FROM (SELECT lower(hex(d.target_bot_id)) AS id, t.name, count(*) AS tasks,
@@ -162,6 +176,8 @@ const SELECT_BOT: &str = concat!(
                                  WHERE x.conversation_id = c.id AND x.kind = 'assistant'
                                  AND ",
     handed_back!(),
+    " AND NOT ",
+    no_news!(),
     " ORDER BY x.seq DESC LIMIT 1)
     LEFT JOIN owner_questions question ON question.id = (
         SELECT p.id FROM owner_questions p

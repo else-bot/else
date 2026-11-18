@@ -117,6 +117,7 @@ struct OwnerPatch {
     /// Forget the routine's failed runs.
     #[serde(default)]
     dismiss_failures: bool,
+    quiet: Option<bool>,
 }
 
 async fn owner_update(
@@ -138,6 +139,7 @@ async fn owner_update(
     let patch = Patch {
         enabled: body.enabled,
         model,
+        quiet: body.quiet,
         dismiss_failures: body.dismiss_failures,
         ..Patch::default()
     };
@@ -277,6 +279,9 @@ fn fields() -> Value {
                   "additionalProperties": false },
             ],
         },
+        "quiet": { "type": "boolean",
+                   "description": "Only when the owner wants no message when a run has nothing \
+                       to report. A quiet run may end with no_news instead of a report." },
         "model": { "type": "string", "maxLength": MAX_MODEL_CHARS,
                    "description": "Only when the owner asks for a specific model: its ID or name, such as gpt-6.1-sol \
                        or Claude Opus 5.5. Omit it to use your model. An unmatched name still saves on your \
@@ -652,6 +657,8 @@ struct CreateArgs {
     provider_id: Option<String>,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
+    #[serde(default)]
+    quiet: bool,
 }
 
 fn parse_new(
@@ -722,6 +729,7 @@ pub async fn create(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         model: &model,
         model_request: model_request.as_deref(),
         when_request: None,
+        quiet: args.quiet,
     };
     match routines::create(&state.db, caller(grant), new, now).await {
         Ok((routine, created)) => {
@@ -800,6 +808,7 @@ struct UpdateArgs {
     provider_id: Option<String>,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
+    quiet: Option<bool>,
 }
 
 fn parse_patch(args: &UpdateArgs) -> Result<Patch, RoutineError> {
@@ -824,6 +833,7 @@ fn parse_patch(args: &UpdateArgs) -> Result<Patch, RoutineError> {
             .transpose()?,
         enabled: args.enabled,
         model: None,
+        quiet: args.quiet,
         dismiss_failures: false,
     })
 }
@@ -948,6 +958,45 @@ pub async fn run(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     }
 }
 
+pub const NO_NEWS: &str = "no_news";
+
+pub fn no_news_schema() -> Value {
+    json!({
+        "name": NO_NEWS,
+        "description": "In a run of a quiet routine, record that it has nothing to report, so \
+            the owner gets no alert; the run still shows in its history. Only when the run \
+            found nothing new and changed nothing. A run that asked the owner or acted outside \
+            your computer still reports.",
+        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+        "annotations": annotations(false, false),
+    })
+}
+
+pub async fn no_news(state: &AppState, grant: &Grant) -> Outcome {
+    match routines::report_no_news(&state.db, grant.turn_id).await {
+        Ok(Ok(_)) => (
+            tool_result(json!({
+                "report": "no_news",
+                "next": "End the run with one short line saying what you checked. If you \
+                    still ask the owner or act outside your computer in this run, it reports \
+                    as usual.",
+            })),
+            Some("no news".into()),
+        ),
+        Ok(Err(refusal)) => (
+            tool_error(
+                &json!({
+                    "error": refusal.to_string(),
+                    "next": "Report to the owner as usual.",
+                })
+                .to_string(),
+            ),
+            Some(format!("refused {refusal:?}")),
+        ),
+        Err(err) => reject(err.into()),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReminderArgs {
@@ -1007,6 +1056,7 @@ pub async fn create_reminder(state: &AppState, grant: &Grant, args: &Value) -> O
         model: &model,
         model_request: None,
         when_request: Some(&when_request),
+        quiet: false,
     };
     match routines::create(&state.db, caller(grant), new, now).await {
         Ok((reminder, created)) => {

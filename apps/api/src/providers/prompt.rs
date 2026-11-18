@@ -837,10 +837,17 @@ fn base_request_text(input: &TurnInput) -> String {
              you to run it on schedule. Do it now with your tools, then reply to the owner with a \
              concise report of what you actually did and found, including failures. Never invent \
              results. Routine tools are not available during a run. Where your rules conflict \
-             with this task's wording, follow your rules.\n<task>\n{task}\n</task>",
+             with this task's wording, follow your rules.{quiet}\n<task>\n{task}\n</task>",
             name = run.name,
             id = run.routine_id,
             due = at(&run.due_at),
+            quiet = if run.quiet {
+                " The owner marked this routine quiet: when the run finds nothing new and you \
+                 changed nothing, call no_news through use_tool, then end with one short line, \
+                 and the owner gets no alert. Otherwise report as usual."
+            } else {
+                ""
+            },
             task = input.text,
         ),
         Some(SavedRun::Webhook(run)) => format!(

@@ -113,6 +113,11 @@ def run(runner):
                         "prompt": "Summarize the new changelog entries.",
                         "check": "curl -fsS https://status.example.com/changelog.txt | diff ~/seen.txt - | grep '^>' || true"}})],
                                                   "Saved an hourly watch that only wakes me when the changelog changes."),
+                "quiet-routine-on-request": ([self.call("use_tool", {
+                    "name": "routine_create", "arguments": {
+                        "name": "Status check", "cron": "0 * * * *", "quiet": True,
+                        "prompt": "Check that https://status.example.com answers."}})],
+                                             "Saved an hourly status check that only messages you when it's down."),
                 "one-off-check-is-a-reminder": ([self.call("find_tool", {"query": "reminder_create"}), self.call("use_tool", {
                     "name": "reminder_create", "arguments": {"name": "Scout check", "in_minutes": 360,
                                                              "prompt": "Check whether Scout sent 2-3 DMs."}})],

@@ -172,7 +172,9 @@ pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id,
     (SELECT s.into_turn_id FROM turn_steers s WHERE s.turn_id = t.id) AS steered_into,
     (SELECT s.status FROM turn_steers s WHERE s.turn_id = t.id) AS steer_status,
     (SELECT json_object('routine_id', lower(hex(r.routine_id)), 'name', r.name, 'due_at', r.due_at,
-                        'reminder', json(iif(o.run_at IS NULL, 'false', 'true')))
+                        'reminder', json(iif(o.run_at IS NULL, 'false', 'true')),
+                        'quiet', json(iif(o.quiet, 'true', 'false')),
+                        'no_news', json(iif(r.report = 'no_news' AND t.status = 'completed', 'true', 'false')))
      FROM routine_runs r JOIN routines o ON o.id = r.routine_id WHERE r.turn_id = t.id) AS routine,
     (SELECT json_group_array(json_object('account_id', m.account_id, 'message',
                 json_object('folder', m.folder, 'uid_validity', m.uid_validity, 'uid', m.uid)))
