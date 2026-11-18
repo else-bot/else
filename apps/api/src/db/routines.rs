@@ -623,6 +623,9 @@ pub async fn update(
         .map_or(check_command, |c| c.map(|c| c.as_str().to_owned()));
     let new_enabled = patch.enabled.unwrap_or(enabled);
     let new_quiet = patch.quiet.unwrap_or(quiet);
+    if new_quiet && run_at.is_some() {
+        return Err(InvalidRoutine::QuietReminder.into());
+    }
     let new_model = patch.model.unwrap_or_else(|| setting(model, requested));
     let (model, requested_model) = columns(&new_model);
     let rescheduled =
@@ -1335,14 +1338,16 @@ impl From<CheckSkip> for Skip {
 }
 
 /// What a run's turn tells the owner, as `routine_runs.report` stores it.
-/// A run reports news unless its bot ended it with no news;
-/// `routine_runs_news_when_involved` turns a no-news run that involved the
-/// owner or acted outside the bot back into news as its turn completes.
+/// A run reports news unless its bot ended it with no news. Migration
+/// 0075's triggers turn no news back into news when the turn parks, or when
+/// it completes having involved the owner or acted outside the bot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum Report {
     News,
     NoNews,
+    /// A gated action ran in the run, so it reports whatever its bot says.
+    Acted,
 }
 
 /// Why a run cannot end with no news.
@@ -1355,20 +1360,22 @@ pub enum NoNewsRefusal {
          Bot details > Routines"
     )]
     NotQuiet,
+    #[error("an approved or allowed action ran in this run, so it reports to the owner")]
+    Acted,
     #[error("the run is no longer running")]
     NotRunning,
 }
 
 /// Record that the run `turn_id` executes has nothing to report. Repeating
-/// it changes nothing. A run can only move from news to no news while its
-/// turn serves tools, and only for a quiet routine.
+/// it changes nothing. Only a running run of a quiet routine moves from
+/// news to no news; one that acted never does.
 pub async fn report_no_news(
     pool: &SqlitePool,
     turn_id: Uuid,
 ) -> Result<Result<Report, NoNewsRefusal>, sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let run: Option<(Uuid, bool, TurnStatus)> = sqlx::query_as(
-        "SELECT rr.id, r.quiet, t.status FROM routine_runs rr
+    let run: Option<(bool, Report, TurnStatus)> = sqlx::query_as(
+        "SELECT r.quiet, rr.report, t.status FROM routine_runs rr
          JOIN routines r ON r.id = rr.routine_id JOIN turns t ON t.id = rr.turn_id
          WHERE rr.turn_id = ?1",
     )
@@ -1376,25 +1383,36 @@ pub async fn report_no_news(
     .fetch_optional(&mut *tx)
     .await?;
     let refusal = match run {
-        None => Some(NoNewsRefusal::NotARoutineRun),
-        Some((_, false, _)) => Some(NoNewsRefusal::NotQuiet),
-        Some((_, true, status)) if !status.serves_tools() => Some(NoNewsRefusal::NotRunning),
-        Some(_) => None,
+        None => NoNewsRefusal::NotARoutineRun,
+        Some((false, _, _)) => NoNewsRefusal::NotQuiet,
+        Some((_, Report::Acted, _)) => NoNewsRefusal::Acted,
+        Some((_, _, status)) if !status.serves_tools() => NoNewsRefusal::NotRunning,
+        Some((true, Report::News | Report::NoNews, _)) => {
+            let report: Report = sqlx::query_scalar(
+                "UPDATE routine_runs SET report = 'no_news'
+                 WHERE turn_id = ?1 AND report IN ('news', 'no_news') RETURNING report",
+            )
+            .bind(turn_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(Ok(report));
+        }
     };
-    if let Some(refusal) = refusal {
-        return Ok(Err(refusal));
-    }
-    let report: Option<Report> = sqlx::query_scalar(
-        "UPDATE routine_runs SET report = 'no_news'
-         WHERE turn_id = ?1 AND report IN ('news', 'no_news')
-           AND EXISTS (SELECT 1 FROM turns t WHERE t.id = ?1 AND t.status IN ('sending', 'running'))
-         RETURNING report",
+    Ok(Err(refusal))
+}
+
+/// Record that a gated action is about to run in the turn, if it executes a
+/// routine run: the run then reports whatever its bot says. Repeating it
+/// changes nothing.
+pub async fn report_acted(pool: &SqlitePool, turn_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE routine_runs SET report = 'acted' WHERE turn_id = ?1 AND report <> 'acted'",
     )
     .bind(turn_id)
-    .fetch_optional(&mut *tx)
+    .execute(pool)
     .await?;
-    tx.commit().await?;
-    Ok(report.ok_or(NoNewsRefusal::NotRunning))
+    Ok(())
 }
 
 /// Why [`queue_saved_task`] queued no turn.

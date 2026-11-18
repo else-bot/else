@@ -3,7 +3,7 @@ use crate::common;
 use axum::http::StatusCode;
 use chrono::DateTime;
 use common::TestApp;
-use common::recorder::{self, GATE, Harness, tool};
+use common::recorder::{self, GATE, GATE_EVERY_ATTEMPT, Harness, tool};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -45,16 +45,18 @@ async fn no_news(app: &TestApp, token: &str) -> recorder::Called {
     .await
 }
 
+const UPTIME: &str = "[gate] Check that example.com answers.";
+
 /// Save a routine from an owner turn, read everything so far, and start
 /// its first run, held running. Returns the routine and the run's turn
 /// and grant.
-async fn start_run(h: &Harness, bot: &str, quiet: bool) -> (Value, Uuid, String) {
+async fn start_run(h: &Harness, bot: &str, quiet: bool, task: &str) -> (Value, Uuid, String) {
     let (setup, token) = h.running(bot, GATE).await;
     let created = tool(
         &h.app,
         &token,
         "routine_create",
-        json!({ "name": "Uptime", "prompt": format!("{GATE} Check that example.com answers."),
+        json!({ "name": "Uptime", "prompt": task,
                 "cron": "0 9 1 1 *", "quiet": quiet }),
     )
     .await;
@@ -97,7 +99,7 @@ async fn start_run(h: &Harness, bot: &str, quiet: bool) -> (Value, Uuid, String)
 async fn a_quiet_run_with_no_news_alerts_no_one() {
     let h = recorder::harness(4).await;
     let main = h.app.main_bot().await;
-    let (_, run, token) = start_run(&h, &main, true).await;
+    let (_, run, token) = start_run(&h, &main, true, UPTIME).await;
     let before = shown_bot(&h.app, &main).await;
     let packet = h.packets().await.into_iter().last().unwrap();
     assert!(
@@ -136,7 +138,7 @@ async fn a_quiet_run_with_no_news_alerts_no_one() {
 async fn a_quiet_run_that_asks_the_owner_still_reports() {
     let h = recorder::harness(4).await;
     let main = h.app.main_bot().await;
-    let (_, run, token) = start_run(&h, &main, true).await;
+    let (_, run, token) = start_run(&h, &main, true, UPTIME).await;
     assert!(!no_news(&h.app, &token).await.error);
     let asked = tool(
         &h.app,
@@ -182,7 +184,7 @@ async fn a_quiet_run_that_asks_the_owner_still_reports() {
 async fn only_a_run_of_a_quiet_routine_can_end_with_no_news() {
     let h = recorder::harness(4).await;
     let main = h.app.main_bot().await;
-    let (saved, run, token) = start_run(&h, &main, false).await;
+    let (saved, run, token) = start_run(&h, &main, false, UPTIME).await;
     let refused = no_news(&h.app, &token).await;
     assert!(refused.error, "{}", refused.body);
     assert!(
@@ -223,4 +225,73 @@ async fn only_a_run_of_a_quiet_routine_can_end_with_no_news() {
         owner.body
     );
     h.release(owner_turn).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quiet_run_that_fails_still_reports() {
+    let h = recorder::harness(4).await;
+    let main = h.app.main_bot().await;
+    let task = format!("{GATE} [synthetic:fail] Check that example.com answers.");
+    let (_, run, token) = start_run(&h, &main, true, &task).await;
+    assert!(!no_news(&h.app, &token).await.error);
+    h.release(run).await;
+    h.app.wait_turn(&run.to_string(), &["failed"]).await;
+
+    let after = shown_bot(&h.app, &main).await;
+    assert_eq!(after["read_state"]["unread"], true, "{after}");
+    assert_eq!(after["read_state"]["latest"]["turn_id"], run.to_string());
+    assert_eq!(
+        shown_turn(&h.app, &main, run).await["routine"]["no_news"],
+        false
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_that_ran_an_allowed_action_cannot_end_with_no_news() {
+    let h = recorder::harness(4).await;
+    let main = h.app.main_bot().await;
+    let task = format!("{GATE_EVERY_ATTEMPT} Delete merged branches on origin.");
+    let (_, run, token) = start_run(&h, &main, true, &task).await;
+    let delete = |branch: &str| {
+        json!({ "command": format!("git push origin --delete {branch}"),
+                "effect": "destructive", "purpose": "Delete a merged branch" })
+    };
+    let asked = tool(&h.app, &token, "computer_run", delete("feature-a")).await;
+    assert_eq!(asked.result["status"], "pending", "{}", asked.body);
+    let question = asked.result["question_id"].as_str().unwrap().to_owned();
+    h.release(run).await;
+    h.app.wait_turn(&run.to_string(), &["waiting"]).await;
+    let answered = h
+        .app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/questions/{question}/answer"),
+            Some(json!({ "choice": "approve_routine" })),
+        )
+        .await;
+    assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
+    let token = h.continued(run, &token).await;
+
+    let ran = tool(&h.app, &token, "computer_run", delete("feature-b")).await;
+    assert_ne!(
+        ran.result["status"], "pending",
+        "the grant runs it: {}",
+        ran.body
+    );
+    let refused = no_news(&h.app, &token).await;
+    assert!(refused.error, "{}", refused.body);
+    assert!(
+        refused.result["error"]
+            .as_str()
+            .unwrap()
+            .contains("approved or allowed action ran"),
+        "{}",
+        refused.body
+    );
+    h.release(run).await;
+    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    assert_eq!(
+        routine(&h.app, &main).await["last_run"]["status"],
+        "completed"
+    );
 }

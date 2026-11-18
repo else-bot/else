@@ -69,6 +69,8 @@ pub enum InvalidRoutine {
          to change when it runs"
     )]
     FixedTime,
+    #[error("a reminder runs once and always reports; only a routine can be quiet")]
+    QuietReminder,
     #[error(
         "active_hours must be \"always\" or {{\"days\": [\"mon\", ...], \"start\": \"HH:MM\", \
          \"end\": \"HH:MM\"}} with at least one day and start before end"

@@ -436,6 +436,20 @@ pub async fn gate_host(
     spec: &Spec,
     authorization: Option<&str>,
 ) -> Result<Gate, RequestError> {
+    let gate = decide(pool, turn_id, spec, authorization).await?;
+    if matches!(gate, Gate::Run { .. }) {
+        // Saved before the action runs, so a routine run that acted reports.
+        super::routines::report_acted(pool, turn_id).await?;
+    }
+    Ok(gate)
+}
+
+async fn decide(
+    pool: &SqlitePool,
+    turn_id: Uuid,
+    spec: &Spec,
+    authorization: Option<&str>,
+) -> Result<Gate, RequestError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = turns::asking_caller(&mut tx, turn_id)
         .await?

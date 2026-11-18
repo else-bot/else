@@ -2063,6 +2063,11 @@ impl ElseApp {
                 } else {
                     gpui_kit::assets::IconName::Bell
                 })
+                .tooltip(if quiet {
+                    "Quiet: runs with nothing to report send no message. Click to report every run."
+                } else {
+                    "Reports every run. Click to make runs with nothing to report send no message."
+                })
                 .accessibility_label(if quiet {
                     format!("Report every run of {}", routine.name)
                 } else {
