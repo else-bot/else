@@ -117,6 +117,7 @@ pub(super) fn parse(text: &str) -> Result<Palette, Error> {
         blue,
         magenta,
         cyan,
+        primary: super::Primary::Saturated,
     })
 }
 

@@ -909,7 +909,7 @@ impl ElseApp {
             .map(|frame| {
                 if theme.mode.is_dark() {
                     frame
-                        .border_color(theme.foreground.opacity(0.12))
+                        .border_color(theme.foreground.opacity(0.08))
                         .bg(theme.background)
                 } else {
                     frame.border_color(theme.border).bg(theme.popover)
