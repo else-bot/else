@@ -71,6 +71,8 @@ pub fn export(turn: Turn) -> Value {
         },
         Turn::MailEvent => DelegationContext {
             origin: Origin::ConnectorEvent,
+            registry: vec![(Uuid::from_u128(5), "Marketing Manager".into())],
+            remaining: crate::db::delegations::MAX_CHILDREN,
             ..DelegationContext::default()
         },
     };

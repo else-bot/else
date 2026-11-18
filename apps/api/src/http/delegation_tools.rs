@@ -55,6 +55,15 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> O
             );
         }
     };
+    if !paths.is_empty() && from_email(state, grant).await {
+        return (
+            tool_error(
+                "files are unavailable here: this turn cannot read the project. Put what the \
+                 other bot needs in task.",
+            ),
+            Some("rejected NO_PROJECT".into()),
+        );
+    }
     let files = if paths.is_empty() {
         Vec::new()
     } else {
@@ -163,6 +172,17 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> O
             (tool_error(&format!("{code}: {err}")), Some(log))
         }
     }
+}
+
+/// Whether `grant`'s turn traces back to incoming email, which cannot read
+/// the project. Fails closed.
+async fn from_email(state: &AppState, grant: &Grant) -> bool {
+    let Ok(mut conn) = state.db.acquire().await else {
+        return true;
+    };
+    !crate::db::delegations::origin(&mut conn, grant.turn_id)
+        .await
+        .is_ok_and(|origin| origin != crate::app::providers::Origin::ConnectorEvent)
 }
 
 fn task_json(task: &crate::db::delegations::Task) -> Value {
