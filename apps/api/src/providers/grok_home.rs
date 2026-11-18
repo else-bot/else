@@ -30,13 +30,25 @@ pub fn host_home() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".grok")))
 }
 
+/// The host login's entries, one per signed-in account. Grok rewrites
+/// `auth.json` to `{}` when its login stops working, through a bot's linked
+/// copy too, and `grok login` fills it again.
+fn logins(login: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let text = fs::read_to_string(login.join("auth.json")).ok()?;
+    match serde_json::from_str(&text).ok()? {
+        serde_json::Value::Object(entries) => Some(entries),
+        _ => None,
+    }
+}
+
+pub fn signed_in(login: &Path) -> bool {
+    logins(login).is_some_and(|entries| !entries.is_empty())
+}
+
 /// A stable, non-secret identity of the host login (its users and teams),
 /// used only inside session fingerprints.
 pub fn host_account(login: &Path) -> String {
-    let Ok(text) = fs::read_to_string(login.join("auth.json")) else {
-        return String::new();
-    };
-    let Ok(serde_json::Value::Object(entries)) = serde_json::from_str(&text) else {
+    let Some(entries) = logins(login) else {
         return String::new();
     };
     let mut accounts: Vec<String> = entries

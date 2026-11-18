@@ -33,6 +33,8 @@ use protocol::Tracker;
 
 pub const ID: &str = "grok";
 const PROMPT_VERSION: &str = "else-grok-v4";
+const SIGNED_OUT: &str = "Grok isn't signed in on this server. Run `grok login --device-code` there, \
+                          or switch this bot to another model.";
 
 pub static DEFINITION: Definition = Definition {
     id: ID,
@@ -63,9 +65,13 @@ fn build(wiring: &super::Wiring) -> super::Built {
 }
 
 /// The models `grok models` prints under "Available models:", one per
-/// `* id (default)` or `- id` line. Grok names no efforts per model.
-fn listed_models(printed: &str) -> Vec<Listed> {
-    printed
+/// `* id (default)` or `- id` line. Grok names no efforts per model. Signed
+/// out, it prints only the models it offers without an account.
+fn listed_models(printed: &str) -> Result<Vec<Listed>, String> {
+    if printed.contains("You are not authenticated") {
+        return Err(SIGNED_OUT.into());
+    }
+    Ok(printed
         .lines()
         .skip_while(|line| !line.trim_start().starts_with("Available models"))
         .filter_map(|line| {
@@ -73,7 +79,7 @@ fn listed_models(printed: &str) -> Vec<Listed> {
             let id = rest.split_whitespace().next()?;
             Some(Listed::id(id))
         })
-        .collect()
+        .collect())
 }
 
 /// The binary Grok's installers keep in the host's `GROK_HOME` (curl's
@@ -119,7 +125,7 @@ fn is_script(path: &Path) -> bool {
         .is_ok_and(|()| &head == b"#!")
 }
 
-/// A CLI that runs and a host login.
+/// A CLI that runs, and the host's Grok home, which holds its login.
 struct Ready {
     host: Host,
     program: PathBuf,
@@ -155,9 +161,7 @@ impl Grok {
                 program.display()
             )
         })?;
-        let login = login
-            .filter(|dir| dir.join("auth.json").is_file())
-            .ok_or("Grok CLI is not logged in on the host (run `grok login`).")?;
+        let login = login.ok_or("Grok CLI's home directory is unknown on the host.")?;
         Ok(Ready {
             host,
             program,
@@ -276,7 +280,8 @@ impl Provider for Grok {
     }
     fn availability(&self) -> Availability {
         match &self.ready {
-            Ok(_) => Availability::Available,
+            Ok(ready) if grok_home::signed_in(&ready.login) => Availability::Available,
+            Ok(_) => Availability::Unavailable(SIGNED_OUT.into()),
             Err(reason) => Availability::Unavailable(reason.clone()),
         }
     }
@@ -296,7 +301,7 @@ impl Provider for Grok {
             .output(&ready.program, &["models"], &[], 1024 * 1024)
             .await
             .map_err(|why| format!("`grok models` failed: {why}"))?;
-        Ok(listed_models(&printed))
+        listed_models(&printed)
     }
 
     async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
@@ -304,6 +309,9 @@ impl Provider for Grok {
             Ok(ready) => ready,
             Err(reason) => return failed("provider_unavailable", reason.clone()),
         };
+        if !grok_home::signed_in(&ready.login) {
+            return failed("provider_unavailable", SIGNED_OUT);
+        }
         let Some(profile) = &input.profile else {
             return failed(
                 "provider_misconfigured",
@@ -361,7 +369,12 @@ impl Provider for Grok {
             self.tool_url.is_some(),
         );
         let ended = attempt.drive(&mut tracker, &mut turn, sink, &stop).await;
-        attempt.conclude(ended, sink).await
+        match attempt.conclude(ended, sink).await {
+            TurnOutcome::Failed { .. } if !grok_home::signed_in(&ready.login) => {
+                failed("provider_unavailable", SIGNED_OUT)
+            }
+            outcome => outcome,
+        }
     }
 }
 

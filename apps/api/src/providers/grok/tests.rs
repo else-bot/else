@@ -398,9 +398,16 @@ fn profiles_reject_settings_the_cli_cannot_apply() {
 fn grok_models_prints_the_listed_models() {
     let printed = "You are logged in with grok.com.\n\nDefault model: grok-4.7\n\n\
                    Available models:\n  * grok-4.7 (default)\n  - grok-4.7-build-fast\n  - grok-4.5\n";
-    let ids: Vec<String> = listed_models(printed).into_iter().map(|m| m.id).collect();
+    let ids: Vec<String> = listed_models(printed)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
     assert_eq!(ids, ["grok-4.7", "grok-4.7-build-fast", "grok-4.5"]);
-    assert!(listed_models("Not logged in.").is_empty());
+    // Grok 1.0.89, signed out.
+    let signed_out = "You are not authenticated.\n\nDefault model: grok-4.6\n\n\
+                      Available models:\n  * grok-4.6 (default)\n  - grok-4.5\n";
+    assert_eq!(listed_models(signed_out).unwrap_err(), SIGNED_OUT);
 }
 
 #[test]
