@@ -8,9 +8,11 @@
 //! A joined message keeps its own turn, `queued` but never claimed while it
 //! has a steer row. It reaches the reply one of two ways. A running attempt
 //! whose provider takes input mid-turn marks it `sending` before it writes
-//! it ([`sending`]) and `delivered` on the provider's echo ([`deliver`]); a
-//! provider that answered that it took nothing returns it to `pending`
-//! ([`refuse`]). Otherwise it waits `pending` until the reply's next
+//! it ([`sending`]) and `delivered` on the provider's echo ([`deliver`]),
+//! unless the attempt has parked by then; a provider that answered that it
+//! took nothing returns it to `pending` ([`refuse`]). A parked attempt
+//! refuses every tool call, so it takes no message: none is written into
+//! it, and one echoed after the park returns to `pending`. Otherwise it waits `pending` until the reply's next
 //! attempt, whose request carries it ([`fold`]). A delivered message stays
 //! part of that reply for good: it ends with the reply's outcome
 //! ([`settle`]) and keeps its row, so the chat shows one answer to both.
@@ -197,7 +199,9 @@ async fn target(
 }
 
 /// The pending messages steered into running turn `into`, oldest first,
-/// whose turns are still queued, with their files.
+/// whose turns are still queued, with their files. None while its attempt
+/// is parked: that attempt refuses every tool call, so the message waits
+/// for the next attempt, which starts as soon as the parked one ends.
 pub async fn pending(pool: &SqlitePool, into: Uuid) -> Result<Vec<Steer>, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     let rows = joined(&mut conn, into).await?;
@@ -234,16 +238,17 @@ pub async fn for_request(
 /// The messages joined to `into` and not sent yet or taken ([`joined_into`]),
 /// oldest first.
 async fn joined(conn: &mut SqliteConnection, into: Uuid) -> Result<Vec<Row>, sqlx::Error> {
-    sqlx::query_as(
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT t.id AS turn_id, t.bot_id, i.text, coalesce(i.parts, '[]') AS parts, s.status,
-                a.status = 'running' AS reply_running
+                a.status = 'running' AND NOT {} AS reply_running
          FROM turn_steers s
          JOIN turns t ON t.id = s.turn_id AND t.status = 'queued'
          JOIN items i ON i.id = t.owner_item_id
          JOIN turns a ON a.id = s.into_turn_id
          WHERE s.into_turn_id = ?1 AND s.status IN ('pending', 'delivered')
          ORDER BY t.turn_no",
-    )
+        super::turns::parked("a.id", "a.attempt")
+    )))
     .bind(into)
     .fetch_all(&mut *conn)
     .await
@@ -317,13 +322,17 @@ async fn changed(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<(), sqlx:
 
 /// Record, before writing it, that message `turn_id` goes to running turn
 /// `into`. From here a crash leaves its delivery unknown. False when it is
-/// no longer pending there (the owner stopped it, or the reply ended).
+/// no longer pending there (the owner stopped it, or the reply ended) or
+/// the reply's attempt has parked.
 pub async fn sending(pool: &SqlitePool, turn_id: Uuid, into: Uuid) -> Result<bool, sqlx::Error> {
     advance(pool, turn_id, into, Status::Pending, Status::Sending).await
 }
 
-/// The provider echoed message `turn_id` into running turn `into`. False
-/// when it was not `sending` there.
+/// The provider echoed message `turn_id` into running turn `into`. An
+/// attempt that has parked refuses every tool call, so it cannot act on
+/// the message: it returns to `pending`, and the next attempt, which starts
+/// as soon as this one ends, carries it again. False when it was not
+/// `sending` there.
 pub async fn deliver(pool: &SqlitePool, turn_id: Uuid, into: Uuid) -> Result<bool, sqlx::Error> {
     advance(pool, turn_id, into, Status::Sending, Status::Delivered).await
 }
@@ -343,12 +352,16 @@ async fn advance(
     to: Status,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let updated = sqlx::query(
-        "UPDATE turn_steers SET status = ?4
+    let parked = super::turns::parked("a.id", "a.attempt");
+    let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE turn_steers SET status = CASE
+             WHEN ?4 = 'delivered' AND (SELECT {parked} FROM turns a WHERE a.id = ?2)
+             THEN 'pending' ELSE ?4 END
          WHERE turn_id = ?1 AND into_turn_id = ?2 AND status = ?3
            AND EXISTS (SELECT 1 FROM turns WHERE id = ?1 AND status = 'queued')
-           AND EXISTS (SELECT 1 FROM turns WHERE id = ?2 AND status = 'running')",
-    )
+           AND EXISTS (SELECT 1 FROM turns a WHERE a.id = ?2 AND a.status = 'running'
+                       AND (?4 <> 'sending' OR NOT {parked}))"
+    )))
     .bind(turn_id)
     .bind(into)
     .bind(from)

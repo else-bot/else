@@ -15,8 +15,10 @@ use uuid::Uuid;
 /// script stays running until an owner message joins it: `take` takes it
 /// and completes, `fail` takes it and fails, `ignore` completes without
 /// taking it (a provider that takes no input mid-turn), `drop` fails
-/// without taking it, and `hold` takes it and keeps running. A
-/// continuation that carries joined messages says which.
+/// without taking it, `hold` takes it and keeps running, and `park` takes
+/// whatever the server still offers once an owner message joins, then ends
+/// as an attempt that parked on a wait does. A continuation that carries
+/// joined messages says which.
 struct Steering {
     inner: Synthetic,
 }
@@ -45,10 +47,10 @@ impl Provider for Steering {
             .filter(|steered| !steered.seen)
             .map(|steered| steered.message.text.clone())
             .collect();
-        let script = ["take", "fail", "ignore", "drop", "hold"]
+        let script = ["take", "fail", "ignore", "drop", "hold", "park"]
             .into_iter()
             .find(|script| input.text.contains(&format!("[steer:{script}]")))
-            .filter(|_| joined.is_empty());
+            .filter(|script| joined.is_empty() && (*script != "park" || input.steered.is_empty()));
         if script.is_none() && joined.is_empty() {
             return self.inner.run(input, sink, stop).await;
         }
@@ -92,6 +94,9 @@ impl Provider for Steering {
                     "fail" => return failed(),
                     _ => {}
                 }
+            }
+            if script == "park" {
+                return TurnOutcome::Completed;
             }
         }
     }
@@ -700,5 +705,164 @@ async fn a_message_the_reply_took_is_history_of_that_reply() {
     assert_eq!(
         entry.turn_no, first_no,
         "a session that considered the reply has seen it"
+    );
+}
+
+/// A message that joins a reply after its attempt parked on a long job is
+/// not written into that attempt, which refuses every tool call. The
+/// attempt ends, the reply continues at once with the message while the
+/// job's wait stays held, and the job's end still continues it once.
+#[tokio::test]
+async fn a_message_to_a_parked_attempt_runs_now_and_the_wait_still_reports() {
+    let app = app().await;
+    let bot = app.main_bot().await;
+    let first = send(&app, &bot, "Run the release build. [steer:park]").await;
+    app.wait_turn(&first, &["running"]).await;
+    wait_for_reply_text(&app, &bot).await;
+    let pool = &app.db.pool;
+    let into: Uuid = first.parse().unwrap();
+    let bot_id: Uuid = bot.parse().unwrap();
+    let job = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib)
+         VALUES (?1, 'elsebot-x', 'img', 1, 2048)",
+    )
+    .bind(bot_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO guest_jobs (id, bot_id, command, status, deadline)
+         VALUES (?1, ?2, 'make release', 'running',
+                 strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '+1 hours'))",
+    )
+    .bind(job)
+    .bind(bot_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO computer_job_waits (id, bot_id, turn_id, attempt, job_id)
+         VALUES (?1, ?2, ?3, 1, ?4)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(bot_id)
+    .bind(into)
+    .bind(job)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let second = send(&app, &bot, "Also file the flaky test issue.").await;
+
+    assert_eq!(app.wait_turn(&first, &["waiting"]).await, "waiting");
+    let attempt: i32 = sqlx::query_scalar("SELECT attempt FROM turns WHERE id = ?1")
+        .bind(into)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(attempt, 2, "a fresh attempt took the message");
+    assert_eq!(
+        transcript(&app, &bot).await.last().unwrap(),
+        &(
+            "assistant".into(),
+            "Continued with: Also file the flaky test issue.".into()
+        )
+    );
+    let wait: (String, Option<i32>) = sqlx::query_as(
+        "SELECT status, delivered_attempt FROM computer_job_waits WHERE turn_id = ?1",
+    )
+    .bind(into)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(wait, ("pending".into(), None), "the wait stays held");
+
+    sqlx::query("UPDATE guest_jobs SET status = 'completed' WHERE id = ?1")
+        .bind(job)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    assert_eq!(app.wait_turn(&first, ENDED).await, "completed");
+    assert_eq!(app.wait_turn(&second, ENDED).await, "completed");
+    let ended: (i32, String, Option<i32>) = sqlx::query_as(
+        "SELECT t.attempt, w.status, w.delivered_attempt
+         FROM turns t JOIN computer_job_waits w ON w.turn_id = t.id WHERE t.id = ?1",
+    )
+    .bind(into)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        ended,
+        (3, "settled".into(), Some(3)),
+        "the job's end continued the reply once"
+    );
+}
+
+/// A parked attempt refuses every tool call, so it never takes an owner
+/// message: none is written into it, and one the provider echoes after the
+/// park goes back to pending for the next attempt. A message it took
+/// before parking, while its tools still worked, stays taken.
+#[tokio::test]
+async fn a_parked_attempt_takes_no_owner_message() {
+    let (db, bot, first) = setup_running().await;
+    let pool = &db.pool;
+    let sending = else_api::db::steers::sending;
+    let (before, _) = accept(pool, bot, "Use the staging key.").await;
+    let (in_flight, _) = accept(pool, bot, "Also file the flaky test issue.").await;
+    let (after, _) = accept(pool, bot, "And tag the release.").await;
+    for turn in [before, in_flight] {
+        assert!(sending(pool, turn, first).await.unwrap());
+    }
+    assert!(
+        else_api::db::steers::deliver(pool, before, first)
+            .await
+            .unwrap()
+    );
+    sqlx::query(
+        "INSERT INTO secret_requests (id, bot_id, turn_id, attempt, name, reason, env_names)
+         VALUES (?1, ?2, ?3, 1, 'deploy_key', 'To deploy.', '[\"DEPLOY_KEY\"]')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(bot)
+    .bind(first)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    assert!(
+        !sending(pool, after, first).await.unwrap(),
+        "nothing is written into a parked attempt"
+    );
+    assert!(
+        else_api::db::steers::deliver(pool, in_flight, first)
+            .await
+            .unwrap()
+    );
+
+    let statuses: Vec<(String, String)> = sqlx::query_as(
+        "SELECT i.text, s.status FROM turn_steers s JOIN turns t ON t.id = s.turn_id
+         JOIN items i ON i.id = t.owner_item_id ORDER BY t.turn_no",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        statuses,
+        [
+            ("Use the staging key.".into(), "delivered".into()),
+            ("Also file the flaky test issue.".into(), "pending".into()),
+            ("And tag the release.".into(), "pending".into()),
+        ]
+    );
+    let mut conn = pool.acquire().await.unwrap();
+    assert_eq!(
+        else_api::db::steers::waiting_for(&mut conn, first)
+            .await
+            .unwrap(),
+        2,
+        "the attempt's end continues the reply with both"
     );
 }

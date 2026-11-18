@@ -109,12 +109,19 @@ async fn a_handoff_parks_the_turn_until_the_owner_hands_the_computer_back() {
     let asked = hand_off(&app, &token, "X wants a 2FA code at x.com/login.").await;
     assert_eq!(asked["status"], "pending", "{asked}");
     assert_eq!(asked["parked"], true, "{asked}");
-    let again = hand_off(&app, &token, "Log in to X again.").await;
-    assert!(
-        again
-            .as_str()
-            .is_some_and(|t| t.starts_with("ATTEMPT_PARKED")),
-        "a parked attempt asks nothing more: {again}"
+    let again = app
+        .call(
+            "POST",
+            "/tools/v1/mcp",
+            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                         "params": { "name": "computer_screenshot", "arguments": {} } })),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.body);
+    assert_eq!(
+        again.body["error"]["code"], "attempt_parked",
+        "a parked attempt runs no more tools"
     );
     wait(&app, turn, "waiting").await;
 

@@ -268,6 +268,7 @@ pub(super) async fn computer_handoff(state: &AppState, grant: &Grant, args: &Val
     let screen = super::guest_tools::current_screen(state, grant).await;
     match computer_handoffs::create(&state.db, grant.turn_id, &reason).await {
         Ok(handoff) => {
+            state.scheduler.grants().park(grant.turn_id).await;
             const END: &str = "end this attempt now without more computer actions. You \
                 continue when the owner hands your computer back, declines, or messages you.";
             let mut result =
