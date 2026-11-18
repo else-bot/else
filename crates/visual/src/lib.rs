@@ -3,6 +3,7 @@
 //! checks is what the owner sees. No scripts run and nothing is fetched:
 //! only bundled fonts and `data:` images load.
 
+pub mod email;
 pub mod isolate;
 
 use std::sync::{Arc, OnceLock};
@@ -217,10 +218,13 @@ pub struct Rendered {
     pub rgba: Vec<u8>,
     /// The content's full height in CSS pixels, before any cut.
     pub content_height: u32,
-    /// Whether content past [`MAX_HEIGHT`] was cut off.
+    /// Whether content past the height limit ([`MAX_HEIGHT`] for a visual,
+    /// [`email::MAX_HEIGHT`] for an email) was cut off.
     pub clipped: bool,
     /// Remote images and fonts the visual names, none of which load.
     pub blocked: Vec<String>,
+    /// The links an email holds, none of which are live. Empty for a visual.
+    pub links: Vec<String>,
 }
 
 impl Rendered {
@@ -255,6 +259,18 @@ pub fn render(html: &str, width: u32, scale: f32, theme: &Theme) -> Result<Rende
     if html.len() > MAX_BYTES {
         return Err(Error::TooLarge(html.len()));
     }
+    draw(html, theme.base_css(), MAX_HEIGHT, width, scale)
+}
+
+/// Lay out `html` over the `base` sheet and paint at most `max_height` CSS
+/// pixels of it.
+fn draw(
+    html: &str,
+    base: String,
+    max_height: u32,
+    width: u32,
+    scale: f32,
+) -> Result<Rendered, Error> {
     let width = width.clamp(MIN_WIDTH, MAX_WIDTH);
     let scale = if scale.is_finite() {
         scale.clamp(1.0, MAX_SCALE)
@@ -266,7 +282,7 @@ pub fn render(html: &str, width: u32, scale: f32, theme: &Theme) -> Result<Rende
         FromHtmlOptions::builder().max_depth(MAX_DEPTH).build(),
     )
     .map_err(|e| Error::Html(e.to_string()))?;
-    let mut sheets = vec![theme.base_css()];
+    let mut sheets = vec![base];
     sheets.extend(parsed.css);
     let stylesheet = Arc::new(StyleSheet::parse_list_loosy(&sheets));
     let fonts = fonts();
@@ -288,7 +304,7 @@ pub fn render(html: &str, width: u32, scale: f32, theme: &Theme) -> Result<Rende
     if content_height == 0 {
         return Err(Error::Empty);
     }
-    let height = content_height.min(MAX_HEIGHT);
+    let height = content_height.min(max_height);
     let scale = scale.min((MAX_PIXELS / (width * height) as f32).sqrt());
     let device = |css: u32| (css as f32 * scale).floor().max(1.0) as u32;
     let bitmap = takumi::render(options(
@@ -300,8 +316,9 @@ pub fn render(html: &str, width: u32, scale: f32, theme: &Theme) -> Result<Rende
         height: bitmap.height(),
         rgba: bitmap.into_raw(),
         content_height,
-        clipped: content_height > MAX_HEIGHT,
+        clipped: content_height > max_height,
         blocked,
+        links: Vec::new(),
     })
 }
 
