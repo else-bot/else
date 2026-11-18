@@ -2,6 +2,8 @@
 
 use markdown::mdast::Node;
 
+pub mod find;
+
 /// The lines `markdown` shows, as plain text: link text without its URL,
 /// markup and list markers dropped, whitespace collapsed, empty lines
 /// skipped. Parses the whole text, so cut it afterwards, never before.

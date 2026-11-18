@@ -2580,6 +2580,7 @@ name = "else-plain-text"
 version = "0.0.30"
 dependencies = [
  "markdown",
+ "unicode-normalization",
 ]
 
 [[package]]
