@@ -800,3 +800,69 @@ async fn a_message_to_a_parked_attempt_runs_now_and_the_wait_still_reports() {
         "the job's end continued the reply once"
     );
 }
+
+/// A parked attempt refuses every tool call, so it never takes an owner
+/// message: none is written into it, and one the provider echoes after the
+/// park goes back to pending for the next attempt. A message it took
+/// before parking, while its tools still worked, stays taken.
+#[tokio::test]
+async fn a_parked_attempt_takes_no_owner_message() {
+    let (db, bot, first) = setup_running().await;
+    let pool = &db.pool;
+    let steers = else_api::db::steers::sending;
+    let (before, _) = accept(pool, bot, "Use the staging key.").await;
+    let (in_flight, _) = accept(pool, bot, "Also file the flaky test issue.").await;
+    let (after, _) = accept(pool, bot, "And tag the release.").await;
+    for turn in [before, in_flight] {
+        assert!(steers(pool, turn, first).await.unwrap());
+    }
+    assert!(
+        else_api::db::steers::deliver(pool, before, first)
+            .await
+            .unwrap()
+    );
+    sqlx::query(
+        "INSERT INTO secret_requests (id, bot_id, turn_id, attempt, name, reason, env_names)
+         VALUES (?1, ?2, ?3, 1, 'deploy_key', 'To deploy.', '[\"DEPLOY_KEY\"]')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(bot)
+    .bind(first)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    assert!(
+        !steers(pool, after, first).await.unwrap(),
+        "nothing is written into a parked attempt"
+    );
+    assert!(
+        else_api::db::steers::deliver(pool, in_flight, first)
+            .await
+            .unwrap()
+    );
+
+    let statuses: Vec<(String, String)> = sqlx::query_as(
+        "SELECT i.text, s.status FROM turn_steers s JOIN turns t ON t.id = s.turn_id
+         JOIN items i ON i.id = t.owner_item_id ORDER BY t.turn_no",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        statuses,
+        [
+            ("Use the staging key.".into(), "delivered".into()),
+            ("Also file the flaky test issue.".into(), "pending".into()),
+            ("And tag the release.".into(), "pending".into()),
+        ]
+    );
+    let mut conn = pool.acquire().await.unwrap();
+    assert_eq!(
+        else_api::db::steers::waiting_for(&mut conn, first)
+            .await
+            .unwrap(),
+        2,
+        "the attempt's end continues the reply with both"
+    );
+}
