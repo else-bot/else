@@ -53,6 +53,9 @@ impl ElseApp {
         else {
             return div().into_any_element();
         };
+        if let RowKey::Gap(above) = row.key {
+            return self.render_gap(above, cx);
+        }
         if let RowKey::Item(id) = row.key
             && let Some(view) = self.view.as_ref()
             && let Some(conversation) = view.conversation.as_ref()
@@ -296,6 +299,7 @@ impl ElseApp {
                 .child(text)
         };
         Some(match key {
+            RowKey::Gap(_) => return None,
             RowKey::Item(id) => {
                 let conversation = view.conversation.as_ref()?;
                 let item = conversation.item(id)?;
@@ -597,7 +601,9 @@ impl ElseApp {
             RowKey::Handoff(id) => self.render_handoff(id, cx),
             RowKey::ComputerHandoff(id) => self.render_handoff_row(id, cx),
             RowKey::OwnerNotice(id) => side(self.render_notice_card(id, cx)?),
-            RowKey::Item(_) | RowKey::Task(_) | RowKey::Pending(_) => return None,
+            RowKey::Item(_) | RowKey::Task(_) | RowKey::Pending(_) | RowKey::Gap(_) => {
+                return None;
+            }
         })
     }
 }

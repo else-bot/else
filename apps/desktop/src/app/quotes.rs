@@ -313,7 +313,14 @@ impl ElseApp {
             .get(&view.bot_id)
             .map_or(&[][..], |d| &d.quotes[..]);
         if let Some(text) = view.texts.get_mut(&key) {
-            paint_text(key, text, quotes, view.revealed.as_mut(), cx);
+            paint_text(
+                key,
+                text,
+                quotes,
+                view.revealed.as_mut(),
+                view.find.as_mut(),
+                cx,
+            );
         }
     }
 
@@ -749,17 +756,26 @@ pub(super) fn paint_view(
 ) {
     let quotes = drafts.get(&view.bot_id).map_or(&[][..], |d| &d.quotes[..]);
     for (key, text) in view.texts.iter_mut() {
-        paint_text(*key, text, quotes, view.revealed.as_mut(), cx);
+        paint_text(
+            *key,
+            text,
+            quotes,
+            view.revealed.as_mut(),
+            view.find.as_mut(),
+            cx,
+        );
     }
 }
 
-/// Paints the draft's quotes of one message, and the passage the owner
-/// jumped to in it, asking the list to center that passage once it is found.
+/// Paints the draft's quotes of one message, the find bar's matches, and
+/// the passage the owner jumped to in it, asking the list to center that
+/// passage once it is found.
 fn paint_text(
     key: RowKey,
     text: &mut RowText,
     quotes: &[Quote],
     revealed: Option<&mut Reveal>,
+    find: Option<&mut super::find::Find>,
     cx: &mut App,
 ) {
     let color = highlight_color(cx);
@@ -767,6 +783,7 @@ fn paint_text(
         .into_iter()
         .map(|range| (range, color))
         .collect();
+    highlights.extend(super::find::highlights(find, key, text, cx));
     if let Some(reveal) = revealed {
         let strength = reveal.shown;
         if let Spot::Passage {

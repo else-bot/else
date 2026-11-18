@@ -13,6 +13,7 @@ mod delete_dialog;
 mod dialogs;
 mod draft_card;
 mod email_reader;
+mod find;
 mod handoff;
 mod images;
 mod layout;
@@ -77,6 +78,7 @@ actions!(
         ToggleSettings,
         TakeOverComputer,
         CiteSelection,
+        FindInConversation,
         Quit,
         CloseWindow,
         Hide,
@@ -122,6 +124,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(primary!("shift-b"), ToggleSettings, Some(APP_CONTEXT)),
         KeyBinding::new(primary!("shift-t"), TakeOverComputer, Some(APP_CONTEXT)),
         KeyBinding::new(primary!("shift-c"), CiteSelection, Some(APP_CONTEXT)),
+        KeyBinding::new(primary!("f"), FindInConversation, Some(APP_CONTEXT)),
         KeyBinding::new(
             primary!(","),
             crate::connection::OpenAppSettings,
@@ -183,6 +186,8 @@ pub fn install_menus(cx: &mut App) {
             MenuItem::os_action("Copy", input::Copy, OsAction::Copy),
             MenuItem::os_action("Paste", input::Paste, OsAction::Paste),
             MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
+            MenuItem::separator(),
+            MenuItem::action("Find in Conversation", FindInConversation),
         ]),
         Menu::new("Bot").items([
             MenuItem::action("New Bot", NewBot),
