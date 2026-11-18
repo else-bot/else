@@ -604,10 +604,15 @@ impl ElseApp {
     }
 
     fn reconcile_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let active = |id: Option<Uuid>| id.filter(|id| self.active_bots().any(|b| b.id == *id));
-        let next = active(self.selected)
-            .or(active(self.default_bot_id))
-            .or_else(|| self.active_bots().next().map(|b| b.id));
+        let active: Vec<Uuid> = self.active_bots().map(|b| b.id).collect();
+        let next = next_selection(
+            &active,
+            [
+                self.selected,
+                self.preferences.last_bot,
+                self.default_bot_id,
+            ],
+        );
         if next != self.selected || (next.is_some() && self.view.is_none()) {
             self.select(next, window, cx);
         }
@@ -699,6 +704,10 @@ impl ElseApp {
         self.computer = None;
         self._computer_layout = None;
         self.selected = id;
+        if id.is_some() && self.preferences.last_bot != id {
+            self.preferences.last_bot = id;
+            self.save_preferences(cx);
+        }
         self.mentions = Default::default();
         self.quote_prompt = None;
         let draft = id
@@ -1055,6 +1064,16 @@ enum SendKind {
     Reaction(Reaction),
 }
 
+/// The first of `preferred` that is still `active`, else the first active
+/// bot.
+fn next_selection(active: &[Uuid], preferred: [Option<Uuid>; 3]) -> Option<Uuid> {
+    preferred
+        .into_iter()
+        .flatten()
+        .find(|id| active.contains(id))
+        .or_else(|| active.first().copied())
+}
+
 /// `parts` without the quoted prefix `send` laid before the owner's own
 /// text, as its first text part.
 fn without_prefix(
@@ -1101,5 +1120,35 @@ mod prefix_tests {
             without_prefix(&[text("> quoted\n\n"), text("see "), file.clone()], 10),
             [text("see "), file]
         );
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::next_selection;
+    use uuid::Uuid;
+
+    #[test]
+    fn launch_reopens_the_last_bot_until_it_is_gone() {
+        let main = Uuid::from_u128(1);
+        let last = Uuid::from_u128(2);
+        let other = Uuid::from_u128(3);
+        assert_eq!(
+            next_selection(&[main, last], [None, Some(last), Some(main)]),
+            Some(last)
+        );
+        assert_eq!(
+            next_selection(&[main, other], [None, Some(last), Some(main)]),
+            Some(main)
+        );
+        assert_eq!(
+            next_selection(&[other], [None, Some(last), Some(main)]),
+            Some(other)
+        );
+        assert_eq!(
+            next_selection(&[main, last, other], [Some(other), Some(last), Some(main)]),
+            Some(other)
+        );
+        assert_eq!(next_selection(&[], [None, Some(last), Some(main)]), None);
     }
 }

@@ -19,6 +19,8 @@ pub struct Preferences {
     pub rules_seen: HashMap<Uuid, i64>,
     /// The models the owner has seen in a model picker, per provider.
     pub models_seen: HashMap<String, HashSet<String>>,
+    /// The bot the owner last opened on this server, reopened at launch.
+    pub last_bot: Option<Uuid>,
 }
 
 impl Default for Preferences {
@@ -31,6 +33,7 @@ impl Default for Preferences {
             collapsed: HashSet::new(),
             rules_seen: HashMap::new(),
             models_seen: HashMap::new(),
+            last_bot: None,
         }
     }
 }
