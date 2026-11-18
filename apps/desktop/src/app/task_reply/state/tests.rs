@@ -1240,3 +1240,145 @@ fn a_message_the_reply_took_adds_no_reply_of_its_own() {
         "the reply that took it answers both"
     );
 }
+
+/// #565: the owner sends three messages while a reply waits on a job, and
+/// the bot answers each one before the job's result ends the reply.
+fn joined_reply(status: &str, attempt: i64, replies: &[(u128, i64)]) -> Conversation {
+    let mut items = vec![item(1, 20, "user")];
+    for (number, joined) in [(3, 21), (5, 22), (7, 23)] {
+        items.push(item(number, joined, "user"));
+    }
+    for &(number, attempt) in replies {
+        let mut reply = item(number, 20, "assistant");
+        reply["attempt"] = json!(attempt);
+        items.push(reply);
+    }
+    let mut turns = vec![{
+        let mut reply = turn(20, status);
+        reply["attempt"] = json!(attempt);
+        reply
+    }];
+    for joined in [21, 22, 23] {
+        let mut message = turn(joined, "queued");
+        message["steered_into"] = json!(id(20));
+        message["steer_status"] = json!("delivered");
+        turns.push(message);
+    }
+    conversation(items, turns)
+}
+
+#[test]
+fn each_joined_message_keeps_the_answer_the_bot_gave_it() {
+    let c = joined_reply(
+        "completed",
+        5,
+        &[(2, 1), (4, 2), (6, 3), (8, 4), (9, 5), (10, 5)],
+    );
+    let task = &task_replies(&c)[&id(20)];
+    assert_eq!(
+        task.answers,
+        [id(2), id(4), id(6), id(8)],
+        "each message reads after the answer before it and before its own"
+    );
+    assert_eq!(task.latest, Some(id(10)), "the job's result ends the reply");
+    assert_eq!(task.anchor, Some(id(10)));
+    assert_eq!(task.history, [id(9)], "a status line still folds");
+    assert!(task.kept.is_empty(), "{:?}", task.kept);
+}
+
+fn rows(c: &Conversation) -> Vec<RowKey> {
+    crate::app::conversation::transcript_rows(c, &task_replies(c), Vec::new())
+}
+
+fn items_then_task(items: &[u128]) -> Vec<RowKey> {
+    items
+        .iter()
+        .map(|&n| RowKey::Item(id(n)))
+        .chain([RowKey::Task(id(20))])
+        .collect()
+}
+
+#[test]
+fn the_joined_conversation_reads_message_answer_message_answer() {
+    let c = joined_reply(
+        "completed",
+        5,
+        &[(2, 1), (4, 2), (6, 3), (8, 4), (9, 5), (10, 5)],
+    );
+    assert_eq!(rows(&c), items_then_task(&[1, 2, 3, 4, 5, 6, 7, 8]));
+}
+
+#[test]
+fn a_reply_that_just_took_a_message_works_below_it() {
+    let c = joined_reply("running", 4, &[(2, 1), (4, 2), (6, 3)]);
+    let task = &task_replies(&c)[&id(20)];
+    assert_eq!(task.answers, [id(2), id(4), id(6)]);
+    assert_eq!(task.latest, None, "nothing answers the newest message yet");
+    assert_eq!(
+        rows(&c),
+        items_then_task(&[1, 2, 3, 4, 5, 6, 7]),
+        "the working reply reads below the message it works on"
+    );
+}
+
+#[test]
+fn a_message_taken_mid_attempt_keeps_the_first_reply_after_it() {
+    let c = joined_reply(
+        "completed",
+        1,
+        &[(2, 1), (4, 1), (6, 1), (8, 1), (9, 1), (10, 1)],
+    );
+    let task = &task_replies(&c)[&id(20)];
+    assert_eq!(task.answers, [id(2), id(4), id(6), id(8)]);
+    assert_eq!(task.latest, Some(id(10)));
+    assert_eq!(
+        task.history,
+        [id(9)],
+        "progress after the first reply folds"
+    );
+}
+
+#[test]
+fn an_answer_does_not_make_a_folded_update_look_like_an_attempts_end() {
+    let reply = |number, attempt| {
+        let mut reply = item(number, 20, "assistant");
+        reply["attempt"] = json!(attempt);
+        reply
+    };
+    let mut running = turn(20, "running");
+    running["attempt"] = json!(2);
+    let mut joined = turn(21, "queued");
+    joined["steered_into"] = json!(id(20));
+    joined["steer_status"] = json!("delivered");
+    let c = conversation(
+        vec![
+            item(1, 20, "user"),
+            reply(2, 1),
+            reply(3, 1),
+            item(4, 21, "user"),
+            reply(5, 2),
+        ],
+        vec![running, joined],
+    );
+    let task = &task_replies(&c)[&id(20)];
+    assert_eq!(task.answers, [id(3)]);
+    assert_eq!(
+        task.history,
+        [id(2)],
+        "an update inside attempt 1 still folds"
+    );
+    assert!(task.kept.is_empty(), "{:?}", task.kept);
+}
+
+#[test]
+fn a_reply_reads_under_the_bots_name_unless_its_turns_reply_is_just_above() {
+    let c = joined_reply("completed", 1, &[(2, 1), (4, 1)]);
+    let item = |n| RowKey::Item(id(n));
+    let starts = |keys: &[RowKey]| crate::app::conversation::starts_runs(Some(&c), keys);
+    assert_eq!(starts(&[item(1), item(2), item(4)]), [true, true, false]);
+    assert_eq!(
+        starts(&[item(1), item(4)]),
+        [true, true],
+        "a reply after a folded update starts its own run"
+    );
+}

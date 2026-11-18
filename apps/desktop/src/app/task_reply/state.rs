@@ -51,6 +51,9 @@ pub(in crate::app) struct TaskReply {
     pub latest_kept: bool,
     pub summary: Option<String>,
     pub history: Vec<Uuid>,
+    /// Replies before and after owner messages joined into the turn, each
+    /// read as a bot message of its own at its place in the transcript.
+    pub answers: Vec<Uuid>,
     pub kept: Vec<Uuid>,
     /// Files of `kept` replies that a later reply delivers again; the kept
     /// reply shows its text without them, so a file appears once.
@@ -238,6 +241,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                     latest_kept: false,
                     summary: None,
                     history: Vec::new(),
+                    answers: Vec::new(),
                     kept: Vec::new(),
                     repeated_files: HashSet::new(),
                     cards: Vec::new(),
@@ -288,7 +292,19 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             reply.anchor = Some(item.id);
         }
     }
+    let mut joined: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for item in conversation.items().filter(|item| item.kind == "user") {
+        if let Some(into) = conversation
+            .turn(item.turn_id)
+            .and_then(|turn| turn.steered_into)
+        {
+            joined.entry(into).or_default().push(item.id);
+        }
+    }
     for reply in replies.values_mut() {
+        if let Some(joined) = joined.get(&reply.turn) {
+            split_answers(conversation, &reactions, reply, joined);
+        }
         keep_earlier_replies(conversation, &reactions, reply);
     }
     // A queued turn runs no attempt, so its latest reply ended one.
@@ -352,8 +368,9 @@ pub(in crate::app) enum Earlier {
 /// Moves each card of a task's turn that follows an item before the task's
 /// row into that task, so it reads where the owner acted instead of above
 /// the bot's name, with the reply it followed kept in view. A pending card
-/// follows the turn's last item, so it keeps its own row below the task.
-/// Returns the rows left in the transcript.
+/// follows the turn's last item, so it keeps its own row below the task, and
+/// so does a card that follows one of the task's `answers`, which reads in
+/// the transcript. Returns the rows left in the transcript.
 pub(in crate::app) fn place_cards(
     conversation: &Conversation,
     tasks: &mut HashMap<Uuid, TaskReply>,
@@ -371,7 +388,7 @@ pub(in crate::app) fn place_cards(
                 .anchor
                 .and_then(seq)
                 .is_some_and(|row| seq(after) < Some(row));
-            if turn_of(after) != Some(turn) || !before_row {
+            if turn_of(after) != Some(turn) || !before_row || task.answers.contains(&after) {
                 return Some((key, anchor));
             }
             let attempt = match key {
@@ -397,21 +414,89 @@ pub(in crate::app) fn place_cards(
         .collect()
 }
 
+/// Moves the replies around owner messages joined into the turn out of the
+/// fold into `answers`, so the chat reads message, answer, message, answer.
+/// `joined` holds those messages' items, oldest first, pending or taken; each
+/// one starts a segment of the turn's replies by seq. The last reply before
+/// each message is what the owner saw when writing it. After a message, its
+/// segment's first reply and the reply ending that reply's attempt answer
+/// it: seq cannot tell where the provider took the message, so both stay in
+/// view. The newest segment stays the task, anchored after its message until
+/// the bot writes there, and every other reply folds into it. A finished turn
+/// that wrote nothing after its last messages ends on the reply before them.
+fn split_answers(
+    conversation: &Conversation,
+    reactions: &HashMap<Uuid, crate::model::ReactionKind>,
+    reply: &mut TaskReply,
+    joined: &[Uuid],
+) {
+    let seq = |id| conversation.item(id).map_or(i64::MAX, |item| item.seq);
+    let attempt = |id| conversation.item(id).and_then(|item| item.attempt);
+    let mut boundaries: Vec<_> = joined.to_vec();
+    let mut segments = vec![Vec::new(); boundaries.len() + 1];
+    for id in reply.history.iter().copied().chain(reply.latest) {
+        let index = boundaries.partition_point(|&message| seq(message) < seq(id));
+        segments[index].push(id);
+    }
+    while reply.state.terminal() && segments.len() > 1 && segments.last().is_some_and(Vec::is_empty)
+    {
+        segments.pop();
+        boundaries.pop();
+    }
+    let Some((current, earlier)) = segments.split_last() else {
+        return;
+    };
+    let mut answers: Vec<Uuid> = earlier
+        .iter()
+        .filter_map(|segment| segment.last().copied())
+        .collect();
+    for segment in segments.iter().skip(1) {
+        let Some(&first) = segment.first() else {
+            continue;
+        };
+        let took = segment
+            .iter()
+            .copied()
+            .rfind(|&id| attempt(id) == attempt(first));
+        answers.push(first);
+        answers.extend(took);
+    }
+    answers.retain(|&id| current.last() != Some(&id));
+    answers.sort_by_key(|&id| seq(id));
+    answers.dedup();
+    if answers.is_empty() {
+        return;
+    }
+    reply.latest = current.last().copied();
+    reply.anchor = reply.latest.or_else(|| boundaries.last().copied());
+    reply.latest_kept = reply.latest.is_some_and(|id| {
+        reactions.contains_key(&id)
+            || conversation.item(id).is_some_and(|item| {
+                item.parts
+                    .iter()
+                    .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }))
+            })
+    });
+    reply
+        .history
+        .retain(|id| !answers.contains(id) && reply.latest != Some(*id));
+    reply.answers = answers;
+}
+
 /// Moves the earlier replies the owner still needs from `history` to `kept`:
 /// a reacted reply, the reply that ended each earlier attempt, and a reply
 /// with a file no later reply delivers again. A resumed attempt reports only
 /// what changed, so every attempt's ending reply stays in view. A bot that
 /// re-uploads a file after a park, sometimes renaming an image, delivers the
 /// same file again: an image of the same type and byte size counts as the same
-/// file, and the kept reply shows its text without it.
+/// file, and the kept reply shows its text without it. An answer to a joined
+/// owner message always shows, so it counts among the replies around it the
+/// same way.
 fn keep_earlier_replies(
     conversation: &Conversation,
     reactions: &HashMap<Uuid, crate::model::ReactionKind>,
     reply: &mut TaskReply,
 ) {
-    let Some(latest) = reply.latest else {
-        return;
-    };
     let attempt = |id| conversation.item(id).and_then(|item| item.attempt);
     let files = |id| {
         conversation
@@ -424,7 +509,15 @@ fn keep_earlier_replies(
             })
             .collect::<Vec<_>>()
     };
-    let replies: Vec<_> = reply.history.iter().copied().chain([latest]).collect();
+    let seq = |id| conversation.item(id).map_or(i64::MAX, |item| item.seq);
+    let mut replies: Vec<_> = reply
+        .history
+        .iter()
+        .chain(&reply.answers)
+        .copied()
+        .chain(reply.latest)
+        .collect();
+    replies.sort_by_key(|&id| seq(id));
     let ended: Vec<Uuid> = replies
         .windows(2)
         .filter(|pair| attempt(pair[0]).is_some_and(|ended| attempt(pair[1]) > Some(ended)))
@@ -440,18 +533,22 @@ fn keep_earlier_replies(
             .item(id)
             .is_some_and(|item| crate::attachments::has_prose(&item.text, &item.parts))
     };
-    let mut delivered_later = files(latest);
+    let mut delivered_later = reply.latest.map(files).unwrap_or_default();
     let mut kept = Vec::new();
     let mut repeated = HashSet::new();
-    for &id in reply.history.iter().rev() {
+    for &id in replies.iter().rev().filter(|&&id| reply.latest != Some(id)) {
         let files = files(id);
         let (again, new): (Vec<&&crate::attachments::Attachment>, Vec<_>) = files
             .iter()
             .partition(|file| delivered_later.iter().any(|later| same(file, later)));
-        let keep = !new.is_empty()
-            || ((reactions.contains_key(&id) || ended.contains(&id)) && has_text(id));
+        let answer = reply.answers.contains(&id);
+        let keep = !answer
+            && (!new.is_empty()
+                || ((reactions.contains_key(&id) || ended.contains(&id)) && has_text(id)));
         if keep {
             kept.push(id);
+        }
+        if keep || answer {
             repeated.extend(again.iter().map(|file| file.id));
         }
         delivered_later.extend(files);

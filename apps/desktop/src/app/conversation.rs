@@ -62,6 +62,8 @@ pub(super) struct TranscriptRow {
     pub(super) routine: Option<RoutineRow>,
     pub(super) task: Option<TaskReply>,
     pub(super) activity: Option<BotActivity>,
+    /// It starts a run of its turn's messages, under its sender's name.
+    pub(super) starts_run: bool,
     routine_status: Option<(String, bool)>,
     reaction: Option<crate::model::ReactionKind>,
     state: Option<String>,
@@ -186,6 +188,84 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
                 first: ix == 0 || turns[ix - 1] != Some(turn),
                 last: turns.get(ix + 1) != Some(&Some(turn)),
             })
+        })
+        .collect()
+}
+
+/// The transcript's rows in reading order, before the owner's unsent
+/// messages: each item, task and card where it reads. A task sits after its
+/// anchor, which may be an item of another turn, such as the owner message
+/// it works on; `requests` are cards with the item they follow.
+pub(super) fn transcript_rows(
+    c: &Conversation,
+    tasks: &HashMap<Uuid, TaskReply>,
+    mut requests: Vec<(RowKey, Option<Uuid>)>,
+) -> Vec<RowKey> {
+    let mut rows = Vec::new();
+    let delegated = c.delegated_turns();
+    // A received task's row sits where its latest answer landed, like a task card.
+    let answered: HashMap<Uuid, Uuid> = c
+        .items()
+        .filter(|item| item.kind == "assistant" && delegated.contains(&item.turn_id))
+        .map(|item| (item.turn_id, item.id))
+        .collect();
+    let anchored: HashMap<Uuid, Uuid> = tasks
+        .values()
+        .filter_map(|task| Some((task.anchor?, task.turn)))
+        .collect();
+    let folded = folded_no_news(c);
+    for item in c.items().filter(|item| !folded.contains(&item.id)) {
+        if item.kind == "assistant" && answered.get(&item.turn_id) == Some(&item.id) {
+            rows.extend(
+                c.task_receipt(item.turn_id)
+                    .map(|receipt| RowKey::Item(receipt.id)),
+            );
+        } else if item.reaction.is_none()
+            && !(item.bot_task.is_some() && answered.contains_key(&item.turn_id))
+            && (item.kind != "assistant"
+                || tasks
+                    .get(&item.turn_id)
+                    .is_some_and(|reply| reply.answers.contains(&item.id))
+                || !(tasks.contains_key(&item.turn_id) || delegated.contains(&item.turn_id)))
+        {
+            rows.push(RowKey::Item(item.id));
+        }
+        rows.extend(anchored.get(&item.id).map(|&turn| RowKey::Task(turn)));
+        requests.retain(|(key, anchor)| {
+            let here = *anchor == Some(item.id);
+            if here {
+                rows.push(*key);
+            }
+            !here
+        });
+    }
+    for turn in c.turns_in_order() {
+        if tasks
+            .get(&turn.id)
+            .is_some_and(|reply| reply.anchor.is_none())
+        {
+            rows.push(RowKey::Task(turn.id));
+        }
+    }
+    rows.extend(requests.into_iter().map(|(key, _)| key));
+    rows
+}
+
+/// Whether each row starts a run of one turn's messages of the same kind,
+/// which reads under its own sender name: a reply after a folded update of
+/// its turn starts one.
+pub(super) fn starts_runs(c: Option<&Conversation>, rows: &[RowKey]) -> Vec<bool> {
+    let item = |key: &RowKey| match *key {
+        RowKey::Item(id) => c?.item(id),
+        _ => None,
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(ix, key)| {
+            let previous = ix.checked_sub(1).and_then(|ix| item(&rows[ix]));
+            !previous
+                .zip(item(key))
+                .is_some_and(|(a, b)| a.kind == b.kind && a.turn_id == b.turn_id)
         })
         .collect()
 }
@@ -866,7 +946,6 @@ impl ElseApp {
             pending.retain(|p| !conversation.has_request(p.request_id));
         }
         let mut tasks = conversation.map(task_replies).unwrap_or_default();
-        let mut rows = Vec::new();
         let mut texts = Vec::new();
         let mut requests = conversation
             .map(|c| place_cards(c, &mut tasks, turn_card_rows(c)))
@@ -888,31 +967,18 @@ impl ElseApp {
                     )
                 })
         }));
-        let items: Vec<_> = conversation.into_iter().flat_map(|c| c.items()).collect();
+        let mut rows = conversation
+            .map(|c| transcript_rows(c, &tasks, requests))
+            .unwrap_or_default();
         let delegated = conversation
             .map(Conversation::delegated_turns)
             .unwrap_or_default();
-        // A received task's row sits where its latest answer landed, like a task card.
-        let answered: HashMap<Uuid, Uuid> = items
-            .iter()
-            .filter(|item| item.kind == "assistant" && delegated.contains(&item.turn_id))
-            .map(|item| (item.turn_id, item.id))
-            .collect();
         let folded = conversation.map(folded_no_news).unwrap_or_default();
-        for item in items.iter().filter(|item| !folded.contains(&item.id)) {
-            if item.kind == "assistant" && answered.get(&item.turn_id) == Some(&item.id) {
-                rows.extend(
-                    conversation
-                        .and_then(|c| c.task_receipt(item.turn_id))
-                        .map(|receipt| RowKey::Item(receipt.id)),
-                );
-            } else if item.reaction.is_none()
-                && !(item.bot_task.is_some() && answered.contains_key(&item.turn_id))
-                && (item.kind != "assistant"
-                    || !(tasks.contains_key(&item.turn_id) || delegated.contains(&item.turn_id)))
-            {
-                rows.push(RowKey::Item(item.id));
-            }
+        for item in conversation
+            .into_iter()
+            .flat_map(|c| c.items())
+            .filter(|item| !folded.contains(&item.id))
+        {
             let format = RowFormat::for_item(item);
             // A kept task reply leaves out a file a later reply delivers again.
             let repeated = tasks.get(&item.turn_id).map(|reply| &reply.repeated_files);
@@ -934,29 +1000,7 @@ impl ElseApp {
                 (text, parts)
             };
             texts.push((RowKey::Item(item.id), text, format, parts));
-            if tasks
-                .get(&item.turn_id)
-                .is_some_and(|reply| reply.anchor == Some(item.id))
-            {
-                rows.push(RowKey::Task(item.turn_id));
-            }
-            requests.retain(|(key, anchor)| {
-                let here = *anchor == Some(item.id);
-                if here {
-                    rows.push(*key);
-                }
-                !here
-            });
         }
-        for turn in conversation.into_iter().flat_map(|c| c.turns_in_order()) {
-            if tasks
-                .get(&turn.id)
-                .is_some_and(|reply| reply.anchor.is_none())
-            {
-                rows.push(RowKey::Task(turn.id));
-            }
-        }
-        rows.extend(requests.into_iter().map(|(key, _)| key));
         for pending in self.pending.get(&bot).into_iter().flatten() {
             rows.push(RowKey::Pending(pending.request_id));
             texts.push((
@@ -1061,11 +1105,16 @@ impl ElseApp {
                         _ => None,
                     },
                     activity: None,
+                    starts_run: true,
                     state,
                 }
             })
             .collect();
         let mut rows = group_activity(rows, conversation);
+        let keys: Vec<_> = rows.iter().map(|row| row.key).collect();
+        for (row, starts) in rows.iter_mut().zip(starts_runs(conversation, &keys)) {
+            row.starts_run = starts;
+        }
         mark_days(&mut rows, &times, &Local);
         let old = std::mem::take(&mut view.rows);
         view.reply_transitions
@@ -1759,6 +1808,7 @@ mod tests {
             routine: None,
             task: None,
             activity: None,
+            starts_run: true,
             routine_status: None,
             reaction: None,
             state: None,
@@ -2007,6 +2057,7 @@ mod tests {
             routine: None,
             task: None,
             activity: None,
+            starts_run: true,
             routine_status: None,
             reaction: None,
             state: None,

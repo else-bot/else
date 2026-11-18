@@ -328,7 +328,6 @@ impl ElseApp {
                 let text = view.texts.get(&key)?;
                 let user = item.kind == "user";
                 let turn = conversation.turn(item.turn_id);
-                let run = conversation.run(id);
                 if item.reaction.is_some() {
                     return None;
                 }
@@ -337,14 +336,14 @@ impl ElseApp {
                 let mut column = gpui_kit::component::v_flex().w_full().min_w_0().gap_1();
                 let card = card(text, user).id(SharedString::from(format!("message-{id}")));
                 if !user
-                    && run.first
+                    && row.starts_run
                     && let Some(banner) =
                         turn.and_then(|turn| super::email_reader::mail_banner(turn, cx))
                 {
                     column = column.child(banner);
                 }
                 if !user
-                    && run.first
+                    && row.starts_run
                     && turn.and_then(|t| t.routine.as_ref()).is_none()
                     && let Some(bot) = self.bots.iter().find(|b| b.id == view.bot_id)
                 {
