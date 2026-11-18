@@ -118,12 +118,6 @@ fn inventories_models_subagents_and_sessions_are_checked() {
             e["tools"]
                 .as_array_mut()
                 .unwrap()
-                .push(json!("spawn_subagent"))
-        }),
-        edit(|e| {
-            e["tools"]
-                .as_array_mut()
-                .unwrap()
                 .push(json!({"name": "spawn_subagent"}))
         }),
         edit(|e| e["tools"].as_array_mut().unwrap().push(json!(7))),
@@ -175,7 +169,16 @@ fn an_inventory_without_some_allowed_tools_opens_and_only_extras_are_named() {
     assert_eq!(
         tracker(true).on(&extra),
         Err(Violation::policy(
-            "Grok offered tools outside --tools: [\"spawn_subagent\"]"
+            "Grok offered tools else.bot does not allow: [\"spawn_subagent\"]"
+        ))
+    );
+
+    let no_bridge = json!({"type":"system","subtype":"init","session_id":"session","model":"grok-4.7",
+        "tools":["search_tool"],"mcp_servers":[{"name":"elsebot","status":"connected"}]});
+    assert_eq!(
+        tracker(false).on(&no_bridge),
+        Err(Violation::policy(
+            "Grok did not offer the tools that reach else.bot: [\"use_tool\"]"
         ))
     );
 }
