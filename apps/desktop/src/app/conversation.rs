@@ -1309,7 +1309,7 @@ mod tests {
     use super::{
         ConversationView, REVEAL_FADE, REVEAL_HOLD, Reveal, RoutineRow, RowKey, Spot,
         TranscriptRow, burst_tail_stamps, first_unread_row, folded_no_news, request_rows,
-        routine_rows,
+        routine_rows, transcript_rows,
     };
     use std::collections::HashSet;
     use std::time::{Duration, Instant};
@@ -1827,6 +1827,31 @@ mod tests {
             "items": items, "turns": [],
             "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
         })).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_gap_row_stands_above_the_message_that_follows_the_missing_ones() {
+        let message = |seq: i64| {
+            json!({
+                "id": Uuid::from_u128(seq as u128), "seq": seq,
+                "turn_id": Uuid::from_u128(seq as u128 + 100), "kind": "user",
+                "text": format!("Message {seq}")
+            })
+        };
+        let mut c = Conversation::from_snapshot(serde_json::from_value(json!({
+            "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+            "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+            "items": [message(90)], "turns": [], "older_before_seq": 90,
+            "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
+        })).unwrap()).unwrap();
+        let window = json!({
+            "items": [message(10), message(11)], "turns": [], "older_gap": 0, "newer_gap": 40,
+        });
+        c.merge_window(serde_json::from_value(window).unwrap(), None, Some(90));
+        assert_eq!(
+            transcript_rows(&c, &Default::default(), Vec::new()),
+            [item(10), item(11), RowKey::Gap(90), item(90)]
+        );
     }
 
     fn transcript_row(key: RowKey) -> TranscriptRow {
