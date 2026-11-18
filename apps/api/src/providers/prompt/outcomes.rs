@@ -7,7 +7,8 @@
 use super::file_reference;
 use crate::app::providers::TurnInput;
 use crate::app::questions::{
-    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, Action, DENY, Status,
+    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, Action, DENY,
+    GrantReach, Status,
 };
 
 /// Recorded child outcomes and the owner's answers to secret requests and
@@ -486,7 +487,9 @@ fn questions_block(input: &TurnInput) -> String {
                             task_scope: Some(_),
                             ..
                         },
-                    ) if question.status == Status::Skipped => {
+                    ) if question.status == Status::Skipped
+                        && input.grant_reach() != GrantReach::Nothing =>
+                    {
                         let covers = match action {
                             Action::Host { .. } => "host",
                             _ => "computer",

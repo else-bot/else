@@ -583,6 +583,35 @@ async fn work_delegated_for_an_owner_request_records_a_task_grant_only_from_the_
         .await
         .unwrap();
     assert_eq!(skipped, "skipped");
+    assert!(
+        h.packets()
+            .await
+            .iter()
+            .any(|p| p.contains("call confirm_permission with this task scope")),
+        "the skipped card tells the task how to save its scope"
+    );
+    for wider in [
+        json!({ "scope": "task", "task": DOCKER, "target": "every host", "kind": "destructive",
+                "covers": "host" }),
+        json!({ "scope": "task", "task": DOCKER, "target": HOST, "kind": "external",
+                "covers": "host" }),
+        json!({ "scope": "task", "task": DOCKER, "target": HOST, "kind": "destructive",
+                "covers": "computer" }),
+    ] {
+        let refused = tool(
+            app,
+            &child_token,
+            "confirm_permission",
+            json!({ "target": wider, "authorization": TYPED }),
+        )
+        .await;
+        assert_eq!(
+            refused.code(),
+            "NO_SKIPPED_CARD",
+            "{wider}: {}",
+            refused.body
+        );
+    }
     let typed = confirm_docker(child_token.clone(), TYPED).await;
     assert_eq!(typed.result["status"], "approved", "{}", typed.body);
     runs_by_task_grant(app, &child_token, docker).await;
