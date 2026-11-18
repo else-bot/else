@@ -293,6 +293,12 @@ pub enum MailCommand {
     FindSent {
         message_id: String,
     },
+    /// The whole message for the owner's reader: headers, full text, the
+    /// HTML part with the images it shows, and the attachment list. Only
+    /// the owner's route calls it.
+    View {
+        message: MessageRef,
+    },
 }
 /// `send: true`, the only value reply and forward accept: they send at once,
 /// and a draft for the owner goes to a `draft_email` card, not the mailbox.
@@ -333,6 +339,7 @@ impl MailCommand {
                 | Self::Read { .. }
                 | Self::OpenAttachments { .. }
                 | Self::FindSent { .. }
+                | Self::View { .. }
         )
     }
     pub fn sends(&self) -> bool {

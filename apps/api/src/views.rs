@@ -87,6 +87,7 @@ pub fn turn_json(turn: &TurnRecord) -> Value {
         "skill_installs": turn.skill_installs,
         "questions": turn.questions,
         "routine": turn.routine,
+        "mail": turn.mail,
         "outgoing_drafts": turn.outgoing_drafts,
         "delegations": turn.delegations,
         "mcp_waits": turn.mcp_waits,

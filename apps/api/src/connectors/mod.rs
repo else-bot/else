@@ -130,9 +130,17 @@ fn failure_receipt(
     }
 }
 
+/// Who asks for a mail command.
+#[derive(Clone, Copy)]
+enum Caller {
+    /// A bot's running turn, limited by the bot's grant on the account.
+    Bot { bot_id: Uuid, turn_id: Uuid },
+    /// The owner's reader, which only views messages.
+    Owner,
+}
+
 struct Command {
-    bot_id: Uuid,
-    turn_id: Uuid,
+    caller: Caller,
     action_id: Option<Uuid>,
     command: MailCommand,
     deadline: tokio::time::Instant,
@@ -317,6 +325,37 @@ impl ConnectorManager {
         action_id: Option<Uuid>,
         command: MailCommand,
     ) -> Result<Value, MailError> {
+        self.submit(
+            account_id,
+            Caller::Bot { bot_id, turn_id },
+            action_id,
+            command,
+        )
+        .await
+    }
+
+    /// One message for the owner's reader. It never marks the message read.
+    pub async fn view(
+        self: &Arc<Self>,
+        account_id: Uuid,
+        message: MessageRef,
+    ) -> Result<Value, MailError> {
+        self.submit(
+            account_id,
+            Caller::Owner,
+            None,
+            MailCommand::View { message },
+        )
+        .await
+    }
+
+    async fn submit(
+        self: &Arc<Self>,
+        account_id: Uuid,
+        caller: Caller,
+        action_id: Option<Uuid>,
+        command: MailCommand,
+    ) -> Result<Value, MailError> {
         command.validate()?;
         let mutates = command.mutates();
         if mutates && action_id.is_none() {
@@ -324,8 +363,7 @@ impl ConnectorManager {
         }
         let (reply, result) = oneshot::channel();
         let command = Command {
-            bot_id,
-            turn_id,
+            caller,
             action_id,
             command,
             deadline: tokio::time::Instant::now() + Duration::from_secs(120),
@@ -379,17 +417,25 @@ impl ConnectorManager {
     }
 
     async fn authorization(&self, account: &Account, command: &Command) -> Result<(), MailError> {
-        store::authorize(
-            &self.db,
-            account.id,
-            account.generation,
-            command.bot_id,
-            command.turn_id,
-            &command.command,
-        )
-        .await
-        .map_err(|_| MailError::new("mail_forbidden"))?;
-        Ok(())
+        match command.caller {
+            Caller::Bot { bot_id, turn_id } => store::authorize(
+                &self.db,
+                account.id,
+                account.generation,
+                bot_id,
+                turn_id,
+                &command.command,
+            )
+            .await
+            .map_err(|_| MailError::new("mail_forbidden")),
+            Caller::Owner if !matches!(command.command, MailCommand::View { .. }) => {
+                Err(MailError::new("mail_forbidden"))
+            }
+            Caller::Owner if account.state != "active" => {
+                Err(MailError::new("mail_account_paused"))
+            }
+            Caller::Owner => Ok(()),
+        }
     }
 
     async fn auth(&self, account: &Account) -> Result<Auth, MailError> {
@@ -471,25 +517,27 @@ impl ConnectorManager {
             }
         })?;
         self.authorization(&account, command).await?;
-        let action_id = if command.command.mutates() {
-            let action_id = command.action_id.expect("validated action ID");
-            match store::begin_action(
-                &self.db,
-                id,
-                account.generation,
-                command.bot_id,
-                command.turn_id,
-                action_id,
-                &command.command,
-            )
-            .await
-            .map_err(|_| MailError::new("mail_action_conflict"))?
-            {
-                store::ActionStart::Existing(receipt) => return Ok(receipt),
-                store::ActionStart::Dispatch => Some(action_id),
+        let action_id = match (command.command.mutates(), command.caller) {
+            (false, _) => None,
+            (true, Caller::Owner) => return Err(MailError::new("mail_forbidden")),
+            (true, Caller::Bot { bot_id, turn_id }) => {
+                let action_id = command.action_id.expect("validated action ID");
+                match store::begin_action(
+                    &self.db,
+                    id,
+                    account.generation,
+                    bot_id,
+                    turn_id,
+                    action_id,
+                    &command.command,
+                )
+                .await
+                .map_err(|_| MailError::new("mail_action_conflict"))?
+                {
+                    store::ActionStart::Existing(receipt) => return Ok(receipt),
+                    store::ActionStart::Dispatch => Some(action_id),
+                }
             }
-        } else {
-            None
         };
         let result = self
             .transport

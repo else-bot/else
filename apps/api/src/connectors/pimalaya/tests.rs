@@ -1015,3 +1015,53 @@ impl std::io::Write for LogWriter {
         Ok(())
     }
 }
+
+fn reader(raw: &str) -> Value {
+    let parsed = MessageParser::default().parse(raw.as_bytes()).unwrap();
+    let message = MessageRef {
+        folder: "INBOX".into(),
+        uid_validity: 1,
+        uid: 9,
+    };
+    view(&parsed, &message, None)
+}
+
+#[test]
+fn the_reader_gets_the_html_part_with_its_cid_images_and_lists_only_real_attachments() {
+    let value = reader(
+        "From: Coupon Co <hello@coupons.test>\r\nTo: me@x.test\r\nSubject: Verify\r\n\
+         MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"m\"\r\n\r\n\
+         --m\r\nContent-Type: multipart/related; boundary=\"r\"\r\n\r\n\
+         --r\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
+         <p>Hi <img src=\"cid:Logo@x\"></p>\r\n\
+         --r\r\nContent-Type: image/png\r\nContent-ID: <logo@x>\r\nContent-Transfer-Encoding: base64\r\n\r\n\
+         iVBORw0KGgo=\r\n--r--\r\n\
+         --m\r\nContent-Type: application/pdf; name=\"terms.pdf\"\r\n\
+         Content-Disposition: attachment; filename=\"terms.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\n\
+         JVBERi0=\r\n--m--\r\n",
+    );
+    assert_eq!(value["html"], "<p>Hi <img src=\"cid:Logo@x\"></p>");
+    assert_eq!(value["text"], "Hi\n");
+    assert_eq!(
+        value["from"],
+        json!([{"name":"Coupon Co","address":"hello@coupons.test"}])
+    );
+    assert_eq!(
+        value["inline"],
+        json!([{"content_id":"logo@x","media_type":"image/png","data_base64":"iVBORw0KGgo="}])
+    );
+    assert_eq!(
+        value["attachments"],
+        json!([{"part":1,"name":"terms.pdf","media_type":"application/pdf","size":5}])
+    );
+}
+
+#[test]
+fn a_plain_text_email_has_no_html_for_the_reader() {
+    let value = reader(
+        "From: a@x.test\r\nTo: me@x.test\r\nSubject: Hi\r\nContent-Type: text/plain\r\n\r\nJust text.\r\n",
+    );
+    assert_eq!(value["html"], Value::Null);
+    assert_eq!(value["text"], "Just text.\r\n");
+    assert_eq!(value["attachments"], json!([]));
+}

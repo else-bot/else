@@ -27,6 +27,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             get(account).patch(activate).delete(disconnect),
         )
         .route(
+            "/connectors/email/accounts/{account_id}/messages",
+            get(view_message),
+        )
+        .route(
             "/connectors/email/accounts/{account_id}/credentials",
             put(credentials),
         )
@@ -147,6 +151,43 @@ async fn accounts(State(state): State<Arc<AppState>>) -> Result<Json<Value>, Api
     Ok(Json(
         json!({"accounts":store::accounts(&state.db).await.map_err(unavailable)?}),
     ))
+}
+/// One message for the owner's reader. It goes to the mail server with the
+/// saved credential, never through a bot, and leaves the message unread.
+async fn view_message(
+    State(state): State<Arc<AppState>>,
+    ApiPath(id): ApiPath<Uuid>,
+    query: Result<axum::extract::Query<MessageRef>, axum::extract::rejection::QueryRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let axum::extract::Query(message) = query
+        .map_err(|_| ApiError::bad_request("invalid_query", "Use folder, uid_validity and uid."))?;
+    let manager = manager(&state)?;
+    let view = manager.view(id, message).await.map_err(|error| {
+        use axum::http::StatusCode;
+        let (status, message) = match error.code {
+            "message_not_found" | "stale_message_reference" => (
+                StatusCode::NOT_FOUND,
+                "This email is no longer in that folder. It may have been moved or deleted.",
+            ),
+            "mail_forbidden" => (StatusCode::NOT_FOUND, "This inbox is no longer connected."),
+            "mail_account_paused" => (
+                StatusCode::CONFLICT,
+                "This inbox is paused. Resume it in Settings, Email, to read its mail.",
+            ),
+            "mail_message_too_large" => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "This email is over 64 MiB, too large to show.",
+            ),
+            AUTHENTICATION_FAILED | REAUTHENTICATION_REQUIRED => (
+                StatusCode::CONFLICT,
+                "The mail server no longer accepts the saved sign-in. Reconnect the inbox in \
+                 Settings, Email.",
+            ),
+            _ => return ApiError::from(error),
+        };
+        ApiError::new(status, error.code, message)
+    })?;
+    Ok(Json(view))
 }
 async fn account(
     State(state): State<Arc<AppState>>,
@@ -1033,7 +1074,9 @@ async fn tool_call(
     }
     if matches!(
         request.command,
-        MailCommand::OpenAttachments { .. } | MailCommand::FindSent { .. }
+        MailCommand::OpenAttachments { .. }
+            | MailCommand::FindSent { .. }
+            | MailCommand::View { .. }
     ) {
         return Err(MailError::new("invalid_mail_request"));
     }
