@@ -644,10 +644,11 @@ fn routine_run(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> But
         run.due_at.timestamp()
     )))
     .accessibility_label(format!(
-        "{} {}, {}. View routines in bot details",
+        "{} {}, {}{}. View routines in bot details",
         run.label(),
         run.name,
-        stamp(run.due_at)
+        stamp(run.due_at),
+        if run.no_news { ", no news" } else { "" }
     ))
     .child(
         super::action_card::event_row(theme)
@@ -656,7 +657,14 @@ fn routine_run(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> But
             .child(super::action_card::event_object(theme, run.name.clone()))
             .child(super::action_card::event_end(
                 theme,
-                super::action_card::EventEnd::Meta(stamp(run.due_at).into()),
+                super::action_card::EventEnd::Meta(
+                    if run.no_news {
+                        format!("No news · {}", stamp(run.due_at))
+                    } else {
+                        stamp(run.due_at)
+                    }
+                    .into(),
+                ),
                 super::action_card::Disclosure::None,
             )),
     )

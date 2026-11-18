@@ -88,6 +88,7 @@ fn first_unread_row(
         .filter(|item| {
             item.kind == "assistant"
                 && !conversation.is_feedback_acknowledgement(item)
+                && !conversation.no_news(item.turn_id)
                 && ReplyPosition {
                     item_seq: item.seq,
                     text_bytes: item.text.len() as i64,
@@ -105,6 +106,20 @@ fn first_unread_row(
         .flatten()
         .collect();
     rows.iter().copied().find(|key| unread.contains(key))
+}
+
+/// The replies a routine run with no news leaves out: all but its last,
+/// the bot's one-line summary.
+fn folded_no_news(conversation: &Conversation) -> HashSet<Uuid> {
+    let mut last = HashMap::new();
+    let mut folded = HashSet::new();
+    for item in conversation
+        .items()
+        .filter(|item| item.kind == "assistant" && conversation.no_news(item.turn_id))
+    {
+        folded.extend(last.insert(item.turn_id, item.id));
+    }
+    folded
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -877,7 +892,8 @@ impl ElseApp {
             .filter(|item| item.kind == "assistant" && delegated.contains(&item.turn_id))
             .map(|item| (item.turn_id, item.id))
             .collect();
-        for item in &items {
+        let folded = conversation.map(folded_no_news).unwrap_or_default();
+        for item in items.iter().filter(|item| !folded.contains(&item.id)) {
             if item.kind == "assistant" && answered.get(&item.turn_id) == Some(&item.id) {
                 rows.extend(
                     conversation
@@ -1207,8 +1223,10 @@ impl ElseApp {
 mod tests {
     use super::{
         ConversationView, REVEAL_FADE, REVEAL_HOLD, Reveal, RoutineRow, RowKey, Spot,
-        TranscriptRow, burst_tail_stamps, first_unread_row, request_rows, routine_rows,
+        TranscriptRow, burst_tail_stamps, first_unread_row, folded_no_news, request_rows,
+        routine_rows,
     };
+    use std::collections::HashSet;
     use std::time::{Duration, Instant};
 
     fn reveal_from(ago: Duration) -> Reveal {
@@ -1240,6 +1258,10 @@ mod tests {
     use uuid::Uuid;
 
     fn routine_conversation() -> Conversation {
+        Conversation::from_snapshot(serde_json::from_value(routine_snapshot()).unwrap()).unwrap()
+    }
+
+    fn routine_snapshot() -> Value {
         let turn = |id: u128| {
             json!({
                 "id": Uuid::from_u128(id), "request_id": Uuid::from_u128(id + 100),
@@ -1262,13 +1284,12 @@ mod tests {
                 })
             })
             .collect();
-        let snapshot: Snapshot = serde_json::from_value(json!({
+        json!({
             "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
             "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
             "items": items, "turns": [turn(10), turn(11)],
             "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
-        })).unwrap();
-        Conversation::from_snapshot(snapshot).unwrap()
+        })
     }
 
     fn question_page(status: &str, seq: i64, created_at: &str) -> Snapshot {
@@ -1920,6 +1941,29 @@ mod tests {
         assert_eq!(first_unread_row(&rows, &c, read(2, 5)), Some(item(3)));
         assert_eq!(first_unread_row(&rows, &c, read(2, 3)), Some(item(2)));
         assert_eq!(first_unread_row(&rows, &c, read(5, 5)), None);
+    }
+
+    #[test]
+    fn a_run_with_no_news_shows_its_last_line_and_is_never_unread() {
+        let mut snapshot = routine_snapshot();
+        let quiet = &mut snapshot["turns"][0];
+        quiet["status"] = json!("completed");
+        quiet["questions"] = json!([]);
+        quiet["secret_requests"] = json!([]);
+        quiet["routine"]["no_news"] = json!(true);
+        let c = Conversation::from_snapshot(serde_json::from_value(snapshot).unwrap()).unwrap();
+        assert_eq!(
+            folded_no_news(&c),
+            HashSet::from([Uuid::from_u128(1), Uuid::from_u128(2)]),
+            "item 5 is the run's last line"
+        );
+        let rows = [item(3), item(4), item(5)];
+        let read = ReplyPosition {
+            item_seq: 0,
+            text_bytes: 0,
+        };
+        assert_eq!(first_unread_row(&rows, &c, read), Some(item(3)));
+        assert_eq!(first_unread_row(&[item(5)], &c, read), None);
     }
 
     #[test]

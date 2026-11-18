@@ -806,6 +806,9 @@ pub struct RoutineRun {
     /// The routine is a reminder, due once. Absent from older servers.
     #[serde(default)]
     pub reminder: bool,
+    /// The run completed with nothing to report, so it alerts no one.
+    #[serde(default)]
+    pub no_news: bool,
 }
 
 impl RoutineRun {
@@ -824,7 +827,8 @@ impl RoutineRun {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct LastRun {
     pub due_at: DateTime<Utc>,
-    /// `queued`, `running`, `skipped`, or the turn's terminal status.
+    /// `checking`, `queued`, `running`, `skipped`, `no_news`, or the turn's
+    /// terminal status.
     pub status: String,
     pub skip_reason: Option<String>,
     pub error: Option<TurnError>,
@@ -872,6 +876,9 @@ pub struct Routine {
     /// settled.
     #[serde(default)]
     pub retrying: bool,
+    /// A run with nothing to report may end with no news, alerting no one.
+    #[serde(default)]
+    pub quiet: bool,
 }
 
 /// A bot's webhook: an authenticated call to its URL wakes the bot with
@@ -1141,6 +1148,13 @@ impl Conversation {
 
     pub fn turn(&self, id: Uuid) -> Option<&Turn> {
         self.turns.get(&id)
+    }
+
+    /// Whether turn `id` is a routine run that completed with no news.
+    pub fn no_news(&self, id: Uuid) -> bool {
+        self.turn(id)
+            .and_then(|turn| turn.routine.as_ref())
+            .is_some_and(|run| run.no_news)
     }
 
     pub fn latest_unshown_turn(&self) -> Option<&Turn> {

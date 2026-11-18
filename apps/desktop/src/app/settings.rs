@@ -257,6 +257,7 @@ impl ModelDialog {
 #[derive(Debug, Clone, PartialEq)]
 enum RoutineSave {
     Saving { attempt: Uuid, enabled: bool },
+    Quieting { attempt: Uuid, quiet: bool },
     Dismissing { attempt: Uuid },
     Retrying { attempt: Uuid },
     Model { attempt: Uuid },
@@ -269,6 +270,7 @@ impl RoutineSave {
         matches!(
             self,
             Self::Saving { .. }
+                | Self::Quieting { .. }
                 | Self::Dismissing { .. }
                 | Self::Retrying { .. }
                 | Self::Model { .. }
@@ -279,6 +281,7 @@ impl RoutineSave {
     fn attempt(&self) -> Option<Uuid> {
         match self {
             Self::Saving { attempt, .. }
+            | Self::Quieting { attempt, .. }
             | Self::Dismissing { attempt }
             | Self::Retrying { attempt }
             | Self::Model { attempt }
@@ -539,6 +542,20 @@ impl ElseApp {
             .clone()
             .set_routine_enabled(bot, routine, enabled);
         let change = RoutineSave::Saving { attempt, enabled };
+        self.save_routine(bot, routine, change, request, window, cx);
+    }
+
+    fn set_routine_quiet(
+        &mut self,
+        bot: Uuid,
+        routine: Uuid,
+        quiet: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let attempt = Uuid::new_v4();
+        let request = self.client.clone().set_routine_quiet(bot, routine, quiet);
+        let change = RoutineSave::Quieting { attempt, quiet };
         self.save_routine(bot, routine, change, request, window, cx);
     }
 
@@ -2028,6 +2045,38 @@ impl ElseApp {
         // The model is changed from the row's actions, beside Delete. The
         // meta line names it only when the routine overrides the bot model
         // shown above, so a routine reads as one line.
+        let quiet = match save {
+            Some(RoutineSave::Quieting { quiet, .. }) => *quiet,
+            _ => routine.quiet,
+        };
+        let quiet_control = routine.run_at.is_none().then(|| {
+            Button::new(ElementId::Name(format!("routine-quiet-{id}").into()))
+                .focus_ring(false)
+                .cursor_pointer()
+                .ghost()
+                .opacity(0.)
+                .group_hover("automation-card", |style| style.opacity(1.))
+                .focus(|style| style.opacity(1.))
+                .xsmall()
+                .icon(if quiet {
+                    gpui_kit::assets::IconName::BellOff
+                } else {
+                    gpui_kit::assets::IconName::Bell
+                })
+                .accessibility_label(if quiet {
+                    format!("Report every run of {}", routine.name)
+                } else {
+                    format!(
+                        "Make {} quiet: runs with nothing to report send no message",
+                        routine.name
+                    )
+                })
+                .loading(matches!(save, Some(RoutineSave::Quieting { .. })))
+                .disabled(busy || !connected)
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    app.set_routine_quiet(bot, id, !quiet, window, cx)
+                }))
+        });
         let model_control = routine.run_at.is_none().then(|| {
             Button::new(ElementId::Name(format!("routine-model-{id}").into()))
                 .focus_ring(false)
@@ -2058,6 +2107,14 @@ impl ElseApp {
         if let Some(choice) = routine.model.as_ref().filter(|_| routine.run_at.is_none()) {
             tokens.push(
                 meta(self.model_name(choice), cx)
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .into_any_element(),
+            );
+        }
+        if quiet && routine.run_at.is_none() {
+            tokens.push(
+                meta("Quiet".to_owned(), cx)
                     .flex_none()
                     .whitespace_nowrap()
                     .into_any_element(),
@@ -2193,6 +2250,7 @@ impl ElseApp {
                             .items_center()
                             .children(retry)
                             .children(dismiss)
+                            .children(quiet_control)
                             .children(model_control)
                             .child(delete)
                             .child(switch),
@@ -2420,6 +2478,7 @@ fn last_run_status(run: &LastRun, when: &str, error: Option<String>) -> (String,
         "skipped" if run.skip_reason.as_deref() == Some("nothing_new") => {
             (format!("Last run {when}: nothing new"), false)
         }
+        "no_news" => (format!("Last run {when}: no news"), false),
         "failed" | "uncertain" | "interrupted" => {
             let detail = error.unwrap_or_else(|| run.status.clone());
             (format!("Last run {when} {}: {detail}", run.status), true)
@@ -2999,6 +3058,14 @@ mod tests {
         let (text, attention) = skipped("check_unavailable");
         assert!(attention);
         assert!(text.ends_with(": its check could not start"), "{text}");
+        let (text, attention) = last_run(&routine(serde_json::json!({
+            "quiet": true,
+            "last_run": { "due_at": "2026-11-08T02:00:00Z", "status": "no_news",
+                          "skip_reason": null, "error": null },
+        })))
+        .unwrap();
+        assert!(!attention, "a run with no news is a normal run");
+        assert_eq!(text, "Last run Sun 8 Nov, 03:00: no news");
     }
 
     fn trigger(enabled: bool) -> Trigger {
