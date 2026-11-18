@@ -28,6 +28,7 @@ mod computer_job_waits;
 mod computer_memory;
 mod computers;
 mod connector_store;
+mod conversation_search;
 mod default_skills;
 mod delegation;
 mod delegation_files;
