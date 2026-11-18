@@ -26,7 +26,10 @@
 //! delegate: follow-up work for another bot goes in its reply with that
 //! bot's name and a self-contained task, and the delegating turn hands it on
 //! in its continuation. The task hash makes a repeated delegation of the
-//! same follow-up return the existing task.
+//! same follow-up return the existing task. A hand-off that carries a card
+//! the owner answered, asked by the turn or a task below it, is the owner's
+//! own decision: it spends up to [`MAX_CHILDREN`] hand-offs of that card
+//! instead of the request budget.
 
 use std::collections::HashMap;
 
@@ -96,6 +99,8 @@ pub enum DelegateError {
     BotUnavailable,
     #[error("this request already used its {MAX_CHILDREN} delegations")]
     BudgetExhausted,
+    #[error("that card already sent its {MAX_CHILDREN} hand-offs")]
+    AnswerBudgetExhausted,
     #[error("this request already used its {MAX_COUNCIL_BOTS} council reports")]
     CouncilBudgetExhausted,
     #[error("this attempt already delegated; wait for the result")]
@@ -106,7 +111,9 @@ pub enum DelegateError {
     NotRunning,
     #[error("a council needs 1 to 32 distinct bot IDs")]
     InvalidCouncil,
-    #[error("owner_answer must name a choice card the owner answered in this request")]
+    #[error(
+        "owner_answer must name a choice card the owner answered for you or a task you delegated"
+    )]
     AnswerUnavailable,
     #[error("database error")]
     Db,
@@ -303,14 +310,22 @@ async fn create_in(
         return Err(DelegateError::UpstreamTarget);
     }
     if let Some(question) = owner_answer {
+        // The card may come from a task below this turn: a task that
+        // cannot delegate names the owner's choice for this turn to hand on.
         let answered: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM owner_questions
-                            WHERE id = ?1 AND turn_id = ?2 AND bot_id = ?3
+            "WITH RECURSIVE tree(turn, depth) AS (
+                 SELECT ?2, 0
+                 UNION
+                 SELECT t.id, tree.depth + 1
+                 FROM tree JOIN delegations d ON d.root_turn_id = tree.turn
+                 JOIN turns t ON t.conversation_id = d.conversation_id
+                 WHERE tree.depth < 8)
+             SELECT EXISTS (SELECT 1 FROM owner_questions
+                            WHERE id = ?1 AND turn_id IN (SELECT turn FROM tree)
                               AND kind = 'choice' AND status = 'answered')",
         )
         .bind(question)
         .bind(turn_id)
-        .bind(parent)
         .fetch_one(&mut *conn)
         .await?;
         if !answered {
@@ -364,6 +379,15 @@ async fn create_in(
     if council {
         if total >= MAX_COUNCIL_BOTS as i64 {
             return Err(DelegateError::CouncilBudgetExhausted);
+        }
+    } else if let Some(question) = owner_answer {
+        let sent: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM delegations WHERE owner_question_id = ?1")
+                .bind(question)
+                .fetch_one(&mut *conn)
+                .await?;
+        if sent >= MAX_CHILDREN {
+            return Err(DelegateError::AnswerBudgetExhausted);
         }
     } else if request_used(conn, chain.budget_top).await? >= MAX_CHILDREN {
         return Err(DelegateError::BudgetExhausted);
@@ -905,6 +929,7 @@ pub async fn undelivered(
             row.takeover_turn_id,
         )
         .await?;
+        let choices = answered_choices(conn, row.conversation_id, row.takeover_turn_id).await?;
         outcomes.push(Outcome {
             id: row.id,
             target_bot_id: row.target_bot_id,
@@ -918,9 +943,47 @@ pub async fn undelivered(
             earlier_request: row.earlier_request,
             ran,
             owner: row.owner,
+            choices,
         });
     }
     Ok(outcomes)
+}
+
+/// The choice cards the owner answered in a task, its takeover turn, or a
+/// task below them, oldest first.
+async fn answered_choices(
+    conn: &mut SqliteConnection,
+    conversation: Uuid,
+    takeover: Option<Uuid>,
+) -> Result<Vec<crate::app::providers::OwnerChoice>, sqlx::Error> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "WITH RECURSIVE tree(turn, depth) AS (
+             SELECT id, 0 FROM turns WHERE conversation_id = ?1
+             UNION SELECT ?2, 0 WHERE ?2 IS NOT NULL
+             UNION
+             SELECT t.id, tree.depth + 1
+             FROM tree JOIN delegations d ON d.root_turn_id = tree.turn
+             JOIN turns t ON t.conversation_id = d.conversation_id
+             WHERE tree.depth < 8)
+         SELECT id FROM owner_questions
+         WHERE turn_id IN (SELECT turn FROM tree) AND kind = 'choice' AND status = 'answered'
+         ORDER BY settled_at, id",
+    )
+    .bind(conversation)
+    .bind(takeover)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut choices = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(question) = super::owner_questions::get(conn, id).await? {
+            choices.push(crate::app::providers::OwnerChoice {
+                id,
+                chosen: question.selected().into_iter().map(|c| c.label).collect(),
+                question: question.title,
+            });
+        }
+    }
+    Ok(choices)
 }
 
 async fn attachment(
@@ -1029,7 +1092,8 @@ pub struct Chain {
 
 /// Individual delegations a request has made, at every depth below `top`.
 /// A task carried onto a later owner message (attempt 0) stays out, with
-/// everything below it: it counts toward the message that sent it.
+/// everything below it: it counts toward the message that sent it. A
+/// hand-off the owner chose on a card counts toward that card instead.
 async fn request_used(conn: &mut SqliteConnection, top: Uuid) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         "WITH RECURSIVE tree(turn, depth) AS (
@@ -1040,7 +1104,8 @@ async fn request_used(conn: &mut SqliteConnection, top: Uuid) -> Result<i64, sql
              JOIN turns t ON t.conversation_id = d.conversation_id
              WHERE tree.depth < 8)
          SELECT count(*) FROM delegations
-         WHERE parent_attempt > 0 AND root_turn_id IN (SELECT turn FROM tree)",
+         WHERE parent_attempt > 0 AND owner_question_id IS NULL
+           AND root_turn_id IN (SELECT turn FROM tree)",
     )
     .bind(top)
     .fetch_one(&mut *conn)

@@ -56,7 +56,10 @@ fn outcomes_without_social(input: &TurnInput) -> String {
          with a line starting \"Not acted on:\" naming each such request and the bot that \
          made it, so the owner can decide. owner=\"asked\" means the owner already sees that \
          bot's ask on a card: do not ask it again or list it as not acted on. owner=\"nothing\" \
-         or \"fyi\" is that bot's own judgment of what the owner needs.\n",
+         or \"fyi\" is that bot's own judgment of what the owner needs. \"Owner chose on \
+         card\" is the owner's own answer in that task: work it decides for another bot is \
+         covered, so hand it on with delegate and that card's id as owner_answer, which does \
+         not use your delegate budget.\n",
     );
     for outcome in outcomes {
         let files: String = outcome
@@ -75,6 +78,14 @@ fn outcomes_without_social(input: &TurnInput) -> String {
                     ran.tool,
                     ran.title,
                     ran.used.describe()
+                )
+            }))
+            .chain(outcome.choices.iter().map(|choice| {
+                format!(
+                    "Owner chose on card {}: \"{}\" -> {}\n",
+                    choice.id,
+                    choice.question,
+                    choice.chosen.join("; ")
                 )
             }))
             .collect();

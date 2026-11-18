@@ -1577,6 +1577,109 @@ async fn delegations_at_every_depth_share_one_request_budget() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_hand_off_the_owner_chose_on_a_sub_tasks_card_goes_after_the_budget_runs_out() {
+    use else_api::db::delegations::{DelegateError, MAX_CHILDREN, create};
+    let db = TestDb::migrated().await;
+    let (_, _, child, _, grandchild, _, third) = seed_chain(&db).await;
+    let next_attempt = || async {
+        sqlx::query("UPDATE turns SET attempt = attempt + 1 WHERE id = ?1")
+            .bind(child)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    };
+    for n in 0..4 {
+        next_attempt().await;
+        create(
+            &db.pool,
+            child,
+            third,
+            &format!("step {n}"),
+            None,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    next_attempt().await;
+    assert_eq!(
+        create(
+            &db.pool,
+            child,
+            third,
+            "post the changelog",
+            None,
+            &[],
+            None
+        )
+        .await,
+        Err(DelegateError::BudgetExhausted)
+    );
+
+    let card = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, choices, multiple, status, answer)
+         VALUES (?1, ?2, ?3, 1, 'choice', 'Where should the changelog go?',
+                 '[{\"id\":\"a\",\"label\":\"Telegram\"},{\"id\":\"b\",\"label\":\"Discord\"}]',
+                 1, 'answered', '[\"a\",\"b\"]')",
+    )
+    .bind(card)
+    .bind(third)
+    .bind(grandchild)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    set_status(&db, grandchild, "running").await;
+    sqlx::query(
+        "UPDATE turns SET status = 'completed',
+             finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
+    )
+    .bind(grandchild)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let named: Vec<(Uuid, Vec<String>)> = delegation_context(&db, child)
+        .await
+        .outcomes
+        .iter()
+        .flat_map(|o| o.choices.iter().map(|c| (c.id, c.chosen.clone())))
+        .collect();
+    assert_eq!(
+        named,
+        vec![(card, vec!["Telegram".to_owned(), "Discord".to_owned()])],
+        "the sub-task's result carries the owner's card"
+    );
+    for n in 0..6 {
+        let sent = create(
+            &db.pool,
+            child,
+            third,
+            &format!("post the changelog, part {n}"),
+            None,
+            &[],
+            Some(card),
+        )
+        .await;
+        assert!(
+            sent.as_ref().is_ok_and(|s| s.created),
+            "hand-off {n}: {sent:?}"
+        );
+        next_attempt().await;
+    }
+    assert_eq!(
+        delegation_context(&db, child).await.remaining,
+        0,
+        "the owner's hand-offs leave the request budget alone"
+    );
+    assert_eq!(
+        create(&db.pool, child, third, "one more", None, &[], Some(card)).await,
+        Err(DelegateError::AnswerBudgetExhausted),
+        "a card authorizes at most {MAX_CHILDREN} hand-offs"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_sub_task_of_a_routine_run_keeps_the_routine_origin() {
     use else_api::app::providers::Origin;
     let db = TestDb::migrated().await;

@@ -206,7 +206,9 @@ fn delegation_budget(input: &TurnInput) -> String {
         return String::new();
     }
     format!(
-        "[else.bot delegation budget] {} individual delegate calls remain for this request.\n\n",
+        "[else.bot delegation budget] {} individual delegate calls remain for this request. \
+         A hand-off the owner chose on a card does not count when you pass that card as \
+         owner_answer.\n\n",
         delegation.remaining
     )
 }
@@ -1283,6 +1285,7 @@ mod tests {
             earlier_request: false,
             ran: Vec::new(),
             owner: None,
+            choices: Vec::new(),
         }];
         let (packet, _) = super::turn_packet(&input, input.turn_no, None, &skills, &context);
         assert!(packet.contains("Task: Post the callout."));
@@ -1309,6 +1312,7 @@ mod tests {
             earlier_request,
             ran: Vec::new(),
             owner: None,
+            choices: Vec::new(),
         };
         input.delegation.outcomes = vec![
             outcome("Post the callout.", true),
@@ -1395,6 +1399,7 @@ mod tests {
                 },
             }],
             owner: Some("asked".into()),
+            choices: Vec::new(),
         }];
         let block = super::outcomes_block(&input);
         assert!(

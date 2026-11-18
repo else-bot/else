@@ -158,9 +158,9 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> O
                 DelegateError::SelfTarget => "SELF_DELEGATION",
                 DelegateError::UpstreamTarget => "UPSTREAM_TARGET",
                 DelegateError::BotUnavailable => "BOT_UNAVAILABLE",
-                DelegateError::BudgetExhausted | DelegateError::CouncilBudgetExhausted => {
-                    "BUDGET_EXHAUSTED"
-                }
+                DelegateError::BudgetExhausted
+                | DelegateError::AnswerBudgetExhausted
+                | DelegateError::CouncilBudgetExhausted => "BUDGET_EXHAUSTED",
                 DelegateError::AttemptParked => "ATTEMPT_PARKED",
                 DelegateError::InvalidTask => "INVALID_TASK",
                 DelegateError::InvalidCouncil => "INVALID_COUNCIL",
@@ -168,8 +168,15 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> O
                 DelegateError::NotRunning => "NOT_RUNNING",
                 DelegateError::Db => "UNAVAILABLE",
             };
+            let next = if err == DelegateError::BudgetExhausted {
+                " If the owner chose this hand-off on a card, yours or one a task's result \
+                 lists, call delegate again with owner_answer set to that card's ID; otherwise \
+                 give the work back in your reply."
+            } else {
+                ""
+            };
             let log = format!("rejected {code}");
-            (tool_error(&format!("{code}: {err}")), Some(log))
+            (tool_error(&format!("{code}: {err}.{next}")), Some(log))
         }
     }
 }
