@@ -737,7 +737,11 @@ async fn an_external_action_needs_approval_for_exactly_that_call_once() {
         .iter()
         .map(|c| c["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, ["approve", "deny"], "no standing grant for external");
+    assert_eq!(
+        ids,
+        ["approve", "deny", "approve_tool"],
+        "only a grant for this tool's external calls"
+    );
 
     let forever = answer(&app, &main, question, "approve_forever").await;
     assert_eq!(forever.status, StatusCode::BAD_REQUEST, "{}", forever.body);
@@ -1117,7 +1121,7 @@ async fn a_scoped_computer_call_can_be_always_allowed_for_its_task_and_target() 
         ),
         (
             json!({ "command": "node unfollow.js @a", "effect": "external" }),
-            &["approve", "deny"][..],
+            &["approve", "deny", "approve_tool"][..],
         ),
     ] {
         let (turn, token) = turn_token;

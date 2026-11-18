@@ -4,7 +4,7 @@ use axum::http::StatusCode;
 use common::recorder::{self, GATE, GATE_EVERY_ATTEMPT, Harness, tool};
 use serde_json::{Value, json};
 
-const SERVER: &str = r#"
+pub(super) const SERVER: &str = r#"
 import json, sys
 calls = 0
 for line in sys.stdin:
@@ -25,7 +25,7 @@ fn target() -> Value {
     json!({"scope":"mcp_tool", "mcp_id":"tickets", "tool":"create_ticket", "kind":"external"})
 }
 
-fn create(effect: &str, title: &str) -> Value {
+pub(super) fn create(effect: &str, title: &str) -> Value {
     json!({"id":"tickets", "method":"tools/call", "params":{"name":"create_ticket",
         "arguments":{"title":title}}, "effect":effect, "purpose":"Create a ticket"})
 }
@@ -68,7 +68,7 @@ async fn stop(h: &Harness, bot: &str, turn: uuid::Uuid) {
         .await;
 }
 
-fn executed(called: &recorder::Called, title: &str) {
+pub(super) fn executed(called: &recorder::Called, title: &str) {
     assert_eq!(called.status, StatusCode::OK, "{}", called.body);
     assert!(!called.error, "{}", called.body);
     let body: Value = serde_json::from_str(
@@ -371,7 +371,7 @@ async fn a_task_grant_for_mcp_work_redirects_to_the_tool_grant() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn delegated_work_cannot_inherit_a_saved_tool_permission() {
+async fn delegated_work_uses_the_bots_saved_tool_permission_and_can_save_another() {
     let (h, _, turn, token) = setup().await;
     let worker = h.app.create_bot("Worker").await;
     let authorization = "Always approve ticket creation.";
@@ -412,18 +412,20 @@ async fn delegated_work_cannot_inherit_a_saved_tool_permission() {
             .await
             .unwrap();
     let (_, child_token) = h.started(child).await;
-    let blocked = tool(
-        &h.app,
-        &child_token,
-        "mcp_request",
-        create("external", "Delegated"),
-    )
-    .await;
-    assert_eq!(
-        blocked.result["status"], "pending",
-        "the saved permission does not cover it; the owner gets a card: {}",
-        blocked.body
+    executed(
+        &tool(
+            &h.app,
+            &child_token,
+            "mcp_request",
+            create("external", "Delegated"),
+        )
+        .await,
+        "Delegated",
     );
+    let mut deletion = create("destructive", "Old");
+    deletion["params"]["name"] = json!("delete_ticket");
+    let blocked = tool(&h.app, &child_token, "mcp_request", deletion).await;
+    assert_eq!(blocked.result["status"], "pending", "{}", blocked.body);
     let question: uuid::Uuid = blocked.result["question_id"]
         .as_str()
         .unwrap()
@@ -441,8 +443,8 @@ async fn delegated_work_cannot_inherit_a_saved_tool_permission() {
         .collect();
     assert_eq!(
         ids,
-        ["approve", "deny"],
-        "no standing grant from delegated work"
+        ["approve", "deny", "approve_tool"],
+        "a delegated task may offer only the tool grant"
     );
     for turn in [turn, worker_turn, child] {
         h.release(turn).await;

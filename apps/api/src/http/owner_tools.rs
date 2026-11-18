@@ -110,9 +110,9 @@ pub(super) fn confirm_permission_schema() -> Value {
     json!({
         "name": "confirm_permission",
         "description": "Record the owner's explicit instruction, in the current message, to always allow a \
-            type of work; quote their exact words. Use task scope for recurring host or computer \
-            work; it never covers MCP calls. Use mcp_tool for one MCP tool with any arguments, \
-            routine for one routine's runs, and bot only to allow ALL destructive actions. Keep \
+            type of work; quote their exact words. Scopes: task for recurring host or computer work \
+            (never MCP), mcp_tool for one MCP tool, computer_tool for one computer tool's \
+            external calls, routine for one routine's runs, bot for ALL destructive actions. Keep \
             every limit the owner gave; save nothing if no scope keeps it.",
         "inputSchema": {
             "type": "object",
@@ -120,7 +120,7 @@ pub(super) fn confirm_permission_schema() -> Value {
                 "target": {
                     "type": "object",
                     "properties": {
-                        "scope": { "type": "string", "enum": ["bot", "routine", "mcp_tool", "task"] },
+                        "scope": { "type": "string", "enum": ["bot", "routine", "mcp_tool", "computer_tool", "task"] },
                         "task": { "type": "string", "minLength": 1, "maxLength": crate::app::questions::MAX_TASK_SCOPE,
                             "description": "Required only for task scope: recurring category of host or computer work, at most 200 UTF-8 bytes." },
                         "target": { "type": "string", "minLength": 1, "maxLength": crate::app::questions::MAX_TASK_SCOPE,
@@ -131,9 +131,9 @@ pub(super) fn confirm_permission_schema() -> Value {
                             "description": "Required for routine scope; omit for bot scope." },
                         "mcp_id": { "type": "string", "description": "Required only for mcp_tool scope." },
                         "tool": { "type": "string", "minLength": 1, "maxLength": 128,
-                            "description": "Exact discovered MCP tool name. Required only for mcp_tool scope." },
+                            "description": "Exact discovered MCP tool name for mcp_tool scope, or computer tool name such as computer_browser for computer_tool scope." },
                         "kind": { "type": "string", "enum": ["destructive", "external"],
-                            "description": "Effect to remember. Required for mcp_tool or task scope." },
+                            "description": "Effect to remember. Required for mcp_tool, computer_tool or task scope; computer_tool is external only; routine defaults to destructive." },
                         "covers": { "type": "string", "enum": ["host", "computer"],
                             "description": "Required only for task scope: host for ask_permission actions, computer for computer tool calls. MCP work needs mcp_tool scope." },
                     },
@@ -207,11 +207,17 @@ pub(super) async fn confirm_permission(state: &AppState, grant: &Grant, args: &V
                             computer tool calls declaring this task_scope. MCP tools/call is not \
                             covered. Sensitive actions outside this scope still need approval.",
                     }
-                } else if matches!(target, PermissionTarget::Routine { .. }) {
-                    "Standing permission is recorded for destructive actions in this routine's own \
-                     runs only. It does not cover drafted messages or the bots it delegates to: a \
-                     message is sent without a card only after the owner approves a draft for that \
-                     destination always, on its card or in chat (confirm_draft_approval always)."
+                } else if let PermissionTarget::Routine { kind, .. } = target {
+                    match kind {
+                        crate::app::questions::Kind::External => "Standing permission is recorded \
+                            for external host actions and computer tool calls in this routine's own \
+                            runs only. It does not cover MCP tools, drafted messages, or the bots it \
+                            delegates to.",
+                        _ => "Standing permission is recorded for destructive actions in this routine's own \
+                            runs only. It does not cover drafted messages or the bots it delegates to: a \
+                            message is sent without a card only after the owner approves a draft for that \
+                            destination always, on its card or in chat (confirm_draft_approval always).",
+                    }
                 } else {
                     "Standing permission is recorded for this scope. Declare each effect honestly. \
                      Routine reversible work needs no card. Sensitive actions outside this scope still need approval."

@@ -114,9 +114,13 @@ impl Placement {
 ///    provider whose card waits on the owner;
 /// 3. otherwise it queues.
 ///
-/// Joining skips the target's pending questions and computer handoff, as an owner who types instead of clicking does, and
-/// continues a waiting target at once with every other hold kept. Runs in
-/// the accepting immediate transaction.
+/// A message that says only to always allow first answers the one card
+/// waiting with an Always choice ([`super::owner_questions::answer_typed`]):
+/// the joined target's, or with no target, any of the bot's. Joining skips
+/// the target's other pending questions and computer handoff, as an owner
+/// who types instead of clicking does, and continues a waiting target at
+/// once with every other hold kept. Runs in the accepting immediate
+/// transaction.
 pub async fn place(
     conn: &mut SqliteConnection,
     bot_id: Uuid,
@@ -126,7 +130,19 @@ pub async fn place(
     provider_id: &str,
 ) -> Result<Placement, sqlx::Error> {
     super::delegations::lock_targets_of_bot(&mut *conn, bot_id).await?;
-    let Some(target) = target(conn, bot_id, conversation_id, turn_no, provider_id).await? else {
+    let target = target(conn, bot_id, conversation_id, turn_no, provider_id).await?;
+    let text: Option<String> = sqlx::query_scalar(
+        "SELECT i.text FROM turns t JOIN items i ON i.id = t.owner_item_id
+         WHERE t.id = ?1 AND i.kind = 'user' AND NOT i.hidden",
+    )
+    .bind(turn_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(text) = text {
+        super::owner_questions::answer_typed(conn, bot_id, target.as_ref().map(|t| t.id), &text)
+            .await?;
+    }
+    let Some(target) = target else {
         return Ok(Placement::Queued);
     };
     sqlx::query("INSERT INTO turn_steers (turn_id, into_turn_id) VALUES (?1, ?2)")

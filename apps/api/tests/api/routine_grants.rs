@@ -12,19 +12,19 @@ use else_api::db::routines::{self, By, Patch};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-const YEARLY: &str = "0 9 1 1 *";
+pub(super) const YEARLY: &str = "0 9 1 1 *";
 
-fn delete_args(path: &str) -> Value {
+pub(super) fn delete_args(path: &str) -> Value {
     json!({ "command": format!("git push origin --delete {path}"), "effect": "destructive",
             "purpose": "Delete a merged branch" })
 }
 
-fn send_args() -> Value {
+pub(super) fn send_args() -> Value {
     json!({ "command": "node send.js --all", "effect": "external",
             "purpose": "Send the build report", "context": "To: team list" })
 }
 
-async fn create(
+pub(super) async fn create(
     app: &TestApp,
     token: &str,
     name: &str,
@@ -48,7 +48,7 @@ async fn create(
     )
 }
 
-async fn fire(app: &TestApp, now: DateTime<Utc>) -> Vec<(Uuid, Uuid)> {
+pub(super) async fn fire(app: &TestApp, now: DateTime<Utc>) -> Vec<(Uuid, Uuid)> {
     for _ in 0..400 {
         let pending: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
@@ -76,11 +76,11 @@ async fn fire(app: &TestApp, now: DateTime<Utc>) -> Vec<(Uuid, Uuid)> {
     .unwrap()
 }
 
-fn run_of(runs: &[(Uuid, Uuid)], routine: Uuid) -> Uuid {
+pub(super) fn run_of(runs: &[(Uuid, Uuid)], routine: Uuid) -> Uuid {
     runs.iter().find(|(r, _)| *r == routine).unwrap().1
 }
 
-async fn next_run(app: &TestApp, routine: Uuid) -> DateTime<Utc> {
+pub(super) async fn next_run(app: &TestApp, routine: Uuid) -> DateTime<Utc> {
     sqlx::query_scalar("SELECT next_due_at FROM routines WHERE id = ?1")
         .bind(routine)
         .fetch_one(&app.db.pool)
@@ -88,12 +88,12 @@ async fn next_run(app: &TestApp, routine: Uuid) -> DateTime<Utc> {
         .unwrap()
 }
 
-async fn wait(app: &TestApp, turn: Uuid, status: &str) {
+pub(super) async fn wait(app: &TestApp, turn: Uuid, status: &str) {
     app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(30))
         .await;
 }
 
-async fn asks(app: &TestApp, token: &str, args: Value) -> (Uuid, Vec<String>) {
+pub(super) async fn asks(app: &TestApp, token: &str, args: Value) -> (Uuid, Vec<String>) {
     let called = tool(app, token, "computer_run", args).await;
     assert_eq!(called.result["status"], "pending", "{}", called.body);
     let question: Uuid = called.result["question_id"]
@@ -114,7 +114,7 @@ async fn asks(app: &TestApp, token: &str, args: Value) -> (Uuid, Vec<String>) {
     (question, ids)
 }
 
-async fn runs_without_asking(app: &TestApp, token: &str, args: Value) {
+pub(super) async fn runs_without_asking(app: &TestApp, token: &str, args: Value) {
     let called = tool(app, token, "computer_run", args).await;
     assert!(
         called
@@ -126,7 +126,7 @@ async fn runs_without_asking(app: &TestApp, token: &str, args: Value) {
     );
 }
 
-async fn answer(app: &TestApp, bot: &str, question: Uuid, choice: &str) {
+pub(super) async fn answer(app: &TestApp, bot: &str, question: Uuid, choice: &str) {
     let reply = app
         .owner(
             "POST",
@@ -137,7 +137,7 @@ async fn answer(app: &TestApp, bot: &str, question: Uuid, choice: &str) {
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
 }
 
-async fn routine_grants(app: &TestApp) -> Vec<(Uuid, i64)> {
+pub(super) async fn routine_grants(app: &TestApp) -> Vec<(Uuid, i64)> {
     sqlx::query_as("SELECT routine_id, prompt_revision FROM routine_grants ORDER BY routine_id")
         .fetch_all(&app.db.pool)
         .await
@@ -215,7 +215,10 @@ async fn chat_can_preapprove_a_routine_before_its_first_run() {
     let (_, token) = h.started(run).await;
     runs_without_asking(app, &token, delete_args("feature-a")).await;
     let (send_question, choices) = asks(app, &token, send_args()).await;
-    assert_eq!(choices, ["approve", "deny"]);
+    assert_eq!(
+        choices, APPROVE_ROUTINE,
+        "the destructive grant does not cover external actions"
+    );
     h.release(run).await;
     wait(app, run, "waiting").await;
 
@@ -551,7 +554,7 @@ async fn a_routine_grant_covers_future_runs_of_that_routine_only() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn no_grant_covers_an_external_action() {
+async fn a_destructive_routine_grant_does_not_cover_an_external_action() {
     let h = recorder::harness(4).await;
     let app = &h.app;
     let main = app.main_bot().await;
@@ -578,9 +581,8 @@ async fn no_grant_covers_an_external_action() {
     let (_, token) = h.started(run).await;
     let (_, choices) = asks(app, &token, send_args()).await;
     assert_eq!(
-        choices,
-        ["approve", "deny"],
-        "external is approved once, always"
+        choices, APPROVE_ROUTINE,
+        "external actions need their own routine grant"
     );
 }
 
