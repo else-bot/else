@@ -6,7 +6,7 @@ use crate::common;
 
 use axum::http::StatusCode;
 use common::TestApp;
-use common::recorder::{self, GATE, Harness, tool};
+use common::recorder::{self, GATE, GATE_EVERY_ATTEMPT, Harness, tool};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -224,7 +224,9 @@ async fn typing_always_allow_answers_the_waiting_card_with_its_grant_and_nothing
     let h = recorder::harness(4).await;
     let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = h.running(&main, &format!("{GATE} send the report")).await;
+    let (turn, token) = h
+        .running(&main, &format!("{GATE_EVERY_ATTEMPT} send the report"))
+        .await;
     let (card, _) = asks(app, &token, send_args()).await;
     h.release(turn).await;
     wait(app, turn, "waiting").await;
@@ -236,17 +238,27 @@ async fn typing_always_allow_answers_the_waiting_card_with_its_grant_and_nothing
     let listed = permissions(app, &main).await;
     assert_eq!(listed["permissions"].as_array().unwrap().len(), 1);
     assert_eq!(listed["permissions"][0]["target"]["tool"], "computer_run");
+    let token = h.continued(turn, &token).await;
+    let again = tool(
+        app,
+        &token,
+        "confirm_permission",
+        json!({ "target": { "scope": "bot" }, "authorization": "Always allow." }),
+    )
+    .await;
+    assert_eq!(again.code(), "CARD_ANSWERED", "{}", again.body);
+    h.release(turn).await;
     wait(app, turn, "completed").await;
 
     let (turn, token) = h.running(&main, &format!("{GATE} prune branches")).await;
     let (card, _) = asks(app, &token, delete_args("feature-a")).await;
     h.release(turn).await;
     wait(app, turn, "waiting").await;
-    h.send(&main, "Always allow, but not on main.").await;
+    h.send(&main, "Always allow.").await;
     assert_eq!(
         question(app, card).await,
         ("skipped".to_owned(), None),
-        "a reply with a limit only skips the card"
+        "the bot-wide destructive grant needs a click"
     );
     assert_eq!(
         permissions(app, &main).await["permissions"]
@@ -274,5 +286,25 @@ async fn typing_always_approve_answers_a_waiting_routine_card() {
         ("answered".to_owned(), Some("approve_routine".to_owned()))
     );
     assert_eq!(routine_grant_kinds(app, report).await, ["external"]);
+    wait(app, run, "completed").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_typed_reply_after_another_owner_message_answers_no_older_card() {
+    let h = recorder::harness(4).await;
+    let app = &h.app;
+    let main = app.main_bot().await;
+    let (report, due) = routine(&h, &main, "Send the build report.", false).await;
+    let run = run_of(&fire(app, due).await, report);
+    let (_, token) = h.started(run).await;
+    let (card, _) = asks(app, &token, send_args()).await;
+    h.release(run).await;
+    wait(app, run, "waiting").await;
+    let chat = h.send(&main, "What is on my calendar today?").await;
+    wait(app, chat, "completed").await;
+    h.send(&main, "Always approve.").await;
+    assert_eq!(question(app, card).await, ("pending".to_owned(), None));
+    assert!(routine_grant_kinds(app, report).await.is_empty());
+    answer(app, &main, card, "deny").await;
     wait(app, run, "completed").await;
 }

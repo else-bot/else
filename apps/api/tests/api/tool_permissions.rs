@@ -371,7 +371,7 @@ async fn a_task_grant_for_mcp_work_redirects_to_the_tool_grant() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn delegated_work_uses_the_bots_saved_tool_permission_and_can_save_another() {
+async fn delegated_work_uses_the_bots_saved_tool_permission_and_offers_another() {
     let (h, _, turn, token) = setup().await;
     let worker = h.app.create_bot("Worker").await;
     let authorization = "Always approve ticket creation.";

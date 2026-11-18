@@ -24,6 +24,8 @@ pub enum ConfirmError {
         "in a delegated task, save only the exact task scope, kind and covers of a card the owner's message skipped"
     )]
     NoSkippedCard,
+    #[error("this owner message already answered a card with its Always choice; save nothing more")]
+    CardAnswered,
 }
 
 impl From<sqlx::Error> for ConfirmError {
@@ -71,6 +73,18 @@ pub async fn confirm(
     }
     if !super::owner_message_quotes(&mut tx, turn_id, authorization).await? {
         return Err(ConfirmError::NotAuthorized);
+    }
+    // A bare "Always allow" already saved exactly its card's grant.
+    let typed: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS (SELECT 1 FROM owner_questions
+         WHERE typed_turn_id = ?1 OR typed_turn_id IN ({}))",
+        crate::db::steers::delivered_into("?1")
+    )))
+    .bind(turn_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if typed {
+        return Err(ConfirmError::CardAnswered);
     }
     // The owner's words in a delegated task answer a card they skipped by
     // typing, so they grant exactly that card's scope, never one the bot names.

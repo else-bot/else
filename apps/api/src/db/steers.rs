@@ -114,9 +114,10 @@ impl Placement {
 ///    provider whose card waits on the owner;
 /// 3. otherwise it queues.
 ///
-/// A message that says only to always allow first answers the one card
-/// waiting with an Always choice ([`super::owner_questions::answer_typed`]):
-/// the joined target's, or with no target, any of the bot's. Joining skips
+/// A message that may answer a card (`typed`: it targets no notice, draft
+/// or reaction) and says only to always allow first answers the card it
+/// replies to with its Always choice
+/// ([`super::owner_questions::answer_typed`]). Joining skips
 /// the target's other pending questions and computer handoff, as an owner
 /// who types instead of clicking does, and continues a waiting target at
 /// once with every other hold kept. Runs in the accepting immediate
@@ -128,6 +129,7 @@ pub async fn place(
     turn_no: i64,
     turn_id: Uuid,
     provider_id: &str,
+    typed: bool,
 ) -> Result<Placement, sqlx::Error> {
     super::delegations::lock_targets_of_bot(&mut *conn, bot_id).await?;
     let target = target(conn, bot_id, conversation_id, turn_no, provider_id).await?;
@@ -138,9 +140,9 @@ pub async fn place(
     .bind(turn_id)
     .fetch_optional(&mut *conn)
     .await?;
-    if let Some(text) = text {
-        super::owner_questions::answer_typed(conn, bot_id, target.as_ref().map(|t| t.id), &text)
-            .await?;
+    if let Some(text) = text.filter(|_| typed) {
+        let joined = target.as_ref().map(|t| t.id);
+        super::owner_questions::answer_typed(conn, bot_id, turn_id, joined, &text).await?;
     }
     let Some(target) = target else {
         return Ok(Placement::Queued);

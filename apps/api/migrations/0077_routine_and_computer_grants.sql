@@ -26,3 +26,7 @@ CREATE TABLE bot_permissions_new (
 INSERT INTO bot_permissions_new SELECT * FROM bot_permissions;
 DROP TABLE bot_permissions;
 ALTER TABLE bot_permissions_new RENAME TO bot_permissions;
+
+-- The owner message that answered a card by saying only "Always allow".
+-- Its words saved that card's grant and authorize no other one.
+ALTER TABLE owner_questions ADD COLUMN typed_turn_id BLOB REFERENCES turns (id);

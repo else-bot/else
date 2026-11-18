@@ -12,7 +12,8 @@
 //! marks it `cancelled` (a trigger).
 //!
 //! Actions may be allowed in advance, chosen on a card, typed as the whole
-//! answer to the one card waiting (see [`answer_typed`]), or explicitly
+//! reply to the one card asked since the owner's last message (see
+//! [`answer_typed`]), or explicitly
 //! authorized in owner chat. The broad bot grant covers destructive actions
 //! in the bot's own requests but never a routine run; host action cards no
 //! longer offer it. "Always allow for this routine" covers one effect in runs
@@ -680,16 +681,18 @@ pub async fn answer(
     Ok(settled)
 }
 
-/// The owner's message `text`, when it says only to always allow (see
-/// [`says_always_allow`]), answers the one pending card of `bot_id` that
-/// offers an Always choice with that choice, so the grant saved is exactly
-/// the card's. Only cards of `turn_id` count when the message joins that
-/// turn. Returns the answered card; with no such card, or several, or a
-/// choice the card's turn can no longer receive, it answers nothing and the
-/// message skips cards as usual.
+/// The owner's message of turn `message`, when it says only to always
+/// allow (see [`says_always_allow`]), answers the card it replies to with
+/// that card's Always choice, so the grant saved is exactly the card's. It
+/// replies to a card only when exactly one approval card of `bot_id` is
+/// pending that was asked after the owner's previous message (of the joined
+/// turn `joined`, when the message joins one). A bot-wide destructive grant
+/// still needs a click. Returns the answered card; otherwise it answers
+/// nothing, and the message skips cards as usual.
 pub(crate) async fn answer_typed(
     conn: &mut SqliteConnection,
     bot_id: Uuid,
+    message: Uuid,
     joined: Option<Uuid>,
     text: &str,
 ) -> Result<Option<Settled>, sqlx::Error> {
@@ -697,37 +700,56 @@ pub(crate) async fn answer_typed(
         return Ok(None);
     }
     let rows: Vec<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM owner_questions
-         WHERE bot_id = ?1 AND status = 'pending' AND kind <> 'choice'
-           AND (?2 IS NULL OR turn_id = ?2)"
+        "SELECT {COLUMNS} FROM owner_questions q
+         WHERE q.bot_id = ?1 AND q.status = 'pending' AND q.kind <> 'choice'
+           AND (?2 IS NULL OR q.turn_id = ?2)
+           AND q.created_at < (SELECT created_at FROM turns WHERE id = ?3)
+           AND q.created_at > coalesce((
+               SELECT max(t.created_at) FROM turns t
+               JOIN conversations c ON c.id = t.conversation_id AND c.kind = 'owner'
+               JOIN items i ON i.id = t.owner_item_id AND i.kind = 'user' AND NOT i.hidden
+               WHERE c.bot_id = ?1 AND t.id <> ?3
+                 AND t.created_at < (SELECT created_at FROM turns WHERE id = ?3)), '')"
     )))
     .bind(bot_id)
     .bind(joined)
+    .bind(message)
     .fetch_all(&mut *conn)
     .await?;
-    let mut offers = Vec::new();
-    for row in rows {
-        let question = info(row)?;
-        if let Some(choice) = question
-            .choices
-            .iter()
-            .find(|c| STANDING_CHOICES.contains(&c.id.as_str()))
-        {
-            offers.push((question.id, choice.id.clone()));
-        }
-    }
-    let [(question_id, choice)] = offers.as_slice() else {
+    let Ok([row]) = <[Row; 1]>::try_from(rows) else {
         return Ok(None);
     };
-    match answer_in(conn, bot_id, *question_id, &Answer::Single(choice.clone())).await {
-        Ok(settled) => Ok(Some(settled)),
-        Err(SettleError::Db(err)) => Err(err),
-        Err(_) => Ok(None),
-    }
+    let question = info(row)?;
+    let Some(choice) = question
+        .choices
+        .iter()
+        .find(|c| TYPED_CHOICES.contains(&c.id.as_str()))
+    else {
+        return Ok(None);
+    };
+    let settled = match answer_in(
+        conn,
+        bot_id,
+        question.id,
+        &Answer::Single(choice.id.clone()),
+    )
+    .await
+    {
+        Ok(settled) => settled,
+        Err(SettleError::Db(err)) => return Err(err),
+        Err(_) => return Ok(None),
+    };
+    sqlx::query("UPDATE owner_questions SET typed_turn_id = ?2 WHERE id = ?1")
+        .bind(question.id)
+        .bind(message)
+        .execute(&mut *conn)
+        .await?;
+    Ok(Some(settled))
 }
 
-/// The choices that save a standing grant.
-const STANDING_CHOICES: [&str; 4] = [APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TOOL, APPROVE_TASK];
+/// The Always choices a typed reply may pick: every one but the bot-wide
+/// destructive grant.
+const TYPED_CHOICES: [&str; 3] = [APPROVE_ROUTINE, APPROVE_TOOL, APPROVE_TASK];
 
 /// [`answer`] inside the caller's immediate transaction. Writes nothing
 /// unless the result is `changed`.

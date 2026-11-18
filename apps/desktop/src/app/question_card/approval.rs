@@ -394,13 +394,13 @@ impl ElseApp {
                     "Covers exactly this action, once. Sending a new message skips this."
                 }
                 Some(APPROVE_ROUTINE) => {
-                    "Covers this routine until its task changes."
+                    "Covers this routine until its task changes. Replying \"Always allow\" also chooses this."
                 }
                 Some(APPROVE_FOREVER) => {
                     "Covers destructive actions from now on."
                 }
                 Some(_) => {
-                    "Covers this tool or task and effect from now on."
+                    "Covers this tool or task and effect from now on. Replying \"Always allow\" also chooses this."
                 }
             },
         );
