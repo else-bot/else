@@ -293,7 +293,19 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             reply.anchor = Some(item.id);
         }
     }
+    let mut joined: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for item in conversation.items().filter(|item| item.kind == "user") {
+        if let Some(into) = conversation
+            .turn(item.turn_id)
+            .and_then(|turn| turn.steered_into)
+        {
+            joined.entry(into).or_default().push(item.id);
+        }
+    }
     for reply in replies.values_mut() {
+        if let Some(joined) = joined.get(&reply.turn) {
+            split_answers(conversation, &reactions, reply, joined);
+        }
         keep_earlier_replies(conversation, &reactions, reply);
     }
     // A queued turn runs no attempt, so its latest reply ended one.
@@ -376,7 +388,7 @@ pub(in crate::app) fn place_cards(
                 .anchor
                 .and_then(seq)
                 .is_some_and(|row| seq(after) < Some(row));
-            if turn_of(after) != Some(turn) || !before_row {
+            if turn_of(after) != Some(turn) || !before_row || task.answers.contains(&after) {
                 return Some((key, anchor));
             }
             let attempt = match key {
@@ -402,6 +414,72 @@ pub(in crate::app) fn place_cards(
         .collect()
 }
 
+/// Moves the replies that answer owner messages joined into the turn from
+/// `history` to `answers`, so the chat reads message, answer, message,
+/// answer. `joined` holds those messages' items, oldest first; each one
+/// starts a segment of the turn's replies. The last reply before each
+/// message is what the owner was answering, and the reply that ends the
+/// attempt which took a message answers it. The newest segment stays the
+/// task, below its message even before the bot writes there, and its
+/// progress folds as before. A finished turn that wrote nothing after its
+/// last messages ends on the reply before them.
+fn split_answers(
+    conversation: &Conversation,
+    reactions: &HashMap<Uuid, crate::model::ReactionKind>,
+    reply: &mut TaskReply,
+    joined: &[Uuid],
+) {
+    let seq = |id| conversation.item(id).map_or(i64::MAX, |item| item.seq);
+    let attempt = |id| conversation.item(id).and_then(|item| item.attempt);
+    let mut boundaries: Vec<_> = joined.to_vec();
+    let mut segments = vec![Vec::new(); boundaries.len() + 1];
+    for id in reply.history.iter().copied().chain(reply.latest) {
+        let index = boundaries.partition_point(|&message| seq(message) < seq(id));
+        segments[index].push(id);
+    }
+    while reply.state.terminal() && segments.len() > 1 && segments.last().is_some_and(Vec::is_empty)
+    {
+        segments.pop();
+        boundaries.pop();
+    }
+    let Some((current, earlier)) = segments.split_last() else {
+        return;
+    };
+    let mut answers: Vec<Uuid> = earlier
+        .iter()
+        .filter_map(|segment| segment.last().copied())
+        .collect();
+    for segment in segments.iter().skip(1) {
+        let Some(&first) = segment.first() else {
+            continue;
+        };
+        let took = segment
+            .iter()
+            .copied()
+            .rfind(|&id| attempt(id) == attempt(first));
+        answers.extend(took.filter(|&id| segment.last() != Some(&id)));
+    }
+    answers.sort_by_key(|&id| seq(id));
+    answers.dedup();
+    if answers.is_empty() {
+        return;
+    }
+    reply.latest = current.last().copied();
+    reply.anchor = reply.latest.or_else(|| boundaries.last().copied());
+    reply.latest_kept = reply.latest.is_some_and(|id| {
+        reactions.contains_key(&id)
+            || conversation.item(id).is_some_and(|item| {
+                item.parts
+                    .iter()
+                    .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }))
+            })
+    });
+    reply
+        .history
+        .retain(|id| !answers.contains(id) && reply.latest != Some(*id));
+    reply.answers = answers;
+}
+
 /// Moves the earlier replies the owner still needs from `history` to `kept`:
 /// a reacted reply, the reply that ended each earlier attempt, and a reply
 /// with a file no later reply delivers again. A resumed attempt reports only
@@ -414,9 +492,6 @@ fn keep_earlier_replies(
     reactions: &HashMap<Uuid, crate::model::ReactionKind>,
     reply: &mut TaskReply,
 ) {
-    let Some(latest) = reply.latest else {
-        return;
-    };
     let attempt = |id| conversation.item(id).and_then(|item| item.attempt);
     let files = |id| {
         conversation
@@ -429,7 +504,7 @@ fn keep_earlier_replies(
             })
             .collect::<Vec<_>>()
     };
-    let replies: Vec<_> = reply.history.iter().copied().chain([latest]).collect();
+    let replies: Vec<_> = reply.history.iter().copied().chain(reply.latest).collect();
     let ended: Vec<Uuid> = replies
         .windows(2)
         .filter(|pair| attempt(pair[0]).is_some_and(|ended| attempt(pair[1]) > Some(ended)))
@@ -445,7 +520,7 @@ fn keep_earlier_replies(
             .item(id)
             .is_some_and(|item| crate::attachments::has_prose(&item.text, &item.parts))
     };
-    let mut delivered_later = files(latest);
+    let mut delivered_later = reply.latest.map(files).unwrap_or_default();
     let mut kept = Vec::new();
     let mut repeated = HashSet::new();
     for &id in reply.history.iter().rev() {

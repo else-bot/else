@@ -909,6 +909,9 @@ impl ElseApp {
             } else if item.reaction.is_none()
                 && !(item.bot_task.is_some() && answered.contains_key(&item.turn_id))
                 && (item.kind != "assistant"
+                    || tasks
+                        .get(&item.turn_id)
+                        .is_some_and(|reply| reply.answers.contains(&item.id))
                     || !(tasks.contains_key(&item.turn_id) || delegated.contains(&item.turn_id)))
             {
                 rows.push(RowKey::Item(item.id));
