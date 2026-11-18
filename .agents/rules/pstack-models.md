@@ -22,7 +22,7 @@ Recheck provider capabilities before using a model in a new environment.
 {
   "sol-high-fast": {
     "providerInstanceId": "codex",
-    "model": "gpt-6.1-sol",
+    "model": "gpt-6.2-sol",
     "options": { "reasoningEffort": "high", "serviceTier": "priority" }
   },
   "opus-medium": {
