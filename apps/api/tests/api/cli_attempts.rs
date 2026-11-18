@@ -37,6 +37,13 @@ if "[signout]" in prompt and once("signed-out"):
     out({"type": "result", "subtype": "error_during_execution", "is_error": True, "stop_reason": None,
          "errors": ["Not signed in. To authenticate without a browser, run:\n  grok login --device-code"]})
     sys.exit(1)
+if "[revoked]" in prompt and once("revoked"):
+    open(os.path.join(os.environ["GROK_HOME"], "auth.json"), "w").write("{}")
+    out({"type": "system", "subtype": "init", "session_id": session, "model": arg("--model"),
+         "tools": tools, "mcp_servers": [{"name": "elsebot", "status": "connected"}]})
+    out({"type": "result", "subtype": "error_during_execution", "is_error": True, "stop_reason": None,
+         "errors": ["Internal error: {\n  \"message\": \"Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: Invalid or expired credentials\",\n  \"http_status\": 401\n}"]})
+    sys.exit(1)
 with open(os.path.join(here, "launches.jsonl"), "a") as f:
     f.write(json.dumps({"session": session, "resumed": resumed, "prompt": prompt}) + "\n")
 out({"type": "system", "subtype": "init", "session_id": session, "model": arg("--model"),
@@ -281,6 +288,9 @@ async fn grok_capability(app: &TestApp) -> Value {
         .clone()
 }
 
+/// Grok's two ways of failing for want of a login, as Grok 1.0.89 prints
+/// them: an expired login stops before opening a session, and a revoked one
+/// opens a session and gets a 401. Both clear the host `auth.json`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_grok_that_signs_out_mid_turn_is_unavailable_until_the_host_signs_in_again() {
@@ -290,38 +300,44 @@ async fn a_grok_that_signs_out_mid_turn_is_unavailable_until_the_host_signs_in_a
     let bot = fx.app.main_bot().await;
     assert_eq!(grok_capability(&fx.app).await["available"], true);
 
-    let turn = send(&fx.app, &bot, "[signout] hello").await;
-    let status = fx
-        .app
-        .wait_turn(&turn.to_string(), &["failed", "completed", "uncertain"])
-        .await;
-    assert_eq!(status, "failed");
-    let (code, message): (String, String) =
-        sqlx::query_as("SELECT error_code, error_message FROM turns WHERE id = ?1")
-            .bind(turn)
-            .fetch_one(&fx.app.db.pool)
-            .await
-            .unwrap();
-    assert_eq!(code, "provider_unavailable");
-    assert_eq!(message, signed_out, "not the CLI's raw login text");
+    for marker in ["[signout]", "[revoked]"] {
+        let turn = send(&fx.app, &bot, &format!("{marker} hello")).await;
+        let status = fx
+            .app
+            .wait_turn(&turn.to_string(), &["failed", "completed", "uncertain"])
+            .await;
+        let (code, message): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT error_code, error_message FROM turns WHERE id = ?1")
+                .bind(turn)
+                .fetch_one(&fx.app.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "failed", "{marker}: {message:?}");
+        assert_eq!(code.as_deref(), Some("provider_unavailable"), "{marker}");
+        assert_eq!(
+            message.as_deref(),
+            Some(signed_out),
+            "{marker}: not the CLI's raw login text"
+        );
 
-    let grok = grok_capability(&fx.app).await;
-    assert_eq!(grok["available"], false);
-    assert_eq!(grok["unavailable_reason"], signed_out);
-    let rejected = fx
-        .app
-        .send(&bot, Uuid::new_v4(), "again", Some("grok"))
-        .await;
-    assert_eq!(rejected.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(rejected.body["error"]["code"], "provider_unavailable");
-    assert_eq!(rejected.body["error"]["message"], signed_out);
+        let grok = grok_capability(&fx.app).await;
+        assert_eq!(grok["available"], false);
+        assert_eq!(grok["unavailable_reason"], signed_out);
+        let rejected = fx
+            .app
+            .send(&bot, Uuid::new_v4(), "again", Some("grok"))
+            .await;
+        assert_eq!(rejected.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(rejected.body["error"]["code"], "provider_unavailable");
+        assert_eq!(rejected.body["error"]["message"], signed_out);
 
-    std::fs::write(fx.login.join("auth.json"), SIGNED_IN).unwrap();
-    assert_eq!(
-        grok_capability(&fx.app).await["available"],
-        true,
-        "a host sign-in is picked up without a restart"
-    );
+        std::fs::write(fx.login.join("auth.json"), SIGNED_IN).unwrap();
+        assert_eq!(
+            grok_capability(&fx.app).await["available"],
+            true,
+            "a host sign-in is picked up without a restart"
+        );
+    }
     let turn = send(&fx.app, &bot, "hello again").await;
     let status = fx
         .app
