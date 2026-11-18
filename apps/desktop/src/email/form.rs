@@ -229,7 +229,6 @@ impl Form {
         let theme = cx.theme().clone();
         let note = |text: &str| {
             div()
-                .max_w(crate::panel_kit::PARAGRAPH)
                 .text_xs()
                 .text_color(theme.muted_foreground)
                 .child(text.to_owned())
