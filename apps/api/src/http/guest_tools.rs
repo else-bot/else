@@ -24,6 +24,7 @@ use crate::grants::Grant;
 pub(crate) mod approval;
 mod input_progress;
 mod job_wait;
+mod resize;
 
 pub use approval::call;
 use approval::{EFFECT_ADVERTISED, MAX_PURPOSE};
@@ -41,6 +42,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "computer_secrets",
     "computer_screenshot",
     "computer_input",
+    "computer_resize",
 ];
 
 /// Input batches one turn may send (unattended iterations are bounded; the
@@ -254,6 +256,23 @@ pub fn tool_list() -> Vec<Value> {
                 "purpose": purpose, "context": context, "task_scope": task_scope,
                 "approved_draft": approved_draft },
                 "required": ["frame", "actions", "effect"], "additionalProperties": false },
+            "annotations": guest.clone(),
+        }),
+        json!({
+            "name": "computer_resize",
+            "description": "Ask the owner for more memory after work in your computer ran out of \
+                it. Shows an approval card unless a saved grant covers the size. Applying it \
+                restarts the computer: running jobs stop, files stay. With retry_job, else.bot \
+                re-runs that failed job after the restart and continues you with its result.",
+            "inputSchema": { "type": "object", "properties": {
+                "memory_mib": { "type": "integer", "enum": crate::computers::memory::MEMORY_SIZES_MIB,
+                    "description": "The smallest offered size likely to work." },
+                "reason": { "type": "string", "minLength": 1, "maxLength": 300,
+                    "description": "What ran out of memory and why this size, for the owner's card." },
+                "retry_job": { "type": "string", "format": "uuid",
+                    "description": "The failed background job to re-run once the computer restarts; \
+                        the card shows its command." } },
+                "required": ["memory_mib", "reason"], "additionalProperties": false },
             "annotations": guest.clone(),
         }),
         json!({
@@ -989,7 +1008,12 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                         out.exit_code,
                         slice(&command, 0, 200).1
                     );
-                    (tool_result(fit(output_json(&out))), Some(log))
+                    let mut value = fit(output_json(&out));
+                    if out.out_of_memory {
+                        value["out_of_memory"] =
+                            resize::out_of_memory(&computers, grant.bot_id).await;
+                    }
+                    (tool_result(value), Some(log))
                 }
                 Ok(Err(acquired)) => (not_ready(&acquired), None),
                 Err(err) => failure(err),
@@ -1069,6 +1093,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                 Err(err) => failure(err),
             }
         }
+        resize::NAME => resize::resize(state, grant, &computers, args).await,
         "computer_job" if args["wait"] == true => {
             let Some(id) = text("job_id").and_then(|s| s.parse::<Uuid>().ok()) else {
                 return (tool_error("job_id must be a job ID."), None);
@@ -1085,10 +1110,17 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                 computers.cancel_job(grant.bot_id, id).await
             };
             match result {
-                Ok(Some(job)) => (
-                    tool_result(fit(job_json(&job))),
-                    Some(format!("{name} {id}: {}", job.status)),
-                ),
+                Ok(Some(job)) => {
+                    let mut value = fit(job_json(&job));
+                    if job.out_of_memory {
+                        value["out_of_memory"] =
+                            resize::out_of_memory(&computers, grant.bot_id).await;
+                    }
+                    (
+                        tool_result(value),
+                        Some(format!("{name} {id}: {}", job.status)),
+                    )
+                }
                 Ok(None) => (tool_error("No such job."), None),
                 Err(err) => failure(err),
             }

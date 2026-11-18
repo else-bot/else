@@ -240,6 +240,13 @@ impl Action {
             Self::BotDeletion { .. } | Self::EmailRemoval { .. } | Self::MailAttachments { .. }
         )
     }
+
+    /// Whether the bot-wide destructive grant and a routine's grant cover
+    /// this action. A computer resize takes host memory, so only a grant
+    /// for its size covers it.
+    pub fn broad_grants_cover(&self) -> bool {
+        !matches!(self, Self::Tool { tool, .. } if tool == "computer_resize")
+    }
 }
 
 /// The recurring work a host action or computer tool call belongs to, as

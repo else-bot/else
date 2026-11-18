@@ -29,6 +29,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/bots/{bot_id}/computer/stop", post(stop))
         .route("/bots/{bot_id}/computer/resume", post(resume))
         .route("/bots/{bot_id}/computer/upgrade", post(upgrade))
+        .route("/bots/{bot_id}/computer/memory", post(set_memory))
         .route("/bots/{bot_id}/desktop", get(desktop).delete(close_desktop))
         .route(
             "/bots/{bot_id}/desktop/stream",
@@ -157,6 +158,10 @@ async fn show(
         .computers
         .as_ref()
         .is_some_and(|computers| computers.config().desktop);
+    let default_memory = state
+        .computers
+        .as_ref()
+        .map(|computers| computers.config().memory_mib);
     let (latest_image, upgrade) = match &state.computers {
         Some(computers) => (
             Some(computers.config().image.clone()),
@@ -185,6 +190,7 @@ async fn show(
             "state": "absent",
             "desired_state": "auto",
             "desktop_available": desktop,
+            "default_memory_mib": default_memory,
         })));
     };
     Ok(Json(json!({
@@ -193,6 +199,7 @@ async fn show(
         "image": image,
         "cpus": cpus,
         "memory_mib": memory,
+        "default_memory_mib": default_memory,
         "desired_state": desired,
         "state": observed,
         "active_leases": leases,
@@ -401,6 +408,48 @@ async fn upgrade(
             "upgrade_refused",
             reason,
         )),
+        Err(err) => Err(computer_error(err)),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetMemory {
+    /// One of the offered sizes; `null` returns to the configured size.
+    memory_mib: Option<u32>,
+}
+
+/// Set the memory the computer boots with. A running computer restarts at
+/// the new size; its jobs stop and its files stay.
+async fn set_memory(
+    State(state): State<Arc<AppState>>,
+    ApiPath(bot_id): ApiPath<Uuid>,
+    Json(body): Json<SetMemory>,
+) -> Result<Json<Value>, ApiError> {
+    require_bot(&state, bot_id, true).await?;
+    let computers = manager(&state)?;
+    let Some(_admission) = state.scheduler.gate().enter() else {
+        return Err(ApiError::unavailable(
+            "maintenance",
+            "A backup or an update is in progress; try again shortly.",
+        ));
+    };
+    let memory = body
+        .memory_mib
+        .filter(|memory| *memory != computers.config().memory_mib);
+    match computers.resize_memory(bot_id, memory).await {
+        Ok(resized) => Ok(Json(json!({
+            "memory_mib": resized.memory_mib,
+            "restarted": resized.restarted,
+        }))),
+        Err(ComputerError::Refused(reason)) => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "memory_refused",
+            reason,
+        )),
+        Err(ComputerError::Busy(reason)) => {
+            Err(ApiError::new(StatusCode::CONFLICT, "computer_busy", reason))
+        }
         Err(err) => Err(computer_error(err)),
     }
 }

@@ -197,6 +197,7 @@ impl ComputerManager {
             stderr: tail(&out.stderr, TAIL_BYTES),
             stdout_bytes: 0,
             stderr_bytes: out.stderr.len() as u64,
+            out_of_memory: false,
         });
         result.stdout = tail(&redact(&result.stdout, &redaction), TAIL_BYTES);
         result.stderr = tail(&redact(&result.stderr, &redaction), TAIL_BYTES);

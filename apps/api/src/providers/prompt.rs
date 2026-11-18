@@ -524,7 +524,7 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          named for the task, with files written by computer_write_file, a runtime from \
          `else-capabilities`, and its dependencies installed in the project. Check a \
          job with computer_job instead of rerunning it; wait with wait true, not polling. \
-         Link result files \
+         On out of memory, call computer_resize once; never loop. Link result files \
          and say where the source is. Credentials come only from \
          the Vault, shared by every bot: before asking for a login or a takeover, search \
          computer_secrets by site. Never print values or put them in arguments, files, \

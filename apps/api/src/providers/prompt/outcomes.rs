@@ -299,6 +299,13 @@ fn computer_job_waits_block(input: &TurnInput) -> String {
         } else if let Some(error) = &wait.error {
             text.push_str(&format!("Ended by else.bot: {}\n", escape(error)));
         }
+        if wait.out_of_memory && !stopped {
+            text.push_str(&format!(
+                "Out of memory: it likely ran out of your computer's {}. Call computer_resize \
+                 once with retry_job set to this job's id.\n",
+                crate::computers::memory::gib(wait.memory_mib.max(0) as u32)
+            ));
+        }
         text.push_str(&format!(
             "Output tail: {}\n</computer_job>\n",
             escape(&wait.output_tail)

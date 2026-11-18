@@ -22,6 +22,7 @@ mod desktop;
 pub mod jobs;
 mod leases;
 mod maintenance;
+pub mod memory;
 pub mod runtime;
 pub mod screens;
 mod snapshot;
@@ -231,6 +232,8 @@ struct Row {
     /// The runtime holds the computer at its maximum: it grew, and no reset
     /// of its boot size has been confirmed since.
     grown: bool,
+    /// The boot memory the owner approved; `None` boots at the configured size.
+    chosen_memory_mib: Option<i32>,
     desired_state: String,
     observed_state: String,
     generation: i64,
@@ -259,7 +262,7 @@ impl Row {
 }
 
 const ROW: &str = "runtime_name, image, cpus, memory_mib, max_cpus, max_memory_mib, grown, \
-                   desired_state, observed_state, generation, network";
+                   chosen_memory_mib, desired_state, observed_state, generation, network";
 
 /// What an active computer holds of the budget: its maximum once it grew,
 /// until a reset of its boot size is confirmed; its boot size otherwise.
@@ -280,6 +283,8 @@ enum Reason {
     Idle(IdleAction),
     Backup,
     ForJobs,
+    /// The owner approved a new memory size, applied while it is stopped.
+    Resize,
 }
 
 fn bounded(text: &str, max: usize) -> String {
@@ -833,16 +838,22 @@ impl ComputerManager {
         self.observe(bot_id).await
     }
 
-    /// Set a stopped computer to boot at the configured size, able to grow
-    /// to the desktop size, and return its row as it now is. Growth persists
-    /// across a restart, so a computer that grew stays counted at its
-    /// maximum until this reset succeeds. The caller holds the bot's
-    /// operation lock, and admits the start after this, against the result.
+    /// Set a stopped computer to boot at the configured size, with the
+    /// memory the owner chose if any, able to grow to the desktop size, and
+    /// return its row as it now is. Growth persists across a restart, so a
+    /// computer that grew stays counted at its maximum until this reset
+    /// succeeds. The caller holds the bot's operation lock, and admits the
+    /// start after this, against the result.
     async fn configure_boot(&self, bot_id: Uuid, row: &Row) -> Result<Row, ComputerError> {
-        let Some((max_cpus, max_memory)) = self.config.growth() else {
+        let cpus = self.config.cpus;
+        let max_cpus = self.config.growth().map_or(cpus, |(grown, _)| grown);
+        let (memory, max_memory) = self.boot_size(row.chosen_memory_mib.map(|m| m as u32));
+        if !row.grown
+            && (row.cpus as u32, row.memory_mib as u32) == (cpus, memory)
+            && row.max() == (max_cpus, max_memory)
+        {
             return Ok(row.clone());
-        };
-        let (cpus, memory) = (self.config.cpus, self.config.memory_mib);
+        }
         match self
             .runtime
             .configure(&row.runtime_name, cpus, memory, max_cpus, max_memory)

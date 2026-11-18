@@ -11,7 +11,7 @@ use crate::db::task_secrets::{Env, redact};
 
 const LAUNCH: &str = r#"mkdir -p "$1" && { cd "$HOME/work" 2>/dev/null || cd "$HOME"; }
 @ENV@
-cat /proc/sys/kernel/random/boot_id > "$1/boot" 2>/dev/null
+cat /proc/sys/kernel/random/boot_id > "$1/boot" 2>/dev/null; @OOM_KILLS@ > "$1/oom"
 if [ -n "$ELSE_REDACT_VARS" ]; then
   /usr/bin/setsid /bin/sh -c '{ PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" /bin/sh -c "$2" < /dev/null; echo $? > "$1/code"; } 2>&1 | /usr/bin/python3 -I -S -c "$3" > "$1/out"; mv "$1/code" "$1/exit"' sh "$1" "$2" "$3" > /dev/null 2>&1 < /dev/null &
 else

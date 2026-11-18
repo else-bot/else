@@ -46,6 +46,13 @@ enum Screen {
     Upgrading,
 }
 
+/// The owner's request to return the computer to its configured memory.
+enum MemoryReset {
+    Idle,
+    Running { _task: Task<()> },
+    Failed(String),
+}
+
 pub(super) struct ComputerView {
     client: Arc<Client>,
     bot: Uuid,
@@ -54,6 +61,7 @@ pub(super) struct ComputerView {
     screen: Screen,
     computer: Option<ComputerState>,
     upgrade_refused: Option<String>,
+    memory: MemoryReset,
     image: Option<Arc<RenderImage>>,
     painted_image: Option<Arc<RenderImage>>,
     resolution: (u16, u16),
@@ -115,6 +123,7 @@ impl ComputerView {
             screen: Screen::Loading,
             computer: None,
             upgrade_refused: None,
+            memory: MemoryReset::Idle,
             image: None,
             painted_image: None,
             resolution: (0, 0),
@@ -456,6 +465,64 @@ impl ComputerView {
                         })
                         .w_full()
                         .on_click(cx.listener(|view, _, _, cx| view.upgrade(cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn reset_memory(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.memory, MemoryReset::Running { .. }) {
+            return;
+        }
+        let client = self.client.clone();
+        let bot = self.bot;
+        self.memory = MemoryReset::Running {
+            _task: cx.spawn(async move |this, cx| {
+                let reset = client.reset_computer_memory(bot).await;
+                let _ = this.update(cx, |view, cx| {
+                    view.memory = match reset {
+                        Ok(()) => MemoryReset::Idle,
+                        Err(error) => MemoryReset::Failed(error.to_string()),
+                    };
+                    view.monitor(false, cx);
+                });
+            }),
+        };
+        cx.notify();
+    }
+
+    fn memory_section(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (memory, default) = self.computer.as_ref()?.raised_memory()?;
+        let theme = cx.theme();
+        let (message, color) = match &self.memory {
+            MemoryReset::Failed(error) => {
+                (format!("Couldn't lower its memory: {error}"), theme.danger)
+            }
+            _ => (
+                format!(
+                    "You raised this computer's memory to {}. Lowering it to {} restarts the \
+                     computer: running jobs stop, files stay.",
+                    gib(memory),
+                    gib(default)
+                ),
+                theme.muted_foreground,
+            ),
+        };
+        let running = matches!(self.memory, MemoryReset::Running { .. });
+        Some(
+            v_flex()
+                .gap_2()
+                .child(div().text_xs().text_color(color).child(message))
+                .child(
+                    Button::new("lower-computer-memory")
+                        .control(Tier::Secondary, Scale::Compact, running, cx)
+                        .label(if running {
+                            "Lowering memory…".to_owned()
+                        } else {
+                            format!("Lower to {}", gib(default))
+                        })
+                        .w_full()
+                        .on_click(cx.listener(|view, _, _, cx| view.reset_memory(cx))),
                 )
                 .into_any_element(),
         )
@@ -881,6 +948,7 @@ impl Render for ComputerView {
                         .bg(transparent_black())
                 })
                 .children(self.upgrade_section(cx))
+                .children(self.memory_section(cx))
                 .children(match &self.screen {
                     Screen::Failed(error) => Some(
                         div()
@@ -1020,6 +1088,14 @@ impl Render for ComputerView {
                     .child(notice.clone())
             }))
             .into_any_element()
+    }
+}
+
+fn gib(mib: u32) -> String {
+    if mib.is_multiple_of(1024) {
+        format!("{} GiB", mib / 1024)
+    } else {
+        format!("{:.1} GiB", f64::from(mib) / 1024.0)
     }
 }
 

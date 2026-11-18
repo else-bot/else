@@ -15,6 +15,18 @@ fn scope(choice: &QuestionChoice, question: &Question, bot: &str) -> (String, St
             "Just this once".into(),
             "Covers exactly this action.".into(),
         ),
+        APPROVE_TASK
+            if question.action.as_ref().and_then(|a| a.tool.as_deref())
+                == Some("computer_resize") =>
+        {
+            let up_to = question
+                .task_scope()
+                .map_or_else(|| "this size".to_owned(), |scope| scope.target.clone());
+            (
+                format!("Always allow {up_to}"),
+                format!("{bot} can raise its computer's memory {up_to} without asking. It still asks before re-running a job."),
+            )
+        }
         APPROVE_TASK => (
             "Always for this task".into(),
             question.task_scope().map_or_else(

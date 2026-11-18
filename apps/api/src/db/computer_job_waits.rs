@@ -185,6 +185,9 @@ pub struct Outcome {
     pub output_tail: String,
     /// Why else.bot ended it, such as `deadline exceeded`.
     pub error: Option<String>,
+    /// It likely ran out of its computer's memory, which has this many MiB.
+    pub out_of_memory: bool,
+    pub memory_mib: i32,
     /// `Settled` when the job ended, `Stopped` when the owner stopped the
     /// wait and cancelled the job.
     pub wait: Status,
@@ -197,8 +200,10 @@ pub async fn undelivered(
 ) -> Result<Vec<Outcome>, sqlx::Error> {
     sqlx::query_as(
         "SELECT w.id, w.job_id, j.command, j.status, j.exit_code,
-             coalesce(j.output_tail, '') AS output_tail, j.error, w.status AS wait
+             coalesce(j.output_tail, '') AS output_tail, j.error, w.status AS wait,
+             j.out_of_memory, coalesce(c.memory_mib, 0) AS memory_mib
          FROM computer_job_waits w JOIN guest_jobs j ON j.id = w.job_id
+         LEFT JOIN bot_computers c ON c.bot_id = j.bot_id
          WHERE w.turn_id = ?1 AND w.delivered_attempt IS NULL
            AND w.status IN ('settled', 'stopped')
          ORDER BY w.created_at, w.id",

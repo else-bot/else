@@ -39,6 +39,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "computer_browser",
     "computer_screenshot",
     "computer_input",
+    "computer_resize",
     "computer_handoff",
     "notify_owner",
     "mail_accounts",
@@ -118,6 +119,7 @@ pub const PARKING_TOOLS: &[&str] = &[
     "computer_browser",
     "computer_input",
     "computer_write_file",
+    "computer_resize",
 ];
 
 pub fn parks(tool: &str, result: &serde_json::Value) -> bool {

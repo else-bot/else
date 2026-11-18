@@ -69,8 +69,11 @@ impl ComputerManager {
             return Ok(false);
         };
         let action = match reason {
-            Reason::MustStop => {
-                if active == Some(true) && row.desired_state != "stopped" {
+            Reason::MustStop | Reason::Resize => {
+                if reason == Reason::MustStop
+                    && active == Some(true)
+                    && row.desired_state != "stopped"
+                {
                     return Ok(false);
                 }
                 sqlx::query(
