@@ -91,6 +91,8 @@ pub enum RoutineError {
          another model for the routine"
     )]
     ProviderUnavailable,
+    #[error("the routine is not paused by a failure; switch it on with its toggle instead")]
+    NotPaused,
     #[error(transparent)]
     Invalid(#[from] InvalidRoutine),
     #[error(transparent)]
@@ -160,6 +162,9 @@ pub struct Routine {
     pub failed_runs: i64,
     /// Why else.bot switched the routine off, if it did.
     pub paused_reason: Option<String>,
+    /// The last run is the owner's retry of the paused routine, not yet
+    /// reviewed.
+    pub retrying: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -184,6 +189,7 @@ struct Row {
     deleted_at: Option<DateTime<Utc>>,
     failed_runs: i64,
     paused_reason: Option<String>,
+    retrying: bool,
     run_due_at: Option<DateTime<Utc>>,
     skip_reason: Option<Skip>,
     turn_id: Option<Uuid>,
@@ -256,6 +262,7 @@ impl From<Row> for Routine {
             last_run,
             failed_runs: row.failed_runs,
             paused_reason: row.paused_reason,
+            retrying: row.retrying,
         }
     }
 }
@@ -303,7 +310,8 @@ const SELECT: &str =
     "SELECT r.id, r.bot_id, r.name, r.prompt, r.prompt_revision, r.check_command, r.cron, r.run_at, r.timezone,
         r.active_days, r.active_start, r.active_end, r.enabled,
         r.model, r.requested_model, r.next_due_at, r.created_at, r.updated_at, r.deleted_at,
-        r.failed_runs, r.paused_reason, lr.due_at AS run_due_at, lr.skip_reason, lr.turn_id, t.status AS turn_status,
+        r.failed_runs, r.paused_reason,
+        coalesce(lr.resumes AND NOT lr.reviewed, false) AS retrying, lr.due_at AS run_due_at, lr.skip_reason, lr.turn_id, t.status AS turn_status,
         t.error_code, t.error_message, t.finished_at
     FROM routines r
     LEFT JOIN routine_runs lr ON lr.id = (SELECT x.id FROM routine_runs x
@@ -745,28 +753,60 @@ struct OnDemand {
     prompt: String,
     prompt_revision: i64,
     model: Option<Json<RoutineModel>>,
+    paused: bool,
     queued: bool,
     busy: bool,
     last_due_at: Option<DateTime<Utc>>,
 }
 
+/// Who asks for a run now, and the request that names it.
+#[derive(Debug, Clone, Copy)]
+pub enum RunNow {
+    /// The bot, for an owner request; one turn queues at most one run of
+    /// each routine.
+    Turn(Caller),
+    /// The owner's Retry of a routine else.bot paused; a success switches
+    /// it back on.
+    Resume { bot_id: Uuid, request_id: Uuid },
+}
+
+impl RunNow {
+    fn tag(self) -> &'static [u8] {
+        match self {
+            Self::Turn(_) => b"routine-run-now\0",
+            Self::Resume { .. } => b"routine-resume\0",
+        }
+    }
+}
+
 /// Queue a run of a routine now, at the owner's request, outside its
 /// schedule and active hours. It leaves the schedule and the enabled state
-/// alone, and its outcome is reviewed like a scheduled run. One turn queues
-/// at most one run of each routine: a retry returns that run. Returns the
+/// alone, and its outcome is reviewed like a scheduled run, except that a
+/// successful [`RunNow::Resume`] switches its paused routine back on. One
+/// request queues at most one run: a retry returns that run. Returns the
 /// routine and whether this call queued the run.
 pub async fn run_now(
     pool: &SqlitePool,
     registry: &Registry,
-    caller: Caller,
+    by: RunNow,
     id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<(Routine, bool), RoutineError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    authorized_owner_conversation(&mut tx, caller).await?;
+    let (bot_id, request_id) = match by {
+        RunNow::Turn(caller) => {
+            authorized_owner_conversation(&mut tx, caller).await?;
+            (caller.bot_id, caller.turn_id)
+        }
+        RunNow::Resume { bot_id, request_id } => {
+            authorize_by(&mut tx, By::Owner { bot_id }).await?;
+            (bot_id, request_id)
+        }
+    };
+    let resumes = matches!(by, RunNow::Resume { .. });
     let mut hasher = Sha256::new();
-    hasher.update(b"routine-run-now\0");
-    hasher.update(caller.turn_id.as_bytes());
+    hasher.update(by.tag());
+    hasher.update(request_id.as_bytes());
     hasher.update(id.as_bytes());
     let digest = hasher.finalize();
     let run_id = Uuid::from_bytes(
@@ -776,6 +816,7 @@ pub async fn run_now(
     );
     let row: Option<OnDemand> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT r.conversation_id, r.name, r.prompt, r.prompt_revision, r.model,
+                NOT r.enabled AND r.paused_reason IS NOT NULL AS paused,
                 EXISTS (SELECT 1 FROM routine_runs WHERE id = ?3) AS queued,
                 (EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
                          WHERE rr.routine_id = r.id
@@ -787,7 +828,7 @@ pub async fn run_now(
          FROM routines r WHERE r.id = ?1 AND r.bot_id = ?2 AND r.deleted_at IS NULL"
     )))
     .bind(id)
-    .bind(caller.bot_id)
+    .bind(bot_id)
     .bind(run_id)
     .fetch_optional(&mut *tx)
     .await?;
@@ -797,6 +838,7 @@ pub async fn run_now(
         prompt,
         prompt_revision,
         model,
+        paused,
         queued,
         busy,
         last_due_at,
@@ -809,6 +851,9 @@ pub async fn run_now(
         tx.commit().await?;
         return Ok((routine, false));
     }
+    if resumes && !paused {
+        return Err(RoutineError::NotPaused);
+    }
     // An ended run awaiting review may still be retried; wait for it too.
     if busy {
         return Err(RoutineError::AlreadyRunning);
@@ -817,10 +862,10 @@ pub async fn run_now(
     let turn_id = match queue_saved_task(
         &mut tx,
         registry,
-        caller.bot_id,
+        bot_id,
         conversation_id,
         run_id,
-        b"routine-run-now\0",
+        by.tag(),
         &prompt,
         run_on,
     )
@@ -835,8 +880,8 @@ pub async fn run_now(
         now.max(last + chrono::Duration::milliseconds(1))
     });
     sqlx::query(
-        "INSERT INTO routine_runs (id, routine_id, due_at, name, turn_id, prompt_revision)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO routine_runs (id, routine_id, due_at, name, turn_id, prompt_revision, resumes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )
     .bind(run_id)
     .bind(id)
@@ -844,9 +889,20 @@ pub async fn run_now(
     .bind(&name)
     .bind(turn_id)
     .bind(prompt_revision)
+    .bind(resumes)
     .execute(&mut *tx)
     .await?;
-    events::turn_accepted(&mut tx, caller.bot_id, turn_id).await?;
+    if resumes {
+        // The owner's copy of the routine applies only a newer one.
+        sqlx::query(
+            "UPDATE routines SET updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    events::turn_accepted(&mut tx, bot_id, turn_id).await?;
     let routine = load(&mut tx, id).await?;
     tx.commit().await?;
     Ok((routine, true))
@@ -876,7 +932,8 @@ pub async fn run_of(
 pub const REVIEW_BATCH: i64 = 8;
 
 /// Handle up to `limit` routine runs whose turns have ended, per
-/// [`routine_failures::react`]: forget failures after a success, retry a
+/// [`routine_failures::react`]: forget failures after a success, switch a
+/// paused routine back on after the owner's retry succeeds, retry a
 /// transient failure once, or count the failure and tell the owner in the
 /// failed turn, pausing the routine when retrying cannot help or its runs
 /// keep failing. Each run is reviewed once, in one transaction with all it
@@ -913,6 +970,7 @@ struct EndedRun {
     turn_no: i64,
     due_at: DateTime<Utc>,
     retry: bool,
+    resumes: bool,
     status: TurnStatus,
     error_code: Option<String>,
     error_message: Option<String>,
@@ -921,10 +979,12 @@ struct EndedRun {
     name: String,
     prompt: String,
     prompt_revision: i64,
+    cron: String,
     timezone: String,
     #[sqlx(flatten)]
     active: ActiveColumns,
     enabled: bool,
+    paused: bool,
     next_due_at: Option<DateTime<Utc>>,
     model: Option<Json<RoutineModel>>,
     failed_runs: i64,
@@ -942,14 +1002,15 @@ async fn review(
     run_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
-    use crate::app::routine_failures::{self, Ended, Notice, Pause, Reaction, Run};
+    use crate::app::routine_failures::{self, Attempt, Ended, Notice, Pause, Reaction, Run};
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row: Option<EndedRun> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT rr.routine_id, rr.turn_id, t.turn_no, rr.due_at, rr.retry_of IS NOT NULL AS retry,
-                t.status, t.error_code, t.error_message,
-                r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.timezone,
+                rr.resumes, t.status, t.error_code, t.error_message,
+                r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.cron, r.timezone,
                 r.active_days, r.active_start, r.active_end,
-                r.enabled, r.next_due_at, r.model, r.failed_runs, r.run_at IS NOT NULL AS reminder,
+                r.enabled, NOT r.enabled AND r.paused_reason IS NOT NULL AS paused,
+                r.next_due_at, r.model, r.failed_runs, r.run_at IS NOT NULL AS reminder,
                 r.deleted_at IS NULL AND b.status = 'active' AS live,
                 rr.check_job_id, {checked},
                 NOT b.cancel_pending AND NOT EXISTS (
@@ -986,9 +1047,15 @@ async fn review(
         tx.commit().await?;
         return Ok(false);
     }
+    let attempt = match (run.retry, run.resumes) {
+        (true, _) => Attempt::Retry,
+        (false, true) => Attempt::Resume,
+        (false, false) => Attempt::First,
+    };
     let state = Run {
-        retry: run.retry,
+        attempt,
         enabled: run.enabled,
+        paused: run.paused,
         failed_runs: run.failed_runs,
     };
     let mut reaction = routine_failures::react(ended, state);
@@ -1045,14 +1112,16 @@ async fn review(
         reaction = routine_failures::react(
             ended,
             Run {
-                retry: true,
+                attempt: Attempt::Retry,
                 ..state
             },
         );
     }
+    // Reviewing an owner's retry ends its `retrying` flag.
+    let mut updated = run.resumes;
     let paused = match reaction {
         Reaction::Retry | Reaction::Ignore => None,
-        Reaction::Reset if run.reminder => {
+        Reaction::Reset | Reaction::Resume if run.reminder => {
             sqlx::query(
                 "UPDATE routines SET enabled = false, next_due_at = NULL,
                      deleted_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
@@ -1062,7 +1131,7 @@ async fn review(
             .bind(run.routine_id)
             .execute(&mut *tx)
             .await?;
-            events::bot_updated(&mut tx, run.bot_id).await?;
+            updated = true;
             None
         }
         Reaction::Reset => {
@@ -1074,14 +1143,31 @@ async fn review(
             .execute(&mut *tx)
             .await?
             .rows_affected();
-            if reset > 0 {
-                events::bot_updated(&mut tx, run.bot_id).await?;
-            }
+            updated |= reset > 0;
+            None
+        }
+        Reaction::Resume => {
+            let next = Schedule::stored(&run.cron, None, &run.timezone, run.active.hours())
+                .ok()
+                .and_then(|schedule| schedule.next_after(now));
+            sqlx::query(
+                "UPDATE routines SET enabled = ?2 IS NOT NULL, next_due_at = ?2, failed_runs = 0,
+                     paused_reason = NULL,
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                 WHERE id = ?1",
+            )
+            .bind(run.routine_id)
+            .bind(next.map(ts))
+            .execute(&mut *tx)
+            .await?;
+            updated = true;
             None
         }
         Reaction::Report => Some(None),
-        Reaction::Pause(Pause::NeedsAction) => Some(Some("needs_action")),
-        Reaction::Pause(Pause::Repeated) => Some(Some("repeated")),
+        Reaction::Pause(pause) | Reaction::StayPaused(pause) => Some(Some(match pause {
+            Pause::NeedsAction => "needs_action",
+            Pause::Repeated => "repeated",
+        })),
     };
     if let Some(paused) = paused {
         let failed_runs = run.failed_runs + 1;
@@ -1103,7 +1189,7 @@ async fn review(
                 name: &run.name,
                 ended,
                 message: run.error_message.as_deref(),
-                retried: run.retry,
+                retried: attempt == Attempt::Retry,
                 enabled,
                 failed_runs,
                 next: run
@@ -1143,6 +1229,9 @@ async fn review(
         .execute(&mut *tx)
         .await?;
         events::item_upsert(&mut tx, run.bot_id, item_id).await?;
+        updated = true;
+    }
+    if updated {
         events::bot_updated(&mut tx, run.bot_id).await?;
     }
     tx.commit().await?;

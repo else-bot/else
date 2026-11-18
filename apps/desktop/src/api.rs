@@ -1194,6 +1194,23 @@ impl Client {
         .map(|(_, v)| v.routine)
     }
 
+    /// Run a paused routine now; a success switches it back on. Repeating
+    /// `request_id` returns the same run.
+    pub async fn retry_routine(
+        self: Arc<Self>,
+        bot: Uuid,
+        routine: Uuid,
+        request_id: Uuid,
+    ) -> Result<Routine, ClientError> {
+        self.call::<RoutineEnvelope>(
+            Method::POST,
+            format!("/v1/bots/{bot}/routines/{routine}/retry"),
+            Some(json!({ "request_id": request_id })),
+        )
+        .await
+        .map(|(_, v)| v.routine)
+    }
+
     pub async fn set_routine_model(
         self: Arc<Self>,
         bot: Uuid,

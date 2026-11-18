@@ -1579,6 +1579,173 @@ async fn a_failure_retrying_cannot_fix_pauses_at_once_and_says_why() {
     );
 }
 
+async fn retry(app: &TestApp, bot: &str, routine: &str, request_id: Uuid) -> common::Reply {
+    app.owner(
+        "POST",
+        &format!("/v1/bots/{bot}/routines/{routine}/retry"),
+        Some(json!({ "request_id": request_id })),
+    )
+    .await
+}
+
+async fn set_prompt(app: &TestApp, routine: &str, prompt: &str) {
+    sqlx::query("UPDATE routines SET prompt = ?2 WHERE id = ?1")
+        .bind(routine.parse::<Uuid>().unwrap())
+        .bind(prompt)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+}
+
+async fn paused_routine(h: &Harness, bot: &str) -> String {
+    let (id, due) = failing_routine(h, bot, "[synthetic:policy] check the servers").await;
+    fire(&h.app, due).await;
+    wait_routine(&h.app, bot, |r| r["paused_reason"] == "needs_action").await;
+    id
+}
+
+#[tokio::test]
+async fn the_owner_retries_a_paused_routine_and_a_success_switches_it_back_on() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let id = paused_routine(&h, &main).await;
+    set_prompt(&h.app, &id, "Check the servers.").await;
+
+    let request = Uuid::new_v4();
+    let queued = retry(&h.app, &main, &id, request).await;
+    assert_eq!(queued.status, StatusCode::OK, "{}", queued.body);
+    assert_eq!(queued.body["queued"], true);
+    assert_eq!(
+        queued.body["routine"]["enabled"], false,
+        "paused while it runs"
+    );
+    assert_eq!(queued.body["routine"]["retrying"], true);
+    let again = retry(&h.app, &main, &id, request).await;
+    assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+    assert_eq!(
+        again.body["queued"], false,
+        "a repeated request returns its run"
+    );
+
+    let routine = wait_routine(&h.app, &main, |r| r["enabled"] == true).await;
+    assert_eq!(routine["last_run"]["status"], "completed");
+    assert_eq!(routine["paused_reason"], Value::Null);
+    assert_eq!(routine["failed_runs"], 0);
+    assert_eq!(routine["retrying"], false);
+    assert!(at(&routine["next_run_at"]) > Utc::now());
+    assert_eq!(runs(&h.app, &id).await.len(), 2);
+
+    let late = retry(&h.app, &main, &id, Uuid::new_v4()).await;
+    assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
+    assert_eq!(late.body["error"]["code"], "not_paused");
+    assert_eq!(runs(&h.app, &id).await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_second_retry_waits_for_the_first_and_a_stopped_retry_stays_paused() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let id = paused_routine(&h, &main).await;
+    set_prompt(&h.app, &id, "[synthetic:hang] check the servers").await;
+
+    let first = retry(&h.app, &main, &id, Uuid::new_v4()).await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    let second = retry(&h.app, &main, &id, Uuid::new_v4()).await;
+    assert_eq!(second.status, StatusCode::CONFLICT, "{}", second.body);
+    assert_eq!(second.body["error"]["code"], "already_running");
+    assert_eq!(runs(&h.app, &id).await.len(), 2, "one retry run");
+
+    let run = runs(&h.app, &id).await[1].0.unwrap();
+    h.app.wait_turn(&run.to_string(), &["running"]).await;
+    let stop = h
+        .app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/cancel"),
+            Some(json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert!(stop.status.is_success(), "{}", stop.body);
+    let routine = wait_routine(&h.app, &main, |r| r["retrying"] == false).await;
+    assert_eq!(routine["enabled"], false);
+    assert_eq!(routine["paused_reason"], "needs_action");
+    assert_eq!(routine["last_run"]["status"], "interrupted");
+    let (_, update) = events(&h.app, &main)
+        .await
+        .into_iter()
+        .rfind(|(kind, _)| kind == "bot.updated")
+        .unwrap();
+    assert_eq!(
+        update["routines"][0]["retrying"], false,
+        "clients learn the retry ended"
+    );
+}
+
+#[tokio::test]
+async fn a_retry_without_a_provider_says_so_and_queues_nothing() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let id = paused_routine(&h, &main).await;
+    sqlx::query("UPDATE routines SET model = ?2 WHERE id = ?1")
+        .bind(id.parse::<Uuid>().unwrap())
+        .bind(
+            json!({ "provider_id": "claude", "model": "claude-opus-5-5",
+                    "reasoning_effort": "high", "service_tier": "default" })
+            .to_string(),
+        )
+        .execute(&h.app.db.pool)
+        .await
+        .unwrap();
+    let refused = retry(&h.app, &main, &id, Uuid::new_v4()).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+    assert_eq!(refused.body["error"]["code"], "provider_unavailable");
+    assert_eq!(runs(&h.app, &id).await.len(), 1);
+    assert_eq!(owner_routines(&h.app, &main).await[0]["retrying"], false);
+}
+
+#[tokio::test]
+async fn a_failed_owner_retry_keeps_the_routine_paused_with_the_new_reason() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let id = paused_routine(&h, &main).await;
+    set_prompt(&h.app, &id, "[synthetic:fail] check the servers").await;
+
+    let queued = retry(&h.app, &main, &id, Uuid::new_v4()).await;
+    assert_eq!(queued.status, StatusCode::OK, "{}", queued.body);
+    let routine = wait_routine(&h.app, &main, |r| r["failed_runs"] == 2).await;
+    assert_eq!(routine["enabled"], false);
+    assert_eq!(routine["next_run_at"], Value::Null);
+    assert_eq!(routine["paused_reason"], "repeated");
+    assert_eq!(routine["retrying"], false);
+    assert_eq!(routine["last_run"]["error"]["code"], "provider_failed");
+    let all = runs(&h.app, &id).await;
+    assert_eq!(
+        all.len(),
+        2,
+        "an owner retry is never retried automatically"
+    );
+    let notice = replies(&h.app, all[1].0.unwrap()).await.pop().unwrap();
+    assert!(
+        notice.starts_with(
+            "Your retry of the routine **Tickets** failed because the AI provider reported an \
+             error, so it stays paused."
+        ),
+        "{notice}"
+    );
+
+    let dismissed = h
+        .app
+        .owner(
+            "PATCH",
+            &format!("/v1/bots/{main}/routines/{id}"),
+            Some(json!({ "dismiss_failures": true })),
+        )
+        .await;
+    assert_eq!(dismissed.status, StatusCode::OK, "{}", dismissed.body);
+    assert_eq!(dismissed.body["routine"]["paused_reason"], Value::Null);
+    assert_eq!(dismissed.body["routine"]["enabled"], false);
+}
+
 #[tokio::test]
 async fn a_successful_run_forgets_earlier_failures() {
     let h = harness().await;

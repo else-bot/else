@@ -868,6 +868,10 @@ pub struct Routine {
     /// Why else.bot switched the routine off: `needs_action` or `repeated`.
     #[serde(default)]
     pub paused_reason: Option<String>,
+    /// The last run is the owner's retry of the paused routine, not yet
+    /// settled.
+    #[serde(default)]
+    pub retrying: bool,
 }
 
 /// A bot's webhook: an authenticated call to its URL wakes the bot with

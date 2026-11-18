@@ -258,6 +258,7 @@ impl ModelDialog {
 enum RoutineSave {
     Saving { attempt: Uuid, enabled: bool },
     Dismissing { attempt: Uuid },
+    Retrying { attempt: Uuid },
     Model { attempt: Uuid },
     Deleting { attempt: Uuid },
     Failed(String),
@@ -269,6 +270,7 @@ impl RoutineSave {
             self,
             Self::Saving { .. }
                 | Self::Dismissing { .. }
+                | Self::Retrying { .. }
                 | Self::Model { .. }
                 | Self::Deleting { .. }
         )
@@ -278,6 +280,7 @@ impl RoutineSave {
         match self {
             Self::Saving { attempt, .. }
             | Self::Dismissing { attempt }
+            | Self::Retrying { attempt }
             | Self::Model { attempt }
             | Self::Deleting { attempt } => Some(*attempt),
             Self::Failed(_) => None,
@@ -552,6 +555,19 @@ impl ElseApp {
         self.save_routine(bot, routine, change, request, window, cx);
     }
 
+    fn retry_routine(
+        &mut self,
+        bot: Uuid,
+        routine: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let attempt = Uuid::new_v4();
+        let request = self.client.clone().retry_routine(bot, routine, attempt);
+        let change = RoutineSave::Retrying { attempt };
+        self.save_routine(bot, routine, change, request, window, cx);
+    }
+
     fn save_routine(
         &mut self,
         bot: Uuid,
@@ -564,6 +580,7 @@ impl ElseApp {
         let Some(attempt) = change.attempt() else {
             return;
         };
+        let retrying = matches!(change, RoutineSave::Retrying { .. });
         if !self.begin_routine_change(bot, routine, change) {
             return;
         }
@@ -587,10 +604,12 @@ impl ElseApp {
                         }
                     }
                     Err(err) => {
-                        entry.routines.insert(
-                            routine,
-                            RoutineSave::Failed(format!("Couldn't save. {err}")),
-                        );
+                        let text = if retrying {
+                            retry_failure(&err)
+                        } else {
+                            format!("Couldn't save. {err}")
+                        };
+                        entry.routines.insert(routine, RoutineSave::Failed(text));
                     }
                 }
                 cx.notify();
@@ -1913,7 +1932,8 @@ impl ElseApp {
             .on_click(cx.listener(move |app, _, window, cx| {
                 app.open_routine_delete_dialog(bot, id, window, cx)
             }));
-        let dismiss = (routine.failed_runs > 0).then(|| {
+        let retrying = routine.retrying || matches!(save, Some(RoutineSave::Retrying { .. }));
+        let dismiss = (routine.failed_runs > 0 && !retrying).then(|| {
             Button::new(ElementId::Name(format!("routine-dismiss-{id}").into()))
                 .control(Tier::Ghost, Scale::Compact, busy || !connected, cx)
                 .label("Dismiss")
@@ -1923,6 +1943,24 @@ impl ElseApp {
                     app.dismiss_routine_failures(bot, id, window, cx)
                 }))
         });
+        let retry =
+            (retrying || (!routine.enabled && routine.paused_reason.is_some())).then(|| {
+                Button::new(ElementId::Name(format!("routine-retry-{id}").into()))
+                    .control(
+                        Tier::Ghost,
+                        Scale::Compact,
+                        busy || !connected || retrying,
+                        cx,
+                    )
+                    .label("Retry")
+                    .loading(retrying)
+                    .accessibility_label(format!("Retry {} now", routine.name))
+                    .on_click(
+                        cx.listener(move |app, _, window, cx| {
+                            app.retry_routine(bot, id, window, cx)
+                        }),
+                    )
+            });
         // Whole tokens, so a narrow panel wraps between them and never
         // inside "Europe/Paris".
         let when = match (routine.run_at, &routine.active_hours) {
@@ -1938,6 +1976,10 @@ impl ElseApp {
         };
         let schedule = format!("{when} · {}", routine.timezone);
         let last = last_run(routine);
+        let progress = last
+            .clone()
+            .filter(|_| routine.retrying)
+            .map(|(text, _)| text);
         let problem = match save {
             Some(RoutineSave::Failed(err)) => Some(err.clone()),
             _ => last
@@ -2149,15 +2191,33 @@ impl ElseApp {
                             .flex_none()
                             .gap_1()
                             .items_center()
+                            .children(retry)
                             .children(dismiss)
                             .children(model_control)
                             .child(delete)
                             .child(switch),
                     ),
             )
+            .children(progress.map(|text| meta(text, cx)))
             .children(problem.map(|text| alert(text, theme.danger, cx)))
             .children(warning.map(|warning| alert(warning, theme.warning, cx)))
             .into_any_element()
+    }
+}
+
+/// Why a Retry queued nothing, in the owner's terms.
+fn retry_failure(err: &crate::api::ClientError) -> String {
+    match err.code() {
+        Some("provider_unavailable") => "Couldn't retry. No provider can run this routine now. \
+            Check Settings or choose another model for the routine."
+            .to_owned(),
+        Some("already_running") => "A run of this routine is already in progress.".to_owned(),
+        Some("not_paused") => "This routine is no longer paused.".to_owned(),
+        Some("queue_full") => {
+            "Couldn't retry. The bot's queue is full; try again once its requests finish."
+                .to_owned()
+        }
+        _ => format!("Couldn't retry. {err}"),
     }
 }
 
@@ -2322,6 +2382,14 @@ fn last_run(routine: &Routine) -> Option<(String, bool)> {
     let run = routine.last_run.as_ref()?;
     let when = local_time(run.due_at, &routine.timezone);
     let error = run.error.as_ref().and_then(|e| e.message.clone());
+    if routine.retrying {
+        let progress = match run.status.as_str() {
+            "queued" => "Retrying: waiting to start",
+            "checking" | "running" => "Retrying: running now",
+            _ => "Retrying: checking the result",
+        };
+        return Some((progress.to_owned(), false));
+    }
     if !routine.enabled
         && let Some(reason) = &routine.paused_reason
     {
@@ -2910,6 +2978,14 @@ mod tests {
             text,
             "Paused after 3 failed runs (the provider process exited)"
         );
+        let (text, attention) = last_run(&routine(serde_json::json!({
+            "enabled": false, "failed_runs": 1, "paused_reason": "needs_action", "retrying": true,
+            "last_run": { "due_at": "2026-11-08T02:00:00Z", "status": "running",
+                          "skip_reason": null, "error": null },
+        })))
+        .unwrap();
+        assert!(!attention, "a retry in progress hides the old failure");
+        assert_eq!(text, "Retrying: running now");
         let skipped = |reason: &str| {
             last_run(&routine(serde_json::json!({
                 "last_run": { "due_at": "2026-11-08T02:00:00Z", "status": "skipped",

@@ -7,6 +7,8 @@
 //! invalid model settings, a reply else.bot cannot read), or a routine whose scheduled
 //! runs keep failing, is paused and the owner is told why. An uncertain run
 //! may have done part of its work, so it is never retried automatically.
+//! The owner can retry a paused routine: a success switches it back on, and
+//! a failure keeps it paused with the new reason.
 
 use chrono::{DateTime, Utc};
 
@@ -143,12 +145,25 @@ fn explanation(code: &str) -> &'static str {
     known(code).map_or("an unexpected error happened", |known| known.explanation)
 }
 
+/// Why a run started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attempt {
+    /// A scheduled run, or one the bot started on demand.
+    First,
+    /// An automatic retry of a failed run.
+    Retry,
+    /// The owner's retry of a paused routine; a success switches it back on.
+    Resume,
+}
+
 /// The routine as the ended run found it.
 #[derive(Debug, Clone, Copy)]
 pub struct Run {
-    /// The run was itself an automatic retry.
-    pub retry: bool,
+    pub attempt: Attempt,
     pub enabled: bool,
+    /// else.bot switched the routine off and the owner has not switched it
+    /// on, off, or dismissed its failures since.
+    pub paused: bool,
     /// Consecutive failed occurrences before this one.
     pub failed_runs: i64,
 }
@@ -171,22 +186,39 @@ pub enum Reaction {
     Report,
     /// Count the failure, switch the routine off, and tell the owner.
     Pause(Pause),
+    /// Forget earlier failures and switch the paused routine back on.
+    Resume,
+    /// The owner's retry failed: count it, keep the routine paused with
+    /// this reason, and tell the owner.
+    StayPaused(Pause),
 }
 
 pub fn react(ended: Ended<'_>, run: Run) -> Reaction {
+    // A routine the owner switched on, off, or dismissed during the retry
+    // keeps the owner's choice.
+    let resumes = run.attempt == Attempt::Resume && run.paused;
     let code = match ended {
+        Ended::Completed if resumes => return Reaction::Resume,
         Ended::Completed => return Reaction::Reset,
         Ended::Stopped => return Reaction::Ignore,
         Ended::Failed { code } => Some(code),
         Ended::Uncertain => None,
     };
+    let needs_action = code.is_some_and(|code| cause(code) == Cause::NeedsAction);
+    if resumes {
+        return Reaction::StayPaused(if needs_action {
+            Pause::NeedsAction
+        } else {
+            Pause::Repeated
+        });
+    }
     if !run.enabled {
         return Reaction::Report;
     }
-    if code.is_some_and(|code| cause(code) == Cause::NeedsAction) {
+    if needs_action {
         return Reaction::Pause(Pause::NeedsAction);
     }
-    if code.is_some() && !run.retry {
+    if code.is_some() && run.attempt == Attempt::First {
         return Reaction::Retry;
     }
     if run.failed_runs + 1 >= MAX_FAILED_RUNS {
@@ -211,7 +243,8 @@ pub struct Notice<'a> {
     pub reminder: bool,
 }
 
-/// The bot's message about a failed run; `reaction` is `Report` or `Pause`.
+/// The bot's message about a failed run; `reaction` is `Report`, `Pause`, or
+/// `StayPaused`.
 pub fn notice(notice: &Notice<'_>, reaction: Reaction) -> String {
     let name = notice.name;
     let (what, error) = match notice.ended {
@@ -240,6 +273,10 @@ pub fn notice(notice: &Notice<'_>, reaction: Reaction) -> String {
         )
     };
     let body = match reaction {
+        Reaction::StayPaused(_) => format!(
+            "Your retry of the {kind} **{name}** failed because {what}, so it stays paused. Ask \
+             me to look into it, then retry it from this bot's settings."
+        ),
         Reaction::Pause(Pause::NeedsAction) if notice.reminder => format!(
             "The reminder **{name}** failed because {what}. Retrying won't fix this: its \
              instructions, its model, or else.bot itself needs a change first. {fix}"
@@ -290,8 +327,9 @@ mod tests {
     use super::*;
 
     const FRESH: Run = Run {
-        retry: false,
+        attempt: Attempt::First,
         enabled: true,
+        paused: false,
         failed_runs: 0,
     };
     const CLOSED: Ended<'static> = Ended::Failed {
@@ -302,7 +340,7 @@ mod tests {
     fn a_transient_failure_retries_once_then_waits_then_pauses() {
         assert_eq!(react(CLOSED, FRESH), Reaction::Retry);
         let retry = Run {
-            retry: true,
+            attempt: Attempt::Retry,
             ..FRESH
         };
         assert_eq!(react(CLOSED, retry), Reaction::Report);
@@ -359,6 +397,53 @@ mod tests {
             ),
             Reaction::Report
         );
+    }
+
+    #[test]
+    fn an_owner_retry_resumes_on_success_and_otherwise_stays_paused() {
+        let paused = Run {
+            attempt: Attempt::Resume,
+            enabled: false,
+            paused: true,
+            failed_runs: 1,
+        };
+        assert_eq!(react(Ended::Completed, paused), Reaction::Resume);
+        assert_eq!(
+            react(
+                Ended::Failed {
+                    code: "policy_violation"
+                },
+                paused
+            ),
+            Reaction::StayPaused(Pause::NeedsAction)
+        );
+        assert_eq!(react(CLOSED, paused), Reaction::StayPaused(Pause::Repeated));
+        assert_eq!(
+            react(Ended::Uncertain, paused),
+            Reaction::StayPaused(Pause::Repeated)
+        );
+        assert_eq!(react(Ended::Stopped, paused), Reaction::Ignore);
+        let switched_on = Run {
+            enabled: true,
+            paused: false,
+            ..paused
+        };
+        assert_eq!(react(Ended::Completed, switched_on), Reaction::Reset);
+        assert_eq!(
+            react(CLOSED, switched_on),
+            Reaction::Report,
+            "never retried automatically"
+        );
+        let switched_off = Run {
+            paused: false,
+            ..paused
+        };
+        assert_eq!(
+            react(Ended::Completed, switched_off),
+            Reaction::Reset,
+            "the owner's switch stays off"
+        );
+        assert_eq!(react(CLOSED, switched_off), Reaction::Report);
     }
 
     #[test]
