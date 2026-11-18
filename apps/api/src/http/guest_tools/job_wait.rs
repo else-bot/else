@@ -35,14 +35,17 @@ pub(super) async fn wait_job(
         Ok(None) => return refused(CreateError::NotRunning),
         Err(err) => return refused(err.into()),
     };
-    let ended = |job: crate::computers::jobs::JobState| -> Outcome {
+    let ended = async |job: crate::computers::jobs::JobState| -> Outcome {
         let mut value = job_json(&job);
         value["next"] = json!("The job already ended; nothing waits. Continue with this result.");
+        if job.out_of_memory {
+            value["out_of_memory"] = super::resize::out_of_memory(computers, grant.bot_id).await;
+        }
         let log = format!("computer_job wait {id}: already {}", job.status);
         (tool_result(fit(value)), Some(log))
     };
     match computers.job(grant.bot_id, id).await {
-        Ok(Some(job)) if job.status.is_ended() => return ended(job),
+        Ok(Some(job)) if job.status.is_ended() => return ended(job).await,
         Ok(Some(_)) => {}
         Ok(None) => return refused(CreateError::NoSuchJob),
         Err(err) => return failure(err),
@@ -69,7 +72,7 @@ pub(super) async fn wait_job(
             )
         }
         Ok(Created::Ended) => match computers.job(grant.bot_id, id).await {
-            Ok(Some(job)) => ended(job),
+            Ok(Some(job)) => ended(job).await,
             Ok(None) => refused(CreateError::NoSuchJob),
             Err(err) => failure(err),
         },

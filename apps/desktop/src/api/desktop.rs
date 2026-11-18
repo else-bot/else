@@ -38,9 +38,21 @@ pub struct ComputerState {
     pub latest_image: Option<String>,
     #[serde(default)]
     pub upgrade: Option<ComputerUpgrade>,
+    #[serde(default)]
+    pub memory_mib: Option<u32>,
+    #[serde(default)]
+    pub default_memory_mib: Option<u32>,
 }
 
 impl ComputerState {
+    /// The memory the owner approved above the configured size, and that size.
+    pub fn raised_memory(&self) -> Option<(u32, u32)> {
+        match (self.memory_mib, self.default_memory_mib) {
+            (Some(memory), Some(default)) if memory > default => Some((memory, default)),
+            _ => None,
+        }
+    }
+
     pub fn outdated(&self) -> bool {
         matches!((&self.image, &self.latest_image), (Some(image), Some(latest)) if image != latest)
     }
@@ -267,25 +279,39 @@ impl Client {
     }
 
     pub async fn resume_computer(self: Arc<Self>, bot: Uuid) -> Result<(), ClientError> {
-        self.post_computer(bot, "resume").await
+        self.post_computer(bot, "resume", None).await
     }
 
     /// Starts moving the computer to the server's latest image; the
     /// computer state reports its progress.
     pub async fn upgrade_computer(self: Arc<Self>, bot: Uuid) -> Result<(), ClientError> {
-        self.post_computer(bot, "upgrade").await
+        self.post_computer(bot, "upgrade", None).await
+    }
+
+    /// Return the computer to its configured memory; it restarts if running.
+    pub async fn reset_computer_memory(self: Arc<Self>, bot: Uuid) -> Result<(), ClientError> {
+        self.post_computer(
+            bot,
+            "memory",
+            Some(serde_json::json!({ "memory_mib": null })),
+        )
+        .await
     }
 
     async fn post_computer(
         self: Arc<Self>,
         bot: Uuid,
         action: &'static str,
+        body: Option<serde_json::Value>,
     ) -> Result<(), ClientError> {
         let this = self.clone();
         self.run(async move {
-            let request = this
+            let mut request = this
                 .request(Method::POST, &format!("/v1/bots/{bot}/computer/{action}"))
-                .timeout(Duration::from_secs(15));
+                .timeout(Duration::from_secs(if body.is_some() { 120 } else { 15 }));
+            if let Some(body) = body {
+                request = request.json(&body);
+            }
             let response = this.send_request(request).await?;
             let status = response.status();
             if status == StatusCode::UNAUTHORIZED {

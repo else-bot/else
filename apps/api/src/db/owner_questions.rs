@@ -474,7 +474,11 @@ async fn decide(
             }
         }
     }
-    if spec.kind == Kind::Destructive && standing_allowed {
+    let broad = spec
+        .approval
+        .as_ref()
+        .is_none_or(|a| a.action.broad_grants_cover());
+    if spec.kind == Kind::Destructive && standing_allowed && broad {
         let standing = match scope {
             Scope::Bot if has_permission(&mut tx, caller.bot_id, DESTRUCTIVE_SCOPE).await? => {
                 Some(Standing::Bot)

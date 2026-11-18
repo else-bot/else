@@ -135,6 +135,14 @@ def run(runner):
                                         self.call("computer_job", {"job_id": "40000000-0000-0000-0000-000000000001", "wait": True},
                                                   {"status": "waiting", "parked": True})],
                                        "Started the crawl; I'll report when it ends."),
+                "oom-job-asks-for-memory": ([self.call("computer_job_start", {
+                    "command": "cd ~/work/search && python3 build_index.py", "effect": "local", "purpose": "Build the search index"}),
+                                            self.call("computer_job", {"job_id": "40000000-0000-0000-0000-000000000021", "wait": True},
+                                                      {"status": "failed", "exit_code": 137}),
+                                            self.call("computer_resize", {"memory_mib": 2048, "reason": "The index build was killed at 1 GiB",
+                                                                          "retry_job": "40000000-0000-0000-0000-000000000021"},
+                                                      {"status": "pending", "parked": True})],
+                                           "The build ran out of memory at 1 GiB; I asked you for 2 GiB and will re-run it."),
                 "ci-poll-job-has-readable-purpose": ([self.call("computer_job_start", {
                     "command": "./wait-ci.sh 482", "effect": "local", "purpose": "CI checks on PR #482"}),
                                                      self.call("computer_job", {"job_id": "40000000-0000-0000-0000-000000000011", "wait": True},

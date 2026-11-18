@@ -10,6 +10,8 @@ use else_api::computers::{ComputerRuntime, ExecOutput, RuntimeError, RuntimeStat
 pub struct Guest {
     probe: Mutex<String>,
     state: Mutex<std::collections::HashMap<String, RuntimeState>>,
+    /// The boot memory each `configure` set, in order.
+    configured: Mutex<Vec<u32>>,
 }
 
 impl Guest {
@@ -17,7 +19,12 @@ impl Guest {
         Self {
             probe: Mutex::new("running\n".into()),
             state: Mutex::default(),
+            configured: Mutex::default(),
         }
+    }
+
+    pub fn configured(&self) -> Vec<u32> {
+        self.configured.lock().unwrap().clone()
     }
 
     pub fn report(&self, probe: &str) {
@@ -55,6 +62,17 @@ impl ComputerRuntime for Guest {
             .lock()
             .unwrap()
             .insert(name.into(), RuntimeState::Stopped);
+        Ok(())
+    }
+    async fn configure(
+        &self,
+        _: &str,
+        _: u32,
+        memory_mib: u32,
+        _: u32,
+        _: u32,
+    ) -> Result<(), RuntimeError> {
+        self.configured.lock().unwrap().push(memory_mib);
         Ok(())
     }
     async fn pause(&self, _: &str) -> Result<(), RuntimeError> {

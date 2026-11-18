@@ -62,7 +62,7 @@ out.write(clean(buf)); out.flush()"#;
 const RUN: &str = r#"cd "$HOME/work" 2>/dev/null || cd "$HOME"
 @ENV@
 mkdir -p "$3"; cat /proc/sys/kernel/random/boot_id > "$3/boot" 2>/dev/null
-o=$(mktemp); e=$(mktemp)
+o=$(mktemp); e=$(mktemp); k=$(@OOM_KILLS@)
 if [ -n "$ELSE_REDACT_VARS" ]; then
   mkfifo "$3/o" "$3/e"
   /usr/bin/setsid /bin/sh -c '/usr/bin/python3 -I -S -c "$4" < "$1/o" > "$2" & /usr/bin/python3 -I -S -c "$4" < "$1/e" > "$3" & PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" /bin/sh -c "$5" > "$1/o" 2> "$1/e" < /dev/null; c=$?; wait; exit $c' sh "$3" "$o" "$e" "$4" "$1" < /dev/null &
@@ -70,18 +70,46 @@ else
   PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" /usr/bin/setsid /bin/sh -c "$1" > "$o" 2> "$e" < /dev/null &
 fi
 pg=$!; echo $pg > "$3/pid"
-wait $pg; c=$?
+wait $pg; c=$?; k=$(( $(@OOM_KILLS@) - $k ))
 /usr/bin/kill -s KILL -- "-$pg" 2>/dev/null
-printf '%s\n%s\n%s\n' "$c" "$(wc -c < "$o")" "$(wc -c < "$e")"
+printf '%s %s\n%s\n%s\n' "$c" "$k" "$(wc -c < "$o")" "$(wc -c < "$e")"
 tail -c "$2" "$o"; printf '\n\000\n'; tail -c "$2" "$e"
 rm -f "$o" "$e"; rm -rf "$3""#;
+
+/// Prints how many processes the guest kernel's OOM killer has ended since
+/// boot (0 when unknown); a rise across a command means it ran out of
+/// memory.
+const OOM_KILLS: &str = r#"k=$(sed -n 's/^oom_kill //p' /proc/vmstat 2>/dev/null); echo "${k:-0}""#;
+
+/// What a failed command's own output says when an allocation failed
+/// without the kernel killing it.
+const OOM_MESSAGES: [&str; 7] = [
+    "Cannot allocate memory",
+    "MemoryError",
+    "out of memory",
+    "Out of memory",
+    "memory allocation of",
+    "std::bad_alloc",
+    "JavaScript heap out of memory",
+];
+
+/// Whether a command that ended with `exit_code` likely ran out of memory:
+/// it failed and the guest kernel's OOM killer ran meanwhile, or its output
+/// reports a failed allocation.
+fn ran_out_of_memory(exit_code: Option<i32>, oom_kills: u64, output: &[&str]) -> bool {
+    exit_code != Some(0)
+        && (oom_kills > 0
+            || output
+                .iter()
+                .any(|text| OOM_MESSAGES.iter().any(|m| text.contains(m))))
+}
 
 const RUNS_DIR: &str = "/var/lib/elsebot/runs";
 const REDACT_MARGIN: usize = crate::db::task_secrets::MAX_VALUE + 64;
 const JOB_TAIL: usize = 4000;
 
 const PROBE: &str = r#"b=$(cat "$1/boot" 2>/dev/null) && [ "$b" != "$(cat /proc/sys/kernel/random/boot_id)" ] && [ ! -f "$1/exit" ] && { echo lost; exit 0; }
-if [ -f "$1/exit" ]; then echo "done $(cat "$1/exit")"; elif [ -f "$1/pid" ] && kill -0 "$(cat "$1/pid")" 2>/dev/null; then echo running; else echo lost; fi; tail -c "$2" "$1/out" 2>/dev/null"#;
+if [ -f "$1/exit" ]; then k=0; k0=$(cat "$1/oom" 2>/dev/null) && k=$(( $(@OOM_KILLS@) - k0 )); echo "done $(cat "$1/exit") $k"; elif [ -f "$1/pid" ] && kill -0 "$(cat "$1/pid")" 2>/dev/null; then echo running; else echo lost; fi; tail -c "$2" "$1/out" 2>/dev/null"#;
 
 /// Stop a job's whole process group and confirm it is gone. procps `kill`
 /// takes a negative process group (the shell builtin does not). Once it is
@@ -144,7 +172,10 @@ impl JobStatus {
 /// How a launched job ended, with the exit code each outcome records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
-    Exited(Option<i32>),
+    Exited {
+        code: Option<i32>,
+        out_of_memory: bool,
+    },
     Cancelled,
     Lost,
 }
@@ -152,8 +183,8 @@ enum Outcome {
 impl Outcome {
     fn status(self) -> JobStatus {
         match self {
-            Self::Exited(Some(0)) => JobStatus::Completed,
-            Self::Exited(_) => JobStatus::Failed,
+            Self::Exited { code: Some(0), .. } => JobStatus::Completed,
+            Self::Exited { .. } => JobStatus::Failed,
             Self::Cancelled => JobStatus::Cancelled,
             Self::Lost => JobStatus::Lost,
         }
@@ -161,10 +192,20 @@ impl Outcome {
 
     fn exit_code(self) -> Option<i32> {
         match self {
-            Self::Exited(code) => code,
+            Self::Exited { code, .. } => code,
             Self::Cancelled => Some(130),
             Self::Lost => None,
         }
+    }
+
+    fn out_of_memory(self) -> bool {
+        matches!(
+            self,
+            Self::Exited {
+                out_of_memory: true,
+                ..
+            }
+        )
     }
 }
 
@@ -248,6 +289,20 @@ pub struct JobState {
     pub exit_code: Option<i32>,
     pub output_tail: String,
     pub command: String,
+    /// The job likely ran out of the computer's memory.
+    pub out_of_memory: bool,
+}
+
+/// What a failed job needs to run again exactly as it was started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rerun {
+    pub status: JobStatus,
+    pub command: String,
+    pub purpose: Option<String>,
+    /// Vault entry names whose variables it got.
+    pub secrets: Vec<String>,
+    pub webhook: Option<Uuid>,
+    pub max_duration: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,6 +332,8 @@ pub struct CommandOutput {
     pub stderr: String,
     pub stdout_bytes: u64,
     pub stderr_bytes: u64,
+    /// The command likely ran out of the computer's memory.
+    pub out_of_memory: bool,
 }
 
 fn tail(text: &str, max: usize) -> String {
@@ -288,7 +345,9 @@ fn tail(text: &str, max: usize) -> String {
 }
 
 fn with_env(script: &str) -> String {
-    script.replace("@ENV@", ENV_FROM_STDIN)
+    script
+        .replace("@ENV@", ENV_FROM_STDIN)
+        .replace("@OOM_KILLS@", OOM_KILLS)
 }
 
 fn env_input(env: &Env) -> Vec<u8> {
@@ -318,7 +377,9 @@ pub(super) struct Foreground {
 
 fn parse_run(out: &ExecOutput) -> Option<CommandOutput> {
     let mut lines = out.stdout.splitn(4, '\n');
-    let exit_code = lines.next()?.trim().parse::<i32>().ok();
+    let mut status = lines.next()?.split_whitespace();
+    let exit_code = status.next().and_then(|code| code.parse::<i32>().ok());
+    let oom_kills = status.next().and_then(|n| n.parse().ok()).unwrap_or(0);
     let stdout_bytes = lines.next()?.trim().parse().ok()?;
     let stderr_bytes = lines.next()?.trim().parse().ok()?;
     let rest = lines.next().unwrap_or_default();
@@ -329,6 +390,7 @@ fn parse_run(out: &ExecOutput) -> Option<CommandOutput> {
         stderr: stderr.to_owned(),
         stdout_bytes,
         stderr_bytes,
+        out_of_memory: ran_out_of_memory(exit_code, oom_kills, &[stdout, stderr]),
     })
 }
 
@@ -385,13 +447,44 @@ impl ComputerManager {
         self.load_job(bot_id, job_id).await
     }
 
+    /// How a job of this bot was started, to run it again.
+    pub async fn rerun(&self, bot_id: Uuid, job_id: Uuid) -> Result<Option<Rerun>, ComputerError> {
+        type Found = (
+            JobStatus,
+            String,
+            Option<String>,
+            sqlx::types::Json<Vec<String>>,
+            Option<Uuid>,
+            f64,
+        );
+        let found: Option<Found> = sqlx::query_as(
+            "SELECT status, command, purpose, secrets, webhook_id,
+                    (julianday(deadline) - julianday(started_at)) * 86400.0
+             FROM guest_jobs WHERE id = ?1 AND bot_id = ?2",
+        )
+        .bind(job_id)
+        .bind(bot_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(found.map(
+            |(status, command, purpose, secrets, webhook, seconds)| Rerun {
+                status,
+                command,
+                purpose,
+                secrets: secrets.0,
+                webhook,
+                max_duration: Duration::from_secs_f64(seconds.max(60.0)),
+            },
+        ))
+    }
+
     async fn load_job(
         &self,
         bot_id: Uuid,
         job_id: Uuid,
     ) -> Result<Option<JobState>, ComputerError> {
         let row = sqlx::query(
-            "SELECT id, status, exit_code, coalesce(output_tail, '') AS tail, command
+            "SELECT id, status, exit_code, coalesce(output_tail, '') AS tail, command, out_of_memory
              FROM guest_jobs WHERE id = ?1 AND bot_id = ?2",
         )
         .bind(job_id)
@@ -404,6 +497,7 @@ impl ComputerManager {
             exit_code: r.get("exit_code"),
             output_tail: r.get("tail"),
             command: r.get("command"),
+            out_of_memory: r.get("out_of_memory"),
         }))
     }
 
@@ -453,7 +547,10 @@ impl ComputerManager {
         let dir = format!("{JOBS_DIR}/{job_id}");
         let op = self.op(bot_id).await;
         let margin = (JOB_TAIL + REDACT_MARGIN).to_string();
-        let out = match self.inspect_held(bot_id, PROBE, &[&dir, &margin]).await? {
+        let out = match self
+            .inspect_held(bot_id, &with_env(PROBE), &[&dir, &margin])
+            .await?
+        {
             Inspect::Out(out) => out,
             Inspect::Gone => {
                 drop(op);
@@ -467,10 +564,15 @@ impl ComputerManager {
             .split_once('\n')
             .unwrap_or((out.stdout.as_str(), ""));
         let output = tail(&self.redact_job(job_id, rest).await?, JOB_TAIL);
-        if let Some(code) = first.strip_prefix("done ") {
-            let code = code.trim().parse::<i32>().ok();
-            self.finish_job(job_id, Outcome::Exited(code), &output, lease)
-                .await
+        if let Some(done) = first.strip_prefix("done ") {
+            let mut done = done.split_whitespace();
+            let code = done.next().and_then(|code| code.parse::<i32>().ok());
+            let kills = done.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            let outcome = Outcome::Exited {
+                code,
+                out_of_memory: ran_out_of_memory(code, kills, &[&output]),
+            };
+            self.finish_job(job_id, outcome, &output, lease).await
         } else if first == "lost" {
             self.finish_job(job_id, Outcome::Lost, &output, lease).await
         } else {
@@ -514,11 +616,13 @@ impl ComputerManager {
             End::CancelledUnlaunched => (None, None, None),
             End::Ended { outcome, output } => (outcome.exit_code(), Some(output), None),
         };
+        let out_of_memory = matches!(end, End::Ended { outcome, .. } if outcome.out_of_memory());
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let (states, unleased) = end.sources();
         sqlx::query(
             "UPDATE guest_jobs SET status = ?2, exit_code = ?3,
                  output_tail = COALESCE(?4, output_tail), error = COALESCE(?5, error),
+                 out_of_memory = ?8,
                  finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
              WHERE id = ?1 AND status IN (SELECT value FROM json_each(?6))
                AND (NOT ?7 OR lease_id IS NULL)",
@@ -530,6 +634,7 @@ impl ComputerManager {
         .bind(error)
         .bind(states)
         .bind(unleased)
+        .bind(out_of_memory)
         .execute(&mut *tx)
         .await?;
         job_waits::publish_settled(&mut tx, id).await?;
@@ -795,5 +900,26 @@ mod tests {
         assert_eq!((parsed.stdout_bytes, parsed.stderr_bytes), (12, 4));
         assert_eq!(parsed.stdout, "hello world\n");
         assert_eq!(parsed.stderr, "warn");
+        assert!(!parsed.out_of_memory);
+    }
+
+    #[test]
+    fn a_failed_command_is_out_of_memory_when_the_oom_killer_ran_or_it_says_so() {
+        let run = |status: &str, stderr: &str| {
+            parse_run(&ExecOutput {
+                status: Some(0),
+                stdout: format!("{status}\n0\n{}\n\n\0\n{stderr}", stderr.len()),
+                stderr: String::new(),
+                truncated: false,
+            })
+            .unwrap()
+            .out_of_memory
+        };
+        assert!(run("137 1", ""), "killed by the OOM killer");
+        assert!(run("101 0", "memory allocation of 4096 bytes failed"));
+        assert!(run("1 0", "MemoryError"));
+        assert!(!run("137 0", ""), "a SIGKILL without the OOM killer");
+        assert!(!run("0 1", ""), "another process was killed");
+        assert!(!run("137", ""), "an older guest script reports no count");
     }
 }
