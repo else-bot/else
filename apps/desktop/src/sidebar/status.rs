@@ -14,16 +14,24 @@ pub fn waited(since: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
-/// What a bot waiting on other bots shows: `Waiting for Dev`,
-/// `Waiting for Dev · 3 tasks`, `Waiting for 2 bots · 4 tasks`. The count
-/// appears only when it adds to the names.
-pub fn waiting_for(names: &[&str], tasks: usize) -> String {
+/// What a parked bot shows: `Waiting for Dev`, `Waiting for Dev · 3 tasks`,
+/// `Waiting for 2 bots · 4 tasks`, `Waiting on a job`, `Waiting on 2 jobs`,
+/// `Waiting for Dev and a job`. The task count appears only when it adds to
+/// the names.
+pub fn waiting_for(names: &[&str], tasks: usize, jobs: usize) -> String {
+    let jobs_text = match jobs {
+        1 => "a job".to_owned(),
+        jobs => format!("{jobs} jobs"),
+    };
     let who = match names {
+        [] if jobs > 0 && tasks == 0 => return format!("Waiting on {jobs_text}"),
         [] => "another bot".to_owned(),
         [name] => (*name).to_owned(),
         many => format!("{} bots", many.len()),
     };
-    if tasks > names.len().max(1) {
+    if jobs > 0 {
+        format!("Waiting for {who} and {jobs_text}")
+    } else if tasks > names.len().max(1) {
         format!("Waiting for {who} · {tasks} tasks")
     } else {
         format!("Waiting for {who}")
@@ -33,14 +41,15 @@ pub fn waiting_for(names: &[&str], tasks: usize) -> String {
 pub fn waiting_label(waiting: &WaitingOn) -> String {
     let names: Vec<&str> = waiting.bots.iter().map(|b| b.name.as_str()).collect();
     let tasks = waiting.bots.iter().map(|b| b.tasks as usize).sum();
-    waiting_for(&names, tasks)
+    waiting_for(&names, tasks, waiting.jobs as usize)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Message,
     Working,
-    /// Parked on tasks other bots are doing; nothing for the owner to do.
+    /// Parked on tasks other bots are doing or on its own jobs; nothing for
+    /// the owner to do.
     Waiting,
     Queued,
     Answer,
@@ -278,29 +287,46 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_parked_on_other_bots_waits_instead_of_working() {
-        let waiting = |bots: Value, queued: u32| {
+    fn a_turn_parked_on_other_bots_or_jobs_waits_instead_of_working() {
+        let waiting = |bots: Value, jobs: Option<u32>, queued: u32| {
+            let mut waiting_on = json!({ "since": "2026-11-13T12:00:00Z", "bots": bots });
+            if let Some(jobs) = jobs {
+                waiting_on["jobs"] = jobs.into();
+            }
             let bot = bot(json!({ "activity": {
                 "phase": "working", "active_turn_id": null, "queued_count": queued,
-                "waiting_on": { "since": "2026-11-13T12:00:00Z", "bots": bots } } }));
+                "waiting_on": waiting_on } }));
             let subtitle = Subtitle::new(&bot, true, false);
             (subtitle.kind, subtitle.text)
         };
         let dev = |tasks| json!({ "id": uuid::Uuid::nil(), "name": "Dev", "tasks": tasks });
         let qa = json!({ "id": uuid::Uuid::max(), "name": "QA", "tasks": 1 });
-        for (bots, queued, text) in [
-            (json!([dev(1)]), 0, "Waiting for Dev"),
-            (json!([dev(3)]), 0, "Waiting for Dev · 3 tasks"),
-            (json!([dev(1), qa.clone()]), 0, "Waiting for 2 bots"),
+        for (bots, jobs, queued, text) in [
+            (json!([dev(1)]), None, 0, "Waiting for Dev"),
+            (json!([dev(3)]), Some(0), 0, "Waiting for Dev · 3 tasks"),
+            (json!([dev(1), qa.clone()]), None, 0, "Waiting for 2 bots"),
             (
-                json!([dev(3), qa]),
+                json!([dev(3), qa.clone()]),
+                None,
                 1,
                 "Waiting for 2 bots · 4 tasks · 1 queued",
             ),
+            (json!([]), Some(1), 0, "Waiting on a job"),
+            (json!([]), Some(2), 1, "Waiting on 2 jobs · 1 queued"),
+            (json!([dev(3)]), Some(1), 0, "Waiting for Dev and a job"),
+            (
+                json!([dev(1), qa]),
+                Some(2),
+                0,
+                "Waiting for 2 bots and 2 jobs",
+            ),
         ] {
-            assert_eq!(waiting(bots, queued), (Kind::Waiting, text.to_owned()));
+            assert_eq!(
+                waiting(bots, jobs, queued),
+                (Kind::Waiting, text.to_owned())
+            );
         }
-        assert_eq!(waiting_for(&[], 0), "Waiting for another bot");
+        assert_eq!(waiting_for(&[], 0, 0), "Waiting for another bot");
     }
 
     #[test]

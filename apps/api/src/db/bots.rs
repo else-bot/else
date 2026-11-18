@@ -61,16 +61,20 @@ pub struct BotRecord {
     pub read: super::reads::ReadRow,
     #[sqlx(flatten)]
     pub sidebar: sidebar::SidebarRow,
-    /// Set while its active turn waits only on tasks it handed to other bots.
+    /// Set while its active turn is parked on tasks it handed to other bots
+    /// or on its own MCP and computer jobs.
     pub waiting_on: Option<Json<WaitingOn>>,
 }
 
-/// The bots an active turn waits on, oldest task first.
+/// What a parked turn waits on: the bots doing its tasks, oldest task
+/// first, and its own pending jobs.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct WaitingOn {
-    /// When its oldest unfinished task was handed off.
+    /// When its oldest unfinished task or job wait began.
     pub since: DateTime<Utc>,
     pub bots: Vec<WaitingBot>,
+    /// Its pending MCP and computer job waits.
+    pub jobs: u32,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -145,17 +149,22 @@ const SELECT_BOT: &str = concat!(
         (SELECT m.created_at FROM items m WHERE m.conversation_id = c.id
             AND m.kind IN ('user', 'assistant') AND NOT m.hidden AND NOT m.silent
             ORDER BY m.seq DESC LIMIT 1) AS last_message_at,
-        (SELECT CASE WHEN count(*) > 0 THEN json_object('since', min(g.since),
-                'bots', json_group_array(json_object('id', g.id, 'name', g.name, 'tasks', g.tasks))) END
-            FROM (SELECT lower(hex(d.target_bot_id)) AS id, t.name, count(*) AS tasks,
+        (SELECT CASE WHEN count(g.id) > 0 OR j.jobs > 0 THEN json_object(
+                'since', min(coalesce(min(g.since), j.since), coalesce(j.since, min(g.since))),
+                'bots', CASE WHEN count(g.id) > 0 THEN json_group_array(
+                    json_object('id', g.id, 'name', g.name, 'tasks', g.tasks)) ELSE json('[]') END,
+                'jobs', j.jobs) END
+            FROM (SELECT count(*) AS jobs, min(w.created_at) AS since
+                  FROM (SELECT created_at FROM mcp_waits WHERE turn_id = a.id AND status = 'pending'
+                        UNION ALL
+                        SELECT created_at FROM computer_job_waits
+                        WHERE turn_id = a.id AND status = 'pending') w) j
+            LEFT JOIN (SELECT lower(hex(d.target_bot_id)) AS id, t.name, count(*) AS tasks,
                          min(d.created_at) AS since
                   FROM delegations d JOIN bots t ON t.id = d.target_bot_id
                   WHERE d.root_turn_id = a.id AND d.status IN ('queued', 'running')
-                  GROUP BY d.target_bot_id ORDER BY min(d.created_at), d.target_bot_id) g
-            WHERE a.status = 'waiting'
-              AND NOT EXISTS (SELECT 1 FROM mcp_waits w WHERE w.turn_id = a.id AND w.status = 'pending')
-              AND NOT EXISTS (SELECT 1 FROM computer_job_waits w
-                              WHERE w.turn_id = a.id AND w.status = 'pending')) AS waiting_on,
+                  GROUP BY d.target_bot_id ORDER BY min(d.created_at), d.target_bot_id) g ON true
+            WHERE a.status = 'waiting') AS waiting_on,
         coalesce((SELECT e.seq FROM bot_events e WHERE e.bot_id = b.id
             AND e.kind = 'bot.updated' ORDER BY e.seq DESC LIMIT 1), 0) AS metadata_revision
     FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'

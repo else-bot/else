@@ -307,9 +307,14 @@ fn a_turn_parked_on_a_job_waits_and_says_on_how_many() {
     let mut computer = turn(13, "waiting");
     computer["computer_job_waits"] = json!([{ "id": id(31), "job_id": id(32) },
                                             { "id": id(33), "job_id": id(34) }]);
+    let mut both = turn(14, "waiting");
+    both["computer_job_waits"] = json!([{ "id": id(35), "job_id": id(36) }]);
+    both["delegations"] = json!([{ "id": id(40), "attempt": 0, "target_bot_id": id(50),
+        "target_name": "Dev", "task": "Fix it", "status": "running",
+        "created_at": "2026-11-05T10:02:00Z" }]);
     let c = conversation(
         vec![item(1, 11, "assistant"), item(2, 13, "assistant")],
-        vec![mcp, turn(12, "waiting"), computer],
+        vec![mcp, turn(12, "waiting"), computer, both],
     );
     let replies = task_replies(&c);
     assert_eq!(replies[&id(11)].state, ReplyState::Waiting);
@@ -319,6 +324,11 @@ fn a_turn_parked_on_a_job_waits_and_says_on_how_many() {
     assert_eq!(label(11), "Waiting on a job");
     assert_eq!(label(13), "Waiting on 2 jobs");
     assert_eq!(label(12), "Waiting for another bot…");
+    assert_eq!(
+        label(14),
+        "Waiting for Dev and a job",
+        "as the sidebar says"
+    );
 }
 
 #[test]
