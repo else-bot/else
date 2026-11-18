@@ -12,79 +12,75 @@ const IGNORED: [char; 5] = ['*', '_', '~', '`', '\\'];
 
 /// A folded query.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Needle(Vec<char>);
+pub struct Needle(String);
 
 impl Needle {
     /// `None` when nothing searchable is left after folding.
     pub fn new(query: &str) -> Option<Self> {
-        let folded = Folded::new(query).chars;
+        let mut folded = String::new();
+        fold(query, |c, _| folded.push(c));
         (!folded.is_empty()).then_some(Self(folded))
     }
 
     /// Where the needle shows in `text`, as byte ranges in order that do
     /// not overlap.
     pub fn find(&self, text: &str) -> Vec<Range<usize>> {
-        let folded = Folded::new(text);
-        let mut found = Vec::new();
-        let mut at = 0;
-        while at + self.0.len() <= folded.chars.len() {
-            if folded.chars[at..at + self.0.len()] == self.0[..] {
-                let end = at + self.0.len() - 1;
-                found.push(folded.from[at].start..folded.from[end].end);
-                at += self.0.len();
-            } else {
-                at += 1;
-            }
-        }
-        found
+        let mut folded = String::with_capacity(text.len());
+        let mut from = Vec::with_capacity(text.len());
+        fold(text, |c, source| {
+            folded.push(c);
+            from.resize(folded.len(), source);
+        });
+        folded
+            .match_indices(&self.0)
+            .map(|(at, found)| from[at].start..from[at + found.len() - 1].end)
+            .collect()
     }
 
     /// How often the needle shows in `markdown` once rendered, read from a
     /// cheap skim of its syntax rather than a full parse.
     pub fn count_in_markdown(&self, markdown: &str) -> usize {
-        self.find(&skim(markdown)).len()
+        let skimmed = skim(markdown);
+        let mut folded = String::with_capacity(skimmed.len());
+        fold(&skimmed, |c, _| folded.push(c));
+        folded.matches(&self.0).count()
     }
 }
 
-/// `text` folded, with the source bytes of each folded character.
-struct Folded {
-    chars: Vec<char>,
-    from: Vec<Range<usize>>,
-}
-
-impl Folded {
-    fn new(text: &str) -> Self {
-        let mut folded = Self {
-            chars: Vec::with_capacity(text.len()),
-            from: Vec::with_capacity(text.len()),
+/// Emits each folded character of `text` with the source bytes it came
+/// from.
+fn fold(text: &str, mut emit: impl FnMut(char, Range<usize>)) {
+    let mut started = false;
+    let mut space = None;
+    for (start, c) in text.char_indices() {
+        let source = start..start + c.len_utf8();
+        if c.is_whitespace() || c == '|' {
+            if started {
+                space.get_or_insert(source);
+            }
+            continue;
+        }
+        if IGNORED.contains(&c) {
+            continue;
+        }
+        let mut push = |base: char| {
+            if let Some(space) = space.take() {
+                emit(' ', space);
+            }
+            emit(base, source.clone());
         };
-        let mut space = None;
-        for (start, c) in text.char_indices() {
-            let source = start..start + c.len_utf8();
-            if c.is_whitespace() || c == '|' {
-                if !folded.chars.is_empty() {
-                    space.get_or_insert(source);
-                }
-                continue;
-            }
-            if IGNORED.contains(&c) {
-                continue;
-            }
+        if c.is_ascii() {
+            push(c.to_ascii_lowercase());
+        } else {
             for lower in c.to_lowercase() {
                 decompose_canonical(lower, |base| {
-                    if is_combining_mark(base) {
-                        return;
+                    if !is_combining_mark(base) {
+                        push(base);
                     }
-                    if let Some(space) = space.take() {
-                        folded.chars.push(' ');
-                        folded.from.push(space);
-                    }
-                    folded.chars.push(base);
-                    folded.from.push(source.clone());
                 });
             }
         }
-        folded
+        started = true;
     }
 }
 
