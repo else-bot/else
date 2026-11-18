@@ -184,7 +184,7 @@ pub struct MailTrigger {
     pub last_woke_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct MessageRef {
     pub folder: String,
@@ -479,6 +479,13 @@ pub struct Auth {
     pub oauth: bool,
 }
 
+/// A message as the mail server stores it, and when the server received it.
+#[derive(Clone)]
+pub struct Fetched {
+    pub raw: std::sync::Arc<[u8]>,
+    pub received_at: Option<String>,
+}
+
 #[async_trait::async_trait]
 pub trait MailTransport: Send + Sync {
     /// Signs in to IMAP and SMTP once, so a rejected password fails before
@@ -490,6 +497,14 @@ pub trait MailTransport: Send + Sync {
         auth: &Auth,
         command: &MailCommand,
     ) -> Result<Value, MailError>;
+    /// One whole message, fetched with `BODY.PEEK[]` so it stays unread.
+    /// `read` and `view` go through here, never through `execute`.
+    async fn fetch(
+        &self,
+        config: &MailConfig,
+        auth: &Auth,
+        message: &MessageRef,
+    ) -> Result<Fetched, MailError>;
     async fn scan(
         &self,
         config: &MailConfig,

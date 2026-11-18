@@ -122,6 +122,9 @@ impl MailTransport for Inbox {
             "subject":"Shareholder documents","from":["registrar@example.org"]}),
         )
     }
+    async fn fetch(&self, _: &MailConfig, _: &Auth, _: &MessageRef) -> Result<Fetched, MailError> {
+        Err(MailError::new("message_not_found"))
+    }
     async fn scan(&self, _: &MailConfig, _: &Auth, _: Option<&Cursor>) -> Result<Scan, MailError> {
         Ok(Scan {
             cursor: Cursor {

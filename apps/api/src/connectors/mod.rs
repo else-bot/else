@@ -1,3 +1,4 @@
+mod cache;
 mod config;
 pub mod delivery;
 pub mod documents;
@@ -143,6 +144,7 @@ struct Command {
     caller: Caller,
     action_id: Option<Uuid>,
     command: MailCommand,
+    queued: tokio::time::Instant,
     deadline: tokio::time::Instant,
     reply: oneshot::Sender<Result<Value, MailError>>,
 }
@@ -167,6 +169,7 @@ pub struct ConnectorManager {
     scheduler: Arc<Scheduler>,
     transport: Arc<dyn MailTransport>,
     workers: Actor<HashMap<Uuid, Worker>>,
+    messages: Actor<cache::Messages>,
     pub oauth: oauth::OAuth,
 }
 
@@ -186,6 +189,7 @@ impl ConnectorManager {
             scheduler,
             transport,
             workers: Actor::default(),
+            messages: Actor::default(),
             oauth: oauth::OAuth::default(),
         }
     }
@@ -233,6 +237,9 @@ impl ConnectorManager {
     }
 
     pub async fn forget(&self, id: Uuid) {
+        self.messages
+            .call(move |messages| messages.forget(id))
+            .await;
         if let Some(mut worker) = self.workers.call(move |workers| workers.remove(&id)).await {
             worker.stop.cancel();
             while !*worker.done.borrow_and_update() {
@@ -335,11 +342,35 @@ impl ConnectorManager {
     }
 
     /// One message for the owner's reader. It never marks the message read.
+    /// A message read recently comes from the cache without waiting behind
+    /// the account's other commands.
     pub async fn view(
         self: &Arc<Self>,
         account_id: Uuid,
         message: MessageRef,
     ) -> Result<Value, MailError> {
+        let started = tokio::time::Instant::now();
+        MailCommand::View {
+            message: message.clone(),
+        }
+        .validate()?;
+        let account = store::account(&self.db, account_id)
+            .await
+            .map_err(|_| MailError::new("mail_unavailable"))?
+            .ok_or_else(|| MailError::new("mail_forbidden"))?;
+        if account.state != "active" {
+            return Err(MailError::new("mail_account_paused"));
+        }
+        if let Some(fetched) = self.cached(&account, &message).await {
+            let view = pimalaya::view(&fetched, &message);
+            tracing::info!(
+                %account_id,
+                cached = true,
+                total_ms = started.elapsed().as_millis() as u64,
+                "owner viewed a message"
+            );
+            return view;
+        }
         self.submit(
             account_id,
             Caller::Owner,
@@ -347,6 +378,19 @@ impl ConnectorManager {
             MailCommand::View { message },
         )
         .await
+    }
+
+    fn cache_key(account: &Account, message: &MessageRef) -> cache::Key {
+        cache::Key {
+            account_id: account.id,
+            generation: account.generation,
+            message: message.clone(),
+        }
+    }
+
+    async fn cached(&self, account: &Account, message: &MessageRef) -> Option<Fetched> {
+        let key = Self::cache_key(account, message);
+        self.messages.call(move |messages| messages.get(&key)).await
     }
 
     async fn submit(
@@ -362,11 +406,13 @@ impl ConnectorManager {
             return Err(MailError::new("action_id_required"));
         }
         let (reply, result) = oneshot::channel();
+        let queued = tokio::time::Instant::now();
         let command = Command {
             caller,
             action_id,
             command,
-            deadline: tokio::time::Instant::now() + Duration::from_secs(120),
+            queued,
+            deadline: queued + Duration::from_secs(120),
             reply,
         };
         let account = store::account(&self.db, account_id)
@@ -511,6 +557,18 @@ impl ConnectorManager {
             .map_err(|_| MailError::new("mail_unavailable"))?
             .ok_or_else(|| MailError::new("mail_forbidden"))?;
         self.authorization(&account, command).await?;
+        let started = tokio::time::Instant::now();
+        let read = match &command.command {
+            MailCommand::Read { message } => Some((message, pimalaya::read as Parse)),
+            MailCommand::View { message } => Some((message, pimalaya::view as Parse)),
+            _ => None,
+        };
+        if let Some((message, parse)) = read
+            && let Some(fetched) = self.cached(&account, message).await
+        {
+            log_read(id, command, started, None);
+            return parse(&fetched, message);
+        }
         let auth = self.auth(&account).await.inspect_err(|error| {
             if error.code == REAUTHENTICATION_REQUIRED {
                 *rejected = Some((account.generation, REAUTHENTICATION_REQUIRED));
@@ -539,10 +597,27 @@ impl ConnectorManager {
                 }
             }
         };
-        let result = self
-            .transport
-            .execute(&account.config, &auth, &command.command)
-            .await;
+        let result = match read {
+            Some((message, parse)) => {
+                let signed_in = started.elapsed();
+                let fetched = self.transport.fetch(&account.config, &auth, message).await;
+                log_read(id, command, started, Some(signed_in));
+                match fetched {
+                    Ok(fetched) => {
+                        let key = Self::cache_key(&account, message);
+                        let stored = fetched.clone();
+                        self.messages.call(move |m| m.put(key, stored)).await;
+                        parse(&fetched, message)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            None => {
+                self.transport
+                    .execute(&account.config, &auth, &command.command)
+                    .await
+            }
+        };
         if matches!(&result, Err(error) if error.code == AUTHENTICATION_FAILED) {
             *rejected = Some((account.generation, AUTHENTICATION_FAILED));
         }
@@ -713,6 +788,31 @@ impl ConnectorManager {
         }
         stop_watch(&mut watching).await;
     }
+}
+
+type Parse = fn(&Fetched, &MessageRef) -> Result<Value, MailError>;
+
+/// Where a read's time went: waiting in the account's queue, refreshing
+/// the sign-in, and fetching the message. A cached read has no `auth`.
+fn log_read(
+    account_id: Uuid,
+    command: &Command,
+    started: tokio::time::Instant,
+    auth: Option<Duration>,
+) {
+    let ms = |at: Duration| at.as_millis() as u64;
+    tracing::info!(
+        %account_id,
+        caller = match command.caller {
+            Caller::Owner => "owner",
+            Caller::Bot { .. } => "bot",
+        },
+        cached = auth.is_none(),
+        queue_ms = ms(started - command.queued),
+        auth_ms = auth.map(ms),
+        fetch_ms = auth.map(|auth| ms(started.elapsed() - auth)),
+        "read a message"
+    );
 }
 
 struct Watching {

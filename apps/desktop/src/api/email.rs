@@ -48,7 +48,7 @@ pub struct AppPasswordHelp {
 }
 
 /// Where a message lives in a mailbox.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct MessageRef {
     pub folder: String,
     pub uid_validity: u32,
