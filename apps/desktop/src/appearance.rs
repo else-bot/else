@@ -22,12 +22,12 @@ struct Appearance {
 
 impl Global for Appearance {}
 
-/// Installs the Quiet palettes, then the Omarchy palette when one is
+/// Installs the Quiet Light and Midnight palettes, then the Omarchy palette when one is
 /// readable. Without one, the system appearance applies until a valid
 /// palette appears.
 pub fn init(cx: &mut App) {
     let light = Rc::new(QUIET_LIGHT.config("Quiet Light", Style::SYSTEM));
-    let dark = Rc::new(QUIET_DARK.config("Quiet Dark", Style::SYSTEM));
+    let dark = Rc::new(MIDNIGHT.config("Midnight", Style::SYSTEM));
     Theme::update(cx, |theme| {
         theme.light_theme = light;
         theme.dark_theme = dark;
@@ -121,7 +121,7 @@ pub fn section_label(text: impl Into<SharedString>, cx: &App) -> Div {
 pub fn modal_surface(dialog: Dialog, cx: &App) -> Dialog {
     let theme = cx.theme();
     let edge = if theme.mode.is_dark() {
-        theme.foreground.opacity(0.08)
+        theme.foreground.opacity(0.06)
     } else {
         theme.border
     };
@@ -288,7 +288,7 @@ fn line_ink(p: &Palette, line: Rgb) -> String {
         .map(|i| (line[i] as f32 - bg[i] as f32) / (fg[i] as f32 - bg[i] as f32))
         .collect();
     let alpha = shares.iter().sum::<f32>() / shares.len().max(1) as f32;
-    let alpha = (alpha.clamp(0.08, 0.2) * 255.).round() as u8;
+    let alpha = (alpha.clamp(0.05, 0.2) * 255.).round() as u8;
     format!("{}{alpha:02x}", p.foreground.hex())
 }
 
@@ -326,6 +326,29 @@ struct Palette {
     blue: Rgb,
     magenta: Rgb,
     cyan: Rgb,
+    primary: Primary,
+}
+
+/// How a palette paints primary actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Primary {
+    /// A saturated fill of the accent's hue that carries white text.
+    Saturated,
+    /// The accent itself, with whichever of near-black or white reads best.
+    Accent,
+}
+
+/// Near-black ink for text on a light accent fill.
+const INK: Rgb = Rgb(0x111827);
+
+impl Primary {
+    /// The fill and its text color for `accent` in `mode`.
+    fn paint(self, accent: Rgb, mode: ThemeMode) -> (Rgb, Rgb) {
+        match self {
+            Self::Saturated => (accent_fill(accent, mode), WHITE),
+            Self::Accent => (accent, accent.most_legible(&[INK, WHITE])),
+        }
+    }
 }
 
 const QUIET_LIGHT: Palette = Palette {
@@ -344,24 +367,28 @@ const QUIET_LIGHT: Palette = Palette {
     blue: Rgb(0x0a6fdb),
     magenta: Rgb(0x8e4ec6),
     cyan: Rgb(0x16808e),
+    primary: Primary::Saturated,
 };
 
-const QUIET_DARK: Palette = Palette {
+/// Midnight: a cool slate dark modeled on Proliquid's Midnight Dark, with
+/// Nord-like hues and a soft slate-blue accent.
+const MIDNIGHT: Palette = Palette {
     mode: ThemeMode::Dark,
-    background: Rgb(0x202022),
-    surface: Rgb(0x28282b),
-    raised: Rgb(0x2e2e32),
-    foreground: Rgb(0xededf0),
-    muted_foreground: Rgb(0xa0a0a8),
-    border: Rgb(0x3a3a3e),
-    accent: Rgb(0x69a9ff),
-    selection: Rgb(0x35445a),
-    red: Rgb(0xff9b9b),
-    yellow: Rgb(0xe7be75),
-    green: Rgb(0x79bd8f),
-    blue: Rgb(0x69a9ff),
-    magenta: Rgb(0xc9a2f0),
-    cyan: Rgb(0x7cc8d4),
+    background: Rgb(0x1a1c21),
+    surface: Rgb(0x1f2126),
+    raised: Rgb(0x23262b),
+    foreground: Rgb(0xd8dee9),
+    muted_foreground: Rgb(0x7f8491),
+    border: Rgb(0x24262a),
+    accent: Rgb(0x7794b2),
+    selection: Rgb(0x3a4a5c),
+    red: Rgb(0xbf616a),
+    yellow: Rgb(0xf0803c),
+    green: Rgb(0xa3be8c),
+    blue: Rgb(0x81a1c1),
+    magenta: Rgb(0xb48ead),
+    cyan: Rgb(0x88c0d0),
+    primary: Primary::Accent,
 };
 
 impl Palette {
@@ -441,7 +468,7 @@ impl Palette {
             sidebar.mix(BLACK, 0.06)
         };
         let border = p.background.mix(p.border, style.border_strength);
-        let (primary, on_primary) = (accent_fill(p.accent, p.mode), WHITE);
+        let (primary, on_primary) = p.primary.paint(p.accent, p.mode);
         let roles = [
             ("background", p.background),
             ("foreground", p.foreground),
@@ -635,7 +662,7 @@ mod tests {
 
     #[test]
     fn quiet_palettes_keep_text_readable() {
-        for palette in [&QUIET_LIGHT, &QUIET_DARK] {
+        for palette in [&QUIET_LIGHT, &MIDNIGHT] {
             assert!(palette.background.contrast(palette.foreground) >= 7.);
             assert!(palette.background.contrast(palette.muted_foreground) >= 4.5);
             assert!(palette.raised.contrast(palette.foreground) >= 7.);
@@ -701,7 +728,7 @@ mod tests {
 
     #[test]
     fn the_scrim_is_neutral_and_dark_sheets_sit_just_above_the_page() {
-        for palette in [QUIET_DARK, cursor_dark(), QUIET_LIGHT, latte()] {
+        for palette in [MIDNIGHT, cursor_dark(), QUIET_LIGHT, latte()] {
             let mut theme = Theme::default();
             theme.apply_config(&Rc::new(palette.config("test", Style::OMARCHY)));
             assert_eq!(theme.overlay.s, 0., "the scrim is untinted");
@@ -731,7 +758,8 @@ mod tests {
             foreground: Rgb(0xd4d4d4),
             accent: Rgb(0x81a1c1),
             selection: Rgb(0x2c2c2c),
-            ..QUIET_DARK
+            primary: Primary::Saturated,
+            ..MIDNIGHT
         }
     }
 
@@ -751,13 +779,14 @@ mod tests {
     #[test]
     fn primary_buttons_are_solid_and_selections_are_neutral() {
         let rgb = |color: gpui_kit::Hsla| Rgb(u32::from(gpui_kit::Rgba::from(color)) >> 8);
-        for palette in [QUIET_LIGHT, QUIET_DARK, cursor_dark(), latte()] {
+        for palette in [QUIET_LIGHT, MIDNIGHT, cursor_dark(), latte()] {
             let mut theme = Theme::default();
             theme.apply_config(&Rc::new(palette.config("test", Style::OMARCHY)));
+            let (fill, text) = palette.primary.paint(palette.accent, palette.mode);
             for (actual, expected) in rgb(theme.button_primary)
                 .channels()
                 .into_iter()
-                .zip(accent_fill(palette.accent, palette.mode).channels())
+                .zip(fill.channels())
             {
                 assert!(actual.abs_diff(expected) <= 1);
             }
@@ -765,7 +794,7 @@ mod tests {
             assert!(
                 rgb(theme.button_primary).contrast(rgb(theme.button_primary_foreground)) >= 4.5
             );
-            assert_eq!(rgb(theme.button_primary_foreground), WHITE);
+            assert_eq!(rgb(theme.button_primary_foreground), text);
             assert_ne!(rgb(theme.secondary_active), palette.accent);
             assert!(rgb(theme.secondary_active).contrast(rgb(theme.secondary_foreground)) >= 4.5);
             if !palette.mode.is_dark() {
@@ -781,7 +810,7 @@ mod tests {
     fn input_selection_is_distinct_and_keeps_text_readable() {
         for (name, palette) in [
             ("Quiet Light", QUIET_LIGHT),
-            ("Quiet Dark", QUIET_DARK),
+            ("Midnight", MIDNIGHT),
             ("Cursor Dark", cursor_dark()),
         ] {
             let mut theme = Theme::default();
@@ -804,15 +833,16 @@ mod tests {
 
     #[test]
     fn a_palette_projects_its_mode_style_and_roles() {
-        let config = QUIET_DARK.config("Quiet Dark", Style::SYSTEM);
+        let config = MIDNIGHT.config("Midnight", Style::SYSTEM);
         assert_eq!(config.mode, ThemeMode::Dark);
         assert_eq!((config.radius, config.radius_lg), (Some(8), Some(12)));
         assert_eq!(config.shadow, Some(true));
         let colors = &config.colors;
-        assert_eq!(colors.border.as_deref(), Some("#ededf021"));
-        assert_eq!(colors.primary.as_deref(), Some("#0d6ff2"));
-        assert_eq!(colors.sidebar.as_deref(), Some("#28282b"));
-        assert_eq!(colors.list_active.as_deref(), Some("#353537"));
+        assert_eq!(colors.border.as_deref(), Some("#d8dee90d"));
+        assert_eq!(colors.primary.as_deref(), Some("#7794b2"));
+        assert_eq!(colors.primary_foreground.as_deref(), Some("#111827"));
+        assert_eq!(colors.sidebar.as_deref(), Some("#1f2126"));
+        assert_eq!(colors.list_active.as_deref(), Some("#2d2f35"));
     }
 
     #[test]
@@ -821,7 +851,7 @@ mod tests {
         let mut failures = Vec::new();
         for (name, palette) in [
             ("Quiet Light", QUIET_LIGHT),
-            ("Quiet Dark", QUIET_DARK),
+            ("Midnight", MIDNIGHT),
             ("Cursor Dark", cursor_dark()),
         ] {
             let mut theme = Theme::default();

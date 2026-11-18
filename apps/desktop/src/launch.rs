@@ -543,7 +543,7 @@ async fn attempt(
     limits: Limits,
 ) -> Option<Result<(), LocalError>> {
     tx.send(Step::Phase(Phase::Connecting)).await.ok()?;
-    match probe(&client, limits.ready).await {
+    match watched(tx, probe(&client, limits.ready)).await? {
         Probe::Up => return Some(Ok(())),
         Probe::Failed(err) => return Some(Err(err)),
         Probe::Down => {}
@@ -559,7 +559,7 @@ async fn attempt(
     tx.send(Step::Phase(Phase::Waiting)).await.ok()?;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
-        match probe(&client, left).await {
+        match watched(tx, probe(&client, left)).await? {
             Probe::Up => return Some(Ok(())),
             Probe::Failed(err) => return Some(Err(err)),
             Probe::Down if left.is_zero() => return Some(Err(LocalError::NotReady(limits.ready))),
@@ -569,6 +569,16 @@ async fn attempt(
             _ = tokio::time::sleep(limits.poll.min(left)) => {}
             _ = tx.closed() => return None,
         }
+    }
+}
+
+/// `work`, or `None` as soon as the receiver is dropped: a probe of a port
+/// that drops connections instead of refusing them can otherwise hold an
+/// abandoned attempt for its whole limit.
+async fn watched<T>(tx: &mpsc::Sender<Step>, work: impl Future<Output = T>) -> Option<T> {
+    tokio::select! {
+        done = work => Some(done),
+        _ = tx.closed() => None,
     }
 }
 
