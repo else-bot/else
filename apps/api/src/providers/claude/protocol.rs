@@ -26,6 +26,9 @@ enum Call {
 pub(super) struct Tracker {
     expected_tools: Vec<String>,
     model: String,
+    /// Models the CLI announced it switched to during this turn, latest
+    /// last. It may go back to `model` at the start of each native turn.
+    fallbacks: Vec<String>,
     message_uuid: String,
     pub(super) init_seen: bool,
     calls: HashMap<String, Call>,
@@ -76,6 +79,7 @@ impl Tracker {
         Self {
             expected_tools,
             model: model.to_owned(),
+            fallbacks: Vec::new(),
             message_uuid: message_uuid.to_owned(),
             init_seen: false,
             calls: HashMap::new(),
@@ -87,19 +91,56 @@ impl Tracker {
         }
     }
 
-    fn check_model(&self, model: Option<&str>) -> Result<(), Violation> {
-        match model {
-            Some(model) if model != self.model => Err(Violation::profile(format!(
-                "Claude used {model} instead of {}.",
-                self.model
-            ))),
-            _ => Ok(()),
+    fn reported_model(&self) -> &str {
+        self.fallbacks.last().unwrap_or(&self.model)
+    }
+
+    fn check_model(&self, event: &str, model: Option<&str>) -> Result<(), Violation> {
+        let Some(model) = model else {
+            return Ok(());
+        };
+        if model == self.model || self.fallbacks.iter().any(|f| f == model) {
+            return Ok(());
         }
+        tracing::warn!(event, model, requested = %self.model, "Claude reported an unannounced model");
+        Err(Violation::profile(format!(
+            "Claude answered with {model} instead of the chosen {}, so else.bot stopped the \
+             turn. Send the message again, or choose another model for this bot.",
+            self.model
+        )))
+    }
+
+    /// The CLI falls back to another model when the chosen one is busy,
+    /// unavailable to the account, or refuses, and announces it first.
+    fn on_fallback(
+        &mut self,
+        event: &Value,
+        events: &mut Vec<Event<ResultInfo>>,
+    ) -> Result<(), Violation> {
+        let subtype = required(&event["subtype"], "model fallback")?;
+        let model = required(&event["fallback_model"], "model fallback")?;
+        tracing::warn!(
+            event = subtype,
+            trigger = event["trigger"].as_str(),
+            from = event["original_model"].as_str(),
+            to = model,
+            requested = %self.model,
+            "Claude switched models"
+        );
+        self.fallbacks.push(model.to_owned());
+        events.push(Event::Rerouted {
+            model: model.to_owned(),
+            native_turn: self.message_uuid.clone(),
+        });
+        Ok(())
     }
 
     fn on_init(&mut self, event: &Value) -> Result<(), Violation> {
         self.init_seen = true;
-        self.check_model(Some(text(&event["model"], "model")?.unwrap_or("(none)")))?;
+        self.check_model(
+            "init",
+            Some(text(&event["model"], "model")?.unwrap_or("(none)")),
+        )?;
         let mut tools = inventory(&event["tools"], "tool inventory")?
             .iter()
             .map(|tool| required(tool, "tool inventory").map(str::to_owned))
@@ -141,7 +182,7 @@ impl Tracker {
         if event["isReplay"].as_bool() == Some(true) {
             if uuid == Some(self.message_uuid.as_str()) {
                 events.push(Event::Accepted {
-                    model: self.model.clone(),
+                    model: self.reported_model().to_owned(),
                     native_turn: self.message_uuid.clone(),
                 });
             } else if let Some(turn) = uuid
@@ -188,7 +229,9 @@ impl Tracker {
         self.activity = true;
         let inner = &event["event"];
         match required(&inner["type"], "stream event")? {
-            "message_start" => self.check_model(text(&inner["message"]["model"], "model")?)?,
+            "message_start" => {
+                self.check_model("message_start", text(&inner["message"]["model"], "model")?)?;
+            }
             "content_block_start" if inner["content_block"]["type"] == "text" => {
                 self.separate = self.wrote_text;
             }
@@ -225,7 +268,7 @@ impl Tracker {
     fn on_assistant(&mut self, event: &Value) -> Result<(), Violation> {
         self.activity = true;
         if event["is_api_error_message"].as_bool() != Some(true) {
-            self.check_model(text(&event["message"]["model"], "model")?)?;
+            self.check_model("assistant", text(&event["message"]["model"], "model")?)?;
         }
         for block in list(&event["message"]["content"], "assistant message")? {
             if block["type"] != "tool_use" {
@@ -309,6 +352,9 @@ impl Protocol for Tracker {
             "system" => match text(&event["subtype"], "system event")?.unwrap_or_default() {
                 "init" => self.on_init(event)?,
                 "compact_boundary" => events.push(Event::Compacted),
+                "model_fallback" | "model_refusal_fallback" | "model_consent_fallback" => {
+                    self.on_fallback(event, &mut events)?;
+                }
                 sub if sub.starts_with("task_") || sub.contains("agent") => {
                     let detail = ["task_type", "description"]
                         .iter()
