@@ -2598,7 +2598,9 @@ version = "0.0.30"
 dependencies = [
  "futures-channel",
  "futures-executor",
+ "html5ever",
  "libc",
+ "markup5ever_rcdom",
  "rustix",
  "serde",
  "serde_json",

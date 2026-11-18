@@ -143,6 +143,8 @@ pub struct TurnRecord {
     #[sqlx(skip)]
     pub questions: Vec<crate::db::owner_questions::QuestionInfo>,
     pub routine: Option<Json<crate::app::providers::RoutineRun>>,
+    /// The emails whose arrival started this turn, oldest first.
+    pub mail: Json<Vec<TurnMail>>,
     /// The outgoing draft revisions shown under this turn.
     #[sqlx(skip)]
     pub outgoing_drafts: Vec<crate::db::outgoing_drafts::OutgoingDraft>,
@@ -171,7 +173,19 @@ pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id,
     (SELECT s.status FROM turn_steers s WHERE s.turn_id = t.id) AS steer_status,
     (SELECT json_object('routine_id', lower(hex(r.routine_id)), 'name', r.name, 'due_at', r.due_at,
                         'reminder', json(iif(o.run_at IS NULL, 'false', 'true')))
-     FROM routine_runs r JOIN routines o ON o.id = r.routine_id WHERE r.turn_id = t.id) AS routine";
+     FROM routine_runs r JOIN routines o ON o.id = r.routine_id WHERE r.turn_id = t.id) AS routine,
+    (SELECT json_group_array(json_object('account_id', m.account_id, 'message',
+                json_object('folder', m.folder, 'uid_validity', m.uid_validity, 'uid', m.uid)))
+     FROM (SELECT lower(hex(d.account_id)) AS account_id, e.folder, e.uid_validity, e.uid
+           FROM connector_deliveries d JOIN connector_events e ON e.id = d.event_id
+           WHERE d.turn_id = t.id ORDER BY e.created_at, e.uid, e.folder) m) AS mail";
+
+/// An email that started a turn, which the owner can open in the reader.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TurnMail {
+    pub account_id: Uuid,
+    pub message: crate::connectors::types::MessageRef,
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BotTask {

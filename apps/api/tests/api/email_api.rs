@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 mod app_passwords;
 mod oauth_sign_in_again;
+mod reader;
 mod removal;
 
 fn config() -> MailConfig {

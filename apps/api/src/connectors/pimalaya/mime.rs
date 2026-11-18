@@ -9,6 +9,80 @@ pub(super) fn addresses(value: Option<&mail_parser::Address<'_>>) -> Vec<String>
         .collect()
 }
 
+/// Each address with its display name, for the owner's reader.
+fn people(value: Option<&mail_parser::Address<'_>>) -> Vec<Value> {
+    value
+        .into_iter()
+        .flat_map(|a| a.iter())
+        .take(100)
+        .map(|a| json!({"name":a.name.as_deref(),"address":a.address.as_deref()}))
+        .collect()
+}
+
+/// Characters of text the owner's reader gets.
+const VIEW_TEXT_CHARS: usize = 200_000;
+/// Decoded bytes one image the HTML shows may have.
+const INLINE_IMAGE_LIMIT: usize = 1024 * 1024;
+
+/// The message as the owner's reader shows it. `html` is the message's own
+/// HTML part, never one made from its text, and is left out over
+/// `else_visual::email::MAX_HTML_BYTES`. Images the HTML names by `cid:`
+/// travel as `inline` within that render's budget instead of as
+/// attachments.
+pub(super) fn view(
+    parsed: &mail_parser::Message<'_>,
+    message: &MessageRef,
+    received_at: Option<String>,
+) -> Value {
+    use else_visual::email::{MAX_HTML_BYTES, MAX_INLINE_BASE64};
+    let html = parsed
+        .html_body
+        .first()
+        .and_then(|id| parsed.part(*id))
+        .and_then(|part| match &part.body {
+            mail_parser::PartType::Html(html) => Some(html.as_ref()),
+            _ => None,
+        });
+    let (html, html_omitted) = match html {
+        Some(html) if html.len() > MAX_HTML_BYTES => (None, Some("too_large")),
+        html => (html, None),
+    };
+    let lowered = html.map(str::to_ascii_lowercase).unwrap_or_default();
+    let body = parsed.body_text(0).unwrap_or_default();
+    let text: String = body.chars().take(VIEW_TEXT_CHARS).collect();
+    let mut budget = MAX_INLINE_BASE64;
+    let mut inline = Vec::new();
+    let mut attachments = Vec::new();
+    for (part, file) in parsed.attachments().enumerate() {
+        let media_type = media_type(file);
+        let shown = file
+            .content_id()
+            .map(|id| id.trim_matches(['<', '>']))
+            .filter(|id| {
+                !id.is_empty()
+                    && media_type.starts_with("image/")
+                    && lowered.contains(&format!("cid:{}", id.to_ascii_lowercase()))
+            });
+        if let Some(id) = shown {
+            let size = file.contents().len();
+            let encoded = size.div_ceil(3) * 4;
+            if size <= INLINE_IMAGE_LIMIT && encoded <= budget {
+                budget -= encoded;
+                inline.push(json!({"content_id":id,"media_type":media_type,
+                    "data_base64":STANDARD.encode(file.contents())}));
+            }
+            continue;
+        }
+        attachments.push(json!({"part":part,"name":file.attachment_name(),
+            "media_type":media_type,"size":file.contents().len()}));
+    }
+    json!({"message":message,"date":header_date(parsed.header_raw("Date")),
+        "received_at":received_at,"subject":parsed.subject(),"from":people(parsed.from()),
+        "to":people(parsed.to()),"cc":people(parsed.cc()),"reply_to":people(parsed.reply_to()),
+        "text":text,"text_truncated":text.len() < body.len(),"html":html,
+        "html_omitted":html_omitted,"inline":inline,"attachments":attachments})
+}
+
 pub(super) struct ThreadHeaders {
     in_reply_to: String,
     references: Vec<String>,

@@ -284,6 +284,7 @@ impl MailCommand {
                 ensure((1..=100).contains(limit), "limit must be 1 to 100")
             }
             Self::Read { message }
+            | Self::View { message }
             | Self::SetRead { message, .. }
             | Self::SetFlagged { message, .. }
             | Self::Archive { message }

@@ -7,6 +7,8 @@ rust-version.workspace = true
 [dependencies]
 futures-channel = "0.3.34"
 futures-executor = "0.3.34"
+html5ever = "0.27.0"
+markup5ever_rcdom = "0.3.0"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 takumi = { version = "=2.20.0", default-features = false, features = ["raster-backend", "from-html", "svg-source", "png", "jpeg", "webp", "woff2", "unstable"] }

@@ -1,7 +1,7 @@
 mod mime;
 mod session;
 
-use mime::{ThreadHeaders, addresses, compose, compose_forward, reply, smtp_address, thread};
+use mime::{ThreadHeaders, addresses, compose, compose_forward, reply, smtp_address, thread, view};
 use session::{Imap, Smtp};
 
 use std::borrow::Cow;
@@ -304,6 +304,13 @@ impl Imap {
             json!({"message":message,"source":"external_email","date":header_date(parsed.header_raw("Date")),"received_at":received_at,"subject":parsed.subject(),"from":addresses(parsed.from()),"to":addresses(parsed.to()),"cc":addresses(parsed.cc()),"reply_to":addresses(parsed.reply_to()),"body":text,"truncated":body.chars().count()>32000,"attachments":parsed.attachments().enumerate().map(|(part,a)|json!({"part":part,"name":a.attachment_name(),"media_type":media_type(a),"size":a.contents().len()})).collect::<Vec<_>>()}),
         )
     }
+    async fn view_message(&mut self, message: &MessageRef) -> Result<Value, MailError> {
+        let (bytes, received_at) = self.fetch_message(message).await?;
+        let parsed = MessageParser::default()
+            .parse(&bytes)
+            .ok_or_else(|| MailError::new("invalid_email_message"))?;
+        Ok(view(&parsed, message, received_at))
+    }
     /// Each requested attachment's name, type and size, with its bytes
     /// unless it is missing or over `ATTACHMENT_LIMIT`.
     async fn open_attachments(
@@ -599,6 +606,7 @@ async fn execute(
                 .await
         }
         MailCommand::Read { message } => client.read_message(message).await,
+        MailCommand::View { message } => client.view_message(message).await,
         MailCommand::OpenAttachments { message, parts } => {
             client.open_attachments(message, parts).await
         }

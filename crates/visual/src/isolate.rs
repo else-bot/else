@@ -16,7 +16,7 @@ use futures_channel::oneshot;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Rendered, Theme};
+use crate::{Error, Rendered, Theme, email::Source};
 
 /// The first argument that turns the host binary into a render worker.
 pub const WORKER_ARG: &str = "--else-visual-worker";
@@ -24,7 +24,7 @@ const MAX_WORKERS: usize = 2;
 const QUEUE: usize = 16;
 /// Bumped whenever [`Request`] or the reply changes, so a worker binary an
 /// update replaced refuses a request it would misread.
-const PROTOCOL: u32 = 1;
+const PROTOCOL: u32 = 2;
 const TIME_LIMIT: Duration = Duration::from_secs(10);
 const MEMORY_LIMIT: u64 = 384 * 1024 * 1024;
 /// A worker's own address-space cap where the kernel enforces one.
@@ -54,10 +54,35 @@ pub fn use_this_executable() {
 #[derive(Serialize, Deserialize)]
 struct Request {
     protocol: u32,
-    html: String,
+    page: Page,
     width: u32,
     scale: f32,
-    theme: Theme,
+}
+
+/// What one render draws.
+#[derive(Serialize, Deserialize)]
+enum Page {
+    Visual { html: String, theme: Theme },
+    Email(Source),
+}
+
+impl Page {
+    fn check(&self) -> Result<(), Error> {
+        match self {
+            Self::Visual { html, .. } if html.len() > crate::MAX_BYTES => {
+                Err(Error::TooLarge(html.len()))
+            }
+            Self::Visual { .. } => Ok(()),
+            Self::Email(source) => source.check(),
+        }
+    }
+
+    fn render(&self, width: u32, scale: f32) -> Result<Rendered, Error> {
+        match self {
+            Self::Visual { html, theme } => crate::render(html, width, scale, theme),
+            Self::Email(source) => crate::email::render(source, width, scale),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -67,6 +92,7 @@ struct Header {
     content_height: u32,
     clipped: bool,
     blocked: Vec<String>,
+    links: Vec<String>,
 }
 
 /// Render in a worker process, waiting for the result. See
@@ -83,12 +109,27 @@ pub fn submit(
     scale: f32,
     theme: &Theme,
 ) -> impl Future<Output = Result<Rendered, Error>> + use<> {
-    let queued = queue(html, width, scale, theme);
-    async move {
-        queued?
-            .await
-            .unwrap_or_else(|_| Err(Error::Render("the render worker stopped".into())))
-    }
+    let page = Page::Visual {
+        html: html.to_owned(),
+        theme: theme.clone(),
+    };
+    wait(queue(page, width, scale))
+}
+
+/// Queue an email render in a worker process. See [`crate::email::render`]
+/// for the arguments.
+pub fn submit_email(
+    source: &Source,
+    width: u32,
+    scale: f32,
+) -> impl Future<Output = Result<Rendered, Error>> + use<> {
+    wait(queue(Page::Email(source.clone()), width, scale))
+}
+
+async fn wait(queued: Result<oneshot::Receiver<Reply>, Error>) -> Result<Rendered, Error> {
+    queued?
+        .await
+        .unwrap_or_else(|_| Err(Error::Render("the render worker stopped".into())))
 }
 
 type Reply = Result<Rendered, Error>;
@@ -98,21 +139,13 @@ struct Job {
     reply: oneshot::Sender<Reply>,
 }
 
-fn queue(
-    html: &str,
-    width: u32,
-    scale: f32,
-    theme: &Theme,
-) -> Result<oneshot::Receiver<Reply>, Error> {
-    if html.len() > crate::MAX_BYTES {
-        return Err(Error::TooLarge(html.len()));
-    }
+fn queue(page: Page, width: u32, scale: f32) -> Result<oneshot::Receiver<Reply>, Error> {
+    page.check()?;
     let request = serde_json::to_vec(&Request {
         protocol: PROTOCOL,
-        html: html.to_owned(),
+        page,
         width,
         scale,
-        theme: theme.clone(),
     })
     .map_err(|e| Error::Render(e.to_string()))?;
     let (reply, receiver) = oneshot::channel();
@@ -262,6 +295,7 @@ fn decode(output: &[u8]) -> Result<Rendered, Error> {
         content_height: header.content_height,
         clipped: header.clipped,
         blocked: header.blocked,
+        links: header.links,
     })
 }
 
@@ -289,9 +323,7 @@ pub fn run_worker() -> ! {
     let result = request.and_then(|request| {
         std::thread::Builder::new()
             .stack_size(WORKER_STACK)
-            .spawn(move || {
-                crate::render(&request.html, request.width, request.scale, &request.theme)
-            })
+            .spawn(move || request.page.render(request.width, request.scale))
             .ok()
             .and_then(|thread| thread.join().ok())
             .unwrap_or_else(|| Err(Error::Render("the renderer crashed".into())))
@@ -306,6 +338,7 @@ pub fn run_worker() -> ! {
                 content_height: rendered.content_height,
                 clipped: rendered.clipped,
                 blocked: rendered.blocked,
+                links: rendered.links,
             }),
         )
         .ok()
