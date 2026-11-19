@@ -4,6 +4,7 @@
 //! they agree to.
 
 use super::*;
+use crate::app::clip;
 use crate::controls::{Scale, Tier};
 use crate::model::QuestionChoice;
 use gpui_kit::component::radio::Radio;
@@ -68,22 +69,28 @@ fn scope(choice: &QuestionChoice, question: &Question, bot: &str) -> (String, St
     }
 }
 
-/// The context lines shown before "Show all".
+/// The most of a context shown before "Show all".
 const PREVIEW_LINES: usize = 6;
-const PREVIEW_BYTES: usize = 480;
+const PREVIEW_CHARS: usize = 480;
 
-/// The first lines of a long context, or `None` when it fits whole. A line
-/// cut partway ends in an ellipsis; "Show all" marks the hidden lines.
+/// The first lines of a long context, or `None` when it fits whole or the
+/// rest is too little to hide. A line cut partway ends between words with an
+/// ellipsis; "Show all" marks the hidden lines.
 pub(super) fn preview(context: &str) -> Option<String> {
     let lines = context
         .match_indices('\n')
         .nth(PREVIEW_LINES - 1)
         .map_or(context.len(), |(ix, _)| ix);
-    if lines > PREVIEW_BYTES {
-        let end = context.floor_char_boundary(PREVIEW_BYTES);
-        return Some(format!("{}…", context[..end].trim_end()));
+    let end = clip::char_end(&context[..lines], PREVIEW_CHARS);
+    if !clip::hides_enough(&context[end..], PREVIEW_CHARS) {
+        return None;
     }
-    (lines < context.len()).then(|| context[..lines].trim_end().to_owned())
+    let words = clip::word_end(context, end);
+    let mid_line = !context[words..]
+        .trim_start_matches([' ', '\t'])
+        .starts_with(['\n', '\r']);
+    let close = if mid_line { "…" } else { "" };
+    Some(format!("{}{close}", &context[..words]))
 }
 
 impl ElseApp {
@@ -452,15 +459,46 @@ mod tests {
     use super::preview;
 
     #[test]
-    fn long_context_previews_its_first_lines_on_a_char_boundary() {
+    fn a_context_that_fits_or_barely_overflows_shows_whole() {
         assert_eq!(preview("rm -rf ./dist"), None);
+        let over = format!("{}done.", "word ".repeat(96));
+        assert_eq!(preview(&over), None, "a few characters over the limit");
+        let one_word = format!("Run {}", "é".repeat(477));
+        assert_eq!(preview(&one_word), None, "one character over the limit");
+        let fenced = "```sh\npwd\nls\ndate\nwhoami\nid\n```\n.";
+        assert_eq!(preview(fenced), None, "a closing fence draws nothing");
+        let seven = "1\n2\n3\n4\n5\n6\nlast line";
+        assert_eq!(preview(seven), None, "one short line over the limit");
+    }
+
+    #[test]
+    fn a_long_context_collapses_between_words() {
+        let context = "alpha beta ".repeat(80);
+        let short = preview(&context).unwrap();
+        let shown = short.strip_suffix('…').expect("a mid-line cut ends in …");
+        assert!(shown.chars().count() <= 480, "{shown}");
+        assert!(
+            context[shown.len()..].starts_with(' '),
+            "cut between words: {short}"
+        );
+        let wide = "é".repeat(800);
+        let short = preview(&wide).unwrap();
+        assert_eq!(short.chars().count(), 481, "one word is cut at the limit");
+        let code = format!("```sh\n{}xx\n```\n{}", "é ".repeat(234), "word ".repeat(40));
+        assert!(
+            preview(&code).unwrap().ends_with("xx\n```"),
+            "a cut at a line end adds no ellipsis to the code"
+        );
+    }
+
+    #[test]
+    fn many_lines_collapse_to_the_first_six() {
         let lines = (1..=8)
             .map(|n| n.to_string())
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(preview(&lines).as_deref(), Some("1\n2\n3\n4\n5\n6"));
-        let wide = "é".repeat(400);
-        let short = preview(&wide).unwrap();
-        assert!(short.len() <= 480 + '…'.len_utf8() && short.ends_with('…'));
+        let tail = format!("1\n2\n3\n4\n5\n6\n{}", "word ".repeat(40));
+        assert_eq!(preview(&tail).as_deref(), Some("1\n2\n3\n4\n5\n6"));
     }
 }

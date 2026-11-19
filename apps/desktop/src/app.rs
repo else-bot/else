@@ -5,6 +5,7 @@ mod bot_mention;
 mod bot_menu;
 mod card_markdown;
 mod categories;
+mod clip;
 mod computer;
 mod computer_handoff;
 mod conversation;
