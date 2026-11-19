@@ -14,6 +14,7 @@ mod settings;
 mod shared_icons;
 mod skills;
 mod switcher;
+mod switching;
 mod updates;
 mod usage;
 mod vault;
@@ -208,9 +209,10 @@ pub struct Shell {
     rail: server_rail::Rail,
     hold: server_keys::Hold,
     _server_keys: [Subscription; 3],
-    switch_attempt: Option<Uuid>,
+    switch: switching::Switch<Task<()>>,
     arrival: Option<Arrival>,
-    _switch: Option<Task<()>>,
+    /// Opens a hovered server's session so a click lands warm.
+    _prefetch: Option<(Uuid, Task<()>)>,
     connection_error: Option<String>,
     names: servers::Writes<servers::NameWrite>,
     icon_writes: servers::Writes<shared_icons::IconWrite>,
@@ -312,9 +314,9 @@ impl Shell {
             rail,
             hold: server_keys::Hold::Idle,
             _server_keys: server_keys,
-            switch_attempt: None,
+            switch: switching::Switch::Settled,
             arrival: None,
-            _switch: None,
+            _prefetch: None,
             connection_error: loaded.err().or(rail_error),
             server_updates,
             remote_updates: HashMap::new(),
@@ -442,6 +444,25 @@ impl Shell {
             cx.notify();
             return;
         }
+        let session = self.open_session(id, profile, client, window, cx);
+        if let Some(widths) = widths {
+            session
+                .app
+                .update(cx, |app, cx| app.set_panel_widths(widths, cx));
+        }
+        self.active = Some(session);
+        cx.notify();
+    }
+
+    /// Opens a server's session: its app connects and loads on its own.
+    fn open_session(
+        &mut self,
+        id: Uuid,
+        profile: Profile,
+        client: Arc<Client>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Active {
         let preferences = self
             .launch
             .store
@@ -455,9 +476,6 @@ impl Shell {
             })
             .unwrap_or_default();
         let app = cx.new(|cx| ElseApp::new(client.clone(), preferences, window, cx));
-        if let Some(widths) = widths {
-            app.update(cx, |app, cx| app.set_panel_widths(widths, cx));
-        }
         let observer = cx.observe_in(&app, window, move |shell, app, window, cx| {
             let attention = app.read(cx).attention();
             let session = match shell.active.as_mut() {
@@ -472,6 +490,9 @@ impl Shell {
             }
             shell.cache_session_bots(id, &app, cx);
             if shell.active.as_ref().is_some_and(|active| active.id == id) {
+                if app.read(cx).connected() && shell.switch.recheck(id) {
+                    shell.retry_switch(window, cx);
+                }
                 shell.reclaim_switcher_focus(window, cx);
                 if let Some(bot) = app.read(cx).selected_bot_id() {
                     shell.remember(crate::quick_switcher::Target::Bot { server: id, bot }, cx);
@@ -491,7 +512,7 @@ impl Shell {
                 cx.notify();
             }
         });
-        self.active = Some(Active {
+        Active {
             id,
             profile,
             client,
@@ -500,8 +521,41 @@ impl Shell {
             pane: cx.focus_handle(),
             last_focus: None,
             _app: observer,
-        });
-        cx.notify();
+        }
+    }
+
+    /// Opens a saved server's session in the background, so switching to
+    /// it shows a loaded list. A server this desktop starts waits for a
+    /// click, which starts it.
+    fn prefetch(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active.as_ref().is_some_and(|active| active.id == id)
+            || self.inactive.contains_key(&id)
+        {
+            return;
+        }
+        let Some(saved) = self.registry.find(id).cloned() else {
+            return;
+        };
+        if self.managed_server(&saved.profile) {
+            return;
+        }
+        let Ok(client) = Client::new(
+            saved.profile.origin.clone(),
+            &saved.profile.token,
+            self.runtime.clone(),
+        ) else {
+            return;
+        };
+        let focused = window.focused(cx);
+        let session = self.open_session(id, saved.profile, Arc::new(client), window, cx);
+        session
+            .app
+            .update(cx, |app, cx| app.set_hidden(true, window, cx));
+        // A new app takes focus, and a hidden one would swallow keys.
+        focused
+            .unwrap_or_else(|| self.settings_focus.clone())
+            .focus(window, cx);
+        self.inactive.insert(id, session);
     }
 
     fn open_notification(
@@ -996,10 +1050,8 @@ impl Render for Shell {
         let Some(active) = &self.active else {
             return root;
         };
-        // A pending server switch or the quick switcher owns the keys.
-        let commands = self.switch_attempt.is_none()
-            && self.switcher.is_none()
-            && active.app.read(cx).takes_commands(cx);
+        // The quick switcher owns the keys while open.
+        let commands = self.switcher.is_none() && active.app.read(cx).takes_commands(cx);
         // macOS draws its traffic lights over a title bar the app owns.
         root.when(commands, |root| crate::app::on_commands(root, &active.app))
             .track_focus(&self.settings_focus)
@@ -1020,6 +1072,10 @@ impl Render for Shell {
                             .child(error),
                     )
                 },
+            )
+            .children(
+                self.render_switch_failure(cx)
+                    .filter(|_| self.settings_section().is_none()),
             )
             .child(self.render_with_rail(active.app.clone().into(), &active.pane, window, cx))
             .children(self.render_switcher(cx))

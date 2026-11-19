@@ -43,17 +43,20 @@ pub enum LiveCommand {
 /// A capacity-one mailbox of desired subscriptions. Intermediate UI changes
 /// coalesce while the socket is busy or disconnected; the latest state wins.
 #[derive(Clone)]
-pub struct LiveCommands(pub(super) tokio::sync::watch::Sender<HashMap<Uuid, String>>);
+pub struct LiveCommands {
+    pub(super) wanted: tokio::sync::watch::Sender<HashMap<Uuid, String>>,
+    pub(super) wake: Arc<tokio::sync::Notify>,
+}
 
 impl LiveCommands {
     pub fn send(
         &self,
         command: LiveCommand,
     ) -> Result<(), tokio::sync::watch::error::SendError<LiveCommand>> {
-        if self.0.is_closed() {
+        if self.wanted.is_closed() {
             return Err(tokio::sync::watch::error::SendError(command));
         }
-        self.0.send_modify(|wanted| match command {
+        self.wanted.send_modify(|wanted| match command {
             LiveCommand::Subscribe { bot, cursor } => {
                 wanted.insert(bot, cursor);
             }
@@ -62,6 +65,11 @@ impl LiveCommands {
             }
         });
         Ok(())
+    }
+
+    /// Ends a reconnect wait now and restarts the backoff.
+    pub fn reconnect(&self) {
+        self.wake.notify_one();
     }
 }
 
@@ -145,11 +153,16 @@ impl Client {
     pub fn live(self: Arc<Self>) -> Live {
         let (commands, command_rx) = tokio::sync::watch::channel(HashMap::new());
         let (event_tx, events) = tokio::sync::mpsc::channel(256);
+        let wake = Arc::new(tokio::sync::Notify::new());
         let this = self.clone();
+        let woken = wake.clone();
         self.runtime
-            .spawn(async move { this.run_live(command_rx, event_tx).await });
+            .spawn(async move { this.run_live(command_rx, event_tx, woken).await });
         Live {
-            commands: LiveCommands(commands),
+            commands: LiveCommands {
+                wanted: commands,
+                wake,
+            },
             events,
         }
     }
@@ -171,6 +184,7 @@ impl Client {
         &self,
         mut commands: tokio::sync::watch::Receiver<HashMap<Uuid, String>>,
         events: tokio::sync::mpsc::Sender<LiveEvent>,
+        wake: Arc<tokio::sync::Notify>,
     ) {
         use tokio_tungstenite::tungstenite::{Error as WsError, Message};
         const INACTIVITY: Duration = Duration::from_secs(45);
@@ -190,11 +204,11 @@ impl Client {
         macro_rules! pause {
             () => {
                 let jitter = Duration::from_millis(u64::from(Uuid::new_v4().as_bytes()[0]) * 2);
-                tokio::select! {
+                backoff = tokio::select! {
                     _ = events.closed() => return,
-                    _ = tokio::time::sleep(backoff + jitter) => {}
-                }
-                backoff = (backoff * 2).min(Duration::from_secs(15));
+                    _ = wake.notified() => Duration::from_millis(500),
+                    _ = tokio::time::sleep(backoff + jitter) => (backoff * 2).min(Duration::from_secs(15)),
+                };
             };
         }
         loop {
@@ -227,6 +241,7 @@ impl Client {
                     deliver!(LiveEvent::Unauthorized);
                     tokio::select! {
                         _ = events.closed() => return,
+                        _ = wake.notified() => {}
                         _ = tokio::time::sleep(Duration::from_secs(30)) => {}
                     }
                     continue;

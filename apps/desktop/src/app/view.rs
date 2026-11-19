@@ -1028,8 +1028,10 @@ impl ElseApp {
                 .child(self.render_conversation(&bot, window, cx))
                 .into_any_element();
         }
+        let listed = self.connection == Connection::Connected && self.listed_at.is_some();
         let message = match self.connection {
-            Connection::Connected => "Create a bot to start a conversation.",
+            Connection::Connected if listed => "Create a bot to start a conversation.",
+            Connection::Connected => "Loading bots…",
             Connection::InvalidCredentials(_) => {
                 "Open Settings to fix the server address or owner key."
             }
@@ -1043,7 +1045,7 @@ impl ElseApp {
             .gap_3()
             .bg(theme.background)
             .child(div().text_color(theme.muted_foreground).child(message));
-        if self.connection == Connection::Connected {
+        if listed {
             body = body.child(
                 Button::new("empty-create")
                     .control(Tier::Primary, Scale::Standard, false, cx)
