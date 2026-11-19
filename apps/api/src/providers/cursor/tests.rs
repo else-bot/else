@@ -41,7 +41,7 @@ if resumed and not os.path.exists(os.path.join(store, "store.db")):
 os.makedirs(store, exist_ok=True)
 open(os.path.join(store, "store.db"), "a").close()
 with open(os.path.join(here, "launches.jsonl"), "a") as f:
-    f.write(json.dumps({"chat": chat, "resumed": resumed, "args": a, "home": home, "prompt": prompt,
+    f.write(json.dumps({"chat": chat, "resumed": resumed, "args": a, "home": home, "prompt": prompt, "cwd": os.getcwd(),
         "grant": os.environ.get("ELSE_TASK_GRANT"), "direnv": os.environ.get("DIRENV_DISABLE"),
         "mcp": json.load(open(os.path.join(home, ".cursor/mcp.json"))),
         "config": json.load(open(os.path.join(home, ".cursor/cli-config.json")))}) + "\n")
@@ -60,7 +60,7 @@ if "[lost]" in prompt:
     delta("Partial")
     os.kill(os.getpid(), signal.SIGKILL)
 if "[crash]" in prompt:
-    delta("Partial")
+    out({"type": "tool_call", "subtype": "started", "call_id": "c0", "tool_call": {"mcpToolCall": {"args": {"providerIdentifier": "elsebot", "toolName": "find_tool"}}}})
     print("Error: socket hang up", file=sys.stderr)
     sys.exit(1)
 if "[stop]" in prompt:
@@ -82,6 +82,11 @@ delta(" there")
 out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " there"}]}})
 out({"type": "result", "subtype": "success", "is_error": False, "duration_ms": 5, "result": "Hello there",
      "usage": {"inputTokens": 100, "outputTokens": 20, "cacheReadTokens": 400, "cacheWriteTokens": 10}})
+if "[stall]" in prompt:
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
+    open(os.path.join(here, "result-sent"), "w").close()
+    while True:
+        time.sleep(1)
 if "[unsaved]" in prompt:
     print("Error: database is locked", file=sys.stderr)
     sys.exit(1)
@@ -243,11 +248,11 @@ async fn an_owner_turn_creates_a_chat_and_the_next_turn_resumes_it() {
     assert_eq!(created["resumed"], false);
     assert_eq!(resumed["chat"], first.native_id.as_str());
     assert_eq!(resumed["resumed"], true);
+    let project = server.path("bots").join(Uuid::nil().to_string());
     for launch in [created, resumed] {
-        assert!(
-            has(&launch["args"], "--force"),
-            "owner turns run host tools"
-        );
+        assert!(!has(&launch["args"], "--force"), "web stays unapproved");
+        assert_eq!(launch["config"]["approvalMode"], "unrestricted");
+        assert_eq!(launch["cwd"], project.to_str().unwrap());
         assert!(!has(&launch["args"], "--approve-mcps"));
         assert!(has(&launch["args"], "--disable-project-configs"));
         assert_eq!(launch["direnv"], "1");
@@ -352,6 +357,16 @@ async fn an_event_turn_offers_only_elsebot_tools_and_a_shell_call_fails_it() {
         panic!("one launch");
     };
     assert!(!has(&launch["args"], "--force"));
+    let private = server
+        .path("data/bots")
+        .join(Uuid::nil().to_string())
+        .join("cursor-home/workspace");
+    assert_eq!(
+        launch["cwd"],
+        private.to_str().unwrap(),
+        "the guest-writable project never loads"
+    );
+    assert!(has(&launch["args"], private.to_str().unwrap()));
     assert!(has(
         &launch["args"],
         "update_todos_tool_call,read_todos_tool_call,mcp_tool_call,get_mcp_tools_tool_call"
@@ -396,6 +411,36 @@ async fn stop_interrupts_the_running_cli() {
 }
 
 #[tokio::test]
+async fn stop_while_the_cli_stores_its_result_keeps_the_result_but_not_the_chat() {
+    let server = Server::new();
+    let sink = Sink::default();
+    let stop = Stop::default();
+    let sent = server.path("bin/result-sent");
+    let requester = {
+        let stop = stop.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(60), async {
+                while !sent.exists() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the CLI wrote its result");
+            stop.request();
+        }
+    };
+    let (outcome, ()) = tokio::join!(
+        server
+            .cursor
+            .run(input("[stall]", Origin::OwnerRequest), &sink, stop.clone()),
+        requester
+    );
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(*sink.text.lock().unwrap(), "Hello there");
+    assert!(sink.retired(), "the chat may not be stored");
+}
+
+#[tokio::test]
 async fn a_usage_limit_makes_cursor_unavailable_for_the_turn() {
     let server = Server::new();
     let outcome = server
@@ -427,7 +472,7 @@ async fn a_lost_stream_ends_uncertain_and_retires_the_chat() {
 }
 
 #[tokio::test]
-async fn a_cli_that_fails_after_taking_the_prompt_ends_uncertain() {
+async fn a_cli_that_fails_after_using_a_tool_ends_uncertain() {
     let server = Server::new();
     let sink = Sink::default();
     let outcome = server
@@ -436,7 +481,7 @@ async fn a_cli_that_fails_after_taking_the_prompt_ends_uncertain() {
     assert_eq!(
         outcome,
         TurnOutcome::Uncertain {
-            message: "Cursor CLI ended without a result (exit 1). Error: socket hang up".into()
+            message: "Cursor CLI exited with 1 after using tools. Error: socket hang up".into()
         }
     );
     assert!(sink.retired());
@@ -528,46 +573,6 @@ fn the_installers_link_is_used_and_kept_unresolved() {
     assert!(err.contains("ELSE_CURSOR_BIN"), "{err}");
 }
 
-#[tokio::test]
-async fn hooks_in_the_bots_project_refuse_the_turn() {
-    let server = Server::new();
-    let project = server.path("bots").join(Uuid::nil().to_string());
-    std::fs::create_dir_all(project.join(".claude")).unwrap();
-    std::fs::write(
-        project.join(".claude/settings.json"),
-        r#"{"permissions":{}}"#,
-    )
-    .unwrap();
-    let outcome = server
-        .run(input("hi", Origin::OwnerRequest), &Sink::default())
-        .await;
-    assert_eq!(
-        outcome,
-        TurnOutcome::Completed,
-        "settings without hooks are fine"
-    );
-
-    std::fs::create_dir_all(project.join(".cursor")).unwrap();
-    std::fs::write(
-        project.join(".cursor/hooks.json"),
-        r#"{"version":1,"hooks":{"sessionStart":[{"command":"touch /tmp/x"}]}}"#,
-    )
-    .unwrap();
-    let outcome = server
-        .run(input("hi", Origin::OwnerRequest), &Sink::default())
-        .await;
-    let TurnOutcome::Failed { code, message } = outcome else {
-        panic!("refused: {outcome:?}");
-    };
-    assert_eq!(code, "provider_refused");
-    assert!(message.contains(".cursor/hooks.json"), "{message}");
-    assert_eq!(
-        server.launches().len(),
-        1,
-        "the refused turn never launched"
-    );
-}
-
 #[test]
 fn the_host_login_is_found_where_the_cli_keeps_it() {
     let path = |p: &str| Some(PathBuf::from(p));
@@ -657,10 +662,22 @@ fn a_delta_that_repeats_the_text_so_far_is_held_until_the_next_event() {
     t.on(&said("e", ts.clone())).unwrap();
     assert_eq!(t.on(&said("e", ts.clone())), Ok(vec![]));
     assert_eq!(
-        t.on(&json!({"type":"interaction_query","session_id":"chat"})),
+        t.on(&json!({"type":"interaction_query","subtype":"request",
+            "query_type":"askQuestionInteractionQuery","session_id":"chat"})),
         Ok(vec![Event::EndMessage]),
         "a flush before a question"
     );
+}
+
+#[test]
+fn a_web_request_violates_every_turns_policy() {
+    for query in ["webSearchRequestQuery", "webFetchRequestQuery"] {
+        let violation = tracker(true)
+            .on(&json!({"type":"interaction_query","subtype":"request",
+                "query_type":query,"session_id":"chat"}))
+            .unwrap_err();
+        assert_eq!(violation.code, "policy_violation");
+    }
 }
 
 #[test]
@@ -751,17 +768,25 @@ fn an_exit_after_a_stop_interrupts_and_other_exits_name_their_cause() {
         t.outcome(exit(Some(130), ""), Some(StopCause::Owner), true),
         TurnOutcome::Interrupted
     );
-    assert!(
-        matches!(
-            t.outcome(exit(Some(1), "Error: x"), Some(StopCause::Owner), true),
-            TurnOutcome::Uncertain { .. }
-        ),
-        "a failure the stop did not cause"
-    );
-    assert!(matches!(
-        t.outcome(exit(Some(1), "Error: x"), None, true),
-        TurnOutcome::Uncertain { .. }
-    ));
+    let mut acted = tracker(true);
+    acted
+        .on(
+            &json!({"type":"tool_call","subtype":"started","call_id":"c","session_id":"chat",
+            "tool_call":{"shellToolCall":{"args":{}}}}),
+        )
+        .unwrap();
+    for (stopping, stderr) in [
+        (Some(StopCause::Owner), "Error: x"),
+        (None, "Error: [resource_exhausted] limit"),
+    ] {
+        assert_eq!(
+            acted.outcome(exit(Some(1), stderr), stopping, true),
+            TurnOutcome::Uncertain {
+                message: "Cursor CLI exited with 1 after using tools.".into()
+            },
+            "{stderr}"
+        );
+    }
     assert_eq!(
         t.outcome(
             exit(Some(1), "Error: Cannot use this model: x"),

@@ -55,7 +55,7 @@ Install the Cursor CLI with `curl https://cursor.com/install -fsS | bash`, then 
 
 Each bot runs the CLI with its own home directory, so your Cursor rules, MCP servers, hooks, plugins and Claude Code settings never load into a bot. Only your login is shared. The project's `.cursor/cli.json` and `.envrc` are ignored too. A side effect is that shell commands in your Cursor turns see the bot's home as `~`, not yours.
 
-Turns you start get else.bot's tools plus the shell and file tools. Turns started by an incoming event get only else.bot's tools, and any other tool call fails the turn. Subagents, web search and web fetch are never offered. A bot whose project holds hooks in `.cursor/hooks.json` or `.claude/settings.json` cannot run on Cursor, because Cursor would run them on this server. The CLI takes no messages mid-turn, so a message you send while a turn runs is delivered when that turn ends.
+Turns you start get else.bot's tools plus the shell and file tools. Turns started by an incoming event get only else.bot's tools, and any other tool call fails the turn. Subagents, web search and web fetch are never offered. Turns started by an event run in a private directory, not the bot's project, so hooks, plugins, rules and MCP servers in the project load only in turns you start, which already have the shell. The CLI takes no messages mid-turn, so a message you send while a turn runs is delivered when that turn ends.
 
 ## Open the app
 

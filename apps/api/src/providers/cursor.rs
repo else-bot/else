@@ -1,6 +1,5 @@
 //! The host Cursor adapter, over Cursor CLI's headless print mode
-//! (`cursor-agent -p --output-format stream-json`), started in the bot's
-//! project directory.
+//! (`cursor-agent -p --output-format stream-json`).
 //!
 //! One CLI process runs per turn and reads the packet on stdin. A new chat
 //! gets an ID allocated here (`--new-session-id`); the next turn resumes it
@@ -8,9 +7,10 @@
 //! matches. The CLI runs with the bot's provider home as `HOME` (see
 //! [`super::cursor_home`]), sharing only the host's login, and ignores the
 //! project's CLI config and `.envrc`. `--allowed-tools` offers else.bot's
-//! MCP server, plus the host shell and file tools when the owner started the
-//! work, and every call is checked again. Owner turns run with `--force`, so
-//! tools run without asking. Cursor takes no system prompt from most
+//! MCP server, plus the host shell and file tools when the owner started
+//! the work, and every call is checked again. Owner turns start in the
+//! bot's project; other turns start in a private workspace, so nothing a
+//! guest wrote there loads. Cursor takes no system prompt from most
 //! accounts, so else.bot's instructions lead the packet whenever the chat
 //! has not seen this exact text. Stop is SIGINT. The CLI takes no input
 //! while it runs, so owner messages that join a turn wait for its next
@@ -98,6 +98,9 @@ fn lookup(configured: Option<&Path>, home: Option<&Path>) -> Result<Option<PathB
     else {
         return Ok(None);
     };
+    // Turns start in the bot's project, where a relative path means
+    // another file.
+    let given = std::path::absolute(&given).map_err(|e| e.to_string())?;
     let resolved = super::executable_as(Some(&given), "cursor-agent", "ELSE_CURSOR_BIN")?;
     let linked = std::fs::canonicalize(&given).ok() == resolved;
     Ok(if linked { Some(given) } else { resolved })
@@ -203,7 +206,8 @@ impl Cursor {
         ready: &Ready,
         input: &TurnInput,
         profile: &Profile,
-        dirs: BotDirs,
+        mut dirs: BotDirs,
+        workspace: PathBuf,
         turn: &PreparedTurn<'_>,
     ) -> LaunchSpec {
         let mut args: Vec<OsString> = [
@@ -213,6 +217,8 @@ impl Cursor {
             "--stream-partial-output",
             "--trust",
             "--disable-project-configs",
+            "--workspace",
+            &workspace.to_string_lossy(),
             "--sandbox",
             "disabled",
             "--allowed-tools",
@@ -232,9 +238,7 @@ impl Cursor {
             .into(),
             turn.native_id().into(),
         ]);
-        if input.delegation.host_tools() {
-            args.push("--force".into());
-        }
+        dirs.project = workspace;
         let mut env = cursor_home::env(&dirs.provider_home, &ready.login);
         if let (Some(_), Some(grant)) = (&self.tool_url, &input.tool_grant) {
             env.push((GRANT_ENV.into(), grant.clone()));
@@ -254,9 +258,12 @@ impl Cursor {
 /// so the result is held until the exit and carries its `exit_code`.
 struct Running<'a> {
     attempt: &'a mut StreamAttempt,
-    result: Option<Value>,
+    result: Option<(Value, tokio::time::Instant)>,
     exited: bool,
 }
+
+/// How long the CLI may take to store its chat and exit after its result.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[async_trait]
 impl Channel for Running<'_> {
@@ -265,9 +272,21 @@ impl Channel for Running<'_> {
     async fn next(&mut self) -> Result<Option<Value>, String> {
         use std::os::unix::process::ExitStatusExt;
         while !self.exited {
-            match self.attempt.next().await? {
+            let next = match &self.result {
+                Some((_, deadline)) => {
+                    match tokio::time::timeout_at(*deadline, self.attempt.next()).await {
+                        Ok(next) => next?,
+                        Err(_) => {
+                            self.exited = true;
+                            return Ok(self.result.take().map(|(result, _)| result));
+                        }
+                    }
+                }
+                None => self.attempt.next().await?,
+            };
+            match next {
                 Some(event) if self.result.is_none() && event["type"] == "result" => {
-                    self.result = Some(event);
+                    self.result = Some((event, tokio::time::Instant::now() + SETTLE));
                 }
                 Some(event) => return Ok(Some(event)),
                 None => {
@@ -275,7 +294,7 @@ impl Channel for Running<'_> {
                     self.exited = true;
                     let code = status.and_then(|s| s.code());
                     return Ok(Some(match self.result.take() {
-                        Some(mut result) => {
+                        Some((mut result, _)) => {
                             result["exit_code"] = json!(code);
                             result
                         }
@@ -334,18 +353,20 @@ impl Provider for Cursor {
         // Listing runs no agent, so it reads the host login where it is.
         // `probe` keeps the line that says why it failed.
         let (host, program) = (ready.host.clone(), ready.program.clone());
-        let printed = tokio::task::spawn_blocking(move || {
-            host.probe(&program, &["models"], &[("NO_COLOR".into(), "1".into())])
-        })
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|why| {
-            if cursor_home::refused_login(&why) {
-                cursor_home::SIGNED_OUT.to_owned()
-            } else {
-                format!("`cursor-agent models` failed: {why}")
-            }
-        })?;
+        let mut env = vec![("NO_COLOR".to_owned(), "1".to_owned())];
+        if let Some(store) = &ready.login.store {
+            env.push(("AGENT_CLI_CREDENTIAL_STORE".into(), store.clone()));
+        }
+        let printed = tokio::task::spawn_blocking(move || host.probe(&program, &["models"], &env))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|why| {
+                if cursor_home::refused_login(&why) {
+                    cursor_home::SIGNED_OUT.to_owned()
+                } else {
+                    format!("`cursor-agent models` failed: {why}")
+                }
+            })?;
         match listed_models(&printed) {
             listed if listed.is_empty() => Err(format!(
                 "`cursor-agent models` listed no models: {}",
@@ -379,21 +400,19 @@ impl Provider for Cursor {
             Ok(dirs) => dirs,
             Err(e) => return failed("provider_unavailable", e.to_string()),
         };
-        if let Some(hooks) = cursor_home::project_hooks(&dirs.project) {
-            return failed(
-                "provider_refused",
-                format!(
-                    "Cursor would run the hooks in {} on this server, outside else.bot's tool \
-                     policy. Remove them from the bot's project, or switch this bot to another \
-                     model.",
-                    hooks.display()
-                ),
-            );
-        }
+        let host_tools = input.delegation.host_tools();
+        let workspace = if host_tools {
+            dirs.project.clone()
+        } else {
+            match cursor_home::private_workspace(&dirs.provider_home) {
+                Ok(workspace) => workspace,
+                Err(e) => return failed("provider_unavailable", e.to_string()),
+            }
+        };
         let fingerprint = self.fingerprint(ready, &input, profile);
         let opened = match input.session.as_ref().filter(|s| {
             s.fingerprint == fingerprint
-                && cursor_home::session_exists(&dirs.provider_home, &dirs.project, &s.native_id)
+                && cursor_home::session_exists(&dirs.provider_home, &workspace, &s.native_id)
         }) {
             Some(session) => Opened::Resumed(session),
             None => Opened::Fresh(Uuid::new_v4().to_string()),
@@ -406,13 +425,12 @@ impl Provider for Cursor {
         if let Err(e) = attachments::stage(&dirs.project, &input.files).await {
             return failed("attachment_unavailable", e.to_string());
         }
-        let host_tools = input.delegation.host_tools();
         if let Err(e) =
             cursor_home::prepare(&dirs, &ready.login, self.tool_url.as_deref(), host_tools)
         {
             return failed("provider_unavailable", e.to_string());
         }
-        let spec = self.launch(ready, &input, profile, dirs, &turn);
+        let spec = self.launch(ready, &input, profile, dirs, workspace, &turn);
         if sink.sending().await.is_err() {
             return TurnOutcome::Interrupted;
         }

@@ -92,6 +92,8 @@ pub(super) struct Tracker {
     /// An event that is a delta unless a flush boundary follows it.
     held: Option<String>,
     calls: HashMap<String, String>,
+    /// Whether a tool call started, so a failure may have left effects.
+    acted: bool,
     /// Whether the CLI exited cleanly after its result, so its chat is
     /// stored.
     clean: bool,
@@ -148,6 +150,7 @@ impl Tracker {
             since_flush: String::new(),
             held: None,
             calls: HashMap::new(),
+            acted: false,
             clean: false,
         }
     }
@@ -192,6 +195,7 @@ impl Tracker {
         let (kind, call) = tool_call(event)?;
         match required(&event["subtype"], "tool call")? {
             "started" => {
+                self.acted = true;
                 let args = &call["args"];
                 if kind == "mcpToolCall" {
                     let server = required(&args["providerIdentifier"], "MCP call")?;
@@ -276,6 +280,15 @@ impl Protocol for Tracker {
             }
             ("assistant", Start::Accepted) => events.extend(self.on_assistant(event)?),
             ("tool_call", Start::Accepted) => events.extend(self.on_tool_call(event)?),
+            ("interaction_query", _)
+                if event["subtype"] == "request"
+                    && matches!(
+                        event["query_type"].as_str(),
+                        Some("webSearchRequestQuery" | "webFetchRequestQuery")
+                    ) =>
+            {
+                return Err(Violation::policy("Cursor asked to use the web"));
+            }
             ("result", _) => {
                 self.clean = event["exit_code"] == 0;
                 let usage = &event["usage"];
@@ -323,6 +336,11 @@ impl Protocol for Tracker {
                 signal,
                 stderr,
             } if stopping.is_some() && cancelled(code, signal, &stderr) => TurnOutcome::Interrupted,
+            Terminal::Exit {
+                code: Some(code), ..
+            } if self.acted => TurnOutcome::Uncertain {
+                message: format!("Cursor CLI exited with {code} after using tools."),
+            },
             Terminal::Exit { stderr, .. } if super::cursor_home::refused_login(&stderr) => {
                 failed("provider_unavailable", super::cursor_home::SIGNED_OUT)
             }
@@ -334,7 +352,7 @@ impl Protocol for Tracker {
                 code: Some(code),
                 stderr,
                 ..
-            } if code != 0 && !accepted => failed(
+            } if code != 0 => failed(
                 "provider_failed",
                 format!("Cursor CLI exited with {code}: {}", last_line(&stderr)),
             ),

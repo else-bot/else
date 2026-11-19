@@ -152,12 +152,14 @@ pub fn env(home: &Path, login: &Login) -> Vec<(String, String)> {
     env
 }
 
-/// No sandbox, as with the other providers' host tools.
+/// Owner turns run tools without asking (`unrestricted`, which unlike
+/// `--force` leaves web search and fetch unapproved); other turns run only
+/// else.bot's. No sandbox, as with the other providers' host tools.
 fn cli_config(host_tools: bool) -> serde_json::Value {
-    let deny: &[&str] = if host_tools {
-        &[]
+    let (deny, mode): (&[&str], _) = if host_tools {
+        (&[], "unrestricted")
     } else {
-        &["Shell(*)", "Read(**)", "Write(**)"]
+        (&["Shell(*)", "Read(**)", "Write(**)"], "allowlist")
     };
     json!({
         "version": 1,
@@ -165,7 +167,7 @@ fn cli_config(host_tools: bool) -> serde_json::Value {
             "allow": [format!("Mcp({SERVER_NAME}:*)")],
             "deny": deny,
         },
-        "approvalMode": "allowlist",
+        "approvalMode": mode,
         "sandbox": { "mode": "disabled" },
         "autoAcceptWebSearch": false,
         "attribution": { "attributeCommitsToAgent": false, "attributePRsToAgent": false },
@@ -205,38 +207,13 @@ pub fn prepare(
     replace_private(&cursor, "mcp.json", &mcp)
 }
 
-/// The directory Cursor treats as the project: the nearest one above the
-/// bot's project directory holding `.git`, else the directory itself.
-fn project_root(project: &Path) -> &Path {
-    project
-        .ancestors()
-        .find(|dir| dir.join(".git").exists())
-        .unwrap_or(project)
-}
-
-/// A project file whose hooks Cursor would run on the host outside the
-/// turn's policy. A file that does not parse counts.
-pub fn project_hooks(project: &Path) -> Option<PathBuf> {
-    let root = project_root(project);
-    [
-        ".cursor/hooks.json",
-        ".claude/settings.json",
-        ".claude/settings.local.json",
-    ]
-    .into_iter()
-    .map(|name| root.join(name))
-    .find(|path| match fs::read(path) {
-        Err(_) => false,
-        Ok(bytes) => {
-            serde_json::from_slice::<serde_json::Value>(&bytes).map_or(true, |config| match &config
-                ["hooks"]
-            {
-                serde_json::Value::Null => false,
-                serde_json::Value::Object(hooks) => !hooks.is_empty(),
-                _ => true,
-            })
-        }
-    })
+/// Where a turn without host tools runs: a directory only else.bot writes,
+/// so no project hooks, plugins, rules or MCP servers load. The bot's
+/// project is its computer's `~/work`, which a guest can write.
+pub fn private_workspace(home: &Path) -> std::io::Result<PathBuf> {
+    let dir = home.join("workspace");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
 }
 
 /// Whether the bot's chat `id` exists for this project directory: Cursor
