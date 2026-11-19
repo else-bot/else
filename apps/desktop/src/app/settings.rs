@@ -161,6 +161,64 @@ enum ModelState {
     Loading(Uuid),
     Failed(String),
     Ready(Option<BotProfile>),
+    /// Every routine, trigger and turn change moves the bot's revision and
+    /// reloads its profile, so a reload keeps the shown profile on screen
+    /// and the panel's sections don't jump.
+    Refreshing {
+        attempt: Uuid,
+        shown: Option<BotProfile>,
+    },
+}
+
+impl ModelState {
+    fn shown(&self) -> Option<&Option<BotProfile>> {
+        match self {
+            Self::Ready(shown) | Self::Refreshing { shown, .. } => Some(shown),
+            Self::Loading(_) | Self::Failed(_) => None,
+        }
+    }
+
+    fn pending(&self) -> bool {
+        matches!(self, Self::Loading(_) | Self::Refreshing { .. })
+    }
+
+    fn reload(&mut self, attempt: Uuid) {
+        *self = match std::mem::replace(self, Self::Loading(attempt)) {
+            Self::Ready(shown) | Self::Refreshing { shown, .. } => {
+                Self::Refreshing { attempt, shown }
+            }
+            Self::Loading(_) | Self::Failed(_) => Self::Loading(attempt),
+        };
+    }
+
+    /// Applies the answer to `attempt`, unless a later load superseded it.
+    /// A failed refresh keeps the shown profile; the next revision retries.
+    fn answer(&mut self, attempt: Uuid, result: Result<Option<BotProfile>, String>) -> bool {
+        let next = match (&*self, result) {
+            (Self::Loading(a) | Self::Refreshing { attempt: a, .. }, Ok(profile))
+                if *a == attempt =>
+            {
+                Self::Ready(profile)
+            }
+            (Self::Loading(a), Err(err)) if *a == attempt => Self::Failed(err),
+            (Self::Refreshing { attempt: a, shown }, Err(_)) if *a == attempt => {
+                Self::Ready(shown.clone())
+            }
+            _ => return false,
+        };
+        *self = next;
+        true
+    }
+
+    /// A saved profile is current, but a pending load stays pending so a
+    /// change made elsewhere after the save still lands.
+    fn saved(&mut self, profile: BotProfile) {
+        match self {
+            Self::Ready(_) | Self::Failed(_) => *self = Self::Ready(Some(profile)),
+            Self::Refreshing { shown, .. } => *shown = Some(profile),
+            Self::Loading(_) => {}
+        }
+    }
 }
 
 /// A one-click switch of a bot to the newer model of its family.
@@ -329,7 +387,7 @@ impl ElseApp {
             if let Some(bot) = self.selected.filter(|id| {
                 self.settings
                     .get(id)
-                    .is_some_and(|entry| !matches!(entry.model, ModelState::Loading(_)))
+                    .is_some_and(|entry| !entry.model.pending())
             }) {
                 self.load_profile(bot, window, cx);
             }
@@ -508,7 +566,7 @@ impl ElseApp {
             return;
         };
         let attempt = Uuid::new_v4();
-        entry.model = ModelState::Loading(attempt);
+        entry.model.reload(attempt);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.bot_profile(bot).await;
@@ -516,14 +574,12 @@ impl ElseApp {
                 let Some(entry) = app.settings.get_mut(&bot) else {
                     return;
                 };
-                if !matches!(entry.model, ModelState::Loading(a) if a == attempt) {
-                    return;
+                if entry
+                    .model
+                    .answer(attempt, result.map_err(|err| err.to_string()))
+                {
+                    cx.notify();
                 }
-                entry.model = match result {
-                    Ok(saved) => ModelState::Ready(saved),
-                    Err(err) => ModelState::Failed(err.to_string()),
-                };
-                cx.notify();
             });
         })
         .detach();
@@ -847,7 +903,7 @@ impl ElseApp {
     }
 
     fn open_model_dialog(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(ModelState::Ready(saved)) = self.settings.get(&bot).map(|s| &s.model) else {
+        let Some(saved) = self.settings.get(&bot).and_then(|s| s.model.shown()) else {
             return;
         };
         let saved = saved.as_ref().map(|p| p.choice.clone());
@@ -912,10 +968,10 @@ impl ElseApp {
             return;
         };
         let initial = saved.as_ref().or_else(|| {
-            self.settings.get(&bot).and_then(|s| match &s.model {
-                ModelState::Ready(Some(profile)) => Some(&profile.choice),
-                _ => None,
-            })
+            self.settings
+                .get(&bot)
+                .and_then(|s| s.model.shown()?.as_ref())
+                .map(|profile| &profile.choice)
         });
         let initial = initial.cloned();
         let picker = self.profile_picker(&caps, initial.as_ref(), cx);
@@ -1077,10 +1133,8 @@ impl ElseApp {
                     Ok(saved) => {
                         match saved {
                             SavedModel::Bot(saved) => {
-                                if let Some(entry) = app.settings.get_mut(&bot)
-                                    && matches!(entry.model, ModelState::Ready(_))
-                                {
-                                    entry.model = ModelState::Ready(Some(saved));
+                                if let Some(entry) = app.settings.get_mut(&bot) {
+                                    entry.model.saved(saved);
                                 }
                             }
                             SavedModel::Routine(saved) => {
@@ -1451,24 +1505,23 @@ impl ElseApp {
 
     fn render_model(&self, bot: Uuid, state: &ModelState, cx: &mut Context<Self>) -> AnyElement {
         let body = section("Model", cx);
-        let saved = match state {
-            ModelState::Loading(_) => return body.child(muted("Loading…", cx)).into_any_element(),
-            ModelState::Failed(err) => {
-                return body
-                    .child(note(format!("Couldn't load the model. {err}"), true, cx))
-                    .child(
-                        h_flex().child(
-                            Button::new("retry-model")
-                                .control(Tier::Secondary, Scale::Standard, false, cx)
-                                .label("Retry")
-                                .on_click(cx.listener(move |app, _, window, cx| {
-                                    app.load_profile(bot, window, cx)
-                                })),
-                        ),
-                    )
-                    .into_any_element();
-            }
-            ModelState::Ready(saved) => saved,
+        let Some(saved) = state.shown() else {
+            let ModelState::Failed(err) = state else {
+                return body.child(muted("Loading…", cx)).into_any_element();
+            };
+            return body
+                .child(note(format!("Couldn't load the model. {err}"), true, cx))
+                .child(
+                    h_flex().child(
+                        Button::new("retry-model")
+                            .control(Tier::Secondary, Scale::Standard, false, cx)
+                            .label("Retry")
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.load_profile(bot, window, cx)
+                            })),
+                    ),
+                )
+                .into_any_element();
         };
         body.child(self.render_current_model(bot, saved.as_ref(), cx))
             .into_any_element()
@@ -1652,10 +1705,8 @@ impl ElseApp {
                 }
                 app.model_upgrade = match result {
                     Ok(saved) => {
-                        if let Some(entry) = app.settings.get_mut(&bot)
-                            && matches!(entry.model, ModelState::Ready(_))
-                        {
-                            entry.model = ModelState::Ready(Some(saved));
+                        if let Some(entry) = app.settings.get_mut(&bot) {
+                            entry.model.saved(saved);
                         }
                         None
                     }
@@ -1994,10 +2045,8 @@ impl ElseApp {
         let choice = routine.model.as_ref().or_else(|| {
             self.settings
                 .get(&bot)
-                .and_then(|entry| match &entry.model {
-                    ModelState::Ready(Some(profile)) => Some(&profile.choice),
-                    _ => None,
-                })
+                .and_then(|entry| entry.model.shown()?.as_ref())
+                .map(|profile| &profile.choice)
         });
         let model_title = match (&routine.model, choice) {
             (Some(choice), _) => self.model_name(choice),
@@ -3074,14 +3123,76 @@ fn still_pending(save: &TriggerSave, current: Option<bool>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Banner, Metadata, MetadataChange, MetadataSync, RoutineSave, TriggerSave, banner,
-        describe_cron, describe_hours, last_run, pace, parse_name, still_pending, trigger_cards,
+        Banner, Metadata, MetadataChange, MetadataSync, ModelState, RoutineSave, TriggerSave,
+        banner, describe_cron, describe_hours, last_run, pace, parse_name, still_pending,
+        trigger_cards,
     };
     use crate::api::socials::Trigger;
+    use crate::api::{BotProfile, ProfileChoice};
     use crate::avatar::{Avatar, AvatarColor, AvatarShape};
     use crate::model::{Conversation, Snapshot};
     use serde_json::json;
     use uuid::Uuid;
+
+    fn profile(model: &str) -> Option<BotProfile> {
+        Some(BotProfile {
+            choice: ProfileChoice {
+                provider_id: "codex".into(),
+                model: model.into(),
+                reasoning_effort: "medium".into(),
+                service_tier: "priority".into(),
+            },
+            own: true,
+        })
+    }
+
+    #[test]
+    fn a_refresh_shows_the_profile_until_its_answer_lands() {
+        let mut state = ModelState::Ready(profile("gpt-6.1-sol"));
+        let attempt = Uuid::new_v4();
+        state.reload(attempt);
+        assert_eq!(state.shown(), Some(&profile("gpt-6.1-sol")));
+        assert!(state.answer(attempt, Ok(profile("gpt-6.2-sol"))));
+        assert_eq!(state.shown(), Some(&profile("gpt-6.2-sol")));
+    }
+
+    #[test]
+    fn a_superseded_answer_is_dropped() {
+        let mut state = ModelState::Ready(profile("gpt-6.1-sol"));
+        let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
+        state.reload(first);
+        state.reload(second);
+        assert!(state.answer(second, Ok(profile("gpt-6.2-sol"))));
+        assert!(!state.answer(first, Ok(profile("gpt-6.1-sol"))));
+        assert_eq!(state.shown(), Some(&profile("gpt-6.2-sol")));
+    }
+
+    #[test]
+    fn a_failed_refresh_keeps_the_profile_and_a_failed_first_load_shows_the_error() {
+        let mut state = ModelState::Ready(profile("gpt-6.1-sol"));
+        let attempt = Uuid::new_v4();
+        state.reload(attempt);
+        assert!(state.answer(attempt, Err("offline".into())));
+        assert_eq!(state.shown(), Some(&profile("gpt-6.1-sol")));
+
+        let mut state = ModelState::Loading(Uuid::nil());
+        let attempt = Uuid::new_v4();
+        state.reload(attempt);
+        assert_eq!(state.shown(), None);
+        assert!(state.answer(attempt, Err("offline".into())));
+        assert!(matches!(&state, ModelState::Failed(err) if err == "offline"));
+    }
+
+    #[test]
+    fn a_save_during_a_refresh_shows_at_once_and_the_refresh_still_lands() {
+        let mut state = ModelState::Ready(profile("gpt-6.1-sol"));
+        let attempt = Uuid::new_v4();
+        state.reload(attempt);
+        state.saved(profile("gpt-6.2-sol").unwrap());
+        assert_eq!(state.shown(), Some(&profile("gpt-6.2-sol")));
+        assert!(state.answer(attempt, Ok(profile("gpt-6.3-sol"))));
+        assert_eq!(state.shown(), Some(&profile("gpt-6.3-sol")));
+    }
 
     fn metadata(name: &str, avatar: Avatar) -> Metadata {
         Metadata {
