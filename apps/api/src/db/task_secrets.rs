@@ -627,8 +627,16 @@ pub async fn delete(pool: &SqlitePool, name: &str) -> Result<bool, sqlx::Error> 
         == 1)
 }
 
-/// Decrypt the named secrets into environment variables. A missing name is
-/// `Unknown`. Two secrets setting the same variable are refused.
+/// Whether an entry is reserved for a provider's own login. Cursor's SDK
+/// adapter kept its API key in `provider-cursor`; installations that added
+/// one keep it hidden from bots' commands, jobs, logins and listing.
+pub fn provider_only(name: &str) -> bool {
+    name.starts_with("provider-")
+}
+
+/// Decrypt the named secrets into environment variables. A missing or
+/// provider-only name is `Unknown`. Two secrets setting the same variable
+/// are refused.
 pub async fn resolve(
     pool: &SqlitePool,
     key: Option<&SecretKey>,
@@ -645,6 +653,9 @@ pub async fn resolve(
     }
     let key = key.ok_or(SecretError::NoKey)?;
     for name in names {
+        if provider_only(name) {
+            return Err(SecretError::Unknown(name.clone()));
+        }
         let row: Option<(Vec<u8>, Vec<u8>)> =
             sqlx::query_as("SELECT salt, ciphertext FROM task_secrets WHERE name = ?1")
                 .bind(name)
@@ -666,12 +677,15 @@ pub async fn resolve(
 }
 
 /// An entry's website and values, read together so the website checked is
-/// the one stored with these values.
+/// the one stored with these values. A provider-only entry is `Unknown`.
 pub async fn login(
     pool: &SqlitePool,
     key: Option<&SecretKey>,
     name: &str,
 ) -> Result<(Option<Website>, Env), SecretError> {
+    if provider_only(name) {
+        return Err(SecretError::Unknown(name.to_owned()));
+    }
     let row: Option<(Option<String>, Vec<u8>, Vec<u8>)> =
         sqlx::query_as("SELECT website, salt, ciphertext FROM task_secrets WHERE name = ?1")
             .bind(name)

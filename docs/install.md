@@ -53,9 +53,9 @@ The installer checks for these CLIs but does not install them. Provider CLIs run
 
 Install the Cursor CLI with `curl https://cursor.com/install -fsS | bash`, then run `cursor-agent login`. else.bot needs version 2026.08.11 or newer, and finds it in `~/.local/bin`, where its installer puts it, or on `PATH`. Set `ELSE_CURSOR_BIN` to use another copy.
 
-Each bot runs the CLI with its own home directory, so your Cursor rules, MCP servers, hooks, plugins and Claude Code settings never load into a bot. Only your login is shared. A side effect is that shell commands in your Cursor turns see the bot's home as `~`, not yours.
+Each bot runs the CLI with its own home directory, so your Cursor rules, MCP servers, hooks, plugins and Claude Code settings never load into a bot. Only your login is shared. The project's `.cursor/cli.json` and `.envrc` are ignored too. A side effect is that shell commands in your Cursor turns see the bot's home as `~`, not yours.
 
-Turns you start get else.bot's tools plus the shell and file tools. Turns started by an incoming event get only else.bot's tools, and any other tool call fails the turn. Subagents and web search are always off. A bot whose project holds hooks in `.cursor/hooks.json` or `.claude/settings.json` cannot run on Cursor, because Cursor would run them on this server. The CLI takes no messages mid-turn, so a message you send while a turn runs is delivered when that turn ends.
+Turns you start get else.bot's tools plus the shell and file tools. Turns started by an incoming event get only else.bot's tools, and any other tool call fails the turn. Subagents, web search and web fetch are never offered. A bot whose project holds hooks in `.cursor/hooks.json` or `.claude/settings.json` cannot run on Cursor, because Cursor would run them on this server. The CLI takes no messages mid-turn, so a message you send while a turn runs is delivered when that turn ends.
 
 ## Open the app
 

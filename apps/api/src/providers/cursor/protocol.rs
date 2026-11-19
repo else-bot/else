@@ -1,16 +1,15 @@
 //! Cursor CLI's `stream-json` events, validated against the turn's policy.
 //!
-//! The CLI reports no tool inventory, so each tool call is checked when it
-//! starts. It writes a `result` only on success; it exits with a message on
-//! stderr after an error or SIGINT. [`super::Running`] turns that exit into
-//! a final `exit` event, so every attempt that ends has a terminal.
+//! `--allowed-tools` limits what the model is offered; each call is still
+//! checked when it starts. The CLI writes a `result` only on success and
+//! otherwise just exits; [`super::Running`] reports how it exited.
 //!
 //! With `--stream-partial-output` each text delta arrives as an `assistant`
 //! event with a timestamp, and the text since the last flush arrives again
-//! as one event before each tool call, retry and the result. A flush has a
-//! `model_call_id` or no timestamp, except before a retry or a tool call
-//! whose model call has no ID; such an event that repeats the text since
-//! the last flush is held until the next event shows which it was.
+//! before each tool call, retry, question and the result. A flush has a
+//! `model_call_id` or no timestamp, except when its model call has no ID;
+//! such an event that repeats the text since the last flush is held until
+//! the next event shows which it was.
 
 use std::collections::HashMap;
 
@@ -20,23 +19,45 @@ use crate::app::providers::{TurnOutcome, Usage};
 use crate::app::tools::{SERVER_NAME, TOOL_NAMES};
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 
-/// The host shell and file tools an owner's turn may use, by the key their
-/// call reports.
-const HOST_TOOLS: &[&str] = &[
-    "shellToolCall",
-    "readToolCall",
-    "editToolCall",
-    "writeToolCall",
-    "deleteToolCall",
-    "grepToolCall",
-    "globToolCall",
-    "lsToolCall",
-    "semSearchToolCall",
-    "readLintsToolCall",
+/// The host shell and file tools an owner's turn may use, as
+/// `--allowed-tools` names them and as their calls report them.
+const HOST_TOOLS: &[(&str, &str)] = &[
+    ("shell_tool_call", "shellToolCall"),
+    ("read_tool_call", "readToolCall"),
+    ("edit_tool_call", "editToolCall"),
+    ("delete_tool_call", "deleteToolCall"),
+    ("grep_tool_call", "grepToolCall"),
+    ("glob_tool_call", "globToolCall"),
+    ("ls_tool_call", "lsToolCall"),
+    ("sem_search_tool_call", "semSearchToolCall"),
+    ("read_lints_tool_call", "readLintsToolCall"),
 ];
 /// The agent's own to-do list, which touches nothing outside the turn.
-const OWN_TOOLS: &[&str] = &["updateTodosToolCall", "readTodosToolCall"];
-const MCP_TOOL: &str = "mcpToolCall";
+const OWN_TOOLS: &[(&str, &str)] = &[
+    ("update_todos_tool_call", "updateTodosToolCall"),
+    ("read_todos_tool_call", "readTodosToolCall"),
+];
+const MCP_TOOLS: &[(&str, &str)] = &[
+    ("mcp_tool_call", "mcpToolCall"),
+    ("get_mcp_tools_tool_call", "getMcpToolsToolCall"),
+];
+
+/// The `--allowed-tools` value for a turn.
+pub(super) fn allowed_tools(host: bool, mcp: bool) -> String {
+    let mut tools = OWN_TOOLS.to_vec();
+    if host {
+        tools.extend(HOST_TOOLS);
+    }
+    if mcp {
+        tools.extend(MCP_TOOLS);
+    }
+    let names: Vec<&str> = tools.iter().map(|(flag, _)| *flag).collect();
+    names.join(",")
+}
+
+fn reports(tools: &[(&str, &str)], kind: &str) -> bool {
+    tools.iter().any(|(_, call)| *call == kind)
+}
 
 /// How the CLI's turn ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,11 +88,13 @@ pub(super) struct Tracker {
     host: bool,
     mcp: bool,
     start: Start,
-    /// Text since the last flush.
     since_flush: String,
-    /// An event that is a delta unless a retry or tool call follows it.
+    /// An event that is a delta unless a flush boundary follows it.
     held: Option<String>,
     calls: HashMap<String, String>,
+    /// Whether the CLI exited cleanly after its result, so its chat is
+    /// stored.
+    clean: bool,
 }
 
 fn malformed(what: &str) -> Violation {
@@ -125,6 +148,7 @@ impl Tracker {
             since_flush: String::new(),
             held: None,
             calls: HashMap::new(),
+            clean: false,
         }
     }
 
@@ -151,13 +175,11 @@ impl Tracker {
         Ok(vec![Event::Text(chunk)])
     }
 
-    /// Settle a held event: a flush when a retry or tool call follows it,
-    /// else a delta.
     fn release(&mut self, kind: &str) -> Vec<Event<Terminal>> {
         let Some(chunk) = self.held.take() else {
             return Vec::new();
         };
-        if matches!(kind, "retry" | "tool_call") {
+        if matches!(kind, "retry" | "tool_call" | "interaction_query") {
             self.since_flush.clear();
             return vec![Event::EndMessage];
         }
@@ -170,8 +192,8 @@ impl Tracker {
         let (kind, call) = tool_call(event)?;
         match required(&event["subtype"], "tool call")? {
             "started" => {
-                if kind == MCP_TOOL {
-                    let args = &call["args"];
+                let args = &call["args"];
+                if kind == "mcpToolCall" {
                     let server = required(&args["providerIdentifier"], "MCP call")?;
                     let tool = required(&args["toolName"], "MCP call")?;
                     if !self.mcp || server != SERVER_NAME || !TOOL_NAMES.contains(&tool) {
@@ -180,7 +202,15 @@ impl Tracker {
                         )));
                     }
                     self.calls.insert(id.to_owned(), tool.to_owned());
-                } else if !(OWN_TOOLS.contains(&kind) || self.host && HOST_TOOLS.contains(&kind)) {
+                } else if kind == "getMcpToolsToolCall" {
+                    let server = text(&args["server"], "MCP listing")?;
+                    if !self.mcp || server.is_some_and(|server| server != SERVER_NAME) {
+                        return Err(Violation::policy(format!(
+                            "Cursor listed MCP tools outside else.bot: {}",
+                            server.unwrap_or_default()
+                        )));
+                    }
+                } else if !(reports(OWN_TOOLS, kind) || self.host && reports(HOST_TOOLS, kind)) {
                     return Err(Violation::policy(format!(
                         "Cursor called a tool this turn does not allow: {kind}"
                     )));
@@ -247,6 +277,7 @@ impl Protocol for Tracker {
             ("assistant", Start::Accepted) => events.extend(self.on_assistant(event)?),
             ("tool_call", Start::Accepted) => events.extend(self.on_tool_call(event)?),
             ("result", _) => {
+                self.clean = event["exit_code"] == 0;
                 let usage = &event["usage"];
                 let count = |key: &str| usage[key].as_i64().unwrap_or(0).max(0);
                 if usage.is_object() {
@@ -287,7 +318,11 @@ impl Protocol for Tracker {
             Terminal::Result { text, .. } => {
                 failed("provider_failed", format!("Cursor failed: {text}"))
             }
-            Terminal::Exit { .. } if stopping.is_some() => TurnOutcome::Interrupted,
+            Terminal::Exit {
+                code,
+                signal,
+                stderr,
+            } if stopping.is_some() && cancelled(code, signal, &stderr) => TurnOutcome::Interrupted,
             Terminal::Exit { stderr, .. } if super::cursor_home::refused_login(&stderr) => {
                 failed("provider_unavailable", super::cursor_home::SIGNED_OUT)
             }
@@ -299,7 +334,7 @@ impl Protocol for Tracker {
                 code: Some(code),
                 stderr,
                 ..
-            } if code != 0 => failed(
+            } if code != 0 && !accepted => failed(
                 "provider_failed",
                 format!("Cursor CLI exited with {code}: {}", last_line(&stderr)),
             ),
@@ -316,11 +351,17 @@ impl Protocol for Tracker {
         }
     }
 
-    /// Only a completed native turn is known to have settled; chats that
-    /// ended any other way are rebuilt from SQLite.
     fn resumable(&self, outcome: &TurnOutcome) -> bool {
-        *outcome == TurnOutcome::Completed
+        *outcome == TurnOutcome::Completed && self.clean
     }
+}
+
+/// Whether the CLI ended as SIGINT asks: it prints "Operation cancelled"
+/// and exits 130, unless the signal ended it first.
+fn cancelled(code: Option<i32>, signal: Option<i32>, stderr: &str) -> bool {
+    code == Some(130)
+        || signal.is_some_and(|s| [2, 9, 15].contains(&s))
+        || stderr.contains("Operation cancelled")
 }
 
 fn usage_limit(stderr: &str) -> bool {

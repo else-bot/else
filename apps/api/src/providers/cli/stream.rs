@@ -49,6 +49,30 @@ impl StreamAttempt {
             Interrupt::Line(_) => Stdio::piped(),
             Interrupt::Signal => Stdio::null(),
         };
+        Self::start(host, spec, stdin, interrupt, label)
+    }
+
+    /// Start a CLI that reads its prompt from stdin to the end and is
+    /// stopped by SIGINT.
+    pub async fn spawn_with_prompt(
+        host: &Host,
+        spec: &LaunchSpec,
+        prompt: &str,
+        label: &'static str,
+    ) -> std::io::Result<Self> {
+        let mut attempt = Self::start(host, spec, Stdio::piped(), Interrupt::Signal, label)?;
+        attempt.write(prompt).await?;
+        attempt.stdin = None;
+        Ok(attempt)
+    }
+
+    fn start(
+        host: &Host,
+        spec: &LaunchSpec,
+        stdin: Stdio,
+        interrupt: Interrupt,
+        label: &'static str,
+    ) -> std::io::Result<Self> {
         let mut scope = Scope::spawn(host, spec, stdin, Stdio::piped())?;
         let child = scope.child();
         let stdin = child.stdin.take();

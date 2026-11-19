@@ -88,8 +88,6 @@ fn bot_login(home: &Path, macos: bool) -> PathBuf {
     }
 }
 
-/// Whether the host has no login file. A file the CLI holds but cannot
-/// use is caught when a turn or the model list is refused.
 pub fn signed_out(login: Option<&Path>) -> bool {
     login.is_some_and(|login| !login.is_file())
 }
@@ -146,6 +144,7 @@ pub fn env(home: &Path, login: &Login) -> Vec<(String, String)> {
         ("CURSOR_DATA_DIR".into(), path(&home.join(".cursor"))),
         ("NO_COLOR".into(), "1".into()),
         ("NO_OPEN_BROWSER".into(), "1".into()),
+        ("DIRENV_DISABLE".into(), "1".into()),
     ];
     if let Some(store) = &login.store {
         env.push(("AGENT_CLI_CREDENTIAL_STORE".into(), store.clone()));
@@ -153,9 +152,7 @@ pub fn env(home: &Path, login: &Login) -> Vec<(String, String)> {
     env
 }
 
-/// The CLI's own settings: no approvals beyond the turn's policy, which
-/// [`super::cursor`] passes as flags, and no sandbox, as with the other
-/// providers' host tools.
+/// No sandbox, as with the other providers' host tools.
 fn cli_config(host_tools: bool) -> serde_json::Value {
     let deny: &[&str] = if host_tools {
         &[]
@@ -217,11 +214,8 @@ fn project_root(project: &Path) -> &Path {
         .unwrap_or(project)
 }
 
-/// A project file that would make Cursor run a command on the host
-/// outside the turn's policy: a hook in `.cursor/hooks.json` or in Claude
-/// Code's project settings, which Cursor also honors. The bot's project is
-/// its computer's `~/work`, so a guest could write one. A file that does
-/// not parse counts, since Cursor's own reading of it is unknown.
+/// A project file whose hooks Cursor would run on the host outside the
+/// turn's policy. A file that does not parse counts.
 pub fn project_hooks(project: &Path) -> Option<PathBuf> {
     let root = project_root(project);
     [

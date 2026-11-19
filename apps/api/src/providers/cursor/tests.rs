@@ -33,7 +33,7 @@ if not os.path.isfile(os.path.join(home, ".config/cursor/auth.json")):
 arg = lambda flag: a[a.index(flag) + 1]
 resumed = "--resume" in a
 chat = arg("--resume") if resumed else arg("--new-session-id")
-prompt = a[-1]
+prompt = sys.stdin.read()
 store = os.path.join(home, ".cursor/chats", hashlib.md5(os.getcwd().encode()).hexdigest(), chat)
 if resumed and not os.path.exists(os.path.join(store, "store.db")):
     print(f'Error: Chat "{chat}" not found', file=sys.stderr)
@@ -41,8 +41,8 @@ if resumed and not os.path.exists(os.path.join(store, "store.db")):
 os.makedirs(store, exist_ok=True)
 open(os.path.join(store, "store.db"), "a").close()
 with open(os.path.join(here, "launches.jsonl"), "a") as f:
-    f.write(json.dumps({"chat": chat, "resumed": resumed, "args": a, "home": home,
-        "grant": os.environ.get("ELSE_TASK_GRANT"),
+    f.write(json.dumps({"chat": chat, "resumed": resumed, "args": a, "home": home, "prompt": prompt,
+        "grant": os.environ.get("ELSE_TASK_GRANT"), "direnv": os.environ.get("DIRENV_DISABLE"),
         "mcp": json.load(open(os.path.join(home, ".cursor/mcp.json"))),
         "config": json.load(open(os.path.join(home, ".cursor/cli-config.json")))}) + "\n")
 out = lambda e: print(json.dumps(dict(e, session_id=chat)), flush=True)
@@ -59,6 +59,10 @@ if "[limit]" in prompt:
 if "[lost]" in prompt:
     delta("Partial")
     os.kill(os.getpid(), signal.SIGKILL)
+if "[crash]" in prompt:
+    delta("Partial")
+    print("Error: socket hang up", file=sys.stderr)
+    sys.exit(1)
 if "[stop]" in prompt:
     def cancel(*_):
         print("\nAborting operation...\nOperation cancelled", file=sys.stderr)
@@ -69,15 +73,18 @@ if "[stop]" in prompt:
         time.sleep(1)
 delta("Hel")
 delta("lo")
+out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Hello"}]}, "model_call_id": "m1", "timestamp_ms": now()})
 out({"type": "tool_call", "subtype": "started", "call_id": "c2", "model_call_id": "m1", "timestamp_ms": now(),
      "tool_call": {"mcpToolCall": {"args": {"name": "elsebot-find_tool", "providerIdentifier": "elsebot", "toolName": "find_tool", "args": {}}}}})
-out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Hello"}]}, "model_call_id": "m1", "timestamp_ms": now()})
 out({"type": "tool_call", "subtype": "completed", "call_id": "c2", "model_call_id": "m1", "timestamp_ms": now(),
      "tool_call": {"mcpToolCall": {"args": {"providerIdentifier": "elsebot", "toolName": "find_tool"}, "result": {"success": {"content": [{"text": {"text": "{}"}}], "isError": False}}}}})
 delta(" there")
 out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " there"}]}})
 out({"type": "result", "subtype": "success", "is_error": False, "duration_ms": 5, "result": "Hello there",
      "usage": {"inputTokens": 100, "outputTokens": 20, "cacheReadTokens": 400, "cacheWriteTokens": 10}})
+if "[unsaved]" in prompt:
+    print("Error: database is locked", file=sys.stderr)
+    sys.exit(1)
 "#;
 
 /// A host with the fake CLI and a host login file, both in a temporary
@@ -222,7 +229,7 @@ async fn an_owner_turn_creates_a_chat_and_the_next_turn_resumes_it() {
     );
     let first = sink.last_session();
 
-    let mut next = input("- again", Origin::OwnerRequest);
+    let mut next = input("--again", Origin::OwnerRequest);
     next.session = Some(first.clone());
     next.turn_no = 4;
     let sink = Sink::default();
@@ -242,6 +249,8 @@ async fn an_owner_turn_creates_a_chat_and_the_next_turn_resumes_it() {
             "owner turns run host tools"
         );
         assert!(!has(&launch["args"], "--approve-mcps"));
+        assert!(has(&launch["args"], "--disable-project-configs"));
+        assert_eq!(launch["direnv"], "1");
         assert_eq!(launch["grant"], "grant-1");
         let home = server
             .path("data/bots")
@@ -256,20 +265,43 @@ async fn an_owner_turn_creates_a_chat_and_the_next_turn_resumes_it() {
         );
         assert_eq!(launch["config"]["permissions"]["deny"], json!([]));
     }
-    let prompt = |launch: &Value| launch["args"].as_array().unwrap().last().unwrap().clone();
-    assert!(
-        prompt(created)
-            .as_str()
-            .unwrap()
-            .starts_with("[else.bot instructions]")
+    let allowed = |launch: &Value| {
+        let args = launch["args"].as_array().unwrap();
+        let at = args.iter().position(|a| a == "--allowed-tools").unwrap();
+        args[at + 1].clone()
+    };
+    assert_eq!(
+        allowed(created),
+        "update_todos_tool_call,read_todos_tool_call,shell_tool_call,read_tool_call,\
+         edit_tool_call,delete_tool_call,grep_tool_call,glob_tool_call,ls_tool_call,\
+         sem_search_tool_call,read_lints_tool_call,mcp_tool_call,get_mcp_tools_tool_call"
     );
+    let prompt = |launch: &Value| launch["prompt"].as_str().unwrap().to_owned();
+    assert!(prompt(created).starts_with("[else.bot instructions]"));
     assert!(
-        !prompt(resumed)
-            .as_str()
-            .unwrap()
-            .contains("[else.bot instructions]"),
+        !prompt(resumed).contains("[else.bot instructions]"),
         "the chat already holds them"
     );
+    assert!(
+        prompt(resumed).contains("--again"),
+        "a prompt starting with dashes is not an option"
+    );
+}
+
+#[tokio::test]
+async fn a_result_the_cli_did_not_store_completes_without_resuming() {
+    let server = Server::new();
+    let sink = Sink::default();
+    let outcome = server
+        .run(input("[unsaved]", Origin::OwnerRequest), &sink)
+        .await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert!(sink.retired(), "the next turn rebuilds the chat");
+
+    let sink = Sink::default();
+    let outcome = server.run(input("hi", Origin::OwnerRequest), &sink).await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert!(!sink.retired());
 }
 
 #[tokio::test]
@@ -320,6 +352,10 @@ async fn an_event_turn_offers_only_elsebot_tools_and_a_shell_call_fails_it() {
         panic!("one launch");
     };
     assert!(!has(&launch["args"], "--force"));
+    assert!(has(
+        &launch["args"],
+        "update_todos_tool_call,read_todos_tool_call,mcp_tool_call,get_mcp_tools_tool_call"
+    ));
     assert_eq!(
         launch["config"]["permissions"],
         json!({"allow": ["Mcp(elsebot:*)"], "deny": ["Shell(*)", "Read(**)", "Write(**)"]})
@@ -339,9 +375,13 @@ async fn stop_interrupts_the_running_cli() {
         let stop = stop.clone();
         let sink = &sink;
         async move {
-            while sink.text.lock().unwrap().is_empty() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
+            tokio::time::timeout(Duration::from_secs(60), async {
+                while sink.text.lock().unwrap().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the CLI started replying");
             stop.request();
         }
     };
@@ -381,6 +421,22 @@ async fn a_lost_stream_ends_uncertain_and_retires_the_chat() {
         outcome,
         TurnOutcome::Uncertain {
             message: "Cursor CLI ended without a result (signal 9).".into()
+        }
+    );
+    assert!(sink.retired());
+}
+
+#[tokio::test]
+async fn a_cli_that_fails_after_taking_the_prompt_ends_uncertain() {
+    let server = Server::new();
+    let sink = Sink::default();
+    let outcome = server
+        .run(input("[crash]", Origin::OwnerRequest), &sink)
+        .await;
+    assert_eq!(
+        outcome,
+        TurnOutcome::Uncertain {
+            message: "Cursor CLI ended without a result (exit 1). Error: socket hang up".into()
         }
     );
     assert!(sink.retired());
@@ -598,10 +654,17 @@ fn a_delta_that_repeats_the_text_so_far_is_held_until_the_next_event() {
         Ok(vec![Event::EndMessage]),
         "a flush without a timestamp"
     );
+    t.on(&said("e", ts.clone())).unwrap();
+    assert_eq!(t.on(&said("e", ts.clone())), Ok(vec![]));
+    assert_eq!(
+        t.on(&json!({"type":"interaction_query","session_id":"chat"})),
+        Ok(vec![Event::EndMessage]),
+        "a flush before a question"
+    );
 }
 
 #[test]
-fn only_allowed_tools_run() {
+fn a_tool_call_outside_the_turns_policy_violates_it() {
     let call = |kind: &str, args: Value| {
         json!({"type":"tool_call","subtype":"started","call_id":"c","session_id":"chat",
             "tool_call": {kind: {"args": args}}})
@@ -621,7 +684,15 @@ fn only_allowed_tools_run() {
         tracker(true).on(&call("shellToolCall", json!({}))),
         Ok(vec![])
     );
+    assert_eq!(
+        tracker(false).on(&call("getMcpToolsToolCall", json!({"server": "elsebot"}))),
+        Ok(vec![])
+    );
     for (host, event) in [
+        (
+            false,
+            call("getMcpToolsToolCall", json!({"server": "github"})),
+        ),
         (false, call("readToolCall", json!({}))),
         (true, call("taskToolCall", json!({}))),
         (true, call("webSearchToolCall", json!({}))),
@@ -680,6 +751,17 @@ fn an_exit_after_a_stop_interrupts_and_other_exits_name_their_cause() {
         t.outcome(exit(Some(130), ""), Some(StopCause::Owner), true),
         TurnOutcome::Interrupted
     );
+    assert!(
+        matches!(
+            t.outcome(exit(Some(1), "Error: x"), Some(StopCause::Owner), true),
+            TurnOutcome::Uncertain { .. }
+        ),
+        "a failure the stop did not cause"
+    );
+    assert!(matches!(
+        t.outcome(exit(Some(1), "Error: x"), None, true),
+        TurnOutcome::Uncertain { .. }
+    ));
     assert_eq!(
         t.outcome(
             exit(Some(1), "Error: Cannot use this model: x"),
@@ -703,6 +785,17 @@ fn an_exit_after_a_stop_interrupts_and_other_exits_name_their_cause() {
         t.outcome(result(true), None, false),
         TurnOutcome::Uncertain { .. }
     ));
-    assert!(t.resumable(&TurnOutcome::Completed));
-    assert!(!t.resumable(&TurnOutcome::Interrupted));
+    let ended = |exit_code: Value| {
+        let mut t = tracker(true);
+        t.on(
+            &json!({"type":"result","subtype":"success","is_error":false,
+            "session_id":"chat","exit_code": exit_code}),
+        )
+        .unwrap();
+        t
+    };
+    assert!(ended(json!(0)).resumable(&TurnOutcome::Completed));
+    assert!(!ended(json!(1)).resumable(&TurnOutcome::Completed));
+    assert!(!ended(Value::Null).resumable(&TurnOutcome::Completed));
+    assert!(!ended(json!(0)).resumable(&TurnOutcome::Interrupted));
 }

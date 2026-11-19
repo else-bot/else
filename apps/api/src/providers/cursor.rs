@@ -2,20 +2,19 @@
 //! (`cursor-agent -p --output-format stream-json`), started in the bot's
 //! project directory.
 //!
-//! One CLI process runs per turn, with the packet as its prompt. A new chat
+//! One CLI process runs per turn and reads the packet on stdin. A new chat
 //! gets an ID allocated here (`--new-session-id`); the next turn resumes it
 //! (`--resume <id>`) when it is in the bot's own home and its fingerprint
 //! matches. The CLI runs with the bot's provider home as `HOME` (see
-//! [`super::cursor_home`]), sharing only the host's login. Its tools are
-//! else.bot's MCP server, authorized by the turn's grant, plus the host
-//! shell and file tools when the owner started the work; every reported
-//! tool call is checked against that. Owner turns run with `--force`, which
-//! runs tools without asking; turns started by an event run without it, so
-//! only else.bot's tools are allowed. Cursor takes no system prompt from
-//! most accounts, so else.bot's instructions lead the packet whenever the
-//! chat has not seen this exact text. Stop is SIGINT. The CLI takes no
-//! input while it runs, so owner messages that join a turn wait for its
-//! next attempt.
+//! [`super::cursor_home`]), sharing only the host's login, and ignores the
+//! project's CLI config and `.envrc`. `--allowed-tools` offers else.bot's
+//! MCP server, plus the host shell and file tools when the owner started the
+//! work, and every call is checked again. Owner turns run with `--force`, so
+//! tools run without asking. Cursor takes no system prompt from most
+//! accounts, so else.bot's instructions lead the packet whenever the chat
+//! has not seen this exact text. Stop is SIGINT. The CLI takes no input
+//! while it runs, so owner messages that join a turn wait for its next
+//! attempt.
 
 mod protocol;
 
@@ -29,7 +28,7 @@ use uuid::Uuid;
 use super::cli::attempt::{self, Channel};
 use super::cli::files::GRANT_ENV;
 use super::cli::session::{self, Identity, Opened, PreparedTurn};
-use super::cli::stream::{Interrupt, StreamAttempt};
+use super::cli::stream::StreamAttempt;
 use super::cursor_home::{self, Login};
 use super::definitions::Definition;
 use super::host::{BotDirs, Host, LaunchSpec};
@@ -43,8 +42,6 @@ use protocol::Tracker;
 pub const ID: &str = "cursor";
 const PROMPT_VERSION: &str = "else-cursor-v2";
 const INSTRUCTIONS: &str = "instructions";
-/// Linux limits one argument to 32 pages; the packet is one argument.
-const MAX_PROMPT: usize = 128 * 1024 - 1;
 
 pub static DEFINITION: Definition = Definition {
     id: ID,
@@ -80,19 +77,30 @@ fn build(wiring: &super::Wiring) -> super::Built {
 /// `cursor-agent` on `PATH`. A link is kept, not resolved: an update points
 /// it at a new versioned directory and removes the old one.
 fn lookup(configured: Option<&Path>, home: Option<&Path>) -> Result<Option<PathBuf>, String> {
-    if let Some(given) = configured {
-        let resolved = super::executable(Some(given), "cursor-agent")?;
-        let linked = std::fs::canonicalize(given).ok() == resolved;
-        return Ok(if linked {
-            Some(given.to_owned())
-        } else {
-            resolved
-        });
-    }
-    match home.map(|home| home.join(cursor_home::INSTALLED)) {
-        Some(installed) if installed.is_file() => Ok(Some(installed)),
-        _ => super::executable(None, "cursor-agent"),
-    }
+    use std::os::unix::fs::PermissionsExt;
+    let runs = |file: &PathBuf| {
+        file.metadata()
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    let path = std::env::var_os("PATH");
+    let on_path = || {
+        std::env::split_paths(path.as_deref()?)
+            .map(|dir| dir.join("cursor-agent"))
+            .find(runs)
+    };
+    let Some(given) = configured
+        .map(Path::to_owned)
+        .or_else(|| {
+            home.map(|home| home.join(cursor_home::INSTALLED))
+                .filter(runs)
+        })
+        .or_else(on_path)
+    else {
+        return Ok(None);
+    };
+    let resolved = super::executable_as(Some(&given), "cursor-agent", "ELSE_CURSOR_BIN")?;
+    let linked = std::fs::canonicalize(&given).ok() == resolved;
+    Ok(if linked { Some(given) } else { resolved })
 }
 
 /// The models `cursor-agent models` prints after "Available models", one
@@ -204,8 +212,11 @@ impl Cursor {
             "stream-json",
             "--stream-partial-output",
             "--trust",
+            "--disable-project-configs",
             "--sandbox",
             "disabled",
+            "--allowed-tools",
+            &protocol::allowed_tools(input.delegation.host_tools(), self.tool_url.is_some()),
             "--model",
             &profile.model,
         ]
@@ -224,8 +235,6 @@ impl Cursor {
         if input.delegation.host_tools() {
             args.push("--force".into());
         }
-        // A message may start with `-`; it is the prompt, not an option.
-        args.extend(["--".into(), turn.packet.clone().into()]);
         let mut env = cursor_home::env(&dirs.provider_home, &ready.login);
         if let (Some(_), Some(grant)) = (&self.tool_url, &input.tool_grant) {
             env.push((GRANT_ENV.into(), grant.clone()));
@@ -240,10 +249,12 @@ impl Cursor {
     }
 }
 
-/// The attempt, with its exit reported as a final `exit` event: Cursor
-/// writes no result after an error or SIGINT.
+/// The attempt, reporting how the CLI exited: Cursor writes no result
+/// after an error or SIGINT, and writes its result before storing the chat,
+/// so the result is held until the exit and carries its `exit_code`.
 struct Running<'a> {
     attempt: &'a mut StreamAttempt,
+    result: Option<Value>,
     exited: bool,
 }
 
@@ -252,20 +263,33 @@ impl Channel for Running<'_> {
     type Message = Value;
 
     async fn next(&mut self) -> Result<Option<Value>, String> {
-        match self.attempt.next().await? {
-            None if !self.exited => {
-                use std::os::unix::process::ExitStatusExt;
-                let (status, stderr) = self.attempt.exited().await;
-                self.exited = true;
-                Ok(Some(json!({
-                    "type": "exit",
-                    "code": status.and_then(|s| s.code()),
-                    "signal": status.and_then(|s| s.signal()),
-                    "stderr": stderr,
-                })))
+        use std::os::unix::process::ExitStatusExt;
+        while !self.exited {
+            match self.attempt.next().await? {
+                Some(event) if self.result.is_none() && event["type"] == "result" => {
+                    self.result = Some(event);
+                }
+                Some(event) => return Ok(Some(event)),
+                None => {
+                    let (status, stderr) = self.attempt.exited().await;
+                    self.exited = true;
+                    let code = status.and_then(|s| s.code());
+                    return Ok(Some(match self.result.take() {
+                        Some(mut result) => {
+                            result["exit_code"] = json!(code);
+                            result
+                        }
+                        None => json!({
+                            "type": "exit",
+                            "code": code,
+                            "signal": status.and_then(|s| s.signal()),
+                            "stderr": stderr,
+                        }),
+                    }));
+                }
             }
-            next => Ok(next),
         }
+        Ok(None)
     }
 
     async fn interrupt(&mut self) {
@@ -376,17 +400,6 @@ impl Provider for Cursor {
         };
         let mut turn = PreparedTurn::new(&input, fingerprint, opened);
         turn.lead_once(INSTRUCTIONS, instructions(&input, &dirs.project));
-        if turn.packet.len() > MAX_PROMPT {
-            return failed(
-                "provider_refused",
-                format!(
-                    "This turn's message is {} KiB, more than the {} KiB Cursor CLI takes as \
-                     its prompt. Start a new conversation, or switch this bot to another model.",
-                    turn.packet.len() / 1024,
-                    (MAX_PROMPT + 1) / 1024,
-                ),
-            );
-        }
         if turn.record(sink).await.is_err() {
             return TurnOutcome::Interrupted;
         }
@@ -403,11 +416,17 @@ impl Provider for Cursor {
         if sink.sending().await.is_err() {
             return TurnOutcome::Interrupted;
         }
-        let mut attempt =
-            match StreamAttempt::spawn(&ready.host, &spec, Interrupt::Signal, DEFINITION.label) {
-                Ok(attempt) => attempt,
-                Err(e) => return failed("provider_unavailable", e.to_string()),
-            };
+        let mut attempt = match StreamAttempt::spawn_with_prompt(
+            &ready.host,
+            &spec,
+            &turn.packet,
+            DEFINITION.label,
+        )
+        .await
+        {
+            Ok(attempt) => attempt,
+            Err(e) => return failed("provider_unavailable", e.to_string()),
+        };
         let mut tracker = Tracker::new(
             &profile.model,
             turn.native_id(),
@@ -416,6 +435,7 @@ impl Provider for Cursor {
         );
         let mut running = Running {
             attempt: &mut attempt,
+            result: None,
             exited: false,
         };
         let ended = attempt::drive(

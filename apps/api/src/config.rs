@@ -66,8 +66,8 @@ pub struct Config {
     /// Grok CLI path; otherwise `grok` on `PATH`. A script in either place
     /// gives way to the binary installed in `GROK_HOME`.
     pub grok_bin: Option<PathBuf>,
-    /// Cursor CLI path; otherwise `cursor-agent` on `PATH`, else the one
-    /// Cursor's installer links in `~/.local/bin`.
+    /// Cursor CLI path; otherwise the one Cursor's installer links in
+    /// `~/.local/bin`, else `cursor-agent` on `PATH`.
     pub cursor_bin: Option<PathBuf>,
     /// Explicit `msb` path; otherwise `PATH` or `~/.microsandbox/bin`.
     pub msb_bin: Option<PathBuf>,

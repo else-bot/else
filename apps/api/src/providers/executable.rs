@@ -18,14 +18,39 @@ pub fn executable(configured: Option<&Path>, name: &str) -> Result<Option<PathBu
     resolve(configured, name, std::env::var_os("PATH").as_deref())
 }
 
+/// [`executable`] for a CLI configured by a `setting` not named after it.
+pub fn executable_as(
+    configured: Option<&Path>,
+    name: &str,
+    setting: &str,
+) -> Result<Option<PathBuf>, String> {
+    resolve_as(
+        configured,
+        name,
+        setting,
+        std::env::var_os("PATH").as_deref(),
+    )
+}
+
 fn resolve(
     configured: Option<&Path>,
     name: &str,
     path: Option<&OsStr>,
 ) -> Result<Option<PathBuf>, String> {
-    // `cursor-agent` is configured as ELSE_CURSOR_BIN.
-    let product = name.split('-').next().unwrap_or(name);
-    let setting = format!("ELSE_{}_BIN", product.to_uppercase());
+    resolve_as(
+        configured,
+        name,
+        &format!("ELSE_{}_BIN", name.to_uppercase()),
+        path,
+    )
+}
+
+fn resolve_as(
+    configured: Option<&Path>,
+    name: &str,
+    setting: &str,
+    path: Option<&OsStr>,
+) -> Result<Option<PathBuf>, String> {
     let found = match configured {
         Some(found) if is_executable(found) => found.to_path_buf(),
         Some(found) => {
