@@ -34,13 +34,14 @@ pub const DEFINITIONS: &[&Definition] = &[
     &super::codex::DEFINITION,
     &super::claude::DEFINITION,
     &super::grok::DEFINITION,
+    &super::cursor::DEFINITION,
 ];
 
 pub fn find(id: &str) -> Option<&'static Definition> {
     DEFINITIONS.iter().copied().find(|d| d.id == id)
 }
 
-/// Provider IDs as prose: `codex, claude, or grok`.
+/// Provider IDs as prose: `codex, claude, grok, or cursor`.
 pub fn id_list() -> String {
     match DEFINITIONS.split_last() {
         Some((last, [])) => last.id.to_owned(),
@@ -163,6 +164,6 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), DEFINITIONS.len());
-        assert_eq!(id_list(), "codex, claude, or grok");
+        assert_eq!(id_list(), "codex, claude, grok, or cursor");
     }
 }

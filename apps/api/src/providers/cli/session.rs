@@ -97,6 +97,23 @@ impl<'a> PreparedTurn<'a> {
         }
     }
 
+    /// Lead the packet with `block` unless the session already holds this
+    /// exact text under `key`, for a provider that takes no system prompt.
+    /// Its receipt advances with the turn's other context.
+    pub fn lead_once(&mut self, key: &str, block: String) {
+        let hash = hex::encode(&Sha256::digest(block.as_bytes())[..16]);
+        let Some(advance) = self.advance.as_mut() else {
+            return;
+        };
+        if self.session.context.get(key) == Some(&hash) {
+            return;
+        }
+        advance.context.insert(key.to_owned(), hash);
+        self.segments
+            .insert(0, prompt::Segment::Text(block + "\n\n"));
+        self.packet = prompt::segments_text(&self.segments);
+    }
+
     pub fn native_id(&self) -> &str {
         &self.session.native_id
     }
