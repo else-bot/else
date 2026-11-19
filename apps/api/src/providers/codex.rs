@@ -347,7 +347,7 @@ impl Provider for Codex {
             Ok(spec) => spec,
             Err(outcome) => return outcome,
         };
-        let mut server = match AppServer::spawn(&ready.host, &spec) {
+        let mut server = match AppServer::spawn(&ready.host, &spec, DEFINITION.label) {
             Ok(server) => server,
             Err(err) => return failed("provider_unavailable", err.to_string()),
         };

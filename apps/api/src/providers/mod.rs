@@ -6,6 +6,8 @@ pub mod codex;
 pub mod codex_home;
 pub mod codex_rpc;
 pub(crate) mod context;
+pub mod cursor;
+pub mod cursor_home;
 mod default_skills;
 pub mod definitions;
 pub mod executable;
@@ -27,18 +29,22 @@ use crate::app::providers::{Availability, Provider};
 use crate::config::Config;
 use crate::memory_worker::Summarizer;
 
-/// Providers in default-selection order. Codex, Claude, and Grok report
-/// unavailable with a reason when their CLI or host login is missing.
-pub fn registry(config: &Config) -> Registry {
-    build(config).0
-}
-
 /// What a CLI definition's constructor gets: the configuration (its
-/// executable override), the host, and the else.bot tool endpoint.
+/// executable override), the host, the else.bot tool endpoint, and the
+/// Vault, where a provider without a host login keeps its key.
 pub struct Wiring<'a> {
     pub config: &'a Config,
     pub host: host::Host,
     pub tool_url: String,
+    pub vault: Option<Vault>,
+}
+
+/// The installation's Vault: its database and the key its entries are
+/// sealed with.
+#[derive(Clone)]
+pub struct Vault {
+    pub pool: sqlx::SqlitePool,
+    pub key: Arc<crate::credentials::SecretKey>,
 }
 
 /// A constructed CLI provider, and the same instance as the memory
@@ -51,7 +57,7 @@ pub struct Built {
 /// The registry, one provider per [`definitions::DEFINITIONS`] entry in its
 /// order and then the optional synthetic one, and the no-tools summarizer
 /// for memory.
-pub fn build(config: &Config) -> (Registry, Option<Arc<dyn Summarizer>>) {
+pub fn build(config: &Config, vault: Option<Vault>) -> (Registry, Option<Arc<dyn Summarizer>>) {
     let mut tool_addr = config.bind;
     if tool_addr.ip().is_unspecified() {
         tool_addr.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
@@ -60,6 +66,7 @@ pub fn build(config: &Config) -> (Registry, Option<Arc<dyn Summarizer>>) {
         config,
         host: host::Host::new(&config.data_dir, &config.bots_dir),
         tool_url: format!("http://{tool_addr}/tools/v1/mcp"),
+        vault,
     };
     let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
     let mut summarizer = None;
@@ -153,14 +160,15 @@ mod registration_tests {
             ("ELSE_CODEX_BIN", path("missing/codex")),
             ("ELSE_CLAUDE_BIN", path("missing/claude")),
             ("ELSE_GROK_BIN", path("missing/grok")),
+            ("ELSE_NODE_BIN", path("missing/node")),
             ("ELSE_SYNTHETIC_PROVIDER", "true".into()),
         ]))
         .unwrap();
-        let (registry, summarizer) = build(&config);
+        let (registry, summarizer) = build(&config, None);
 
         let ids: Vec<&str> = registry.all().iter().map(|p| p.id()).collect();
         let mut expected: Vec<&str> = definitions::DEFINITIONS.iter().map(|d| d.id).collect();
-        assert_eq!(expected, ["codex", "claude", "grok"]);
+        assert_eq!(expected, ["codex", "claude", "grok", "cursor"]);
         expected.push(synthetic::ID);
         assert_eq!(ids, expected);
 
@@ -180,7 +188,10 @@ mod registration_tests {
                 shown, bundled,
                 "the bundled list until the CLI lists its own"
             );
-            let setting = format!("ELSE_{}_BIN", definition.id.to_uppercase());
+            let setting = match definition.id {
+                cursor::ID => "ELSE_NODE_BIN".to_owned(),
+                id => format!("ELSE_{}_BIN", id.to_uppercase()),
+            };
             assert!(
                 matches!(provider.availability(), Availability::Unavailable(why) if why.contains(&setting)),
                 "{setting} is named in {:?}",

@@ -88,7 +88,7 @@ async fn only_bot_project_skills_reach_new_and_resumed_model_context() {
         ],
         dirs,
     };
-    let mut server = AppServer::start(&host, &spec).await.unwrap();
+    let mut server = AppServer::start(&host, &spec, "Codex").await.unwrap();
     let overrides = config(&server).await.unwrap();
     let settings = json!({
         "model": "gpt-6.1-sol", "cwd": server.cwd,

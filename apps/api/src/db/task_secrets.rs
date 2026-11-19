@@ -627,8 +627,36 @@ pub async fn delete(pool: &SqlitePool, name: &str) -> Result<bool, sqlx::Error> 
         == 1)
 }
 
-/// Decrypt the named secrets into environment variables. A missing name is
-/// `Unknown`. Two secrets setting the same variable are refused.
+/// Whether an entry holds a provider's own login, such as Cursor's API key.
+/// Only that provider's adapter reads it ([`provider_env`]): to a bot's
+/// commands, jobs, logins and listing it does not exist.
+pub fn provider_only(name: &str) -> bool {
+    name.starts_with("provider-")
+}
+
+/// A provider-only entry's variables, for its provider adapter.
+pub async fn provider_env(
+    pool: &SqlitePool,
+    key: &SecretKey,
+    name: &str,
+) -> Result<Vec<(String, Zeroizing<String>)>, SecretError> {
+    if !provider_only(name) {
+        return Err(SecretError::Invalid(format!(
+            "{name} is not a provider entry"
+        )));
+    }
+    let row: Option<(Vec<u8>, Vec<u8>)> =
+        sqlx::query_as("SELECT salt, ciphertext FROM task_secrets WHERE name = ?1")
+            .bind(name)
+            .fetch_optional(pool)
+            .await?;
+    let (salt, cipher) = row.ok_or_else(|| SecretError::Unknown(name.to_owned()))?;
+    Ok(decrypt(key, &salt, &cipher)?.into_iter().collect())
+}
+
+/// Decrypt the named secrets into environment variables. A missing or
+/// provider-only name is `Unknown`. Two secrets setting the same variable
+/// are refused.
 pub async fn resolve(
     pool: &SqlitePool,
     key: Option<&SecretKey>,
@@ -645,6 +673,9 @@ pub async fn resolve(
     }
     let key = key.ok_or(SecretError::NoKey)?;
     for name in names {
+        if provider_only(name) {
+            return Err(SecretError::Unknown(name.clone()));
+        }
         let row: Option<(Vec<u8>, Vec<u8>)> =
             sqlx::query_as("SELECT salt, ciphertext FROM task_secrets WHERE name = ?1")
                 .bind(name)
@@ -666,12 +697,15 @@ pub async fn resolve(
 }
 
 /// An entry's website and values, read together so the website checked is
-/// the one stored with these values.
+/// the one stored with these values. A provider-only entry is `Unknown`.
 pub async fn login(
     pool: &SqlitePool,
     key: Option<&SecretKey>,
     name: &str,
 ) -> Result<(Option<Website>, Env), SecretError> {
+    if provider_only(name) {
+        return Err(SecretError::Unknown(name.to_owned()));
+    }
     let row: Option<(Option<String>, Vec<u8>, Vec<u8>)> =
         sqlx::query_as("SELECT website, salt, ciphertext FROM task_secrets WHERE name = ?1")
             .bind(name)

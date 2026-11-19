@@ -81,6 +81,9 @@ impl Spec {
             .as_str()
             .filter(|n| valid_name(n))
             .ok_or("name is 1 to 40 of a-z, 0-9, _ and -, starting with a letter")?;
+        if task_secrets::provider_only(name) {
+            return Err("names starting with provider- hold provider logins; choose another");
+        }
         let reason = args["reason"]
             .as_str()
             .map(str::trim)
