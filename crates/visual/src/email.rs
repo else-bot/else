@@ -196,7 +196,9 @@ pub(crate) fn links(anchors: &[Anchor], document: &PaintDocument) -> Vec<Link> {
     for node in &document.nodes {
         match &node.kind {
             paint_tree::NodeKind::Text { runs, .. } => {
-                for run in runs {
+                let mut drawn = Vec::new();
+                drawn_runs(&node.drawables, &mut drawn);
+                for run in drawn.into_iter().filter_map(|index| runs.get(index)) {
                     let rect = Rect {
                         x: run.x,
                         y: run.y - run.ascent,
@@ -210,6 +212,9 @@ pub(crate) fn links(anchors: &[Anchor], document: &PaintDocument) -> Vec<Link> {
                     );
                 }
             }
+            // A box counts only where it paints, so a hidden one opens nothing;
+            // its text and images count on their own.
+            paint_tree::NodeKind::Box { .. } if node.drawables.is_empty() => {}
             paint_tree::NodeKind::Box { .. } | paint_tree::NodeKind::Image { .. } => {
                 let b = node.bounds;
                 let rect = Rect {
@@ -234,6 +239,18 @@ pub(crate) fn links(anchors: &[Anchor], document: &PaintDocument) -> Vec<Link> {
             rects,
         })
         .collect()
+}
+
+/// The runs `drawables` paint glyphs for, so hidden text counts as nothing.
+fn drawn_runs(drawables: &[paint_tree::Drawable], drawn: &mut Vec<usize>) {
+    for drawable in drawables {
+        match drawable {
+            paint_tree::Drawable::Glyphs { run, .. } if !drawn.contains(run) => drawn.push(*run),
+            paint_tree::Drawable::Group { drawables, .. } => drawn_runs(drawables, drawn),
+            paint_tree::Drawable::Masked { content, .. } => drawn_runs(content, drawn),
+            _ => {}
+        }
+    }
 }
 
 /// The part of `page` each node of `document` shows through its
@@ -272,19 +289,35 @@ fn clips(document: &PaintDocument, page: Rect) -> Vec<Option<Rect>> {
 }
 
 /// `clip` narrowed to `node`'s box when its `overflow` clips its children.
+/// A rounded clip counts as its rectangle and a path clip as the box.
 fn own_clip(node: &paint_tree::PaintNode, clip: Rect) -> Option<Rect> {
-    match node.kind {
-        paint_tree::NodeKind::Box {
-            overflow_clip: Some(_),
-            ..
-        } => clip.intersect(Rect {
+    let paint_tree::NodeKind::Box {
+        overflow_clip: Some(shape),
+        ..
+    } = &node.kind
+    else {
+        return Some(clip);
+    };
+    let own = match shape {
+        paint_tree::Shape::Rect { rect } | paint_tree::Shape::RoundedRect { rect, .. } => {
+            transformed(
+                node.transform,
+                Rect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: rect.height,
+                },
+            )
+        }
+        paint_tree::Shape::Path { .. } => Rect {
             x: node.bounds.x,
             y: node.bounds.y,
             width: node.bounds.width,
             height: node.bounds.height,
-        }),
-        _ => Some(clip),
-    }
+        },
+    };
+    clip.intersect(own)
 }
 
 /// The index of the anchor `element` sits in, from its class.
@@ -400,7 +433,9 @@ pub(crate) fn prepare(source: &Source) -> Prepared {
             } else if tag == "a" {
                 passed.anchor = None;
             }
-            if let Some(class) = attrs.iter_mut().find(|a| &*a.name.local == "class") {
+            if let Some(class) = attrs.iter_mut().find(|a| &*a.name.local == "class")
+                && class.value.contains(ANCHOR_CLASS)
+            {
                 let own: Vec<&str> = class
                     .value
                     .split_ascii_whitespace()
@@ -822,6 +857,19 @@ mod tests {
         assert_eq!(
             found.iter().map(|l| l.href.as_str()).collect::<Vec<_>>(),
             ["https://a.test/shown"]
+        );
+    }
+
+    #[test]
+    fn a_hidden_link_and_one_clipped_on_the_other_axis() {
+        let found = links(
+            r#"<a href="https://a.test/hidden" style="display:block;visibility:hidden;height:30px;background:red">hidden</a><div style="overflow-x:clip;height:10px"><a href="https://a.test/below" style="display:block;margin-top:20px">below</a></div>"#,
+            300,
+            1.0,
+        );
+        assert_eq!(
+            found.iter().map(|l| l.href.as_str()).collect::<Vec<_>>(),
+            ["https://a.test/below"]
         );
     }
 }

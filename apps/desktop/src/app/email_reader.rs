@@ -201,8 +201,9 @@ pub(super) struct EmailReader {
     /// Each shown link's focus, by its [`else_visual::email::Link::index`],
     /// so focus stays on the same link when the page draws again.
     link_focus: HashMap<usize, FocusHandle>,
-    /// The link last scrolled into view because it took focus.
-    revealed: Option<usize>,
+    /// The link last scrolled into view because it took focus, and the
+    /// page it sat on: a redraw at another width moves it.
+    revealed: Option<(Key, usize)>,
     scroll: ScrollHandle,
 }
 
@@ -660,8 +661,8 @@ impl Render for EmailReader {
                     })
                     .collect();
                 match focused {
-                    Some(link) if self.revealed != Some(link.index) => {
-                        self.revealed = Some(link.index);
+                    Some(link) if self.revealed != Some((key, link.index)) => {
+                        self.revealed = Some((key, link.index));
                         if let Some(rect) = link.rects.first() {
                             reveal(&self.scroll, area(*rect, page.pixels, shown));
                         }
