@@ -751,6 +751,7 @@ fn link_area(
     } else {
         link.text.clone()
     };
+    let href = link.href.clone();
     gpui_kit::base::Link::new(SharedString::from(format!("email-link-{ix}-{part}")))
         .absolute()
         .left(at.origin.x)
@@ -763,6 +764,9 @@ fn link_area(
         .aria_description(link.href.clone())
         .href(link.href.clone())
         .open_with(|href, _, _, cx| open_link(href, cx))
+        // The reader's dialog binds Enter to Confirm, which would close it
+        // before the focused link sees the key.
+        .on_action(move |_: &gpui_kit::base::actions::Confirm, _, cx| open_link(&href, cx))
         .tooltip(move |window, cx| Tooltip::new(destination.clone()).build(window, cx))
 }
 
