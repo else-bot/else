@@ -105,9 +105,10 @@ fn waits_on_owner(conversation: &Conversation, turn: Uuid) -> bool {
 }
 
 /// Where an exchange cuts `text` before "Show more": the byte the shown
-/// prefix ends at, and what closes it. `None` when it all fits. The cut
-/// falls at the end of a paragraph or list item where one fits, so the
-/// excerpt is real markdown and holds no hidden text.
+/// prefix ends at, and what closes it. `None` when it all fits or the rest
+/// is too little to hide. The cut falls at the end of a paragraph or list
+/// item where one fits, so the excerpt is real markdown and holds no hidden
+/// text.
 fn excerpt_cut(text: &str) -> Option<(usize, &'static str)> {
     let text = text.trim_end();
     let count = |line: &str| line.trim_end_matches(['\n', '\r']).chars().count();
@@ -147,19 +148,9 @@ fn excerpt_cut(text: &str) -> Option<(usize, &'static str)> {
         (None, Some((end, true))) => (end, "\n```"),
         (None, Some((end, false))) => (end, "…"),
         // The first line alone is over the budget: cut it between words.
-        (None, None) => {
-            let limit = text
-                .char_indices()
-                .nth(EXCERPT_CHARS)
-                .map_or(text.len(), |(at, _)| at);
-            let cut = text[..limit]
-                .rfind(char::is_whitespace)
-                .filter(|&at| at > 0)
-                .unwrap_or(limit);
-            (text[..cut].trim_end().len(), "…")
-        }
+        (None, None) => (super::clip::word_cut(text, EXCERPT_CHARS), "…"),
     };
-    (cut.0 < text.len()).then_some(cut)
+    super::clip::hides_enough(&text[cut.0..], EXCERPT_CHARS).then_some(cut)
 }
 
 /// `text` as an exchange shows it before "Show more", or `None` when it

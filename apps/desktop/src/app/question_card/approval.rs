@@ -4,6 +4,7 @@
 //! they agree to.
 
 use super::*;
+use crate::app::clip;
 use crate::controls::{Scale, Tier};
 use crate::model::QuestionChoice;
 use gpui_kit::component::radio::Radio;
@@ -68,22 +69,22 @@ fn scope(choice: &QuestionChoice, question: &Question, bot: &str) -> (String, St
     }
 }
 
-/// The context lines shown before "Show all".
+/// The most of a context shown before "Show all".
 const PREVIEW_LINES: usize = 6;
-const PREVIEW_BYTES: usize = 480;
+const PREVIEW_CHARS: usize = 480;
 
-/// The first lines of a long context, or `None` when it fits whole. A line
-/// cut partway ends in an ellipsis; "Show all" marks the hidden lines.
+/// The first lines of a long context, or `None` when it fits whole or the
+/// rest is too little to hide. A line cut partway ends between words with an
+/// ellipsis; "Show all" marks the hidden lines.
 pub(super) fn preview(context: &str) -> Option<String> {
     let lines = context
         .match_indices('\n')
         .nth(PREVIEW_LINES - 1)
         .map_or(context.len(), |(ix, _)| ix);
-    if lines > PREVIEW_BYTES {
-        let end = context.floor_char_boundary(PREVIEW_BYTES);
-        return Some(format!("{}…", context[..end].trim_end()));
-    }
-    (lines < context.len()).then(|| context[..lines].trim_end().to_owned())
+    let words = clip::word_cut(&context[..lines], PREVIEW_CHARS);
+    let close = if words < lines { "…" } else { "" };
+    clip::hides_enough(&context[words..], PREVIEW_CHARS)
+        .then(|| format!("{}{close}", context[..words].trim_end()))
 }
 
 impl ElseApp {
