@@ -81,10 +81,16 @@ pub(super) fn preview(context: &str) -> Option<String> {
         .match_indices('\n')
         .nth(PREVIEW_LINES - 1)
         .map_or(context.len(), |(ix, _)| ix);
-    let words = clip::word_cut(&context[..lines], PREVIEW_CHARS);
-    let close = if words < lines { "…" } else { "" };
-    clip::hides_enough(&context[words..], PREVIEW_CHARS)
-        .then(|| format!("{}{close}", context[..words].trim_end()))
+    let end = clip::char_end(&context[..lines], PREVIEW_CHARS);
+    if !clip::hides_enough(&context[end..], PREVIEW_CHARS) {
+        return None;
+    }
+    let words = clip::word_end(context, end);
+    let mid_line = !context[words..]
+        .trim_start_matches([' ', '\t'])
+        .starts_with(['\n', '\r']);
+    let close = if mid_line { "…" } else { "" };
+    Some(format!("{}{close}", &context[..words]))
 }
 
 impl ElseApp {
@@ -456,8 +462,11 @@ mod tests {
     fn a_context_that_fits_or_barely_overflows_shows_whole() {
         assert_eq!(preview("rm -rf ./dist"), None);
         let over = format!("{}done.", "word ".repeat(96));
-        assert!(over.len() > 480);
         assert_eq!(preview(&over), None, "a few characters over the limit");
+        let one_word = format!("Run {}", "é".repeat(477));
+        assert_eq!(preview(&one_word), None, "one character over the limit");
+        let fenced = "```sh\npwd\nls\ndate\nwhoami\nid\n```\n.";
+        assert_eq!(preview(fenced), None, "a closing fence draws nothing");
         let seven = "1\n2\n3\n4\n5\n6\nlast line";
         assert_eq!(preview(seven), None, "one short line over the limit");
     }
@@ -473,7 +482,13 @@ mod tests {
             "cut between words: {short}"
         );
         let wide = "é".repeat(800);
-        assert!(preview(&wide).unwrap().ends_with('…'));
+        let short = preview(&wide).unwrap();
+        assert_eq!(short.chars().count(), 481, "one word is cut at the limit");
+        let code = format!("```sh\n{}xx\n```\n{}", "é ".repeat(234), "word ".repeat(40));
+        assert!(
+            preview(&code).unwrap().ends_with("xx\n```"),
+            "a cut at a line end adds no ellipsis to the code"
+        );
     }
 
     #[test]

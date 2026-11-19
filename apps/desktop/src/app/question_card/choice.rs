@@ -498,9 +498,9 @@ fn settled(question: &Question, form: Option<&QuestionForm>, reply: Option<&str>
         "answered" => resumed(chose(question, question.answer.as_ref())),
         "skipped" => match reply.map(str::trim).filter(|r| !r.is_empty()) {
             Some(reply) => {
-                let end = clip::word_cut(reply, QUOTE_CHARS);
+                let end = clip::char_end(reply, QUOTE_CHARS);
                 let quote = if clip::hides_enough(&reply[end..], QUOTE_CHARS) {
-                    format!("{}…", &reply[..end])
+                    format!("{}…", &reply[..clip::word_end(reply, end)])
                 } else {
                     reply.to_owned()
                 };

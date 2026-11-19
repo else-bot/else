@@ -148,7 +148,13 @@ fn excerpt_cut(text: &str) -> Option<(usize, &'static str)> {
         (None, Some((end, true))) => (end, "\n```"),
         (None, Some((end, false))) => (end, "…"),
         // The first line alone is over the budget: cut it between words.
-        (None, None) => (super::clip::word_cut(text, EXCERPT_CHARS), "…"),
+        (None, None) => {
+            let end = super::clip::char_end(text, EXCERPT_CHARS);
+            if !super::clip::hides_enough(&text[end..], EXCERPT_CHARS) {
+                return None;
+            }
+            (super::clip::word_end(text, end), "…")
+        }
     };
     super::clip::hides_enough(&text[cut.0..], EXCERPT_CHARS).then_some(cut)
 }
@@ -166,7 +172,21 @@ pub(super) fn excerpt_message(
     text: &str,
     parts: &[MessagePart],
 ) -> Option<(String, Vec<MessagePart>)> {
-    let (end, close) = excerpt_cut(text)?;
+    let (mut end, close) = excerpt_cut(text)?;
+    // A cut inside a file's placeholder moves before the file, which the
+    // parts below drop whole.
+    let mut offset = 0;
+    for part in parts {
+        let len = match part {
+            MessagePart::Text { text } => text.len(),
+            MessagePart::File { file } => file.fallback().len(),
+        };
+        if matches!(part, MessagePart::File { .. }) && offset < end && end < offset + len {
+            end = text[..offset].trim_end().len();
+            break;
+        }
+        offset += len;
+    }
     let shown = format!("{}{close}", &text[..end]);
     if parts.is_empty() {
         return Some((shown, Vec::new()));
@@ -1390,6 +1410,34 @@ mod tests {
             let reply = vec!["x".repeat(75); 8].join(end);
             assert_eq!(excerpt(&reply), None, "eight full lines fit");
         }
+    }
+
+    #[test]
+    fn a_cut_never_splits_a_file_placeholder() {
+        let file = Attachment {
+            id: Uuid::from_u128(8),
+            name: "report.pdf".into(),
+            media_type: "application/pdf".into(),
+            size: 10,
+        };
+        let head = format!("{}go! ", "word ".repeat(118));
+        let tail = " details".repeat(25);
+        let text = format!("{head}{}{tail}", file.fallback());
+        let parts = vec![
+            MessagePart::Text { text: head.clone() },
+            MessagePart::File { file },
+            MessagePart::Text { text: tail },
+        ];
+        let (shown, cut) = excerpt_message(&text, &parts).unwrap();
+        assert!(shown.ends_with("go!…"), "{shown}");
+        let rebuilt: String = cut
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Text { text } => Some(text.as_str()),
+                MessagePart::File { .. } => None,
+            })
+            .collect();
+        assert_eq!(rebuilt, shown);
     }
 
     #[test]
