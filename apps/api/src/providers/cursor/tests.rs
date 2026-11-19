@@ -80,7 +80,7 @@ impl Server {
             }),
             vault: Some(vault),
             tool_url: Some("http://127.0.0.1:9/tools/v1/mcp".into()),
-            installing: tokio::sync::Mutex::new(()),
+            installing: Default::default(),
         };
         Self { dir, cursor }
     }
@@ -579,7 +579,7 @@ async fn a_stream_that_breaks_without_a_result_is_uncertain_and_retires_the_agen
 }
 
 #[tokio::test]
-async fn bots_cannot_read_the_cursor_key_from_the_vault() {
+async fn bots_cannot_read_or_request_the_cursor_key() {
     let server = Server::new(Some("test-key")).await;
     let vault = server.cursor.vault.as_ref().unwrap();
     let names = [cursor_home::VAULT_ENTRY.to_owned()];
@@ -591,4 +591,13 @@ async fn bots_cannot_read_the_cursor_key_from_the_vault() {
         task_secrets::login(&vault.pool, Some(&vault.key), cursor_home::VAULT_ENTRY).await,
         Err(task_secrets::SecretError::Unknown(_))
     ));
+    let request = json!({
+        "name": cursor_home::VAULT_ENTRY,
+        "reason": "a task key",
+        "env": [cursor_home::KEY_VAR],
+    });
+    assert!(
+        crate::db::secret_requests::Spec::parse(&request).is_err(),
+        "a bot cannot ask the owner to fill a provider entry"
+    );
 }

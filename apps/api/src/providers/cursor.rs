@@ -74,7 +74,7 @@ fn build(wiring: &super::Wiring) -> super::Built {
         }),
         vault: wiring.vault.clone(),
         tool_url: Some(wiring.tool_url.clone()),
-        installing: tokio::sync::Mutex::new(()),
+        installing: Default::default(),
     };
     super::Built {
         provider: std::sync::Arc::new(cursor),
@@ -93,7 +93,7 @@ pub struct Cursor {
     ready: Result<Ready, String>,
     vault: Option<Vault>,
     tool_url: Option<String>,
-    installing: tokio::sync::Mutex<()>,
+    installing: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 struct Sidecar {
@@ -110,17 +110,21 @@ struct Account<'a> {
 impl Cursor {
     async fn sidecar(&self, ready: &Ready) -> Result<Sidecar, String> {
         let key = cursor_home::api_key(self.vault.as_ref()).await?;
-        let _installing = self.installing.lock().await;
-        // Its own task, so a caller that gives up (the model refresher's
-        // timeout) never cuts an install off midway.
+        // Its own task, holding the install lock, so a caller that gives up
+        // (the model refresher's timeout) never cuts an install off midway or
+        // lets a second one start beside it.
+        let installing = self.installing.clone();
         let (host, node, data) = (
             ready.host.clone(),
             ready.node.clone(),
             ready.data_dir.clone(),
         );
-        let script = tokio::spawn(async move { cursor_home::prepare(&host, &node, &data).await })
-            .await
-            .map_err(|e| format!("The Cursor SDK install stopped: {e}"))??;
+        let script = tokio::spawn(async move {
+            let _installing = installing.lock_owned().await;
+            cursor_home::prepare(&host, &node, &data).await
+        })
+        .await
+        .map_err(|e| format!("The Cursor SDK install stopped: {e}"))??;
         Ok(Sidecar { script, key })
     }
 

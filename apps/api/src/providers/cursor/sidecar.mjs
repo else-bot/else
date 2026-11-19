@@ -169,7 +169,7 @@ const methods = {
     apiKey = params.apiKey;
     const { Cursor } = await load();
     const me = await Cursor.me({ apiKey });
-    return { account: `${me.userId ?? me.apiKeyName}` };
+    return { account: `${me.userId ?? `${me.apiKeyName}@${me.createdAt}`}` };
   },
 
   async "models.list"() {
