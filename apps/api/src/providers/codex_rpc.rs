@@ -1,5 +1,5 @@
-//! A JSON-RPC client for `codex app-server` over stdio, running on the
-//! host. Responses are matched to requests by ID; notifications are
+//! A JSON-RPC client over stdio for a provider process on the host:
+//! `codex app-server`, or the Cursor SDK sidecar. Responses are matched to requests by ID; notifications are
 //! delivered in order through [`AppServer::next`].
 //!
 //! Server-initiated requests (approvals, tool calls, input requests) are
@@ -81,6 +81,7 @@ pub enum Incoming {
 pub struct AppServer {
     /// The bot's project directory, for `cwd`.
     pub cwd: String,
+    label: &'static str,
     scope: Scope,
     stderr: Stderr,
     commands: mpsc::Sender<Command>,
@@ -106,8 +107,12 @@ async fn write_line(
 
 impl AppServer {
     /// Start the server on the host and complete the initialize handshake.
-    pub async fn start(host: &Host, spec: &LaunchSpec) -> Result<Self, RpcError> {
-        let server = Self::spawn(host, spec)?;
+    pub async fn start(
+        host: &Host,
+        spec: &LaunchSpec,
+        label: &'static str,
+    ) -> Result<Self, RpcError> {
+        let server = Self::spawn(host, spec, label)?;
         match server.initialize().await {
             Ok(()) => Ok(server),
             Err(err) => {
@@ -118,7 +123,7 @@ impl AppServer {
     }
 
     /// Start the server on the host without its handshake.
-    pub fn spawn(host: &Host, spec: &LaunchSpec) -> Result<Self, RpcError> {
+    pub fn spawn(host: &Host, spec: &LaunchSpec, label: &'static str) -> Result<Self, RpcError> {
         let mut spec = spec.clone();
         spec.env.push(("NO_COLOR".into(), "1".into()));
         let mut scope = Scope::spawn(host, &spec, Stdio::piped(), Stdio::piped())
@@ -128,9 +133,10 @@ impl AppServer {
         let stderr = scope.child().stderr.take().ok_or(RpcError::Closed)?;
         let (tx, incoming) = mpsc::channel(MAX_QUEUED);
         let (commands, command_rx) = mpsc::channel(MAX_REQUESTS);
-        tokio::spawn(io_loop(stdout, stdin, command_rx, tx));
+        tokio::spawn(io_loop(stdout, stdin, command_rx, tx, label));
         Ok(Self {
             cwd: spec.dirs.project.to_string_lossy().into_owned(),
+            label,
             scope,
             stderr: Stderr::collect(stderr, &spec),
             commands,
@@ -221,7 +227,7 @@ impl AppServer {
         if lines.is_empty() {
             return Err(RpcError::Closed);
         }
-        tracing::warn!(stderr = %tail, "Codex closed its connection");
+        tracing::warn!(stderr = %tail, provider = self.label, "the provider closed its connection");
         Err(RpcError::Exited(lines.join(" / ")))
     }
 
@@ -251,7 +257,8 @@ impl AppServer {
     /// End a turn's attempt: close the server, verify its cleanup, and
     /// retire the native session if the turn may be unfinished.
     pub async fn conclude(self, ended: Ended, sink: &dyn TurnSink) -> TurnOutcome {
-        attempt::conclude(ended, self.into_scope(), None, sink, "Codex").await
+        let label = self.label;
+        attempt::conclude(ended, self.into_scope(), None, sink, label).await
     }
 }
 
@@ -260,9 +267,10 @@ async fn io_loop(
     mut stdin: impl AsyncWrite + Unpin,
     mut commands: mpsc::Receiver<Command>,
     tx: mpsc::Sender<Incoming>,
+    label: &'static str,
 ) {
     let (wire_tx, mut wire) = mpsc::channel(MAX_QUEUED);
-    let reader = tokio::spawn(read_loop(stdout, wire_tx));
+    let reader = tokio::spawn(read_loop(stdout, wire_tx, label));
     let mut pending = HashMap::<i64, Pending>::new();
     let mut cleanup = tokio::time::interval(Duration::from_millis(100));
     loop {
@@ -331,8 +339,8 @@ async fn io_loop(
     reader.abort();
 }
 
-async fn read_loop(stdout: impl AsyncRead + Unpin, tx: mpsc::Sender<Value>) {
-    let mut lines = JsonLines::new(stdout, "Codex");
+async fn read_loop(stdout: impl AsyncRead + Unpin, tx: mpsc::Sender<Value>, label: &'static str) {
+    let mut lines = JsonLines::new(stdout, label);
     loop {
         match lines.next().await {
             Ok(Some(message)) => {
@@ -361,7 +369,7 @@ mod tests {
         let (input, output) = tokio::io::split(client);
         let (commands, rx) = mpsc::channel(MAX_REQUESTS);
         let (events, mut incoming) = mpsc::channel(MAX_QUEUED);
-        let actor = tokio::spawn(io_loop(input, output, rx, events));
+        let actor = tokio::spawn(io_loop(input, output, rx, events, "Test"));
         let slots = Arc::new(Semaphore::new(1));
         let (reply, response) = oneshot::channel();
         commands
@@ -412,7 +420,7 @@ mod tests {
         let (input, output) = tokio::io::split(client);
         let (commands, rx) = mpsc::channel(MAX_REQUESTS);
         let (events, _incoming) = mpsc::channel(MAX_QUEUED);
-        let actor = tokio::spawn(io_loop(input, output, rx, events));
+        let actor = tokio::spawn(io_loop(input, output, rx, events, "Test"));
         let slots = Arc::new(Semaphore::new(1));
         let (reply, response) = oneshot::channel();
         commands
