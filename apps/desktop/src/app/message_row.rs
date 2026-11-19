@@ -159,8 +159,8 @@ impl ElseApp {
                             .as_ref()
                             .and_then(|view| view.conversation.as_ref())
                             .and_then(|conversation| conversation.turn(task.turn))
-                            .and_then(|turn| turn.routine.as_ref())
-                            .map(|run| routine_run(run, cx)),
+                            .and_then(|turn| Some((turn.id, turn.routine.as_ref()?)))
+                            .map(|(turn, run)| routine_run(turn, run, true, cx)),
                     )
                     .child(body)
                     .into_any_element()
@@ -204,7 +204,7 @@ impl ElseApp {
                 turn.routine
                     .as_ref()
                     .filter(|_| group.first && !follows_task)
-                    .map(|run| routine_run(run, cx)),
+                    .map(|run| routine_run(turn.id, run, true, cx)),
             )
             .child(div().w_full().child(body));
         column
@@ -316,6 +316,21 @@ impl ElseApp {
         };
         Some(match key {
             RowKey::Gap(_) => return None,
+            RowKey::QuietRun(turn) => {
+                let run = view.conversation.as_ref()?.turn(turn)?.routine.as_ref()?;
+                routine_run(turn, run, false, cx).into_any_element()
+            }
+            RowKey::QuietRuns(first) => {
+                let open = super::conversation::group_open(&row.quiet_runs, &view.open_quiet);
+                quiet_runs(
+                    view.conversation.as_ref()?,
+                    first,
+                    &row.quiet_runs,
+                    open,
+                    cx,
+                )?
+                .into_any_element()
+            }
             RowKey::Item(id) => {
                 let conversation = view.conversation.as_ref()?;
                 let item = conversation.item(id)?;
@@ -610,7 +625,12 @@ impl ElseApp {
             RowKey::Handoff(id) => self.render_handoff(id, cx),
             RowKey::ComputerHandoff(id) => self.render_handoff_row(id, cx),
             RowKey::OwnerNotice(id) => side(self.render_notice_card(id, cx)?),
-            RowKey::Item(_) | RowKey::Task(_) | RowKey::Pending(_) | RowKey::Gap(_) => {
+            RowKey::Item(_)
+            | RowKey::Task(_)
+            | RowKey::Pending(_)
+            | RowKey::Gap(_)
+            | RowKey::QuietRun(_)
+            | RowKey::QuietRuns(_) => {
                 return None;
             }
         })
@@ -648,17 +668,43 @@ pub(super) fn with_reaction(
         .into_any_element()
 }
 
-/// The row naming a routine run: when it was due in the row's slot, and the
-/// whole row opens the routines in bot details.
-fn routine_run(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> Button {
+/// The row naming a routine run, with when it was due in the row's slot.
+/// `shown` says whether a no-news run's replies show below it.
+fn routine_run(
+    turn: uuid::Uuid,
+    run: &crate::model::RoutineRun,
+    shown: bool,
+    cx: &mut Context<ElseApp>,
+) -> Button {
     let theme = cx.theme();
-    super::action_card::event_button(SharedString::from(format!(
+    let (meta, disclosure, action) = if run.no_news {
+        (
+            format!("No news · {}", stamp(run.due_at)),
+            if shown {
+                super::action_card::Disclosure::Expanded
+            } else {
+                super::action_card::Disclosure::Collapsed
+            },
+            if shown {
+                "Hide the run's replies"
+            } else {
+                "Show the run's replies"
+            },
+        )
+    } else {
+        (
+            stamp(run.due_at),
+            super::action_card::Disclosure::None,
+            "View routines in bot details",
+        )
+    };
+    let button = super::action_card::event_button(SharedString::from(format!(
         "routine-{}-{}",
         run.routine_id,
         run.due_at.timestamp()
     )))
     .accessibility_label(format!(
-        "{} {}, {}{}. View routines in bot details",
+        "{} {}, {}{}. {action}",
         run.label(),
         run.name,
         stamp(run.due_at),
@@ -671,18 +717,59 @@ fn routine_run(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> But
             .child(super::action_card::event_object(theme, run.name.clone()))
             .child(super::action_card::event_end(
                 theme,
-                super::action_card::EventEnd::Meta(
-                    if run.no_news {
-                        format!("No news · {}", stamp(run.due_at))
-                    } else {
-                        stamp(run.due_at)
-                    }
-                    .into(),
-                ),
-                super::action_card::Disclosure::None,
+                super::action_card::EventEnd::Meta(meta.into()),
+                disclosure,
             )),
+    );
+    if run.no_news {
+        let key = RowKey::QuietRun(turn);
+        button.on_click(cx.listener(move |app, _, window, cx| app.toggle_quiet(key, window, cx)))
+    } else {
+        button.on_click(cx.listener(open_routines))
+    }
+}
+
+/// One row for consecutive no-news runs of a routine: how many, and when
+/// the last was due. It shows or folds the list of runs.
+fn quiet_runs(
+    conversation: &crate::model::Conversation,
+    first: uuid::Uuid,
+    runs: &[uuid::Uuid],
+    open: bool,
+    cx: &mut Context<ElseApp>,
+) -> Option<Button> {
+    let theme = cx.theme();
+    let run = conversation.turn(*runs.last()?)?.routine.as_ref()?;
+    let count = runs.len();
+    let key = RowKey::QuietRuns(first);
+    Some(
+        super::action_card::event_button(SharedString::from(format!("quiet-runs-{first}")))
+            .accessibility_label(format!(
+                "{} {}, no news {count} times, last {}. {} the runs",
+                run.label(),
+                run.name,
+                stamp(run.due_at),
+                if open { "Hide" } else { "Show" }
+            ))
+            .child(
+                super::action_card::event_row(theme)
+                    .child(super::action_card::event_icon(IconName::Clock))
+                    .child(super::action_card::event_verb(theme, run.label()))
+                    .child(super::action_card::event_object(theme, run.name.clone()))
+                    .child(super::action_card::event_end(
+                        theme,
+                        super::action_card::EventEnd::Meta(
+                            format!("No news × {count} · last {}", stamp(run.due_at)).into(),
+                        ),
+                        if open {
+                            super::action_card::Disclosure::Expanded
+                        } else {
+                            super::action_card::Disclosure::Collapsed
+                        },
+                    )),
+            )
+            .on_click(cx.listener(move |app, _, window, cx| app.toggle_quiet(key, window, cx))),
     )
-    .on_click(cx.listener(open_routines))
 }
 
 fn open_routines(
@@ -739,6 +826,9 @@ impl ElseApp {
         }
         if matches!(row.key, RowKey::Handoff(_)) {
             return Some(EventKind::Exchange);
+        }
+        if matches!(row.key, RowKey::QuietRun(_) | RowKey::QuietRuns(_)) {
+            return Some(EventKind::Change);
         }
         let RowKey::Item(id) = row.key else {
             return None;
