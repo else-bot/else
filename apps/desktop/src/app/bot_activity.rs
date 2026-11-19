@@ -1347,12 +1347,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n\n");
         assert_eq!(excerpt(&eight), None, "blank lines do not count");
+        let nine =
+            "Summary first.\n\n- one\n- two\n- three\n- four\n- five\n- six\n- seven\n- eight";
+        assert_eq!(excerpt(nine), None, "one short line over the limit");
+        let over = format!("{}done.", "word ".repeat(120));
+        assert_eq!(excerpt(&over), None, "a few characters over the limit");
     }
 
     #[test]
     fn a_long_reply_is_cut_after_a_whole_paragraph_or_list_item() {
-        let reply =
-            "Summary first.\n\n- one\n- two\n- three\n- four\n- five\n- six\n- seven\n- eight";
+        let reply = "Summary first.\n\n- one\n- two\n- three\n- four\n- five\n- six\n- seven\n- eight\n- nine\n- ten";
         assert_eq!(
             excerpt(reply).as_deref(),
             Some("Summary first.\n\n- one\n- two\n- three\n- four\n- five\n- six\n- seven")

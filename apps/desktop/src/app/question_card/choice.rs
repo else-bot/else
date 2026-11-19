@@ -606,8 +606,20 @@ mod tests {
         let own = settled(&skipped, None, Some("Markdown, for Notion "));
         assert!(own.resumed);
         assert_eq!(own.outcome, "You answered in chat: “Markdown, for Notion”");
-        let long = "é".repeat(300);
-        assert!(settled(&skipped, None, Some(&long)).outcome.ends_with("…”"));
+        let long = "Markdown please ".repeat(30);
+        assert!(
+            settled(&skipped, None, Some(&long))
+                .outcome
+                .ends_with("please…”"),
+            "a long reply is cut between words"
+        );
+        let over = format!("{}ok", "word ".repeat(48));
+        assert!(
+            settled(&skipped, None, Some(&over))
+                .outcome
+                .ends_with("ok”"),
+            "a reply barely over the limit shows whole"
+        );
         assert!(!settled(&skipped, None, None).resumed);
         assert_eq!(
             settled(&question("cancelled", false, None), None, None).marker,

@@ -452,15 +452,37 @@ mod tests {
     use super::preview;
 
     #[test]
-    fn long_context_previews_its_first_lines_on_a_char_boundary() {
+    fn a_context_that_fits_or_barely_overflows_shows_whole() {
         assert_eq!(preview("rm -rf ./dist"), None);
+        let over = format!("{}done.", "word ".repeat(96));
+        assert!(over.len() > 480);
+        assert_eq!(preview(&over), None, "a few characters over the limit");
+        let seven = "1\n2\n3\n4\n5\n6\nlast line";
+        assert_eq!(preview(seven), None, "one short line over the limit");
+    }
+
+    #[test]
+    fn a_long_context_collapses_between_words() {
+        let context = "alpha beta ".repeat(80);
+        let short = preview(&context).unwrap();
+        let shown = short.strip_suffix('…').expect("a mid-line cut ends in …");
+        assert!(shown.chars().count() <= 480, "{shown}");
+        assert!(
+            context[shown.len()..].starts_with(' '),
+            "cut between words: {short}"
+        );
+        let wide = "é".repeat(800);
+        assert!(preview(&wide).unwrap().ends_with('…'));
+    }
+
+    #[test]
+    fn many_lines_collapse_to_the_first_six() {
         let lines = (1..=8)
             .map(|n| n.to_string())
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(preview(&lines).as_deref(), Some("1\n2\n3\n4\n5\n6"));
-        let wide = "é".repeat(400);
-        let short = preview(&wide).unwrap();
-        assert!(short.len() <= 480 + '…'.len_utf8() && short.ends_with('…'));
+        let tail = format!("1\n2\n3\n4\n5\n6\n{}", "word ".repeat(40));
+        assert_eq!(preview(&tail).as_deref(), Some("1\n2\n3\n4\n5\n6"));
     }
 }
