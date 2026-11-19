@@ -321,7 +321,7 @@ impl ElseApp {
                 routine_run(turn, run, false, cx).into_any_element()
             }
             RowKey::QuietRuns(first) => {
-                let open = view.open_quiet.contains(&key);
+                let open = super::conversation::group_open(&row.quiet_runs, &view.open_quiet);
                 quiet_runs(
                     view.conversation.as_ref()?,
                     first,
@@ -668,9 +668,8 @@ pub(super) fn with_reaction(
         .into_any_element()
 }
 
-/// The row naming a routine run: when it was due in the row's slot. The
-/// whole row opens the routines in bot details, or, for a run with no news,
-/// shows or folds the run's replies; `shown` says whether they show.
+/// The row naming a routine run, with when it was due in the row's slot.
+/// `shown` says whether a no-news run's replies show below it.
 fn routine_run(
     turn: uuid::Uuid,
     run: &crate::model::RoutineRun,

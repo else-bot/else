@@ -163,7 +163,8 @@ fn fold_quiet(rows: Vec<RowKey>, c: &Conversation, open: &HashSet<RowKey>) -> Qu
             fold.groups
                 .insert(first, runs.iter().map(|(turn, _)| *turn).collect());
         }
-        let shown = !grouped || open.contains(&RowKey::QuietRuns(first));
+        let turns: Vec<_> = runs.iter().map(|(turn, _)| *turn).collect();
+        let shown = !grouped || group_open(&turns, open);
         for (turn, keys) in runs {
             if shown && open.contains(&RowKey::QuietRun(turn)) {
                 fold.rows.extend(keys);
@@ -176,6 +177,15 @@ fn fold_quiet(rows: Vec<RowKey>, c: &Conversation, open: &HashSet<RowKey>) -> Qu
         }
     }
     fold
+}
+
+/// Whether a group of no-news runs lists its runs. It is keyed by its runs,
+/// not its first one, so it stays open as older runs load or newer ones
+/// join it, and an opened run keeps it open.
+pub(super) fn group_open(runs: &[Uuid], open: &HashSet<RowKey>) -> bool {
+    runs.iter().any(|&turn| {
+        open.contains(&RowKey::QuietRuns(turn)) || open.contains(&RowKey::QuietRun(turn))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -973,14 +983,7 @@ impl ElseApp {
         else {
             return;
         };
-        let group = view
-            .rows
-            .iter()
-            .find(|row| row.quiet_runs.contains(&turn))
-            .map(|row| row.key);
-        let opened = view.open_quiet.insert(RowKey::QuietRun(turn));
-        let opened = group.is_some_and(|group| view.open_quiet.insert(group)) || opened;
-        if opened {
+        if view.open_quiet.insert(RowKey::QuietRun(turn)) {
             self.sync_rows(window, cx);
         }
     }
@@ -995,10 +998,26 @@ impl ElseApp {
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        if !view.open_quiet.remove(&key) {
+        let runs = view
+            .rows
+            .iter()
+            .find(|row| row.key == key)
+            .map(|row| row.quiet_runs.clone())
+            .unwrap_or_default();
+        if !runs.is_empty() && group_open(&runs, &view.open_quiet) {
+            for turn in runs {
+                view.open_quiet.remove(&RowKey::QuietRuns(turn));
+                view.open_quiet.remove(&RowKey::QuietRun(turn));
+            }
+        } else if !view.open_quiet.remove(&key) {
             view.open_quiet.insert(key);
         }
         self.sync_rows(window, cx);
+        // The rows below a folded or unfolded run keep their keys, but their
+        // spacing depends on the row above.
+        if let Some(view) = self.view.as_ref() {
+            view.list.remeasure();
+        }
     }
 
     /// Flashes `reveal` until it fades out, painting its passage on each
@@ -2404,8 +2423,13 @@ mod tests {
         );
         assert_eq!(
             quiet_rows(&c, &[run(11)]),
-            [group, task(13)],
-            "an opened run stays folded in its closed group"
+            [group, run(10), task(11), run(12), task(13)],
+            "an opened run keeps its group open"
+        );
+        assert_eq!(
+            quiet_rows(&c, &[RowKey::QuietRuns(Uuid::from_u128(11))]),
+            [group, run(10), run(11), run(12), task(13)],
+            "a group stays open when an older run loads above its first"
         );
     }
 
