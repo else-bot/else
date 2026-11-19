@@ -1,11 +1,11 @@
 //! The owner's reader for the email behind a mail-triggered turn. The
 //! message comes from the server with the inbox's saved sign-in, never
 //! through the bot, and stays unread. Its HTML renders offline in the
-//! visual worker: remote content never loads, scripts never run, and links
-//! open only from the list below the message.
+//! visual worker: remote content never loads and scripts never run. Its
+//! `http`, `https` and `mailto` links open in place, in the system's browser
+//! or mail client, and show where they go on hover.
 
 use super::ElseApp;
-use super::link_target::LinkTarget;
 use crate::api::{Client, EmailMessage, EmailPerson};
 use crate::attachments::byte_size;
 use crate::controls::{Control as _, Scale, Tier};
@@ -14,6 +14,7 @@ use futures_util::FutureExt as _;
 use futures_util::future::{Either, Shared};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Sizable as _, Theme, WindowExt as _, h_flex, v_flex,
 };
@@ -182,7 +183,9 @@ struct Page {
     height: u32,
     clipped: bool,
     blocked: usize,
-    links: Vec<String>,
+    /// The render's size in device pixels, which its links' boxes use.
+    pixels: (u32, u32),
+    links: Vec<else_visual::email::Link>,
 }
 
 pub(super) struct EmailReader {
@@ -195,7 +198,6 @@ pub(super) struct EmailReader {
     html: Option<Html>,
     /// The body column's width in CSS pixels, known after the first layout.
     width: Option<u32>,
-    links_open: bool,
 }
 
 impl EmailReader {
@@ -208,7 +210,6 @@ impl EmailReader {
             shown: Shown::Html,
             html: None,
             width: None,
-            links_open: false,
         };
         reader.load(0, false, cx);
         reader
@@ -223,7 +224,6 @@ impl EmailReader {
         let fetch = ReaderCache::fetch(&self.client, mail, fresh, cx);
         self.index = index;
         self.html = None;
-        self.links_open = false;
         cx.notify();
         if let Some(Ok(message)) = fetch.peek() {
             self.loaded(message.clone());
@@ -319,13 +319,14 @@ impl EmailReader {
             }
             let scale = key.scale as f32 / 100.0;
             let result = match else_visual::isolate::submit_email(&source, key.width, scale).await {
-                Ok(rendered) => {
-                    let (bytes, clipped, blocked, links) = (
+                Ok(mut rendered) => {
+                    let (bytes, clipped, blocked, pixels) = (
                         rendered.rgba.len(),
                         rendered.clipped,
                         rendered.blocked.len(),
-                        rendered.links.clone(),
+                        (rendered.width, rendered.height),
                     );
+                    let links = std::mem::take(&mut rendered.links);
                     cx.background_executor()
                         .spawn(async move {
                             super::visuals::picture(rendered, else_visual::email::MAX_HEIGHT)
@@ -338,6 +339,7 @@ impl EmailReader {
                                 height,
                                 clipped,
                                 blocked,
+                                pixels,
                                 links,
                             })
                         })
@@ -628,15 +630,24 @@ impl Render for EmailReader {
             notes.push(note("The text is cut off at 200,000 characters.".into()));
         }
         let body = match shows {
-            Body::Page(key, page) => div()
-                .w(px(key.width as f32))
-                .h(px(page.height as f32))
-                .child(
-                    img(ImageSource::Render(page.image.clone()))
-                        .w(px(key.width as f32))
-                        .h(px(page.height as f32)),
-                )
-                .into_any_element(),
+            Body::Page(key, page) => {
+                let shown = size(px(key.width as f32), px(page.height as f32));
+                div()
+                    .relative()
+                    .w(shown.width)
+                    .h(shown.height)
+                    .child(
+                        img(ImageSource::Render(page.image.clone()))
+                            .w(shown.width)
+                            .h(shown.height),
+                    )
+                    .children(page.links.iter().enumerate().flat_map(|(ix, link)| {
+                        link.rects.iter().enumerate().map(move |(part, rect)| {
+                            link_area(ix, part, link, area(*rect, page.pixels, shown))
+                        })
+                    }))
+                    .into_any_element()
+            }
             Body::Failed(error) => div()
                 .text_sm()
                 .text_color(theme.danger)
@@ -655,44 +666,6 @@ impl Render for EmailReader {
                 })
                 .into_any_element(),
         };
-        let links: &[String] = page.map_or(&[], |(_, page)| &page.links);
-        let links_section = (!links.is_empty()).then(|| {
-            let open = self.links_open;
-            v_flex()
-                .gap_1()
-                .child(
-                    Button::new("email-links")
-                        .control(Tier::Ghost, Scale::Compact, false, cx)
-                        .icon(if open {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .label(format!("Links ({})", links.len()))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.links_open = !this.links_open;
-                            cx.notify();
-                        })),
-                )
-                .when(open, |section| {
-                    section.children(links.iter().enumerate().map(|(ix, link)| {
-                        let target = LinkTarget::parse(link);
-                        let row = div()
-                            .id(("email-link", ix))
-                            .text_xs()
-                            .truncate()
-                            .child(link.clone());
-                        match target {
-                            Some(target) => row
-                                .cursor_pointer()
-                                .text_color(theme.link)
-                                .on_click(move |_, _, cx| target.open(cx))
-                                .into_any_element(),
-                            None => row.text_color(theme.muted_foreground).into_any_element(),
-                        }
-                    }))
-                })
-        });
         let attachments = (!message.attachments.is_empty()).then(|| {
             v_flex()
                 .gap_1()
@@ -749,8 +722,70 @@ impl Render for EmailReader {
                     .child(div().w_full().relative().child(measure).child(body)),
             )
             .children(attachments)
-            .children(links_section)
             .into_any_element()
+    }
+}
+
+/// Where a link's box in device pixels of a render of `pixels` sits on the
+/// page shown at `shown`.
+fn area(rect: else_visual::email::Rect, pixels: (u32, u32), shown: Size<Pixels>) -> Bounds<Pixels> {
+    let x = f32::from(shown.width) / pixels.0.max(1) as f32;
+    let y = f32::from(shown.height) / pixels.1.max(1) as f32;
+    Bounds::new(
+        point(px(rect.x * x), px(rect.y * y)),
+        size(px(rect.width * x), px(rect.height * y)),
+    )
+}
+
+/// One box of link `ix` over the page. A link that wraps has a box per
+/// line; only its first is a tab stop.
+fn link_area(
+    ix: usize,
+    part: usize,
+    link: &else_visual::email::Link,
+    at: Bounds<Pixels>,
+) -> impl IntoElement {
+    let destination = SharedString::from(destination(&link.href));
+    let label = if link.text.is_empty() {
+        link.href.clone()
+    } else {
+        link.text.clone()
+    };
+    gpui_kit::base::Link::new(SharedString::from(format!("email-link-{ix}-{part}")))
+        .absolute()
+        .left(at.origin.x)
+        .top(at.origin.y)
+        .w(at.size.width)
+        .h(at.size.height)
+        .cursor_pointer()
+        .tab_stop(part == 0)
+        .accessibility_label(label)
+        .aria_description(link.href.clone())
+        .href(link.href.clone())
+        .open_with(|href, _, _, cx| open_link(href, cx))
+        .tooltip(move |window, cx| Tooltip::new(destination.clone()).build(window, cx))
+}
+
+/// Where a link goes, as its hover shows it: the site or address first,
+/// then the whole URL, since the link's own text can say anything.
+fn destination(href: &str) -> String {
+    match url::Url::parse(href) {
+        Ok(url) if url.scheme() == "mailto" => format!("Email {}\n{href}", url.path()),
+        Ok(url) => match url.host_str() {
+            Some(host) => format!("{host}\n{href}"),
+            None => href.to_owned(),
+        },
+        Err(_) => href.to_owned(),
+    }
+}
+
+/// Opens an email's link in the system's browser or mail client. Only
+/// `http`, `https` and `mailto` open; the renderer offers nothing else.
+fn open_link(href: &str, cx: &App) {
+    if let Ok(url) = url::Url::parse(href)
+        && matches!(url.scheme(), "http" | "https" | "mailto")
+    {
+        cx.open_url(url.as_str());
     }
 }
 
@@ -824,7 +859,9 @@ pub(super) fn mail_banner(turn: &crate::model::Turn, cx: &mut Context<ElseApp>) 
 
 #[cfg(test)]
 mod tests {
-    use super::{Body, Html, Key, Page, Shown, body};
+    use super::{Body, Html, Key, Page, Shown, area, body};
+    use else_visual::email::Rect;
+    use gpui_kit::{Bounds, point, px, size};
     use gpui_kit::{RenderImage, Task};
     use std::sync::Arc;
 
@@ -846,6 +883,7 @@ mod tests {
             height: 1,
             clipped: false,
             blocked: 0,
+            pixels: (1, 1),
             links: Vec::new(),
         })
     }
@@ -902,5 +940,21 @@ mod tests {
             body(Shown::Html, Some(&failed)),
             Body::Failed("too deep.")
         ));
+    }
+
+    #[test]
+    fn a_link_box_lands_where_the_page_shows_it_at_any_scale() {
+        let shown = size(px(700.), px(300.));
+        let rect = |scale: f32| Rect {
+            x: 100. * scale,
+            y: 50. * scale,
+            width: 40. * scale,
+            height: 20. * scale,
+        };
+        let expected = Bounds::new(point(px(100.), px(50.)), size(px(40.), px(20.)));
+        assert_eq!(area(rect(1.), (700, 300), shown), expected);
+        assert_eq!(area(rect(2.), (1400, 600), shown), expected);
+        assert!(expected.contains(&point(px(120.), px(60.))));
+        assert!(!expected.contains(&point(px(150.), px(60.))));
     }
 }

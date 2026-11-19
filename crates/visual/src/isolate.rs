@@ -24,7 +24,7 @@ const MAX_WORKERS: usize = 2;
 const QUEUE: usize = 16;
 /// Bumped whenever [`Request`] or the reply changes, so a worker binary an
 /// update replaced refuses a request it would misread.
-const PROTOCOL: u32 = 2;
+const PROTOCOL: u32 = 3;
 const TIME_LIMIT: Duration = Duration::from_secs(10);
 const MEMORY_LIMIT: u64 = 384 * 1024 * 1024;
 /// A worker's own address-space cap where the kernel enforces one.
@@ -92,7 +92,7 @@ struct Header {
     content_height: u32,
     clipped: bool,
     blocked: Vec<String>,
-    links: Vec<String>,
+    links: Vec<crate::email::Link>,
 }
 
 /// Render in a worker process, waiting for the result. See

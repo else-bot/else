@@ -1,14 +1,17 @@
 //! An email's HTML part, drawn on a white page like a mail client would.
 //! Rendering is offline: remote images, fonts and stylesheets stay unloaded
 //! and are reported in [`crate::Rendered::blocked`]. Images the message
-//! carries itself, named by `cid:`, are drawn. Links are listed, never live.
+//! carries itself, named by `cid:`, are drawn. Links come back as boxes on
+//! the page for the host to make clickable; nothing follows them here.
 
 use std::collections::HashMap;
 
 use html5ever::tendril::TendrilSink as _;
 use html5ever::{Attribute, QualName, local_name, serialize::SerializeOpts};
+use markup5ever_rcdom::Handle;
 use markup5ever_rcdom::{NodeData, RcDom, SerializableHandle};
 use serde::{Deserialize, Serialize};
+use takumi_core::paint_tree::{self, ElementInfo, PaintDocument};
 
 use crate::{Error, Rendered};
 
@@ -18,9 +21,12 @@ pub const MAX_HTML_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_INLINE_BASE64: usize = 6 * 1024 * 1024;
 /// Content below this many CSS pixels is cut off.
 pub const MAX_HEIGHT: u32 = 20_000;
-/// Links listed beside the render.
+/// Links a render locates, in document order.
 const MAX_LINKS: usize = 100;
 const MAX_LINK_BYTES: usize = 2048;
+/// Boxes one link keeps, one per line it covers once merged.
+const MAX_LINK_RECTS: usize = 64;
+const MAX_LINK_TEXT: usize = 200;
 /// Image types the renderer decodes.
 const INLINE_TYPES: [&str; 3] = ["image/png", "image/jpeg", "image/webp"];
 
@@ -31,6 +37,54 @@ pub struct Inline {
     pub content_id: String,
     pub media_type: String,
     pub data_base64: String,
+}
+
+/// A clickable `http`, `https` or `mailto` link on a rendered email.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Link {
+    pub href: String,
+    /// The text the link shows, empty for an image link.
+    pub text: String,
+    /// Where it sits, in device pixels of [`crate::Rendered`]. A link that
+    /// wraps has one box per line.
+    pub rects: Vec<Rect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Rect {
+    fn right(&self) -> f32 {
+        self.x + self.width
+    }
+
+    fn bottom(&self) -> f32 {
+        self.y + self.height
+    }
+
+    fn union(self, other: Rect) -> Rect {
+        let (x, y) = (self.x.min(other.x), self.y.min(other.y));
+        Rect {
+            x,
+            y,
+            width: self.right().max(other.right()) - x,
+            height: self.bottom().max(other.bottom()) - y,
+        }
+    }
+
+    /// Whether `other` sits on the same line and touches this box, as the
+    /// runs of one link do.
+    fn joins(&self, other: &Rect) -> bool {
+        let overlap = self.bottom().min(other.bottom()) - self.y.max(other.y);
+        overlap > 0.5 * self.height.min(other.height)
+            && other.x <= self.right() + 1.0
+            && self.x <= other.right() + 1.0
+    }
 }
 
 /// An email's HTML part and the inline images it refers to.
@@ -67,15 +121,134 @@ const BASE_CSS: &str = ":root { color-scheme: light; }\n\
 pub fn render(source: &Source, width: u32, scale: f32) -> Result<Rendered, Error> {
     source.check()?;
     let prepared = prepare(source);
-    let mut rendered = crate::draw(
+    crate::draw(
         &prepared.html,
         BASE_CSS.to_owned(),
         MAX_HEIGHT,
         width,
         scale,
-    )?;
-    rendered.links = prepared.links;
-    Ok(rendered)
+        Some(&prepared.anchors),
+    )
+}
+
+/// Marks an element inside the `<a>` at this index of [`Prepared::anchors`].
+const ANCHOR_CLASS: &str = "else-link-";
+
+/// A distinct link destination in an email and the text it first shows.
+pub(crate) struct Anchor {
+    href: String,
+    text: String,
+}
+
+/// The `anchors` that `document` paints, with their boxes cut at `height`
+/// CSS pixels and scaled to device pixels by `scale`. Each text run and
+/// box carries its element's [`ANCHOR_CLASS`] mark from [`prepare`].
+pub(crate) fn links(
+    anchors: &[Anchor],
+    document: &PaintDocument,
+    height: f32,
+    scale: f32,
+) -> Vec<Link> {
+    let mut rects: Vec<Vec<Rect>> = vec![Vec::new(); anchors.len()];
+    let mut add = |element: Option<&ElementInfo>, rect: Rect| {
+        let Some(kept) = element
+            .and_then(anchor)
+            .and_then(|index| rects.get_mut(index))
+        else {
+            return;
+        };
+        if rect.width <= 0.0 || rect.height <= 0.0 || rect.y >= height {
+            return;
+        }
+        let rect = Rect {
+            height: rect.height.min(height - rect.y),
+            ..rect
+        };
+        if let Some(line) = kept.iter_mut().find(|line| line.joins(&rect)) {
+            *line = line.union(rect);
+        } else if kept.len() < MAX_LINK_RECTS {
+            kept.push(rect);
+        }
+    };
+    for node in &document.nodes {
+        match &node.kind {
+            paint_tree::NodeKind::Text { runs, .. } => {
+                for run in runs {
+                    let rect = Rect {
+                        x: run.x,
+                        y: run.y - run.ascent,
+                        width: run.width,
+                        height: run.ascent + run.descent,
+                    };
+                    add(
+                        run.element.as_ref().or(node.element.as_ref()),
+                        transformed(node.transform, rect),
+                    );
+                }
+            }
+            paint_tree::NodeKind::Box { .. } | paint_tree::NodeKind::Image { .. } => {
+                let b = node.bounds;
+                let rect = Rect {
+                    x: b.x,
+                    y: b.y,
+                    width: b.width,
+                    height: b.height,
+                };
+                add(node.element.as_ref(), rect);
+            }
+        }
+    }
+    anchors
+        .iter()
+        .zip(rects)
+        .filter(|(_, rects)| !rects.is_empty())
+        .map(|(anchor, rects)| Link {
+            href: anchor.href.clone(),
+            text: anchor.text.clone(),
+            rects: rects
+                .into_iter()
+                .map(|rect| Rect {
+                    x: rect.x * scale,
+                    y: rect.y * scale,
+                    width: rect.width * scale,
+                    height: rect.height * scale,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// The index of the anchor `element` sits in, from its class.
+fn anchor(element: &ElementInfo) -> Option<usize> {
+    element
+        .class_name
+        .as_deref()?
+        .split_ascii_whitespace()
+        .find_map(|class| class.strip_prefix(ANCHOR_CLASS)?.parse().ok())
+}
+
+/// The bounding box of `rect` under an affine `transform`, as Takumi's
+/// column array `[a, b, c, d, e, f]`.
+fn transformed([a, b, c, d, e, f]: [f32; 6], rect: Rect) -> Rect {
+    let corners = [
+        (rect.x, rect.y),
+        (rect.right(), rect.y),
+        (rect.x, rect.bottom()),
+        (rect.right(), rect.bottom()),
+    ]
+    .map(|(x, y)| (a * x + c * y + e, b * x + d * y + f));
+    let xs = corners.map(|(x, _)| x);
+    let ys = corners.map(|(_, y)| y);
+    let (left, top) = (
+        xs.iter().copied().fold(f32::INFINITY, f32::min),
+        ys.iter().copied().fold(f32::INFINITY, f32::min),
+    );
+    Rect {
+        x: left,
+        y: top,
+        width: xs.iter().copied().fold(f32::NEG_INFINITY, f32::max) - left,
+        height: ys.iter().copied().fold(f32::NEG_INFINITY, f32::max) - top,
+    }
 }
 
 /// What an element takes from its ancestors' presentational attributes.
@@ -86,17 +259,21 @@ struct Inherited {
     /// Inside `<center>` or an `align="center"` block, which centers
     /// tables as well as text.
     centered: bool,
+    /// Inside the `<a>` at this index of [`Prepared::anchors`].
+    anchor: Option<usize>,
 }
 
 pub(crate) struct Prepared {
     pub html: String,
-    pub links: Vec<String>,
+    /// The `http`, `https` and `mailto` links, in order, each once.
+    pub anchors: Vec<Anchor>,
 }
 
 /// The HTML with its presentational attributes (`bgcolor`, `width`,
 /// `align`, `cellpadding` and the like) moved into inline styles, which is
-/// all the renderer reads, and `cid:` images replaced by their data. Also
-/// returns the `http`, `https` and `mailto` links it holds, in order.
+/// all the renderer reads, and `cid:` images replaced by their data. Each
+/// link's elements get its [`ANCHOR_CLASS`] mark, so the paint tree tells
+/// which link a box belongs to.
 pub(crate) fn prepare(source: &Source) -> Prepared {
     let inline: HashMap<String, String> = source
         .inline
@@ -110,7 +287,7 @@ pub(crate) fn prepare(source: &Source) -> Prepared {
         })
         .collect();
     let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(&*source.html);
-    let mut links = Vec::new();
+    let mut anchors: Vec<Anchor> = Vec::new();
     let mut stack = vec![(dom.document.clone(), Inherited::default())];
     while let Some((node, inherited)) = stack.pop() {
         let mut passed = inherited.clone();
@@ -139,6 +316,36 @@ pub(crate) fn prepare(source: &Source) -> Prepared {
             {
                 passed.centered = align.trim().eq_ignore_ascii_case("center");
             }
+            if tag == "a"
+                && let Some(href) = attribute(&attrs, "href").map(str::trim)
+                && href.len() <= MAX_LINK_BYTES
+                && is_link(href)
+            {
+                let text = text_of(&node);
+                passed.anchor = match anchors.iter().position(|a| a.href == href) {
+                    Some(index) => {
+                        if anchors[index].text.is_empty() {
+                            anchors[index].text = text;
+                        }
+                        Some(index)
+                    }
+                    None if anchors.len() < MAX_LINKS => {
+                        anchors.push(Anchor {
+                            href: href.to_owned(),
+                            text,
+                        });
+                        Some(anchors.len() - 1)
+                    }
+                    None => None,
+                };
+            }
+            if let Some(index) = passed.anchor {
+                let mark = format!("{ANCHOR_CLASS}{index}");
+                match attrs.iter_mut().find(|a| &*a.name.local == "class") {
+                    Some(class) => class.value = format!("{} {mark}", class.value).into(),
+                    None => attrs.push(new_attribute(local_name!("class"), mark)),
+                }
+            }
             if tag == "img" {
                 for attr in attrs.iter_mut() {
                     if &*attr.name.local == "src"
@@ -149,15 +356,6 @@ pub(crate) fn prepare(source: &Source) -> Prepared {
                     }
                 }
             }
-            if tag == "a"
-                && let Some(href) = attribute(&attrs, "href").map(str::trim)
-                && links.len() < MAX_LINKS
-                && href.len() <= MAX_LINK_BYTES
-                && is_link(href)
-                && !links.iter().any(|link| link == href)
-            {
-                links.push(href.to_owned());
-            }
             if !hints.is_empty() {
                 let mut style = hints.join(";");
                 if let Some(own) = attrs.iter_mut().find(|a| &*a.name.local == "style") {
@@ -165,14 +363,7 @@ pub(crate) fn prepare(source: &Source) -> Prepared {
                     style.push_str(&own.value);
                     own.value = style.into();
                 } else {
-                    attrs.push(Attribute {
-                        name: QualName::new(
-                            None,
-                            html5ever::Namespace::from(""),
-                            local_name!("style"),
-                        ),
-                        value: style.into(),
-                    });
+                    attrs.push(new_attribute(local_name!("style"), style));
                 }
             }
         }
@@ -194,7 +385,36 @@ pub(crate) fn prepare(source: &Source) -> Prepared {
         Ok(()) => String::from_utf8(html).unwrap_or_default(),
         Err(_) => String::new(),
     };
-    Prepared { html, links }
+    Prepared { html, anchors }
+}
+
+fn new_attribute(name: html5ever::LocalName, value: String) -> Attribute {
+    Attribute {
+        name: QualName::new(None, html5ever::Namespace::from(""), name),
+        value: value.into(),
+    }
+}
+
+/// The text `node` shows, with images standing in by their `alt`, its
+/// white space collapsed and cut at [`MAX_LINK_TEXT`] characters.
+fn text_of(node: &Handle) -> String {
+    let mut words = Vec::new();
+    let mut stack = vec![node.clone()];
+    while let Some(node) = stack.pop() {
+        match &node.data {
+            NodeData::Text { contents } => {
+                words.extend(contents.borrow().split_whitespace().map(str::to_owned));
+            }
+            NodeData::Element { name, attrs, .. } if &*name.local == "img" => {
+                if let Some(alt) = attribute(&attrs.borrow(), "alt") {
+                    words.extend(alt.split_whitespace().map(str::to_owned));
+                }
+            }
+            _ => {}
+        }
+        stack.extend(node.children.borrow().iter().rev().cloned());
+    }
+    words.join(" ").chars().take(MAX_LINK_TEXT).collect()
 }
 
 fn attribute<'a>(attrs: &'a [Attribute], name: &str) -> Option<&'a str> {
@@ -319,7 +539,7 @@ fn is_link(href: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn prepared(html: &str) -> Prepared {
+    fn prepared(html: &str) -> String {
         prepare(&Source {
             html: html.into(),
             inline: vec![Inline {
@@ -328,14 +548,14 @@ mod tests {
                 data_base64: "AAAA".into(),
             }],
         })
+        .html
     }
 
     #[test]
     fn presentational_attributes_become_inline_styles_before_the_own_style() {
         let html = prepared(
             r#"<table width="600" bgcolor="ffffff" align="center" cellpadding="8"><tr><td style="color:red" valign="top">x</td></tr></table>"#,
-        )
-        .html;
+        );
         assert!(
             html.contains(r#"<table width="600" bgcolor="ffffff" align="center" cellpadding="8" style="background-color:#ffffff;width:600px;margin-left:auto;margin-right:auto">"#),
             "{html}"
@@ -350,8 +570,7 @@ mod tests {
     fn tables_inside_a_centered_cell_are_centered() {
         let html = prepared(
             r#"<table><tr><td align="center"><table><tr><td>x</td></tr></table></td></tr></table><table><tr><td>y</td></tr></table>"#,
-        )
-        .html;
+        );
         assert_eq!(html.matches("margin-left:auto").count(), 1, "{html}");
         assert!(
             html.contains(r#"<td align="center" style="text-align:center"><table style="margin-left:auto;margin-right:auto">"#),
@@ -363,8 +582,7 @@ mod tests {
     fn attribute_text_that_is_not_a_color_or_length_never_reaches_the_css() {
         let html = prepared(
             r#"<table bgcolor="red;background:url(https://x.test/a)" width="1;x:y"><tr><td>x</td></tr></table>"#,
-        )
-        .html;
+        );
         assert!(!html.contains("style="), "{html}");
     }
 
@@ -372,8 +590,7 @@ mod tests {
     fn cid_images_get_their_data_and_remote_images_stay_remote() {
         let html = prepared(
             r#"<img src="cid:logo@X"><img src="https://x.test/p.gif"><img src="cid:other">"#,
-        )
-        .html;
+        );
         assert!(
             html.contains(r#"<img src="data:image/png;base64,AAAA">"#),
             "{html}"
@@ -385,12 +602,118 @@ mod tests {
         assert!(html.contains(r#"<img src="cid:other">"#), "{html}");
     }
 
-    #[test]
-    fn links_are_listed_once_in_order_and_scripts_are_not_links() {
-        let links = prepared(
-            r#"<a href="https://a.test/1">a</a><a href="javascript:alert(1)">b</a><a href=" mailto:me@x.test ">c</a><a href="https://a.test/1">d</a>"#,
+    fn links(html: &str, width: u32, scale: f32) -> Vec<Link> {
+        render(
+            &Source {
+                html: html.into(),
+                inline: Vec::new(),
+            },
+            width,
+            scale,
         )
-        .links;
-        assert_eq!(links, ["https://a.test/1", "mailto:me@x.test"]);
+        .unwrap()
+        .links
+    }
+
+    const PIXEL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn an_image_link_covers_the_image_in_device_pixels() {
+        let html = format!(
+            r#"<a href="https://a.test/x"><img src="{PIXEL}" width="40" height="30" style="display:block"></a>"#
+        );
+        let at = |scale| links(&html, 300, scale);
+        assert_eq!(
+            at(1.0),
+            [Link {
+                href: "https://a.test/x".into(),
+                text: String::new(),
+                rects: vec![Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 40.0,
+                    height: 30.0
+                }],
+            }]
+        );
+        assert_eq!(
+            at(2.0)[0].rects,
+            [Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 80.0,
+                height: 60.0
+            }]
+        );
+    }
+
+    #[test]
+    fn a_wrapped_link_has_a_box_per_line_and_its_whole_text() {
+        let found = links(
+            r#"<p style="margin:0">Go <a href="https://a.test/long">to the <b>very</b> long page that wraps over lines</a> now</p>"#,
+            240,
+            1.0,
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].href, "https://a.test/long");
+        assert_eq!(found[0].text, "to the very long page that wraps over lines");
+        let rects = &found[0].rects;
+        assert!(rects.len() >= 2, "{rects:?}");
+        assert!(
+            rects
+                .windows(2)
+                .all(|pair| pair[1].y >= pair[0].y + pair[0].height - 1.0),
+            "{rects:?}"
+        );
+        assert!(
+            rects[0].x > 0.0,
+            "the first line starts after \"Go\": {rects:?}"
+        );
+        assert_eq!(rects[1].x, 0.0, "{rects:?}");
+    }
+
+    #[test]
+    fn a_link_in_a_table_cell_sits_inside_the_cell() {
+        let found = links(
+            r#"<table cellpadding="10" style="margin-left:100px"><tr><td><a href="mailto:me@x.test">write</a></td></tr></table>"#,
+            400,
+            1.0,
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            (found[0].href.as_str(), found[0].text.as_str()),
+            ("mailto:me@x.test", "write")
+        );
+        let [rect] = found[0].rects[..] else {
+            panic!("{found:?}");
+        };
+        assert!(rect.x >= 110.0 && rect.y >= 10.0, "{rect:?}");
+    }
+
+    #[test]
+    fn only_web_and_mail_links_get_boxes() {
+        let found = links(
+            r#"<a href="javascript:alert(1)">a</a> <a href="file:///etc/passwd">b</a> <a href="data:text/html,x">c</a> <a href=" https://a.test/1 ">d</a> <a href="https://a.test/1">e</a>"#,
+            300,
+            1.0,
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(
+            (found[0].href.as_str(), found[0].text.as_str()),
+            ("https://a.test/1", "d")
+        );
+        assert_eq!(found[0].rects.len(), 2, "{found:?}");
+    }
+
+    #[test]
+    fn link_boxes_past_the_height_limit_are_dropped() {
+        let html = format!(
+            r#"<a href="https://a.test/top">top</a><div style="height:{MAX_HEIGHT}px"></div><a href="https://a.test/bottom">bottom</a>"#
+        );
+        let found = links(&html, 300, 1.0);
+        assert_eq!(
+            found.iter().map(|l| l.href.as_str()).collect::<Vec<_>>(),
+            ["https://a.test/top"]
+        );
     }
 }

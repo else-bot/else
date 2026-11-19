@@ -223,8 +223,8 @@ pub struct Rendered {
     pub clipped: bool,
     /// Remote images and fonts the visual names, none of which load.
     pub blocked: Vec<String>,
-    /// The links an email holds, none of which are live. Empty for a visual.
-    pub links: Vec<String>,
+    /// The links an email shows and where. Empty for a visual.
+    pub links: Vec<email::Link>,
 }
 
 impl Rendered {
@@ -259,17 +259,18 @@ pub fn render(html: &str, width: u32, scale: f32, theme: &Theme) -> Result<Rende
     if html.len() > MAX_BYTES {
         return Err(Error::TooLarge(html.len()));
     }
-    draw(html, theme.base_css(), MAX_HEIGHT, width, scale)
+    draw(html, theme.base_css(), MAX_HEIGHT, width, scale, None)
 }
 
 /// Lay out `html` over the `base` sheet and paint at most `max_height` CSS
-/// pixels of it.
+/// pixels of it, locating where it shows `anchors` when it has any.
 fn draw(
     html: &str,
     base: String,
     max_height: u32,
     width: u32,
     scale: f32,
+    anchors: Option<&[email::Anchor]>,
 ) -> Result<Rendered, Error> {
     let width = width.clamp(MIN_WIDTH, MAX_WIDTH);
     let scale = if scale.is_finite() {
@@ -306,6 +307,22 @@ fn draw(
     }
     let height = content_height.min(max_height);
     let scale = scale.min((MAX_PIXELS / (width * height) as f32).sqrt());
+    // A page whose links cannot be located still shows, without them.
+    let links = anchors
+        .filter(|anchors| !anchors.is_empty())
+        .and_then(|anchors| {
+            let tree = takumi_core::paint_tree::paint_tree(
+                takumi_core::paint_tree::PaintTreeOptions::builder()
+                    .viewport(Viewport::new((width, None)))
+                    .fonts(fonts)
+                    .node(parsed.node.clone())
+                    .stylesheet(stylesheet.clone())
+                    .build(),
+            )
+            .ok()?;
+            Some(email::links(anchors, &tree.document, height as f32, scale))
+        })
+        .unwrap_or_default();
     let device = |css: u32| (css as f32 * scale).floor().max(1.0) as u32;
     let bitmap = takumi::render(options(
         Viewport::new((device(width), device(height))).with_device_pixel_ratio(scale),
@@ -318,7 +335,7 @@ fn draw(
         content_height,
         clipped: content_height > max_height,
         blocked,
-        links: Vec::new(),
+        links,
     })
 }
 
