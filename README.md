@@ -18,7 +18,7 @@
 
 else.bot is a desktop app for chatting with AI bots. Each bot has its own job, model, memory and computer. They work in the background, hand tasks to each other, and ask you before they send anything in your name.
 
-Bots run on the Codex, Claude Code or Grok Build CLI you already use, with your own subscription. The server and your data stay on your laptop, a home server or a VPS.
+Bots run on the Codex, Claude Code or Grok Build CLI you already use, or on Cursor with your API key, with your own subscription. The server and your data stay on your laptop, a home server or a VPS.
 
 ## What you get
 
@@ -57,6 +57,8 @@ codex login     # Codex CLI
 claude          # Claude Code
 grok login      # Grok Build
 ```
+
+For Cursor, add your API key in **Settings › Vault** instead (see [Install](docs/install.md#cursor)).
 
 Open else.bot from your launcher, choose **Start local**, and name your assistant.
 

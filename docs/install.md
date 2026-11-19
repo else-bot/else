@@ -45,8 +45,20 @@ Bots run on a provider CLI installed on the server. Install at least one and sig
 | [Codex CLI](https://developers.openai.com/codex/cli) | `codex login` |
 | [Claude Code](https://claude.com/product/claude-code) | Run `claude` and finish sign-in |
 | Grok Build | `grok login` |
+| [Cursor](https://cursor.com) | Add a Vault entry with an API key (see below) |
 
 The installer checks for these CLIs but does not install them. Provider CLIs run as your user and can read your host files. Bot computers are isolated VMs.
+
+### Cursor
+
+Cursor runs through Cursor's own SDK instead of a CLI. It needs Node.js 22.13 or newer on the server, with `npm` beside it. Set `ELSE_NODE_BIN` when the right `node` is not first on the server's `PATH`.
+
+1. Create an API key at [cursor.com/dashboard](https://cursor.com/dashboard).
+2. In else.bot, open **Settings › Vault** and add an entry named `cursor` with the variable `CURSOR_API_KEY` set to the key.
+
+The server then installs the pinned `@cursor/sdk` with npm into its data directory, once, and lists your account's models within the hour, or at the next restart. else.bot does not ship the SDK, because its license does not allow it. If the install fails, the model picker and the failed turn show the `npm install` command to run by hand.
+
+Cursor turns load no Cursor settings, rules or MCP servers from your account or the bot's project. They get else.bot's tools, plus the shell and file tools on turns you start. Turns started by an incoming event get only else.bot's tools. Subagents are always off.
 
 ## Open the app
 
