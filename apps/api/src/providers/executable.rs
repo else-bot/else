@@ -23,7 +23,9 @@ fn resolve(
     name: &str,
     path: Option<&OsStr>,
 ) -> Result<Option<PathBuf>, String> {
-    let setting = format!("ELSE_{}_BIN", name.to_uppercase());
+    // `cursor-agent` is configured as ELSE_CURSOR_BIN.
+    let product = name.split('-').next().unwrap_or(name);
+    let setting = format!("ELSE_{}_BIN", product.to_uppercase());
     let found = match configured {
         Some(found) if is_executable(found) => found.to_path_buf(),
         Some(found) => {

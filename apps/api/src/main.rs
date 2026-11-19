@@ -606,13 +606,7 @@ fn run_serve() -> anyhow::Result<()> {
             );
         }
         else_api::mcp::cleanup(&config.data_dir.join("mcp"))?;
-        let (registry, summarizer) = else_api::providers::build(
-            &config,
-            Some(else_api::providers::Vault {
-                pool: pool.clone(),
-                key: secret_key.clone(),
-            }),
-        );
+        let (registry, summarizer) = else_api::providers::build(&config);
         let (requeued, uncertain) = db::turns::recover_after_restart(&pool).await?;
         else_api::connectors::store::recover(&pool).await?;
         else_api::socials::store::recover(&pool).await?;

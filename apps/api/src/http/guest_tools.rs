@@ -1310,7 +1310,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                 let query = text("query").unwrap_or_default();
                 let secrets: Vec<Value> = list
                     .iter()
-                    .filter(|s| !task_secrets::provider_only(&s.name) && s.matches(&query))
+                    .filter(|s| s.matches(&query))
                     .map(|s| {
                         json!({
                             "name": s.name,

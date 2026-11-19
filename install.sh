@@ -965,13 +965,15 @@ ensure_bots_dir() {
 }
 
 refresh_provider_paths() {
-	local codex claude grok
+	local codex claude grok cursor
 	codex="$(command -v codex 2>/dev/null || true)"
 	claude="$(command -v claude 2>/dev/null || true)"
 	if [ -n "$codex" ]; then config_set ELSE_CODEX_BIN "$codex"; fi
 	if [ -n "$claude" ]; then config_set ELSE_CLAUDE_BIN "$claude"; fi
 	grok="$(command -v grok 2>/dev/null || true)"
 	if [ -n "$grok" ]; then config_set ELSE_GROK_BIN "$grok"; fi
+	cursor="$(command -v cursor-agent 2>/dev/null || true)"
+	if [ -n "$cursor" ]; then config_set ELSE_CURSOR_BIN "$cursor"; fi
 }
 
 # msb records a released maintenance lease with no holder and an expiry equal
@@ -1259,6 +1261,11 @@ check_providers() {
 		ok "$(grok --version 2>/dev/null)"
 	else
 		info "Grok CLI not found (optional). Install Grok Build and run grok login."
+	fi
+	if have cursor-agent; then
+		ok "cursor-agent $(cursor-agent --version 2>/dev/null)"
+	else
+		info "Cursor CLI not found (optional). Install it with: curl https://cursor.com/install -fsS | bash, then run cursor-agent login."
 	fi
 }
 

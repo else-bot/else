@@ -45,20 +45,17 @@ Bots run on a provider CLI installed on the server. Install at least one and sig
 | [Codex CLI](https://developers.openai.com/codex/cli) | `codex login` |
 | [Claude Code](https://claude.com/product/claude-code) | Run `claude` and finish sign-in |
 | Grok Build | `grok login` |
-| [Cursor](https://cursor.com) | Add a Vault entry with an API key (see below) |
+| [Cursor CLI](https://cursor.com/cli) | `cursor-agent login` |
 
 The installer checks for these CLIs but does not install them. Provider CLIs run as your user and can read your host files. Bot computers are isolated VMs.
 
 ### Cursor
 
-Cursor runs through Cursor's own SDK instead of a CLI. It needs Node.js 22.13 or newer on the server, with `npm` beside it. Set `ELSE_NODE_BIN` when the right `node` is not first on the server's `PATH`.
+Install the Cursor CLI with `curl https://cursor.com/install -fsS | bash`, then run `cursor-agent login`. else.bot needs version 2026.08.11 or newer, and finds it in `~/.local/bin`, where its installer puts it, or on `PATH`. Set `ELSE_CURSOR_BIN` to use another copy.
 
-1. Create an API key at [cursor.com/dashboard](https://cursor.com/dashboard).
-2. In else.bot, open **Settings › Vault** and add an entry named `provider-cursor` with the variable `CURSOR_API_KEY` set to the key.
+Each bot runs the CLI with its own home directory, so your Cursor rules, MCP servers, hooks, plugins and Claude Code settings never load into a bot. Only your login is shared. A side effect is that shell commands in your Cursor turns see the bot's home as `~`, not yours.
 
-The server then installs the pinned `@cursor/sdk` with npm into its data directory, once, and lists your account's models within the hour, or at the next restart. else.bot does not ship the SDK, because its license does not allow it. If the install fails, the failed turn shows the `npm install` command to run by hand. Bots cannot read Vault entries whose names start with `provider-`, so the key never reaches their commands.
-
-Cursor turns load no Cursor settings, rules or MCP servers from your account or the bot's project. They get else.bot's tools, plus the shell and file tools on turns you start. Turns started by an incoming event get only else.bot's tools. Subagents are always off.
+Turns you start get else.bot's tools plus the shell and file tools. Turns started by an incoming event get only else.bot's tools, and any other tool call fails the turn. Subagents and web search are always off. A bot whose project holds hooks in `.cursor/hooks.json` or `.claude/settings.json` cannot run on Cursor, because Cursor would run them on this server. The CLI takes no messages mid-turn, so a message you send while a turn runs is delivered when that turn ends.
 
 ## Open the app
 

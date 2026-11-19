@@ -97,6 +97,17 @@ impl StreamAttempt {
         attempt::drive(self, protocol, turn, sink, stop, label).await
     }
 
+    /// How the CLI exited after its output ended, for a CLI that reports
+    /// errors and interruptions only by exiting, and its stderr's tail.
+    /// The status is `None` when it has not exited within [`PIPE_TIMEOUT`].
+    pub async fn exited(&mut self) -> (Option<std::process::ExitStatus>, String) {
+        let status = tokio::time::timeout(PIPE_TIMEOUT, self.scope.child().wait())
+            .await
+            .ok()
+            .and_then(Result::ok);
+        (status, self.stderr.tail().await)
+    }
+
     pub async fn conclude(self, ended: Ended, sink: &dyn TurnSink) -> TurnOutcome {
         drop(self.stdin);
         attempt::conclude(ended, self.scope, Some(self.stderr), sink, self.label).await
