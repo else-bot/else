@@ -35,7 +35,7 @@ MARKER = ".else-dev-session"
 NAME = re.compile(r"(?!runs$)[A-Za-z0-9_-]{1,64}")
 LOOPBACK = re.compile(r"http://127\.0\.0\.1:[1-9][0-9]{0,4}")
 DROPPED = {"DATABASE_URL", "TEST_DATABASE_URL", "SECRET_KEY", "SECRET_KEY_FILE", "OWNER_TOKEN_FILE"}
-INHERITED = {"ELSE_CODEX_BIN", "ELSE_CODEX_ALLOW_UNVERIFIED", "ELSE_CLAUDE_BIN", "ELSE_GROK_BIN", "ELSE_MSB_BIN",
+INHERITED = {"ELSE_CODEX_BIN", "ELSE_CODEX_ALLOW_UNVERIFIED", "ELSE_CLAUDE_BIN", "ELSE_GROK_BIN", "ELSE_CURSOR_BIN", "ELSE_MSB_BIN",
              "ELSE_MSB_ALLOW_UNVERIFIED", "ELSE_VM_IMAGE", "ELSE_VM_DESKTOP", "ELSE_VM_NETWORK",
              "ELSE_MAX_ACTIVE_TURNS", "ELSE_SYNTHETIC_PROVIDER"}
 DARWIN = sys.platform == "darwin"
@@ -78,7 +78,7 @@ def clean_env(host_providers):
         for key in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "GROK_HOME"):
             env.pop(key, None)
         env.update(ELSE_CODEX_BIN="/nonexistent/else-dev-codex", ELSE_CLAUDE_BIN="/nonexistent/else-dev-claude",
-                   ELSE_GROK_BIN="/nonexistent/else-dev-grok",
+                   ELSE_GROK_BIN="/nonexistent/else-dev-grok", ELSE_CURSOR_BIN="/nonexistent/else-dev-cursor",
                    ELSE_MSB_BIN="/nonexistent/else-dev-msb")
     return env
 

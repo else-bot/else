@@ -578,7 +578,7 @@ async fn codex_offers_a_connector_event_no_native_tools() {
         spec.args.push("app-server".into());
         let host = fx.host.clone();
         async move {
-            let server = else_api::providers::codex_rpc::AppServer::start(&host, &spec, "Codex")
+            let server = else_api::providers::codex_rpc::AppServer::start(&host, &spec)
                 .await
                 .unwrap();
             let listed = server

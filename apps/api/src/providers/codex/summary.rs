@@ -64,7 +64,7 @@ impl Codex {
             args = codex_home::no_native_tools(host, &spec, &profile.model) => args?,
         };
         spec.args.push(OsString::from("app-server"));
-        let mut server = AppServer::start(host, &spec, super::DEFINITION.label)
+        let mut server = AppServer::start(host, &spec)
             .await
             .map_err(|e| e.to_string())?;
         let result = tokio::select! {

@@ -1,80 +1,70 @@
-//! The host Cursor adapter, over a Node sidecar that wraps `@cursor/sdk`
-//! (see [`super::cursor_home`]), started in the bot's project directory.
+//! The host Cursor adapter, over Cursor CLI's headless print mode
+//! (`cursor-agent -p --output-format stream-json`).
 //!
-//! One sidecar runs per turn and speaks JSON-RPC over stdio through the
-//! same client as Codex. The turn opens the bot's Cursor agent, resuming
-//! the recorded one when its fingerprint matches and the SDK still has it,
-//! and then sends the packet. The SDK takes no system prompt on most
-//! accounts, so else.bot's instructions lead the packet whenever the agent
-//! has not been given this exact text yet. No Cursor settings load
-//! (`settingSources: []`), so no user, project or team rules, hooks, or MCP
-//! servers reach the agent. Its tools are else.bot's MCP server, authorized
-//! by the turn's grant, plus the host shell and file tools unless an
-//! incoming event started the work; subagents (`task`) are always off. The
-//! SDK has no approvals, so the tool list is the whole policy, and any
-//! other tool the stream reports ends the turn as a policy failure. Stop
-//! cancels the run; joined owner messages steer it.
+//! One CLI process runs per turn and reads the packet on stdin. A new chat
+//! gets an ID allocated here (`--new-session-id`); the next turn resumes it
+//! (`--resume <id>`) when it is in the bot's own home and its fingerprint
+//! matches. The CLI runs with the bot's provider home as `HOME` (see
+//! [`super::cursor_home`]), sharing only the host's login, and ignores the
+//! project's CLI config and `.envrc`. `--allowed-tools` offers else.bot's
+//! MCP server, plus the host shell and file tools when the owner started
+//! the work, and every call is checked again. Owner turns start in the
+//! bot's project; other turns start in a private workspace, so nothing a
+//! guest wrote there loads. Cursor takes no system prompt from most
+//! accounts, so else.bot's instructions lead the packet whenever the chat
+//! has not seen this exact text. Stop is SIGINT. The CLI takes no input
+//! while it runs, so owner messages that join a turn wait for its next
+//! attempt.
 
 mod protocol;
 
 use std::ffi::OsString;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::Vault;
-use super::cli::attempt::{self, Channel, Ended, SendError};
+use super::cli::attempt::{self, Channel};
+use super::cli::files::GRANT_ENV;
 use super::cli::session::{self, Identity, Opened, PreparedTurn};
-use super::codex_rpc::{AppServer, Incoming, RpcError};
+use super::cli::stream::StreamAttempt;
+use super::cursor_home::{self, Login};
 use super::definitions::Definition;
-use super::host::{Host, LaunchSpec};
+use super::host::{BotDirs, Host, LaunchSpec};
 use super::models::{Listed, Models};
-use super::{attachments, cursor_home, prompt};
+use super::{attachments, prompt};
 use crate::app::providers::{
     Availability, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
 };
 use protocol::Tracker;
 
 pub const ID: &str = "cursor";
-const PROMPT_VERSION: &str = "else-cursor-v1";
+const PROMPT_VERSION: &str = "else-cursor-v2";
 const INSTRUCTIONS: &str = "instructions";
-const RPC_TIMEOUT: Duration = Duration::from_secs(60);
-/// `run.steer` answers once the run has taken the message, which can take
-/// a model step; no answer by then leaves its delivery unknown.
-const STEER_TIMEOUT: Duration = Duration::from_secs(30);
-const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
-const REFUSED: i64 = -32001;
-const SIGNED_OUT: i64 = -32002;
-const USAGE_LIMIT: i64 = -32003;
 
 pub static DEFINITION: Definition = Definition {
     id: ID,
     label: "Cursor",
-    fallback: &["composer-2", "claude-opus-4-8"],
-    efforts: protocol::EFFORTS,
-    tiers: protocol::TIERS,
+    fallback: &["composer-2.5", "composer-2"],
+    efforts: &["default"],
+    tiers: &["default"],
     pinned: super::definitions::any_id,
     model_note: "",
-    effort_note: "",
-    tier_note: "",
+    effort_note: " Cursor names the effort in the model ID, such as gpt-5.5-high.",
+    tier_note: " Choose a model ID ending in -fast for its fast variant.",
     build,
 };
 
 fn build(wiring: &super::Wiring) -> super::Built {
-    let found = super::executable(wiring.config.node_bin.as_deref(), "node");
+    let program = lookup(
+        wiring.config.cursor_bin.as_deref(),
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+    );
     let cursor = Cursor {
         models: Models::new(&DEFINITION),
-        ready: cursor_home::node(&wiring.host, found).map(|node| Ready {
-            host: wiring.host.clone(),
-            node,
-            data_dir: wiring.config.data_dir.clone(),
-        }),
-        vault: wiring.vault.clone(),
+        ready: Cursor::ready(Some(wiring.host.clone()), program, Login::host()),
         tool_url: Some(wiring.tool_url.clone()),
-        installing: Default::default(),
     };
     super::Built {
         provider: std::sync::Arc::new(cursor),
@@ -82,67 +72,123 @@ fn build(wiring: &super::Wiring) -> super::Built {
     }
 }
 
+/// `ELSE_CURSOR_BIN`, else the link Cursor's installer keeps in
+/// `~/.local/bin`, which a service's `PATH` often lacks, else
+/// `cursor-agent` on `PATH`. A link is kept, not resolved: an update points
+/// it at a new versioned directory and removes the old one.
+fn lookup(configured: Option<&Path>, home: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let runs = |file: &PathBuf| {
+        file.metadata()
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    let path = std::env::var_os("PATH");
+    let on_path = || {
+        std::env::split_paths(path.as_deref()?)
+            .map(|dir| dir.join("cursor-agent"))
+            .find(runs)
+    };
+    let Some(given) = configured
+        .map(Path::to_owned)
+        .or_else(|| {
+            home.map(|home| home.join(cursor_home::INSTALLED))
+                .filter(runs)
+        })
+        .or_else(on_path)
+    else {
+        return Ok(None);
+    };
+    // Turns start in the bot's project, where a relative path means
+    // another file.
+    let given = std::path::absolute(&given).map_err(|e| e.to_string())?;
+    let resolved = super::executable_as(Some(&given), "cursor-agent", "ELSE_CURSOR_BIN")?;
+    let linked = std::fs::canonicalize(&given).ok() == resolved;
+    Ok(if linked { Some(given) } else { resolved })
+}
+
+/// The models `cursor-agent models` prints after "Available models", one
+/// `id - Display Name (current, default)` line each.
+fn listed_models(printed: &str) -> Vec<Listed> {
+    printed
+        .lines()
+        .skip_while(|line| !line.trim_start().starts_with("Available models"))
+        .skip(1)
+        .map(str::trim)
+        .skip_while(|line| line.is_empty())
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_whitespace().next())
+        .map(Listed::id)
+        .collect()
+}
+
+/// A CLI that runs and is new enough, and how it finds the host's login.
 struct Ready {
     host: Host,
-    node: PathBuf,
-    data_dir: PathBuf,
+    program: PathBuf,
+    version: String,
+    login: Login,
 }
 
 pub struct Cursor {
     models: Models,
     ready: Result<Ready, String>,
-    vault: Option<Vault>,
     tool_url: Option<String>,
-    installing: std::sync::Arc<tokio::sync::Mutex<()>>,
-}
-
-struct Sidecar {
-    script: PathBuf,
-    key: zeroize::Zeroizing<String>,
-}
-
-struct Account<'a> {
-    ready: &'a Ready,
-    key: &'a str,
-    store: &'a std::path::Path,
 }
 
 impl Cursor {
-    async fn sidecar(&self, ready: &Ready) -> Result<Sidecar, String> {
-        let key = cursor_home::api_key(self.vault.as_ref()).await?;
-        // Its own task, holding the install lock, so a caller that gives up
-        // (the model refresher's timeout) never cuts an install off midway or
-        // lets a second one start beside it.
-        let installing = self.installing.clone();
-        let (host, node, data) = (
-            ready.host.clone(),
-            ready.node.clone(),
-            ready.data_dir.clone(),
-        );
-        let script = tokio::spawn(async move {
-            let _installing = installing.lock_owned().await;
-            cursor_home::prepare(&host, &node, &data).await
-        })
-        .await
-        .map_err(|e| format!("The Cursor SDK install stopped: {e}"))??;
-        Ok(Sidecar { script, key })
+    pub fn detect(host: Option<Host>, program: Option<PathBuf>, login: Login) -> Self {
+        Self {
+            models: Models::new(&DEFINITION),
+            ready: Self::ready(host, Ok(program), login),
+            tool_url: None,
+        }
     }
 
-    /// `account` is the non-secret identity `initialize` reports: an agent
-    /// never resumes under another account.
-    fn fingerprint(
-        &self,
-        ready: &Ready,
-        input: &TurnInput,
-        profile: &Profile,
-        account: &str,
-    ) -> String {
+    fn ready(
+        host: Option<Host>,
+        program: Result<Option<PathBuf>, String>,
+        login: Login,
+    ) -> Result<Ready, String> {
+        let host = host.ok_or("Cursor CLI is not configured on this host.")?;
+        let program = program?.ok_or(cursor_home::NOT_INSTALLED)?;
+        let version = host.probe(&program, &["--version"], &[]).map_err(|why| {
+            format!(
+                "Cursor CLI does not run (`{} --version`: {why}).",
+                program.display()
+            )
+        })?;
+        if !cursor_home::supported(&version) {
+            return Err(format!(
+                "Cursor CLI {version} is older than {}. Run `cursor-agent update` on this server.",
+                cursor_home::MIN_VERSION
+            ));
+        }
+        Ok(Ready {
+            host,
+            program,
+            version,
+            login,
+        })
+    }
+
+    pub fn with_tools(mut self, url: String) -> Self {
+        self.tool_url = Some(url);
+        self
+    }
+
+    fn fingerprint(&self, ready: &Ready, input: &TurnInput, profile: &Profile) -> String {
+        let account = ready
+            .login
+            .file
+            .as_deref()
+            .map(cursor_home::host_account)
+            .unwrap_or_default();
         session::fingerprint(
             input,
             profile,
             &Identity {
                 prompt_version: PROMPT_VERSION,
-                version: cursor_home::SDK_VERSION,
+                version: &ready.version,
                 runtime: &ready.host.runtime(input.bot_id),
                 tools: match (input.delegation.host_tools(), self.tool_url.is_some()) {
                     (true, true) => "tools:host+elsebot-v1",
@@ -150,210 +196,129 @@ impl Cursor {
                     (false, true) => "tools:elsebot-v1",
                     (false, false) => "tools:none",
                 },
-                policy: &["agents:disabled", "settings:none", account],
+                policy: &["agents:disabled", "home:bot", &account],
             },
         )
     }
 
-    /// The agent's options, sent again on every resume: the SDK keeps none
-    /// of the tool restrictions.
-    fn agent_options(&self, input: &TurnInput, profile: &Profile, cwd: &str) -> Value {
-        let mut options = json!({
-            "model": protocol::selection(profile),
-            "mode": "agent",
-            "tools": protocol::allowed_tools(input.delegation.host_tools(), self.tool_url.is_some()),
-            "disallowedTools": protocol::DISALLOWED,
-            "local": {
-                "cwd": cwd,
-                "settingSources": [],
-                "sandboxOptions": { "enabled": false },
-                "enableAgentRetries": true,
-            },
-        });
-        if let (Some(url), Some(grant)) = (&self.tool_url, &input.tool_grant) {
-            options["mcpServers"] = json!({
-                crate::app::tools::SERVER_NAME: {
-                    "type": "http",
-                    "url": url,
-                    "headers": { "Authorization": format!("Bearer {grant}") },
-                },
-            });
-        }
-        options
-    }
-
-    async fn converse(
+    fn launch(
         &self,
-        server: &mut AppServer,
-        account: Account<'_>,
+        ready: &Ready,
         input: &TurnInput,
         profile: &Profile,
-        sink: &dyn TurnSink,
-        stop: &Stop,
-    ) -> Ended {
-        let open = async {
-            let initialized = server
-                .request("initialize", json!({ "apiKey": account.key }), RPC_TIMEOUT)
-                .await?;
-            let identity = initialized["account"].as_str().unwrap_or_default();
-            let fingerprint = self.fingerprint(account.ready, input, profile, identity);
-            let recorded = input
-                .session
-                .as_ref()
-                .filter(|s| s.fingerprint == fingerprint);
-            let params = json!({
-                "agentId": recorded.map(|s| s.native_id.as_str()),
-                "options": self.agent_options(input, profile, &server.cwd),
-                "storeDir": account.store,
-            });
-            let opened = server.request("agent.open", params, RPC_TIMEOUT).await?;
-            Ok::<_, RpcError>((fingerprint, recorded, opened))
-        };
-        let opened = tokio::select! {
-            opened = open => opened,
-            () = stop.escalated() => return Ended::Undelivered(TurnOutcome::Interrupted),
-        };
-        let (fingerprint, recorded, opened) = match opened {
-            Ok(opened) => opened,
-            Err(err) => return Ended::Undelivered(refusal(err)),
-        };
-        let Some(agent_id) = opened["agentId"].as_str() else {
-            return Ended::Undelivered(failed(
-                "provider_protocol",
-                "Cursor opened an agent without an ID.",
-            ));
-        };
-        let opened = match recorded {
-            Some(session) if opened["resumed"] == true && session.native_id == agent_id => {
-                Opened::Resumed(session)
+        mut dirs: BotDirs,
+        workspace: PathBuf,
+        turn: &PreparedTurn<'_>,
+    ) -> LaunchSpec {
+        let mut args: Vec<OsString> = [
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--stream-partial-output",
+            "--trust",
+            "--disable-project-configs",
+            "--workspace",
+            &workspace.to_string_lossy(),
+            "--sandbox",
+            "disabled",
+            "--allowed-tools",
+            &protocol::allowed_tools(input.delegation.host_tools(), self.tool_url.is_some()),
+            "--model",
+            &profile.model,
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        args.extend([
+            if turn.resumed() {
+                "--resume"
+            } else {
+                "--new-session-id"
             }
-            _ => Opened::Fresh(agent_id.to_owned()),
-        };
-        if stop.is_requested() {
-            return Ended::Undelivered(TurnOutcome::Interrupted);
+            .into(),
+            turn.native_id().into(),
+        ]);
+        dirs.project = workspace;
+        let mut env = cursor_home::env(&dirs.provider_home, &ready.login);
+        if let (Some(_), Some(grant)) = (&self.tool_url, &input.tool_grant) {
+            env.push((GRANT_ENV.into(), grant.clone()));
         }
-        let mut turn = PreparedTurn::new(input, fingerprint, opened);
-        turn.lead_once(INSTRUCTIONS, instructions(input, &server.cwd));
-        if turn.record(sink).await.is_err() || sink.sending().await.is_err() {
-            return Ended::Undelivered(TurnOutcome::Interrupted);
+        LaunchSpec {
+            turn_id: input.turn_id,
+            dirs,
+            program: ready.program.clone(),
+            args,
+            env,
         }
-        let send = server.request(
-            "run.send",
-            json!({ "message": protocol::message(&turn.segments) }),
-            RPC_TIMEOUT,
-        );
-        let sent = tokio::select! {
-            sent = send => sent,
-            () = stop.escalated() => {
-                return Ended::Abandoned(TurnOutcome::Uncertain {
-                    message: "Delivery to Cursor is unknown: the stop escalated during delivery."
-                        .into(),
-                });
-            }
-        };
-        let run_id = match sent {
-            Ok(response) => match response["runId"].as_str() {
-                Some(id) => id.to_owned(),
-                None => {
-                    return Ended::Abandoned(TurnOutcome::Uncertain {
-                        message: "Cursor accepted the turn without a run ID.".into(),
-                    });
-                }
-            },
-            Err(err @ RpcError::Remote { code, .. })
-                if [REFUSED, SIGNED_OUT, USAGE_LIMIT].contains(&code) =>
-            {
-                return Ended::Undelivered(refusal(err));
-            }
-            Err(err) => {
-                return Ended::Abandoned(TurnOutcome::Uncertain {
-                    message: format!("Delivery to Cursor is unknown: {err}"),
-                });
-            }
-        };
-        let reported = json!({ "model": profile.model, "reasoning_effort": profile.reasoning_effort, "service_tier": profile.service_tier });
-        if turn.accept(sink, &reported, &run_id).await.is_err() {
-            stop.request();
-        }
-        let mut tracker = Tracker::new(
-            profile,
-            input.delegation.host_tools(),
-            self.tool_url.is_some(),
-        );
-        let mut running = Running { server };
-        attempt::drive(&mut running, &mut tracker, &mut turn, sink, stop, "Cursor").await
     }
 }
 
-/// The shared instructions, given in the packet: most accounts cannot
-/// replace Cursor's system prompt.
-fn instructions(input: &TurnInput, cwd: &str) -> String {
-    format!(
-        "[else.bot instructions]\n{}\n\nelse.bot's tools are on the MCP server named {}. End \
-         this attempt when one of them returns parked or pending; the app continues it after the \
-         outcome.\n[/else.bot instructions]",
-        prompt::instructions(input, cwd),
-        crate::app::tools::SERVER_NAME,
-    )
+/// The attempt, reporting how the CLI exited: Cursor writes no result
+/// after an error or SIGINT, and writes its result before storing the chat,
+/// so the result is held until the exit and carries its `exit_code`.
+struct Running<'a> {
+    attempt: &'a mut StreamAttempt,
+    result: Option<(Value, tokio::time::Instant)>,
+    exited: bool,
 }
 
-fn refusal(err: RpcError) -> TurnOutcome {
-    match err {
-        RpcError::Remote { code, message, .. } if code == SIGNED_OUT => failed(
-            "provider_unavailable",
-            format!("{} ({message})", cursor_home::signed_out()),
-        ),
-        RpcError::Remote { code, message, .. } if code == USAGE_LIMIT => failed(
-            "provider_unavailable",
-            format!("Cursor's usage limit is reached: {message}"),
-        ),
-        RpcError::Remote { message, .. } => failed("provider_refused", message),
-        err => failed("provider_unavailable", err.to_string()),
-    }
-}
-
-struct Running<'s> {
-    server: &'s mut AppServer,
-}
+/// How long the CLI may take to store its chat and exit after its result.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[async_trait]
 impl Channel for Running<'_> {
-    type Message = Incoming;
+    type Message = Value;
 
-    async fn next(&mut self) -> Result<Option<Incoming>, String> {
-        Ok(self.server.next().await)
+    async fn next(&mut self) -> Result<Option<Value>, String> {
+        use std::os::unix::process::ExitStatusExt;
+        while !self.exited {
+            let next = match &self.result {
+                Some((_, deadline)) => {
+                    match tokio::time::timeout_at(*deadline, self.attempt.next()).await {
+                        Ok(next) => next?,
+                        Err(_) => {
+                            self.exited = true;
+                            return Ok(self.result.take().map(|(result, _)| result));
+                        }
+                    }
+                }
+                None => self.attempt.next().await?,
+            };
+            match next {
+                Some(event) if self.result.is_none() && event["type"] == "result" => {
+                    self.result = Some((event, tokio::time::Instant::now() + SETTLE));
+                }
+                Some(event) => return Ok(Some(event)),
+                None => {
+                    let exited = self.attempt.exited();
+                    let (status, stderr) = match &self.result {
+                        Some((_, deadline)) => tokio::time::timeout_at(*deadline, exited)
+                            .await
+                            .unwrap_or_default(),
+                        None => exited.await,
+                    };
+                    self.exited = true;
+                    let code = status.and_then(|s| s.code());
+                    return Ok(Some(match self.result.take() {
+                        Some((mut result, _)) => {
+                            result["exit_code"] = json!(code);
+                            result
+                        }
+                        None => json!({
+                            "type": "exit",
+                            "code": code,
+                            "signal": status.and_then(|s| s.signal()),
+                            "stderr": stderr,
+                        }),
+                    }));
+                }
+            }
+        }
+        Ok(None)
     }
 
     async fn interrupt(&mut self) {
-        let _ = self
-            .server
-            .request("run.cancel", json!({}), CANCEL_TIMEOUT)
-            .await;
-    }
-
-    async fn send(&mut self, input: &Value) -> Result<(), SendError> {
-        match self
-            .server
-            .request("run.steer", input.clone(), STEER_TIMEOUT)
-            .await
-        {
-            Ok(response) if response["outcome"] == "complete_delivered" => Ok(()),
-            Ok(response) if response["outcome"] == "revert_to_followup" => Err(SendError::Refused(
-                "Cursor will take it as a follow-up".into(),
-            )),
-            Ok(response) => Err(SendError::Unknown(format!(
-                "Cursor answered {}",
-                response["outcome"]
-            ))),
-            Err(RpcError::Remote { code, message, .. }) if code == REFUSED => {
-                Err(SendError::Refused(message))
-            }
-            Err(err) => Err(SendError::Unknown(err.to_string())),
-        }
-    }
-
-    fn project(&self) -> Option<&std::path::Path> {
-        Some(std::path::Path::new(&self.server.cwd))
+        self.attempt.interrupt().await;
     }
 }
 
@@ -373,6 +338,9 @@ impl Provider for Cursor {
     }
     fn availability(&self) -> Availability {
         match &self.ready {
+            Ok(ready) if cursor_home::signed_out(ready.login.file.as_deref()) => {
+                Availability::Unavailable(cursor_home::SIGNED_OUT.into())
+            }
             Ok(_) => Availability::Available,
             Err(reason) => Availability::Unavailable(reason.clone()),
         }
@@ -388,39 +356,29 @@ impl Provider for Cursor {
     }
     async fn list_models(&self) -> Result<Vec<Listed>, String> {
         let ready = self.ready.as_ref().map_err(Clone::clone)?;
-        let sidecar = self.sidecar(ready).await?;
-        let requests = format!(
-            "{}\n{}\n",
-            json!({ "id": 1, "method": "initialize", "params": { "apiKey": *sidecar.key } }),
-            json!({ "id": 2, "method": "models.list" }),
-        );
-        let script = sidecar.script.to_string_lossy();
-        let answer = ready
-            .host
-            .ask(
-                &ready.node,
-                &[&script],
-                &[],
-                &requests,
-                16 * 1024 * 1024,
-                |line| {
-                    let message: Value = serde_json::from_str(line).ok()?;
-                    match (&message["id"], message.get("error")) {
-                        (id, Some(error)) if id == 1 || id == 2 => Some(Err(error.clone())),
-                        (id, None) if id == 2 => Some(Ok(message["result"].clone())),
-                        _ => None,
-                    }
-                },
-            )
+        // Listing runs no agent, so it reads the host login where it is.
+        // `probe` keeps the line that says why it failed.
+        let (host, program) = (ready.host.clone(), ready.program.clone());
+        let mut env = vec![("NO_COLOR".to_owned(), "1".to_owned())];
+        if let Some(store) = &ready.login.store {
+            env.push(("AGENT_CLI_CREDENTIAL_STORE".into(), store.clone()));
+        }
+        let printed = tokio::task::spawn_blocking(move || host.probe(&program, &["models"], &env))
             .await
-            .map_err(|why| format!("Cursor's models could not be listed: {why}"))?;
-        match answer {
-            Ok(result) => protocol::listed_models(&result["models"]),
-            Err(error) if error["code"] == SIGNED_OUT => Err(cursor_home::signed_out()),
-            Err(error) => Err(format!(
-                "Cursor's models could not be listed: {}",
-                error["message"].as_str().unwrap_or("unknown error")
+            .map_err(|e| e.to_string())?
+            .map_err(|why| {
+                if cursor_home::refused_login(&why) {
+                    cursor_home::SIGNED_OUT.to_owned()
+                } else {
+                    format!("`cursor-agent models` failed: {why}")
+                }
+            })?;
+        match listed_models(&printed) {
+            listed if listed.is_empty() => Err(format!(
+                "`cursor-agent models` listed no models: {}",
+                printed.trim()
             )),
+            listed => Ok(listed),
         }
     }
 
@@ -429,64 +387,104 @@ impl Provider for Cursor {
             Ok(ready) => ready,
             Err(reason) => return failed("provider_unavailable", reason.clone()),
         };
-        let Some(profile) = input.profile.clone() else {
+        if cursor_home::signed_out(ready.login.file.as_deref()) {
+            return failed("provider_unavailable", cursor_home::SIGNED_OUT);
+        }
+        let Some(profile) = &input.profile else {
             return failed(
                 "provider_misconfigured",
                 "No execution profile was snapshotted.",
             );
         };
-        if let Err(reason) = self.models.validate(&profile) {
+        if let Err(reason) = self.models.validate(profile) {
             return failed("invalid_profile", reason);
         }
-        let sidecar = tokio::select! {
-            sidecar = self.sidecar(ready) => sidecar,
-            () = stop.requested() => return TurnOutcome::Interrupted,
-        };
-        let sidecar = match sidecar {
-            Ok(sidecar) => sidecar,
-            Err(reason) => return failed("provider_unavailable", reason),
-        };
+        if stop.is_requested() {
+            return TurnOutcome::Interrupted;
+        }
         let dirs = match ready.host.bot_dirs(input.bot_id, ID) {
             Ok(dirs) => dirs,
             Err(e) => return failed("provider_unavailable", e.to_string()),
         };
-        if let Err(e) = attachments::stage(&dirs.project, &input.files).await {
-            return failed(
-                "attachment_unavailable",
-                format!("The attached files could not be prepared: {e}"),
-            );
+        let host_tools = input.delegation.host_tools();
+        let workspace = if host_tools {
+            dirs.project.clone()
+        } else {
+            match cursor_home::private_workspace(&dirs.provider_home) {
+                Ok(workspace) => workspace,
+                Err(e) => return failed("provider_unavailable", e.to_string()),
+            }
+        };
+        let fingerprint = self.fingerprint(ready, &input, profile);
+        let opened = match input.session.as_ref().filter(|s| {
+            s.fingerprint == fingerprint
+                && cursor_home::session_exists(&dirs.provider_home, &workspace, &s.native_id)
+        }) {
+            Some(session) => Opened::Resumed(session),
+            None => Opened::Fresh(Uuid::new_v4().to_string()),
+        };
+        let mut turn = PreparedTurn::new(&input, fingerprint, opened);
+        turn.lead_once(INSTRUCTIONS, instructions(&input, &dirs.project));
+        if turn.record(sink).await.is_err() {
+            return TurnOutcome::Interrupted;
         }
-        let store = match cursor_home::store_dir(&dirs.provider_home) {
-            Ok(store) => store,
+        if let Err(e) = attachments::stage(&dirs.project, &input.files).await {
+            return failed("attachment_unavailable", e.to_string());
+        }
+        if let Err(e) =
+            cursor_home::prepare(&dirs, &ready.login, self.tool_url.as_deref(), host_tools)
+        {
+            return failed("provider_unavailable", e.to_string());
+        }
+        let spec = self.launch(ready, &input, profile, dirs, workspace, &turn);
+        if sink.sending().await.is_err() {
+            return TurnOutcome::Interrupted;
+        }
+        let mut attempt = match StreamAttempt::spawn_with_prompt(
+            &ready.host,
+            &spec,
+            &turn.packet,
+            DEFINITION.label,
+        )
+        .await
+        {
+            Ok(attempt) => attempt,
             Err(e) => return failed("provider_unavailable", e.to_string()),
         };
-        let spec = LaunchSpec {
-            turn_id: input.turn_id,
-            program: ready.node.clone(),
-            args: vec![OsString::from(&sidecar.script)],
-            env: cursor_home::env(&dirs.provider_home),
-            dirs,
+        let mut tracker = Tracker::new(
+            &profile.model,
+            turn.native_id(),
+            host_tools,
+            self.tool_url.is_some(),
+        );
+        let mut running = Running {
+            attempt: &mut attempt,
+            result: None,
+            exited: false,
         };
-        let mut server = match AppServer::spawn(&ready.host, &spec, DEFINITION.label) {
-            Ok(server) => server,
-            Err(e) => return failed("provider_unavailable", e.to_string()),
-        };
-        let ended = self
-            .converse(
-                &mut server,
-                Account {
-                    key: &sidecar.key,
-                    store: &store,
-                    ready,
-                },
-                &input,
-                &profile,
-                sink,
-                &stop,
-            )
-            .await;
-        server.conclude(ended, sink).await
+        let ended = attempt::drive(
+            &mut running,
+            &mut tracker,
+            &mut turn,
+            sink,
+            &stop,
+            DEFINITION.label,
+        )
+        .await;
+        attempt.conclude(ended, sink).await
     }
+}
+
+/// The shared instructions, given in the packet: most accounts cannot
+/// replace Cursor's system prompt.
+fn instructions(input: &TurnInput, project: &Path) -> String {
+    format!(
+        "[else.bot instructions]\n{}\n\nelse.bot's tools are on the MCP server named {}. End \
+         this attempt when one of them returns parked or pending; the app continues it after the \
+         outcome.\n[/else.bot instructions]",
+        prompt::instructions(input, &project.to_string_lossy()),
+        crate::app::tools::SERVER_NAME,
+    )
 }
 
 fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {

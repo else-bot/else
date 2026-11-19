@@ -66,9 +66,9 @@ pub struct Config {
     /// Grok CLI path; otherwise `grok` on `PATH`. A script in either place
     /// gives way to the binary installed in `GROK_HOME`.
     pub grok_bin: Option<PathBuf>,
-    /// The Node.js that runs Cursor's SDK (`ELSE_NODE_BIN`), else `node` on
-    /// `PATH`.
-    pub node_bin: Option<PathBuf>,
+    /// Cursor CLI path; otherwise the one Cursor's installer links in
+    /// `~/.local/bin`, else `cursor-agent` on `PATH`.
+    pub cursor_bin: Option<PathBuf>,
     /// Explicit `msb` path; otherwise `PATH` or `~/.microsandbox/bin`.
     pub msb_bin: Option<PathBuf>,
     pub computers: crate::computers::ComputerConfig,
@@ -156,8 +156,8 @@ impl Config {
             Some(path) => Some(absolute_path("ELSE_GROK_BIN", path)?),
             None => None,
         };
-        let node_bin = match source.get("ELSE_NODE_BIN") {
-            Some(path) => Some(absolute_path("ELSE_NODE_BIN", path)?),
+        let cursor_bin = match source.get("ELSE_CURSOR_BIN") {
+            Some(path) => Some(absolute_path("ELSE_CURSOR_BIN", path)?),
             None => None,
         };
         let msb_bin = match source.get("ELSE_MSB_BIN") {
@@ -302,7 +302,7 @@ impl Config {
             codex_bin,
             claude_bin,
             grok_bin,
-            node_bin,
+            cursor_bin,
             backup,
             s3,
             github_oauth,

@@ -49,6 +49,30 @@ impl StreamAttempt {
             Interrupt::Line(_) => Stdio::piped(),
             Interrupt::Signal => Stdio::null(),
         };
+        Self::start(host, spec, stdin, interrupt, label)
+    }
+
+    /// Start a CLI that reads its prompt from stdin to the end and is
+    /// stopped by SIGINT.
+    pub async fn spawn_with_prompt(
+        host: &Host,
+        spec: &LaunchSpec,
+        prompt: &str,
+        label: &'static str,
+    ) -> std::io::Result<Self> {
+        let mut attempt = Self::start(host, spec, Stdio::piped(), Interrupt::Signal, label)?;
+        attempt.write(prompt).await?;
+        attempt.stdin = None;
+        Ok(attempt)
+    }
+
+    fn start(
+        host: &Host,
+        spec: &LaunchSpec,
+        stdin: Stdio,
+        interrupt: Interrupt,
+        label: &'static str,
+    ) -> std::io::Result<Self> {
         let mut scope = Scope::spawn(host, spec, stdin, Stdio::piped())?;
         let child = scope.child();
         let stdin = child.stdin.take();
@@ -95,6 +119,17 @@ impl StreamAttempt {
     ) -> Ended {
         let label = self.label;
         attempt::drive(self, protocol, turn, sink, stop, label).await
+    }
+
+    /// How the CLI exited after its output ended, for a CLI that reports
+    /// errors and interruptions only by exiting, and its stderr's tail.
+    /// The status is `None` when it has not exited within [`PIPE_TIMEOUT`].
+    pub async fn exited(&mut self) -> (Option<std::process::ExitStatus>, String) {
+        let status = tokio::time::timeout(PIPE_TIMEOUT, self.scope.child().wait())
+            .await
+            .ok()
+            .and_then(Result::ok);
+        (status, self.stderr.tail().await)
     }
 
     pub async fn conclude(self, ended: Ended, sink: &dyn TurnSink) -> TurnOutcome {

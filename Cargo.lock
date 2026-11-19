@@ -2486,6 +2486,7 @@ dependencies = [
  "mail-builder",
  "mail-parser",
  "markdown",
+ "md-5 0.11.0",
  "mime_guess",
  "oauth2",
  "pdf-extract",

@@ -627,31 +627,11 @@ pub async fn delete(pool: &SqlitePool, name: &str) -> Result<bool, sqlx::Error> 
         == 1)
 }
 
-/// Whether an entry holds a provider's own login, such as Cursor's API key.
-/// Only that provider's adapter reads it ([`provider_env`]): to a bot's
-/// commands, jobs, logins and listing it does not exist.
+/// Whether an entry is reserved for a provider's own login. Cursor's SDK
+/// adapter kept its API key in `provider-cursor`; installations that added
+/// one keep it hidden from bots' commands, jobs, logins and listing.
 pub fn provider_only(name: &str) -> bool {
     name.starts_with("provider-")
-}
-
-/// A provider-only entry's variables, for its provider adapter.
-pub async fn provider_env(
-    pool: &SqlitePool,
-    key: &SecretKey,
-    name: &str,
-) -> Result<Vec<(String, Zeroizing<String>)>, SecretError> {
-    if !provider_only(name) {
-        return Err(SecretError::Invalid(format!(
-            "{name} is not a provider entry"
-        )));
-    }
-    let row: Option<(Vec<u8>, Vec<u8>)> =
-        sqlx::query_as("SELECT salt, ciphertext FROM task_secrets WHERE name = ?1")
-            .bind(name)
-            .fetch_optional(pool)
-            .await?;
-    let (salt, cipher) = row.ok_or_else(|| SecretError::Unknown(name.to_owned()))?;
-    Ok(decrypt(key, &salt, &cipher)?.into_iter().collect())
 }
 
 /// Decrypt the named secrets into environment variables. A missing or

@@ -107,7 +107,7 @@ async fn probe_native_tools(tools: Option<(String, String)>) {
         args: vec![OsString::from("app-server")],
         env,
     };
-    let mut server = AppServer::start(&host, &spec, "Codex").await.unwrap();
+    let mut server = AppServer::start(&host, &spec).await.unwrap();
     let started = server
         .request(
             "thread/start",
