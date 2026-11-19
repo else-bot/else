@@ -349,6 +349,7 @@ impl Provider for Grok {
         if let Err(e) = grok_home::prepare(
             &dirs,
             &ready.login,
+            &profile.model,
             self.tool_url.as_deref(),
             &turn.packet,
             host_tools,

@@ -195,7 +195,11 @@ impl Tracker {
             let name = required(&block["name"], "tool call")?;
             let id = required(&block["id"], "tool call")?;
             let tool = if name == "use_tool" {
-                let target = required(&block["input"]["tool_name"], "use_tool call")?;
+                let Some(target) = block["input"]["tool_name"].as_str() else {
+                    return Err(Violation::policy(
+                        "Grok called use_tool without a tool_name, so else.bot could not check which tool it ran",
+                    ));
+                };
                 match self.mcp_tool(target) {
                     Some(tool) => Some(tool),
                     None if self.misnamed(target) => None,

@@ -265,7 +265,6 @@ fn malformed_known_events_fail_and_unknown_events_are_ignored() {
         json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":7}}}),
         json!({"type":"stream_event","event":{}}),
         json!({"type":"assistant","message":{}}),
-        json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"use_tool","id":"c1","input":{}}]}}),
         json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"read_file"}]}}),
         json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":5}]}}),
         json!({"type":"result","subtype":1}),
@@ -331,6 +330,18 @@ fn only_elsebot_mcp_calls_are_allowed_and_parking_is_preserved() {
         assert!(t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c2","name":"use_tool","input":{"tool_name":name}}]}})).is_err());
     }
     assert!(t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c3","name":"run_terminal_command"}]}})).is_err());
+}
+
+#[test]
+fn a_use_tool_call_that_hides_its_target_in_a_file_names_the_missing_field() {
+    let mut t = tracker(true);
+    t.on(&init(true)).unwrap();
+    assert_eq!(
+        t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c1","name":"use_tool","input":{"file":"/tmp/mcp-whale.json"}}]}})),
+        Err(Violation::policy(
+            "Grok called use_tool without a tool_name, so else.bot could not check which tool it ran"
+        ))
+    );
 }
 
 #[test]
@@ -457,6 +468,23 @@ fn the_fingerprint_follows_the_account_not_the_login_path() {
 }
 
 #[test]
+fn use_tool_offers_only_the_inline_form_that_names_its_target() {
+    let root = tempfile::tempdir().unwrap();
+    let login = root.path().join("login");
+    std::fs::create_dir(&login).unwrap();
+    let host = Host::new(&root.path().join("data"), &root.path().join("bots"));
+    let dirs = host.bot_dirs(Uuid::new_v4(), ID).unwrap();
+    grok_home::prepare(&dirs, &login, "grok-4.7", None, "prompt", true).unwrap();
+    let config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(dirs.provider_home.join("config.toml")).unwrap())
+            .unwrap();
+    assert_eq!(
+        config["model"]["grok-4.7"]["supports_tool_schema_root_union"],
+        toml::Value::Boolean(false)
+    );
+}
+
+#[test]
 fn provider_homes_link_login_and_keep_grants_out_of_config() {
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
@@ -468,6 +496,7 @@ fn provider_homes_link_login_and_keep_grants_out_of_config() {
     grok_home::prepare(
         &dirs,
         &login,
+        "grok-4.7",
         Some("http://127.0.0.1:1234/mcp"),
         "test prompt",
         true,
@@ -488,7 +517,7 @@ fn provider_homes_link_login_and_keep_grants_out_of_config() {
             & 0o777,
         0o600
     );
-    grok_home::prepare(&dirs, &login, None, "next prompt", false).unwrap();
+    grok_home::prepare(&dirs, &login, "grok-4.7", None, "next prompt", false).unwrap();
     assert!(
         !std::fs::read_to_string(dirs.provider_home.join("config.toml"))
             .unwrap()

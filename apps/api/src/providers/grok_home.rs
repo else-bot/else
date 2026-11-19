@@ -128,6 +128,7 @@ default_skills_installs_purged = true
 pub fn prepare(
     dirs: &BotDirs,
     login: &Path,
+    model: &str,
     tool_url: Option<&str>,
     prompt: &str,
     host_tools: bool,
@@ -144,6 +145,10 @@ pub fn prepare(
             ],
         },
     });
+    // Grok's use_tool also accepts {"file": path}, which names the tool only
+    // inside the file, so protocol::Tracker could not check the call. Grok
+    // drops that form for a model that declares no root-union schemas.
+    launch["model"] = json!({ model: { "supports_tool_schema_root_union": false } });
     if !host_tools {
         launch["permission"]["deny"] = json!(["Read(**)"]);
     }

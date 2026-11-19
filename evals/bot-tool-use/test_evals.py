@@ -555,6 +555,10 @@ def run(runner):
                                                             "active_hours": "always"}})],
                                               "Hourly scout now runs 24/7; next run at 23:03.",
                                               "The change did not apply; set it manually in Bot details."),
+                "task-edits-own-routine-prompts": ([self.call("use_tool", {
+                    "name": "routine_update", "arguments": {"routine_id": f"10000000-0000-0000-0000-00000000000{n}",
+                                                            "prompt": "Every hour, scan.\n1. Skip anything older than 60 minutes."}})
+                    for n in (3, 4)], "Both hourly prompts no longer send a per-run handoff."),
             }
             write_in_case = next(c for c in runner.load_cases() if c["id"] == "choice-without-write-in-option")
             for bad_args in ({"choices": ["9:00 a.m. New York", "10:00 a.m. New York", "I'll specify another time"]},
