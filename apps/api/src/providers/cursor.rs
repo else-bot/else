@@ -290,7 +290,13 @@ impl Channel for Running<'_> {
                 }
                 Some(event) => return Ok(Some(event)),
                 None => {
-                    let (status, stderr) = self.attempt.exited().await;
+                    let exited = self.attempt.exited();
+                    let (status, stderr) = match &self.result {
+                        Some((_, deadline)) => tokio::time::timeout_at(*deadline, exited)
+                            .await
+                            .unwrap_or_default(),
+                        None => exited.await,
+                    };
                     self.exited = true;
                     let code = status.and_then(|s| s.code());
                     return Ok(Some(match self.result.take() {

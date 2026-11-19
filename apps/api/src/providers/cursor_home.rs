@@ -209,10 +209,16 @@ pub fn prepare(
 
 /// Where a turn without host tools runs: a directory only else.bot writes,
 /// so no project hooks, plugins, rules or MCP servers load. The bot's
-/// project is its computer's `~/work`, which a guest can write.
+/// project is its computer's `~/work`, which a guest can write. Cursor
+/// takes the enclosing Git repository as the project, so the directory is
+/// made the root of an empty one; else a data directory inside a checkout
+/// would load that checkout's files.
 pub fn private_workspace(home: &Path) -> std::io::Result<PathBuf> {
     let dir = home.join("workspace");
-    fs::create_dir_all(&dir)?;
+    let git = dir.join(".git");
+    fs::create_dir_all(git.join("objects"))?;
+    fs::create_dir_all(git.join("refs"))?;
+    fs::write(git.join("HEAD"), "ref: refs/heads/main\n")?;
     Ok(dir)
 }
 

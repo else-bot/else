@@ -367,6 +367,10 @@ async fn an_event_turn_offers_only_elsebot_tools_and_a_shell_call_fails_it() {
         "the guest-writable project never loads"
     );
     assert!(has(&launch["args"], private.to_str().unwrap()));
+    assert!(
+        private.join(".git/HEAD").is_file(),
+        "an enclosing checkout is not the project"
+    );
     assert!(has(
         &launch["args"],
         "update_todos_tool_call,read_todos_tool_call,mcp_tool_call,get_mcp_tools_tool_call"
@@ -444,7 +448,7 @@ async fn stop_while_the_cli_stores_its_result_keeps_the_result_but_not_the_chat(
 async fn a_usage_limit_makes_cursor_unavailable_for_the_turn() {
     let server = Server::new();
     let outcome = server
-        .run(input("[limit]", Origin::OwnerRequest), &Sink::default())
+        .run(input("[limit]", Origin::ConnectorEvent), &Sink::default())
         .await;
     assert_eq!(
         outcome,
@@ -481,7 +485,8 @@ async fn a_cli_that_fails_after_using_a_tool_ends_uncertain() {
     assert_eq!(
         outcome,
         TurnOutcome::Uncertain {
-            message: "Cursor CLI exited with 1 after using tools. Error: socket hang up".into()
+            message: "Cursor CLI exited with 1 partway through the turn. Error: socket hang up"
+                .into()
         }
     );
     assert!(sink.retired());
@@ -758,7 +763,7 @@ fn a_parked_elsebot_result_parks_the_turn() {
 
 #[test]
 fn an_exit_after_a_stop_interrupts_and_other_exits_name_their_cause() {
-    let t = tracker(true);
+    let t = tracker(false);
     let exit = |code: Option<i32>, stderr: &str| Terminal::Exit {
         code,
         signal: None,
@@ -768,13 +773,22 @@ fn an_exit_after_a_stop_interrupts_and_other_exits_name_their_cause() {
         t.outcome(exit(Some(130), ""), Some(StopCause::Owner), true),
         TurnOutcome::Interrupted
     );
-    let mut acted = tracker(true);
+    let mut acted = tracker(false);
     acted
-        .on(
-            &json!({"type":"tool_call","subtype":"started","call_id":"c","session_id":"chat",
-            "tool_call":{"shellToolCall":{"args":{}}}}),
-        )
+        .on(&json!({"type":"tool_call","subtype":"started","call_id":"c","session_id":"chat",
+            "tool_call":{"mcpToolCall":{"args":{"providerIdentifier":"elsebot","toolName":"find_tool"}}}}))
         .unwrap();
+    assert!(
+        matches!(
+            tracker(true).outcome(
+                exit(Some(1), "Error: [resource_exhausted] limit"),
+                None,
+                true
+            ),
+            TurnOutcome::Uncertain { .. }
+        ),
+        "an owner turn's project hooks may have run"
+    );
     for (stopping, stderr) in [
         (Some(StopCause::Owner), "Error: x"),
         (None, "Error: [resource_exhausted] limit"),
@@ -782,7 +796,7 @@ fn an_exit_after_a_stop_interrupts_and_other_exits_name_their_cause() {
         assert_eq!(
             acted.outcome(exit(Some(1), stderr), stopping, true),
             TurnOutcome::Uncertain {
-                message: "Cursor CLI exited with 1 after using tools.".into()
+                message: "Cursor CLI exited with 1 partway through the turn.".into()
             },
             "{stderr}"
         );

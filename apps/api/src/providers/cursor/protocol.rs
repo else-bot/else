@@ -92,7 +92,8 @@ pub(super) struct Tracker {
     /// An event that is a delta unless a flush boundary follows it.
     held: Option<String>,
     calls: HashMap<String, String>,
-    /// Whether a tool call started, so a failure may have left effects.
+    /// Whether a failure may have left effects: a tool call started, or an
+    /// owner's turn took the prompt, when the project's hooks may run.
     acted: bool,
     /// Whether the CLI exited cleanly after its result, so its chat is
     /// stored.
@@ -273,6 +274,7 @@ impl Protocol for Tracker {
             }
             ("user", Start::Opened) => {
                 self.start = Start::Accepted;
+                self.acted |= self.host;
                 events.push(Event::Accepted {
                     model: self.model.clone(),
                     native_turn: self.session.clone(),
@@ -339,7 +341,7 @@ impl Protocol for Tracker {
             Terminal::Exit {
                 code: Some(code), ..
             } if self.acted => TurnOutcome::Uncertain {
-                message: format!("Cursor CLI exited with {code} after using tools."),
+                message: format!("Cursor CLI exited with {code} partway through the turn."),
             },
             Terminal::Exit { stderr, .. } if super::cursor_home::refused_login(&stderr) => {
                 failed("provider_unavailable", super::cursor_home::SIGNED_OUT)
