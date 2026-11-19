@@ -53,6 +53,8 @@ allow = ["MCPTool(elsebot__*)", "MCPTool(mcp__elsebot__*)"]
 command = {command}
 args = {args}
 startup_timeout_sec = 30
+[model.{model}]
+supports_tool_schema_root_union = false
 """
 
 # grok_home::HOST_TOOLS, the --tools names a task with host tools adds.
@@ -100,7 +102,7 @@ def sample(case, context, out, model, effort, host_tools):
     args = ["-I", str(HERE / "mock_mcp.py"), "--context", str(out / "context.json"),
             "--case", str(out / "case.json"), "--log", str(out / "calls.jsonl")]
     (home / "config.toml").write_text(CONFIG.format(command=json.dumps(sys.executable),
-                                                    args=json.dumps(args),
+                                                    args=json.dumps(args), model=json.dumps(model, ensure_ascii=False),
                                                     deny="" if host_tools else 'deny = ["Read(**)"]'))
     (home / "prompt.txt").write_text(run.packet(case["setup"], context))
     system = f"{context['instructions']}\n{context['grok_tool_note']}"
@@ -114,7 +116,8 @@ def sample(case, context, out, model, effort, host_tools):
              "--prompt-file", str(home / "prompt.txt"), "--session-id", str(uuid.uuid4()),
              *(["--always-approve"] if host_tools else ["--permission-mode", "dontAsk"])],
             cwd=work, capture_output=True, text=True, timeout=600,
-            env={**os.environ, "GROK_HOME": str(home), **ENV})
+            env={**{k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TERM") if k in os.environ},
+                 "GROK_HOME": str(home), **ENV})
     finally:
         shutil.rmtree(work, ignore_errors=True)
     (out / "stdout.jsonl").write_text(proc.stdout)
