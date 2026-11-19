@@ -198,6 +198,12 @@ pub(super) struct EmailReader {
     html: Option<Html>,
     /// The body column's width in CSS pixels, known after the first layout.
     width: Option<u32>,
+    /// Each shown link's focus, by its [`else_visual::email::Link::index`],
+    /// so focus stays on the same link when the page draws again.
+    link_focus: HashMap<usize, FocusHandle>,
+    /// The link last scrolled into view because it took focus.
+    revealed: Option<usize>,
+    scroll: ScrollHandle,
 }
 
 impl EmailReader {
@@ -210,6 +216,9 @@ impl EmailReader {
             shown: Shown::Html,
             html: None,
             width: None,
+            link_focus: HashMap::new(),
+            revealed: None,
+            scroll: ScrollHandle::new(),
         };
         reader.load(0, false, cx);
         reader
@@ -224,6 +233,8 @@ impl EmailReader {
         let fetch = ReaderCache::fetch(&self.client, mail, fresh, cx);
         self.index = index;
         self.html = None;
+        self.link_focus.clear();
+        self.revealed = None;
         cx.notify();
         if let Some(Ok(message)) = fetch.peek() {
             self.loaded(message.clone());
@@ -632,6 +643,33 @@ impl Render for EmailReader {
         let body = match shows {
             Body::Page(key, page) => {
                 let shown = size(px(key.width as f32), px(page.height as f32));
+                let mut focused = None;
+                let links: Vec<_> = page
+                    .links
+                    .iter()
+                    .map(|link| {
+                        let focus = self
+                            .link_focus
+                            .entry(link.index)
+                            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+                            .clone();
+                        if focus.is_focused(window) {
+                            focused = Some(link);
+                        }
+                        (link, focus)
+                    })
+                    .collect();
+                match focused {
+                    Some(link) if self.revealed != Some(link.index) => {
+                        self.revealed = Some(link.index);
+                        if let Some(rect) = link.rects.first() {
+                            reveal(&self.scroll, area(*rect, page.pixels, shown));
+                        }
+                    }
+                    Some(_) => {}
+                    None => self.revealed = None,
+                }
+                let highlight = theme.link.opacity(0.18);
                 div()
                     .relative()
                     .w(shown.width)
@@ -641,9 +679,11 @@ impl Render for EmailReader {
                             .w(shown.width)
                             .h(shown.height),
                     )
-                    .children(page.links.iter().enumerate().flat_map(|(ix, link)| {
+                    .children(links.into_iter().flat_map(|(link, focus)| {
+                        let lit = focus.is_focused(window);
                         link.rects.iter().enumerate().map(move |(part, rect)| {
-                            link_area(ix, part, link, area(*rect, page.pixels, shown))
+                            link_area(link, part, &focus, area(*rect, page.pixels, shown))
+                                .when(lit, |area| area.bg(highlight))
                         })
                     }))
                     .into_any_element()
@@ -713,6 +753,7 @@ impl Render for EmailReader {
             .child(
                 div()
                     .id("email-body")
+                    .track_scroll(&self.scroll)
                     .w_full()
                     .max_h(BODY_HEIGHT)
                     .overflow_y_scroll()
@@ -737,37 +778,58 @@ fn area(rect: else_visual::email::Rect, pixels: (u32, u32), shown: Size<Pixels>)
     )
 }
 
-/// One box of link `ix` over the page. A link that wraps has a box per
-/// line; only its first is a tab stop.
+/// One box of `link` over the page. A link that wraps has a box per line;
+/// only its first takes focus and speaks for the link. The topmost box under the pointer takes the
+/// click, so links drawn over each other never both open.
 fn link_area(
-    ix: usize,
-    part: usize,
     link: &else_visual::email::Link,
+    part: usize,
+    focus: &FocusHandle,
     at: Bounds<Pixels>,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let destination = SharedString::from(destination(&link.href));
     let label = if link.text.is_empty() {
         link.href.clone()
     } else {
         link.text.clone()
     };
-    let href = link.href.clone();
-    gpui_kit::base::Link::new(SharedString::from(format!("email-link-{ix}-{part}")))
+    let (click, confirm) = (link.href.clone(), link.href.clone());
+    div()
+        .id(SharedString::from(format!(
+            "email-link-{}-{part}",
+            link.index
+        )))
         .absolute()
         .left(at.origin.x)
         .top(at.origin.y)
         .w(at.size.width)
         .h(at.size.height)
         .cursor_pointer()
-        .tab_stop(part == 0)
-        .accessibility_label(label)
-        .aria_description(link.href.clone())
-        .href(link.href.clone())
-        .open_with(|href, _, _, cx| open_link(href, cx))
+        .block_mouse_except_scroll()
+        .when(part == 0, |area| {
+            area.role(Role::Link)
+                .aria_label(label)
+                .aria_description(link.href.clone())
+                .track_focus(focus)
+        })
+        .on_click(move |_, _, cx| open_link(&click, cx))
         // The reader's dialog binds Enter to Confirm, which would close it
         // before the focused link sees the key.
-        .on_action(move |_: &gpui_kit::base::actions::Confirm, _, cx| open_link(&href, cx))
+        .on_action(move |_: &gpui_kit::base::actions::Confirm, _, cx| open_link(&confirm, cx))
         .tooltip(move |window, cx| Tooltip::new(destination.clone()).build(window, cx))
+}
+
+/// Scrolls the message area just enough to show `at`, a box on the page.
+fn reveal(scroll: &ScrollHandle, at: Bounds<Pixels>) {
+    let view = scroll.bounds().size.height;
+    let mut offset = scroll.offset();
+    let top = -offset.y;
+    if at.top() < top {
+        offset.y = -at.top();
+    } else if at.bottom() > top + view {
+        offset.y = -(at.bottom() - view);
+    }
+    scroll.set_offset(offset);
 }
 
 /// Where a link goes, as its hover shows it: the site or address first,
@@ -958,7 +1020,5 @@ mod tests {
         let expected = Bounds::new(point(px(100.), px(50.)), size(px(40.), px(20.)));
         assert_eq!(area(rect(1.), (700, 300), shown), expected);
         assert_eq!(area(rect(2.), (1400, 600), shown), expected);
-        assert!(expected.contains(&point(px(120.), px(60.))));
-        assert!(!expected.contains(&point(px(150.), px(60.))));
     }
 }

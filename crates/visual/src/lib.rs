@@ -307,27 +307,25 @@ fn draw(
     }
     let height = content_height.min(max_height);
     let scale = scale.min((MAX_PIXELS / (width * height) as f32).sqrt());
+    let device = |css: u32| (css as f32 * scale).floor().max(1.0) as u32;
+    let viewport = Viewport::new((device(width), device(height))).with_device_pixel_ratio(scale);
     // A page whose links cannot be located still shows, without them.
     let links = anchors
         .filter(|anchors| !anchors.is_empty())
         .and_then(|anchors| {
             let tree = takumi_core::paint_tree::paint_tree(
                 takumi_core::paint_tree::PaintTreeOptions::builder()
-                    .viewport(Viewport::new((width, None)))
+                    .viewport(viewport)
                     .fonts(fonts)
                     .node(parsed.node.clone())
                     .stylesheet(stylesheet.clone())
                     .build(),
             )
             .ok()?;
-            Some(email::links(anchors, &tree.document, height as f32, scale))
+            Some(email::links(anchors, &tree.document))
         })
         .unwrap_or_default();
-    let device = |css: u32| (css as f32 * scale).floor().max(1.0) as u32;
-    let bitmap = takumi::render(options(
-        Viewport::new((device(width), device(height))).with_device_pixel_ratio(scale),
-    ))
-    .map_err(|e| Error::Render(e.to_string()))?;
+    let bitmap = takumi::render(options(viewport)).map_err(|e| Error::Render(e.to_string()))?;
     Ok(Rendered {
         width: bitmap.width(),
         height: bitmap.height(),

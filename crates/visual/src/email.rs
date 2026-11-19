@@ -22,7 +22,7 @@ pub const MAX_INLINE_BASE64: usize = 6 * 1024 * 1024;
 /// Content below this many CSS pixels is cut off.
 pub const MAX_HEIGHT: u32 = 20_000;
 /// Links a render locates, in document order.
-const MAX_LINKS: usize = 100;
+const MAX_LINKS: usize = 200;
 const MAX_LINK_BYTES: usize = 2048;
 /// Boxes one link keeps, one per line it covers once merged.
 const MAX_LINK_RECTS: usize = 64;
@@ -42,8 +42,12 @@ pub struct Inline {
 /// A clickable `http`, `https` or `mailto` link on a rendered email.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Link {
+    /// Which `<a>` of the email this is, counting only links, so the same
+    /// email keeps the number at every width.
+    pub index: usize,
     pub href: String,
-    /// The text the link shows, empty for an image link.
+    /// The text the link shows, with images by their `alt`; empty for an
+    /// image without one.
     pub text: String,
     /// Where it sits, in device pixels of [`crate::Rendered`]. A link that
     /// wraps has one box per line.
@@ -65,6 +69,20 @@ impl Rect {
 
     fn bottom(&self) -> f32 {
         self.y + self.height
+    }
+
+    fn intersect(self, other: Rect) -> Option<Rect> {
+        let (x, y) = (self.x.max(other.x), self.y.max(other.y));
+        let (right, bottom) = (
+            self.right().min(other.right()),
+            self.bottom().min(other.bottom()),
+        );
+        (right > x && bottom > y).then_some(Rect {
+            x,
+            y,
+            width: right - x,
+            height: bottom - y,
+        })
     }
 
     fn union(self, other: Rect) -> Rect {
@@ -132,37 +150,42 @@ pub fn render(source: &Source, width: u32, scale: f32) -> Result<Rendered, Error
 }
 
 /// Marks an element inside the `<a>` at this index of [`Prepared::anchors`].
+/// [`prepare`] strips the mark from the email's own classes first, so a
+/// sender cannot point other content at a link.
 const ANCHOR_CLASS: &str = "else-link-";
 
-/// A distinct link destination in an email and the text it first shows.
+/// An `<a>` with an `http`, `https` or `mailto` link and the text it shows.
 pub(crate) struct Anchor {
     href: String,
     text: String,
 }
 
-/// The `anchors` that `document` paints, with their boxes cut at `height`
-/// CSS pixels and scaled to device pixels by `scale`. Each text run and
-/// box carries its element's [`ANCHOR_CLASS`] mark from [`prepare`].
-pub(crate) fn links(
-    anchors: &[Anchor],
-    document: &PaintDocument,
-    height: f32,
-    scale: f32,
-) -> Vec<Link> {
+/// The `anchors` that `document` paints, in its device pixels, each box cut
+/// to the page and to the boxes whose `overflow` clips it. Each text run
+/// and box carries its element's [`ANCHOR_CLASS`] mark from [`prepare`].
+pub(crate) fn links(anchors: &[Anchor], document: &PaintDocument) -> Vec<Link> {
+    let page = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: document.width,
+        height: document.height,
+    };
+    let clips = clips(document, page);
     let mut rects: Vec<Vec<Rect>> = vec![Vec::new(); anchors.len()];
-    let mut add = |element: Option<&ElementInfo>, rect: Rect| {
+    let mut add = |node: usize, element: Option<&ElementInfo>, rect: Rect| {
         let Some(kept) = element
             .and_then(anchor)
             .and_then(|index| rects.get_mut(index))
         else {
             return;
         };
-        if rect.width <= 0.0 || rect.height <= 0.0 || rect.y >= height {
+        let Some(rect) = clips
+            .get(node)
+            .copied()
+            .flatten()
+            .and_then(|clip| rect.intersect(clip))
+        else {
             return;
-        }
-        let rect = Rect {
-            height: rect.height.min(height - rect.y),
-            ..rect
         };
         if let Some(line) = kept.iter_mut().find(|line| line.joins(&rect)) {
             *line = line.union(rect);
@@ -181,6 +204,7 @@ pub(crate) fn links(
                         height: run.ascent + run.descent,
                     };
                     add(
+                        node.id,
                         run.element.as_ref().or(node.element.as_ref()),
                         transformed(node.transform, rect),
                     );
@@ -194,28 +218,73 @@ pub(crate) fn links(
                     width: b.width,
                     height: b.height,
                 };
-                add(node.element.as_ref(), rect);
+                add(node.id, node.element.as_ref(), rect);
             }
         }
     }
     anchors
         .iter()
         .zip(rects)
-        .filter(|(_, rects)| !rects.is_empty())
-        .map(|(anchor, rects)| Link {
+        .enumerate()
+        .filter(|(_, (_, rects))| !rects.is_empty())
+        .map(|(index, (anchor, rects))| Link {
+            index,
             href: anchor.href.clone(),
             text: anchor.text.clone(),
-            rects: rects
-                .into_iter()
-                .map(|rect| Rect {
-                    x: rect.x * scale,
-                    y: rect.y * scale,
-                    width: rect.width * scale,
-                    height: rect.height * scale,
-                })
-                .collect(),
+            rects,
         })
         .collect()
+}
+
+/// The part of `page` each node of `document` shows through its
+/// ancestors' `overflow` clips, by node id; `None` for a node clipped away.
+fn clips(document: &PaintDocument, page: Rect) -> Vec<Option<Rect>> {
+    let nodes = &document.nodes;
+    let mut clips: Vec<Option<Option<Rect>>> = vec![None; nodes.len()];
+    for id in 0..nodes.len() {
+        let mut chain = vec![id];
+        let mut clip = Some(page);
+        while let Some(&node) = chain.last() {
+            match nodes[node].parent.filter(|parent| *parent < nodes.len()) {
+                Some(parent) => match clips[parent] {
+                    Some(known) => {
+                        clip = known;
+                        // A child's clip adds its parent's own overflow.
+                        clip = clip.and_then(|clip| own_clip(&nodes[parent], clip));
+                        break;
+                    }
+                    None if !chain.contains(&parent) => chain.push(parent),
+                    None => break,
+                },
+                None => break,
+            }
+        }
+        for (step, &node) in chain.iter().rev().enumerate() {
+            if clips[node].is_none() {
+                clips[node] = Some(clip);
+            }
+            if step + 1 < chain.len() {
+                clip = clip.and_then(|clip| own_clip(&nodes[node], clip));
+            }
+        }
+    }
+    clips.into_iter().map(Option::flatten).collect()
+}
+
+/// `clip` narrowed to `node`'s box when its `overflow` clips its children.
+fn own_clip(node: &paint_tree::PaintNode, clip: Rect) -> Option<Rect> {
+    match node.kind {
+        paint_tree::NodeKind::Box {
+            overflow_clip: Some(_),
+            ..
+        } => clip.intersect(Rect {
+            x: node.bounds.x,
+            y: node.bounds.y,
+            width: node.bounds.width,
+            height: node.bounds.height,
+        }),
+        _ => Some(clip),
+    }
 }
 
 /// The index of the anchor `element` sits in, from its class.
@@ -265,7 +334,7 @@ struct Inherited {
 
 pub(crate) struct Prepared {
     pub html: String,
-    /// The `http`, `https` and `mailto` links, in order, each once.
+    /// The `<a>` elements with an `http`, `https` or `mailto` link, in order.
     pub anchors: Vec<Anchor>,
 }
 
@@ -321,28 +390,31 @@ pub(crate) fn prepare(source: &Source) -> Prepared {
                 && href.len() <= MAX_LINK_BYTES
                 && is_link(href)
             {
-                let text = text_of(&node);
-                passed.anchor = match anchors.iter().position(|a| a.href == href) {
-                    Some(index) => {
-                        if anchors[index].text.is_empty() {
-                            anchors[index].text = text;
-                        }
-                        Some(index)
-                    }
-                    None if anchors.len() < MAX_LINKS => {
-                        anchors.push(Anchor {
-                            href: href.to_owned(),
-                            text,
-                        });
-                        Some(anchors.len() - 1)
-                    }
-                    None => None,
-                };
+                passed.anchor = (anchors.len() < MAX_LINKS).then(|| {
+                    anchors.push(Anchor {
+                        href: href.to_owned(),
+                        text: text_of(&node),
+                    });
+                    anchors.len() - 1
+                });
+            } else if tag == "a" {
+                passed.anchor = None;
+            }
+            if let Some(class) = attrs.iter_mut().find(|a| &*a.name.local == "class") {
+                let own: Vec<&str> = class
+                    .value
+                    .split_ascii_whitespace()
+                    .filter(|token| !token.starts_with(ANCHOR_CLASS))
+                    .collect();
+                class.value = own.join(" ").into();
             }
             if let Some(index) = passed.anchor {
                 let mark = format!("{ANCHOR_CLASS}{index}");
                 match attrs.iter_mut().find(|a| &*a.name.local == "class") {
-                    Some(class) => class.value = format!("{} {mark}", class.value).into(),
+                    Some(class) if !class.value.is_empty() => {
+                        class.value = format!("{} {mark}", class.value).into()
+                    }
+                    Some(class) => class.value = mark.into(),
                     None => attrs.push(new_attribute(local_name!("class"), mark)),
                 }
             }
@@ -626,6 +698,7 @@ mod tests {
         assert_eq!(
             at(1.0),
             [Link {
+                index: 0,
                 href: "https://a.test/x".into(),
                 text: String::new(),
                 rects: vec![Rect {
@@ -697,12 +770,14 @@ mod tests {
             300,
             1.0,
         );
-        assert_eq!(found.len(), 1, "{found:?}");
+        let found: Vec<_> = found
+            .iter()
+            .map(|l| (l.index, l.href.as_str(), l.text.as_str()))
+            .collect();
         assert_eq!(
-            (found[0].href.as_str(), found[0].text.as_str()),
-            ("https://a.test/1", "d")
+            found,
+            [(0, "https://a.test/1", "d"), (1, "https://a.test/1", "e")]
         );
-        assert_eq!(found[0].rects.len(), 2, "{found:?}");
     }
 
     #[test]
@@ -714,6 +789,39 @@ mod tests {
         assert_eq!(
             found.iter().map(|l| l.href.as_str()).collect::<Vec<_>>(),
             ["https://a.test/top"]
+        );
+    }
+
+    #[test]
+    fn an_email_cannot_point_other_content_at_a_link_with_its_own_class() {
+        let found = links(
+            r#"<p class="else-link-0" style="margin:0;height:200px">fake</p><a href="javascript:x" class="else-link-0">js</a> <a href="https://a.test/real" class="cta else-link-1">real</a> <a href="https://b.test" class="else-link-0">b</a>"#,
+            300,
+            1.0,
+        );
+        let hrefs: Vec<_> = found
+            .iter()
+            .map(|l| (l.href.as_str(), l.text.as_str()))
+            .collect();
+        assert_eq!(
+            hrefs,
+            [("https://a.test/real", "real"), ("https://b.test", "b")]
+        );
+        for link in &found {
+            assert!(link.rects.iter().all(|r| r.y >= 200.0), "{found:?}");
+        }
+    }
+
+    #[test]
+    fn a_link_an_overflow_clip_hides_gets_no_box() {
+        let found = links(
+            r#"<div style="height:20px;overflow:hidden"><p style="margin:0;height:20px">x</p><a href="https://a.test/hidden">hidden</a></div><a href="https://a.test/shown">shown</a>"#,
+            300,
+            1.0,
+        );
+        assert_eq!(
+            found.iter().map(|l| l.href.as_str()).collect::<Vec<_>>(),
+            ["https://a.test/shown"]
         );
     }
 }
