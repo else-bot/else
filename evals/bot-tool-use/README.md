@@ -56,7 +56,7 @@ python3 -I evals/bot-tool-use/codex.py --case correction-saves-rule,delegate-par
 
 ## Grok
 
-Grok reaches else.bot's tools only through its own `search_tool` and `use_tool`, which collide with else.bot's `find_tool` and `use_tool`. `grok.py` replays cases through `grok` headless print mode with the launch flags of `providers/grok.rs` without host tools, the exported `grok_tool_note` appended to the instructions, and the mock MCP over stdio. Grok refuses a tool name missing from its catalog before the mock sees it, so the runner grades each refused name as a call to an unknown tool. These runs spend Grok model calls on the host login (`~/.grok/auth.json`).
+Grok reaches else.bot's tools only through its own `search_tool` and `use_tool`, which collide with else.bot's `find_tool` and `use_tool`. `grok.py` replays cases through `grok` headless print mode with the launch flags of `providers/grok.rs` without host tools, the exported `grok_tool_note` appended to the instructions, and the mock MCP over stdio. Grok refuses a tool name missing from its catalog before the mock sees it, so the runner grades each refused name as a call to an unknown tool. These runs spend Grok model calls on the host login (`~/.grok/auth.json`). `--host-tools` launches as a task with host tools does, with Grok's file and shell tools and `--always-approve`. Each sample also fails when a `use_tool` call carries no `tool_name`, because production ends that turn.
 
 ```sh
 python3 -I evals/bot-tool-use/grok.py --case task-sends-standing-approved-telegram-draft,task-reports-computer-sent-x-post --samples 4 --out evals/bot-tool-use/runs/grok
