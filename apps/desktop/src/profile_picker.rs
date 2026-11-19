@@ -730,6 +730,7 @@ pub fn model_label(id: &str) -> String {
 
 pub fn effort_label(id: &str) -> &str {
     match id {
+        "default" => "Default",
         "low" => "Low",
         "medium" => "Medium",
         "high" => "High",
