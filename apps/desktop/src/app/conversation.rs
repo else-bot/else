@@ -28,6 +28,10 @@ pub(super) enum RowKey {
     OwnerNotice(Uuid),
     /// Unloaded messages just below the loaded item with this seq.
     Gap(i64),
+    /// A routine run that completed with no news, folded to its header.
+    QuietRun(Uuid),
+    /// Consecutive no-news runs of one routine, by the first run's turn.
+    QuietRuns(Uuid),
 }
 
 impl RowKey {
@@ -69,6 +73,8 @@ pub(super) struct TranscriptRow {
     /// The turn whose first bot row this is, which shows what started it,
     /// such as the email behind a mail-triggered turn.
     pub(super) opens_turn: Option<Uuid>,
+    /// The runs a [`RowKey::QuietRuns`] row stands for, oldest first.
+    pub(super) quiet_runs: Vec<Uuid>,
     routine_status: Option<(String, bool)>,
     reaction: Option<crate::model::ReactionKind>,
     state: Option<String>,
@@ -115,18 +121,61 @@ fn first_unread_row(
     rows.iter().copied().find(|key| unread.contains(key))
 }
 
-/// The replies a routine run with no news leaves out: all but its last,
-/// the bot's one-line summary.
-fn folded_no_news(conversation: &Conversation) -> HashSet<Uuid> {
-    let mut last = HashMap::new();
-    let mut folded = HashSet::new();
-    for item in conversation
-        .items()
-        .filter(|item| item.kind == "assistant" && conversation.no_news(item.turn_id))
-    {
-        folded.extend(last.insert(item.turn_id, item.id));
+/// The transcript after folding routine runs that completed with no news.
+#[derive(Debug, Default, PartialEq)]
+struct QuietFold {
+    rows: Vec<RowKey>,
+    /// The runs each [`RowKey::QuietRuns`] row stands for, by its first run.
+    groups: HashMap<Uuid, Vec<Uuid>>,
+    /// Runs whose rows are folded away.
+    hidden: HashSet<Uuid>,
+}
+
+/// Folds each no-news run to one header row, and consecutive no-news runs
+/// of one routine to a single row, except the runs and groups in `open`.
+fn fold_quiet(rows: Vec<RowKey>, c: &Conversation, open: &HashSet<RowKey>) -> QuietFold {
+    let routine = |turn: Uuid| c.turn(turn)?.routine.as_ref().map(|run| run.routine_id);
+    let quiet: Vec<_> = routine_turns(&rows, Some(c))
+        .into_iter()
+        .map(|turn| turn.filter(|&turn| c.no_news(turn)))
+        .collect();
+    let mut fold = QuietFold::default();
+    let mut ix = 0;
+    while ix < rows.len() {
+        let Some(first) = quiet[ix] else {
+            fold.rows.push(rows[ix]);
+            ix += 1;
+            continue;
+        };
+        let mut runs: Vec<(Uuid, Vec<RowKey>)> = Vec::new();
+        while let Some(Some(turn)) = quiet.get(ix).copied()
+            && routine(turn) == routine(first)
+        {
+            match runs.last_mut() {
+                Some((last, keys)) if *last == turn => keys.push(rows[ix]),
+                _ => runs.push((turn, vec![rows[ix]])),
+            }
+            ix += 1;
+        }
+        let grouped = runs.len() > 1;
+        if grouped {
+            fold.rows.push(RowKey::QuietRuns(first));
+            fold.groups
+                .insert(first, runs.iter().map(|(turn, _)| *turn).collect());
+        }
+        let shown = !grouped || open.contains(&RowKey::QuietRuns(first));
+        for (turn, keys) in runs {
+            if shown && open.contains(&RowKey::QuietRun(turn)) {
+                fold.rows.extend(keys);
+            } else {
+                fold.hidden.insert(turn);
+                if shown && !fold.rows.contains(&RowKey::QuietRun(turn)) {
+                    fold.rows.push(RowKey::QuietRun(turn));
+                }
+            }
+        }
     }
-    folded
+    fold
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,7 +185,8 @@ pub(super) struct RoutineRow {
     pub(super) last: bool,
 }
 
-fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Option<RoutineRow>> {
+/// The routine run each row belongs to, a task row's included.
+fn routine_turns(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Option<Uuid>> {
     let mut turns = HashMap::new();
     for turn in conversation.into_iter().flat_map(|c| c.turns_in_order()) {
         if turn.routine.is_some() {
@@ -166,11 +216,14 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
             }
         }
     }
-    let turns: Vec<_> = rows
-        .iter()
+    rows.iter()
         .map(|key| match *key {
             RowKey::Item(id) => conversation
                 .and_then(|c| c.item(id).and_then(|item| c.turn(item.turn_id)))
+                .filter(|turn| turn.routine.is_some())
+                .map(|turn| turn.id),
+            RowKey::Task(turn) => conversation
+                .and_then(|c| c.turn(turn))
                 .filter(|turn| turn.routine.is_some())
                 .map(|turn| turn.id),
             RowKey::Question(_)
@@ -181,8 +234,20 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
             | RowKey::Handoff(_)
             | RowKey::ComputerHandoff(_)
             | RowKey::OwnerNotice(_) => turns.get(key).copied(),
-            RowKey::Task(_) | RowKey::Pending(_) | RowKey::Gap(_) => None,
+            RowKey::Pending(_) | RowKey::Gap(_) | RowKey::QuietRun(_) | RowKey::QuietRuns(_) => {
+                None
+            }
         })
+        .collect()
+}
+
+/// Each row's place in its routine run's block. A task row and a folded
+/// no-news run name the run themselves.
+fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Option<RoutineRow>> {
+    let turns: Vec<_> = routine_turns(rows, conversation)
+        .into_iter()
+        .zip(rows)
+        .map(|(turn, key)| turn.filter(|_| !matches!(key, RowKey::Task(_))))
         .collect();
     turns
         .iter()
@@ -218,14 +283,9 @@ pub(super) fn transcript_rows(
         .values()
         .filter_map(|task| Some((task.anchor?, task.turn)))
         .collect();
-    let folded = folded_no_news(c);
     for item in c.items() {
-        // A gap row stays even when the item above it is folded away.
         if c.gap_below(item.seq).is_some() {
             rows.push(RowKey::Gap(item.seq));
-        }
-        if folded.contains(&item.id) {
-            continue;
         }
         if item.kind == "assistant" && answered.get(&item.turn_id) == Some(&item.id) {
             rows.extend(
@@ -428,7 +488,7 @@ fn card_state(c: &Conversation, key: RowKey) -> Option<String> {
             .map(|t| t.status.clone()),
         RowKey::Task(id) => c.turn(id).map(|t| t.status.clone()),
         RowKey::Gap(above) => c.gap_below(above).map(|count| count.to_string()),
-        RowKey::Pending(_) => None,
+        RowKey::Pending(_) | RowKey::QuietRun(_) | RowKey::QuietRuns(_) => None,
     }
 }
 
@@ -527,6 +587,9 @@ pub(super) struct ConversationView {
     pub(super) landing: Option<Uuid>,
     /// Exchange replies shown in full instead of their excerpt.
     pub(super) full_replies: HashSet<Uuid>,
+    /// No-news runs ([`RowKey::QuietRun`]) and groups of them
+    /// ([`RowKey::QuietRuns`]) the owner opened.
+    pub(super) open_quiet: HashSet<RowKey>,
     /// The waiting tray lists its waits instead of only its header.
     pub(super) tray_expanded: bool,
     /// Waits in the tray whose details are open.
@@ -648,6 +711,7 @@ impl ConversationView {
             exchange_folds: HashMap::new(),
             landing: None,
             full_replies: HashSet::new(),
+            open_quiet: HashSet::new(),
             tray_expanded: true,
             expanded_waits: HashSet::new(),
             stopping_waits: HashSet::new(),
@@ -857,6 +921,7 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<usize> {
+        self.open_quiet_run_of(target, window, cx);
         let view = self.view.as_mut()?;
         let conversation = view.conversation.as_ref()?;
         // An exchange reply may be folded or cut to an excerpt.
@@ -891,6 +956,49 @@ impl ElseApp {
             view.list.remeasure_items(ix..ix + 1);
         }
         Some(ix)
+    }
+
+    /// Opens the no-news run holding item `target`, and the group of runs
+    /// it folds into, so a find match inside it shows.
+    fn open_quiet_run_of(&mut self, target: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        let Some(turn) = view
+            .conversation
+            .as_ref()
+            .and_then(|c| c.item(target))
+            .map(|item| item.turn_id)
+            .filter(|&turn| view.conversation.as_ref().is_some_and(|c| c.no_news(turn)))
+        else {
+            return;
+        };
+        let group = view
+            .rows
+            .iter()
+            .find(|row| row.quiet_runs.contains(&turn))
+            .map(|row| row.key);
+        let opened = view.open_quiet.insert(RowKey::QuietRun(turn));
+        let opened = group.is_some_and(|group| view.open_quiet.insert(group)) || opened;
+        if opened {
+            self.sync_rows(window, cx);
+        }
+    }
+
+    /// Shows or folds a no-news run, or a group of them.
+    pub(super) fn toggle_quiet(
+        &mut self,
+        key: RowKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        if !view.open_quiet.remove(&key) {
+            view.open_quiet.insert(key);
+        }
+        self.sync_rows(window, cx);
     }
 
     /// Flashes `reveal` until it fades out, painting its passage on each
@@ -1026,17 +1134,20 @@ impl ElseApp {
                     )
                 })
         }));
-        let mut rows = conversation
-            .map(|c| transcript_rows(c, &tasks, requests))
+        let QuietFold {
+            mut rows,
+            groups,
+            hidden,
+        } = conversation
+            .map(|c| fold_quiet(transcript_rows(c, &tasks, requests), c, &view.open_quiet))
             .unwrap_or_default();
         let delegated = conversation
             .map(Conversation::delegated_turns)
             .unwrap_or_default();
-        let folded = conversation.map(folded_no_news).unwrap_or_default();
         for item in conversation
             .into_iter()
             .flat_map(|c| c.items())
-            .filter(|item| !folded.contains(&item.id))
+            .filter(|item| !hidden.contains(&item.turn_id))
         {
             let format = RowFormat::for_item(item);
             // A kept task reply leaves out a file a later reply delivers again.
@@ -1110,6 +1221,13 @@ impl ElseApp {
                 | RowKey::ComputerHandoff(_)
                 | RowKey::OwnerNotice(_)
                 | RowKey::Gap(_) => (None, None),
+                // A folded run dates the day it ran, under no sender.
+                RowKey::QuietRun(turn) | RowKey::QuietRuns(turn) => (
+                    None,
+                    conversation
+                        .and_then(|c| c.turn(turn)?.routine.as_ref())
+                        .map(|run| run.due_at),
+                ),
             })
             .collect();
         let unread_start =
@@ -1155,6 +1273,10 @@ impl ElseApp {
                     footer_stamp: footer_stamp.filter(|_| routine.is_none()),
                     day: None,
                     routine,
+                    quiet_runs: match key {
+                        RowKey::QuietRuns(first) => groups.get(&first).cloned().unwrap_or_default(),
+                        _ => Vec::new(),
+                    },
                     routine_status,
                     reaction: match key {
                         RowKey::Item(id) => conversation.and_then(|c| c.reaction_for(id)),
@@ -1344,8 +1466,8 @@ impl ElseApp {
 mod tests {
     use super::{
         ConversationView, REVEAL_FADE, REVEAL_HOLD, Reveal, RoutineRow, RowKey, Spot,
-        TranscriptRow, burst_tail_stamps, first_unread_row, folded_no_news, opened_mail,
-        opens_turns, request_rows, routine_rows, transcript_rows,
+        TranscriptRow, burst_tail_stamps, first_unread_row, fold_quiet, opened_mail, opens_turns,
+        request_rows, routine_rows, transcript_rows,
     };
     use std::collections::HashSet;
     use std::time::{Duration, Instant};
@@ -1997,6 +2119,7 @@ mod tests {
             activity: None,
             starts_run: true,
             opens_turn: None,
+            quiet_runs: Vec::new(),
             routine_status: None,
             reaction: None,
             state: None,
@@ -2187,27 +2310,112 @@ mod tests {
         assert_eq!(first_unread_row(&rows, &c, read(5, 5)), None);
     }
 
+    /// Completed runs of routine 99: turns 10 to 13 with items 1 to 5,
+    /// all with no news except the turns in `news`.
+    fn quiet_conversation(news: &[u128]) -> Conversation {
+        let turn = |id: u128| {
+            json!({
+                "id": Uuid::from_u128(id), "request_id": Uuid::from_u128(id + 100),
+                "turn_no": id, "provider_id": "codex", "status": "completed",
+                "error": null, "effect_uncertain": false,
+                "routine": { "routine_id": Uuid::from_u128(99), "name": "Sentry tickets",
+                             "due_at": "2026-11-05T04:00:00Z", "no_news": !news.contains(&id) }
+            })
+        };
+        let items: Vec<_> = [(1, 10), (2, 10), (3, 11), (4, 12), (5, 13)]
+            .into_iter()
+            .map(|(id, turn)| {
+                json!({
+                    "id": Uuid::from_u128(id), "seq": id, "turn_id": Uuid::from_u128(turn),
+                    "kind": "assistant", "text": "Nothing to hand off or merge.",
+                    "provider_id": "codex"
+                })
+            })
+            .collect();
+        Conversation::from_snapshot(
+            serde_json::from_value(json!({
+                "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+                "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+                "items": items, "turns": [turn(10), turn(11), turn(12), turn(13)],
+                "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn quiet_rows(c: &Conversation, open: &[RowKey]) -> Vec<RowKey> {
+        let tasks = crate::app::task_reply::state::task_replies(c);
+        let rows = transcript_rows(c, &tasks, Vec::new());
+        fold_quiet(rows, c, &open.iter().copied().collect()).rows
+    }
+
+    fn task(id: u128) -> RowKey {
+        RowKey::Task(Uuid::from_u128(id))
+    }
+
     #[test]
-    fn a_run_with_no_news_shows_its_last_line_and_is_never_unread() {
-        let mut snapshot = routine_snapshot();
-        let quiet = &mut snapshot["turns"][0];
-        quiet["status"] = json!("completed");
-        quiet["questions"] = json!([]);
-        quiet["secret_requests"] = json!([]);
-        quiet["routine"]["no_news"] = json!(true);
-        let c = Conversation::from_snapshot(serde_json::from_value(snapshot).unwrap()).unwrap();
+    fn a_run_with_no_news_shows_only_its_header_until_opened() {
+        let c = quiet_conversation(&[11, 12, 13]);
+        let run = RowKey::QuietRun(Uuid::from_u128(10));
+        assert_eq!(quiet_rows(&c, &[]), [run, task(11), task(12), task(13)]);
         assert_eq!(
-            folded_no_news(&c),
-            HashSet::from([Uuid::from_u128(1), Uuid::from_u128(2)]),
-            "item 5 is the run's last line"
+            quiet_rows(&c, &[run]),
+            [task(10), task(11), task(12), task(13)],
+            "opening the run shows its replies"
         );
-        let rows = [item(3), item(4), item(5)];
         let read = ReplyPosition {
             item_seq: 0,
             text_bytes: 0,
         };
-        assert_eq!(first_unread_row(&rows, &c, read), Some(item(3)));
-        assert_eq!(first_unread_row(&[item(5)], &c, read), None);
+        assert_eq!(
+            first_unread_row(&[item(1), item(3)], &c, read),
+            Some(item(3))
+        );
+    }
+
+    #[test]
+    fn consecutive_runs_with_no_news_fold_into_one_row() {
+        let c = quiet_conversation(&[13]);
+        let group = RowKey::QuietRuns(Uuid::from_u128(10));
+        let run = |id| RowKey::QuietRun(Uuid::from_u128(id));
+        let fold = fold_quiet(
+            transcript_rows(
+                &c,
+                &crate::app::task_reply::state::task_replies(&c),
+                Vec::new(),
+            ),
+            &c,
+            &HashSet::new(),
+        );
+        assert_eq!(fold.rows, [group, task(13)]);
+        assert_eq!(
+            fold.groups[&Uuid::from_u128(10)],
+            [10, 11, 12].map(Uuid::from_u128)
+        );
+        assert_eq!(
+            quiet_rows(&c, &[group]),
+            [group, run(10), run(11), run(12), task(13)],
+            "opening the group lists its runs"
+        );
+        assert_eq!(
+            quiet_rows(&c, &[group, run(11)]),
+            [group, run(10), task(11), run(12), task(13)]
+        );
+        assert_eq!(
+            quiet_rows(&c, &[run(11)]),
+            [group, task(13)],
+            "an opened run stays folded in its closed group"
+        );
+    }
+
+    #[test]
+    fn a_silent_run_is_never_the_latest_reply() {
+        let c = quiet_conversation(&[10]);
+        assert_eq!(
+            c.latest_reply().map(|item| item.id),
+            Some(Uuid::from_u128(2))
+        );
     }
 
     #[test]
@@ -2247,6 +2455,7 @@ mod tests {
             activity: None,
             starts_run: true,
             opens_turn: None,
+            quiet_runs: Vec::new(),
             routine_status: None,
             reaction: None,
             state: None,

@@ -1218,11 +1218,12 @@ impl Conversation {
         self.items.values()
     }
 
+    /// The newest reply; a run with no news is silent, so never the latest.
     pub fn latest_reply(&self) -> Option<&Item> {
         self.items
             .values()
             .rev()
-            .find(|item| item.kind == "assistant")
+            .find(|item| item.kind == "assistant" && !self.no_news(item.turn_id))
     }
 
     pub fn item(&self, id: Uuid) -> Option<&Item> {
