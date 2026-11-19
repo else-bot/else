@@ -191,10 +191,7 @@ impl Shell {
     ) {
         self.close_switcher(window, cx);
         self.remember(target, cx);
-        // A newer pick supersedes a switch still verifying and a bot still
-        // waiting for its list, so neither can land after this one.
-        self.switch_attempt = None;
-        self._switch = None;
+        // A newer pick supersedes a bot still waiting for its list.
         self.arrival = None;
         if let Some(active) = &self.active {
             active.app.update(cx, |app, _| app.drop_requested_bot());

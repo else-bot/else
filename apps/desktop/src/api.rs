@@ -1819,6 +1819,46 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn reconnect_cuts_a_long_backoff_short() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                drop(socket);
+            }
+        });
+        let origin = Origin::parse(&format!("http://{address}")).unwrap();
+        let mut live = client(origin).live();
+        async fn lost(events: &mut tokio::sync::mpsc::Receiver<LiveEvent>) {
+            let next = async {
+                loop {
+                    match events.recv().await {
+                        Some(LiveEvent::Disconnected(_)) => return,
+                        Some(_) => {}
+                        None => panic!("the live connection ended"),
+                    }
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(60), next)
+                .await
+                .expect("the live connection retries");
+        }
+        for _ in 0..4 {
+            lost(&mut live.events).await;
+        }
+        // The fourth failure waits about four seconds before retrying.
+        let woken = std::time::Instant::now();
+        live.commands.reconnect();
+        lost(&mut live.events).await;
+        assert!(
+            woken.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            woken.elapsed()
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn api_errors_use_the_shared_shape() {
         let body = r#"{"error":{"code":"queue_full","message":"Too many messages.","retryable":true,"request_id":null}}"#;
         let response: &'static str = Box::leak(
@@ -1837,7 +1877,10 @@ pub(crate) mod tests {
     #[test]
     fn subscription_mailbox_coalesces_and_preserves_delivered_cursors() {
         let (tx, mut rx) = tokio::sync::watch::channel(HashMap::new());
-        let commands = LiveCommands(tx);
+        let commands = LiveCommands {
+            wanted: tx,
+            wake: Default::default(),
+        };
         let old = Uuid::new_v4();
         let current = Uuid::new_v4();
         commands

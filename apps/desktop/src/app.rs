@@ -546,6 +546,13 @@ impl ElseApp {
         }));
     }
 
+    /// Retries a lost live connection now instead of after its backoff.
+    pub(crate) fn reconnect_now(&self) {
+        if let Some(live) = &self.live {
+            live.reconnect();
+        }
+    }
+
     fn live_command(&self, command: LiveCommand) {
         if let Some(live) = &self.live {
             let _ = live.send(command);

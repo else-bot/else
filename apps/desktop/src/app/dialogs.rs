@@ -43,7 +43,10 @@ impl ElseApp {
                     }
                 }),
             );
-        name.read(cx).focus_handle(cx).focus(window, cx);
+        // A background session must not pull focus from the shown one.
+        if !self.hidden {
+            name.read(cx).focus_handle(cx).focus(window, cx);
+        }
         self.welcome = Some(Welcome {
             name,
             picker,

@@ -243,9 +243,12 @@ impl Shell {
             attention,
             online,
             ring,
+            connecting: self.switch.connecting(id),
         };
         let badged = rail_face(id, &face, badges, cx);
-        let detail = if update {
+        let detail = if self.switch.connecting(id) {
+            "Connecting…".to_owned()
+        } else if update {
             format!("{status} · Update available")
         } else {
             status.to_owned()
@@ -316,9 +319,10 @@ impl Shell {
                     }),
             )
             .children(card)
-            .on_hover(cx.listener(move |shell, hovered: &bool, _, cx| {
+            .on_hover(cx.listener(move |shell, hovered: &bool, window, cx| {
                 let dragging = cx.has_active_drag();
-                shell.move_rail_card(|card| card.hover(id, *hovered, dragging), cx)
+                shell.move_rail_card(|card| card.hover(id, *hovered, dragging), cx);
+                shell.hover_server(id, *hovered && !dragging, window, cx);
             }))
             .on_mouse_down(
                 MouseButton::Right,
@@ -470,6 +474,7 @@ struct Badges<'a> {
     /// Counts from an unreachable server are its last known, so dimmed.
     online: bool,
     ring: Hsla,
+    connecting: bool,
 }
 
 /// A server's icon with its status bottom-right, unread replies top-right,
@@ -483,6 +488,7 @@ fn rail_face(id: Uuid, face: &Face, badges: Badges, cx: &App) -> Div {
         attention,
         online,
         ring,
+        connecting,
     } = badges;
     let hollow = status == theme.muted_foreground;
     let status_dot = div()
@@ -523,9 +529,17 @@ fn rail_face(id: Uuid, face: &Face, badges: Badges, cx: &App) -> Div {
                 .children(content),
         )
     };
+    // A connecting switch outranks bots waiting on the owner.
+    let pulse = if connecting {
+        Some((theme.primary, "connecting", 900, 0.55))
+    } else if waiting > 0 {
+        Some((theme.warning.opacity(opacity), "waiting", 1800, 0.675))
+    } else {
+        None
+    };
     div()
         .relative()
-        .when(waiting > 0, |face| {
+        .when_some(pulse, |face, (color, name, period, floor)| {
             let ring = div()
                 .absolute()
                 .top(px(-4.))
@@ -533,17 +547,17 @@ fn rail_face(id: Uuid, face: &Face, badges: Badges, cx: &App) -> Div {
                 .size(px(ICON_SIZE + 8.))
                 .rounded(px(14.))
                 .border_2()
-                .border_color(theme.warning.opacity(opacity));
+                .border_color(color);
             face.child(looping(move |moving| {
                 if !moving {
                     return ring.into_any_element();
                 }
                 ring.with_animation(
-                    SharedString::from(format!("rail-waiting-{id}")),
-                    Animation::new(std::time::Duration::from_millis(1800)).repeat(),
-                    |ring, t| {
+                    SharedString::from(format!("rail-{name}-{id}")),
+                    Animation::new(std::time::Duration::from_millis(period)).repeat(),
+                    move |ring, t| {
                         let wave = (std::f32::consts::TAU * t).cos();
-                        ring.opacity(0.675 + 0.325 * wave)
+                        ring.opacity(floor + (1. - floor) * wave)
                     },
                 )
                 .into_any_element()
