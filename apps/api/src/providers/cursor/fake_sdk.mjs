@@ -1,7 +1,9 @@
 // A stand-in for @cursor/sdk in the Cursor adapter's tests. Every agent
 // open and send is logged to `calls.jsonl` beside CURSOR_DATA_DIR. The
 // message text picks the run's script: LIMIT fails on the usage limit,
-// SHELL calls the shell, SLOW waits for a steer or a cancel.
+// LOST breaks the stream without a result,
+// SHELL calls the shell, SLOW waits for a steer or a cancel, and SLOW
+// REVERT turns steers down.
 
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -31,6 +33,10 @@ export class JsonlLocalAgentStore {
 }
 
 export const Cursor = {
+  async me({ apiKey }) {
+    checkKey(apiKey);
+    return { apiKeyName: "tests", userId: 42, createdAt: "2026-01-01T00:00:00Z" };
+  },
   models: {
     async list({ apiKey }) {
       checkKey(apiKey);
@@ -44,6 +50,15 @@ export const Cursor = {
           ],
         },
         { id: "plain", displayName: "Plain" },
+        {
+          id: "constrained",
+          displayName: "Constrained",
+          variants: [
+            { displayName: "Low", isDefault: true, params: [{ id: "reasoning", value: "low" }, { id: "fast", value: "false" }] },
+            { displayName: "High", params: [{ id: "reasoning", value: "high" }, { id: "fast", value: "false" }] },
+            { displayName: "Low Fast", params: [{ id: "reasoning", value: "low" }, { id: "fast", value: "true" }] },
+          ],
+        },
       ];
     },
   },
@@ -64,12 +79,25 @@ class FakeRun {
     this.wake?.();
   }
 
+  user(text) {
+    return {
+      type: "user",
+      agent_id: this.agentId,
+      run_id: this.id,
+      message: { role: "user", content: [{ type: "text", text }] },
+    };
+  }
+
   say(text) {
     this.emit({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
   }
 
   async *stream() {
     yield { type: "status", status: "RUNNING", agent_id: this.agentId, run_id: this.id };
+    yield this.user(this.text);
+    if (this.text.includes("LOST")) {
+      throw new Error("connection reset");
+    }
     if (this.text.includes("LIMIT")) {
       this.end("error", { message: "You've hit your usage limit", code: "plan_usage_limit" });
     } else if (this.text.includes("SHELL")) {
@@ -115,6 +143,10 @@ class FakeRun {
 
   async steer(text) {
     log({ call: "steer", text });
+    if (this.text.includes("REVERT")) {
+      return "revert_to_followup";
+    }
+    this.emit(this.user(text));
     this.say(`steered: ${text}`);
     this.end("finished");
     return "complete_delivered";

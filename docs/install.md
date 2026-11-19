@@ -54,9 +54,9 @@ The installer checks for these CLIs but does not install them. Provider CLIs run
 Cursor runs through Cursor's own SDK instead of a CLI. It needs Node.js 22.13 or newer on the server, with `npm` beside it. Set `ELSE_NODE_BIN` when the right `node` is not first on the server's `PATH`.
 
 1. Create an API key at [cursor.com/dashboard](https://cursor.com/dashboard).
-2. In else.bot, open **Settings › Vault** and add an entry named `cursor` with the variable `CURSOR_API_KEY` set to the key.
+2. In else.bot, open **Settings › Vault** and add an entry named `provider-cursor` with the variable `CURSOR_API_KEY` set to the key.
 
-The server then installs the pinned `@cursor/sdk` with npm into its data directory, once, and lists your account's models within the hour, or at the next restart. else.bot does not ship the SDK, because its license does not allow it. If the install fails, the model picker and the failed turn show the `npm install` command to run by hand.
+The server then installs the pinned `@cursor/sdk` with npm into its data directory, once, and lists your account's models within the hour, or at the next restart. else.bot does not ship the SDK, because its license does not allow it. If the install fails, the failed turn shows the `npm install` command to run by hand. Bots cannot read Vault entries whose names start with `provider-`, so the key never reaches their commands.
 
 Cursor turns load no Cursor settings, rules or MCP servers from your account or the bot's project. They get else.bot's tools, plus the shell and file tools on turns you start. Turns started by an incoming event get only else.bot's tools. Subagents are always off.
 

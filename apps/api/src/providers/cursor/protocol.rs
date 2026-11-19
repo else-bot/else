@@ -47,7 +47,7 @@ pub fn allowed_tools(host: bool, mcp: bool) -> Vec<&'static str> {
 }
 
 /// The models `Cursor.models.list()` returned, with the efforts and tiers
-/// their parameters take.
+/// their variants take, else their parameters.
 pub fn listed_models(models: &Value) -> Result<Vec<Listed>, String> {
     let models = models
         .as_array()
@@ -56,23 +56,36 @@ pub fn listed_models(models: &Value) -> Result<Vec<Listed>, String> {
         .iter()
         .filter_map(|model| {
             let id = model["id"].as_str()?;
-            let values = |names: &[&str]| -> Option<Vec<String>> {
-                let parameter = model["parameters"]
-                    .as_array()?
-                    .iter()
-                    .find(|p| p["id"].as_str().is_some_and(|id| names.contains(&id)))?;
-                Some(
-                    parameter["values"]
-                        .as_array()?
-                        .iter()
-                        .filter_map(|v| v["value"].as_str().map(str::to_owned))
-                        .collect(),
-                )
-            };
             let mut efforts = vec!["default".to_owned()];
-            efforts.extend(values(EFFORT_PARAMS).unwrap_or_default());
+            let mut fast = false;
+            let mut add = |param: &str, value: &str| {
+                if EFFORT_PARAMS.contains(&param) && !efforts.iter().any(|e| e == value) {
+                    efforts.push(value.to_owned());
+                }
+                fast |= param == FAST_PARAM && value == "true";
+            };
+            let list = |value: &Value| value.as_array().cloned().unwrap_or_default();
+            let variants = list(&model["variants"]);
+            if variants.is_empty() {
+                for parameter in list(&model["parameters"]) {
+                    for value in list(&parameter["values"]) {
+                        if let (Some(param), Some(value)) =
+                            (parameter["id"].as_str(), value["value"].as_str())
+                        {
+                            add(param, value);
+                        }
+                    }
+                }
+            } else {
+                for param in variants.iter().flat_map(|v| list(&v["params"])) {
+                    if let (Some(id), Some(value)) = (param["id"].as_str(), param["value"].as_str())
+                    {
+                        add(id, value);
+                    }
+                }
+            }
             let mut tiers = vec!["default".to_owned()];
-            if values(&[FAST_PARAM]).is_some_and(|v| v.iter().any(|v| v == "true")) {
+            if fast {
                 tiers.push("priority".to_owned());
             }
             Some(Listed {
@@ -117,12 +130,16 @@ pub fn message(segments: &[prompt::Segment<'_>]) -> Value {
 
 /// How the run ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Terminal {
-    status: String,
-    /// The sidecar's reading of the error: `usage_limit`, `signed_out`, or
-    /// none.
-    kind: Option<String>,
-    message: Option<String>,
+pub enum Terminal {
+    /// The SDK's result. `kind` is the sidecar's reading of its error:
+    /// `usage_limit`, `signed_out`, or none.
+    Result {
+        status: String,
+        kind: Option<String>,
+        message: Option<String>,
+    },
+    /// The stream broke without a result: the run may still be going.
+    Lost(String),
 }
 
 pub struct Tracker {
@@ -131,8 +148,11 @@ pub struct Tracker {
     /// Text since the last tool call, so later text starts a new message.
     text: bool,
     after_tool: bool,
-    /// Steered messages the run took, reported with its next message.
-    steered: Vec<Uuid>,
+    /// Steered messages the run took whose echo has not arrived, oldest
+    /// first.
+    steered: std::collections::VecDeque<Uuid>,
+    /// The packet's own echo arrived, so later user messages are steers.
+    packet_echoed: bool,
     parked_calls: HashSet<String>,
     model: String,
 }
@@ -144,7 +164,8 @@ impl Tracker {
             mcp,
             text: false,
             after_tool: false,
-            steered: Vec::new(),
+            steered: Default::default(),
+            packet_echoed: false,
             parked_calls: HashSet::new(),
             model: profile.model.clone(),
         }
@@ -190,6 +211,12 @@ impl Tracker {
                     cache_write: count("cacheWriteTokens"),
                     output: count("outputTokens"),
                 }));
+            }
+            Some("user") if !self.packet_echoed => self.packet_echoed = true,
+            Some("user") => {
+                if let Some(turn_id) = self.steered.pop_front() {
+                    events.push(Event::Steered(turn_id));
+                }
             }
             Some("summary") if message["status"] == "completed" => events.push(Event::Compacted),
             Some("system") => {
@@ -274,22 +301,40 @@ impl Protocol for Tracker {
         let Incoming::Notification { method, params } = incoming else {
             return Ok(Vec::new());
         };
-        let mut events: Vec<Event<Terminal>> = self.steered.drain(..).map(Event::Steered).collect();
+        let mut events = Vec::new();
+        if method != "run/message" {
+            // The run took each acknowledged steer even when no echo came.
+            events.extend(self.steered.drain(..).map(Event::Steered));
+        }
         match method.as_str() {
             "run/message" => events.extend(self.on_message(&params["message"])?),
-            "run/result" => events.push(Event::Finished(Terminal {
+            "run/result" => events.push(Event::Finished(Terminal::Result {
                 status: params["status"].as_str().unwrap_or("error").to_owned(),
                 kind: params["kind"].as_str().map(str::to_owned),
                 message: params["error"]["message"].as_str().map(str::to_owned),
             })),
+            "run/lost" => events.push(Event::Finished(Terminal::Lost(
+                params["message"].as_str().unwrap_or_default().to_owned(),
+            ))),
             _ => {}
         }
         Ok(events)
     }
 
     fn outcome(&self, terminal: Terminal, _: Option<StopCause>, _: bool) -> TurnOutcome {
-        let message = terminal.message.unwrap_or_default();
-        match (terminal.status.as_str(), terminal.kind.as_deref()) {
+        let (status, kind, message) = match terminal {
+            Terminal::Result {
+                status,
+                kind,
+                message,
+            } => (status, kind, message.unwrap_or_default()),
+            Terminal::Lost(why) => {
+                return TurnOutcome::Uncertain {
+                    message: format!("Cursor's run stopped reporting without a result: {why}"),
+                };
+            }
+        };
+        match (status.as_str(), kind.as_deref()) {
             ("finished", _) => TurnOutcome::Completed,
             ("cancelled", _) => TurnOutcome::Interrupted,
             (_, Some("usage_limit")) => TurnOutcome::Failed {
@@ -318,8 +363,9 @@ impl Protocol for Tracker {
         Some(json!({ "text": prompt::segments_text(&prompt::steer_segments(steer)) }))
     }
 
-    /// The SDK answers a steer only once the run holds it.
+    /// The SDK answers a steer only once the run holds it; the split in the
+    /// reply waits for its echo.
     fn steer_sent(&mut self, steer: &Steer) {
-        self.steered.push(steer.turn_id);
+        self.steered.push_back(steer.turn_id);
     }
 }

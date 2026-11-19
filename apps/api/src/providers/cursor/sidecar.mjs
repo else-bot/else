@@ -1,11 +1,12 @@
 // else.bot's bridge to @cursor/sdk: newline-delimited JSON-RPC over stdio.
 // One process serves one turn (or one model listing) and exits when its
-// input closes. The API key arrives in `initialize`, never in the
-// environment, so tools the agent runs cannot read it.
+// input closes. The API key arrives in `initialize`, not in the
+// environment the agent's shell commands inherit.
 //
 // Requests: initialize, models.list, agent.open, run.send, run.steer,
 // run.cancel. Notifications: run/message (each SDK stream message, with
-// tool arguments reduced to the MCP server and tool names) and run/result.
+// tool arguments reduced to the MCP server and tool names), then
+// run/result, or run/lost when the stream broke without one.
 
 import { createInterface } from "node:readline";
 
@@ -98,7 +99,8 @@ async function load() {
   return sdk;
 }
 
-// else.bot's { id, effort, fast } as the model's own parameters.
+// else.bot's { id, effort, fast } as the model's own parameters: one of its
+// variants when it lists them, since those constrain the combinations.
 async function resolveModel(selection) {
   const { Cursor } = await load();
   const models = await Cursor.models.list({ apiKey });
@@ -106,22 +108,40 @@ async function resolveModel(selection) {
   if (!model) {
     throw failure(`this Cursor account has no model ${selection.id}`, REFUSED);
   }
+  const wanted = `${selection.effort ?? "default"} effort${selection.fast ? " in Fast mode" : ""}`;
+  const fits = (values) => {
+    const effort = EFFORT_PARAMS.find((id) => values.has(id));
+    if (selection.effort && values.get(effort) !== selection.effort) {
+      return false;
+    }
+    return (values.get("fast") === "true") === selection.fast;
+  };
+  const variants = model.variants ?? [];
+  if (variants.length) {
+    const matching = variants.filter((v) => fits(new Map(v.params.map((p) => [p.id, p.value]))));
+    const variant =
+      matching.find((v) => v.isDefault) ?? matching.find((v) => !v.isMaxMode) ?? matching[0];
+    if (!variant) {
+      throw failure(`${model.id} has no ${wanted}`, REFUSED);
+    }
+    return { id: model.id, params: variant.params };
+  }
   const parameters = model.parameters ?? [];
-  const takes = (parameter, value) => parameter?.values?.some((v) => v.value === value);
+  const takes = (id, value) =>
+    parameters.find((p) => p.id === id)?.values?.some((v) => v.value === value) ?? false;
   const params = [];
   if (selection.effort) {
-    const effort = parameters.find((p) => EFFORT_PARAMS.includes(p.id));
-    if (!takes(effort, selection.effort)) {
-      throw failure(`${model.id} takes no ${selection.effort} effort`, REFUSED);
+    const effort = parameters.find((p) => EFFORT_PARAMS.includes(p.id))?.id;
+    if (!effort || !takes(effort, selection.effort)) {
+      throw failure(`${model.id} has no ${wanted}`, REFUSED);
     }
-    params.push({ id: effort.id, value: selection.effort });
+    params.push({ id: effort, value: selection.effort });
   }
-  const fast = parameters.find((p) => p.id === "fast");
-  if (selection.fast && !takes(fast, "true")) {
-    throw failure(`${model.id} has no Fast mode`, REFUSED);
+  if (selection.fast && !takes("fast", "true")) {
+    throw failure(`${model.id} has no ${wanted}`, REFUSED);
   }
-  if (fast) {
-    params.push({ id: "fast", value: selection.fast ? "true" : "false" });
+  if (selection.fast || takes("fast", "false")) {
+    params.push({ id: "fast", value: String(selection.fast) });
   }
   return { id: model.id, params };
 }
@@ -138,19 +158,18 @@ async function follow(current) {
       error: result.error ?? null,
     });
   } catch (error) {
-    notify("run/result", {
-      status: "error",
-      kind: kindOf(error),
-      error: { message: describe(error), code: error?.code ?? null },
-    });
+    // No terminal result: the run may still be going on Cursor's side.
+    notify("run/lost", { message: describe(error) });
   }
 }
 
 const methods = {
+  // Checks the key, and names its account without any secret.
   async initialize(params) {
     apiKey = params.apiKey;
-    await load();
-    return {};
+    const { Cursor } = await load();
+    const me = await Cursor.me({ apiKey });
+    return { account: `${me.userId ?? me.apiKeyName}` };
   },
 
   async "models.list"() {
@@ -176,7 +195,7 @@ const methods = {
         agent = await Agent.resume(params.agentId, options);
         resumed = true;
       } catch (error) {
-        if (error?.name !== "AgentNotFoundError" && error?.name !== "UnknownAgentError") {
+        if (error?.name !== "AgentNotFoundError" && error?.code !== "agent_not_found") {
           throw error;
         }
         process.stderr.write(`agent ${params.agentId} is gone; starting a new one\n`);

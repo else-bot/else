@@ -40,14 +40,12 @@ use protocol::Tracker;
 
 pub const ID: &str = "cursor";
 const PROMPT_VERSION: &str = "else-cursor-v1";
-/// The receipt of the instructions a Cursor agent holds.
 const INSTRUCTIONS: &str = "instructions";
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 /// `run.steer` answers once the run has taken the message, which can take
 /// a model step; no answer by then leaves its delivery unknown.
 const STEER_TIMEOUT: Duration = Duration::from_secs(30);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
-/// JSON-RPC error codes the sidecar gives an SDK failure.
 const REFUSED: i64 = -32001;
 const SIGNED_OUT: i64 = -32002;
 const USAGE_LIMIT: i64 = -32003;
@@ -84,7 +82,6 @@ fn build(wiring: &super::Wiring) -> super::Built {
     }
 }
 
-/// A Node.js that can run the SDK.
 struct Ready {
     host: Host,
     node: PathBuf,
@@ -96,34 +93,46 @@ pub struct Cursor {
     ready: Result<Ready, String>,
     vault: Option<Vault>,
     tool_url: Option<String>,
-    /// One SDK install at a time.
     installing: tokio::sync::Mutex<()>,
 }
 
-/// What the sidecar needs before its first request: its script, and the
-/// account's key for `initialize`.
 struct Sidecar {
     script: PathBuf,
     key: zeroize::Zeroizing<String>,
 }
 
-/// What the sidecar opens the bot's agent with: the account's key, the
-/// bot's agent store, and the fingerprint a recorded agent must match.
 struct Account<'a> {
+    ready: &'a Ready,
     key: &'a str,
     store: &'a std::path::Path,
-    fingerprint: String,
 }
 
 impl Cursor {
     async fn sidecar(&self, ready: &Ready) -> Result<Sidecar, String> {
         let key = cursor_home::api_key(self.vault.as_ref()).await?;
         let _installing = self.installing.lock().await;
-        let script = cursor_home::prepare(&ready.host, &ready.node, &ready.data_dir).await?;
+        // Its own task, so a caller that gives up (the model refresher's
+        // timeout) never cuts an install off midway.
+        let (host, node, data) = (
+            ready.host.clone(),
+            ready.node.clone(),
+            ready.data_dir.clone(),
+        );
+        let script = tokio::spawn(async move { cursor_home::prepare(&host, &node, &data).await })
+            .await
+            .map_err(|e| format!("The Cursor SDK install stopped: {e}"))??;
         Ok(Sidecar { script, key })
     }
 
-    fn fingerprint(&self, ready: &Ready, input: &TurnInput, profile: &Profile) -> String {
+    /// `account` is the non-secret identity `initialize` reports: an agent
+    /// never resumes under another account.
+    fn fingerprint(
+        &self,
+        ready: &Ready,
+        input: &TurnInput,
+        profile: &Profile,
+        account: &str,
+    ) -> String {
         session::fingerprint(
             input,
             profile,
@@ -137,7 +146,7 @@ impl Cursor {
                     (false, true) => "tools:elsebot-v1",
                     (false, false) => "tools:none",
                 },
-                policy: &["agents:disabled", "settings:none"],
+                policy: &["agents:disabled", "settings:none", account],
             },
         )
     }
@@ -178,28 +187,29 @@ impl Cursor {
         sink: &dyn TurnSink,
         stop: &Stop,
     ) -> Ended {
-        let fingerprint = account.fingerprint;
-        let recorded = input
-            .session
-            .as_ref()
-            .filter(|s| s.fingerprint == fingerprint);
         let open = async {
-            server
+            let initialized = server
                 .request("initialize", json!({ "apiKey": account.key }), RPC_TIMEOUT)
                 .await?;
-            let options = self.agent_options(input, profile, &server.cwd);
+            let identity = initialized["account"].as_str().unwrap_or_default();
+            let fingerprint = self.fingerprint(account.ready, input, profile, identity);
+            let recorded = input
+                .session
+                .as_ref()
+                .filter(|s| s.fingerprint == fingerprint);
             let params = json!({
                 "agentId": recorded.map(|s| s.native_id.as_str()),
-                "options": options,
+                "options": self.agent_options(input, profile, &server.cwd),
                 "storeDir": account.store,
             });
-            server.request("agent.open", params, RPC_TIMEOUT).await
+            let opened = server.request("agent.open", params, RPC_TIMEOUT).await?;
+            Ok::<_, RpcError>((fingerprint, recorded, opened))
         };
         let opened = tokio::select! {
             opened = open => opened,
             () = stop.escalated() => return Ended::Undelivered(TurnOutcome::Interrupted),
         };
-        let opened = match opened {
+        let (fingerprint, recorded, opened) = match opened {
             Ok(opened) => opened,
             Err(err) => return Ended::Undelivered(refusal(err)),
         };
@@ -246,7 +256,11 @@ impl Cursor {
                     });
                 }
             },
-            Err(err @ RpcError::Remote { .. }) => return Ended::Undelivered(refusal(err)),
+            Err(err @ RpcError::Remote { code, .. })
+                if [REFUSED, SIGNED_OUT, USAGE_LIMIT].contains(&code) =>
+            {
+                return Ended::Undelivered(refusal(err));
+            }
             Err(err) => {
                 return Ended::Abandoned(TurnOutcome::Uncertain {
                     message: format!("Delivery to Cursor is unknown: {err}"),
@@ -279,7 +293,6 @@ fn instructions(input: &TurnInput, cwd: &str) -> String {
     )
 }
 
-/// The outcome of a request the sidecar answered with an SDK error.
 fn refusal(err: RpcError) -> TurnOutcome {
     match err {
         RpcError::Remote { code, message, .. } if code == SIGNED_OUT => failed(
@@ -295,7 +308,6 @@ fn refusal(err: RpcError) -> TurnOutcome {
     }
 }
 
-/// The running Cursor run, read through the sidecar.
 struct Running<'s> {
     server: &'s mut AppServer,
 }
@@ -315,8 +327,6 @@ impl Channel for Running<'_> {
             .await;
     }
 
-    /// `run.steer`, which answers once the run has the message or has
-    /// turned it down.
     async fn send(&mut self, input: &Value) -> Result<(), SendError> {
         match self
             .server
@@ -324,7 +334,10 @@ impl Channel for Running<'_> {
             .await
         {
             Ok(response) if response["outcome"] == "complete_delivered" => Ok(()),
-            Ok(response) => Err(SendError::Refused(format!(
+            Ok(response) if response["outcome"] == "revert_to_followup" => Err(SendError::Refused(
+                "Cursor will take it as a follow-up".into(),
+            )),
+            Ok(response) => Err(SendError::Unknown(format!(
                 "Cursor answered {}",
                 response["outcome"]
             ))),
@@ -460,7 +473,7 @@ impl Provider for Cursor {
                 Account {
                     key: &sidecar.key,
                     store: &store,
-                    fingerprint: self.fingerprint(ready, &input, &profile),
+                    ready,
                 },
                 &input,
                 &profile,

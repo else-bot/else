@@ -124,6 +124,8 @@ struct Sink {
     text: Mutex<String>,
     steers: Mutex<Vec<Steer>>,
     steered: Mutex<Vec<Uuid>>,
+    refused: Mutex<Vec<Uuid>>,
+    retired: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -156,6 +158,13 @@ impl TurnSink for Sink {
     }
     async fn steer_sending(&self, _: Uuid) -> Result<bool, Fenced> {
         Ok(true)
+    }
+    async fn steer_refused(&self, turn_id: Uuid) {
+        self.refused.lock().unwrap().push(turn_id);
+    }
+    async fn retire_session(&self) {
+        self.retired
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
     async fn steered(&self, turn_id: Uuid) -> Result<(), Fenced> {
         self.steered.lock().unwrap().push(turn_id);
@@ -340,6 +349,11 @@ async fn the_account_s_models_list_with_the_efforts_and_tiers_their_parameters_t
                 efforts: Some(vec!["default".into()]),
                 tiers: Some(vec!["default".into()]),
             },
+            Listed {
+                id: "constrained".into(),
+                efforts: Some(vec!["default".into(), "low".into(), "high".into()]),
+                tiers: Some(vec!["default".into(), "priority".into()]),
+            },
         ]
     );
 }
@@ -372,12 +386,7 @@ async fn a_joined_owner_message_steers_the_running_run() {
         while !sink.text.lock().unwrap().contains("working") {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        sink.steers.lock().unwrap().push(Steer {
-            turn_id: joined,
-            text: "use tabs".into(),
-            parts: Vec::new(),
-            files: Vec::new(),
-        });
+        sink.steers.lock().unwrap().push(steer(joined));
         stop.steer();
     };
     let (outcome, ()) = tokio::join!(run, steer);
@@ -448,4 +457,138 @@ fn node_older_than_the_sdk_needs_is_unavailable_with_the_fix() {
         why.contains("22.13") && why.contains("ELSE_NODE_BIN"),
         "{why}"
     );
+}
+
+fn steer(turn_id: Uuid) -> Steer {
+    Steer {
+        turn_id,
+        text: "use tabs".into(),
+        parts: Vec::new(),
+        files: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn a_steer_cursor_turns_down_waits_for_the_next_attempt() {
+    let server = Server::new(Some("test-key")).await;
+    let stop = Stop::default();
+    let sink = Sink::default();
+    let joined = Uuid::new_v4();
+    let run = server.run(
+        input("SLOW REVERT", Origin::OwnerRequest),
+        &sink,
+        stop.clone(),
+    );
+    let steer_then_stop = async {
+        while !sink.text.lock().unwrap().contains("working") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        sink.steers.lock().unwrap().push(steer(joined));
+        stop.steer();
+        while sink.refused.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        stop.request();
+    };
+    let (outcome, ()) = tokio::join!(run, steer_then_stop);
+    assert_eq!(outcome, TurnOutcome::Interrupted);
+    assert_eq!(*sink.refused.lock().unwrap(), vec![joined]);
+    assert!(sink.steered.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_changed_profile_starts_a_new_agent_instead_of_resuming() {
+    let server = Server::new(Some("test-key")).await;
+    let sink = Sink::default();
+    assert_eq!(
+        server
+            .run(input("hi", Origin::OwnerRequest), &sink, Stop::default())
+            .await,
+        TurnOutcome::Completed
+    );
+    let mut next = input("again", Origin::OwnerRequest);
+    next.session = Some(sink.last_session());
+    next.profile.as_mut().unwrap().reasoning_effort = "low".into();
+    assert_eq!(
+        server.run(next, &Sink::default(), Stop::default()).await,
+        TurnOutcome::Completed
+    );
+    let opens: Vec<Value> = server
+        .calls()
+        .into_iter()
+        .filter(|c| c["call"] != "send")
+        .collect();
+    assert_eq!(opens[1]["call"], "create");
+}
+
+#[tokio::test]
+async fn a_profile_the_model_s_variants_do_not_offer_is_refused_before_delivery() {
+    let server = Server::new(Some("test-key")).await;
+    server
+        .cursor
+        .models
+        .listed(
+            server.cursor.list_models().await.unwrap(),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    let mut turn = input("hi", Origin::OwnerRequest);
+    turn.profile = Some(Profile {
+        model: "constrained".into(),
+        reasoning_effort: "high".into(),
+        service_tier: "priority".into(),
+    });
+    let outcome = server.run(turn, &Sink::default(), Stop::default()).await;
+    assert!(
+        matches!(&outcome, TurnOutcome::Failed { code, message } if code == "provider_refused" && message.contains("no high effort in Fast mode")),
+        "{outcome:?}"
+    );
+    let mut turn = input("hi", Origin::OwnerRequest);
+    turn.profile = Some(Profile {
+        model: "constrained".into(),
+        reasoning_effort: "default".into(),
+        service_tier: "priority".into(),
+    });
+    assert_eq!(
+        server.run(turn, &Sink::default(), Stop::default()).await,
+        TurnOutcome::Completed
+    );
+    let create = server
+        .calls()
+        .into_iter()
+        .find(|c| c["call"] == "create")
+        .unwrap();
+    assert_eq!(
+        create["options"]["model"]["params"],
+        json!([{"id": "reasoning", "value": "low"}, {"id": "fast", "value": "true"}])
+    );
+}
+
+#[tokio::test]
+async fn a_stream_that_breaks_without_a_result_is_uncertain_and_retires_the_agent() {
+    let server = Server::new(Some("test-key")).await;
+    let sink = Sink::default();
+    let outcome = server
+        .run(input("LOST", Origin::OwnerRequest), &sink, Stop::default())
+        .await;
+    assert!(
+        matches!(&outcome, TurnOutcome::Uncertain { message } if message.contains("connection reset")),
+        "{outcome:?}"
+    );
+    assert!(sink.retired.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn bots_cannot_read_the_cursor_key_from_the_vault() {
+    let server = Server::new(Some("test-key")).await;
+    let vault = server.cursor.vault.as_ref().unwrap();
+    let names = [cursor_home::VAULT_ENTRY.to_owned()];
+    assert!(matches!(
+        task_secrets::resolve(&vault.pool, Some(&vault.key), &names).await,
+        Err(task_secrets::SecretError::Unknown(_))
+    ));
+    assert!(matches!(
+        task_secrets::login(&vault.pool, Some(&vault.key), cursor_home::VAULT_ENTRY).await,
+        Err(task_secrets::SecretError::Unknown(_))
+    ));
 }

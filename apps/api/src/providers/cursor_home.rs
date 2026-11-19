@@ -16,7 +16,7 @@ pub const SDK_VERSION: &str = "1.3.1";
 /// The oldest Node.js the SDK runs on.
 const MIN_NODE: (u32, u32) = (22, 13);
 /// The Vault entry and variable that hold the account's API key.
-pub const VAULT_ENTRY: &str = "cursor";
+pub const VAULT_ENTRY: &str = "provider-cursor";
 pub const KEY_VAR: &str = "CURSOR_API_KEY";
 const SIDECAR_FILE: &str = "else-cursor.mjs";
 const SIDECAR: &str = include_str!("cursor/sidecar.mjs");
@@ -61,19 +61,13 @@ fn parse_version(printed: &str) -> Option<(u32, u32)> {
 /// The account's API key from the Vault, or the sign-in step.
 pub async fn api_key(vault: Option<&Vault>) -> Result<zeroize::Zeroizing<String>, String> {
     let vault = vault.ok_or_else(signed_out)?;
-    let env = match crate::db::task_secrets::resolve(
-        &vault.pool,
-        Some(&vault.key),
-        &[VAULT_ENTRY.to_owned()],
-    )
-    .await
-    {
-        Ok(env) => env,
-        Err(crate::db::task_secrets::SecretError::Unknown(_)) => return Err(signed_out()),
-        Err(err) => return Err(format!("Cursor's API key could not be read: {err}")),
-    };
-    env.vars
-        .into_iter()
+    let vars =
+        match crate::db::task_secrets::provider_env(&vault.pool, &vault.key, VAULT_ENTRY).await {
+            Ok(vars) => vars,
+            Err(crate::db::task_secrets::SecretError::Unknown(_)) => return Err(signed_out()),
+            Err(err) => return Err(format!("Cursor's API key could not be read: {err}")),
+        };
+    vars.into_iter()
         .find(|(name, value)| name == KEY_VAR && !value.trim().is_empty())
         .map(|(_, value)| value)
         .ok_or_else(signed_out)
