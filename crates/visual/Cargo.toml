@@ -13,6 +13,8 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 takumi = { version = "=2.20.0", default-features = false, features = ["raster-backend", "from-html", "svg-source", "png", "jpeg", "webp", "woff2", "unstable"] }
 thiserror = { workspace = true }
+# The paint tree locates link boxes; pinned to the version `takumi` uses.
+takumi-core = { version = "=0.36.0", default-features = false, features = ["paint-tree"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["param", "process", "std"] }
