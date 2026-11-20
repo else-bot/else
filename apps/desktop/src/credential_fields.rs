@@ -12,7 +12,17 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) struct CredentialFields {
     fields: Vec<Field>,
     next_id: usize,
+    form: Form,
     pub busy: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Form {
+    /// A bot's request card: exactly the variables the bot named, fixed.
+    Requested,
+    /// The Vault editor: an entry's saved fields, or one blank field for a
+    /// new entry. The owner may add fields, name new ones, and remove any.
+    Vault,
 }
 
 struct Field {
@@ -23,7 +33,7 @@ struct Field {
     kind: FieldKind,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum FieldKind {
     Required,
     Stored,
@@ -34,31 +44,15 @@ pub(crate) struct FieldsChanged;
 impl EventEmitter<FieldsChanged> for CredentialFields {}
 
 impl CredentialFields {
-    pub fn new(
-        names: &[String],
-        stored: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(names: &[String], form: Form, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             fields: Vec::new(),
             next_id: 0,
+            form,
             busy: false,
         };
-        for name in names {
-            this.push(
-                name,
-                if stored {
-                    FieldKind::Stored
-                } else {
-                    FieldKind::Required
-                },
-                window,
-                cx,
-            );
-        }
-        if names.is_empty() {
-            this.push("", FieldKind::Added, window, cx);
+        for (name, kind) in initial_fields(names, form) {
+            this.push(&name, kind, window, cx);
         }
         this
     }
@@ -206,21 +200,23 @@ impl Render for CredentialFields {
                     .child(control),
             );
         }
-        rows.child(
-            Button::new("credential-add")
-                .control(
-                    Tier::Secondary,
-                    Scale::Compact,
-                    self.busy || self.fields.len() >= 16,
-                    cx,
-                )
-                .label("Add field")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.push("", FieldKind::Added, window, cx);
-                    cx.emit(FieldsChanged);
-                    cx.notify();
-                })),
-        )
+        rows.when(self.form == Form::Vault, |rows| {
+            rows.child(
+                Button::new("credential-add")
+                    .control(
+                        Tier::Secondary,
+                        Scale::Compact,
+                        self.busy || self.fields.len() >= 16,
+                        cx,
+                    )
+                    .label("Add field")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.push("", FieldKind::Added, window, cx);
+                        cx.emit(FieldsChanged);
+                        cx.notify();
+                    })),
+            )
+        })
         .child(
             div()
                 .text_xs()
@@ -229,6 +225,20 @@ impl Render for CredentialFields {
                     "Values shorter than 4 bytes cannot be redacted from command or job output.",
                 ),
         )
+    }
+}
+
+fn initial_fields(names: &[String], form: Form) -> Vec<(String, FieldKind)> {
+    match form {
+        Form::Requested => names
+            .iter()
+            .map(|name| (name.clone(), FieldKind::Required))
+            .collect(),
+        Form::Vault if names.is_empty() => vec![(String::new(), FieldKind::Added)],
+        Form::Vault => names
+            .iter()
+            .map(|name| (name.clone(), FieldKind::Stored))
+            .collect(),
     }
 }
 
@@ -270,7 +280,7 @@ pub(crate) fn is_multiline(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_fields, is_multiline};
+    use super::{FieldKind, Form, collect_fields, initial_fields, is_multiline};
 
     fn fields(
         rows: &[(&str, &str, bool)],
@@ -304,6 +314,40 @@ mod tests {
             .collect();
         assert!(collect_fields(too_many.into_iter()).is_err());
     }
+    #[test]
+    fn a_request_card_fixes_exactly_the_requested_fields() {
+        let requested = ["SOME_API_TOKEN".to_string(), "PASSWORD".to_string()];
+        let rows = initial_fields(&requested, Form::Requested);
+        assert_eq!(
+            rows,
+            [
+                ("SOME_API_TOKEN".to_string(), FieldKind::Required),
+                ("PASSWORD".to_string(), FieldKind::Required),
+            ]
+        );
+        let values = collect_fields(
+            rows.into_iter()
+                .map(|(name, _)| (name, "secret".to_string(), false)),
+        )
+        .unwrap();
+        assert_eq!(
+            values.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["PASSWORD", "SOME_API_TOKEN"]
+        );
+    }
+
+    #[test]
+    fn the_vault_editor_keeps_saved_fields_removable_and_starts_new_entries_blank() {
+        assert_eq!(
+            initial_fields(&["PASSWORD".to_string()], Form::Vault),
+            [("PASSWORD".to_string(), FieldKind::Stored)]
+        );
+        assert_eq!(
+            initial_fields(&[], Form::Vault),
+            [(String::new(), FieldKind::Added)]
+        );
+    }
+
     #[test]
     fn vault_fields_preserve_inner_line_breaks() {
         assert!(is_multiline("private\nkey\n"));
