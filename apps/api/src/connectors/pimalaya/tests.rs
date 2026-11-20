@@ -1127,3 +1127,161 @@ fn a_plain_text_email_has_no_html_for_the_reader() {
     assert_eq!(value["text"], "Just text.\r\n");
     assert_eq!(value["attachments"], json!([]));
 }
+
+fn bot_read(raw: &str) -> Value {
+    let fetched = Fetched {
+        raw: raw.as_bytes().into(),
+        received_at: None,
+    };
+    let message = MessageRef {
+        folder: "INBOX".into(),
+        uid_validity: 1,
+        uid: 9,
+    };
+    read(&fetched, &message).unwrap()
+}
+
+const BOOKING_HTML: &str = "<p>Your booking is confirmed.</p>\
+    <table><tr><td style=\"background:#06c\"><a href=\"https://hotel.test/reply?id=1&amp;t=2\" \
+    style=\"color:#fff\">Reply</a></td></tr></table>\
+    <p>Read <a href=\"https://hotel.test/terms\">our terms</a>.</p>\
+    <a href=\"https://hotel.test/home\"><img src=\"https://hotel.test/logo.png\" alt=\"Hotel logo\"></a>\
+    <p><a href=\"https://evil.test/login\">https://bank.test/login</a></p>\
+    <p><a href=\"https://hotel.test/terms\">terms again</a> <a href=\"javascript:alert(1)\">run</a></p>";
+
+#[test]
+fn a_bot_reading_html_mail_gets_every_link_url_inline_and_listed() {
+    let value = bot_read(&format!(
+        "From: Hotel <stay@hotel.test>\r\nTo: me@x.test\r\nSubject: Booking\r\n\
+         MIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{BOOKING_HTML}\r\n"
+    ));
+    let body = value["body"].as_str().unwrap();
+    for shown in [
+        "Reply <https://hotel.test/reply?id=1&t=2>",
+        "our terms <https://hotel.test/terms>",
+        "Hotel logo <https://hotel.test/home>",
+        "https://bank.test/login <https://evil.test/login>",
+    ] {
+        assert!(body.contains(shown), "{shown:?} missing from {body:?}");
+    }
+    assert!(!body.contains("javascript:"), "{body:?}");
+    assert_eq!(
+        value["links"],
+        json!([
+            {"text":"Reply","url":"https://hotel.test/reply?id=1&t=2"},
+            {"text":"our terms","url":"https://hotel.test/terms"},
+            {"text":"Hotel logo","url":"https://hotel.test/home"},
+            {"text":"https://bank.test/login","url":"https://evil.test/login"},
+        ])
+    );
+    assert_eq!(value["source"], "external_email");
+}
+
+#[test]
+fn a_bot_reads_the_html_part_over_a_plain_text_stub() {
+    let value = bot_read(&format!(
+        "From: Hotel <stay@hotel.test>\r\nTo: me@x.test\r\nSubject: Booking\r\n\
+         MIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"a\"\r\n\r\n\
+         --a\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n\
+         View this email in your browser.\r\n\
+         --a\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{BOOKING_HTML}\r\n--a--\r\n"
+    ));
+    let body = value["body"].as_str().unwrap();
+    assert!(
+        body.contains("Reply <https://hotel.test/reply?id=1&t=2>"),
+        "{body:?}"
+    );
+    assert!(!body.contains("in your browser"), "{body:?}");
+}
+
+#[test]
+fn links_past_the_text_limit_are_still_listed() {
+    let filler = "<p>word</p>".repeat(8000);
+    let value = bot_read(&format!(
+        "From: a@x.test\r\nTo: me@x.test\r\nSubject: Long\r\nContent-Type: text/html\r\n\r\n\
+         {filler}<a href=\"https://x.test/end\">End</a>\r\n"
+    ));
+    assert_eq!(value["truncated"], true);
+    assert_eq!(value["body"].as_str().unwrap().chars().count(), 32000);
+    assert_eq!(
+        value["links"],
+        json!([{"text":"End","url":"https://x.test/end"}])
+    );
+}
+
+#[test]
+fn a_forwarded_html_message_quotes_its_link_urls() {
+    let raw = format!(
+        "From: Hotel <stay@hotel.test>\r\nTo: me@x.test\r\nSubject: Booking\r\n\
+         MIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{BOOKING_HTML}\r\n"
+    );
+    let parsed = MessageParser::default().parse(raw.as_bytes()).unwrap();
+    let draft = mime::forward(&parsed, vec!["friend@x.test".into()], "FYI");
+    assert_eq!(draft.subject, "Fwd: Booking");
+    assert!(draft.body.starts_with("FYI\n\n---------- Forwarded message ----------\nFrom: stay@hotel.test\nSubject: Booking\n\n"), "{}", draft.body);
+    assert!(
+        draft
+            .body
+            .contains("Reply <https://hotel.test/reply?id=1&t=2>"),
+        "{}",
+        draft.body
+    );
+}
+
+#[test]
+fn a_fuller_plain_part_wins_over_an_html_button_and_its_link_is_still_listed() {
+    let value = bot_read(
+        "From: Shop <orders@shop.test>\r\nTo: me@x.test\r\nSubject: Ready\r\n\
+         MIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"a\"\r\n\r\n\
+         --a\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n\
+         Your order is ready. Your pickup code is 4821. Show it at the desk.\r\n\
+         --a\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
+         <img src=\"https://shop.test/banner.png\"><a href=\"https://shop.test/order/7\">Details</a>\r\n--a--\r\n",
+    );
+    assert_eq!(
+        value["body"],
+        "Your order is ready. Your pickup code is 4821. Show it at the desk."
+    );
+    assert_eq!(
+        value["links"],
+        json!([{"text":"Details","url":"https://shop.test/order/7"}])
+    );
+}
+
+#[test]
+fn an_inline_html_part_after_a_plain_one_still_gives_its_links() {
+    let value = bot_read(
+        "From: Hotel <stay@hotel.test>\r\nTo: me@x.test\r\nSubject: Booking\r\n\
+         MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"m\"\r\n\r\n\
+         --m\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nHi.\r\n\
+         --m\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
+         <a href=\"https://hotel.test/reply\">Reply</a>\r\n--m--\r\n",
+    );
+    assert_eq!(
+        value["links"],
+        json!([{"text":"Reply","url":"https://hotel.test/reply"}])
+    );
+}
+
+#[test]
+fn every_inline_html_part_gives_its_links() {
+    let value = bot_read(
+        "From: Hotel <stay@hotel.test>\r\nTo: me@x.test\r\nSubject: Booking\r\n\
+         MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"m\"\r\n\r\n\
+         --m\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
+         <a href=\"https://hotel.test/terms\">Terms</a>\r\n\
+         --m\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
+         <a href=\"https://hotel.test/reply\">Reply</a>\r\n--m--\r\n",
+    );
+    assert_eq!(
+        value["body"],
+        "Terms <https://hotel.test/terms>\nReply <https://hotel.test/reply>"
+    );
+    assert_eq!(
+        value["links"],
+        json!([
+            {"text":"Terms","url":"https://hotel.test/terms"},
+            {"text":"Reply","url":"https://hotel.test/reply"},
+        ])
+    );
+}

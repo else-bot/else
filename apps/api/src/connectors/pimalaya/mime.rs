@@ -1,4 +1,5 @@
 use super::*;
+use else_visual::email::TextLink;
 
 pub(super) fn addresses(value: Option<&mail_parser::Address<'_>>) -> Vec<String> {
     value
@@ -35,15 +36,7 @@ pub(super) fn view(
     received_at: Option<String>,
 ) -> Value {
     use else_visual::email::{MAX_HTML_BYTES, MAX_INLINE_BASE64};
-    let html = parsed
-        .html_body
-        .first()
-        .and_then(|id| parsed.part(*id))
-        .and_then(|part| match &part.body {
-            mail_parser::PartType::Html(html) => Some(html.as_ref()),
-            _ => None,
-        });
-    let (html, html_omitted) = match html {
+    let (html, html_omitted) = match html_part(parsed) {
         Some(html) if html.len() > MAX_HTML_BYTES => (None, Some("too_large")),
         html => (html, None),
     };
@@ -81,6 +74,75 @@ pub(super) fn view(
         "to":people(parsed.to()),"cc":people(parsed.cc()),"reply_to":people(parsed.reply_to()),
         "text":text,"text_truncated":text.len() < body.len(),"html":html,
         "html_omitted":html_omitted,"inline":inline,"attachments":attachments})
+}
+
+/// The message's own HTML part, never one made from its text.
+fn html_part<'a>(parsed: &'a mail_parser::Message<'_>) -> Option<&'a str> {
+    parsed
+        .html_body
+        .iter()
+        .find_map(|id| match &parsed.part(*id)?.body {
+            mail_parser::PartType::Html(html) => Some(html.as_ref()),
+            _ => None,
+        })
+}
+
+/// The text a bot reads and the links in the message's HTML parts. The
+/// HTML's text, with each link's URL after its label, wins unless the plain
+/// part shows more words, URLs aside: a plain part is often only a pointer
+/// to the HTML, and an HTML part is sometimes only an image and a button.
+pub(super) fn bot_text(parsed: &mail_parser::Message<'_>) -> (String, Vec<TextLink>) {
+    let html: Vec<&str> = parsed
+        .html_body
+        .iter()
+        .filter_map(|id| match &parsed.part(*id)?.body {
+            mail_parser::PartType::Html(html) => Some(html.as_ref()),
+            _ => None,
+        })
+        .collect();
+    if html.is_empty() {
+        return (
+            parsed.body_text(0).unwrap_or_default().into_owned(),
+            Vec::new(),
+        );
+    }
+    let html = else_visual::email::as_text(html);
+    let plain_words = |plain: &str| {
+        plain
+            .split_whitespace()
+            .filter(|word| !word.contains("://"))
+            .count()
+    };
+    let plain = parsed
+        .text_body
+        .iter()
+        .find_map(|id| match &parsed.part(*id)?.body {
+            mail_parser::PartType::Text(text) => Some(text.as_ref()),
+            _ => None,
+        });
+    match plain {
+        Some(plain) if plain_words(plain) > html.words => (plain.to_owned(), html.links),
+        _ => (html.text, html.links),
+    }
+}
+
+/// A new message to `to` quoting the parsed one below `body`.
+pub(super) fn forward(parsed: &mail_parser::Message<'_>, to: Vec<String>, body: &str) -> Draft {
+    let subject = parsed.subject().unwrap_or_default();
+    Draft {
+        to,
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        attachments: Vec::new(),
+        reply_to: None,
+        message_id: None,
+        subject: format!("Fwd: {subject}"),
+        body: format!(
+            "{body}\n\n---------- Forwarded message ----------\nFrom: {}\nSubject: {subject}\n\n{}",
+            addresses(parsed.from()).join(", "),
+            bot_text(parsed).0
+        ),
+    }
 }
 
 pub(super) struct ThreadHeaders {

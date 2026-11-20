@@ -15,6 +15,9 @@ use takumi_core::paint_tree::{self, ElementInfo, PaintDocument};
 
 use crate::{Error, Rendered};
 
+mod text;
+pub use text::{Text, TextLink, as_text};
+
 /// Largest HTML part an email render takes.
 pub const MAX_HTML_BYTES: usize = 2 * 1024 * 1024;
 /// Largest total of base64 inline-image data an email render takes.

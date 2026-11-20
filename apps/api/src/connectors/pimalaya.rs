@@ -700,21 +700,7 @@ async fn execute(
             let parsed = MessageParser::default()
                 .parse(&raw)
                 .ok_or_else(|| MailError::new("invalid_email_message"))?;
-            let draft = Draft {
-                to: to.clone(),
-                cc: Vec::new(),
-                bcc: Vec::new(),
-                attachments: Vec::new(),
-                reply_to: None,
-                message_id: None,
-                subject: format!("Fwd: {}", parsed.subject().unwrap_or_default()),
-                body: format!(
-                    "{body}\n\n---------- Forwarded message ----------\nFrom: {}\nSubject: {}\n\n{}",
-                    addresses(parsed.from()).join(", "),
-                    parsed.subject().unwrap_or_default(),
-                    parsed.body_text(0).unwrap_or_default()
-                ),
-            };
+            let draft = mime::forward(&parsed, to.clone(), body);
             let bytes = compose_forward(&config.address, &draft, &raw)?;
             send_prepared(config, auth, &draft, bytes, phase).await
         }
@@ -761,13 +747,18 @@ fn parse(fetched: &Fetched) -> Result<mail_parser::Message<'_>, MailError> {
 }
 
 /// A message as a bot reads it: headers, up to 32,000 characters of text,
-/// and its attachments by part index.
+/// the links its HTML names (listed even past that cut), and its
+/// attachments by part index.
 pub fn read(fetched: &Fetched, message: &MessageRef) -> Result<Value, MailError> {
     let parsed = parse(fetched)?;
-    let body = parsed.body_text(0).unwrap_or_default();
+    let (body, links) = mime::bot_text(&parsed);
+    let links: Vec<Value> = links
+        .into_iter()
+        .map(|link| json!({"text":link.text,"url":link.url}))
+        .collect();
     let text: String = body.chars().take(32000).collect();
     Ok(
-        json!({"message":message,"source":"external_email","date":header_date(parsed.header_raw("Date")),"received_at":fetched.received_at,"subject":parsed.subject(),"from":addresses(parsed.from()),"to":addresses(parsed.to()),"cc":addresses(parsed.cc()),"reply_to":addresses(parsed.reply_to()),"body":text,"truncated":body.chars().count()>32000,"attachments":parsed.attachments().enumerate().map(|(part,a)|json!({"part":part,"name":a.attachment_name(),"media_type":media_type(a),"size":a.contents().len()})).collect::<Vec<_>>()}),
+        json!({"message":message,"source":"external_email","date":header_date(parsed.header_raw("Date")),"received_at":fetched.received_at,"subject":parsed.subject(),"from":addresses(parsed.from()),"to":addresses(parsed.to()),"cc":addresses(parsed.cc()),"reply_to":addresses(parsed.reply_to()),"body":text,"truncated":body.chars().count()>32000,"links":links,"attachments":parsed.attachments().enumerate().map(|(part,a)|json!({"part":part,"name":a.attachment_name(),"media_type":media_type(a),"size":a.contents().len()})).collect::<Vec<_>>()}),
     )
 }
 
