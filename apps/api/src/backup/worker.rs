@@ -1,10 +1,8 @@
-//! The one serialized backup worker. It captures sets, retries failures
-//! with a bounded backoff, keeps the newest completed local sets, and
-//! records every run. Its own loop runs a fixed interval for tests and
-//! operators: a missed set runs once at startup, not once per missed
-//! interval. A file lock on the backup directory (released by the kernel
-//! if the process dies) serializes capture, retention, and cleanup with a
-//! manual `else-api backup` run.
+//! The one serialized backup worker. It captures sets, keeps the newest
+//! completed local sets, and records every run; the backup service
+//! ([`super::service`]) schedules it. A file lock on the backup directory
+//! (released by the kernel if the process dies) serializes capture,
+//! retention, and cleanup with a manual `else-api backup` run.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,9 +14,6 @@ use tokio_util::sync::CancellationToken;
 use super::capture::{BackupConfig, Coordinator, SetSummary, create_set};
 use super::{BackupError, DatabaseParams};
 use crate::credentials::SecretKey;
-
-const FIRST_RETRY: Duration = Duration::from_secs(60);
-const MAX_RETRY: Duration = Duration::from_secs(3600);
 
 pub struct BackupWorker {
     pool: SqlitePool,
@@ -294,70 +289,5 @@ impl BackupWorker {
         })
         .await
         .map_err(|e| BackupError::Io(e.to_string()))?
-    }
-
-    /// Run the schedule: captures and uploads have separate deadlines, so
-    /// a bucket outage (or a conflicting old set) never stops local
-    /// backups, and pending uploads start at once after a restart.
-    /// Only a fixed interval runs here; the API's backup service owns the
-    /// daily schedule.
-    pub async fn run(self: Arc<Self>, cancel: CancellationToken) {
-        let super::capture::Cadence::Every(interval) = self.config.cadence else {
-            return;
-        };
-        if let Err(err) = self.recover().await {
-            tracing::warn!(error = %err, "backup recovery failed");
-        }
-        use tokio::time::Instant;
-        let mut capture_retry = FIRST_RETRY;
-        let mut upload_retry = FIRST_RETRY;
-        let mut capture_at = Instant::now() + self.next_due(interval).unwrap_or(FIRST_RETRY);
-        let mut upload_at = match &self.replicator {
-            Some(replicator) => match replicator.awaiting(&self.config.dir).await {
-                Ok(awaiting) if !awaiting.is_empty() => Some(Instant::now()),
-                _ => None,
-            },
-            None => None,
-        };
-        loop {
-            let wake = upload_at.map_or(capture_at, |u| u.min(capture_at));
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep_until(wake) => {}
-            }
-            if upload_at.is_some_and(|u| u <= Instant::now()) {
-                match self.replicate_now().await {
-                    Ok(_) => {
-                        upload_at = None;
-                        upload_retry = FIRST_RETRY;
-                    }
-                    Err(err) => {
-                        tracing::warn!(error = %err, "replication will be retried");
-                        upload_at = Some(Instant::now() + upload_retry);
-                        upload_retry = (upload_retry * 2).min(MAX_RETRY);
-                    }
-                }
-            }
-            if capture_at <= Instant::now() {
-                let result = self.run_once_until(&cancel).await;
-                if cancel.is_cancelled() {
-                    return;
-                }
-                match result {
-                    Ok(summary) => {
-                        capture_retry = FIRST_RETRY;
-                        capture_at = Instant::now() + self.next_due(interval).unwrap_or(interval);
-                        if matches!(summary.remote, Some(Err(_))) && upload_at.is_none() {
-                            upload_at = Some(Instant::now() + upload_retry);
-                            upload_retry = (upload_retry * 2).min(MAX_RETRY);
-                        }
-                    }
-                    Err(_) => {
-                        capture_at = Instant::now() + capture_retry.min(interval);
-                        capture_retry = (capture_retry * 2).min(MAX_RETRY);
-                    }
-                }
-            }
-        }
     }
 }

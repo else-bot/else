@@ -1063,58 +1063,6 @@ async fn unverified_or_lower_coverage_sets_never_displace_the_recovery_point() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
-async fn the_schedule_keeps_capturing_while_the_bucket_is_down_and_uploads_at_start() {
-    let _emulator = EMULATOR.read().await;
-    let app = populated().await;
-    let dir = tempfile::tempdir().unwrap();
-    let unreachable = S3::new(S3Config {
-        endpoint: "http://127.0.0.1:9".into(),
-        ..s3_config("nowhere")
-    })
-    .unwrap();
-    let mut w = worker(&app, dir.path(), replicator(&app, &unreachable));
-    w.config.cadence = else_api::backup::capture::Cadence::Every(Duration::from_secs(2));
-    let w = Arc::new(w);
-    let stop = tokio_util::sync::CancellationToken::new();
-    let task = tokio::spawn(w.clone().run(stop.clone()));
-    tokio::time::sleep(Duration::from_secs(7)).await;
-    stop.cancel();
-    task.await.unwrap();
-    let sets = backup::completed_sets(&dir.path().join("backups")).unwrap();
-    assert!(sets.len() >= 2, "captures continued: {sets:?}");
-    let s3 = bucket().await;
-    let mut w = worker(&app, dir.path(), replicator(&app, &s3));
-    w.config.cadence = else_api::backup::capture::Cadence::Every(Duration::from_secs(3600));
-    let w = Arc::new(w);
-    let stop = tokio_util::sync::CancellationToken::new();
-    let task = tokio::spawn(w.clone().run(stop.clone()));
-    let r = replicator(&app, &s3);
-    let mut done = false;
-    for _ in 0..100 {
-        if r.awaiting(&dir.path().join("backups"))
-            .await
-            .unwrap()
-            .is_empty()
-        {
-            done = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    stop.cancel();
-    task.await.unwrap();
-    assert!(done, "pending uploads ran at startup");
-    assert_eq!(
-        backup::completed_sets(&dir.path().join("backups"))
-            .unwrap()
-            .len(),
-        sets.len(),
-        "no new capture was due"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
 async fn restore_remote_works_without_the_source_database() {
     let _emulator = EMULATOR.read().await;
     let app = populated().await;

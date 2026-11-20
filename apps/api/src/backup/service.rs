@@ -160,6 +160,11 @@ struct Engine {
     coordinator: Coordinator,
 }
 
+/// The first wait after a failed run; each further failure doubles it, up
+/// to [`MAX_RETRY`].
+const FIRST_RETRY: Duration = Duration::from_secs(60);
+const MAX_RETRY: Duration = Duration::from_secs(3600);
+
 #[derive(Clone, Copy)]
 enum Job {
     Local,
@@ -272,7 +277,7 @@ impl Engine {
                     self.key.clone(),
                     self.config(settings),
                 );
-                Some(Instant::now() + worker.next_due(interval).unwrap_or(Duration::from_secs(60)))
+                Some(Instant::now() + worker.next_due(interval).unwrap_or(FIRST_RETRY))
             }
             Cadence::Daily => settings
                 .local
@@ -686,21 +691,59 @@ fn size(path: &Path) -> u64 {
         .fold(0u64, |sum, entry| sum.saturating_add(size(&entry.path())))
 }
 
+/// What the service is doing: nothing, or one backup task.
+enum Activity {
+    Idle,
+    Running {
+        kind: Job,
+        task: JoinHandle<Result<(), Failure>>,
+    },
+}
+
+/// The schedule of local captures or of remote runs: when the next one is
+/// due, how long a failure waits before it retries, and the last error.
+struct Track {
+    due: Option<Instant>,
+    backoff: Duration,
+    error: Option<String>,
+}
+
+impl Track {
+    fn new(due: Option<Instant>) -> Self {
+        Self {
+            due,
+            backoff: FIRST_RETRY,
+            error: None,
+        }
+    }
+
+    fn succeeded(&mut self) {
+        self.backoff = FIRST_RETRY;
+        self.error = None;
+    }
+
+    /// Record a failure and return how long its retry waits.
+    fn failed(&mut self, message: String) -> Duration {
+        let wait = self.backoff;
+        self.backoff = (self.backoff * 2).min(MAX_RETRY);
+        self.error = Some(message);
+        wait
+    }
+}
+
 async fn run(
     engine: Engine,
     mut settings: Settings,
     mut rx: mpsc::Receiver<Command>,
-    mut local_at: Option<Instant>,
-    mut remote_at: Option<Instant>,
+    local_at: Option<Instant>,
+    remote_at: Option<Instant>,
     cancel: CancellationToken,
 ) {
-    let mut job: Option<JoinHandle<Result<(), Failure>>> = None;
-    let mut kind = Job::Local;
-    let mut retry_at = None;
-    let mut local_retry = Duration::from_secs(60);
-    let mut remote_retry = Duration::from_secs(60);
-    let mut local_error = None;
-    let mut remote_error = None;
+    let mut activity = Activity::Idle;
+    let mut local = Track::new(local_at);
+    let mut remote = Track::new(remote_at);
+    // An upload-only retry of the remote track, apart from its full runs.
+    let mut upload_retry = None;
     if settings.enabled
         && settings.interval_secs > 0
         && let Ok(worker) = engine.worker(&settings, true)
@@ -710,17 +753,19 @@ async fn run(
             .await
             .is_ok_and(|v| !v.is_empty())
     {
-        retry_at = Some(Instant::now());
+        upload_retry = Some(Instant::now());
     }
     loop {
-        let wake = if job.is_some() {
-            None
-        } else {
-            [local_at, remote_at, retry_at].into_iter().flatten().min()
+        let wake = match activity {
+            Activity::Running { .. } => None,
+            Activity::Idle => [local.due, remote.due, upload_retry]
+                .into_iter()
+                .flatten()
+                .min(),
         };
         tokio::select! {
             _ = cancel.cancelled() => {
-                if let Some(mut task) = job
+                if let Activity::Running { mut task, .. } = activity
                     && tokio::time::timeout(Duration::from_secs(30), &mut task).await.is_err()
                 {
                     task.abort();
@@ -732,10 +777,10 @@ async fn run(
                 Command::Read(reply) => {
                     let _ = reply.send(RuntimeView {
                         settings: settings.clone(),
-                        running: job.is_some(),
-                        next_backup_at: [remote_at, retry_at].into_iter().flatten().min().map(wall_time),
-                        next_local_at: local_at.map(wall_time),
-                        last_error: remote_error.clone().or_else(|| local_error.clone()),
+                        running: matches!(activity, Activity::Running { .. }),
+                        next_backup_at: [remote.due, upload_retry].into_iter().flatten().min().map(wall_time),
+                        next_local_at: local.due.map(wall_time),
+                        last_error: remote.error.clone().or_else(|| local.error.clone()),
                     });
                 }
                 Command::Resolve(revision, input, reply) => {
@@ -748,13 +793,13 @@ async fn run(
                 }
                 Command::Save(update, reply) => {
                     let result = async {
-                        if job.is_some() { return Err(Error::Busy); }
+                        if matches!(activity, Activity::Running { .. }) { return Err(Error::Busy); }
                         let next = settings.updated(update)?;
                         settings::save(&engine.pool, &engine.key, &next).await?;
                         settings = next;
-                        remote_at = engine.next_remote(&settings).await?;
-                        retry_at = None;
-                        remote_error = None;
+                        remote.due = engine.next_remote(&settings).await?;
+                        remote.error = None;
+                        upload_retry = None;
                         Ok(())
                     }.await;
                     let _ = reply.send(result);
@@ -771,85 +816,71 @@ async fn run(
                         settings = next;
                         // A capture reschedules when it ends; an upload-only
                         // retry does not, so apply the new time now.
-                        if job.is_none() || matches!(kind, Job::Retry) {
-                            local_at = engine.next_local(&settings);
+                        if matches!(activity, Activity::Idle | Activity::Running { kind: Job::Retry, .. }) {
+                            local.due = engine.next_local(&settings);
                         }
                         Ok(())
                     }.await;
                     let _ = reply.send(result);
                 }
                 Command::Run(reply) => {
-                    let result = if job.is_some() {
+                    let result = if matches!(activity, Activity::Running { .. }) {
                         Err(Error::Busy)
                     } else if settings.destination.is_none() {
                         Err(Error::Invalid("Configure a backup destination first."))
                     } else {
                         engine.spawn(&settings, Job::Remote, cancel.child_token()).map(|task| {
-                            kind = Job::Remote;
-                            job = Some(task);
+                            activity = Activity::Running { kind: Job::Remote, task };
                         })
                     };
                     let _ = reply.send(result);
                 }
             },
             outcome = async {
-                match job.as_mut() {
-                    Some(task) => task.await,
-                    None => std::future::pending().await,
+                match &mut activity {
+                    Activity::Running { task, .. } => task.await,
+                    Activity::Idle => std::future::pending().await,
                 }
             } => {
-                job = None;
+                let Activity::Running { kind, .. } = std::mem::replace(&mut activity, Activity::Idle) else {
+                    unreachable!("only a running task finishes");
+                };
                 let result = outcome.unwrap_or_else(|_| Err(Failure::Capture("Backup task stopped unexpectedly.".into())));
                 // An upload-only retry captured nothing, so a local backup
                 // that fell due meanwhile still runs.
                 if !matches!(kind, Job::Retry) {
-                    local_at = engine.next_local(&settings);
+                    local.due = engine.next_local(&settings);
                 }
-                match result {
-                    Ok(()) => {
-                        match kind {
-                            Job::Local => {
-                                local_error = None;
-                                local_retry = Duration::from_secs(60);
-                            }
-                            Job::Remote => {
-                                local_error = None;
-                                remote_error = None;
-                                local_retry = Duration::from_secs(60);
-                            }
-                            Job::Retry => remote_error = None,
+                match (kind, result) {
+                    (Job::Local, Ok(())) => local.succeeded(),
+                    (Job::Local, Err(error)) => {
+                        let wait = local.failed(error.message());
+                        local.due = engine.retry_local(&settings, wait);
+                    }
+                    (Job::Remote | Job::Retry, Ok(())) => {
+                        if matches!(kind, Job::Remote) {
+                            local.succeeded();
                         }
-                        if !matches!(kind, Job::Local) {
-                            retry_at = None;
-                            remote_retry = Duration::from_secs(60);
-                            remote_at = engine.next_remote(&settings).await.unwrap_or(None);
-                            if remote_at.is_some_and(|at| at <= Instant::now()) {
-                                remote_at = Some(Instant::now() + Duration::from_secs(settings.interval_secs.max(60)));
-                            }
+                        remote.succeeded();
+                        upload_retry = None;
+                        remote.due = engine.next_remote(&settings).await.unwrap_or(None);
+                        if remote.due.is_some_and(|at| at <= Instant::now()) {
+                            remote.due = Some(Instant::now() + Duration::from_secs(settings.interval_secs).max(FIRST_RETRY));
                         }
                     }
-                    Err(error) => {
-                        if matches!(kind, Job::Local) {
-                            local_error = Some(error.message());
-                            local_at = engine.retry_local(&settings, local_retry);
-                            local_retry = (local_retry * 2).min(Duration::from_secs(3600));
-                        } else {
-                            remote_error = Some(error.message());
-                        }
-                        if !matches!(kind, Job::Local) && settings.enabled && settings.interval_secs > 0 {
+                    (Job::Remote | Job::Retry, Err(error)) => {
+                        let wait = remote.failed(error.message());
+                        if settings.enabled && settings.interval_secs > 0 {
                             match error {
                                 Failure::Capture(_) => {
-                                    remote_at = Some(Instant::now() + remote_retry);
-                                    retry_at = None;
+                                    remote.due = Some(Instant::now() + wait);
+                                    upload_retry = None;
                                 }
                                 Failure::Upload(_) => {
-                                    retry_at = Some(Instant::now() + remote_retry);
-                                    remote_at = Some(Instant::now() + Duration::from_secs(settings.interval_secs));
+                                    upload_retry = Some(Instant::now() + wait);
+                                    remote.due = Some(Instant::now() + Duration::from_secs(settings.interval_secs));
                                 }
                             }
-                        }
-                        if !matches!(kind, Job::Local) {
-                            remote_retry = (remote_retry * 2).min(Duration::from_secs(3600));
                         }
                     }
                 }
@@ -861,20 +892,20 @@ async fn run(
                 }
             } => {
                 let now = Instant::now();
-                kind = if remote_at.is_some_and(|at| at <= now) {
+                let kind = if remote.due.is_some_and(|at| at <= now) {
                     Job::Remote
-                } else if local_at.is_some_and(|at| at <= now) {
+                } else if local.due.is_some_and(|at| at <= now) {
                     Job::Local
                 } else {
                     Job::Retry
                 };
                 match engine.spawn(&settings, kind, cancel.child_token()) {
-                    Ok(task) => job = Some(task),
+                    Ok(task) => activity = Activity::Running { kind, task },
                     Err(error) => {
-                        remote_error = Some(error.to_string());
-                        remote_at = None;
-                        retry_at = None;
-                        local_at = engine.retry_local(&settings, Duration::from_secs(60));
+                        remote.error = Some(error.to_string());
+                        remote.due = None;
+                        upload_retry = None;
+                        local.due = engine.retry_local(&settings, FIRST_RETRY);
                     }
                 }
             }

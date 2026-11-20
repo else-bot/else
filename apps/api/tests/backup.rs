@@ -577,31 +577,34 @@ async fn scheduling_serializes_runs_and_keeps_the_newest_sets() {
         .count();
     assert_eq!(refused, 1, "{a:?} {b:?}");
     let empty = tempfile::tempdir().unwrap();
-    let mut cfg = config(empty.path());
-    cfg.cadence = else_api::backup::capture::Cadence::Every(Duration::from_secs(3600));
-    let scheduled = Arc::new(BackupWorker::new(
-        app.db.pool.clone(),
-        DatabaseParams::parse(app.db.url.expose()).unwrap(),
-        Arc::new(key(1)),
-        cfg,
-    ));
+    let mut app_config = TestApp::config(&app.db);
+    app_config.backup = config(empty.path());
     let stop = tokio_util::sync::CancellationToken::new();
-    let task = tokio::spawn(scheduled.clone().run(stop.clone()));
-    for _ in 0..200 {
-        if !backup::completed_sets(&empty.path().join("backups"))
-            .unwrap()
+    let (_service, task) = else_api::backup::service::Backups::start(
+        &app_config,
+        app.db.pool.clone(),
+        Arc::new(key(1)),
+        Default::default(),
+        stop.clone(),
+    )
+    .await
+    .unwrap();
+    let scheduled = empty.path().join("backups");
+    tokio::time::timeout(common::SETTLE, async {
+        while backup::completed_sets(&scheduled)
+            .unwrap_or_default()
             .is_empty()
         {
-            break;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    })
+    .await
+    .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
-        backup::completed_sets(&empty.path().join("backups"))
-            .unwrap()
-            .len(),
-        1
+        backup::completed_sets(&scheduled).unwrap().len(),
+        1,
+        "a missed set runs once at startup, then waits for its interval"
     );
     stop.cancel();
     task.await.unwrap();
