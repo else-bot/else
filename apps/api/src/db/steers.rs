@@ -24,6 +24,7 @@ use uuid::Uuid;
 use super::turns::{ACTIVE_STATUSES, TurnStatus};
 use crate::app::messages::MessagePart;
 use crate::app::providers::Steer;
+use crate::db::in_ids;
 
 /// How far the message got into the reply it joined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, strum::IntoStaticStr, serde::Serialize)]
@@ -312,13 +313,14 @@ pub async fn fold(
     if turn_ids.is_empty() {
         return Ok(());
     }
-    let folded: Vec<Uuid> = sqlx::query_scalar(
+    let folded: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "UPDATE turn_steers SET status = 'delivered'
          WHERE into_turn_id = ?1 AND status = 'pending'
-           AND lower(hex(turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?2))
+           AND {}
            AND EXISTS (SELECT 1 FROM turns WHERE id = turn_steers.turn_id AND status = 'queued')
          RETURNING turn_id",
-    )
+        in_ids("turn_id", "?2")
+    )))
     .bind(into)
     .bind(Json(turn_ids))
     .fetch_all(&mut *conn)

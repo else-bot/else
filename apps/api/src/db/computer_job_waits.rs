@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use super::events;
 use crate::computers::jobs::JobStatus;
+use crate::db::in_ids;
 
 /// A wait's lifecycle, as stored in `computer_job_waits.status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
@@ -158,14 +159,15 @@ pub async fn pending_for_turns(
     conn: &mut SqliteConnection,
     turn_ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Vec<Pending>>, sqlx::Error> {
-    let rows: Vec<Pending> = sqlx::query_as(
+    let rows: Vec<Pending> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT w.id, w.turn_id, w.job_id, substr(j.command, 1, 500) AS command,
              j.purpose, j.status AS job_status, w.created_at
          FROM computer_job_waits w JOIN guest_jobs j ON j.id = w.job_id
          WHERE w.status = 'pending'
-           AND lower(hex(w.turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))
+           AND {}
          ORDER BY w.created_at, w.id",
-    )
+        in_ids("w.turn_id", "?1")
+    )))
     .bind(Json(turn_ids))
     .fetch_all(&mut *conn)
     .await?;
@@ -277,11 +279,12 @@ pub async fn mark_delivered(
     attempt: i32,
     ids: &[Uuid],
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE computer_job_waits SET delivered_attempt = ?3
          WHERE turn_id = ?1 AND delivered_attempt IS NULL
-           AND lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?2))",
-    )
+           AND {}",
+        in_ids("id", "?2")
+    )))
     .bind(turn_id)
     .bind(Json(ids))
     .bind(attempt)

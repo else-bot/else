@@ -1,5 +1,6 @@
 use super::types::*;
 use crate::credentials::SecretKey;
+use crate::db::in_ids;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -714,7 +715,13 @@ pub async fn setups(
     conn: &mut SqliteConnection,
     ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Vec<Setup>>, sqlx::Error> {
-    let rows:Vec<Setup>=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {SETUP_COLUMNS} FROM social_setups WHERE lower(hex(turn_id)) IN (SELECT replace(value,'-','') FROM json_each(?1))"))).bind(Json(ids)).fetch_all(conn).await?;
+    let rows: Vec<Setup> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {SETUP_COLUMNS} FROM social_setups WHERE {}",
+        in_ids("turn_id", "?1")
+    )))
+    .bind(Json(ids))
+    .fetch_all(conn)
+    .await?;
     let mut map: HashMap<Uuid, Vec<Setup>> = HashMap::new();
     for row in rows {
         map.entry(row.turn_id).or_default().push(row);

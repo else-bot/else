@@ -41,6 +41,12 @@ use crate::config::DatabaseUrl;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+/// `column IN` the UUIDs bound as a JSON array at `param`. The list side is
+/// converted, not the column, so SQLite can search the column's index.
+pub(crate) fn in_ids(column: &str, param: &str) -> String {
+    format!("{column} IN (SELECT unhex(replace(value, '-', '')) FROM json_each({param}))")
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
     #[error("DATABASE_URL is not a valid SQLite connection URL")]
@@ -242,7 +248,65 @@ pub fn options(url: &str) -> Result<SqliteConnectOptions, DbError> {
 
 #[cfg(test)]
 mod tests {
-    use super::MIGRATOR;
+    use super::{MIGRATOR, in_ids};
+    use sqlx::types::Json;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn id_list_lookups_search_the_column_index() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        super::migrate(&pool).await.unwrap();
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN QUERY PLAN SELECT id FROM secret_requests WHERE {}",
+            in_ids("turn_id", "?1")
+        )))
+        .bind(Json([Uuid::new_v4()]))
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            plan.iter()
+                .any(|(.., step)| step.starts_with("SEARCH secret_requests USING")),
+            "{plan:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn id_lists_match_and_exclude_exactly_the_listed_ids() {
+        let mut conn = <sqlx::SqliteConnection as sqlx::Connection>::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE t (id BLOB PRIMARY KEY)")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        let (listed, other) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        for id in [listed, other] {
+            sqlx::query("INSERT INTO t VALUES (?1)")
+                .bind(id)
+                .execute(&mut conn)
+                .await
+                .unwrap();
+        }
+        let mut select = async |filter: String, ids: &[Uuid]| -> Vec<Uuid> {
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT id FROM t WHERE {filter} ORDER BY id"
+            )))
+            .bind(Json(ids))
+            .fetch_all(&mut conn)
+            .await
+            .unwrap()
+        };
+        assert_eq!(select(in_ids("id", "?1"), &[listed]).await, [listed]);
+        assert_eq!(select(in_ids("id", "?1"), &[]).await, Vec::<Uuid>::new());
+        let not_in = format!("NOT ({})", in_ids("id", "?1"));
+        assert_eq!(select(not_in.clone(), &[listed]).await, [other]);
+        assert_eq!(select(not_in, &[]).await, [listed, other]);
+    }
 
     /// SQLx records each applied migration by its version number, so a
     /// shipped version can never be renumbered. Keep new ones contiguous.

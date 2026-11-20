@@ -20,7 +20,7 @@ use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use super::events;
+use super::{events, in_ids};
 
 pub const MAX_SUMMARY: usize = 300;
 pub const MAX_TRIED: usize = 200;
@@ -439,8 +439,9 @@ pub async fn for_turns(
 ) -> Result<HashMap<Uuid, Vec<Notice>>, sqlx::Error> {
     let rows: Vec<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM owner_notices
-         WHERE lower(hex(turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))
-         ORDER BY created_at, id"
+         WHERE {}
+         ORDER BY created_at, id",
+        in_ids("turn_id", "?1")
     )))
     .bind(Json(turn_ids))
     .fetch_all(&mut *conn)

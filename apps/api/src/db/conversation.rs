@@ -3,6 +3,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use super::bots::{self, BotRecord};
+use super::in_ids;
 use super::turns::{ITEM_COLUMNS, ItemRecord, TURN_COLUMNS, TurnRecord, UNFINISHED_STATUSES};
 
 /// The items a conversation shows the owner.
@@ -68,10 +69,10 @@ pub async fn snapshot(
     let mut turns: Vec<TurnRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {TURN_COLUMNS} FROM turns t
          WHERE t.bot_id = ?1
-           AND (lower(hex(t.id)) IN (SELECT replace(value, '-', '') FROM json_each(?2)) OR t.status IN {UNFINISHED_STATUSES}
+           AND ({} OR t.status IN {UNFINISHED_STATUSES}
                 OR EXISTS (SELECT 1 FROM computer_handoffs h WHERE h.turn_id = t.id AND h.status IN ('pending', 'taken'))
                 OR EXISTS (SELECT 1 FROM owner_notices n WHERE n.turn_id = t.id AND n.status = 'pending'))
-         ORDER BY t.turn_no"
+         ORDER BY t.turn_no", in_ids("t.id", "?2")
     )))
     .bind(bot_id)
     .bind(sqlx::types::Json(&turn_ids))
@@ -262,8 +263,9 @@ pub async fn window(
     let mut turns: Vec<TurnRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {TURN_COLUMNS} FROM turns t
          WHERE t.bot_id = ?1
-           AND lower(hex(t.id)) IN (SELECT replace(value, '-', '') FROM json_each(?2))
-         ORDER BY t.turn_no"
+           AND {}
+         ORDER BY t.turn_no",
+        in_ids("t.id", "?2")
     )))
     .bind(bot_id)
     .bind(sqlx::types::Json(&turn_ids))

@@ -31,6 +31,7 @@ use crate::app::outgoing::{
     self, ApprovalSource, Content, Delivery, DraftKind, Edits, Outcome, Status,
 };
 use crate::app::questions::GrantReach;
+use crate::db::in_ids;
 
 /// Drafts per owner request (turn).
 pub const MAX_PER_TURN: i64 = 8;
@@ -239,8 +240,9 @@ pub async fn for_turns(
     turn_ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Vec<OutgoingDraft>>, sqlx::Error> {
     let rows: Vec<OutgoingDraft> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "{SELECT} WHERE lower(hex(d.turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))
-         ORDER BY d.created_at, d.id"
+        "{SELECT} WHERE {}
+         ORDER BY d.created_at, d.id",
+        in_ids("d.turn_id", "?1")
     )))
     .bind(Json(turn_ids))
     .fetch_all(&mut *conn)
@@ -1172,12 +1174,13 @@ pub async fn record_sent_check(
         return Ok(draft);
     }
     if let Ok(check) = check {
-        let marked = sqlx::query(
+        let marked = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE draft_mail_sends SET sent_check = ?2,
                  checked_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
              WHERE draft_id = ?1 AND sent_check IS NULL
-               AND lower(hex(action_id)) IN (SELECT replace(value, '-', '') FROM json_each(?3))",
-        )
+               AND {}",
+            in_ids("action_id", "?3")
+        )))
         .bind(draft_id)
         .bind(check)
         .bind(Json(earlier))
@@ -1290,11 +1293,12 @@ pub async fn mark_delivered(
     attempt: i32,
     ids: &[Uuid],
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE outgoing_drafts SET delivered_attempt = ?3
          WHERE turn_id = ?1 AND delivered_attempt IS NULL
-           AND lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?2))",
-    )
+           AND {}",
+        in_ids("id", "?2")
+    )))
     .bind(turn_id)
     .bind(Json(ids))
     .bind(attempt)
