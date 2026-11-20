@@ -102,9 +102,10 @@ impl Shell {
             return;
         }
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(PLACEHOLDER));
-        let subscription = cx.subscribe_in(&input, window, |shell, _, event, _, cx| {
+        let subscription = cx.subscribe_in(&input, window, |shell, _, event, window, cx| {
             if matches!(event, InputEvent::Change) {
                 shell.search_switcher(cx);
+                shell.preload_highlighted(window, cx);
             }
         });
         let restore = window
@@ -123,6 +124,7 @@ impl Shell {
             server: active,
             _input: subscription,
         });
+        self.preload_highlighted(window, cx);
         cx.notify();
     }
 
@@ -131,6 +133,25 @@ impl Shell {
             switcher.restore.focus(window, cx);
         }
         cx.notify();
+    }
+
+    /// Preloads the highlighted bot's conversation if it is on the shown
+    /// server, so opening it lands warm.
+    fn preload_highlighted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(switcher), Some(active)) = (&self.switcher, &self.active) else {
+            return;
+        };
+        if let Some(Target::Bot { server, bot }) = switcher
+            .picker
+            .hits
+            .get(switcher.picker.selected)
+            .map(|hit| hit.target)
+            && server == active.id
+        {
+            active
+                .app
+                .update(cx, |app, cx| app.dwell_on(bot, window, cx));
+        }
     }
 
     fn search_switcher(&mut self, cx: &mut Context<Self>) {
@@ -161,6 +182,7 @@ impl Shell {
                 switcher
                     .scroll
                     .scroll_to_item(switcher.picker.selected, ScrollStrategy::Nearest);
+                self.preload_highlighted(window, cx);
                 cx.notify();
             }
             Outcome::Rescoped => {
@@ -668,10 +690,11 @@ impl Shell {
                 .rounded(theme.radius)
                 .cursor_pointer()
                 .when(selected, |row| row.bg(theme.accent))
-                .on_mouse_move(cx.listener(move |shell, _, _, cx| {
+                .on_mouse_move(cx.listener(move |shell, _, window, cx| {
                     if let Some(switcher) = &mut shell.switcher
                         && switcher.picker.select(ix)
                     {
+                        shell.preload_highlighted(window, cx);
                         cx.notify();
                     }
                 }))

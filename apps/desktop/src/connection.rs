@@ -475,7 +475,10 @@ impl Shell {
                 )
             })
             .unwrap_or_default();
-        let app = cx.new(|cx| ElseApp::new(client.clone(), preferences, window, cx));
+        let saved = self.launch.store.as_ref().ok().map(|store| {
+            crate::saved_conversations::SavedConversations::new(store.saved_conversations_dir(id))
+        });
+        let app = cx.new(|cx| ElseApp::new(client.clone(), preferences, saved, window, cx));
         let observer = cx.observe_in(&app, window, move |shell, app, window, cx| {
             let attention = app.read(cx).attention();
             let session = match shell.active.as_mut() {

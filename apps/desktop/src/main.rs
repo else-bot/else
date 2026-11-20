@@ -21,6 +21,7 @@ mod panel_kit;
 mod preferences;
 mod profile_picker;
 mod quick_switcher;
+mod saved_conversations;
 mod server_icon;
 mod sidebar;
 mod skill_ui;

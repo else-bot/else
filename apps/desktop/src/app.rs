@@ -40,6 +40,7 @@ mod usage;
 mod view;
 mod visuals;
 mod waiting_tray;
+mod warm;
 
 use categories::CategoryFormHolder;
 use conversation::{ConversationView, RowKey};
@@ -334,6 +335,11 @@ pub struct ElseApp {
     default_bot_id: Option<Uuid>,
     selected: Option<Uuid>,
     view: Option<ConversationView>,
+    /// Bots' views kept after switching away.
+    warm: warm::Warm<ConversationView>,
+    /// Starts preloading a bot's view once the pointer rests on it.
+    _preload: Option<(Uuid, Task<()>)>,
+    saved: Option<crate::saved_conversations::SavedConversations>,
     composer: Entity<TextareaState>,
     clipboard_read: Option<Task<()>>,
     mentions: mentions::MentionMenu,
@@ -399,6 +405,7 @@ impl ElseApp {
     pub fn new(
         client: Arc<Client>,
         preferences: crate::preferences::Preferences,
+        saved: Option<crate::saved_conversations::SavedConversations>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -448,6 +455,9 @@ impl ElseApp {
             default_bot_id: None,
             selected: None,
             view: None,
+            warm: Default::default(),
+            _preload: None,
+            saved,
             composer,
             clipboard_read: None,
             mentions: Default::default(),
@@ -649,6 +659,8 @@ impl ElseApp {
             self.mention_bots = Arc::new(mention_bots);
         }
         self.categories = list.categories;
+        let bots = &self.bots;
+        self.warm.retain(|id| bots.iter().any(|bot| bot.id == id));
         self.carry_category_order(cx);
         self.stopping.retain(|id| {
             self.bots
@@ -806,33 +818,16 @@ impl ElseApp {
             state.set_placeholder(placeholder, window, cx);
         });
         self.notice = None;
-        if let Some(old) = self.view.as_ref() {
-            self.live_command(LiveCommand::Unsubscribe { bot: old.bot_id });
-        }
         self.clear_secret_forms(window, cx);
         self.clear_social_forms(window, cx);
-        self.view = id.map(|id| {
-            let mut view = ConversationView::new(id);
+        self.swap_view(id, cx);
+        if let Some(view) = self.view.as_mut() {
             view.unread_since = unread_since;
-            view
-        });
-        if let Some(view) = &self.view {
-            let this = cx.entity().downgrade();
-            view.list.set_scroll_handler(move |_, window, cx| {
-                let _ = this.update(cx, |app, cx| {
-                    // The owner scrolled, so an exchange still laying out
-                    // no longer moves the view when it lands.
-                    if let Some(view) = app.view.as_mut() {
-                        view.landing = None;
-                    }
-                    app.check_reading(window, cx)
-                });
-            });
         }
         self.ensure_settings(window, cx);
         if id.is_some() {
             self.sync_rows(window, cx);
-            self.load_conversation(window, cx);
+            self.resume_view(window, cx);
         }
         cx.notify();
     }

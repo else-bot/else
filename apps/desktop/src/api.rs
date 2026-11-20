@@ -517,6 +517,12 @@ struct BotEnvelope {
     bot: Bot,
 }
 
+/// A bot's newest conversation page and the response it was read from.
+pub struct Latest {
+    pub snapshot: Snapshot,
+    pub raw: String,
+}
+
 /// The server's canonical owner item and turn for an accepted message.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Sent {
@@ -806,6 +812,19 @@ impl Client {
             None => format!("/v1/bots/{bot}/conversation?limit=50"),
         };
         self.call(Method::GET, path, None).await.map(|(_, s)| s)
+    }
+
+    /// The newest page of `bot`'s conversation, with the response as sent
+    /// so it can be saved and read back.
+    pub async fn latest(self: Arc<Self>, bot: Uuid) -> Result<Latest, ClientError> {
+        let path = format!("/v1/bots/{bot}/conversation?limit=50");
+        let (_, value): (_, serde_json::Value) = self.call(Method::GET, path, None).await?;
+        let snapshot =
+            Snapshot::deserialize(&value).map_err(|err| ClientError::Protocol(err.to_string()))?;
+        Ok(Latest {
+            snapshot,
+            raw: value.to_string(),
+        })
     }
 
     /// The owner messages and bot replies of `bot` that show `query`.

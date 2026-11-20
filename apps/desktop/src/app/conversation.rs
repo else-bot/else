@@ -560,6 +560,8 @@ pub(super) struct ConversationView {
     pub(super) unread_since: Option<ReplyPosition>,
     pub(super) _unread_dismissal: Option<Task<()>>,
     pub(super) conversation: Option<Conversation>,
+    /// `conversation` is the saved page, shown until the server's arrives.
+    pub(super) stale: bool,
     pub(super) stream_problem: Option<String>,
     pub(super) loading_older: bool,
     pub(super) rows: Vec<TranscriptRow>,
@@ -619,6 +621,7 @@ pub(super) struct ConversationView {
     pub(super) find: Option<super::find::Find>,
     /// The gap row being loaded, by the loaded item just above it.
     pub(super) loading_gap: Option<(i64, Task<()>)>,
+    /// Loads the newest page, or waits to retry; `None` once it settles.
     pub(super) _load: Option<Task<()>>,
     pub(super) _older: Option<Task<()>>,
 }
@@ -696,6 +699,7 @@ impl ConversationView {
             unread_since: None,
             _unread_dismissal: None,
             conversation: None,
+            stale: false,
             stream_problem: None,
             loading_older: false,
             rows: Vec::new(),
@@ -738,6 +742,21 @@ impl ConversationView {
             _older: None,
         }
     }
+
+    /// Settles what only the shown view finishes, before switching away:
+    /// older pages and gaps that were loading, a pending jump and the
+    /// unread divider. Its newest page keeps loading.
+    pub(super) fn park(&mut self) {
+        self.unread_since = None;
+        self._unread_dismissal = None;
+        self.loading_older = false;
+        self._older = None;
+        self.loading_gap = None;
+        self.pending_reveal = None;
+        self.revealed = None;
+        self._reveal_clock = None;
+        self.landing = None;
+    }
 }
 
 impl ElseApp {
@@ -751,12 +770,43 @@ impl ElseApp {
     }
 
     pub(super) fn load_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (client, Some(view)) = (self.client.clone(), self.view.as_mut()) else {
+        if let Some(bot) = self.view.as_ref().map(|view| view.bot_id) {
+            self.load_into(bot, window, cx);
+        }
+    }
+
+    /// Loads `bot`'s newest page into its view, shown or warm. A view with
+    /// nothing to draw shows the saved page while the server's loads.
+    pub(super) fn load_into(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let (client, saved) = (self.client.clone(), self.saved.clone());
+        let Some(view) = self.view_of(bot) else {
             return;
         };
-        let bot = view.bot_id;
+        let cold = view.conversation.is_none();
         view._load = Some(cx.spawn_in(window, async move |this, cx| {
-            let snapshot = client.snapshot(bot, None).await;
+            let fetch = cx.background_executor().spawn(client.latest(bot));
+            if cold
+                && let Some(saved) = saved.clone()
+                && let Some(page) = cx
+                    .background_executor()
+                    .spawn(async move { saved.load(bot) })
+                    .await
+            {
+                let _ =
+                    this.update_in(cx, |app, window, cx| app.apply_saved(bot, page, window, cx));
+            }
+            let snapshot = fetch.await.map(|crate::api::Latest { snapshot, raw }| {
+                if let Some(saved) = saved {
+                    cx.background_executor()
+                        .spawn(async move {
+                            if let Err(err) = saved.save(bot, &raw) {
+                                eprintln!("{err}");
+                            }
+                        })
+                        .detach();
+                }
+                snapshot
+            });
             let _ = this.update_in(cx, |app, window, cx| {
                 if let Some(cursor) = app.apply_snapshot(bot, snapshot, window, cx) {
                     app.live_command(LiveCommand::Subscribe { bot, cursor });
@@ -765,6 +815,30 @@ impl ElseApp {
         }));
     }
 
+    /// Shows the saved page of a view still waiting for its first one.
+    fn apply_saved(
+        &mut self,
+        bot: Uuid,
+        page: Snapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = self.shows(bot);
+        let Some(view) = self.view_of(bot).filter(|v| v.conversation.is_none()) else {
+            return;
+        };
+        let Ok(conversation) = Conversation::from_snapshot(page) else {
+            return;
+        };
+        view.conversation = Some(conversation);
+        view.stale = true;
+        if shown {
+            self.sync_rows(window, cx);
+        }
+    }
+
+    /// Applies `bot`'s newest page to its view, and returns the cursor to
+    /// follow if the view is shown.
     fn apply_snapshot(
         &mut self,
         bot: Uuid,
@@ -772,13 +846,19 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<String> {
-        let view = self.view.as_mut().filter(|v| v.bot_id == bot)?;
+        let shown = self.shows(bot);
+        let view = self.view_of(bot)?;
+        view._load = None;
         match snapshot.map(Conversation::from_snapshot) {
             Ok(Ok(conversation)) => {
                 let cursor = conversation.cursor();
                 view.conversation = Some(conversation);
+                view.stale = false;
                 view.loading_gap = None;
                 view.stream_problem = None;
+                if !shown {
+                    return None;
+                }
                 self.sync_rows(window, cx);
                 self.ensure_rules(bot, window, cx);
                 Some(cursor)
@@ -795,15 +875,18 @@ impl ElseApp {
             Err(err) => {
                 view.stream_problem = Some(format!("Could not load history: {err}"));
                 cx.notify();
-                let retry = cx.spawn_in(window, async move |this, cx| {
-                    cx.background_executor().timer(Duration::from_secs(2)).await;
-                    let _ = this.update_in(cx, |app, window, cx| {
-                        if app.view.as_ref().is_some_and(|v| v.bot_id == bot) {
-                            app.load_conversation(window, cx);
-                        }
-                    });
-                });
-                retry.detach();
+                if shown {
+                    view._load = Some(cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(Duration::from_secs(2)).await;
+                        let _ = this.update_in(cx, |app, window, cx| {
+                            if app.shows(bot) {
+                                app.load_conversation(window, cx);
+                            } else if let Some(view) = app.view_of(bot) {
+                                view._load = None;
+                            }
+                        });
+                    }));
+                }
                 None
             }
         }
