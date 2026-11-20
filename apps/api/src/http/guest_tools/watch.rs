@@ -121,12 +121,12 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                 Err(err) => Err(err),
             };
             match origin {
-                Ok(Origin::OwnerRequest | Origin::RoutineRun) => {}
+                Ok(Origin::OwnerRequest) => {}
                 Ok(_) => {
                     return (
                         tool_error(
-                            "NOT_ALLOWED: only an owner request or a routine run starts a \
-                             watcher. Tell the owner instead.",
+                            "NOT_ALLOWED: its check runs unattended for days, so only an owner \
+                             request starts a watcher. Report what you would watch instead.",
                         ),
                         None,
                     );
@@ -151,10 +151,12 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                 Ok(Started::Created(watcher) | Started::Existing(watcher)) => {
                     state.scheduler.wake();
                     let mut value = watcher_result(&watcher);
-                    value["next"] = json!(
-                        "The first check runs now. End your turn: else.bot wakes you once when \
-                         it ends. Tell the owner the deadline; nothing runs past it."
-                    );
+                    value["next"] = json!(if watcher.status.is_active() {
+                        "Watching. End your turn: else.bot wakes you once when it ends. Tell \
+                         the owner the deadline; nothing runs past it."
+                    } else {
+                        "This watcher already ended; see its outcome."
+                    });
                     (
                         tool_result(fit(value)),
                         Some(format!(
@@ -164,6 +166,20 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                         )),
                     )
                 }
+                Ok(Started::Conflict(watcher)) => {
+                    let mut result = tool_result(fit(json!({
+                        "error": "CONFLICT: this request already started a watcher with this \
+                            check and purpose but another prompt or interval. Stop it first to \
+                            change it. No watcher was started.",
+                        "watcher": watcher_result(&watcher),
+                    })));
+                    result["isError"] = json!(true);
+                    (result, None)
+                }
+                Ok(Started::Stopped) => (
+                    tool_error("STOPPED: this turn was stopped; no watcher was started."),
+                    None,
+                ),
                 Ok(Started::TooMany(active)) => {
                     let mut result = tool_result(fit(json!({
                         "error": format!(

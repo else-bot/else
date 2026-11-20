@@ -301,6 +301,7 @@ impl Scheduler {
             if let Err(err) = crate::db::watchers::deliver_wakes(
                 &self.pool,
                 &self.registry,
+                now,
                 crate::db::watchers::BATCH,
             )
             .await

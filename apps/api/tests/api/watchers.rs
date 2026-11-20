@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 const SLOW: &str = "[synthetic:slow] Tell me when example.com is free.";
 const CHECK: &str = "./domain-free.sh example.com";
-const PROMPT: &str = "Register example.com, then tell the owner.";
+const PROMPT: &str = "[synthetic:slow] Register example.com, then tell the owner.";
 
 struct Setup {
     app: TestApp,
@@ -133,6 +133,19 @@ async fn job_status(app: &TestApp, job: Uuid) -> String {
         .unwrap()
 }
 
+/// The watcher's current check job, once it runs.
+async fn running_check(s: &Setup, id: Uuid) -> Uuid {
+    let job = until("admitted the check", || async {
+        row(&s.app, id).await.check_job_id
+    })
+    .await;
+    until("launched the check", || async {
+        (job_status(&s.app, job).await == "running").then_some(())
+    })
+    .await;
+    job
+}
+
 /// Make the watcher's next check due, and return its running check job.
 async fn checking(s: &Setup, id: Uuid) -> Uuid {
     s.guest.report("running\n");
@@ -145,15 +158,7 @@ async fn checking(s: &Setup, id: Uuid) -> Uuid {
     .await
     .unwrap();
     s.app.scheduler.wake();
-    let job = until("admitted the check", || async {
-        row(&s.app, id).await.check_job_id
-    })
-    .await;
-    until("launched the check", || async {
-        (job_status(&s.app, job).await == "running").then_some(())
-    })
-    .await;
-    job
+    running_check(s, id).await
 }
 
 async fn check_ends(s: &Setup, job: Uuid, probe: &str) {
@@ -212,10 +217,7 @@ async fn bot_turns(s: &Setup) -> i64 {
 async fn a_watcher_checks_until_found_then_wakes_its_bot_once() {
     let s = setup().await;
     let id = started(&s).await;
-    let first = until("ran the first check at once", || async {
-        row(&s.app, id).await.check_job_id
-    })
-    .await;
+    let first = running_check(&s, id).await;
     let command: String = sqlx::query_scalar("SELECT command FROM guest_jobs WHERE id = ?1")
         .bind(first)
         .fetch_one(&s.app.db.pool)
@@ -261,16 +263,110 @@ async fn a_watcher_checks_until_found_then_wakes_its_bot_once() {
     s.app.scheduler.wake();
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(bot_turns(&s).await, turns + 1, "woken once");
+
+    s.app.wait_turn(&wake.to_string(), &["running"]).await;
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
+        .bind(wake)
+        .fetch_one(&s.app.db.pool)
+        .await
+        .unwrap();
+    let woken = s
+        .app
+        .scheduler
+        .grants()
+        .issue(
+            s.bot.parse().unwrap(),
+            conversation,
+            wake,
+            vec![Tool::Computer],
+            DEFAULT_TTL,
+        )
+        .await;
+    let again = tool(
+        &s.app,
+        &woken,
+        "computer_watch_start",
+        json!({ "check": CHECK, "hours": 24, "purpose": "example.com becomes available",
+                "prompt": PROMPT }),
+    )
+    .await;
+    assert_eq!(
+        again.code(),
+        "NOT_ALLOWED",
+        "a wake cannot start the next watcher itself: {}",
+        again.body
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn three_failed_checks_in_a_row_end_the_watcher_as_failed() {
+    let s = setup().await;
+    let id = started(&s).await;
+    let mut job = running_check(&s, id).await;
+    for n in 1..=3 {
+        check_ends(&s, job, "done 6\ncurl: (6) Could not resolve host\n").await;
+        if n < 3 {
+            let waiting = settled(&s, id, "waiting").await;
+            assert_eq!(
+                waiting.last_status.as_deref(),
+                Some("check failed with exit code 6")
+            );
+            job = checking(&s, id).await;
+        }
+    }
+    let ended = settled(&s, id, "ended").await;
+    assert_eq!(ended.outcome.as_deref(), Some("failed"));
+    assert!(ended.wake_turn_id.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_that_finds_it_after_the_deadline_expires_the_watcher() {
+    let s = setup().await;
+    let id = started(&s).await;
+    let job = running_check(&s, id).await;
+    let deadline = (chrono::Utc::now() + chrono::Duration::milliseconds(300))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, false);
+    sqlx::query("UPDATE watchers SET watch_until = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(deadline)
+        .execute(&s.app.db.pool)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    s.guest.report("done 0\nexample.com is available\n");
+    s.manager.job(s.bot.parse().unwrap(), job).await.unwrap();
+    s.app.scheduler.wake();
+    let ended = settled(&s, id, "ended").await;
+    assert_eq!(
+        ended.outcome.as_deref(),
+        Some("expired"),
+        "a match after the deadline never tells the bot to act"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owners_stop_of_the_bot_leaves_a_watcher_check_running() {
+    let s = setup().await;
+    let id = started(&s).await;
+    let job = running_check(&s, id).await;
+    let stopped = s
+        .app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{}/cancel", s.bot),
+            Some(json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert!(stopped.status.is_success(), "{}", stopped.body);
+    assert_eq!(job_status(&s.app, job).await, "running");
+    assert_eq!(row(&s.app, id).await.status, "checking");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_watcher_survives_its_computer_restarting() {
     let s = setup().await;
     let id = started(&s).await;
-    let first = until("ran the first check", || async {
-        row(&s.app, id).await.check_job_id
-    })
-    .await;
+    let first = running_check(&s, id).await;
 
     check_ends(&s, first, "lost\n").await;
     let waiting = settled(&s, id, "waiting").await;
@@ -312,10 +408,7 @@ async fn a_watcher_survives_its_computer_restarting() {
 async fn a_watcher_past_its_deadline_expires_and_stops_its_check() {
     let s = setup().await;
     let id = started(&s).await;
-    let job = until("ran the first check", || async {
-        row(&s.app, id).await.check_job_id
-    })
-    .await;
+    let job = running_check(&s, id).await;
 
     sqlx::query("UPDATE watchers SET watch_until = '2000-01-01T00:00:00.000+00:00' WHERE id = ?1")
         .bind(id)
@@ -380,6 +473,21 @@ async fn a_bot_runs_at_most_four_watchers_and_a_retry_returns_the_same_one() {
     let first = started(&s).await;
     let retried = start(&s, CHECK, 240).await;
     assert_eq!(retried.result["watch_id"], first.to_string());
+    let changed = tool(
+        &s.app,
+        &s.token,
+        "computer_watch_start",
+        json!({ "check": CHECK, "hours": 240, "every_minutes": 60,
+                "purpose": "example.com becomes available", "prompt": PROMPT }),
+    )
+    .await;
+    assert!(changed.error, "{}", changed.body);
+    assert!(
+        changed.result["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("CONFLICT")
+    );
     for n in 0..3 {
         let more = start(&s, &format!("./check-{n}.sh"), 24).await;
         assert!(!more.error, "{}", more.body);

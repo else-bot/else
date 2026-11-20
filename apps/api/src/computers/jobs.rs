@@ -265,7 +265,8 @@ pub async fn request_cancel<'c>(
 }
 
 /// [`request_cancel`] for every active job of the bot that no turn waits
-/// on: the owner's Stop leaves a waited-on job to its wait.
+/// on: the owner's Stop leaves a waited-on job to its wait and a watcher's
+/// check to its watcher.
 pub async fn request_cancel_unwaited<'c>(
     conn: impl sqlx::SqliteExecutor<'c>,
     bot_id: Uuid,
@@ -274,6 +275,7 @@ pub async fn request_cancel_unwaited<'c>(
         "UPDATE guest_jobs SET status = 'cancelling'
          WHERE bot_id = ?1 AND status IN ('starting', 'running', 'cancelling')
            AND id NOT IN (SELECT job_id FROM computer_job_waits WHERE status = 'pending')
+           AND id NOT IN (SELECT job_id FROM watcher_checks)
          RETURNING id, lease_id",
     )
     .bind(bot_id)

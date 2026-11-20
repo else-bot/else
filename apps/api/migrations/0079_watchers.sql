@@ -25,13 +25,16 @@ CREATE TABLE watchers (
     last_output TEXT,
     last_checked_at TEXT,
     wake_turn_id BLOB UNIQUE REFERENCES turns (id),
+    -- A wake the bot's queue refused is retried from then.
+    wake_after TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
     ended_at TEXT,
     CHECK ((status IN ('waking', 'ended')) = (outcome IS NOT NULL)),
     CHECK ((status IN ('waking', 'ended')) = (ended_at IS NOT NULL)),
     CHECK ((status = 'waiting') = (next_check_at IS NOT NULL)),
     CHECK ((status = 'checking') = (check_job_id IS NOT NULL)),
-    CHECK (wake_turn_id IS NULL OR status = 'ended')
+    CHECK (wake_turn_id IS NULL OR status = 'ended'),
+    CHECK (wake_after IS NULL OR status = 'waking')
 ) STRICT;
 
 CREATE INDEX watchers_active ON watchers (bot_id) WHERE status IN ('waiting', 'checking');
@@ -39,3 +42,12 @@ CREATE INDEX watchers_due ON watchers (next_check_at) WHERE status = 'waiting';
 CREATE INDEX watchers_checking ON watchers (check_job_id) WHERE status = 'checking';
 CREATE INDEX watchers_waking ON watchers (ended_at) WHERE status = 'waking';
 CREATE INDEX watchers_created_turn ON watchers (created_turn_id);
+
+-- Every check job a watcher ran. A turn never waits on one, and a bot's
+-- Stop leaves it to its watcher.
+CREATE TABLE watcher_checks (
+    job_id BLOB NOT NULL PRIMARY KEY REFERENCES guest_jobs (id),
+    watcher_id BLOB NOT NULL REFERENCES watchers (id)
+) STRICT;
+
+CREATE INDEX watcher_checks_watcher ON watcher_checks (watcher_id);

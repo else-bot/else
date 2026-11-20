@@ -1039,10 +1039,10 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
             let Some(command) = text("command") else {
                 return (tool_error("command is required."), None);
             };
-            let minutes = args["max_minutes"].as_u64().unwrap_or(60).max(1);
-            if minutes > MAX_JOB_MINUTES {
-                return (tool_error(JOB_TOO_LONG), None);
-            }
+            let minutes = args["max_minutes"]
+                .as_u64()
+                .unwrap_or(60)
+                .clamp(1, MAX_JOB_MINUTES);
             let webhook = match &args["webhook_id"] {
                 Value::Null => None,
                 id => match id.as_str().and_then(|s| s.parse::<Uuid>().ok()) {

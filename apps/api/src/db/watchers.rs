@@ -22,7 +22,7 @@ use super::routines::{Check, RunOn, queue_saved_task, ts};
 use crate::app::providers::WatcherRun;
 use crate::app::watchers::{CHECK_DURATION, MAX_PER_BOT, Outcome, Status, checked, wake_text};
 use crate::computers::ComputerManager;
-use crate::computers::jobs::JobStatus;
+use crate::computers::jobs::{JobStatus, MAX_JOBS};
 use crate::providers::Registry;
 
 /// Due watchers admitted, checks settled, and wakes queued per scan.
@@ -37,6 +37,7 @@ pub struct Watcher {
     pub created_turn_id: Uuid,
     pub purpose: String,
     pub check_command: String,
+    pub prompt: String,
     pub every_minutes: i64,
     pub watch_until: DateTime<Utc>,
     pub status: Status,
@@ -50,7 +51,7 @@ pub struct Watcher {
     pub created_at: DateTime<Utc>,
 }
 
-const COLUMNS: &str = "id, bot_id, created_turn_id, purpose, check_command, every_minutes,
+const COLUMNS: &str = "id, bot_id, created_turn_id, purpose, check_command, prompt, every_minutes,
     watch_until, status, outcome, next_check_at, checks, failures, last_status, last_output,
     last_checked_at, created_at";
 
@@ -71,14 +72,30 @@ pub enum Started {
     Created(Watcher),
     /// A retry of a call that already started this watcher.
     Existing(Watcher),
+    /// The same turn started this check and purpose with another prompt or
+    /// interval.
+    Conflict(Watcher),
     TooMany(Vec<Watcher>),
+    /// The turn no longer runs, or the owner stopped the bot.
+    Stopped,
 }
 
 /// Start a watcher whose first check is due now, in the bot's owner
-/// conversation. The same turn asking again for the same check and purpose
-/// gets the watcher it started.
+/// conversation, while `turn_id` still runs. The same turn asking again for
+/// the same check and purpose gets the watcher it started, or a conflict
+/// when the prompt or interval differ.
 pub async fn start(pool: &SqlitePool, new: NewWatcher<'_>) -> Result<Started, sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let current: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM turns t JOIN bots b ON b.id = t.bot_id
+                        WHERE t.id = ?1 AND t.bot_id = ?2
+                          AND t.status IN ('preparing', 'sending', 'running')
+                          AND b.status = 'active' AND NOT b.cancel_pending)",
+    )
+    .bind(new.turn_id)
+    .bind(new.bot_id)
+    .fetch_one(&mut *tx)
+    .await?;
     let existing: Option<Watcher> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM watchers
          WHERE created_turn_id = ?1 AND check_command = ?2 AND purpose = ?3"
@@ -89,7 +106,15 @@ pub async fn start(pool: &SqlitePool, new: NewWatcher<'_>) -> Result<Started, sq
     .fetch_optional(&mut *tx)
     .await?;
     if let Some(existing) = existing {
-        return Ok(Started::Existing(existing));
+        let same = existing.prompt == new.prompt && existing.every_minutes == new.every_minutes;
+        return Ok(if same {
+            Started::Existing(existing)
+        } else {
+            Started::Conflict(existing)
+        });
+    }
+    if !current {
+        return Ok(Started::Stopped);
     }
     let active = list_active(&mut tx, new.bot_id).await?;
     if active.len() as i64 >= MAX_PER_BOT {
@@ -231,11 +256,12 @@ async fn end(
     .await
 }
 
-/// End the watchers whose deadline passed as expired, then reserve a check
-/// job for each due watcher of an active bot, up to `limit`. Returns the
-/// checks to launch. A check without a free job slot is retried after
-/// [`RETRY`]; without computers, at its next interval. The caller holds a
-/// maintenance admission.
+/// End every watcher whose deadline passed as expired, then reserve a
+/// check job for each due watcher of an active bot, up to `limit`. Returns
+/// the checks to launch. A check leaves one of the bot's job slots free for
+/// its turns and routines, and waits [`RETRY`] for one; without computers
+/// it waits for its next interval. The caller holds a maintenance
+/// admission.
 pub async fn admit_due(
     pool: &SqlitePool,
     computers: Option<&ComputerManager>,
@@ -243,19 +269,17 @@ pub async fn admit_due(
     limit: i64,
 ) -> Result<Vec<Check>, sqlx::Error> {
     let overdue: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM watchers
-         WHERE status IN ('waiting', 'checking') AND watch_until <= ?1 LIMIT ?2",
+        "SELECT id FROM watchers WHERE status IN ('waiting', 'checking') AND watch_until <= ?1",
     )
     .bind(ts(now))
-    .bind(limit)
     .fetch_all(pool)
     .await?;
     for id in overdue {
-        expire(pool, id).await?;
+        expire(pool, id, now).await?;
     }
     let due: Vec<Uuid> = sqlx::query_scalar(
         "SELECT w.id FROM watchers w JOIN bots b ON b.id = w.bot_id
-         WHERE w.status = 'waiting' AND w.next_check_at <= ?1
+         WHERE w.status = 'waiting' AND w.next_check_at <= ?1 AND w.watch_until > ?1
            AND b.status = 'active' AND NOT b.cancel_pending
          ORDER BY w.next_check_at, w.id LIMIT ?2",
     )
@@ -272,12 +296,14 @@ pub async fn admit_due(
     Ok(checks)
 }
 
-async fn expire(pool: &SqlitePool, id: Uuid) -> Result<(), sqlx::Error> {
+async fn expire(pool: &SqlitePool, id: Uuid, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let job: Option<Option<Uuid>> = sqlx::query_scalar(
-        "SELECT check_job_id FROM watchers WHERE id = ?1 AND status IN ('waiting', 'checking')",
+        "SELECT check_job_id FROM watchers
+         WHERE id = ?1 AND status IN ('waiting', 'checking') AND watch_until <= ?2",
     )
     .bind(id)
+    .bind(ts(now))
     .fetch_optional(&mut *tx)
     .await?;
     let Some(job) = job else {
@@ -299,6 +325,15 @@ async fn expire(pool: &SqlitePool, id: Uuid) -> Result<(), sqlx::Error> {
     tx.commit().await
 }
 
+#[derive(sqlx::FromRow)]
+struct Due {
+    bot_id: Uuid,
+    check_command: String,
+    every_minutes: i64,
+    watch_until: DateTime<Utc>,
+    running: i64,
+}
+
 async fn admit(
     pool: &SqlitePool,
     computers: Option<&ComputerManager>,
@@ -306,63 +341,80 @@ async fn admit(
     now: DateTime<Utc>,
 ) -> Result<Option<Check>, sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let row: Option<(Uuid, String, i64)> = sqlx::query_as(
-        "SELECT w.bot_id, w.check_command, w.every_minutes FROM watchers w
-         JOIN bots b ON b.id = w.bot_id
-         WHERE w.id = ?1 AND w.status = 'waiting' AND w.next_check_at <= ?2
+    let row: Option<Due> = sqlx::query_as(
+        "SELECT w.bot_id, w.check_command, w.every_minutes, w.watch_until,
+                (SELECT count(*) FROM guest_jobs j WHERE j.bot_id = w.bot_id
+                   AND j.status IN ('starting', 'running', 'cancelling')) AS running
+         FROM watchers w JOIN bots b ON b.id = w.bot_id
+         WHERE w.id = ?1 AND w.status = 'waiting' AND w.next_check_at <= ?2 AND w.watch_until > ?2
            AND b.status = 'active' AND NOT b.cancel_pending",
     )
     .bind(id)
     .bind(ts(now))
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((bot_id, command, every)) = row else {
+    let Some(due) = row else {
         return Ok(None);
     };
+    let left = (due.watch_until - now).to_std().unwrap_or_default();
     let reserved = match computers {
+        Some(_) if due.running >= MAX_JOBS - 1 => Err(RETRY),
         Some(computers) => computers
             .reserve_job(
                 &mut tx,
-                bot_id,
+                due.bot_id,
                 None,
-                &command,
+                &due.check_command,
                 None,
-                CHECK_DURATION,
+                CHECK_DURATION.min(left),
                 &[],
                 None,
             )
             .await?
             .ok_or(RETRY),
-        None => Err(Duration::minutes(every)),
+        None => Err(Duration::minutes(due.every_minutes)),
     };
     let job_id = match reserved {
         Ok(job_id) => job_id,
         Err(delay) => {
-            sqlx::query(
+            let moved = sqlx::query(
                 "UPDATE watchers SET next_check_at = ?2 WHERE id = ?1 AND status = 'waiting'",
             )
             .bind(id)
             .bind(ts(now + delay))
             .execute(&mut *tx)
-            .await?;
+            .await?
+            .rows_affected();
+            if moved == 1 {
+                events::bot_updated(&mut tx, due.bot_id).await?;
+            }
             tx.commit().await?;
             return Ok(None);
         }
     };
-    sqlx::query(
+    let admitted = sqlx::query(
         "UPDATE watchers SET status = 'checking', check_job_id = ?2, next_check_at = NULL
          WHERE id = ?1 AND status = 'waiting'",
     )
     .bind(id)
     .bind(job_id)
     .execute(&mut *tx)
-    .await?;
-    events::bot_updated(&mut tx, bot_id).await?;
+    .await?
+    .rows_affected();
+    if admitted != 1 {
+        return Ok(None);
+    }
+    sqlx::query("INSERT INTO watcher_checks (job_id, watcher_id) VALUES (?1, ?2)")
+        .bind(job_id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    events::bot_updated(&mut tx, due.bot_id).await?;
     tx.commit().await?;
     Ok(Some(Check {
-        bot_id,
+        bot_id: due.bot_id,
         job_id,
-        command,
+        command: due.check_command,
     }))
 }
 
@@ -376,10 +428,13 @@ struct EndedCheck {
     exit_code: Option<i32>,
     output_tail: Option<String>,
     leased: bool,
+    /// It finished after the watcher's deadline, so it reports nothing.
+    late: bool,
 }
 
 /// Settle up to `limit` checking watchers whose check job ended, per
-/// [`checked`]: wait for the next check, or end the watcher.
+/// [`checked`]: wait for the next check, or end the watcher. A check that
+/// finished after the deadline expires the watcher whatever it reported.
 pub async fn settle_checks(
     pool: &SqlitePool,
     now: DateTime<Utc>,
@@ -403,11 +458,13 @@ async fn settle(pool: &SqlitePool, id: Uuid, now: DateTime<Utc>) -> Result<(), s
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row: Option<EndedCheck> = sqlx::query_as(
         "SELECT w.bot_id, w.check_job_id, w.every_minutes, w.failures, j.status AS job_status,
-                j.exit_code, j.output_tail, j.lease_id IS NOT NULL AS leased
+                j.exit_code, j.output_tail, j.lease_id IS NOT NULL AS leased,
+                coalesce(j.finished_at, ?2) >= w.watch_until AS late
          FROM watchers w JOIN guest_jobs j ON j.id = w.check_job_id
          WHERE w.id = ?1 AND w.status = 'checking'",
     )
     .bind(id)
+    .bind(ts(now))
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {
@@ -422,7 +479,12 @@ async fn settle(pool: &SqlitePool, id: Uuid, now: DateTime<Utc>) -> Result<(), s
     ) else {
         return Ok(());
     };
-    let (status, next) = match check.ends {
+    let ends = if row.late {
+        Some(Outcome::Expired)
+    } else {
+        check.ends
+    };
+    let (status, next) = match ends {
         Some(_) => (Status::Waking, None),
         None => (
             Status::Waiting,
@@ -439,7 +501,7 @@ async fn settle(pool: &SqlitePool, id: Uuid, now: DateTime<Utc>) -> Result<(), s
     .bind(id)
     .bind(row.check_job_id)
     .bind(status)
-    .bind(check.ends)
+    .bind(ends)
     .bind(next)
     .bind(check.failures)
     .bind(check.ran)
@@ -464,32 +526,41 @@ struct Waking {
     last_output: Option<String>,
 }
 
-/// Queue the wake turn of up to `limit` ended watchers of active bots.
-/// A wake that cannot queue (full queue, no provider) stays `waking` and
-/// is retried next scan. Returns how many turns were queued.
+/// Queue the wake turn of up to `limit` ended watchers of active bots. A
+/// wake that cannot queue (full queue, no provider) stays `waking` and is
+/// retried after [`RETRY`], behind the wakes that may run now. Returns how
+/// many turns were queued.
 pub async fn deliver_wakes(
     pool: &SqlitePool,
     registry: &Registry,
+    now: DateTime<Utc>,
     limit: i64,
 ) -> Result<usize, sqlx::Error> {
     let waking: Vec<Uuid> = sqlx::query_scalar(
         "SELECT w.id FROM watchers w JOIN bots b ON b.id = w.bot_id
-         WHERE w.status = 'waking' AND b.status = 'active' AND NOT b.cancel_pending
-         ORDER BY w.ended_at, w.id LIMIT ?1",
+         WHERE w.status = 'waking' AND (w.wake_after IS NULL OR w.wake_after <= ?1)
+           AND b.status = 'active' AND NOT b.cancel_pending
+         ORDER BY coalesce(w.wake_after, w.ended_at), w.id LIMIT ?2",
     )
+    .bind(ts(now))
     .bind(limit)
     .fetch_all(pool)
     .await?;
     let mut queued = 0;
     for id in waking {
-        if wake(pool, registry, id).await? {
+        if wake(pool, registry, id, now).await? {
             queued += 1;
         }
     }
     Ok(queued)
 }
 
-async fn wake(pool: &SqlitePool, registry: &Registry, id: Uuid) -> Result<bool, sqlx::Error> {
+async fn wake(
+    pool: &SqlitePool,
+    registry: &Registry,
+    id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row: Option<Waking> = sqlx::query_as(
         "SELECT w.bot_id, w.conversation_id, w.prompt, w.last_status, w.last_output
@@ -519,15 +590,26 @@ async fn wake(pool: &SqlitePool, registry: &Registry, id: Uuid) -> Result<bool, 
     )
     .await?
     else {
+        sqlx::query("UPDATE watchers SET wake_after = ?2 WHERE id = ?1 AND status = 'waking'")
+            .bind(id)
+            .bind(ts(now + RETRY))
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         return Ok(false);
     };
-    sqlx::query(
-        "UPDATE watchers SET status = 'ended', wake_turn_id = ?2 WHERE id = ?1 AND status = 'waking'",
+    let woken = sqlx::query(
+        "UPDATE watchers SET status = 'ended', wake_turn_id = ?2, wake_after = NULL
+         WHERE id = ?1 AND status = 'waking'",
     )
     .bind(id)
     .bind(turn_id)
     .execute(&mut *tx)
-    .await?;
+    .await?
+    .rows_affected();
+    if woken != 1 {
+        return Ok(false);
+    }
     events::turn_accepted(&mut tx, row.bot_id, turn_id).await?;
     events::bot_updated(&mut tx, row.bot_id).await?;
     tx.commit().await?;
