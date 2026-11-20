@@ -517,7 +517,7 @@ async fn a_restart_after_sending_makes_the_handoff_uncertain() {
         .execute(&db.pool)
         .await
         .unwrap();
-    else_api::db::turns::recover_after_restart(&db.pool)
+    else_api::db::turns::lifecycle::recover_after_restart(&db.pool)
         .await
         .unwrap();
     let state: String = sqlx::query_scalar("SELECT state FROM handoffs WHERE turn_id = ?1")

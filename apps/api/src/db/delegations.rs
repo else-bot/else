@@ -615,46 +615,9 @@ async fn stop_children(
             }
             continue;
         }
-        end_child_turn(conn, child, target, "cancelled", message).await?;
+        crate::db::turns::lifecycle::cancel_task(conn, child, target, "cancelled", message).await?;
     }
     Ok(())
-}
-
-/// End a task's turn with `code`: one that has not started, or waits on its
-/// own tasks, is interrupted at once; one in progress moves to `cancelling`
-/// for the scheduler to interrupt. Either way the tasks it handed on stop
-/// in the same transaction. Returns whether the turn was still in progress.
-async fn end_child_turn(
-    conn: &mut SqliteConnection,
-    turn: Uuid,
-    target: Uuid,
-    code: &str,
-    message: &str,
-) -> Result<bool, sqlx::Error> {
-    let ended: Option<Uuid> = sqlx::query_scalar(
-        "UPDATE turns SET
-             status = CASE WHEN status IN ('queued', 'waiting') THEN 'interrupted' ELSE 'cancelling' END,
-             error_code = ?2,
-             error_message = ?3,
-             finished_at = CASE WHEN status IN ('queued', 'waiting') THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') ELSE finished_at END,
-             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE id = ?1 AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running')
-         RETURNING id",
-    )
-    .bind(turn)
-    .bind(code)
-    .bind(message)
-    .fetch_optional(&mut *conn)
-    .await?;
-    // An owner's Stop of its attempt alone becomes a full cancel.
-    if ended.is_none() && !crate::db::stop::end_all(conn, turn, code, message).await? {
-        return Ok(false);
-    }
-    events::turn_changed(conn, target, turn).await?;
-    // Its tasks stop now, not when a cancelling provider finishes, so none
-    // starts meanwhile. The chain is at most MAX_DEPTH deep.
-    Box::pin(cancel_for_root(conn, turn)).await?;
-    Ok(true)
 }
 
 /// Give a conversation turn `turn_no` and reserve its next item sequence.

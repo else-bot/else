@@ -197,7 +197,7 @@ async fn skip(
     .fetch_optional(&mut *conn)
     .await?;
     if let Some((bot_id, turn_id)) = skipped {
-        super::turns::continue_waiting(conn, turn_id).await?;
+        super::turns::lifecycle::continue_waiting(conn, turn_id).await?;
         events::turn_changed(conn, bot_id, turn_id).await?;
     }
     Ok(())
@@ -369,7 +369,7 @@ pub async fn settle(
     .await?;
     let settled = handoff(row.ok_or(SettleError::Settled(found.clone()))?);
     if target != Status::Taken {
-        super::turns::continue_waiting(&mut tx, found.turn_id).await?;
+        super::turns::lifecycle::continue_waiting(&mut tx, found.turn_id).await?;
     }
     events::turn_changed(&mut tx, bot_id, found.turn_id).await?;
     tx.commit().await?;

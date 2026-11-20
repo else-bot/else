@@ -233,7 +233,7 @@ impl Scheduler {
             .running
             .call(|running| running.keys().copied().collect())
             .await;
-        let orphaned = turns::settle_orphans(&self.pool, &live).await?;
+        let orphaned = turns::lifecycle::settle_orphans(&self.pool, &live).await?;
         if orphaned > 0 {
             tracing::warn!(orphaned, "settled turns without a running provider task");
         }

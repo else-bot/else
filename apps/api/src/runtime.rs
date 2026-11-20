@@ -201,7 +201,7 @@ pub async fn start(
         );
     }
     crate::mcp::cleanup(&mcp_root)?;
-    let (requeued, uncertain) = crate::db::turns::recover_after_restart(&pool).await?;
+    let (requeued, uncertain) = crate::db::turns::lifecycle::recover_after_restart(&pool).await?;
     crate::connectors::store::recover(&pool).await?;
     crate::socials::store::recover(&pool).await?;
     if requeued + uncertain > 0 {

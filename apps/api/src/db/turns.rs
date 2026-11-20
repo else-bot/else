@@ -17,6 +17,8 @@ use crate::db::in_ids;
 pub use crate::db::steers::Placement;
 use crate::db::steers::STEERED;
 
+pub mod lifecycle;
+
 /// Where a turn is in its life, as stored in `turns.status`.
 #[derive(
     Debug,
@@ -853,25 +855,6 @@ pub async fn attempt_parked(
     .await
 }
 
-/// Queue a waiting turn again as a continuation once nothing but its
-/// delegated tasks holds it, and either none of those is pending or a batch
-/// of them has settled: the `turns_continuable` view, which the triggers
-/// that requeue a turn share. True when it was.
-pub async fn continue_waiting(
-    conn: &mut SqliteConnection,
-    turn_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let requeued = sqlx::query(
-        "UPDATE turns SET status = 'queued', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE id = ?1 AND id IN (SELECT id FROM turns_continuable WHERE id = ?1)",
-    )
-    .bind(turn_id)
-    .execute(&mut *conn)
-    .await?
-    .rows_affected();
-    Ok(requeued == 1)
-}
-
 pub async fn load_item(
     conn: &mut SqliteConnection,
     item_id: Uuid,
@@ -1055,21 +1038,7 @@ pub async fn claim_next(
         if eligible != Some(true) {
             continue;
         }
-        let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "UPDATE turns SET status = 'preparing', started_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
-                 attempt = attempt + 1
-             WHERE id = ?1 AND status = 'queued' AND NOT deferred
-               AND NOT EXISTS (SELECT 1 FROM turn_steers s WHERE s.turn_id = ?1)
-               AND NOT EXISTS (SELECT 1 FROM turns a
-                               WHERE a.bot_id = ?2 AND a.status IN {ACTIVE_STATUSES})"
-        )))
-        .bind(turn_id)
-        .bind(bot_id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        if updated == 1 {
-            crate::db::events::turn_changed(&mut tx, bot_id, turn_id).await?;
+        if lifecycle::claim(&mut tx, turn_id, bot_id).await? {
             tx.commit().await?;
             return Ok(Some(Claimed {
                 id: turn_id,
@@ -1097,19 +1066,7 @@ pub async fn fail_unstarted(
     let Some(bot_id) = bot_id else {
         return Ok(());
     };
-    let updated = sqlx::query(
-        "UPDATE turns SET status = 'failed', error_code = 'start_failed', error_message = ?2,
-             finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE id = ?1 AND status = 'preparing'",
-    )
-    .bind(turn_id)
-    .bind(message)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if updated == 1 {
-        crate::db::events::turn_changed(&mut tx, bot_id, turn_id).await?;
-    }
+    lifecycle::fail_unstarted(&mut tx, bot_id, turn_id, message).await?;
     tx.commit().await
 }
 
@@ -1427,114 +1384,6 @@ async fn input_files(
         }
     }
     crate::db::attachments::load(conn, bot_id, &ids).await
-}
-
-/// Startup reconciliation, run before the scheduler admits work. A turn
-/// claimed but never delivered returns to the queue. A turn that may have
-/// reached its provider is never replayed: it becomes `uncertain`, keeping
-/// any partial text. Returns (requeued, uncertain).
-pub async fn recover_after_restart(pool: &SqlitePool) -> Result<(u64, u64), sqlx::Error> {
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let requeued: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "UPDATE turns SET status = 'queued', started_at = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE status = 'preparing'
-           AND bot_id IN (SELECT id FROM bots WHERE status = 'active' AND NOT cancel_pending)
-         RETURNING id, bot_id",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    crate::db::stop::park_unwound(&mut tx, None).await?;
-    let uncertain: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "UPDATE turns SET status = 'uncertain', effect_uncertain = true,
-             error_code = 'api_restarted',
-             error_message = 'The API restarted while this message was being processed. \
-It was not resent; send a follow-up to continue.',
-             finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE status IN ('sending', 'running', 'cancelling') RETURNING id, bot_id",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    let mut uncertain = uncertain;
-    let halted: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "UPDATE turns SET status = 'interrupted', error_code = 'cancelled',
-             error_message = 'Stopped before it was sent.', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE status = 'preparing' RETURNING id, bot_id",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    uncertain.extend(halted);
-    for (turn_id, bot_id) in requeued.iter().chain(&uncertain) {
-        crate::db::events::turn_changed(&mut tx, *bot_id, *turn_id).await?;
-    }
-    crate::db::handoffs::settle_ended(&mut tx, None).await?;
-    for (turn_id, _) in &uncertain {
-        crate::db::memory::log_turn_end(&mut tx, *turn_id).await?;
-        crate::db::delegations::cancel_for_root(&mut tx, *turn_id).await?;
-    }
-    crate::db::steers::settle(&mut tx).await?;
-    tx.commit().await?;
-    crate::db::stop::settle_all(pool).await?;
-    Ok((requeued.len() as u64, uncertain.len() as u64))
-}
-
-/// Turns in an active status that no provider task in this process owns.
-/// The singleton lock means no other process runs them, so they are settled:
-/// one never started fails, one that may have reached its provider becomes
-/// `uncertain` (never resent). Pending stops and deletions then complete.
-pub async fn settle_orphans(pool: &SqlitePool, live: &[Uuid]) -> Result<u64, sqlx::Error> {
-    let orphans: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT id, bot_id FROM turns WHERE status IN {ACTIVE_STATUSES} AND NOT ({})",
-        in_ids("id", "?1")
-    )))
-    .bind(sqlx::types::Json(live))
-    .fetch_all(pool)
-    .await?;
-    let mut settled = 0;
-    for (turn_id, bot_id) in orphans {
-        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("SELECT 1 FROM bots WHERE id = ?1")
-            .bind(bot_id)
-            .execute(&mut *tx)
-            .await?;
-        crate::db::delegations::lock_targets_of_root(&mut tx, turn_id).await?;
-        if !crate::db::stop::park_unwound(&mut tx, Some(turn_id))
-            .await?
-            .is_empty()
-        {
-            crate::db::stop::settle(&mut tx, bot_id).await?;
-            crate::db::steers::settle(&mut tx).await?;
-            tx.commit().await?;
-            settled += 1;
-            continue;
-        }
-        let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "UPDATE turns SET
-                 status = CASE WHEN status = 'preparing' THEN 'failed' ELSE 'uncertain' END,
-                 effect_uncertain = effect_uncertain OR status <> 'preparing',
-                 error_code = CASE WHEN status = 'preparing' THEN 'start_failed' ELSE 'orphaned' END,
-                 error_message = CASE WHEN status = 'preparing'
-                     THEN 'The message could not be started. Send it again.'
-                     ELSE 'Processing stopped unexpectedly. It was not resent; send a follow-up to continue.'
-                 END,
-                 finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-             WHERE id = ?1 AND status IN {ACTIVE_STATUSES}"
-        )))
-        .bind(turn_id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        if updated == 1 {
-            crate::db::events::turn_changed(&mut tx, bot_id, turn_id).await?;
-            crate::db::memory::log_turn_end(&mut tx, turn_id).await?;
-            crate::db::delegations::cancel_for_root(&mut tx, turn_id).await?;
-            crate::db::handoffs::settle_ended(&mut tx, Some(turn_id)).await?;
-            crate::db::stop::settle(&mut tx, bot_id).await?;
-            crate::db::steers::settle(&mut tx).await?;
-            settled += 1;
-        }
-        tx.commit().await?;
-    }
-    Ok(settled)
 }
 
 /// IDs of turns being stopped.

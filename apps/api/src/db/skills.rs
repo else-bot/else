@@ -371,7 +371,7 @@ async fn settle_in(
     .bind(key_stored)
     .fetch_one(&mut *conn)
     .await?;
-    let requeued = super::turns::continue_waiting(conn, card.turn_id).await?;
+    let requeued = super::turns::lifecycle::continue_waiting(conn, card.turn_id).await?;
     events::turn_changed(conn, card.bot_id, card.turn_id).await?;
     Ok(Settled {
         install: install(row),

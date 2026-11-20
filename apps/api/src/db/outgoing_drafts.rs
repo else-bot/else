@@ -507,7 +507,7 @@ pub async fn approve(
     .bind(draft.id)
     .execute(&mut *tx)
     .await?;
-    let requeued = turns::continue_waiting(&mut tx, draft.turn_id).await?;
+    let requeued = turns::lifecycle::continue_waiting(&mut tx, draft.turn_id).await?;
     events::turn_changed(&mut tx, bot_id, draft.turn_id).await?;
     let draft = reload(&mut tx, draft_id).await?;
     tx.commit().await?;
@@ -624,7 +624,7 @@ pub async fn discard(
     .bind(draft.id)
     .execute(&mut *tx)
     .await?;
-    let requeued = turns::continue_waiting(&mut tx, draft.turn_id).await?;
+    let requeued = turns::lifecycle::continue_waiting(&mut tx, draft.turn_id).await?;
     events::turn_changed(&mut tx, bot_id, draft.turn_id).await?;
     let draft = reload(&mut tx, draft_id).await?;
     tx.commit().await?;

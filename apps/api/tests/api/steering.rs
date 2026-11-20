@@ -446,7 +446,7 @@ async fn a_restart_settles_each_steer_by_how_far_it_got() {
         .unwrap();
     assert!(claimed.is_none(), "steered messages are not claimed");
 
-    else_api::db::turns::recover_after_restart(pool)
+    else_api::db::turns::lifecycle::recover_after_restart(pool)
         .await
         .unwrap();
 

@@ -928,7 +928,7 @@ async fn answer_in(
         .execute(&mut *tx)
         .await?;
     }
-    let requeued = turns::continue_waiting(&mut *tx, question.turn_id).await?;
+    let requeued = turns::lifecycle::continue_waiting(&mut *tx, question.turn_id).await?;
     events::turn_changed(&mut *tx, bot_id, question.turn_id).await?;
     Ok(Settled {
         question: info(row)?,

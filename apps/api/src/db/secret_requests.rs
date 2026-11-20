@@ -372,7 +372,7 @@ async fn settle_in(
     })
     .fetch_one(&mut *conn)
     .await?;
-    let requeued = super::turns::continue_waiting(conn, request.turn_id).await?;
+    let requeued = super::turns::lifecycle::continue_waiting(conn, request.turn_id).await?;
     events::turn_changed(conn, request.bot_id, request.turn_id).await?;
     Ok(Settled {
         request: info(row),

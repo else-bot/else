@@ -1879,7 +1879,7 @@ async fn a_child_ending_continues_its_root_only_when_nothing_else_holds_it() {
 async fn restart_reconciliation_ends_the_children_of_an_ended_root() {
     let db = TestDb::migrated().await;
     let (_, root, child, delegation) = seed(&db).await;
-    else_api::db::turns::recover_after_restart(&db.pool)
+    else_api::db::turns::lifecycle::recover_after_restart(&db.pool)
         .await
         .unwrap();
     let (root_status, child_status, delegation_status): (String, String, String) = sqlx::query_as(
@@ -2914,7 +2914,7 @@ async fn a_cancelled_child_keeps_its_partial_reply_and_an_empty_one_shows_empty(
         .execute(&db.pool)
         .await
         .unwrap();
-    else_api::db::turns::recover_after_restart(&db.pool)
+    else_api::db::turns::lifecycle::recover_after_restart(&db.pool)
         .await
         .unwrap();
     let (shown, upserts) = parent_replies(&db, main).await;
