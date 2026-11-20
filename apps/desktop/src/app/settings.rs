@@ -429,7 +429,7 @@ impl ElseApp {
         self.details_tab = super::computer::DetailsTab::Details;
         self.computer = None;
         self._computer_layout = None;
-        self.details_scroll.set_offset(point(px(0.), px(0.)));
+        self.details_scroll.scroll_to_item(WATCHING_SECTION);
         if !self.settings_open {
             self.toggle_settings(window, cx);
         } else {
@@ -1323,13 +1323,15 @@ impl ElseApp {
         }
         if self.details_tab == super::computer::DetailsTab::Details {
             if let Some(entry) = self.settings.get(&bot.id) {
+                // Keep Watching at WATCHING_SECTION: the composer chip
+                // scrolls the panel to that child.
                 body = body
-                    .children(self.render_watchers(bot.id, entry, cx))
                     .child(self.render_bot_usage(cx))
                     .child(self.render_model(bot.id, &entry.model, cx))
                     .child(self.render_rules_section(bot.id, cx))
                     .child(self.render_routines(bot.id, &entry.routines, window, cx))
                     .child(self.render_reminders(bot.id, &entry.routines, window, cx))
+                    .children(self.render_watchers(bot.id, entry, cx))
                     .child(self.render_triggers(bot.id, entry, cx));
             } else {
                 body = body.child(muted("Loading…", cx));
@@ -2965,6 +2967,9 @@ pub(super) fn section(title: &'static str, cx: &App) -> Div {
 fn list_rows(rows: Vec<AnyElement>) -> Div {
     v_flex().w_full().gap(ROW_GAP).children(rows)
 }
+
+/// The Watching section's index among the Details tab's sections.
+const WATCHING_SECTION: usize = 5;
 
 pub(super) fn watching_label(count: usize) -> String {
     let noun = if count == 1 { "thing" } else { "things" };
