@@ -17,9 +17,14 @@ const MAX_WORKERS: usize = 32;
 /// Requests one worker queues before callers are told it is busy.
 const QUEUE: usize = 16;
 
-/// The registry is at [`MAX_WORKERS`].
+/// Why no worker was handed out.
 #[derive(Debug)]
-pub struct Full;
+pub enum Refused {
+    /// The registry is at [`MAX_WORKERS`].
+    Full,
+    /// [`Workers::shutdown`] has run.
+    ShutDown,
+}
 
 /// A caller's handle on a running worker.
 pub struct Worker<R> {
@@ -62,14 +67,19 @@ struct Slot<R> {
     task: JoinHandle<()>,
 }
 
+enum Slots<R> {
+    Open(HashMap<Uuid, Slot<R>>),
+    ShutDown,
+}
+
 pub struct Workers<R> {
-    slots: Actor<HashMap<Uuid, Slot<R>>>,
+    slots: Actor<Slots<R>>,
 }
 
 impl<R: Send + 'static> Default for Workers<R> {
     fn default() -> Self {
         Self {
-            slots: Actor::default(),
+            slots: Actor::new(Slots::Open(HashMap::new())),
         }
     }
 }
@@ -77,19 +87,22 @@ impl<R: Send + 'static> Default for Workers<R> {
 impl<R: Send + 'static> Workers<R> {
     /// The account's worker, and whether this call started it. A worker
     /// whose task has ended is replaced.
-    pub async fn get_or_spawn<F, Fut>(&self, id: Uuid, run: F) -> Result<(Worker<R>, bool), Full>
+    pub async fn get_or_spawn<F, Fut>(&self, id: Uuid, run: F) -> Result<(Worker<R>, bool), Refused>
     where
         F: FnOnce(Inbox<R>) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         self.slots
             .call(move |slots| {
+                let Slots::Open(slots) = slots else {
+                    return Err(Refused::ShutDown);
+                };
                 slots.retain(|_, slot| !slot.task.is_finished());
                 if let Some(slot) = slots.get(&id) {
                     return Ok((slot.worker.clone(), false));
                 }
                 if slots.len() >= MAX_WORKERS {
-                    return Err(Full);
+                    return Err(Refused::Full);
                 }
                 let (requests, receiver) = mpsc::channel(QUEUE);
                 let (changed, revision) = watch::channel(0);
@@ -115,17 +128,27 @@ impl<R: Send + 'static> Workers<R> {
 
     /// Stop the account's worker and wait for its task to end.
     pub async fn stop(&self, id: Uuid) {
-        if let Some(slot) = self.slots.call(move |slots| slots.remove(&id)).await {
+        let removed = self
+            .slots
+            .call(move |slots| match slots {
+                Slots::Open(slots) => slots.remove(&id),
+                Slots::ShutDown => None,
+            })
+            .await;
+        if let Some(slot) = removed {
             slot.stop.cancel();
             let _ = slot.task.await;
         }
     }
 
-    /// Stop every worker and wait for all of them.
+    /// Stop every worker, refuse new ones, and wait for all of them.
     pub async fn shutdown(&self) {
         let slots: Vec<Slot<R>> = self
             .slots
-            .call(|slots| slots.drain().map(|(_, slot)| slot).collect())
+            .call(|slots| match std::mem::replace(slots, Slots::ShutDown) {
+                Slots::Open(slots) => slots.into_values().collect(),
+                Slots::ShutDown => Vec::new(),
+            })
             .await;
         for slot in &slots {
             slot.stop.cancel();
@@ -141,22 +164,38 @@ mod tests {
     #[tokio::test]
     async fn a_finished_worker_is_replaced_and_frees_its_place() {
         let workers = Workers::<()>::default();
-        for _ in 0..MAX_WORKERS {
-            let (_, started) = workers
-                .get_or_spawn(Uuid::new_v4(), |_| async {})
+        let id = Uuid::new_v4();
+        workers.get_or_spawn(id, |_| async {}).await.unwrap();
+        for _ in 1..MAX_WORKERS {
+            workers
+                .get_or_spawn(Uuid::new_v4(), |inbox| async move {
+                    inbox.stop.cancelled().await
+                })
                 .await
                 .unwrap();
-            assert!(started);
         }
         tokio::task::yield_now().await;
-        let id = Uuid::new_v4();
         let (_, started) = workers
             .get_or_spawn(id, |inbox| async move { inbox.stop.cancelled().await })
             .await
-            .expect("finished workers no longer count against the limit");
-        assert!(started);
+            .expect("the finished worker no longer counts against the limit");
+        assert!(started, "a finished worker is replaced");
         let (_, started) = workers.get_or_spawn(id, |_| async {}).await.unwrap();
         assert!(!started, "a running worker is reused");
+        assert!(matches!(
+            workers.get_or_spawn(Uuid::new_v4(), |_| async {}).await,
+            Err(Refused::Full)
+        ));
+    }
+
+    #[tokio::test]
+    async fn no_worker_starts_after_shutdown() {
+        let workers = Workers::<()>::default();
+        workers.shutdown().await;
+        assert!(matches!(
+            workers.get_or_spawn(Uuid::new_v4(), |_| async {}).await,
+            Err(Refused::ShutDown)
+        ));
     }
 
     #[tokio::test]
