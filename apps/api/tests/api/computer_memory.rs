@@ -38,7 +38,7 @@ async fn setup() -> Setup {
     manager.reconcile_startup().await.unwrap();
     let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
     let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
-    let app = TestApp::with_parts(db, 4, registry, Some(manager.clone()));
+    let app = TestApp::with_parts(db, 4, registry, Some(manager.clone())).await;
     Setup {
         app,
         synthetic,
@@ -53,8 +53,8 @@ async fn grant(app: &TestApp, bot: &str, turn: Uuid) -> String {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    app.scheduler
-        .grants()
+    app.state
+        .grants
         .issue(
             bot.parse().unwrap(),
             conversation,

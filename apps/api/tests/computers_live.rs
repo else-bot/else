@@ -825,7 +825,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     let registry = else_api::providers::Registry::new(vec![Arc::new(
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
     )]);
-    let app = TestApp::with_parts(db.clone(), 4, registry, Some(manager.clone()));
+    let app = TestApp::with_parts(db.clone(), 4, registry, Some(manager.clone())).await;
     let site = "cd site && (setsid python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &); sleep 1";
     let mut bots = Vec::new();
     for name in ["Alpha", "Beta"] {

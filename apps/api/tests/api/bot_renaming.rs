@@ -198,7 +198,7 @@ async fn routine_runs_cannot_rename_even_with_a_forged_capability() {
         .unwrap()
         .parse()
         .unwrap();
-    else_api::db::routines::admit_due(&h.app.db.pool, h.app.scheduler.registry(), None, due, 8)
+    else_api::db::routines::admit_due(&h.app.db.pool, &h.app.state.registry, None, due, 8)
         .await
         .unwrap();
     h.app.scheduler.wake();
@@ -221,8 +221,8 @@ async fn routine_runs_cannot_rename_even_with_a_forged_capability() {
     let conversation = h.inputs(routine).await[0].conversation_id;
     let forged = h
         .app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             main.parse().unwrap(),
             conversation,

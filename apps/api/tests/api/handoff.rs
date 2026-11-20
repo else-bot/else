@@ -20,13 +20,13 @@ const B: &str = "synthetic-b";
 async fn two() -> Two {
     let db = TestDb::migrated().await;
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    two_on(Arc::new(db))
+    two_on(Arc::new(db)).await
 }
 
-fn two_on(db: Arc<TestDb>) -> Two {
+async fn two_on(db: Arc<TestDb>) -> Two {
     let a = Arc::new(Synthetic::named(A, "Synthetic A", Duration::from_millis(1)));
     let b = Arc::new(Synthetic::named(B, "Synthetic B", Duration::from_millis(1)));
-    let app = TestApp::with_registry(db, 4, Registry::new(vec![a.clone(), b.clone()]));
+    let app = TestApp::with_registry(db, 4, Registry::new(vec![a.clone(), b.clone()])).await;
     Two { app, a, b }
 }
 
@@ -190,7 +190,7 @@ async fn a_failing_or_missing_source_uses_the_recorded_history() {
     drop(app);
     tokio::time::sleep(Duration::from_millis(200)).await;
     let b2 = Arc::new(Synthetic::named(B, "Synthetic B", Duration::from_millis(1)));
-    let app = TestApp::with_registry(db, 4, Registry::new(vec![b2.clone()]));
+    let app = TestApp::with_registry(db, 4, Registry::new(vec![b2.clone()])).await;
     let (t4, status) = say(&app, &bot, B, "B after a restart without A.").await;
     assert_eq!(status, "completed");
     let h = handoff(&app, t4).await.unwrap();

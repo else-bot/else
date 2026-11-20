@@ -719,7 +719,7 @@ async fn the_backup_and_restore_commands_work_on_an_installation() {
     )
     .unwrap();
     assert!(!complete.whole_assistant);
-    let app = TestApp::with_db(db);
+    let app = TestApp::with_db(db).await;
     let target = Target::new(&app);
     let db = app.db.clone();
     let restored_data = dir.path().join("restored-data");
@@ -1053,7 +1053,7 @@ async fn a_database_only_backup_restores_without_touching_the_schedule() {
         .unwrap();
     drop(conn);
 
-    let app = TestApp::with_db(db);
+    let app = TestApp::with_db(db).await;
     let target = Target::new(&app);
     let db = app.db.clone();
     let out = common::api_command(&db, &data, 0)

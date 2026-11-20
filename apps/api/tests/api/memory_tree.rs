@@ -13,6 +13,21 @@ use else_api::memory_worker;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+/// These tests drive compaction with `memory_worker::drain`, so the API
+/// runs no compactor of its own.
+fn manual() -> common::Setup {
+    common::Setup {
+        memory: else_api::runtime::Memory::Manual,
+        ..common::Setup::default()
+    }
+}
+
+async fn app() -> TestApp {
+    let db = common::TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    TestApp::start(std::sync::Arc::new(db), manual()).await
+}
+
 async fn small_recipe(app: &TestApp) {
     let reply = app
         .owner(
@@ -82,7 +97,7 @@ async fn assert_exact_coverage(app: &TestApp, bot: Uuid) -> memory_tree::SavedVi
 
 #[tokio::test(flavor = "multi_thread")]
 async fn exact_tree_publishes_in_order_compacts_and_keeps_every_range() {
-    let app = TestApp::installed().await;
+    let app = app().await;
     small_recipe(&app).await;
     let bot: Uuid = app.create_bot("Tree").await.parse().unwrap();
     let mut merged_once = false;
@@ -130,7 +145,7 @@ async fn exact_tree_publishes_in_order_compacts_and_keeps_every_range() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
-    let app = TestApp::installed().await;
+    let app = app().await;
     small_recipe(&app).await;
     let bot = app.create_bot("Long").await;
     let bot_id: Uuid = bot.parse().unwrap();
@@ -160,8 +175,8 @@ async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
         .await
         .unwrap();
     let token = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             bot_id,
             conversation,
@@ -207,7 +222,7 @@ async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_retried_job_is_not_reported_blocked_while_leased() {
-    let app = TestApp::installed().await;
+    let app = app().await;
     small_recipe(&app).await;
     let bot: Uuid = app.create_bot("Retry").await.parse().unwrap();
     add(&app, bot, "long", &"long ".repeat(40)).await;
@@ -251,7 +266,7 @@ async fn a_retried_job_is_not_reported_blocked_while_leased() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn replaced_leases_and_concurrent_workers_never_publish_twice() {
-    let app = TestApp::installed().await;
+    let app = app().await;
     small_recipe(&app).await;
     let bot: Uuid = app.create_bot("Race").await.parse().unwrap();
     add(&app, bot, "first", "first").await;
@@ -340,7 +355,7 @@ async fn replaced_leases_and_concurrent_workers_never_publish_twice() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
-    let app = TestApp::installed().await;
+    let app = app().await;
     small_recipe(&app).await;
     let bot = app.create_bot("Saved").await;
     let bot_id: Uuid = bot.parse().unwrap();
@@ -360,7 +375,7 @@ async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
     .await
     .unwrap();
 
-    let app = app.restart().await;
+    let app = TestApp::start(app.stop().await, manual()).await;
     let after = app
         .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
         .await
@@ -432,7 +447,7 @@ async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cut_text_is_marked_with_where_the_rest_is() {
-    let app = TestApp::installed().await;
+    let app = app().await;
     let reply = app
         .owner(
             "PATCH",
@@ -457,8 +472,8 @@ async fn cut_text_is_marked_with_where_the_rest_is() {
         .await
         .unwrap();
     let token = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             bot_id,
             conversation,
@@ -487,7 +502,7 @@ async fn cut_text_is_marked_with_where_the_rest_is() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_backlog_longer_than_one_batch_keeps_publishing() {
-    let app = TestApp::installed().await;
+    let app = app().await;
     let bot: Uuid = app.create_bot("Backlog").await.parse().unwrap();
     add(&app, bot, "first", "first").await;
     sqlx::query("UPDATE memory_store SET next_seq = 10050 WHERE bot_id = ?1")
@@ -529,7 +544,7 @@ async fn a_backlog_longer_than_one_batch_keeps_publishing() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rebuild_switches_only_after_reaching_the_append_watermark() {
-    let app = TestApp::installed().await;
+    let app = app().await;
     small_recipe(&app).await;
     let bot = app.create_bot("Catch").await;
     let bot_id: Uuid = bot.parse().unwrap();
@@ -571,7 +586,7 @@ async fn a_rebuild_switches_only_after_reaching_the_append_watermark() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_compaction_view_is_saved_and_damaged_views_are_reported() {
-    let app = TestApp::installed().await;
+    let app = app().await;
     let reply = app
         .owner(
             "PATCH",
@@ -600,7 +615,7 @@ async fn the_compaction_view_is_saved_and_damaged_views_are_reported() {
         .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
         .await
         .body;
-    let app = app.restart().await;
+    let app = TestApp::start(app.stop().await, manual()).await;
     let after = app
         .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
         .await

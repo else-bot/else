@@ -121,8 +121,8 @@ async fn continuation_grant(app: &TestApp, bot: &str, turn: Uuid) -> String {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    app.scheduler
-        .grants()
+    app.state
+        .grants
         .issue(
             bot.parse().unwrap(),
             conversation,
@@ -227,7 +227,7 @@ async fn owner_consent_resumes_a_parked_read_and_one_sign_in_serves_every_bot() 
         Duration::from_millis(5),
     ));
     let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
-    let app = TestApp::with_registry(db, 4, registry);
+    let app = TestApp::with_registry(db, 4, registry).await;
     let bot = app.create_bot("OAuth owner").await;
     let other = app.create_bot("Other bot").await;
     let (turn, token) = grant(&app, &bot, true).await;
@@ -248,7 +248,7 @@ async fn owner_consent_resumes_a_parked_read_and_one_sign_in_serves_every_bot() 
     assert_eq!(required["parked"], true);
     assert!(!required.to_string().contains("authorization_url"));
     assert!(!required.to_string().contains("code_verifier"));
-    assert!(app.scheduler.grants().is_parked(turn).await);
+    assert!(app.state.grants.is_parked(turn).await);
     app.wait_turn(&turn.to_string(), &["waiting"]).await;
     let question = required["question_id"].as_str().unwrap();
     let snapshot = app
@@ -329,10 +329,7 @@ async fn owner_consent_resumes_a_parked_read_and_one_sign_in_serves_every_bot() 
             ))
             .all(|event| event["authorization"] == false)
     );
-    let root = Path::new(app.db.url.expose().strip_prefix("sqlite://").unwrap())
-        .parent()
-        .unwrap()
-        .join("mcp/oauth-fixture");
+    let root = app.config.data_dir.join("mcp/oauth-fixture");
     assert_private_files(&root);
     let shared = root.join(format!("oauth-{}.json", Uuid::nil()));
     assert!(shared.is_file());

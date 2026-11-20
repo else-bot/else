@@ -94,7 +94,7 @@ async fn settle_handoff(
 pub(super) fn manager(
     state: &AppState,
 ) -> Result<&Arc<crate::computers::ComputerManager>, ApiError> {
-    state.computers.as_ref().ok_or_else(|| {
+    state.computers.manager().ok_or_else(|| {
         ApiError::unavailable(
             "computers_unavailable",
             "Bot computers are not available on this host.",
@@ -126,7 +126,7 @@ async fn show(
     require_bot(&state, bot_id, false).await?;
     // Before the row: an upgrade writes its row before its status ends, so
     // a status that has ended is never paired with the row it replaced.
-    let status = match &state.computers {
+    let status = match state.computers.manager() {
         Some(computers) => computers.upgrade_status(bot_id).await,
         None => None,
     };
@@ -156,13 +156,13 @@ async fn show(
     .await?;
     let desktop = state
         .computers
-        .as_ref()
+        .manager()
         .is_some_and(|computers| computers.config().desktop);
     let default_memory = state
         .computers
-        .as_ref()
+        .manager()
         .map(|computers| computers.config().memory_mib);
-    let (latest_image, upgrade) = match &state.computers {
+    let (latest_image, upgrade) = match state.computers.manager() {
         Some(computers) => (
             Some(computers.config().image.clone()),
             match status {
@@ -315,7 +315,7 @@ async fn upgrade_all(
     State(state): State<Arc<AppState>>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let queued = manager(&state)?
-        .upgrade_all(state.scheduler.gate().clone())
+        .upgrade_all(state.gate.clone())
         .await
         .map_err(computer_error)?;
     Ok((StatusCode::ACCEPTED, Json(json!({ "queued": queued }))))
@@ -395,7 +395,7 @@ async fn upgrade(
 ) -> Result<StatusCode, ApiError> {
     require_bot(&state, bot_id, true).await?;
     let computers = manager(&state)?;
-    let Some(admission) = state.scheduler.gate().enter() else {
+    let Some(admission) = state.gate.enter() else {
         return Err(ApiError::unavailable(
             "maintenance",
             "A backup or an update is in progress; try again shortly.",
@@ -428,7 +428,7 @@ async fn set_memory(
 ) -> Result<Json<Value>, ApiError> {
     require_bot(&state, bot_id, true).await?;
     let computers = manager(&state)?;
-    let Some(_admission) = state.scheduler.gate().enter() else {
+    let Some(_admission) = state.gate.enter() else {
         return Err(ApiError::unavailable(
             "maintenance",
             "A backup or an update is in progress; try again shortly.",

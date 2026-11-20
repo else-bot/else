@@ -27,8 +27,8 @@ async fn grant(app: &TestApp, tools: Vec<Tool>) -> String {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    app.scheduler
-        .grants()
+    app.state
+        .grants
         .issue(bot.parse().unwrap(), conversation, turn, tools, DEFAULT_TTL)
         .await
 }
@@ -54,7 +54,7 @@ async fn a_bot_reads_the_reason_a_provider_is_unavailable() {
         )),
         Arc::new(Grok::detect(None, None, None).await),
     ]);
-    let app = TestApp::with_registry(Arc::new(db), 4, registry);
+    let app = TestApp::with_registry(Arc::new(db), 4, registry).await;
 
     let token = grant(&app, vec![Tool::Diagnose]).await;
     let reply = else_status(&app, &token).await;
@@ -131,7 +131,7 @@ async fn a_provider_a_bot_runs_on_its_own_model_is_available_without_a_saved_def
         )),
         Arc::new(common::ProfiledFake),
     ]);
-    let app = TestApp::with_registry(Arc::new(db), 4, registry);
+    let app = TestApp::with_registry(Arc::new(db), 4, registry).await;
     let token = grant(&app, vec![Tool::Diagnose]).await;
 
     let codex = provider(&status_of(&app, &token).await, "codex");

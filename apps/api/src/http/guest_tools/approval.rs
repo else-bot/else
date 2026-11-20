@@ -272,7 +272,7 @@ pub(crate) async fn approve(
     args: &Value,
     kind: Kind,
 ) -> Result<Option<&'static str>, Outcome> {
-    let label = match (name, args["selector"].as_str(), &state.computers) {
+    let label = match (name, args["selector"].as_str(), state.computers.manager()) {
         ("computer_browser", Some(selector), Some(computers)) => {
             computers.browser_ref(grant.bot_id, selector).await
         }

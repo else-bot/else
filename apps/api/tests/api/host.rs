@@ -770,7 +770,7 @@ async fn task_grants_are_scoped_to_their_turn() {
     let foreign_item = foreign.body["item"]["id"].as_str().unwrap().to_owned();
 
     let (turn, conversation) = hanging_turn(&app, &bot).await;
-    let grants = app.scheduler.grants();
+    let grants = &app.state.grants;
     let token = grants
         .issue(
             bot.parse().unwrap(),
@@ -925,8 +925,8 @@ async fn deleting_a_bot_revokes_its_grants() {
     let bot = app.create_bot("Temp").await;
     let (turn, conversation) = hanging_turn(&app, &bot).await;
     let token = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             bot.parse().unwrap(),
             conversation,

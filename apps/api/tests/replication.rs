@@ -554,7 +554,7 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
     let registry = else_api::providers::Registry::new(vec![Arc::new(
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
     )]);
-    let app = TestApp::with_parts(db.clone(), 4, registry, Some(manager.clone()));
+    let app = TestApp::with_parts(db.clone(), 4, registry, Some(manager.clone())).await;
     let bot = app.create_bot("Builder").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let reply = app
@@ -1003,7 +1003,7 @@ async fn unverified_or_lower_coverage_sets_never_displace_the_recovery_point() {
     let registry = else_api::providers::Registry::new(vec![Arc::new(
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
     )]);
-    let app = TestApp::with_parts(db.clone(), 4, registry, Some(manager.clone()));
+    let app = TestApp::with_parts(db.clone(), 4, registry, Some(manager.clone())).await;
     let bot: Uuid = app.create_bot("Builder").await.parse().unwrap();
     let Acquire::Ready { lease_id, .. } = manager.acquire(bot, "test:use").await.unwrap() else {
         panic!()

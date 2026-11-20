@@ -59,122 +59,47 @@ use crate::credentials::OwnerToken;
 use crate::scheduler::Scheduler;
 use error::ApiError;
 
-/// Shared request state and host-only services.
-#[derive(Default)]
-pub struct StartupFaults {
-    pub computers: Option<String>,
-    pub backups: Option<String>,
-}
-
+/// Shared request state and host-only services, built by
+/// [`crate::runtime::start`].
 pub struct AppState {
     pub owner_token: OwnerToken,
     pub db: SqlitePool,
     pub scheduler: Arc<Scheduler>,
+    /// Provider adapters, shared with the scheduler.
+    pub registry: crate::providers::Registry,
+    /// The maintenance gate, shared with the scheduler and backups.
+    pub gate: Arc<crate::maintenance::Gate>,
+    /// Task grants issued to running turns. Revoked when a turn ends.
+    pub grants: Arc<crate::grants::Grants>,
     pub events: crate::events::EventHub,
     /// Nonsecret identity of this API process, used to bind event cursors.
     pub server_instance_id: Uuid,
     pub auth_failures: auth::FailureLimiter,
-    /// Bot computers, when a runtime is available.
-    pub computers: Option<Arc<crate::computers::ComputerManager>>,
+    pub computers: crate::runtime::Computers,
     /// The installation key for encrypted task and connector credentials.
-    pub secret_key: Option<Arc<crate::credentials::SecretKey>>,
-    pub backups: Option<crate::backup::service::Backups>,
-    pub mcps: std::sync::OnceLock<crate::mcp::Library>,
+    pub secret_key: Arc<crate::credentials::SecretKey>,
+    /// The backup service, or why it did not start (for `else_status`).
+    pub backups: Result<crate::backup::service::Backups, String>,
+    pub mcps: crate::mcp::Library,
     /// Where `skill_install` fetches skills from.
     pub skill_sources: crate::skills::Sources,
-    pub connectors: Option<Arc<crate::connectors::ConnectorManager>>,
-    pub socials: Option<Arc<crate::socials::Manager>>,
-    /// Why bot computers or backups did not start, for `else_status`.
-    pub startup_faults: StartupFaults,
+    pub connectors: Arc<crate::connectors::ConnectorManager>,
+    pub socials: Arc<crate::socials::Manager>,
     pub(crate) update_hold: crate::actor::Actor<Option<crate::maintenance::Closed>>,
     pub(crate) server_updates: crate::actor::Actor<crate::server_updates::Installation>,
-    desktop_streams: desktop_stream::Streams,
+    pub(crate) desktop_streams: desktop_stream::Streams,
 }
 
 impl AppState {
-    pub fn new(
-        owner_token: OwnerToken,
-        db: SqlitePool,
-        scheduler: Arc<Scheduler>,
-        events: crate::events::EventHub,
-    ) -> Self {
-        Self {
-            owner_token,
-            db,
-            scheduler,
-            events,
-            server_instance_id: Uuid::new_v4(),
-            auth_failures: auth::FailureLimiter::default(),
-            computers: None,
-            secret_key: None,
-            connectors: None,
-            backups: None,
-            mcps: std::sync::OnceLock::new(),
-            skill_sources: crate::skills::Sources::default(),
-            socials: None,
-            startup_faults: StartupFaults::default(),
-            update_hold: crate::actor::Actor::default(),
-            server_updates: crate::actor::Actor::default(),
-            desktop_streams: desktop_stream::Streams::default(),
-        }
-    }
-
     /// Refuse new desktop viewer streams and end open ones; resolves once
     /// each has released its held input, control, and lease. Call before
     /// HTTP shutdown: upgraded connections are not part of axum's drain.
     pub fn stop_desktop_streams(&self) -> impl Future<Output = ()> + '_ {
         self.desktop_streams.stop()
     }
-
-    pub fn with_secret_key(mut self, key: Arc<crate::credentials::SecretKey>) -> Self {
-        self.connectors = Some(Arc::new(crate::connectors::ConnectorManager::new(
-            self.db.clone(),
-            key.clone(),
-            self.scheduler.clone(),
-        )));
-        self.socials = Some(Arc::new(
-            crate::socials::Manager::new(self.db.clone(), key.clone())
-                .with_scheduler(self.scheduler.clone()),
-        ));
-        self.secret_key = Some(key);
-        self
-    }
-
-    /// Replace the email connector manager, for a test mail transport.
-    pub fn with_connectors(mut self, connectors: Arc<crate::connectors::ConnectorManager>) -> Self {
-        self.connectors = Some(connectors);
-        self
-    }
-
-    pub fn with_socials(mut self, socials: Arc<crate::socials::Manager>) -> Self {
-        self.socials = Some(socials);
-        self
-    }
-
-    pub fn with_computers(mut self, computers: Arc<crate::computers::ComputerManager>) -> Self {
-        self.scheduler.use_computers(computers.clone());
-        self.computers = Some(computers);
-        self
-    }
-
-    pub fn with_server_updates(mut self, config: &Config) -> Self {
-        self.server_updates =
-            crate::actor::Actor::new(crate::server_updates::Installation::discover(config));
-        self
-    }
 }
 
 pub fn router(config: &Config, state: Arc<AppState>) -> Router {
-    state.scheduler.use_mcp_library(config.data_dir.join("mcp"));
-    state.mcps.get_or_init(|| {
-        crate::mcp::Library::new(config.data_dir.join("mcp"), state.scheduler.gate().clone())
-            .with_oauth_key(state.secret_key.clone())
-            .with_oauth_client(config.github_oauth.clone())
-            .with_task_secrets(crate::mcp::TaskSecrets::new(
-                state.db.clone(),
-                state.secret_key.clone(),
-            ))
-    });
     // Every route under /v1 requires the owner token.
     // `layer` (not `route_layer`) also covers the fallback, so unknown /v1
     // paths are authenticated before they report 404.
@@ -270,7 +195,7 @@ async fn maintenance_gate(
     if crate::maintenance::allowed(request.method(), request.uri().path()) {
         return next.run(request).await;
     }
-    let Some(_admission) = state.scheduler.gate().enter() else {
+    let Some(_admission) = state.gate.enter() else {
         return maintenance_response();
     };
     next.run(request).await
@@ -288,7 +213,7 @@ fn maintenance_response() -> Response {
 /// working while a backup waits for that turn to finish; other callers,
 /// such as webhooks, wait for the pause to end.
 async fn tools_gate(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
-    let gate = state.scheduler.gate();
+    let gate = &state.gate;
     if request.extensions().get::<crate::grants::Grant>().is_some() {
         let Some(_admission) = gate.enter_turn() else {
             return maintenance_response();
@@ -365,8 +290,7 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
         crate::db::installation::server_icon(&state.db),
     );
     let providers: Vec<_> = state
-        .scheduler
-        .registry()
+        .registry
         .all()
         .iter()
         .map(|provider| {
@@ -485,7 +409,7 @@ fn provider_view(
 /// each part's state with the reason it gives.
 pub(crate) async fn status(state: &AppState) -> serde_json::Value {
     let (saved, backups) = tokio::join!(saved_models(&state.db), async {
-        let backups = state.backups.as_ref()?;
+        let backups = state.backups.as_ref().ok()?;
         let read = tokio::time::timeout(std::time::Duration::from_secs(2), backups.snapshot());
         Some(
             read.await
@@ -499,8 +423,7 @@ pub(crate) async fn status(state: &AppState) -> serde_json::Value {
             .collect()
     });
     let providers: Vec<_> = state
-        .scheduler
-        .registry()
+        .registry
         .all()
         .iter()
         .map(|provider| {
@@ -519,7 +442,7 @@ pub(crate) async fn status(state: &AppState) -> serde_json::Value {
         })
         .collect();
     let backups = match backups {
-        None => json!({ "available": false, "unavailable_reason": state.startup_faults.backups }),
+        None => json!({ "available": false, "unavailable_reason": state.backups.as_ref().err() }),
         Some(Err(why)) => json!({ "available": false, "error": why }),
         Some(Ok(Err(err))) => json!({ "available": false, "error": err.to_string() }),
         Some(Ok(Ok(snapshot))) => json!({
@@ -537,8 +460,8 @@ pub(crate) async fn status(state: &AppState) -> serde_json::Value {
         "providers": providers,
         "profiles_readable": saved.is_some(),
         "computers": {
-            "available": state.computers.is_some(),
-            "unavailable_reason": state.startup_faults.computers,
+            "available": state.computers.manager().is_some(),
+            "unavailable_reason": state.computers.unavailable_reason(),
         },
         "backups": backups,
     })
@@ -547,38 +470,18 @@ pub(crate) async fn status(state: &AppState) -> serde_json::Value {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::config::tests::MapSource;
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
-    use base64::Engine;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
     pub const TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
-    fn app() -> Router {
-        assert_eq!(
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(TOKEN)
-                .unwrap()
-                .len(),
-            32
-        );
-        let config = Config::load(&MapSource::new(&[("HOME", "/h")])).unwrap();
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .acquire_timeout(std::time::Duration::from_millis(100))
-            .connect_lazy("sqlite::memory:")
-            .unwrap();
-        let scheduler = Scheduler::new(pool.clone(), crate::providers::Registry::new(vec![]), 1);
-        router(
-            &config,
-            Arc::new(AppState::new(
-                OwnerToken::parse(TOKEN).unwrap(),
-                pool,
-                scheduler,
-                crate::events::EventHub::polling_only(),
-            )),
-        )
+    async fn app() -> Router {
+        let home = tempfile::tempdir().unwrap();
+        let (config, state, background) = crate::runtime::start_in(home.path()).await;
+        // The router owns the API's files and loops, so they end with it.
+        router(&config, state).layer(axum::Extension(Arc::new((home, background))))
     }
 
     async fn send(app: Router, request: Request<Body>) -> (StatusCode, serde_json::Value) {
@@ -595,7 +498,7 @@ pub mod tests {
     #[tokio::test]
     async fn oversized_and_wrong_method_requests_use_error_shape() {
         let (status, body) = send(
-            app(),
+            app().await,
             get("/healthz")
                 .header(header::CONTENT_LENGTH, "70000")
                 .body(Body::from(vec![b'x'; 70000]))
@@ -605,7 +508,7 @@ pub mod tests {
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(body["error"]["code"], "too_large");
         let (status, body) = send(
-            app(),
+            app().await,
             Request::post("/healthz")
                 .header(header::HOST, "127.0.0.1")
                 .body(Body::empty())
@@ -615,7 +518,7 @@ pub mod tests {
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(body["error"]["code"], "method_not_allowed");
         let (status, _) = send(
-            app(),
+            app().await,
             Request::patch("/v1/capabilities")
                 .header(header::HOST, "127.0.0.1")
                 .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
@@ -628,13 +531,13 @@ pub mod tests {
 
     #[tokio::test]
     async fn liveness_needs_no_token() {
-        let (status, _) = send(app(), get("/healthz").body(Body::empty()).unwrap()).await;
+        let (status, _) = send(app().await, get("/healthz").body(Body::empty()).unwrap()).await;
         assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
     async fn unknown_route_uses_error_shape() {
-        let (status, body) = send(app(), get("/nope").body(Body::empty()).unwrap()).await;
+        let (status, body) = send(app().await, get("/nope").body(Body::empty()).unwrap()).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"]["code"], "not_found");
         assert_eq!(body["error"]["retryable"], false);
@@ -642,7 +545,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn protected_route_requires_exactly_one_valid_bearer() {
-        let app = app();
+        let app = app().await;
         let cases: Vec<Vec<String>> = vec![
             vec![],
             vec!["Bearer".into()],
@@ -685,13 +588,17 @@ pub mod tests {
     #[tokio::test]
     async fn unknown_v1_routes_authenticate_before_not_found() {
         for path in ["/v1", "/v1/"] {
-            let (status, _) = send(app(), get(path).body(Body::empty()).unwrap()).await;
+            let (status, _) = send(app().await, get(path).body(Body::empty()).unwrap()).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
         }
-        let (status, _) = send(app(), get("/v1/bots/unknown").body(Body::empty()).unwrap()).await;
+        let (status, _) = send(
+            app().await,
+            get("/v1/bots/unknown").body(Body::empty()).unwrap(),
+        )
+        .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         let (status, _) = send(
-            app(),
+            app().await,
             get("/v1/bots/unknown")
                 .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
                 .body(Body::empty())
@@ -714,14 +621,14 @@ pub mod tests {
                 request = request.header(header::ORIGIN, "http://evil.example");
             }
             let (status, _) = send(
-                app().layer(axum::Extension(auth::ListenerIp(ip))),
+                app().await.layer(axum::Extension(auth::ListenerIp(ip))),
                 request.body(Body::empty()).unwrap(),
             )
             .await;
             assert_eq!(status, expected, "{host}");
         }
         let (status, _) = send(
-            app(),
+            app().await,
             Request::get("/healthz")
                 .header(header::HOST, "100.102.228.67:7878")
                 .body(Body::empty())
@@ -734,7 +641,7 @@ pub mod tests {
     #[tokio::test]
     async fn browser_origin_and_foreign_host_are_rejected() {
         let (status, _) = send(
-            app(),
+            app().await,
             get("/v1/capabilities")
                 .header(header::ORIGIN, "http://evil.example")
                 .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
@@ -744,7 +651,7 @@ pub mod tests {
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         let (status, _) = send(
-            app(),
+            app().await,
             Request::get("/healthz")
                 .header(header::HOST, "evil.example:7878")
                 .body(Body::empty())
@@ -753,7 +660,7 @@ pub mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let (status, _) = send(
-            app(),
+            app().await,
             Request::get("/healthz")
                 .header(header::HOST, "localhost:17001")
                 .body(Body::empty())
@@ -765,7 +672,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn repeated_failures_are_rate_limited() {
-        let app = app();
+        let app = app().await;
         for _ in 0..30 {
             let (status, _) = send(
                 app.clone(),

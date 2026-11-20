@@ -63,8 +63,7 @@ impl ProfileChoice {
 /// profile, and apply this one exactly. Returns the provider's ID.
 pub fn validate_choice(state: &AppState, choice: &ProfileChoice) -> Result<&'static str, ApiError> {
     let provider = state
-        .scheduler
-        .registry()
+        .registry
         .get(&choice.provider_id)
         .filter(|p| p.uses_profile())
         .ok_or_else(|| ApiError::bad_request("unknown_provider", "Unknown provider."))?;
@@ -86,7 +85,7 @@ pub fn choice_json(provider_id: &str, profile: &crate::app::providers::Profile) 
 /// The defaults new bots start with: the installation's default provider
 /// (else the first available one that takes a profile) and that provider's saved profile.
 pub async fn defaults(state: &AppState) -> Result<Option<Value>, ApiError> {
-    let registry = state.scheduler.registry();
+    let registry = &state.registry;
     let mut conn = state.db.acquire().await?;
     let chosen = crate::db::bot_profiles::default_provider(&mut conn)
         .await?
@@ -193,13 +192,12 @@ async fn update(
     ApiJson(body): ApiJson<UpdateBody>,
 ) -> Result<Json<Value>, ApiError> {
     let saved = profiles::get(&state.db, &provider_id).await?.is_some();
-    let adapter = state.scheduler.registry().get(&provider_id);
+    let adapter = state.registry.get(&provider_id);
     if !saved && !adapter.is_some_and(|p| p.uses_profile()) {
         return Err(ApiError::not_found());
     }
     let provider = state
-        .scheduler
-        .registry()
+        .registry
         .get(&provider_id)
         .filter(|p| p.uses_profile())
         .ok_or_else(|| {

@@ -80,7 +80,7 @@ async fn start_run(h: &Harness, bot: &str, quiet: bool, task: &str) -> (Value, U
         .unwrap()
         .to_utc();
     let queued =
-        else_api::db::routines::admit_due(&h.app.db.pool, h.app.scheduler.registry(), None, due, 8)
+        else_api::db::routines::admit_due(&h.app.db.pool, &h.app.state.registry, None, due, 8)
             .await
             .unwrap()
             .queued;

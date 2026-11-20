@@ -126,7 +126,7 @@ async fn send(
     }
     // A message sent during a backup is accepted without an admission and
     // waits in the queue; it lets the turns the backup is waiting for finish.
-    let admission = state.scheduler.gate().enter();
+    let admission = state.gate.enter();
     let mode = match admission {
         Some(_) => turns::Admission::Open,
         None => turns::Admission::Deferred,
@@ -189,7 +189,7 @@ async fn accept_send(
                 _ => ApiError::bad_request("invalid_input", err.to_string()),
             })
         })?;
-    let registry = state.scheduler.registry();
+    let registry = &state.registry;
     let requested = body.provider_id.as_deref();
     let chosen = match requested {
         Some(_) => None,
@@ -294,7 +294,7 @@ async fn cancel(
             .with_request_id(body.request_id)
         })?;
     if receipt.created {
-        state.scheduler.grants().revoke_bot(bot_id).await;
+        state.grants.revoke_bot(bot_id).await;
     }
     if let Some(turn_id) = receipt.interrupt {
         state.scheduler.interrupt(turn_id).await;

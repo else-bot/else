@@ -69,6 +69,7 @@ async fn app(root: &Path, replies: Vec<String>, outcome: TurnOutcome) -> TestApp
             outcome,
         })]),
     )
+    .await
 }
 
 fn png() -> Vec<u8> {

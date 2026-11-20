@@ -99,7 +99,8 @@ async fn app() -> (TestApp, Arc<Mutex<Vec<Seen>>>, Arc<Synthetic>) {
         Arc::new(db),
         2,
         else_api::providers::Registry::new(vec![provider]),
-    );
+    )
+    .await;
     (app, seen, inner)
 }
 

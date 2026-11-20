@@ -198,7 +198,7 @@ async fn setup(desktop: bool) -> Setup {
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(5))
             .with_projects(dir.path().join("projects")),
     )]);
-    let app = Arc::new(TestApp::with_parts(db, 4, registry, Some(manager.clone())));
+    let app = Arc::new(TestApp::with_parts(db, 4, registry, Some(manager.clone())).await);
     Setup {
         app,
         guest,
@@ -218,8 +218,8 @@ async fn grant(app: &TestApp, bot: &str) -> String {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    app.scheduler
-        .grants()
+    app.state
+        .grants
         .issue(
             bot.parse().unwrap(),
             conversation,
@@ -350,8 +350,8 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     assert!(error(&shot(&app, &token, json!({})).await).starts_with("COMPUTER_STOPPED"));
     assert_eq!(guest.files.lock().unwrap().len(), before);
 
-    app.scheduler
-        .grants()
+    app.state
+        .grants
         .revoke_turn(
             sqlx::query_scalar::<_, Uuid>(
                 "SELECT id FROM turns WHERE bot_id = ?1 AND status = 'running' LIMIT 1",

@@ -1592,7 +1592,7 @@ async fn owners_upgrade_from_the_api_while_turns_queue() {
     let registry = else_api::providers::Registry::new(vec![Arc::new(
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
     )]);
-    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone()));
+    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone())).await;
     let bot: Uuid = app.create_bot("Upgrade").await.parse().unwrap();
     let path = format!("/v1/bots/{bot}/computer");
 
@@ -1651,8 +1651,8 @@ async fn owners_upgrade_from_the_api_while_turns_queue() {
         "a turn queues instead of waiting for the upgrade"
     );
     assert!(
-        app.scheduler
-            .gate()
+        app.state
+            .gate
             .close(
                 Duration::from_millis(50),
                 else_api::maintenance::Pause::backup(None)
@@ -1708,7 +1708,7 @@ async fn upgrades_reinstall_the_bots_packages_and_report_the_ones_that_fail() {
     let registry = else_api::providers::Registry::new(vec![Arc::new(
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
     )]);
-    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone()));
+    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone())).await;
     let bot: Uuid = app.create_bot("Root").await.parse().unwrap();
     let path = format!("/v1/bots/{bot}/computer");
     let (turn, _) = ready(&manager, bot, "turn:gone").await;
@@ -1790,7 +1790,7 @@ async fn stopping_the_api_interrupts_an_upgrade_and_the_next_start_removes_its_r
     let registry = else_api::providers::Registry::new(vec![Arc::new(
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
     )]);
-    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone()));
+    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone())).await;
     let bot: Uuid = app.create_bot("Shutdown").await.parse().unwrap();
     let (turn, old_name) = ready(&manager, bot, "turn:gone").await;
     manager.release(turn).await.unwrap();
@@ -1878,7 +1878,7 @@ async fn outdated_fleet(
     let registry = else_api::providers::Registry::new(vec![Arc::new(
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
     )]);
-    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone()));
+    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone())).await;
     let mut bots = Vec::new();
     for name in ["One", "Two", "Three"] {
         let bot: Uuid = app.create_bot(name).await.parse().unwrap();
@@ -2114,8 +2114,8 @@ async fn upgrade_all_waits_for_maintenance_fails_missing_disks_and_counts_kept_c
         .await
         .unwrap();
     let closed = app
-        .scheduler
-        .gate()
+        .state
+        .gate
         .close(
             Duration::from_secs(5),
             else_api::maintenance::Pause::backup(None),
@@ -2124,10 +2124,7 @@ async fn upgrade_all_waits_for_maintenance_fails_missing_disks_and_counts_kept_c
         .unwrap()
         .expect("closed by this test");
     // The API refuses owner requests while the gate is closed.
-    let queued = manager
-        .upgrade_all(app.scheduler.gate().clone())
-        .await
-        .unwrap();
+    let queued = manager.upgrade_all(app.state.gate.clone()).await.unwrap();
     assert_eq!(queued.len(), 3);
     let deadline = tokio::time::Instant::now() + common::SETTLE;
     loop {

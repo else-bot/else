@@ -144,7 +144,7 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             )
         }
         Ok(card) => {
-            state.scheduler.grants().park(grant.turn_id).await;
+            state.grants.park(grant.turn_id).await;
             let result = json!({
                 "status": "pending",
                 "parked": true,
@@ -337,7 +337,7 @@ async fn approve(
 ) -> Result<Json<Value>, ApiError> {
     let done = skills::approve(
         &state.db,
-        state.secret_key.as_deref(),
+        Some(&*state.secret_key),
         bot_id,
         id,
         body.scope,

@@ -292,10 +292,10 @@ async fn social_destination(
     let Ok(mut message) = message else {
         return Ok(message.map(Content::Message));
     };
-    if let (Some(account), Some(destination), Some(socials)) = (
+    if let (Some(account), Some(destination), socials) = (
         message.account_id,
         message.destination.as_mut(),
-        state.socials.as_ref(),
+        &state.socials,
     ) {
         *destination = socials
             .resolve(account, grant.bot_id, grant.turn_id, destination)
@@ -365,7 +365,7 @@ async fn draft(
             Some(log),
         ));
     }
-    state.scheduler.grants().park(grant.turn_id).await;
+    state.grants.park(grant.turn_id).await;
     let log = format!(
         "drafted {} {} revision {} to {}",
         row.content.noun(),
@@ -563,18 +563,14 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
         .account()
         .ok_or_else(|| refused(DraftError::NotConnected))?;
     let delivery = match &draft.content.0 {
-        Content::Email(_) if grant.allows(Tool::Mail) && state.connectors.is_some() => {
-            Delivery::Mail {
-                account_id,
-                action_id: Uuid::new_v4(),
-            }
-        }
-        Content::Message(_) if grant.allows(Tool::Social) && state.socials.is_some() => {
-            Delivery::Social {
-                account_id,
-                action_id: Uuid::new_v4(),
-            }
-        }
+        Content::Email(_) if grant.allows(Tool::Mail) => Delivery::Mail {
+            account_id,
+            action_id: Uuid::new_v4(),
+        },
+        Content::Message(_) if grant.allows(Tool::Social) => Delivery::Social {
+            account_id,
+            action_id: Uuid::new_v4(),
+        },
         _ => {
             return Err((
                 tool_error("Native sending is unavailable for this task and account."),
@@ -605,10 +601,7 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
                 action_id,
                 email,
             } => {
-                let manager = state
-                    .connectors
-                    .as_ref()
-                    .ok_or_else(|| refused(DraftError::NotConnected))?;
+                let manager = &state.connectors;
                 match outgoing_drafts::next_mail_send(&state.db, id, &email.message_id(row.id))
                     .await
                     .map_err(refused)?
@@ -672,10 +665,7 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
                 message,
                 destination,
             } => {
-                let manager = state
-                    .socials
-                    .as_ref()
-                    .ok_or_else(|| refused(DraftError::NotConnected))?;
+                let manager = &state.socials;
                 let result = async {
                     let connection =
                         crate::socials::store::connection(&state.db, account_id).await?;

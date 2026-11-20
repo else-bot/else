@@ -45,7 +45,7 @@ async fn setup() -> Setup {
     manager.reconcile_startup().await.unwrap();
     let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
     let registry = else_api::providers::Registry::new(vec![synthetic]);
-    let app = TestApp::with_parts(db, 4, registry, Some(manager.clone()));
+    let app = TestApp::with_parts(db, 4, registry, Some(manager.clone())).await;
     let bot = app.create_bot("Scout").await;
     let token = owner_turn(&app, &bot).await;
     Setup {
@@ -67,8 +67,8 @@ async fn owner_turn(app: &TestApp, bot: &str) -> String {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    app.scheduler
-        .grants()
+    app.state
+        .grants
         .issue(
             bot.parse().unwrap(),
             conversation,
@@ -310,8 +310,8 @@ async fn a_watcher_checks_until_found_then_wakes_its_bot_once() {
         .unwrap();
     let woken = s
         .app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             s.bot.parse().unwrap(),
             conversation,

@@ -15,7 +15,7 @@ const SLOW: &str = "[synthetic:slow] please plan the week: groceries, school for
 async fn app_with(max_active: usize) -> TestApp {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    TestApp::with_options(db, max_active)
+    TestApp::with_options(db, max_active).await
 }
 
 async fn leaf(app: &TestApp, name: &str) -> String {
@@ -47,8 +47,8 @@ async fn running_main_with(app: &TestApp, prompt: &str) -> (String, Uuid, String
         .await
         .unwrap();
     let token = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             main.parse().unwrap(),
             conversation,
@@ -73,8 +73,8 @@ async fn grant_history(app: &TestApp, turn: Uuid) -> String {
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
-    app.scheduler
-        .grants()
+    app.state
+        .grants
         .issue(
             bot,
             conversation,
@@ -92,8 +92,8 @@ async fn grant_delegate(app: &TestApp, turn: Uuid) -> String {
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
-    app.scheduler
-        .grants()
+    app.state
+        .grants
         .issue(bot, conversation, turn, vec![Tool::Delegate], DEFAULT_TTL)
         .await
 }
@@ -123,8 +123,8 @@ async fn forged(app: &TestApp, turn: Uuid) -> String {
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
-    app.scheduler
-        .grants()
+    app.state
+        .grants
         .issue(bot, conversation, turn, vec![Tool::CreateBot], DEFAULT_TTL)
         .await
 }
@@ -464,8 +464,8 @@ async fn task_history_pages_its_source_and_reply_without_the_owner_receipt() {
         .await
         .unwrap();
     let grant = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             target_id,
             task_conversation,
@@ -531,8 +531,8 @@ async fn a_running_delegated_task_keeps_its_scope_and_its_stop_is_shown() {
             .await
             .unwrap();
     let grant = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             work_id,
             task_conversation,
@@ -758,8 +758,8 @@ async fn delegation_limits_fail_in_code() {
         .await
         .unwrap();
     let no_delegate = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             main.parse().unwrap(),
             conversation,
@@ -2181,8 +2181,8 @@ async fn a_delegated_task_cannot_read_memory_the_parent_could_not() {
         .unwrap();
     let _ = warm;
     let token = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue_scoped(
             work_id,
             conversation,
@@ -2369,8 +2369,8 @@ async fn creation_requires_an_owner_request_and_a_purpose_for_peer_bots() {
         .await
         .unwrap();
     let plain = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             main.parse().unwrap(),
             conversation,
@@ -3648,8 +3648,8 @@ async fn a_question_while_the_owner_holds_a_delegated_bots_computer_keeps_the_ta
             .await
             .unwrap();
     let child_token = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(bot, conversation, child, vec![Tool::Computer], DEFAULT_TTL)
         .await;
     let asked = app
@@ -3888,7 +3888,7 @@ async fn app_with_synthetic() -> (TestApp, Arc<else_api::providers::synthetic::S
         Duration::from_millis(5),
     ));
     let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
-    (TestApp::with_registry(db, 3, registry), synthetic)
+    (TestApp::with_registry(db, 3, registry).await, synthetic)
 }
 
 async fn update(app: &TestApp, token: &str, task: Uuid, message: &str) -> Value {

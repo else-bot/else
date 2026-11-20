@@ -40,11 +40,10 @@ fn at(value: &Value) -> DateTime<Utc> {
 }
 
 async fn fire(app: &TestApp, now: DateTime<Utc>) -> usize {
-    let queued =
-        else_api::db::routines::admit_due(&app.db.pool, app.scheduler.registry(), None, now, 8)
-            .await
-            .unwrap()
-            .queued;
+    let queued = else_api::db::routines::admit_due(&app.db.pool, &app.state.registry, None, now, 8)
+        .await
+        .unwrap()
+        .queued;
     app.scheduler.wake();
     queued
 }
@@ -574,8 +573,8 @@ async fn forged(app: &TestApp, turn: Uuid, tools: Vec<Tool>) -> String {
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
-    app.scheduler
-        .grants()
+    app.state
+        .grants
         .issue(bot, conversation, turn, tools, DEFAULT_TTL)
         .await
 }
@@ -2133,8 +2132,8 @@ async fn stop_deletion_and_maintenance_hold_runs() {
 
     let closed = h
         .app
-        .scheduler
-        .gate()
+        .state
+        .gate
         .close(
             Duration::from_secs(10),
             else_api::maintenance::Pause::backup(None),
@@ -2217,7 +2216,7 @@ async fn a_restart_never_repeats_an_admitted_run() {
         .await;
     assert_ne!(status, "queued");
     assert_eq!(
-        else_api::db::routines::admit_due(&app.db.pool, app.scheduler.registry(), None, due, 8)
+        else_api::db::routines::admit_due(&app.db.pool, &app.state.registry, None, due, 8)
             .await
             .unwrap()
             .queued,

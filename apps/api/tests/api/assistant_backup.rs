@@ -250,7 +250,7 @@ async fn setup_image(projects: bool, image: &str) -> Setup {
     let registry = else_api::providers::Registry::new(vec![Arc::new(
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
     )]);
-    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone()));
+    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone())).await;
     Setup {
         app,
         fake,
@@ -507,7 +507,7 @@ async fn live_work_defers_the_set_and_a_failed_component_publishes_nothing() {
         "{result:?}"
     );
     assert!(backup::completed_sets(&backups).unwrap().is_empty());
-    assert!(!s.app.scheduler.gate().is_closed(), "the gate reopens");
+    assert!(!s.app.state.gate.is_closed(), "the gate reopens");
     s.app
         .owner(
             "POST",
@@ -551,8 +551,8 @@ async fn the_gate_refuses_changes_and_desktop_wakes_while_closed() {
     let bot = s.app.main_bot().await;
     let closed = s
         .app
-        .scheduler
-        .gate()
+        .state
+        .gate
         .close(
             Duration::from_secs(1),
             else_api::maintenance::Pause::backup(None),
@@ -634,7 +634,7 @@ async fn a_message_sent_during_a_backup_queues_behind_the_running_turn() {
         .await;
     let first = first.body["turn"]["id"].as_str().unwrap().to_owned();
     s.app.wait_turn(&first, &["running"]).await;
-    let gate = s.app.scheduler.gate().clone();
+    let gate = s.app.state.gate.clone();
     let closed = gate
         .close(
             Duration::from_secs(1),

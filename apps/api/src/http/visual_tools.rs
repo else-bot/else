@@ -43,8 +43,7 @@ pub(super) async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outco
         .map_or(else_visual::REFERENCE_WIDTH, |w| w as u32);
     let dark = args["theme"].as_str() != Some("light");
     let Some(project) = state
-        .scheduler
-        .registry()
+        .registry
         .all()
         .iter()
         .find_map(|provider| provider.project_dir(grant.bot_id))

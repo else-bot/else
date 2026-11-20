@@ -110,7 +110,8 @@ async fn fixture() -> Fixture {
             Arc::new(grok),
             Arc::new(Synthetic::new(Duration::from_millis(5))),
         ]),
-    );
+    )
+    .await;
     let saved = app
         .owner(
             "PATCH",
@@ -218,8 +219,8 @@ async fn a_parked_parent_without_a_result_keeps_its_child_and_continues_in_a_new
         .unwrap();
     let token = fx
         .app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             main.parse().unwrap(),
             conversation,

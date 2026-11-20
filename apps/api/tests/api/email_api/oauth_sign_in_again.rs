@@ -21,18 +21,13 @@ async fn a_gmail_inbox_google_signed_out_reopens_the_sign_in_card() {
     };
     let account = store::create(
         &app.db.pool,
-        app.state.secret_key.as_ref().unwrap(),
+        &app.state.secret_key,
         &Provider::Gmail.config("owner@gmail.com".into()).unwrap(),
         &signed_in("expired-refresh"),
     )
     .await
     .unwrap();
-    app.state
-        .connectors
-        .as_ref()
-        .unwrap()
-        .changed(account.id)
-        .await;
+    app.state.connectors.changed(account.id).await;
     health_becomes(app, account.id, Health::Connected).await;
     let generation = store::account(&app.db.pool, account.id)
         .await
@@ -132,7 +127,7 @@ async fn a_gmail_inbox_google_signed_out_reopens_the_sign_in_card() {
 async fn signing_in_again_takes_no_account_slot() {
     let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
     let app = &h.app;
-    let key = app.state.secret_key.as_ref().unwrap();
+    let key = &app.state.secret_key;
     let (config, credential) = gmail("owner@gmail.com");
     let expired = store::create(&app.db.pool, key, &config, &credential)
         .await

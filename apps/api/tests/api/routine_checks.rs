@@ -42,7 +42,7 @@ async fn setup(check: &str) -> Setup {
     manager.reconcile_startup().await.unwrap();
     let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
     let registry = else_api::providers::Registry::new(vec![synthetic]);
-    let app = TestApp::with_parts(db, 4, registry, Some(manager.clone()));
+    let app = TestApp::with_parts(db, 4, registry, Some(manager.clone())).await;
     let bot = app.create_bot("Scout").await;
     let token = owner_turn(&app, &bot).await;
     let created = tool(
@@ -79,8 +79,8 @@ async fn owner_turn(app: &TestApp, bot: &str) -> String {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    app.scheduler
-        .grants()
+    app.state
+        .grants
         .issue(
             bot.parse().unwrap(),
             conversation,
@@ -294,7 +294,7 @@ async fn without_computers_a_check_is_skipped_as_unavailable_and_update_can_remo
         .await
         .unwrap();
     let admitted =
-        else_api::db::routines::admit_due(&s.app.db.pool, s.app.scheduler.registry(), None, due, 8)
+        else_api::db::routines::admit_due(&s.app.db.pool, &s.app.state.registry, None, due, 8)
             .await
             .unwrap();
     assert_eq!((admitted.queued, admitted.checks.len()), (0, 0));

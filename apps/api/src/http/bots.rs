@@ -226,7 +226,7 @@ pub(super) async fn delete_bot(
     bot_id: Uuid,
 ) -> Result<crate::db::bots::BotRecord, BotError> {
     let deleted = bots::delete(&state.db, bot_id).await?;
-    state.scheduler.grants().revoke_bot(bot_id).await;
+    state.grants.revoke_bot(bot_id).await;
     if let Some(turn_id) = deleted.interrupt {
         state.scheduler.interrupt(turn_id).await;
     }

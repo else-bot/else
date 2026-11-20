@@ -192,7 +192,7 @@ impl Installation {
                 "Choose a version newer than the running server.",
             ));
         }
-        if state.scheduler.gate().is_closed() {
+        if state.gate.is_closed() {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
                 "busy",

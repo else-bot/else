@@ -45,8 +45,8 @@ async fn grant(app: &TestApp, bot: &str, tools: Vec<Tool>) -> (Uuid, String) {
         .unwrap();
     (
         turn,
-        app.scheduler
-            .grants()
+        app.state
+            .grants
             .issue(bot.parse().unwrap(), conversation, turn, tools, DEFAULT_TTL)
             .await,
     )
@@ -189,7 +189,7 @@ async fn installation_and_execution_require_their_grants_and_external_calls_park
     assert_eq!(missing_effect.body["result"]["isError"], true);
     let pending=result(&tool(&app,&token,"mcp_request",json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{"message":"Hello"}},"effect":"external","purpose":"Send a greeting"})).await);
     assert_eq!(pending["parked"], true);
-    assert!(app.scheduler.grants().is_parked(turn).await);
+    assert!(app.state.grants.is_parked(turn).await);
     let blocked = tool(&app, &token, "mcp_list", json!({})).await;
     assert_eq!(blocked.status, StatusCode::CONFLICT);
 }
@@ -203,8 +203,8 @@ async fn grant_for_running(app: &TestApp, bot: &str, tools: Vec<Tool>) -> (Uuid,
             .unwrap();
     (
         turn,
-        app.scheduler
-            .grants()
+        app.state
+            .grants
             .issue(bot.parse().unwrap(), conversation, turn, tools, DEFAULT_TTL)
             .await,
     )
@@ -239,7 +239,7 @@ async fn replacing_a_different_package_waits_for_the_owner_and_resets_a_changed_
     assert_eq!(asked, 0, "invalid input is refused before any card");
     let pending = result(&tool(&app, &token, "mcp_install", moved.clone()).await);
     assert_eq!(pending["parked"], true, "{pending}");
-    assert!(app.scheduler.grants().is_parked(turn).await);
+    assert!(app.state.grants.is_parked(turn).await);
     let (question, kind, title, context, choices): (Uuid, String, String, String, String) =
         sqlx::query_as(
             "SELECT id, kind, title, context, choices FROM owner_questions WHERE turn_id = ?1",
@@ -416,7 +416,8 @@ async fn header_credentials_come_from_task_secrets_and_connect_without_oauth() {
         .await;
     assert_eq!(stored.status, StatusCode::CREATED, "{}", stored.body);
     result(&tool(&app, &token, "mcp_install", install(json!(["bento"]))).await);
-    let config = std::fs::read_to_string(app.db.dir().join("mcp/bento/config.json")).unwrap();
+    let config =
+        std::fs::read_to_string(app.config.data_dir.join("mcp/bento/config.json")).unwrap();
     assert!(config.contains("${BENTO_SECRET_KEY}"), "{config}");
     assert!(
         !config.contains("private"),
@@ -518,7 +519,7 @@ async fn a_cut_result_is_saved_whole_in_the_bots_project() {
         inner: else_api::providers::synthetic::Synthetic::new(std::time::Duration::from_millis(5)),
         root: root.path().to_owned(),
     })]);
-    let app = TestApp::with_registry(std::sync::Arc::new(db), 4, registry);
+    let app = TestApp::with_registry(std::sync::Arc::new(db), 4, registry).await;
     let bot = app.create_bot("Scout").await;
     std::fs::create_dir_all(root.path().join(&bot)).unwrap();
     let (_, token) = grant(&app, &bot, vec![Tool::Mcp, Tool::ManageMcp]).await;
