@@ -197,13 +197,14 @@ fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
 }
 
 fn lock(config: &Config) -> anyhow::Result<RuntimeLock> {
-    let url = config.require_database().context("invalid configuration")?;
-    Ok(else_api::runtime_lock::acquire(&config.data_dir, url)?)
+    Ok(else_api::runtime_lock::acquire(
+        &config.data_dir,
+        &config.database_url,
+    )?)
 }
 
 async fn database(config: &Config) -> anyhow::Result<sqlx::SqlitePool> {
-    let url = config.require_database().context("invalid configuration")?;
-    let pool = db::connect(url).await?;
+    let pool = db::connect(&config.database_url).await?;
     db::migrate(&pool).await?;
     Ok(pool)
 }
@@ -214,8 +215,7 @@ fn backup_parts(
     else_api::backup::DatabaseParams,
     Arc<credentials::SecretKey>,
 )> {
-    let url = config.require_database().context("invalid configuration")?;
-    let params = else_api::backup::DatabaseParams::parse(url.expose())?;
+    let params = else_api::backup::DatabaseParams::parse(config.database_url.expose())?;
     let key = credentials::load_secret_key(&config.secret_key)?;
     Ok((params, Arc::new(key)))
 }
@@ -372,7 +372,7 @@ fn run_restore_remote(
     let (_, key) = backup_parts(&config)?;
     let downloads = config.data_dir.join("restore-download");
     let saved = runtime()?.block_on(async {
-        let params = else_api::backup::DatabaseParams::parse(config.require_database()?.expose())?;
+        let params = else_api::backup::DatabaseParams::parse(config.database_url.expose())?;
         if !params.options.get_filename().exists() {
             return Ok::<_, anyhow::Error>(None);
         }

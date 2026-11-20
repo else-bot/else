@@ -46,7 +46,7 @@ impl ResetPlan {
                 .contains(&config.bots_dir),
             "reset requires ELSE_BOTS_DIR to be inside this installation at bots or data/projects"
         );
-        let database = else_api::db::options(config.require_database()?.expose())?;
+        let database = else_api::db::options(config.database_url.expose())?;
         let filename = database.get_filename();
         ensure!(
             [

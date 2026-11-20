@@ -399,13 +399,8 @@ impl Backups {
         cancel: CancellationToken,
     ) -> Result<(Self, JoinHandle<()>), Error> {
         let settings = settings::load_or_seed(&pool, &key, config).await?;
-        let params = DatabaseParams::parse(
-            config
-                .require_database()
-                .map_err(|_| Error::Unavailable)?
-                .expose(),
-        )
-        .map_err(|_| Error::Unavailable)?;
+        let params =
+            DatabaseParams::parse(config.database_url.expose()).map_err(|_| Error::Unavailable)?;
         let (pages, page_size) = tokio::join!(
             sqlx::query_scalar::<_, i64>("PRAGMA page_count").fetch_one(&pool),
             sqlx::query_scalar::<_, i64>("PRAGMA page_size").fetch_one(&pool),
