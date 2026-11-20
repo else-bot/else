@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use super::grok_home;
-use crate::app::providers::{TurnOutcome, Usage};
+use crate::app::providers::{FailureCode, TurnOutcome, Usage};
 use crate::app::tools::{DEFERRED_TOOLS, SERVER_NAME, TOOL_NAMES};
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 
@@ -320,7 +320,9 @@ impl Protocol for Tracker {
         accepted: bool,
     ) -> TurnOutcome {
         let (success, stop_reason, errors) = match terminal {
-            Terminal::Error(message) => return failed("provider_failed", message),
+            Terminal::Error(message) => {
+                return TurnOutcome::failed(FailureCode::ProviderFailed, message);
+            }
             Terminal::Result {
                 success,
                 stop_reason,
@@ -328,8 +330,8 @@ impl Protocol for Tracker {
             } => (success, stop_reason, errors),
         };
         if self.start == Start::Unopened {
-            return failed(
-                "provider_failed",
+            return TurnOutcome::failed(
+                FailureCode::ProviderFailed,
                 format!("Grok stopped before opening a session: {errors}"),
             );
         }
@@ -341,12 +343,12 @@ impl Protocol for Tracker {
         match stop_reason.as_deref() {
             Some("end_turn") if success => TurnOutcome::Completed,
             Some("cancelled") if stopping.is_some() => TurnOutcome::Interrupted,
-            Some("cancelled") => failed(
-                "provider_refused",
+            Some("cancelled") => TurnOutcome::failed(
+                FailureCode::ProviderRefused,
                 "Grok refused to execute a tool without additional permission.",
             ),
-            reason => failed(
-                "provider_failed",
+            reason => TurnOutcome::failed(
+                FailureCode::ProviderFailed,
                 format!(
                     "Grok ended with {}: {errors}",
                     reason.unwrap_or("no stop reason")
@@ -384,11 +386,4 @@ fn errors(value: &Value) -> String {
         .as_array()
         .and_then(|list| list.iter().map(Value::as_str).collect());
     messages.map_or_else(|| value.to_string(), |messages| messages.join("\n"))
-}
-
-fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
-    TurnOutcome::Failed {
-        code: code.into(),
-        message: message.into(),
-    }
 }

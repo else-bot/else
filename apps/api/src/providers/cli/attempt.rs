@@ -9,7 +9,7 @@ use tokio::time::Instant;
 
 use super::process::{Finish, Scope, Stderr, last_lines};
 use super::session::PreparedTurn;
-use crate::app::providers::{Steer, Stop, TurnOutcome, TurnSink};
+use crate::app::providers::{FailureCode, Steer, Stop, TurnOutcome, TurnSink};
 
 mod steer;
 
@@ -20,8 +20,6 @@ pub const TURN_DEADLINE: Duration = Duration::from_secs(30 * 60);
 /// How long before [`TURN_DEADLINE`] the provider is told its time is
 /// running out.
 pub const DEADLINE_WARNING: Duration = Duration::from_secs(5 * 60);
-/// The error code of an attempt cut at [`TURN_DEADLINE`].
-pub const DEADLINE_CODE: &str = "turn_deadline";
 /// How long an interrupted provider may take to report its terminal result.
 pub const INTERRUPT_GRACE: Duration = Duration::from_secs(15);
 /// How long a parent may keep going after a tool parked its turn.
@@ -40,30 +38,36 @@ pub enum StopCause {
 /// The provider broke else.bot's policy for it: the attempt is killed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
-    pub code: &'static str,
+    pub code: FailureCode,
     pub message: String,
 }
 
 impl Violation {
     pub fn policy(message: impl Into<String>) -> Self {
         Self {
-            code: "policy_violation",
+            code: FailureCode::PolicyViolation,
             message: message.into(),
         }
     }
 
     pub fn profile(message: impl Into<String>) -> Self {
         Self {
-            code: "profile_mismatch",
+            code: FailureCode::ProfileMismatch,
             message: message.into(),
         }
+    }
+}
+
+impl std::fmt::Display for Violation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
     }
 }
 
 impl From<Violation> for TurnOutcome {
     fn from(violation: Violation) -> Self {
         TurnOutcome::Failed {
-            code: violation.code.to_owned(),
+            code: violation.code,
             message: violation.message,
         }
     }
@@ -224,7 +228,7 @@ impl Lifecycle {
 /// ([`crate::db::limit_cuts`]).
 pub fn deadline_failure() -> TurnOutcome {
     TurnOutcome::Failed {
-        code: DEADLINE_CODE.into(),
+        code: FailureCode::TurnDeadline,
         message: limit_message(0),
     }
 }
@@ -1038,7 +1042,10 @@ mod tests {
         .await;
         assert!(matches!(
             ended,
-            Ended::Abandoned(TurnOutcome::Failed { code, .. }) if code == "policy_violation"
+            Ended::Abandoned(TurnOutcome::Failed {
+                code: FailureCode::PolicyViolation,
+                ..
+            })
         ));
     }
 
@@ -1063,7 +1070,10 @@ mod tests {
         assert_eq!(life.on_timer(), Tick::Interrupt);
         assert!(matches!(
             life.settled(TurnOutcome::Interrupted),
-            TurnOutcome::Failed { code, .. } if code == "turn_deadline"
+            TurnOutcome::Failed {
+                code: FailureCode::TurnDeadline,
+                ..
+            }
         ));
         assert_eq!(
             life.settled(TurnOutcome::Completed),

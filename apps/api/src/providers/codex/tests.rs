@@ -1,6 +1,7 @@
 use super::policy::Reported;
 use super::*;
-use crate::app::providers::{HistoryEntry, MemoryContext, SessionState};
+use crate::app::providers::{FailureCode, HistoryEntry, MemoryContext, SessionState};
+use crate::db::turns::ItemKind;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -23,7 +24,7 @@ impl Codex {
     }
 }
 
-fn input(history: Vec<(i64, &str, &str)>) -> TurnInput {
+fn input(history: Vec<(i64, ItemKind, &str)>) -> TurnInput {
     TurnInput {
         bot_id: Uuid::new_v4(),
         conversation_id: Uuid::new_v4(),
@@ -39,7 +40,7 @@ fn input(history: Vec<(i64, &str, &str)>) -> TurnInput {
             .into_iter()
             .map(|(turn_no, kind, text)| HistoryEntry {
                 turn_no,
-                kind: kind.into(),
+                kind,
                 text: text.into(),
                 status: crate::db::turns::TurnStatus::Completed,
                 error: None,
@@ -149,9 +150,9 @@ fn saved_task_permissions_are_refreshed_even_in_resumed_sessions() {
 #[test]
 fn packet_includes_only_missed_history() {
     let input = input(vec![
-        (1, "user", "a"),
-        (1, "assistant", "b"),
-        (2, "user", "c"),
+        (1, ItemKind::User, "a"),
+        (1, ItemKind::Assistant, "b"),
+        (2, ItemKind::User, "c"),
     ]);
     assert_eq!(prompt::packet(&input, 2), "latest");
     let packet = prompt::packet(&input, 1);
@@ -171,8 +172,8 @@ fn history_names_earlier_files_by_their_staged_copies() {
         size: 9,
     };
     let mut input = input(vec![
-        (1, "user", "Read [File: plan.pdf]"),
-        (1, "assistant", "Done."),
+        (1, ItemKind::User, "Read [File: plan.pdf]"),
+        (1, ItemKind::Assistant, "Done."),
     ]);
     input.history[0].parts = vec![
         MessagePart::Text {
@@ -195,9 +196,9 @@ fn history_names_earlier_files_by_their_staged_copies() {
 fn packet_respects_the_budget_and_states_omissions() {
     let big = "x".repeat(20 * 1024);
     let input = input(vec![
-        (1, "user", "first"),
-        (2, "user", &big),
-        (3, "user", &big),
+        (1, ItemKind::User, "first"),
+        (2, ItemKind::User, &big),
+        (3, ItemKind::User, &big),
     ]);
     let packet = prompt::packet(&input, 0);
     assert!(
@@ -212,10 +213,10 @@ fn packet_respects_the_budget_and_states_omissions() {
 fn a_welcome_does_not_displace_the_first_owner_message() {
     let big = "x".repeat(20 * 1024);
     let input = input(vec![
-        (1, "assistant", "Welcome to else.bot."),
-        (2, "user", "Remember my original request."),
-        (3, "assistant", &big),
-        (4, "user", &big),
+        (1, ItemKind::Assistant, "Welcome to else.bot."),
+        (2, ItemKind::User, "Remember my original request."),
+        (3, ItemKind::Assistant, &big),
+        (4, ItemKind::User, &big),
     ]);
     let (packet, selection) = prompt::packet_with_selection(&input, 0);
     assert_eq!(
@@ -232,9 +233,9 @@ fn a_welcome_does_not_displace_the_first_owner_message() {
 #[test]
 fn a_welcome_keeps_its_place_in_history() {
     let input = input(vec![
-        (1, "assistant", "Welcome to else.bot."),
-        (2, "user", "My original request."),
-        (2, "assistant", "First reply."),
+        (1, ItemKind::Assistant, "Welcome to else.bot."),
+        (2, ItemKind::User, "My original request."),
+        (2, ItemKind::Assistant, "First reply."),
     ]);
     let (packet, selection) = prompt::packet_with_selection(&input, 0);
     assert!(packet.contains(
@@ -249,10 +250,10 @@ fn a_large_first_message_still_fits_the_budget() {
     let first = "f".repeat(30 * 1024);
     let other = "o".repeat(10 * 1024);
     let input = input(vec![
-        (1, "user", &first),
-        (2, "user", &other),
-        (3, "user", &other),
-        (4, "user", &other),
+        (1, ItemKind::User, &first),
+        (2, ItemKind::User, &other),
+        (3, ItemKind::User, &other),
+        (4, ItemKind::User, &other),
     ]);
     let packet = prompt::packet(&input, 0);
     assert!(
@@ -652,8 +653,11 @@ async fn a_connector_event_fails_before_its_turn_without_the_no_native_catalog()
         let TurnOutcome::Failed { code, .. } = &outcome else {
             panic!("{marker}: {outcome:?}");
         };
-        let expected = "provider_unavailable";
-        assert_eq!(code, expected, "{marker}: {outcome:?}");
+        assert_eq!(
+            *code,
+            FailureCode::ProviderUnavailable,
+            "{marker}: {outcome:?}"
+        );
         assert!(!dir.path().join("threads.jsonl").exists(), "{marker}");
         assert!(!received.exists(), "{marker}");
         if marker == "export-fails" {
@@ -724,7 +728,7 @@ async fn a_failed_account_read_is_asked_once_more_before_the_turn_fails() {
             assert_eq!(
                 outcome,
                 TurnOutcome::Failed {
-                    code: "provider_unavailable".into(),
+                    code: FailureCode::ProviderUnavailable,
                     message: "account/read failed: workspace routing discovery timed out (-32603)"
                         .into(),
                 }
@@ -760,8 +764,8 @@ async fn an_empty_tool_inventory_is_listed_once_more_before_the_turn_fails() {
         } else {
             assert_eq!(
                 outcome,
-                failed(
-                    "provider_unavailable",
+                TurnOutcome::failed(
+                    FailureCode::ProviderUnavailable,
                     "else.bot's MCP server reported no tools: MCP startup failed: connection refused",
                 )
             );
@@ -785,8 +789,8 @@ async fn an_unexpected_tool_inventory_is_a_policy_violation() {
         .await;
     assert_eq!(
         outcome,
-        failed(
-            "policy_violation",
+        TurnOutcome::failed(
+            FailureCode::PolicyViolation,
             "else.bot's MCP server offered unexpected tools: [\"shell\"]",
         )
     );
@@ -818,8 +822,8 @@ async fn a_codex_that_exits_reports_the_end_of_its_stderr_without_the_grant() {
             .await;
         assert_eq!(
             outcome,
-            failed(
-                "provider_unavailable",
+            TurnOutcome::failed(
+                FailureCode::ProviderUnavailable,
                 "the provider process exited: starting / thread main panicked: bad grant [tool grant] / note: run with RUST_BACKTRACE=1",
             ),
             "{leftover}"
@@ -840,7 +844,10 @@ async fn a_connector_event_fails_on_any_command_or_file_change() {
             .await;
         assert_eq!(
             outcome,
-            failed("policy_violation", format!("Codex attempted a {kind} item")),
+            TurnOutcome::failed(
+                FailureCode::PolicyViolation,
+                format!("Codex attempted a {kind} item")
+            ),
         );
     }
     for kind in ["commandExecution", "fileChange"] {

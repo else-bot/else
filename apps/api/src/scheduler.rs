@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
-use crate::app::providers::{Stop, TurnOutcome};
+use crate::app::providers::{FailureCode, Stop, TurnOutcome};
 use crate::db::turn_sink::{FLUSH_INTERVAL, SqliteSink};
 use crate::db::turns;
 use crate::grants::{Grants, Tool};
@@ -510,7 +510,7 @@ impl Scheduler {
         let sink = SqliteSink::new(self.pool.clone(), &input, &provider_id, project);
         let outcome = match self.registry.get(&provider_id) {
             None => TurnOutcome::Failed {
-                code: "provider_unavailable".into(),
+                code: FailureCode::ProviderUnavailable,
                 message: "The provider for this message is no longer configured.".into(),
             },
             Some(provider) => {

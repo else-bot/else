@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-use crate::app::providers::{LimitWindow, Steer, TurnOutcome, Usage};
+use crate::app::providers::{FailureCode, LimitWindow, Steer, TurnOutcome, Usage};
 use crate::app::tools::SERVER_NAME;
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 
@@ -448,7 +448,7 @@ impl Protocol for Tracker {
             let refused =
                 !info.success && stopping.is_none() && !self.activity && info.num_turns == Some(0);
             return if refused {
-                failed("provider_refused", info.message)
+                TurnOutcome::failed(FailureCode::ProviderRefused, info.message)
             } else {
                 TurnOutcome::Uncertain {
                     message: "Claude ended without acknowledging the message.".into(),
@@ -456,8 +456,8 @@ impl Protocol for Tracker {
             };
         }
         if !self.init_seen {
-            return failed(
-                "policy_violation",
+            return TurnOutcome::failed(
+                FailureCode::PolicyViolation,
                 "Claude did not report its tool set and model.",
             );
         }
@@ -466,15 +466,8 @@ impl Protocol for Tracker {
         } else if stopping.is_some() && !info.api_error {
             TurnOutcome::Interrupted
         } else {
-            failed("provider_failed", info.message)
+            TurnOutcome::failed(FailureCode::ProviderFailed, info.message)
         }
-    }
-}
-
-fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
-    TurnOutcome::Failed {
-        code: code.to_owned(),
-        message: message.into(),
     }
 }
 

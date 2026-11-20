@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::providers::{MemoryContext, SessionState};
+use crate::app::providers::{FailureCode, MemoryContext, SessionState};
 use crate::providers::cli::attempt::StopCause;
 use protocol::ResultInfo;
 
@@ -205,7 +205,7 @@ fn an_unannounced_model_fails_the_turn_with_what_the_owner_can_do() {
     let violation = tracker()
         .on(&json!({"type":"assistant","message":{"model":"claude-opus-4-8","content":[]}}))
         .unwrap_err();
-    assert_eq!(violation.code, "profile_mismatch");
+    assert_eq!(violation.code, FailureCode::ProfileMismatch);
     assert_eq!(
         violation.message,
         "Claude answered with claude-opus-4-8 instead of the chosen claude-haiku-5-5, \
@@ -220,7 +220,7 @@ fn an_agent_tool_extra_server_or_malformed_inventory_is_refused() {
     tools.push("Agent".into());
     assert_eq!(
         tracker().on(&init(tools, connected())).unwrap_err().code,
-        "policy_violation"
+        FailureCode::PolicyViolation
     );
     for servers in [
         json!([{ "name": "elsebot", "status": "connected" }, { "name": "other", "status": "connected" }]),
@@ -321,7 +321,7 @@ fn other_tools_models_and_permission_prompts_are_refused() {
     let violation = tracker()
         .on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-opus-5-5"}}}))
         .unwrap_err();
-    assert_eq!(violation.code, "profile_mismatch");
+    assert_eq!(violation.code, FailureCode::ProfileMismatch);
     let violation = tracker()
         .on(&json!({"type":"control_request","request_id":"r9","request":{"subtype":"can_use_tool","tool_name":"Write"}}))
         .unwrap_err();
@@ -537,7 +537,10 @@ fn only_a_provable_non_start_is_a_refusal() {
     let t = tracker();
     assert!(matches!(
         t.outcome(info(false, Some(0)), None, false),
-        TurnOutcome::Failed { ref code, .. } if code == "provider_refused"
+        TurnOutcome::Failed {
+            code: FailureCode::ProviderRefused,
+            ..
+        }
     ));
     assert!(matches!(
         t.outcome(info(false, Some(0)), Some(StopCause::Owner), false),
@@ -566,7 +569,10 @@ fn completion_requires_a_verified_init_and_a_stop_explains_a_failure() {
         .unwrap();
     assert!(matches!(
         t.outcome(info(true, Some(1)), None, true),
-        TurnOutcome::Failed { ref code, .. } if code == "policy_violation"
+        TurnOutcome::Failed {
+            code: FailureCode::PolicyViolation,
+            ..
+        }
     ));
     t.on(&init(claude_home::tool_names(), connected())).unwrap();
     assert_eq!(
@@ -579,7 +585,10 @@ fn completion_requires_a_verified_init_and_a_stop_explains_a_failure() {
     );
     assert!(matches!(
         t.outcome(info(false, Some(1)), None, true),
-        TurnOutcome::Failed { ref code, .. } if code == "provider_failed"
+        TurnOutcome::Failed {
+            code: FailureCode::ProviderFailed,
+            ..
+        }
     ));
 }
 
@@ -656,7 +665,7 @@ fn an_api_error_fails_the_turn_with_the_clis_message() {
         panic!("the result finishes the turn");
     };
     let failed = TurnOutcome::Failed {
-        code: "provider_failed".into(),
+        code: FailureCode::ProviderFailed,
         message: failure.into(),
     };
     assert_eq!(t.outcome(result.clone(), None, true), failed);
@@ -668,7 +677,7 @@ fn an_api_error_fails_the_turn_with_the_clis_message() {
     let model_output = json!({"type":"assistant","message":{"model":"<synthetic>","content":[]}});
     assert_eq!(
         tracker().on(&model_output).unwrap_err().code,
-        "profile_mismatch"
+        FailureCode::ProfileMismatch
     );
 }
 
@@ -1046,7 +1055,7 @@ async fn a_connector_event_offered_host_tools_anyway_fails() {
             .await;
         assert!(
             matches!(&outcome, TurnOutcome::Failed { code, message }
-                if code == "policy_violation" && message.contains("unexpected tools")),
+                if *code == FailureCode::PolicyViolation && message.contains("unexpected tools")),
             "{tool}: {outcome:?}"
         );
     }

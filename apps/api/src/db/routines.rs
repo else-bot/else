@@ -38,7 +38,7 @@ use uuid::Uuid;
 use super::turns::{ENDED_STATUSES, Phase, TurnStatus};
 use super::{bot_profiles, events};
 use crate::app::messages::MAX_QUEUED_TURNS;
-use crate::app::providers::{Availability, Origin, Profile, RoutineRun};
+use crate::app::providers::{Availability, FailureCode, Origin, Profile, RoutineRun};
 use crate::app::routines::{
     ActiveHours, AfterCheck, CheckSkip, InvalidRoutine, MAX_PER_BOT, ModelSetting, RoutineCheck,
     RoutineModel, RoutineName, RoutinePrompt, Schedule, run_prompt,
@@ -1001,7 +1001,7 @@ struct EndedRun {
     retry: bool,
     resumes: bool,
     status: TurnStatus,
-    error_code: Option<String>,
+    error_code: Option<FailureCode>,
     error_message: Option<String>,
     bot_id: Uuid,
     conversation_id: Uuid,
@@ -1065,7 +1065,7 @@ async fn review(
     let Some(run) = row else {
         return Ok(false);
     };
-    let Some(ended) = Ended::of(run.status, run.error_code.as_deref()) else {
+    let Some(ended) = Ended::of(run.status, run.error_code.as_ref()) else {
         return Ok(false);
     };
     sqlx::query("UPDATE routine_runs SET reviewed = true WHERE id = ?1")

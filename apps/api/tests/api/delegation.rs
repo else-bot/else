@@ -2746,8 +2746,11 @@ async fn the_parent_chat_shows_the_childs_reply_once_before_its_continuation() {
     let input = else_api::db::turns::input(&app.db.pool, next)
         .await
         .unwrap();
-    let kinds: Vec<&str> = input.history.iter().map(|h| h.kind.as_str()).collect();
-    assert!(!kinds.contains(&"status"), "{kinds:?}");
+    let kinds: Vec<_> = input.history.iter().map(|h| h.kind).collect();
+    assert!(
+        !kinds.contains(&else_api::db::turns::ItemKind::Status),
+        "{kinds:?}"
+    );
 }
 
 async fn parent_replies(db: &TestDb, main: Uuid) -> (Vec<(String, String, Uuid)>, usize) {
@@ -4227,7 +4230,10 @@ async fn a_failed_child_returns_its_last_checkpoint_and_the_error() {
     let outcomes = else_api::db::delegations::undelivered(&mut conn, root)
         .await
         .unwrap();
-    assert_eq!(outcomes[0].status, "failed");
+    assert_eq!(
+        outcomes[0].status,
+        else_api::db::delegations::Status::Failed
+    );
     assert_eq!(outcomes[0].result.as_deref(), Some(messages[1]));
     assert_eq!(
         outcomes[0].error.as_deref(),

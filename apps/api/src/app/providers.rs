@@ -113,7 +113,7 @@ pub fn default_profiles() -> Vec<(&'static str, Profile)> {
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
     pub turn_no: i64,
-    pub kind: String,
+    pub kind: crate::db::turns::ItemKind,
     pub text: String,
     pub status: crate::db::turns::TurnStatus,
     /// Why a failed or uncertain turn ended that way.
@@ -348,7 +348,7 @@ pub struct DelegationOutcome {
     pub target_bot_id: Uuid,
     pub target_name: String,
     pub task: String,
-    pub status: String,
+    pub status: crate::db::delegations::Status,
     pub result: Option<String>,
     pub error: Option<String>,
     /// The delegating bot's copies of files the task's replies attached.
@@ -394,8 +394,8 @@ pub struct McpWaitOutcome {
     pub mcp_id: String,
     pub tool: String,
     pub purpose: String,
-    /// `finished`, `failed`, or `expired`.
-    pub status: String,
+    /// `Finished`, `Failed`, `Expired`, or `Stopped`.
+    pub status: crate::db::mcp_waits::Status,
     pub checks: i64,
     pub result: Option<String>,
 }
@@ -570,13 +570,89 @@ pub enum TurnOutcome {
     /// Stopped on request, with the provider's confirmation.
     Interrupted,
     Failed {
-        code: String,
+        code: FailureCode,
         message: String,
     },
     /// Delivery or effects are unknown, e.g. the process died mid-turn.
     Uncertain {
         message: String,
     },
+}
+
+impl TurnOutcome {
+    pub fn failed(code: FailureCode, message: impl Into<String>) -> Self {
+        Self::Failed {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+/// Why a turn failed, stored as `turns.error_code`.
+#[derive(Debug, Clone, PartialEq, Eq, strum::IntoStaticStr, strum::EnumString)]
+#[strum(serialize_all = "snake_case")]
+pub enum FailureCode {
+    ProviderUnavailable,
+    ProviderFailed,
+    TurnDeadline,
+    StartFailed,
+    ApiRestarted,
+    Orphaned,
+    /// Covers overload and usage-limit rejections as well as refusals.
+    ProviderRefused,
+    ProviderProtocol,
+    PolicyViolation,
+    InvalidProfile,
+    ProfileMismatch,
+    ProviderMisconfigured,
+    AttachmentUnavailable,
+    /// A code an older build stored; only decoding a row makes one, so a
+    /// misspelled code cannot be written.
+    #[strum(disabled)]
+    Other(String),
+}
+
+impl FailureCode {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Other(code) => code,
+            known => known.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for FailureCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl sqlx::Type<sqlx::Sqlite> for FailureCode {
+    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+        <String as sqlx::Type<sqlx::Sqlite>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::sqlite::SqliteTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Sqlite>>::compatible(ty)
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Sqlite> for FailureCode {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::sqlite::SqliteArgumentsBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        <&str as sqlx::Encode<sqlx::Sqlite>>::encode_by_ref(&self.as_str(), buf)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for FailureCode {
+    fn decode(value: sqlx::sqlite::SqliteValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let code = <&str as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
+        Ok(code
+            .parse()
+            .unwrap_or_else(|_| Self::Other(code.to_owned())))
+    }
 }
 
 /// The sink refused a write because the turn is no longer the bot's active
@@ -839,4 +915,48 @@ pub trait Provider: Send + Sync {
     /// the provider; an escalation must end it at once. Either way it
     /// returns only after its processes have stopped.
     async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FailureCode;
+
+    #[tokio::test]
+    async fn failure_codes_keep_their_stored_strings() {
+        let mut conn = <sqlx::SqliteConnection as sqlx::Connection>::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for (code, stored) in [
+            (FailureCode::ProviderUnavailable, "provider_unavailable"),
+            (FailureCode::ProviderFailed, "provider_failed"),
+            (FailureCode::TurnDeadline, "turn_deadline"),
+            (FailureCode::StartFailed, "start_failed"),
+            (FailureCode::ApiRestarted, "api_restarted"),
+            (FailureCode::Orphaned, "orphaned"),
+            (FailureCode::ProviderRefused, "provider_refused"),
+            (FailureCode::ProviderProtocol, "provider_protocol"),
+            (FailureCode::PolicyViolation, "policy_violation"),
+            (FailureCode::InvalidProfile, "invalid_profile"),
+            (FailureCode::ProfileMismatch, "profile_mismatch"),
+            (FailureCode::ProviderMisconfigured, "provider_misconfigured"),
+            (FailureCode::AttachmentUnavailable, "attachment_unavailable"),
+            (
+                FailureCode::Other("from_an_older_build".into()),
+                "from_an_older_build",
+            ),
+        ] {
+            let written: String = sqlx::query_scalar("SELECT ?1")
+                .bind(&code)
+                .fetch_one(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(written, stored);
+            let read: FailureCode = sqlx::query_scalar("SELECT ?1")
+                .bind(stored)
+                .fetch_one(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(read, code);
+        }
+    }
 }

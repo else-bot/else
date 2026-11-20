@@ -898,14 +898,14 @@ async fn each_routine_run_starts_fresh_with_only_the_last_report() {
         .fetch_one(&h.app.db.pool)
         .await
         .unwrap();
-    let history: Vec<(i64, String)> = h.inputs(runs[2]).await[0]
+    let history: Vec<_> = h.inputs(runs[2]).await[0]
         .history
         .iter()
-        .map(|entry| (entry.turn_no, entry.kind.clone()))
+        .map(|entry| (entry.turn_no, entry.kind))
         .collect();
     assert_eq!(
         history,
-        vec![(previous, "assistant".to_owned())],
+        vec![(previous, else_api::db::turns::ItemKind::Assistant)],
         "a run catches up on its routine's last report alone"
     );
     let active: Vec<(String, String)> = sqlx::query_as(

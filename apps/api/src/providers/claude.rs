@@ -58,6 +58,7 @@ use super::host::{BotDirs, Host, LaunchSpec, Run, RunError};
 use super::models::{Listed, Models};
 use super::prompt;
 use super::{attachments, claude_home};
+use crate::app::providers::FailureCode;
 use crate::app::providers::{
     Availability, CheckpointRequest, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
 };
@@ -345,13 +346,6 @@ impl Claude {
     }
 }
 
-fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
-    TurnOutcome::Failed {
-        code: code.to_owned(),
-        message: message.into(),
-    }
-}
-
 fn user_message(uuid: &str, content: Value) -> String {
     let mut line = user_value(uuid, content).to_string();
     line.push('\n');
@@ -501,20 +495,24 @@ impl Provider for Claude {
     async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
         let ready = match &self.ready {
             Ok(ready) => ready,
-            Err(reason) => return failed("provider_unavailable", reason.clone()),
+            Err(reason) => {
+                return TurnOutcome::failed(FailureCode::ProviderUnavailable, reason.clone());
+            }
         };
         let Some(profile) = input.profile.clone() else {
-            return failed(
-                "provider_misconfigured",
+            return TurnOutcome::failed(
+                FailureCode::ProviderMisconfigured,
                 "No execution profile was snapshotted.",
             );
         };
         if let Err(reason) = self.models.validate(&profile) {
-            return failed("invalid_profile", reason);
+            return TurnOutcome::failed(FailureCode::InvalidProfile, reason);
         }
         let dirs = match ready.host.bot_dirs(input.bot_id, ID) {
             Ok(dirs) => dirs,
-            Err(err) => return failed("provider_unavailable", err.to_string()),
+            Err(err) => {
+                return TurnOutcome::failed(FailureCode::ProviderUnavailable, err.to_string());
+            }
         };
         let fingerprint = self.fingerprint(ready, &profile, &input);
         let opened = match input.session.as_ref().filter(|s| {
@@ -532,8 +530,8 @@ impl Provider for Claude {
             return TurnOutcome::Interrupted;
         }
         if let Err(err) = attachments::stage(&dirs.project, &input.files).await {
-            return failed(
-                "attachment_unavailable",
+            return TurnOutcome::failed(
+                FailureCode::AttachmentUnavailable,
                 format!("The attached files could not be prepared: {err}"),
             );
         }
@@ -552,7 +550,7 @@ impl Provider for Claude {
             .await
         {
             Ok(attempt) => attempt,
-            Err(err) => return failed("provider_unavailable", err),
+            Err(err) => return TurnOutcome::failed(FailureCode::ProviderUnavailable, err),
         };
         let message_uuid = Uuid::new_v4().to_string();
         let mut tracker = Tracker::new(self.offered_tools(tools), &profile.model, &message_uuid);

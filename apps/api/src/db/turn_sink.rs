@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::turns::{ACTIVE_STATUSES, TurnStatus};
 use crate::actor::Actor;
-use crate::app::providers::{Fenced, SessionState, TurnInput, TurnOutcome, TurnSink};
+use crate::app::providers::{FailureCode, Fenced, SessionState, TurnInput, TurnOutcome, TurnSink};
 use crate::db::in_ids;
 
 mod steers;
@@ -474,8 +474,13 @@ impl SinkState {
         // An attempt the limit cut continues in a new one, unless a cap is
         // reached. The owner's stop wins: the cut is the interruption it
         // asked for.
-        let deadline = matches!(outcome, TurnOutcome::Failed { code, .. }
-            if code == crate::providers::cli::attempt::DEADLINE_CODE);
+        let deadline = matches!(
+            outcome,
+            TurnOutcome::Failed {
+                code: FailureCode::TurnDeadline,
+                ..
+            }
+        );
         let cut = if deadline && current != TurnStatus::Cancelling {
             super::limit_cuts::cut(&mut tx, self.turn_id, self.bot_id, i64::from(self.attempt))
                 .await?
@@ -537,8 +542,13 @@ impl SinkState {
         .execute(&mut *tx)
         .await?
         .rows_affected();
-        let refused =
-            matches!(outcome, TurnOutcome::Failed { code, .. } if code == "provider_refused");
+        let refused = matches!(
+            outcome,
+            TurnOutcome::Failed {
+                code: FailureCode::ProviderRefused,
+                ..
+            }
+        );
         crate::db::handoffs::transition(
             &mut tx,
             self.turn_id,

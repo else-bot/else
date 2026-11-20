@@ -26,6 +26,7 @@ use super::definitions::Definition;
 use super::host::{BotDirs, Host, LaunchSpec, Run};
 use super::models::{Listed, Models};
 use super::{attachments, grok_home, prompt};
+use crate::app::providers::FailureCode;
 use crate::app::providers::{
     Availability, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
 };
@@ -331,26 +332,28 @@ impl Provider for Grok {
     async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
         let ready = match &self.ready {
             Ok(ready) => ready,
-            Err(reason) => return failed("provider_unavailable", reason.clone()),
+            Err(reason) => {
+                return TurnOutcome::failed(FailureCode::ProviderUnavailable, reason.clone());
+            }
         };
         if grok_home::signed_out(&ready.login) {
-            return failed("provider_unavailable", SIGNED_OUT);
+            return TurnOutcome::failed(FailureCode::ProviderUnavailable, SIGNED_OUT);
         }
         let Some(profile) = &input.profile else {
-            return failed(
-                "provider_misconfigured",
+            return TurnOutcome::failed(
+                FailureCode::ProviderMisconfigured,
                 "No execution profile was snapshotted.",
             );
         };
         if let Err(reason) = self.models.validate(profile) {
-            return failed("invalid_profile", reason);
+            return TurnOutcome::failed(FailureCode::InvalidProfile, reason);
         }
         if stop.is_requested() {
             return TurnOutcome::Interrupted;
         }
         let dirs = match ready.host.bot_dirs(input.bot_id, ID) {
             Ok(dirs) => dirs,
-            Err(e) => return failed("provider_unavailable", e.to_string()),
+            Err(e) => return TurnOutcome::failed(FailureCode::ProviderUnavailable, e.to_string()),
         };
         let fingerprint = self.fingerprint(ready, &input, profile);
         let opened = match input.session.as_ref().filter(|s| {
@@ -365,7 +368,7 @@ impl Provider for Grok {
             return TurnOutcome::Interrupted;
         }
         if let Err(e) = attachments::stage(&dirs.project, &input.files).await {
-            return failed("attachment_unavailable", e.to_string());
+            return TurnOutcome::failed(FailureCode::AttachmentUnavailable, e.to_string());
         }
         let host_tools = input.delegation.host_tools();
         if let Err(e) = grok_home::prepare(
@@ -376,11 +379,11 @@ impl Provider for Grok {
             &turn.packet,
             host_tools,
         ) {
-            return failed("provider_unavailable", e.to_string());
+            return TurnOutcome::failed(FailureCode::ProviderUnavailable, e.to_string());
         }
         let spec = match self.launch(ready, &input, profile, dirs, &turn).await {
             Ok(spec) => spec,
-            Err(why) => return failed("provider_unavailable", why),
+            Err(why) => return TurnOutcome::failed(FailureCode::ProviderUnavailable, why),
         };
         if sink.sending().await.is_err() {
             return TurnOutcome::Interrupted;
@@ -388,7 +391,7 @@ impl Provider for Grok {
         let mut attempt = match StreamAttempt::spawn(&ready.host, &spec, Interrupt::Signal, "Grok")
         {
             Ok(attempt) => attempt,
-            Err(e) => return failed("provider_unavailable", e.to_string()),
+            Err(e) => return TurnOutcome::failed(FailureCode::ProviderUnavailable, e.to_string()),
         };
         let mut tracker = Tracker::new(
             &profile.model,
@@ -401,14 +404,16 @@ impl Provider for Grok {
         // Grok clears the host login in the run it fails for want of one,
         // before it acknowledges the prompt, so nothing of the turn ran.
         let unacknowledged = !turn.accepted()
-            && match &outcome {
-                TurnOutcome::Failed { code, .. } => code == "provider_failed",
-                TurnOutcome::Uncertain { .. } => true,
-                _ => false,
-            };
+            && matches!(
+                outcome,
+                TurnOutcome::Failed {
+                    code: FailureCode::ProviderFailed,
+                    ..
+                } | TurnOutcome::Uncertain { .. }
+            );
         if unacknowledged && grok_home::signed_out(&ready.login) {
             tracing::info!(turn = %input.turn_id, ?outcome, "Grok failed for want of a login");
-            return failed("provider_unavailable", SIGNED_OUT);
+            return TurnOutcome::failed(FailureCode::ProviderUnavailable, SIGNED_OUT);
         }
         outcome
     }
@@ -420,13 +425,6 @@ pub(crate) fn tool_note() -> String {
         "Use inline use_tool calls with tool_name and tool_input. else.bot MCP tool names start with {0}__. A tool that {0}__find_tool returns, such as send_draft or report_draft_send, has no {0}__ name of its own: run it with tool_name {0}__use_tool and tool_input {{\"name\": \"send_draft\", \"arguments\": {{...}}}}. Do not use invocation files that hide tool_name. End this attempt when an else.bot tool returns parked or pending; the app will continue it after the outcome.",
         crate::app::tools::SERVER_NAME,
     )
-}
-
-fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
-    TurnOutcome::Failed {
-        code: code.into(),
-        message: message.into(),
-    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use crate::common;
+use else_api::app::providers::FailureCode;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -104,7 +105,7 @@ impl Provider for Steering {
 
 fn failed() -> TurnOutcome {
     TurnOutcome::Failed {
-        code: "provider_failed".into(),
+        code: FailureCode::ProviderFailed,
         message: "The scripted provider failed.".into(),
     }
 }
