@@ -27,7 +27,11 @@ struct Fake {
     create_delay: Mutex<Duration>,
     /// While set, each create waits for a permit.
     create_hold: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// While set, each listing waits for a permit after taking its snapshot.
+    list_hold: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    list_entered: tokio::sync::Notify,
     fail_unpack: std::sync::atomic::AtomicBool,
+    fail_create: std::sync::atomic::AtomicBool,
     fail_close: std::sync::atomic::AtomicBool,
     fail_configure: std::sync::atomic::AtomicBool,
     fail_desktop: std::sync::atomic::AtomicBool,
@@ -66,13 +70,19 @@ impl ComputerRuntime for Fake {
         if self.fail_list.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(RuntimeError::Unavailable("listing failed".into()));
         }
-        Ok(self
+        let listed = self
             .computers
             .lock()
             .unwrap()
             .iter()
             .map(|(name, computer)| (name.clone(), computer.state))
-            .collect())
+            .collect();
+        let hold = self.list_hold.lock().unwrap().clone();
+        if let Some(hold) = hold {
+            self.list_entered.notify_one();
+            let _ = hold.acquire().await;
+        }
+        Ok(listed)
     }
     async fn create(&self, spec: &Spec) -> Result<(), RuntimeError> {
         self.log(format!(
@@ -80,6 +90,12 @@ impl ComputerRuntime for Fake {
             spec.name, spec.cpus, spec.memory_mib
         ));
         self.specs.lock().unwrap().push(spec.clone());
+        if self.fail_create.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(RuntimeError::Failed {
+                operation: "create".into(),
+                message: "image pull failed".into(),
+            });
+        }
         let delay = *self.create_delay.lock().unwrap();
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
@@ -1340,6 +1356,52 @@ async fn desktop_computers_boot_small_and_grow_only_for_the_screen() {
 
 /// A desktop whose startup fails is not admitted: the use is told it
 /// failed, the failure is recorded, and the next use starts it again.
+/// A create that fails leaves the computer absent rather than missing, so
+/// the next use creates it instead of reporting it lost.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_create_leaves_the_computer_absent_and_the_next_use_creates_it() {
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let manager = manager(&app, &fake, config(2)).await;
+    let bot: Uuid = app.create_bot("Create").await.parse().unwrap();
+
+    fake.fail_create
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let failed = manager.acquire(bot, "test:a").await.unwrap();
+    assert!(matches!(failed, Acquire::Unavailable { .. }), "{failed:?}");
+    assert_eq!(observed(&app, bot).await, "absent");
+
+    fake.fail_create
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    ready(&manager, bot, "test:a").await;
+}
+
+/// Startup inspection never applies a listing older than the computer's
+/// last transition: an owner stop that finishes while the runtime is being
+/// listed keeps its `stopped`.
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_inspection_never_applies_a_listing_older_than_a_stop() {
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let manager = Arc::new(manager(&app, &fake, config(2)).await);
+    let bot: Uuid = app.create_bot("Race").await.parse().unwrap();
+    let (lease, _) = ready(&manager, bot, "test:a").await;
+    manager.release(lease).await.unwrap();
+
+    let hold = Arc::new(tokio::sync::Semaphore::new(0));
+    *fake.list_hold.lock().unwrap() = Some(hold.clone());
+    let inspection = tokio::spawn({
+        let manager = manager.clone();
+        async move { manager.reconcile_startup().await }
+    });
+    fake.list_entered.notified().await;
+    manager.owner_stop(bot).await.unwrap();
+    assert_eq!(observed(&app, bot).await, "stopped");
+    hold.add_permits(1);
+    inspection.await.unwrap().unwrap();
+    assert_eq!(observed(&app, bot).await, "stopped");
+}
+
 /// A stop only starts from running, paused, or error: an owner stop of a
 /// computer already stopped, or missing from the runtime, asks the runtime
 /// for nothing and leaves its state as recorded.

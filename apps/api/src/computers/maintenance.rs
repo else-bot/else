@@ -316,6 +316,11 @@ impl ComputerManager {
     /// an interrupted transition takes the runtime's actual state. Until
     /// this succeeds no computer is used, and maintenance retries it.
     pub async fn reconcile_startup(&self) -> Result<(), ComputerError> {
+        let rows: Vec<(Uuid, String, Observed, i64)> = sqlx::query_as(
+            "SELECT bot_id, runtime_name, observed_state, generation FROM bot_computers",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         let listed = match self.runtime.list().await {
             Ok(listed) => listed,
             Err(err) => {
@@ -323,17 +328,17 @@ impl ComputerManager {
                 return Ok(());
             }
         };
-        let rows: Vec<(Uuid, String, Observed)> =
-            sqlx::query_as("SELECT bot_id, runtime_name, observed_state FROM bot_computers")
-                .fetch_all(&self.pool)
-                .await?;
-        for (bot, name, was) in rows {
+        for (bot, name, was, generation) in rows {
             let actual = listed.iter().find(|(n, _)| *n == name).map(|(_, s)| *s);
             let now = was.from_runtime(actual);
             let mut conn = self.pool.acquire().await?;
-            let reconciled = Transition::Reconciled { was, now }
-                .apply(&mut conn, bot)
-                .await?;
+            let reconciled = Transition::Reconciled {
+                was,
+                generation,
+                now,
+            }
+            .apply(&mut conn, bot)
+            .await?;
             if reconciled.is_none() {
                 tracing::info!(bot = %bot, "computer changed during startup inspection; left as is");
             } else if now != was {

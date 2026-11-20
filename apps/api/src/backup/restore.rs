@@ -719,7 +719,13 @@ async fn reconcile(
     let target = request.server.with_database(request.target_database);
     let mut conn = SqliteConnection::connect_with(&options(&target)).await?;
     let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
-    crate::computers::state::restored(&mut tx, restored).await?;
+    let tracked = crate::computers::state::restored(&mut tx, restored).await?;
+    if tracked != restored.len() as u64 {
+        return Err(BackupError::Invalid(format!(
+            "{} restored computer disks have no computer in the database",
+            restored.len() as u64 - tracked
+        )));
+    }
     sqlx::query(
         "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'restored'
          WHERE released_at IS NULL",

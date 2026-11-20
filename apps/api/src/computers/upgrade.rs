@@ -603,9 +603,12 @@ impl ComputerManager {
         {
             drop(tx);
             let changed = Busy::Changed("upgrade");
-            let _ = self.discard_replacement(&to_runtime_name).await;
-            self.end_upgrade(id, UpgradeEnd::Fail(&changed.to_string()))
-                .await?;
+            let error = changed.to_string();
+            let end = match self.discard_replacement(&to_runtime_name).await {
+                Ok(()) => UpgradeEnd::Fail(&error),
+                Err(_) => UpgradeEnd::Strand(&error),
+            };
+            self.end_upgrade(id, end).await?;
             return Err(ComputerError::Busy(changed));
         }
         tx.commit().await?;

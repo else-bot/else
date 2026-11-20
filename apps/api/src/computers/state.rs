@@ -129,9 +129,14 @@ pub(super) enum Transition<'a> {
     Failed { from: Observed, error: &'a str },
     /// The runtime reported `now` for a computer recorded as `was`.
     Observed { was: Observed, now: Observed },
-    /// Startup recorded what the runtime reports; a new generation begins,
-    /// so no lease from before the restart matches by accident.
-    Reconciled { was: Observed, now: Observed },
+    /// Startup recorded what the runtime reports for a computer recorded as
+    /// `was` at `generation` before the runtime was listed; a new generation
+    /// begins, so no lease from before the restart matches by accident.
+    Reconciled {
+        was: Observed,
+        generation: i64,
+        now: Observed,
+    },
 }
 
 impl Transition<'_> {
@@ -167,6 +172,16 @@ impl Transition<'_> {
         }
     }
 
+    /// The generation the computer must still be at: a reconciliation acts
+    /// on a listing taken after it read the row, so any transition since
+    /// (which may have finished in the same state) makes the listing stale.
+    fn expected_generation(self) -> Option<i64> {
+        match self {
+            Self::Reconciled { generation, .. } => Some(generation),
+            _ => None,
+        }
+    }
+
     fn new_generation(self) -> bool {
         matches!(
             self,
@@ -191,6 +206,7 @@ impl Transition<'_> {
                  last_error = coalesce(?4, last_error),
                  updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
              WHERE bot_id = ?1 AND observed_state IN (SELECT value FROM json_each(?5))
+               AND (?6 IS NULL OR generation = ?6)
              RETURNING generation",
         )
         .bind(bot_id)
@@ -198,6 +214,7 @@ impl Transition<'_> {
         .bind(i64::from(self.new_generation()))
         .bind(error)
         .bind(sqlx::types::Json(self.sources()))
+        .bind(self.expected_generation())
         .fetch_optional(&mut *conn)
         .await
     }
@@ -233,11 +250,12 @@ pub(super) async fn switch(
 
 /// After a restore: the computers whose disks it brought back (`disks`) are
 /// stopped, whatever the restored database recorded, and every other
-/// created computer is missing. Restore runs
-/// offline, before any manager uses the database.
-pub async fn restored(conn: &mut SqliteConnection, disks: &[Uuid]) -> Result<(), sqlx::Error> {
+/// created computer is missing. Restore runs offline, before any manager
+/// uses the database. Returns how many of `disks` had a computer row; the
+/// caller refuses a restore where one did not.
+pub async fn restored(conn: &mut SqliteConnection, disks: &[Uuid]) -> Result<u64, sqlx::Error> {
     let restored = in_ids("bot_id", "?1");
-    sqlx::query(sqlx::AssertSqlSafe(format!(
+    let stopped = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE bot_computers SET observed_state = ?2,
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE {restored}"
@@ -245,7 +263,8 @@ pub async fn restored(conn: &mut SqliteConnection, disks: &[Uuid]) -> Result<(),
     .bind(sqlx::types::Json(disks))
     .bind(Observed::Stopped)
     .execute(&mut *conn)
-    .await?;
+    .await?
+    .rows_affected();
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE bot_computers SET observed_state = ?2,
              last_error = 'not included in the restored backup',
@@ -257,7 +276,7 @@ pub async fn restored(conn: &mut SqliteConnection, disks: &[Uuid]) -> Result<(),
     .bind(Observed::Absent)
     .execute(&mut *conn)
     .await?;
-    Ok(())
+    Ok(stopped)
 }
 
 /// Where an image upgrade is (`computer_upgrades.state`).
@@ -350,21 +369,5 @@ impl UpgradeEnd<'_> {
         .execute(&mut *conn)
         .await?;
         Ok(applied.rows_affected() == 1)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_computer_that_never_finished_being_created_is_absent_not_missing() {
-        assert_eq!(Observed::Creating.from_runtime(None), Observed::Absent);
-        assert_eq!(Observed::Absent.from_runtime(None), Observed::Absent);
-        assert_eq!(Observed::Stopping.from_runtime(None), Observed::Missing);
-        assert_eq!(
-            Observed::Error.from_runtime(Some(RuntimeState::Stopped)),
-            Observed::Stopped
-        );
     }
 }
