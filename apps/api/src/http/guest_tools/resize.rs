@@ -5,15 +5,16 @@
 //! N GiB" grant applies the size without a card, but never runs a job the
 //! owner did not see.
 
+use crate::http::owner_tools::{Card, Declined, ask};
+use crate::http::tool_result::{self, Done, Refusal, ToolResult};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::{AppState, Grant, Outcome, failure, secrets_for, tool_error, tool_result};
+use super::{AppState, Grant, secrets_for};
 use crate::app::questions::{Kind, Spec, TaskScope};
 use crate::computers::ComputerManager;
 use crate::computers::jobs::{JobStatus, Rerun, Started};
 use crate::computers::memory::{MEMORY_SIZES_MIB, MemorySizes, gib};
-use crate::db::owner_questions::{self, Gate};
 use crate::db::task_secrets;
 
 pub(super) const NAME: &str = "computer_resize";
@@ -77,10 +78,10 @@ pub(super) async fn resize(
     grant: &Grant,
     computers: &ComputerManager,
     args: &Value,
-) -> Outcome {
+) -> ToolResult {
     let memory_mib = match args["memory_mib"].as_u64() {
         Some(size) if MEMORY_SIZES_MIB.iter().any(|s| u64::from(*s) == size) => size as u32,
-        _ => return (tool_error("memory_mib is 2048, 4096, or 8192."), None),
+        _ => return Err(Refusal::text("memory_mib is 2048, 4096, or 8192.")),
     };
     let reason = match args["reason"].as_str().map(str::trim) {
         Some(reason)
@@ -89,35 +90,32 @@ pub(super) async fn resize(
             reason
         }
         _ => {
-            return (
-                tool_error("reason is required: what ran out of memory, in at most 300 bytes."),
-                None,
-            );
+            return Err(Refusal::text(
+                "reason is required: what ran out of memory, in at most 300 bytes.",
+            ));
         }
     };
     let retry_job = match &args["retry_job"] {
         Value::Null => None,
         id => match id.as_str().and_then(|s| s.parse::<Uuid>().ok()) {
             Some(id) => Some(id),
-            None => return (tool_error("retry_job must be a job ID."), None),
+            None => return Err(Refusal::text("retry_job must be a job ID.")),
         },
     };
     let sizes = match computers.memory_sizes(grant.bot_id).await {
         Ok(sizes) => sizes,
-        Err(err) => return failure(err),
+        Err(err) => return Err(err.into()),
     };
     if memory_mib <= sizes.current_mib {
-        return (
-            tool_result(json!({
-                "status": "unchanged",
-                "memory_mib": sizes.current_mib,
-                "next": format!(
-                    "Your computer already has {}. Nothing was changed or re-run.",
-                    gib(sizes.current_mib)
-                ),
-            })),
-            Some(format!("{NAME}: already {}", gib(sizes.current_mib))),
-        );
+        return Ok(Done::json(json!({
+            "status": "unchanged",
+            "memory_mib": sizes.current_mib,
+            "next": format!(
+                "Your computer already has {}. Nothing was changed or re-run.",
+                gib(sizes.current_mib)
+            ),
+        }))
+        .logged(format!("{NAME}: already {}", gib(sizes.current_mib))));
     }
     if !sizes.offered_mib.contains(&memory_mib) {
         let offered: Vec<String> = sizes.offered_mib.iter().map(|m| gib(*m)).collect();
@@ -134,7 +132,7 @@ pub(super) async fn resize(
                 offered.join(", ")
             )
         };
-        return (tool_error(&message), None);
+        return Err(Refusal::text(message));
     }
     let rerun = match retry_job {
         None => None,
@@ -143,20 +141,16 @@ pub(super) async fn resize(
                 Some(rerun)
             }
             Ok(Some(_)) => {
-                return (
-                    tool_error(
-                        "retry_job must name a job that failed or was lost. Nothing was done.",
-                    ),
-                    None,
-                );
+                return Err(Refusal::text(
+                    "retry_job must name a job that failed or was lost. Nothing was done.",
+                ));
             }
             Ok(None) => {
-                return (
-                    tool_error("NO_SUCH_JOB: retry_job names no job of yours."),
-                    None,
-                );
+                return Err(Refusal::text(
+                    "NO_SUCH_JOB: retry_job names no job of yours.",
+                ));
             }
-            Err(err) => return failure(err),
+            Err(err) => return Err(err.into()),
         },
     };
     let scope = covering_scope(state, grant, memory_mib).await;
@@ -168,44 +162,26 @@ pub(super) async fn resize(
         format!("Raise this bot's computer memory to {}", gib(memory_mib)),
         card(&sizes, memory_mib, reason, rerun.as_ref()),
     );
-    let standing = match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
-        Ok(Gate::Run { standing }) => standing,
-        Ok(Gate::Pending(question)) => {
-            return crate::http::owner_tools::pending_approval(
-                state,
-                grant,
-                &question,
-                &format!(
-                    "Nothing was changed. The owner sees a card asking for {}. Tell them briefly \
-                     what ran out of memory, then end this attempt now; do not wait, poll, or \
-                     call more tools. If they approve, you continue: call {NAME} again with \
-                     exactly the same arguments, once. If they decline, report the failure.",
-                    gib(memory_mib)
-                ),
-            )
-            .await;
-        }
-        Ok(Gate::Denied(question)) => {
-            return (
-                tool_error(&format!(
-                    "DENIED: the owner kept the computer at {}. Nothing was changed. Do not ask \
-                     again in this request; report that the work ran out of memory.",
-                    gib(sizes.current_mib)
-                )),
-                Some(format!("denied {} by the owner", question.id)),
-            );
-        }
-        Err(owner_questions::RequestError::NotAllowed) => {
-            return (
-                tool_error(
-                    "NOT_ALLOWED: this task cannot ask the owner for memory. Nothing was \
-                     changed. Report that the work ran out of memory in your result.",
-                ),
-                Some("rejected NOT_ALLOWED".into()),
-            );
-        }
-        Err(err) => return crate::http::owner_tools::question_refused(err),
-    };
+    let card = Card::approval(format!(
+        "Nothing was changed. The owner sees a card asking for {}. Tell them briefly what ran \
+         out of memory, then end this attempt now; do not wait, poll, or call more tools. If \
+         they approve, you continue: call {NAME} again with exactly the same arguments, once. \
+         If they decline, report the failure.",
+        gib(memory_mib)
+    ))
+    .not_allowed(
+        Refusal::text(
+            "NOT_ALLOWED: this task cannot ask the owner for memory. Nothing was changed. Report \
+             that the work ran out of memory in your result.",
+        )
+        .logged("rejected NOT_ALLOWED"),
+    );
+    let declined = Declined::Text(format!(
+        "DENIED: the owner kept the computer at {}. Nothing was changed. Do not ask again in \
+         this request; report that the work ran out of memory.",
+        gib(sizes.current_mib)
+    ));
+    let standing = ask(state, grant, &spec, card, declined).await?;
     let shown = standing.is_none() || card_shown(state, grant, &spec).await;
     let resized = match computers
         .resize_memory(grant.bot_id, Some(memory_mib))
@@ -214,12 +190,10 @@ pub(super) async fn resize(
         Ok(resized) => resized,
         Err(err) => {
             tracing::warn!(bot = %grant.bot_id, error = %err, "resizing a computer failed");
-            return (
-                tool_error(&format!(
-                    "RESIZE_FAILED: {err}. Tell the owner; do not retry the job."
-                )),
-                Some(format!("{NAME} {} failed", gib(memory_mib))),
-            );
+            return Err(Refusal::text(format!(
+                "RESIZE_FAILED: {err}. Tell the owner; do not retry the job."
+            ))
+            .logged(format!("{NAME} {} failed", gib(memory_mib))));
         }
     };
     let log = format!(
@@ -238,7 +212,7 @@ pub(super) async fn resize(
             "Your computer now has {}. Run the work again.",
             gib(resized.memory_mib)
         ));
-        return (tool_result(value), Some(log));
+        return Ok(Done::json(value).logged(log));
     };
     if !shown && standing.is_some() {
         // The owner saw no card, so no command runs that they did not see.
@@ -248,7 +222,7 @@ pub(super) async fn resize(
              jobs. Start the job again yourself with computer_job_start, with its usual effect.",
             gib(resized.memory_mib)
         ));
-        return (tool_result(value), Some(log));
+        return Ok(Done::json(value).logged(log));
     }
     retry(
         state,
@@ -296,7 +270,7 @@ async fn covering_scope(state: &AppState, grant: &Grant, memory_mib: u32) -> Tas
             covers: Covers::Computer,
         };
         for key in target.covering_scopes() {
-            if owner_questions::has_permission(&mut conn, grant.bot_id, &key)
+            if crate::db::owner_questions::has_permission(&mut conn, grant.bot_id, &key)
                 .await
                 .unwrap_or(false)
             {
@@ -315,21 +289,19 @@ async fn retry(
     memory_mib: u32,
     done: Value,
     log: String,
-) -> Outcome {
+) -> ToolResult {
     let not_rerun = |why: &str| {
         let mut value = done.clone();
         value["next"] = json!(format!(
             "Your computer now has {}, but the job was not re-run: {why} Tell the owner.",
             gib(memory_mib)
         ));
-        (tool_result(value), Some(log.clone()))
+        Ok(Done::json(value).logged(log.clone()))
     };
     let secrets = json!({ "secrets": rerun.secrets });
     let (env, names) = match secrets_for(state, grant, &secrets, task_secrets::Use::Job).await {
         Ok(found) => found,
-        Err((error, _)) => {
-            return not_rerun(error["content"][0]["text"].as_str().unwrap_or_default());
-        }
+        Err(error) => return not_rerun(&tool_result::first_text(error)),
     };
     let started = computers
         .start_job_with(
@@ -347,28 +319,28 @@ async fn retry(
         Ok(Started::Job(id)) => id,
         Ok(Started::TooMany) => return not_rerun("4 background jobs already run."),
         Ok(Started::NotReady(acquired)) => {
-            let error = super::not_ready(&acquired);
-            return not_rerun(error["content"][0]["text"].as_str().unwrap_or_default());
+            return not_rerun(&tool_result::first_text(super::not_ready(&acquired)));
         }
         Ok(Started::Stopped) => return not_rerun("this turn was stopped."),
         Err(err) => return not_rerun(&format!("{err}.")),
     };
-    let (mut value, wait_log) = super::job_wait::wait_job(state, grant, computers, job_id).await;
+    let waited = super::job_wait::wait_job(state, grant, computers, job_id).await;
     let summary = format!(
         "Your computer now has {}; the job re-runs as job {job_id}.",
         gib(memory_mib)
     );
-    if let Some(text) = value["content"][0]["text"].as_str()
-        && let Ok(mut payload) = serde_json::from_str::<Value>(text)
-    {
-        let next = payload["next"].as_str().unwrap_or_default();
-        payload["next"] = json!(format!("{summary} {next}"));
-        payload["resized"] = done;
-        value["content"][0]["text"] = json!(payload.to_string());
-    }
-    let log = match wait_log {
-        Some(wait) => format!("{log}; retry {job_id}; {wait}"),
-        None => format!("{log}; retry {job_id}"),
-    };
-    (value, Some(log))
+    tool_result::amend(
+        waited,
+        |payload| {
+            let next = payload["next"].as_str().unwrap_or_default();
+            payload["next"] = json!(format!("{summary} {next}"));
+            payload["resized"] = done;
+        },
+        |wait_log| {
+            Some(match wait_log {
+                Some(wait) => format!("{log}; retry {job_id}; {wait}"),
+                None => format!("{log}; retry {job_id}"),
+            })
+        },
+    )
 }

@@ -2,6 +2,7 @@
 //! the trigger route, authenticated by the webhook's own token. A pace
 //! faster than the default needs the owner's approval of the exact call.
 
+use crate::http::tool_result::{self, Done, Refusal, ToolResult};
 use std::sync::Arc;
 
 use axum::Json;
@@ -16,7 +17,6 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::error::{ApiError, ApiJson, ApiPath};
-use super::mcp::{Outcome, tool_error, tool_result};
 use super::{AppState, Routes};
 use crate::app::routines::{MAX_NAME_CHARS, MAX_PROMPT_BYTES, RoutineName, RoutinePrompt};
 use crate::app::webhooks::{
@@ -156,26 +156,24 @@ fn code(err: &WebhookError) -> &'static str {
     }
 }
 
-fn reject(err: WebhookError) -> Outcome {
-    if let WebhookError::Db(err) = &err {
-        tracing::warn!(error = %err, "a webhook tool failed");
+impl From<WebhookError> for Refusal {
+    fn from(err: WebhookError) -> Self {
+        if let WebhookError::Db(err) = &err {
+            tracing::warn!(error = %err, "a webhook tool failed");
+        }
+        let code = code(&err);
+        let message = match err {
+            WebhookError::Db(_) => {
+                "webhooks are unavailable right now; try again shortly.".to_owned()
+            }
+            other => other.to_string(),
+        };
+        Refusal::coded(code, message)
     }
-    let code = code(&err);
-    let message = match err {
-        WebhookError::Db(_) => "webhooks are unavailable right now; try again shortly.".to_owned(),
-        other => other.to_string(),
-    };
-    (
-        tool_error(&format!("{code}: {message}")),
-        Some(format!("rejected {code}")),
-    )
 }
 
-fn invalid(message: &str) -> Outcome {
-    (
-        tool_error(&format!("INVALID_ARGUMENTS: {message}")),
-        Some("rejected INVALID_ARGUMENTS".into()),
-    )
+fn invalid(message: &str) -> Refusal {
+    Refusal::coded("INVALID_ARGUMENTS", message)
 }
 
 fn annotations(read_only: bool, destructive: bool) -> Value {
@@ -280,7 +278,7 @@ async fn approve_pace(
     name: &str,
     pace: Pace,
     current: Pace,
-) -> Result<Option<&'static str>, Outcome> {
+) -> Result<Option<&'static str>, Refusal> {
     if !pace.needs_approval_over(current) {
         return Ok(None);
     }
@@ -309,20 +307,20 @@ struct CreateArgs {
     daily_limit: Option<i64>,
 }
 
-pub async fn create(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    let Ok(parsed) = serde_json::from_value::<CreateArgs>(args.clone()) else {
-        return invalid(
+pub(crate) async fn create(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    let parsed: CreateArgs = tool_result::args(args, || {
+        invalid(
             "pass name and prompt as strings, and optionally min_interval_minutes and \
              daily_limit as integers.",
-        );
-    };
+        )
+    })?;
     let name = match RoutineName::parse(&parsed.name) {
         Ok(name) => name,
-        Err(err) => return invalid(&err.to_string()),
+        Err(err) => return Err(invalid(&err.to_string())),
     };
     let prompt = match RoutinePrompt::parse(&parsed.prompt) {
         Ok(prompt) => prompt,
-        Err(err) => return invalid(&err.to_string()),
+        Err(err) => return Err(invalid(&err.to_string())),
     };
     let pace = match Pace::with(
         Pace::DEFAULT,
@@ -330,14 +328,14 @@ pub async fn create(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         parsed.daily_limit,
     ) {
         Ok(pace) => pace,
-        Err(err) => return invalid(&err.to_string()),
+        Err(err) => return Err(invalid(&err.to_string())),
     };
     let retry = match webhooks::created_by(&state.db, grant.turn_id, &name).await {
         Ok(retry) => retry,
-        Err(err) => return reject(err.into()),
+        Err(err) => return Err(Refusal::from(WebhookError::from(err))),
     };
     let current = if retry { pace } else { Pace::DEFAULT };
-    let note = match approve_pace(
+    let note = approve_pace(
         state,
         grant,
         "webhook_create",
@@ -346,11 +344,7 @@ pub async fn create(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         pace,
         current,
     )
-    .await
-    {
-        Ok(note) => note,
-        Err(outcome) => return outcome,
-    };
+    .await?;
     let new = NewWebhook {
         name: &name,
         prompt: &prompt,
@@ -389,13 +383,13 @@ pub async fn create(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 "trigger_path": format!("/webhooks/v1/{}", webhook.id),
                 "next": next,
             });
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
-        Err(err) => reject(err),
+        Err(err) => Err(Refusal::from(err)),
     }
 }
 
-pub async fn list(state: &AppState, grant: &Grant) -> Outcome {
+pub(crate) async fn list(state: &AppState, grant: &Grant) -> ToolResult {
     let listed = async {
         let mut conn = state.db.acquire().await?;
         webhooks::list(&mut conn, grant.bot_id).await
@@ -412,9 +406,9 @@ pub async fn list(state: &AppState, grant: &Grant) -> Outcome {
                     "daily_limit": Pace::DEFAULT.daily_limit(),
                 },
             });
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
-        Err(err) => reject(err.into()),
+        Err(err) => Err(Refusal::from(WebhookError::from(err))),
     }
 }
 
@@ -431,10 +425,10 @@ struct UpdateArgs {
     rotate_token: bool,
 }
 
-pub async fn update(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    let Ok(parsed) = serde_json::from_value::<UpdateArgs>(args.clone()) else {
-        return invalid("pass webhook_id and only the fields to change, with their types.");
-    };
+pub(crate) async fn update(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    let parsed: UpdateArgs = tool_result::args(args, || {
+        invalid("pass webhook_id and only the fields to change, with their types.")
+    })?;
     let current = async {
         let mut conn = state.db.acquire().await?;
         webhooks::get(&mut conn, grant.bot_id, parsed.webhook_id).await
@@ -442,8 +436,8 @@ pub async fn update(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     .await;
     let current = match current {
         Ok(Some(current)) => current,
-        Ok(None) => return reject(WebhookError::NotFound),
-        Err(err) => return reject(err.into()),
+        Ok(None) => return Err(Refusal::from(WebhookError::NotFound)),
+        Err(err) => return Err(Refusal::from(WebhookError::from(err))),
     };
     let mut patch = Patch {
         enabled: parsed.enabled,
@@ -453,13 +447,13 @@ pub async fn update(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     if let Some(name) = &parsed.name {
         match RoutineName::parse(name) {
             Ok(name) => patch.name = Some(name),
-            Err(err) => return invalid(&err.to_string()),
+            Err(err) => return Err(invalid(&err.to_string())),
         }
     }
     if let Some(prompt) = &parsed.prompt {
         match RoutinePrompt::parse(prompt) {
             Ok(prompt) => patch.prompt = Some(prompt),
-            Err(err) => return invalid(&err.to_string()),
+            Err(err) => return Err(invalid(&err.to_string())),
         }
     }
     let pace = match Pace::with(
@@ -468,7 +462,7 @@ pub async fn update(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         parsed.daily_limit,
     ) {
         Ok(pace) => pace,
-        Err(err) => return invalid(&err.to_string()),
+        Err(err) => return Err(invalid(&err.to_string())),
     };
     patch.min_interval_minutes = parsed.min_interval_minutes;
     patch.daily_limit = parsed.daily_limit;
@@ -477,7 +471,7 @@ pub async fn update(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         .as_ref()
         .map_or(current.name.as_str(), RoutineName::as_str)
         .to_owned();
-    let note = match approve_pace(
+    let note = approve_pace(
         state,
         grant,
         "webhook_update",
@@ -486,11 +480,7 @@ pub async fn update(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         pace,
         current.pace,
     )
-    .await
-    {
-        Ok(note) => note,
-        Err(outcome) => return outcome,
-    };
+    .await?;
     patch.approved = note.is_some().then_some(pace);
     match webhooks::update(&state.db, By::Turn(caller(grant)), parsed.webhook_id, patch).await {
         Ok((webhook, token)) => {
@@ -508,12 +498,12 @@ pub async fn update(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 },
                 note.map(|n| format!(", {n}")).unwrap_or_default(),
             );
-            (
-                tool_result(json!({ "webhook": webhook_json(&webhook), "token": token })),
-                Some(log),
+            Ok(
+                Done::json(json!({ "webhook": webhook_json(&webhook), "token": token }))
+                    .logged(log),
             )
         }
-        Err(err) => reject(err),
+        Err(err) => Err(Refusal::from(err)),
     }
 }
 
@@ -523,10 +513,8 @@ struct DeleteArgs {
     webhook_id: Uuid,
 }
 
-pub async fn delete(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    let Ok(args) = serde_json::from_value::<DeleteArgs>(args.clone()) else {
-        return invalid("pass webhook_id.");
-    };
+pub(crate) async fn delete(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    let args: DeleteArgs = tool_result::args(args, || invalid("pass webhook_id."))?;
     match webhooks::delete(&state.db, By::Turn(caller(grant)), args.webhook_id).await {
         Ok(now_deleted) => {
             let log = format!(
@@ -540,8 +528,8 @@ pub async fn delete(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             );
             let result = json!({ "webhook_id": args.webhook_id, "deleted": true,
                                  "already_deleted": !now_deleted });
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
-        Err(err) => reject(err),
+        Err(err) => Err(Refusal::from(err)),
     }
 }

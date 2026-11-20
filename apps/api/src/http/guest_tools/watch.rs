@@ -1,10 +1,11 @@
 //! Watcher tools: a bot starts a periodic check that outlives its turn
 //! (see [`crate::app::watchers`]), lists its watchers, and stops one.
 
+use crate::http::tool_result::{Done, Refusal, ToolResult};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::{AppState, Grant, Outcome, fit, slice, tool_error, tool_result};
+use super::{AppState, Grant, fit, slice};
 use crate::app::providers::Origin;
 use crate::app::watchers::{
     DEFAULT_EVERY_MINUTES, MAX_EVERY_MINUTES, MAX_HOURS, MAX_PER_BOT, MIN_EVERY_MINUTES,
@@ -81,13 +82,12 @@ fn text(args: &Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
+pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
     let failed = |err: sqlx::Error| {
         tracing::warn!(error = %err, "a watcher tool failed");
-        (
-            tool_error("WATCHER_ERROR: the watcher store failed. Try again."),
-            None,
-        )
+        Err(Refusal::text(
+            "WATCHER_ERROR: the watcher store failed. Try again.",
+        ))
     };
     match name {
         START => {
@@ -96,30 +96,26 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                 text(args, "purpose"),
                 text(args, "prompt"),
             ) else {
-                return (tool_error("check, purpose and prompt are required."), None);
+                return Err(Refusal::text("check, purpose and prompt are required."));
             };
             if check.len() > MAX_TEXT || prompt.len() > MAX_TEXT || purpose.chars().count() > 300 {
-                return (
-                    tool_error("check and prompt are at most 8000 bytes, purpose 300 characters."),
-                    None,
-                );
+                return Err(Refusal::text(
+                    "check and prompt are at most 8000 bytes, purpose 300 characters.",
+                ));
             }
             let every = args["every_minutes"]
                 .as_i64()
                 .unwrap_or(DEFAULT_EVERY_MINUTES);
             let Some(hours) = args["hours"].as_i64() else {
-                return (tool_error("hours is required."), None);
+                return Err(Refusal::text("hours is required."));
             };
             if !(MIN_EVERY_MINUTES..=MAX_EVERY_MINUTES).contains(&every)
                 || !(1..=MAX_HOURS).contains(&hours)
             {
-                return (
-                    tool_error(&format!(
-                        "every_minutes must be {MIN_EVERY_MINUTES} to {MAX_EVERY_MINUTES} and \
+                return Err(Refusal::text(format!(
+                    "every_minutes must be {MIN_EVERY_MINUTES} to {MAX_EVERY_MINUTES} and \
                          hours 1 to {MAX_HOURS}."
-                    )),
-                    None,
-                );
+                )));
             }
             let origin = match state.db.acquire().await {
                 Ok(mut conn) => crate::db::delegations::origin(&mut conn, grant.turn_id).await,
@@ -128,28 +124,20 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
             match origin {
                 Ok(Origin::OwnerRequest) => {}
                 Ok(_) => {
-                    return (
-                        tool_error(
-                            "NOT_ALLOWED: its check runs unattended for days, so only an owner \
+                    return Err(Refusal::text(
+                        "NOT_ALLOWED: its check runs unattended for days, so only an owner \
                              request starts a watcher. Report what you would watch instead.",
-                        ),
-                        None,
-                    );
+                    ));
                 }
                 Err(err) => return failed(err),
             }
-            let secrets = match super::secret_names(args) {
-                Ok(names) => names,
-                Err(outcome) => return outcome,
-            };
+            let secrets = super::secret_names(args)?;
             // A retry answers with its watcher even if an entry was deleted
             // since; only a new watcher's entries must exist now.
             match watchers::retry_of(&state.db, grant.turn_id, &check, &purpose).await {
                 Ok(Some(_)) => {}
                 Ok(None) => {
-                    if let Err(outcome) = super::resolve_secrets(state, &secrets).await {
-                        return outcome;
-                    }
+                    super::resolve_secrets(state, &secrets).await?;
                 }
                 Err(err) => return failed(err),
             }
@@ -188,40 +176,28 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                     } else {
                         "This watcher already ended; see its outcome."
                     });
-                    (
-                        tool_result(fit(value)),
-                        Some(format!(
-                            "watcher {} started: {}",
-                            watcher.id,
-                            slice(&purpose, 0, 200).1
-                        )),
-                    )
+                    Ok(Done::json(fit(value)).logged(format!(
+                        "watcher {} started: {}",
+                        watcher.id,
+                        slice(&purpose, 0, 200).1
+                    )))
                 }
-                Ok(Started::Conflict(watcher)) => {
-                    let mut result = tool_result(fit(json!({
-                        "error": "CONFLICT: this request already started a watcher with this \
-                            check and purpose but another prompt, interval or secrets. To watch \
-                            differently, give it another purpose. No watcher was started.",
-                        "watcher": watcher_result(&watcher),
-                    })));
-                    result["isError"] = json!(true);
-                    (result, None)
-                }
-                Ok(Started::Stopped) => (
-                    tool_error("STOPPED: this turn was stopped; no watcher was started."),
-                    None,
-                ),
-                Ok(Started::TooMany(active)) => {
-                    let mut result = tool_result(fit(json!({
-                        "error": format!(
-                            "WATCHER_LIMIT: {MAX_PER_BOT} watchers already run. Stop one with \
-                             computer_watch_stop or wait for one to end. No watcher was started."
-                        ),
-                        "watchers": active.iter().map(watcher_result).collect::<Vec<_>>(),
-                    })));
-                    result["isError"] = json!(true);
-                    (result, None)
-                }
+                Ok(Started::Conflict(watcher)) => Err(Refusal::flagged(fit(json!({
+                    "error": "CONFLICT: this request already started a watcher with this \
+                        check and purpose but another prompt, interval or secrets. To watch \
+                        differently, give it another purpose. No watcher was started.",
+                    "watcher": watcher_result(&watcher),
+                })))),
+                Ok(Started::Stopped) => Err(Refusal::text(
+                    "STOPPED: this turn was stopped; no watcher was started.",
+                )),
+                Ok(Started::TooMany(active)) => Err(Refusal::flagged(fit(json!({
+                    "error": format!(
+                        "WATCHER_LIMIT: {MAX_PER_BOT} watchers already run. Stop one with \
+                         computer_watch_stop or wait for one to end. No watcher was started."
+                    ),
+                    "watchers": active.iter().map(watcher_result).collect::<Vec<_>>(),
+                })))),
                 Err(err) => failed(err),
             }
         }
@@ -231,28 +207,25 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                 Err(err) => Err(err),
             };
             match listed {
-                Ok(active) => (
-                    tool_result(fit(json!({
-                        "watchers": active.iter().map(watcher_result).collect::<Vec<_>>(),
-                    }))),
-                    None,
-                ),
+                Ok(active) => Ok(Done::json(fit(json!({
+                    "watchers": active.iter().map(watcher_result).collect::<Vec<_>>(),
+                })))),
                 Err(err) => failed(err),
             }
         }
         STOP => {
             let Some(id) = text(args, "watch_id").and_then(|s| s.parse::<Uuid>().ok()) else {
-                return (tool_error("watch_id must be a watcher ID."), None);
+                return Err(Refusal::text("watch_id must be a watcher ID."));
             };
             match watchers::stop(&state.db, grant.bot_id, id, StopBy::Bot).await {
-                Ok(Stopped::Stopped(watcher) | Stopped::NotActive(watcher)) => (
-                    tool_result(fit(watcher_result(&watcher))),
-                    Some(format!("watcher {id} stopped")),
-                ),
-                Ok(Stopped::NotFound) => (tool_error("NOT_FOUND: no such watcher."), None),
+                Ok(Stopped::Stopped(watcher) | Stopped::NotActive(watcher)) => {
+                    Ok(Done::json(fit(watcher_result(&watcher)))
+                        .logged(format!("watcher {id} stopped")))
+                }
+                Ok(Stopped::NotFound) => Err(Refusal::text("NOT_FOUND: no such watcher.")),
                 Err(err) => failed(err),
             }
         }
-        _ => (tool_error("unknown watcher tool"), None),
+        _ => Err(Refusal::text("unknown watcher tool")),
     }
 }

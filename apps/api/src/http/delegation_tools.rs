@@ -2,36 +2,34 @@
 //! several at once (`council`), and change or stop a running task
 //! (`delegation_update`, `delegation_cancel`).
 
+use crate::http::tool_result::{self, Done, Refusal, ToolResult};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::AppState;
-use super::mcp::{Outcome, tool_error, tool_result};
 use crate::grants::Grant;
 
-pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::db::delegations::{self, DelegateError};
     let Some(target) = args["target_bot_id"]
         .as_str()
         .and_then(|s| s.parse::<Uuid>().ok())
     else {
-        return (
-            tool_error("target_bot_id must be a bot ID from your registry."),
-            None,
-        );
+        return Err(Refusal::text(
+            "target_bot_id must be a bot ID from your registry.",
+        ));
     };
     let Some(task) = args["task"].as_str() else {
-        return (tool_error("task is required."), None);
+        return Err(Refusal::text("task is required."));
     };
     let owner_answer = match &args["owner_answer"] {
         Value::Null => None,
         value => match value.as_str().and_then(|s| s.parse::<Uuid>().ok()) {
             Some(id) => Some(id),
             None => {
-                return (
-                    tool_error("owner_answer must be the ID of an answered choice card."),
-                    None,
-                );
+                return Err(Refusal::text(
+                    "owner_answer must be the ID of an answered choice card.",
+                ));
             }
         },
     };
@@ -44,25 +42,20 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> O
                 .collect()
             {
                 Some(paths) => paths,
-                None => return (tool_error("files must be project paths."), None),
+                None => return Err(Refusal::text("files must be project paths.")),
             }
         }
         _ => {
             let max = crate::app::messages::MAX_MESSAGE_FILES;
-            return (
-                tool_error(&format!("files takes at most {max} paths.")),
-                None,
-            );
+            return Err(Refusal::text(format!("files takes at most {max} paths.")));
         }
     };
     if !paths.is_empty() && from_email(state, grant).await {
-        return (
-            tool_error(
-                "files are unavailable here: this turn cannot read the project. Put what the \
+        return Err(Refusal::text(
+            "files are unavailable here: this turn cannot read the project. Put what the \
                  other bot needs in task.",
-            ),
-            Some("rejected NO_PROJECT".into()),
-        );
+        )
+        .logged("rejected NO_PROJECT"));
     }
     let files = if paths.is_empty() {
         Vec::new()
@@ -73,7 +66,7 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> O
             .iter()
             .find_map(|provider| provider.project_dir(grant.bot_id))
         else {
-            return (tool_error("Your project directory is unavailable."), None);
+            return Err(Refusal::text("Your project directory is unavailable."));
         };
         let read = tokio::task::spawn_blocking(move || {
             paths
@@ -88,12 +81,9 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> O
         match read {
             Ok(Ok(files)) => files,
             Ok(Err(message)) => {
-                return (
-                    tool_error(&message),
-                    Some("rejected FILE_UNAVAILABLE".into()),
-                );
+                return Err(Refusal::text(message).logged("rejected FILE_UNAVAILABLE"));
             }
-            Err(_) => return (tool_error("Reading the files failed."), None),
+            Err(_) => return Err(Refusal::text("Reading the files failed.")),
         }
     };
     let sent: Vec<Value> = files
@@ -129,7 +119,7 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> O
                 "outcome": accepted.outcome,
                 "next": "This task already ended; use its recorded outcome and do not resubmit it.",
             });
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
         Ok(accepted) => {
             state.grants.park(grant.turn_id).await;
@@ -149,7 +139,7 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> O
                          delegate call queues separate work: to change or stop this task later, \
                          use delegation_update or delegation_cancel with its task_id.",
             });
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
         Err(err) => {
             let code = match err {
@@ -175,7 +165,7 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> O
                 ""
             };
             let log = format!("rejected {code}");
-            (tool_error(&format!("{code}: {err}.{next}")), Some(log))
+            Err(Refusal::text(format!("{code}: {err}.{next}")).logged(log))
         }
     }
 }
@@ -210,7 +200,7 @@ fn task_id(args: &Value) -> Option<Uuid> {
     args["task_id"].as_str().and_then(|s| s.parse().ok())
 }
 
-fn control_error(err: crate::db::delegations::ControlError) -> Outcome {
+fn control_error(err: crate::db::delegations::ControlError) -> ToolResult {
     use crate::db::delegations::ControlError;
     let (code, task, next) = match &err {
         ControlError::NotFound => (
@@ -241,18 +231,15 @@ fn control_error(err: crate::db::delegations::ControlError) -> Outcome {
     if !next.is_empty() {
         result["next"] = json!(next);
     }
-    (
-        tool_error(&result.to_string()),
-        Some(format!("rejected {code}")),
-    )
+    Err(Refusal::text(result.to_string()).logged(format!("rejected {code}")))
 }
 
-pub(super) async fn update(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+pub(super) async fn update(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let Some(task) = task_id(args) else {
-        return (tool_error("task_id must be a task ID."), None);
+        return Err(Refusal::text("task_id must be a task ID."));
     };
     let Some(message) = args["message"].as_str() else {
-        return (tool_error("message is required."), None);
+        return Err(Refusal::text("message is required."));
     };
     match crate::db::delegations::update(&state.db, grant.turn_id, task, message).await {
         Ok(updated) => {
@@ -266,16 +253,16 @@ pub(super) async fn update(state: &AppState, grant: &Grant, args: &Value) -> Out
                 "This update was already applied."
             });
             let log = format!("updated {task} ({})", updated.task.state.as_str());
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
         Err(err) => control_error(err),
     }
 }
 
-pub(super) async fn cancel(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+pub(super) async fn cancel(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::db::delegations::TaskState;
     let Some(task) = task_id(args) else {
-        return (tool_error("task_id must be a task ID."), None);
+        return Err(Refusal::text("task_id must be a task ID."));
     };
     match crate::db::delegations::cancel(&state.db, grant.turn_id, task).await {
         Ok(stopped) => {
@@ -288,7 +275,7 @@ pub(super) async fn cancel(state: &AppState, grant: &Grant, args: &Value) -> Out
                 );
             }
             let log = format!("cancel {task} ({})", stopped.state.as_str());
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
         Err(err) => control_error(err),
     }
@@ -303,13 +290,10 @@ struct CouncilArgs {
     title: Option<String>,
 }
 
-pub(super) async fn council(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    let Ok(parsed) = serde_json::from_value::<CouncilArgs>(args.clone()) else {
-        return (
-            tool_error("Pass target_bot_ids from list_bots and a shared task."),
-            None,
-        );
-    };
+pub(super) async fn council(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    let parsed: CouncilArgs = tool_result::args(args, || {
+        Refusal::text("Pass target_bot_ids from list_bots and a shared task.")
+    })?;
     match crate::db::delegations::council(
         &state.db,
         grant.turn_id,
@@ -335,17 +319,11 @@ pub(super) async fn council(state: &AppState, grant: &Grant, args: &Value) -> Ou
                 "status": a.status, "outcome": a.outcome})
                 })
                 .collect();
-            (
-                tool_result(json!({"status": if pending {"pending"} else {"settled"},
+            Ok(Done::json(json!({"status": if pending {"pending"} else {"settled"},
                 "parked": pending, "tasks": tasks,
                 "next": if pending {"End this attempt. All reports arrive in a continuation; combine them and preserve failures and disagreements."}
-                    else {"Use the recorded reports. Do not resubmit completed work."}})),
-                Some(format!("council reports from {} bots", tasks.len())),
-            )
+                    else {"Use the recorded reports. Do not resubmit completed work."}})).logged(format!("council reports from {} bots", tasks.len())))
         }
-        Err(err) => (
-            tool_error(&format!("COUNCIL_REFUSED: {err}")),
-            Some("council refused".into()),
-        ),
+        Err(err) => Err(Refusal::text(format!("COUNCIL_REFUSED: {err}")).logged("council refused")),
     }
 }

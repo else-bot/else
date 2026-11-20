@@ -4,6 +4,7 @@
 //! cannot resolve never blocks saving, the routine inherits the bot's model
 //! and keeps the request for the owner to see.
 
+use crate::http::tool_result::{self, Done, Refusal, ToolResult};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -16,7 +17,6 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::error::{ApiError, ApiJson, ApiPath};
-use super::mcp::{Outcome, tool_error, tool_result};
 use super::{AppState, Routes};
 use crate::app::providers::{Availability, Profile, default_profiles};
 use crate::app::routines::{
@@ -203,19 +203,20 @@ fn caller(grant: &Grant) -> Caller {
     }
 }
 
-fn reject(err: RoutineError) -> Outcome {
-    if let RoutineError::Db(err) = &err {
-        tracing::warn!(error = %err, "a routine tool failed");
+impl From<RoutineError> for Refusal {
+    fn from(err: RoutineError) -> Self {
+        if let RoutineError::Db(err) = &err {
+            tracing::warn!(error = %err, "a routine tool failed");
+        }
+        let code = code(&err);
+        let message = match err {
+            RoutineError::Db(_) => {
+                "routines are unavailable right now; try again shortly.".to_owned()
+            }
+            other => other.to_string(),
+        };
+        Refusal::coded(code, message)
     }
-    let code = code(&err);
-    let message = match err {
-        RoutineError::Db(_) => "routines are unavailable right now; try again shortly.".to_owned(),
-        other => other.to_string(),
-    };
-    (
-        tool_error(&format!("{code}: {message}")),
-        Some(format!("rejected {code}")),
-    )
 }
 
 /// A routine as its bot reads it. Any-time hours read back as "always", the
@@ -228,11 +229,8 @@ fn tool_routine_json(routine: &Routine) -> Value {
     json
 }
 
-fn invalid(message: &str) -> Outcome {
-    (
-        tool_error(&format!("INVALID_ARGUMENTS: {message}")),
-        Some("rejected INVALID_ARGUMENTS".into()),
-    )
+fn invalid(message: &str) -> Refusal {
+    Refusal::coded("INVALID_ARGUMENTS", message)
 }
 
 fn annotations(read_only: bool, destructive: bool) -> Value {
@@ -676,25 +674,25 @@ fn parse_new(
     ))
 }
 
-pub async fn create(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    let Ok(args) = serde_json::from_value::<CreateArgs>(args.clone()) else {
-        return invalid(
+pub(crate) async fn create(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    let args: CreateArgs = tool_result::args(args, || {
+        invalid(
             "pass name, prompt, and cron as strings, and optionally check, timezone, \
              active_hours, and model with provider_id, reasoning_effort, and service_tier.",
-        );
-    };
+        )
+    })?;
     let now = Utc::now();
     let owner_timezone = match &args.timezone {
         Some(_) => None,
         None => match crate::db::installation::owner_timezone(&state.db).await {
             Ok(zone) => zone,
-            Err(err) => return reject(err.into()),
+            Err(err) => return Err(Refusal::from(RoutineError::from(err))),
         },
     };
     let timezone = args.timezone.as_deref().or(owner_timezone.as_deref());
     let (name, prompt, check, schedule) = match parse_new(&args, timezone, now) {
         Ok(parsed) => parsed,
-        Err(err) => return reject(err),
+        Err(err) => return Err(Refusal::from(err)),
     };
     let request = args.model.as_deref().map(|model| ModelRequest {
         model,
@@ -763,13 +761,13 @@ pub async fn create(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 "next": next,
                 "model_note": model_note,
             });
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
-        Err(err) => reject(err),
+        Err(err) => Err(Refusal::from(err)),
     }
 }
 
-pub async fn list(state: &AppState, grant: &Grant) -> Outcome {
+pub(crate) async fn list(state: &AppState, grant: &Grant) -> ToolResult {
     let listed = async {
         let mut conn = state.db.acquire().await?;
         routines::list(&mut conn, grant.bot_id).await
@@ -783,9 +781,9 @@ pub async fn list(state: &AppState, grant: &Grant) -> Outcome {
                 "limit": MAX_PER_BOT,
                 "default_timezone": DEFAULT_TIMEZONE,
             });
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
-        Err(err) => reject(err.into()),
+        Err(err) => Err(Refusal::from(RoutineError::from(err))),
     }
 }
 
@@ -836,13 +834,13 @@ fn parse_patch(args: &UpdateArgs) -> Result<Patch, RoutineError> {
     })
 }
 
-pub async fn update(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    let Ok(args) = serde_json::from_value::<UpdateArgs>(args.clone()) else {
-        return invalid("pass routine_id and only the fields to change, with their types.");
-    };
+pub(crate) async fn update(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    let args: UpdateArgs = tool_result::args(args, || {
+        invalid("pass routine_id and only the fields to change, with their types.")
+    })?;
     let mut patch = match parse_patch(&args) {
         Ok(patch) => patch,
-        Err(err) => return reject(err),
+        Err(err) => return Err(Refusal::from(err)),
     };
     let extras = args.provider_id.is_some()
         || args.reasoning_effort.is_some()
@@ -883,14 +881,12 @@ pub async fn update(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 "updated {} ({}) {} {} enabled={}",
                 routine.name, routine.id, routine.cron, routine.timezone, routine.enabled
             );
-            (
-                tool_result(
-                    json!({ "routine": tool_routine_json(&routine), "model_note": model_note }),
-                ),
-                Some(log),
+            Ok(Done::json(
+                json!({ "routine": tool_routine_json(&routine), "model_note": model_note }),
             )
+            .logged(log))
         }
-        Err(err) => reject(err),
+        Err(err) => Err(Refusal::from(err)),
     }
 }
 
@@ -900,10 +896,8 @@ struct RoutineIdArgs {
     routine_id: Uuid,
 }
 
-pub async fn delete(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    let Ok(args) = serde_json::from_value::<RoutineIdArgs>(args.clone()) else {
-        return invalid("pass routine_id.");
-    };
+pub(crate) async fn delete(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    let args: RoutineIdArgs = tool_result::args(args, || invalid("pass routine_id."))?;
     match routines::delete(&state.db, By::Turn(caller(grant)), args.routine_id).await {
         Ok(now_deleted) => {
             let log = format!(
@@ -917,16 +911,14 @@ pub async fn delete(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             );
             let result = json!({ "routine_id": args.routine_id, "deleted": true,
                                  "already_deleted": !now_deleted });
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
-        Err(err) => reject(err),
+        Err(err) => Err(Refusal::from(err)),
     }
 }
 
-pub async fn run(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    let Ok(args) = serde_json::from_value::<RoutineIdArgs>(args.clone()) else {
-        return invalid("pass routine_id.");
-    };
+pub(crate) async fn run(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    let args: RoutineIdArgs = tool_result::args(args, || invalid("pass routine_id."))?;
     match routines::run_now(
         &state.db,
         &state.registry,
@@ -950,9 +942,9 @@ pub async fn run(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 "next": "The run starts after this reply and reports to the owner when it ends. \
                     Tell the owner it is queued; do not run its task yourself.",
             });
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
-        Err(err) => reject(err),
+        Err(err) => Err(Refusal::from(err)),
     }
 }
 
@@ -970,28 +962,24 @@ pub fn no_news_schema() -> Value {
     })
 }
 
-pub async fn no_news(state: &AppState, grant: &Grant) -> Outcome {
+pub(crate) async fn no_news(state: &AppState, grant: &Grant) -> ToolResult {
     match routines::report_no_news(&state.db, grant.turn_id).await {
-        Ok(Ok(_)) => (
-            tool_result(json!({
-                "report": "no_news",
-                "next": "End the run with one short line saying what you checked. If you \
-                    still ask the owner or act outside your computer in this run, it reports \
-                    as usual.",
-            })),
-            Some("no news".into()),
-        ),
-        Ok(Err(refusal)) => (
-            tool_error(
-                &json!({
-                    "error": refusal.to_string(),
-                    "next": "Report to the owner as usual.",
-                })
-                .to_string(),
-            ),
-            Some(format!("refused {refusal:?}")),
-        ),
-        Err(err) => reject(err.into()),
+        Ok(Ok(_)) => Ok(Done::json(json!({
+            "report": "no_news",
+            "next": "End the run with one short line saying what you checked. If you \
+                still ask the owner or act outside your computer in this run, it reports \
+                as usual.",
+        }))
+        .logged("no news")),
+        Ok(Err(refusal)) => Err(Refusal::text(
+            json!({
+                "error": refusal.to_string(),
+                "next": "Report to the owner as usual.",
+            })
+            .to_string(),
+        )
+        .logged(format!("refused {refusal:?}"))),
+        Err(err) => Err(Refusal::from(RoutineError::from(err))),
     }
 }
 
@@ -1015,19 +1003,19 @@ impl ReminderArgs {
     }
 }
 
-pub async fn create_reminder(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    let Ok(args) = serde_json::from_value::<ReminderArgs>(args.clone()) else {
-        return invalid(
+pub(crate) async fn create_reminder(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    let args: ReminderArgs = tool_result::args(args, || {
+        invalid(
             "pass name and prompt as strings, and in_minutes as a whole number or at as \
              YYYY-MM-DDTHH:MM, and optionally timezone.",
-        );
-    };
+        )
+    })?;
     let now = Utc::now();
     let owner_timezone = match &args.timezone {
         Some(_) => None,
         None => match crate::db::installation::owner_timezone(&state.db).await {
             Ok(zone) => zone,
-            Err(err) => return reject(err.into()),
+            Err(err) => return Err(Refusal::from(RoutineError::from(err))),
         },
     };
     let timezone = args.timezone.as_deref().or(owner_timezone.as_deref());
@@ -1042,7 +1030,7 @@ pub async fn create_reminder(state: &AppState, grant: &Grant, args: &Value) -> O
     })();
     let (name, prompt, schedule, when_request) = match parsed {
         Ok(parsed) => parsed,
-        Err(err) => return reject(err.into()),
+        Err(err) => return Err(Refusal::from(RoutineError::from(err))),
     };
     let model = ModelSetting::Inherit { requested: None };
     let new = NewRoutine {
@@ -1085,8 +1073,8 @@ pub async fn create_reminder(state: &AppState, grant: &Grant, args: &Value) -> O
                 "created": created,
                 "next": next,
             });
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
-        Err(err) => reject(err),
+        Err(err) => Err(Refusal::from(err)),
     }
 }

@@ -1,3 +1,5 @@
+use super::owner_tools::{Card, Declined, ask};
+use crate::http::tool_result::{self, Done, Refusal, ToolResult};
 use axum::{
     Json, Router,
     extract::State,
@@ -11,7 +13,6 @@ use uuid::Uuid;
 use super::{
     AppState, Routes,
     error::{ApiError, ApiJson, ApiPath},
-    mcp::{Outcome, tool_error, tool_result},
 };
 use crate::{
     connectors::{ConnectorManager, oauth, store, types::*},
@@ -581,9 +582,8 @@ pub const SIGNED_IN_NEXT: &str = "The owner signed in, and new mail there now wa
 
 /// Asks the owner, on a chat card, to sign in to an inbox. The desktop runs
 /// the provider's OAuth flow and approves the card once the account exists.
-async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::app::questions::{EmailConnection, Spec};
-    use crate::db::owner_questions::{self, Gate};
     let request = serde_json::from_value::<ConnectRequest>(args.clone())
         .ok()
         .map(|r| ConnectRequest {
@@ -602,17 +602,14 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
     let Some((request, sign_in)) =
         request.and_then(|r| r.provider.card_sign_in().map(|sign_in| (r, sign_in)))
     else {
-        return (
-            tool_error(
-                "Use provider gmail, microsoft, or icloud with a valid inbox address. The \
+        return Err(Refusal::text(
+            "Use provider gmail, microsoft, or icloud with a valid inbox address. The \
                  owner adds other providers with an app password in Settings, Email.",
-            ),
-            None,
-        );
+        ));
     };
     let accounts = match store::accounts(&state.db).await {
         Ok(accounts) => accounts,
-        Err(_) => return (tool_error("mail_unavailable"), None),
+        Err(_) => return Err(Refusal::text("mail_unavailable")),
     };
     let existing = accounts
         .iter()
@@ -623,12 +620,11 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
         .filter(|account| account.health.needs_new_credential())
         .map(|account| account.generation);
     if let Some(account) = existing.filter(|_| replaces.is_none()) {
-        return (
-            tool_result(json!({"status":"connected","account_id":account.id,
+        return Ok(Done::json(
+            json!({"status":"connected","account_id":account.id,
                 "next":"Use mail_accounts and mail_action with this account. If the owner \
-                    wants you to react to new mail, call mail_trigger_set."})),
-            None,
-        );
+                    wants you to react to new mail, call mail_trigger_set."}),
+        ));
     }
     let address = &request.address;
     let sign_in = match (sign_in, replaces) {
@@ -661,28 +657,21 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
         format!("Connect {}", request.address),
         context,
     );
-    match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
-        Ok(Gate::Pending(question)) => {
-            state.grants.park(grant.turn_id).await;
-            (
-                tool_result(json!({"status":"pending_owner_auth","parked":true,
-                    "question_id":question.id,
-                    "next":"The owner sees a sign-in card. Say so briefly and end this attempt. \
-                        You continue after they sign in."})),
-                Some(format!("awaiting email sign-in {}", question.id)),
-            )
-        }
-        Ok(Gate::Denied(_)) => (
-            tool_result(json!({"status":"error","code":"owner_declined",
-                "safe_message":"The owner declined this connection. Continue without it."})),
-            None,
-        ),
-        Ok(Gate::Run { .. }) => (
-            tool_result(json!({"status":"connected", "next": SIGNED_IN_NEXT})),
-            None,
-        ),
-        Err(error) => super::owner_tools::question_refused(error),
-    }
+    let card = Card::waiting(
+        |question| {
+            json!({"status":"pending_owner_auth","parked":true,
+                "question_id":question,
+                "next":"The owner sees a sign-in card. Say so briefly and end this attempt. \
+                    You continue after they sign in."})
+        },
+        "awaiting email sign-in",
+    );
+    let declined =
+        Declined::SafeMessage("The owner declined this connection. Continue without it.");
+    ask(state, grant, &spec, card, declined).await?;
+    Ok(Done::json(
+        json!({"status":"connected", "next": SIGNED_IN_NEXT}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -705,9 +694,8 @@ async fn approve_trigger(
     grant: &Grant,
     args: &Value,
     request: &TriggerSet,
-) -> Result<Option<Outcome>, store::StoreError> {
+) -> Result<Result<(), Refusal>, store::StoreError> {
     use crate::app::questions::{Kind, Spec, approval_choices};
-    use crate::db::owner_questions::{self, Gate};
     let bot_id = store::trigger_manager(&state.db, grant.turn_id).await?;
     let instructions = store::wake_instructions(&request.instructions)?;
     let readable = store::permissions(&state.db, request.account_id, bot_id)
@@ -731,35 +719,22 @@ async fn approve_trigger(
         format!("New mail in {address} will wake this bot to: {instructions}"),
     );
     spec.choices = approval_choices(Kind::External, None);
-    match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
-        Ok(Gate::Run { .. }) => Ok(None),
-        Ok(Gate::Pending(question)) => Ok(Some(
-            super::owner_tools::pending_approval(
-                state,
-                grant,
-                &question,
-                "The owner sees an approval card for this trigger. End this attempt. If \
-                 approved, call mail_trigger_set with exactly the same arguments once.",
-            )
-            .await,
-        )),
-        Ok(Gate::Denied(_)) => Ok(Some((
-            tool_result(json!({"status":"error","code":"owner_declined",
-                "safe_message":"The owner declined this trigger. Don't set it."})),
-            None,
-        ))),
-        Err(error) => Ok(Some(super::owner_tools::question_refused(error))),
-    }
+    let card = Card::approval(
+        "The owner sees an approval card for this trigger. End this attempt. If approved, call \
+         mail_trigger_set with exactly the same arguments once.",
+    );
+    let declined = Declined::SafeMessage("The owner declined this trigger. Don't set it.");
+    Ok(ask(state, grant, &spec, card, declined).await.map(drop))
 }
 
-async fn trigger_call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
+async fn trigger_call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
     let result = if name == "mail_trigger_set" {
-        let Ok(request) = serde_json::from_value::<TriggerSet>(args.clone()) else {
-            return (tool_error("Use account_id and instructions only."), None);
-        };
+        let request: TriggerSet = tool_result::args(args, || {
+            Refusal::text("Use account_id and instructions only.")
+        })?;
         match approve_trigger(state, grant, args, &request).await {
-            Ok(Some(outcome)) => return outcome,
-            Ok(None) => store::set_trigger(
+            Ok(Err(refusal)) => return Err(refusal),
+            Ok(Ok(())) => store::set_trigger(
                 &state.db,
                 grant.turn_id,
                 request.account_id,
@@ -774,26 +749,22 @@ async fn trigger_call(state: &AppState, grant: &Grant, name: &str, args: &Value)
             Err(error) => Err(error),
         }
     } else {
-        let Ok(request) = serde_json::from_value::<TriggerDelete>(args.clone()) else {
-            return (tool_error("Use account_id only."), None);
-        };
+        let request: TriggerDelete =
+            tool_result::args(args, || Refusal::text("Use account_id only."))?;
         store::delete_trigger(&state.db, grant.turn_id, request.account_id)
             .await
             .map(|deleted| json!({"deleted":deleted}))
     };
     match result {
-        Ok(value) => (tool_result(value), Some(format!("native mail tool {name}"))),
+        Ok(value) => Ok(Done::json(value).logged(format!("native mail tool {name}"))),
         Err(store::StoreError::Db(error)) => {
             tracing::warn!(%error, "a mail trigger tool failed");
-            (tool_error("mail_unavailable"), None)
+            Err(Refusal::text("mail_unavailable"))
         }
-        Err(store::StoreError::Forbidden) => (
-            tool_error(
-                "Only a request from the owner can change mail triggers, on an inbox you can read.",
-            ),
-            None,
-        ),
-        Err(error) => (tool_error(&error.to_string()), None),
+        Err(store::StoreError::Forbidden) => Err(Refusal::text(
+            "Only a request from the owner can change mail triggers, on an inbox you can read.",
+        )),
+        Err(error) => Err(Refusal::text(error.to_string())),
     }
 }
 
@@ -806,29 +777,22 @@ struct DisconnectRequest {
 
 /// Asks the owner to remove an inbox the bot can read, on a card no saved
 /// permission covers, and removes it once they approve.
-async fn disconnect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+async fn disconnect_inbox(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::app::questions::{EmailRemoval, MAX_TITLE, Spec};
-    use crate::db::owner_questions::{self, Gate};
     let request = serde_json::from_value::<DisconnectRequest>(args.clone())
         .ok()
         .filter(|r| r.reason.as_ref().is_none_or(|r| r.len() <= MAX_TITLE));
     let Some(request) = request else {
-        return (
-            tool_error(
-                "Pass an account_id from mail_accounts and optionally a reason of at most 500 bytes.",
-            ),
-            None,
-        );
+        return Err(Refusal::text(
+            "Pass an account_id from mail_accounts and optionally a reason of at most 500 bytes.",
+        ));
     };
     let manager = &state.connectors;
     let id = request.account_id;
     let not_connected = || {
-        (
-            tool_result(json!({"status":"not_connected","account_id":id,
+        Ok(Done::json(json!({"status":"not_connected","account_id":id,
                 "next":"This inbox is not connected, so there is nothing to remove. It may \
-                    already be removed; call mail_accounts to see the connected inboxes."})),
-            None,
-        )
+                    already be removed; call mail_accounts to see the connected inboxes."})))
     };
     let (account, permissions, readers) = tokio::join!(
         store::account(&state.db, id),
@@ -839,17 +803,16 @@ async fn disconnect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outc
         (Ok(account), Ok(permissions), Ok(readers)) => (account, permissions, readers),
         (Err(error), ..) | (_, Err(error), _) | (.., Err(error)) => {
             tracing::warn!(%error, "reading an inbox to remove failed");
-            return (tool_error("mail_unavailable"), None);
+            return Err(Refusal::text("mail_unavailable"));
         }
     };
     let Some(account) = account else {
         return not_connected();
     };
     if !permissions.is_some_and(|p| p.read) {
-        return (
-            tool_error("mail_forbidden: you can only remove an inbox you can read."),
-            None,
-        );
+        return Err(Refusal::text(
+            "mail_forbidden: you can only remove an inbox you can read.",
+        ));
     }
     let address = account.config.address;
     let spec = Spec::email_removal(
@@ -859,43 +822,30 @@ async fn disconnect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outc
         },
         removal_context(request.reason.as_deref(), &readers),
     );
-    match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
-        Ok(Gate::Pending(question)) => {
-            super::owner_tools::pending_approval(
-                state,
-                grant,
-                &question,
-                "Tell the owner briefly which inbox this removes and why, then end this attempt \
-                 now. If they approve, call mail_disconnect again with the same account_id.",
-            )
-            .await
-        }
-        Ok(Gate::Denied(question)) => (
-            tool_result(json!({"status":"denied","question_id":question.id,
-                "next":"The owner denied removing this inbox. Do not remove it or ask again in this request."})),
-            Some(format!("denied {} by the owner", question.id)),
-        ),
-        Ok(Gate::Run { .. }) => match remove_account(state, manager, id).await {
-            Ok(true) => (
-                tool_result(json!({"status":"removed","account_id":id,"address":address,
+    let card = Card::approval(
+        "Tell the owner briefly which inbox this removes and why, then end this attempt now. If \
+         they approve, call mail_disconnect again with the same account_id.",
+    );
+    let declined = Declined::Status(
+        "The owner denied removing this inbox. Do not remove it or ask again in this request.",
+    );
+    ask(state, grant, &spec, card, declined).await?;
+    match remove_account(state, manager, id).await {
+        Ok(true) => Ok(
+            Done::json(json!({"status":"removed","account_id":id,"address":address,
                     "next":"Tell the owner the inbox is removed for every bot and its triggers \
                         stopped. To connect it again, call mail_connect with its provider and \
-                        address; it becomes a new account."})),
-                Some(format!("removed inbox {id}")),
-            ),
-            Ok(false) => not_connected(),
-            Err(error) => {
-                tracing::warn!(%error, "removing an inbox from a turn failed");
-                (
-                    tool_error(
-                        "mail_unavailable: the inbox was not removed; tell the owner they can \
+                        address; it becomes a new account."}))
+            .logged(format!("removed inbox {id}")),
+        ),
+        Ok(false) => not_connected(),
+        Err(error) => {
+            tracing::warn!(%error, "removing an inbox from a turn failed");
+            Err(Refusal::text(
+                "mail_unavailable: the inbox was not removed; tell the owner they can \
                          remove it in Settings, Email.",
-                    ),
-                    None,
-                )
-            }
-        },
-        Err(error) => super::owner_tools::question_refused(error),
+            ))
+        }
     }
 }
 
@@ -953,7 +903,7 @@ fn name_list<'a>(names: impl ExactSizeIterator<Item = &'a str>) -> String {
     }
 }
 
-pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
+pub(crate) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
     if name == "mail_connect" {
         return connect_inbox(state, grant, args).await;
     }
@@ -976,23 +926,23 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
     }
     let result = tool_call(state, grant, name, args).await;
     match result {
-        Ok(value) => (tool_result(value), Some("Email tool completed.".into())),
+        Ok(value) => Ok(Done::json(value).logged("Email tool completed.")),
         Err(error) if error.code == AUTHENTICATION_FAILED => {
             let error = error.detail(
                 "the server rejected the inbox's saved password. For an iCloud inbox, call \
                  mail_connect with provider icloud and its address so the owner enters a new \
                  one. Otherwise the owner replaces it in Settings, Email.",
             );
-            (tool_error(&error.to_string()), None)
+            Err(Refusal::text(error.to_string()))
         }
         Err(error) if error.code == REAUTHENTICATION_REQUIRED => {
             let error = error.detail(
                 "the inbox's sign-in expired. Call mail_connect with its provider and address \
                  so the owner signs in again.",
             );
-            (tool_error(&error.to_string()), None)
+            Err(Refusal::text(error.to_string()))
         }
-        Err(error) => (tool_error(&error.to_string()), None),
+        Err(error) => Err(Refusal::text(error.to_string())),
     }
 }
 

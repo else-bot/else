@@ -2,6 +2,7 @@
 //! skills. Every `/v1` route needs the owner token; task grants never
 //! reach them.
 
+use crate::http::tool_result::{Done, Refusal, ToolResult};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -14,7 +15,6 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::error::{ApiError, ApiPath, SecretJson};
-use super::mcp::{Outcome, tool_error, tool_result};
 use super::{AppState, Routes};
 use crate::db::skills::{self, RequestError, Scope, SettleError, Settled, Status};
 use crate::grants::Grant;
@@ -66,7 +66,7 @@ pub(super) fn schemas() -> Vec<Value> {
     ]
 }
 
-pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
+pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
     match name {
         INSTALL => install(state, grant, args).await,
         _ => read(state, grant, args).await,
@@ -94,13 +94,8 @@ fn env_names(args: &Value) -> Result<Vec<String>, &'static str> {
     Ok(names.into_iter().collect())
 }
 
-async fn install(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    let refuse = |code: &str, message: &str| {
-        (
-            tool_error(&format!("{code}: {message}")),
-            Some(format!("rejected {code}")),
-        )
-    };
+async fn install(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    let refuse = |code: &str, message: &str| Err(Refusal::coded(code, message));
     let Some(url) = args["url"].as_str().filter(|u| u.len() <= 2048) else {
         return refuse("INVALID_REQUEST", "url is a github.com link");
     };
@@ -138,10 +133,8 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                     "The owner declined this skill; continue without it and do not ask again unless they do."
                 },
             });
-            (
-                tool_result(result),
-                Some(format!("already {:?} {}", card.status, card.id).to_lowercase()),
-            )
+            Ok(Done::json(result)
+                .logged(format!("already {:?} {}", card.status, card.id).to_lowercase()))
         }
         Ok(card) => {
             state.grants.park(grant.turn_id).await;
@@ -155,10 +148,7 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 "next": "Tell the owner briefly what the skill does and end this attempt now. Do not \
                          wait, poll, or call more tools; the answer arrives in a continuation.",
             });
-            (
-                tool_result(result),
-                Some(format!("pending {} for {}", card.id, card.skill_id)),
-            )
+            Ok(Done::json(result).logged(format!("pending {} for {}", card.id, card.skill_id)))
         }
         Err(err) => {
             let code = match err {
@@ -174,37 +164,32 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     }
 }
 
-async fn read(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+async fn read(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let Some(id) = args["id"].as_str().filter(|id| valid_id(id)) else {
-        return (
-            tool_error("INVALID_REQUEST: id is an installed skill id"),
-            None,
-        );
+        return Err(Refusal::text(
+            "INVALID_REQUEST: id is an installed skill id",
+        ));
     };
     let found = match skills::get(&state.db, id).await {
         Ok(found) => found,
         Err(err) => {
             tracing::warn!(error = %err, "reading a skill failed");
-            return (tool_error("UNAVAILABLE: the skill could not be read"), None);
+            return Err(Refusal::text("UNAVAILABLE: the skill could not be read"));
         }
     };
     let Some((skill, files)) =
         found.filter(|(s, _)| s.bot_id.is_none_or(|owner| owner == grant.bot_id))
     else {
-        return (
-            tool_error("NOT_FOUND: no installed skill with that id for this bot"),
-            None,
-        );
+        return Err(Refusal::text(
+            "NOT_FOUND: no installed skill with that id for this bot",
+        ));
     };
     let path = args["path"].as_str().unwrap_or("SKILL.md");
     let Some(content) = files.get(path) else {
-        return (
-            tool_error(&format!(
-                "NOT_FOUND: {path} is not in this skill; files: {}",
-                files.keys().cloned().collect::<Vec<_>>().join(", ")
-            )),
-            None,
-        );
+        return Err(Refusal::text(format!(
+            "NOT_FOUND: {path} is not in this skill; files: {}",
+            files.keys().cloned().collect::<Vec<_>>().join(", ")
+        )));
     };
     let offset = args["offset"]
         .as_u64()
@@ -241,10 +226,7 @@ async fn read(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             });
         }
     }
-    (
-        tool_result(result),
-        Some(format!("read {} {path}", skill.id)),
-    )
+    Ok(Done::json(result).logged(format!("read {} {path}", skill.id)))
 }
 
 pub fn routes() -> Routes {

@@ -149,6 +149,35 @@ impl Kind {
     }
 }
 
+/// The effect a bot declares for a tool call; all but `local` need the
+/// owner's approval of that [`Kind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effect {
+    Local,
+    Destructive,
+    External,
+}
+
+impl Effect {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "local" => Some(Self::Local),
+            "destructive" => Some(Self::Destructive),
+            "external" => Some(Self::External),
+            _ => None,
+        }
+    }
+
+    pub fn approval(self) -> Option<Kind> {
+        match self {
+            Self::Local => None,
+            Self::Destructive => Some(Kind::Destructive),
+            Self::External => Some(Kind::External),
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, strum::IntoStaticStr,
 )]

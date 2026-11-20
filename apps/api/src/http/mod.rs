@@ -30,6 +30,7 @@ mod skills;
 mod social_tools;
 pub mod socials;
 pub mod task_secrets;
+mod tool_result;
 mod tool_search;
 pub mod tools;
 pub mod turns;

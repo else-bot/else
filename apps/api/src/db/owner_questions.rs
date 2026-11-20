@@ -437,18 +437,15 @@ pub(crate) async fn owner_message_quotes(
 /// its routine's grant for a host action or computer tool call without a
 /// task scope; an owner request offers no standing grant for a host action
 /// without one.
-pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate, RequestError> {
-    gate_host(pool, turn_id, spec, None).await
-}
-
-/// [`gate`] for a host action the bot may say the owner asked for, quoting
-/// `authorization` from the request's owner message. A quote found in this
+///
+/// For a host action the bot may say the owner asked for, `authorization`
+/// quotes the request's owner message. A quote found in this
 /// turn's own owner chat message runs the action without a card, in this
 /// request only: it records nothing, offers no standing grant, and never
 /// overrides a pending or denied card for the same action. Whether the quote
 /// asks for exactly this action is the bot's judgment, as with any host
 /// command; the gate enforces only its source and lifetime.
-pub async fn gate_host(
+pub async fn gate(
     pool: &SqlitePool,
     turn_id: Uuid,
     spec: &Spec,

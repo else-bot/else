@@ -1,6 +1,7 @@
 //! `mcp_wait`: park a request on a long-running job in an installed MCP,
 //! and the watcher that repeats its status call until the job stops.
 
+use crate::http::tool_result::{Done, Refusal, ToolResult};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,9 +14,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::AppState;
 use super::guest_tools::approval::approve_card;
-use super::mcp::{Outcome, tool_error, tool_result};
 use super::shared_mcp::{PURPOSE_MAX, oversized_purpose};
-use crate::app::questions::Kind;
+use crate::app::questions::{Effect, Kind};
 use crate::db::mcp_waits::{self, Check, CreateError, Due, Spec};
 use crate::grants::Grant;
 use crate::mcp::{Error, Library, PackageId};
@@ -80,23 +80,11 @@ struct Args {
     timeout_minutes: Option<u32>,
 }
 
-#[derive(Deserialize, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-enum Effect {
-    Local,
-    Destructive,
-    External,
-}
-
 /// The spec, and the approval its first call needs, if any.
 fn parse(args: &Value) -> Result<(Spec, Option<Kind>), String> {
     let args: Args = serde_json::from_value(args.clone())
         .map_err(|_| "Use id, tool, status_pointer, running_values, effect and purpose, with optional arguments, interval_seconds and timeout_minutes.".to_owned())?;
-    let approval = match args.effect {
-        Effect::Local => None,
-        Effect::Destructive => Some(Kind::Destructive),
-        Effect::External => Some(Kind::External),
-    };
+    let approval = args.effect.approval();
     let text = |s: &str, max: usize| !s.trim().is_empty() && s.len() <= max && !s.contains('\0');
     if !text(&args.tool, 200) {
         return Err("tool is the status tool's name.".into());
@@ -229,7 +217,7 @@ async fn listed_tool(
 
 /// Why a status tool may not be called now. `Paused` passes with the
 /// maintenance window; `permanent` when asking again cannot help.
-enum Refusal {
+enum Unqualified {
     Paused,
     Refused { message: String, permanent: bool },
 }
@@ -238,8 +226,8 @@ enum Refusal {
 /// server currently declares repeating it safe may be called. Checked when
 /// the wait starts and before every repeat, since a package can be replaced
 /// or its server upgraded while a wait is pending.
-async fn qualify(library: &Library, mcp_id: &str, tool: &str) -> Result<(), Refusal> {
-    let refuse = |message: String, permanent: bool| Refusal::Refused { message, permanent };
+async fn qualify(library: &Library, mcp_id: &str, tool: &str) -> Result<(), Unqualified> {
+    let refuse = |message: String, permanent: bool| Unqualified::Refused { message, permanent };
     let id = PackageId::try_from(mcp_id.to_owned()).map_err(|m| refuse(m.into(), true))?;
     match listed_tool(library, &id, tool).await {
         Ok(Some(found)) if repeatable(&found) => Ok(()),
@@ -252,7 +240,7 @@ async fn qualify(library: &Library, mcp_id: &str, tool: &str) -> Result<(), Refu
             true,
         )),
         Ok(None) => Err(refuse(format!("{mcp_id} has no tool named {tool}."), true)),
-        Err(Error::Paused) => Err(Refusal::Paused),
+        Err(Error::Paused) => Err(Unqualified::Paused),
         Err(error) => Err(refuse(
             format!("Listing the MCP's tools failed: {error}"),
             !matches!(
@@ -263,15 +251,14 @@ async fn qualify(library: &Library, mcp_id: &str, tool: &str) -> Result<(), Refu
     }
 }
 
-pub async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    let (value, log) = park(state, grant, args).await;
-    (super::shared_mcp::json_error(value), log)
+pub(crate) async fn call(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    park(state, grant, args).await.map_err(Refusal::enveloped)
 }
 
-async fn park(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+async fn park(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let (spec, approval) = match parse(args) {
         Ok(parsed) => parsed,
-        Err(message) => return (tool_error(&message), None),
+        Err(message) => return Err(Refusal::text(message)),
     };
     let library = &state.mcps;
     let log = format!("{} {} on {}", NAME, spec.tool, spec.mcp_id);
@@ -294,20 +281,20 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 spec.timeout_minutes,
                 spec.arguments,
             );
-            match approve_card(state, grant, NAME, args, kind, title, context).await {
-                Ok(note) => note.map(|n| format!("; {n}")).unwrap_or_default(),
-                Err(outcome) => return outcome,
-            }
+            approve_card(state, grant, NAME, args, kind, title, context)
+                .await?
+                .map(|n| format!("; {n}"))
+                .unwrap_or_default()
         }
     };
     match qualify(library, &spec.mcp_id, &spec.tool).await {
         Ok(()) => {}
-        Err(Refusal::Paused) => return (tool_error(&Error::Paused.to_string()), Some(log)),
-        Err(Refusal::Refused { message, .. }) => {
-            return (
-                tool_error(&format!("{message} Nothing waits.")),
-                Some(format!("{log} refused{note}")),
-            );
+        Err(Unqualified::Paused) => {
+            return Err(Refusal::text(Error::Paused.to_string()).logged(log));
+        }
+        Err(Unqualified::Refused { message, .. }) => {
+            return Err(Refusal::text(format!("{message} Nothing waits."))
+                .logged(format!("{log} refused{note}")));
         }
     }
     let first = check(
@@ -320,36 +307,30 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     )
     .await;
     let first = match first {
-        None => return (tool_error(&Error::Paused.to_string()), Some(log)),
+        None => return Err(Refusal::text(Error::Paused.to_string()).logged(log)),
         Some(Check::Failed { message, .. }) => {
-            return (
-                tool_error(&format!(
-                    "The status call failed, so nothing waits: {}",
-                    mcp_waits::bounded(&message)
-                )),
-                Some(format!("{log} failed{note}")),
-            );
+            return Err(Refusal::text(format!(
+                "The status call failed, so nothing waits: {}",
+                mcp_waits::bounded(&message)
+            ))
+            .logged(format!("{log} failed{note}")));
         }
         Some(Check::Unreadable(message)) => {
-            return (
-                tool_error(&format!(
-                    "{} Nothing waits. Point status_pointer at the status in this result and call \
+            return Err(Refusal::text(format!(
+                "{} Nothing waits. Point status_pointer at the status in this result and call \
                      mcp_wait again.",
-                    mcp_waits::bounded(&message)
-                )),
-                Some(format!("{log} unreadable{note}")),
-            );
+                mcp_waits::bounded(&message)
+            ))
+            .logged(format!("{log} unreadable{note}")));
         }
         Some(Check::Finished(result)) => {
             let result = serde_json::from_str(&result).unwrap_or(Value::String(result));
-            return (
-                tool_result(json!({
-                    "status": "finished",
-                    "result": result,
-                    "next": "The job is no longer running; nothing waits. Continue with this result.",
-                })),
-                Some(format!("{log} already finished{note}")),
-            );
+            return Ok(Done::json(json!({
+                "status": "finished",
+                "result": result,
+                "next": "The job is no longer running; nothing waits. Continue with this result.",
+            }))
+            .logged(format!("{log} already finished{note}")));
         }
         Some(Check::Running(result)) => result,
     };
@@ -365,30 +346,25 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     match mcp_waits::create(&state.db, grant.turn_id, caller.attempt, &spec, &first).await {
         Ok(wait_id) => {
             state.grants.park(grant.turn_id).await;
-            (
-                tool_result(json!({
-                    "status": "waiting",
-                    "parked": true,
-                    "wait_id": wait_id,
-                    "next": next,
-                })),
-                Some(format!("{log} waiting {wait_id}{note}")),
-            )
+            Ok(Done::json(json!({
+                "status": "waiting",
+                "parked": true,
+                "wait_id": wait_id,
+                "next": next,
+            }))
+            .logged(format!("{log} waiting {wait_id}{note}")))
         }
         Err(error) => refused(error, &log),
     }
 }
 
-fn refused(error: CreateError, log: &str) -> Outcome {
+fn refused(error: CreateError, log: &str) -> ToolResult {
     let code = match error {
         CreateError::AttemptParked => "ATTEMPT_PARKED",
         CreateError::NotRunning => "NOT_RUNNING",
         CreateError::Db => "UNAVAILABLE",
     };
-    (
-        tool_error(&format!("{code}: {error}")),
-        Some(format!("{log} refused")),
-    )
+    Err(Refusal::text(format!("{code}: {error}")).logged(format!("{log} refused")))
 }
 
 async fn check_and_record(state: Arc<AppState>, wait: Due) {
@@ -409,8 +385,8 @@ async fn check_and_record(state: Arc<AppState>, wait: Due) {
                 None => return,
             }
         }
-        Err(Refusal::Paused) => return,
-        Err(Refusal::Refused { message, permanent }) => Check::Failed { message, permanent },
+        Err(Unqualified::Paused) => return,
+        Err(Unqualified::Refused { message, permanent }) => Check::Failed { message, permanent },
     };
     match mcp_waits::record(&state.db, wait.id, &result).await {
         Ok(true) => state.scheduler.wake(),

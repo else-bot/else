@@ -1,8 +1,9 @@
 use serde_json::Value;
 
-use super::{AppState, Grant, Outcome, slice, summarize_input, tool_error};
-use crate::app::questions::{Kind, TaskScope};
+use super::{AppState, Grant, slice, summarize_input};
+use crate::app::questions::{Effect, Kind, TaskScope};
 use crate::computers::browser_refs::RefLabel;
+use crate::http::tool_result::{self, Refusal, ToolResult};
 
 pub(super) const MAX_PURPOSE: usize = 300;
 const MAX_PREVIEW: usize = 2000;
@@ -18,32 +19,6 @@ pub(super) const EFFECT_DESCRIPTION: &str = "What this does: local (reads and ro
     message or email, publishes publicly, pays, changes access or security, or makes another \
     sensitive commitment). Routine work requested by the owner needs no approval merely because \
     it uses a remote service. Required; a missing effect is refused, never assumed local.";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Effect {
-    Local,
-    Destructive,
-    External,
-}
-
-impl Effect {
-    fn parse(text: &str) -> Option<Self> {
-        match text {
-            "local" => Some(Self::Local),
-            "destructive" => Some(Self::Destructive),
-            "external" => Some(Self::External),
-            _ => None,
-        }
-    }
-
-    fn approval(self) -> Option<Kind> {
-        match self {
-            Self::Local => None,
-            Self::Destructive => Some(Kind::Destructive),
-            Self::External => Some(Kind::External),
-        }
-    }
-}
 
 fn needs_effect(name: &str, args: &Value) -> bool {
     match name {
@@ -271,7 +246,7 @@ pub(crate) async fn approve(
     name: &str,
     args: &Value,
     kind: Kind,
-) -> Result<Option<&'static str>, Outcome> {
+) -> Result<Option<&'static str>, Refusal> {
     let label = match (name, args["selector"].as_str(), state.computers.manager()) {
         ("computer_browser", Some(selector), Some(computers)) => {
             computers.browser_ref(grant.bot_id, selector).await
@@ -291,103 +266,83 @@ pub(crate) async fn approve_card(
     kind: Kind,
     title: String,
     context: String,
-) -> Result<Option<&'static str>, Outcome> {
+) -> Result<Option<&'static str>, Refusal> {
     use crate::app::questions::{Spec, Standing};
-    use crate::db::owner_questions::{self, Gate};
+    use crate::http::owner_tools::{Card, Declined, ask};
     let task_scope = declares_effect(name)
         .then(|| TaskScope::from_args(args).ok().flatten())
         .flatten();
     let spec = Spec::tool_approval(kind, name, args, task_scope, title, context);
-    match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
-        Ok(Gate::Run {
-            standing: Some(Standing::Bot),
-        }) => Ok(Some("standing destructive permission")),
-        Ok(Gate::Run {
-            standing: Some(Standing::Routine),
-        }) => Ok(Some("standing permission for this routine")),
-        Ok(Gate::Run {
-            standing: Some(Standing::Tool),
-        }) => Ok(Some("standing permission for this tool and effect")),
-        Ok(Gate::Run {
-            standing: Some(Standing::Task),
-        }) => Ok(Some("standing permission for this task and target")),
-        Ok(Gate::Run { standing: None }) => Ok(Some("approved by the owner")),
-        Ok(Gate::Pending(question)) => Err(crate::http::owner_tools::pending_approval(
-            state,
-            grant,
-            &question,
-            &format!(
-                "Nothing was done. The owner sees an approval card for exactly this call. \
-                 Tell them briefly what it will do and why, then end this attempt now; do \
-                 not wait, poll, or call more tools. If they approve, you continue \
-                 automatically: call {name} again with exactly the same arguments, once. \
-                 If they decline, do not do it or an equivalent."
-            ),
-        )
-        .await),
-        Ok(Gate::Denied(question)) => Err((
-            tool_error(&format!(
-                "DENIED: the owner declined this {} action for this request. Nothing was done. \
-                 Do not run it or an equivalent; continue without it or ask what they want.",
-                kind.as_str()
-            )),
-            Some(format!("denied {} by the owner", question.id)),
-        )),
-        Err(owner_questions::RequestError::NotAllowed) => Err((
-            tool_error(&format!(
-                "NOT_ALLOWED: this task cannot ask the owner, so this {} action cannot \
-                 be approved here. Nothing was done. Report what needs approval in your result.",
-                kind.as_str()
-            )),
-            Some("rejected NOT_ALLOWED".into()),
-        )),
-        Err(err) => Err(crate::http::owner_tools::question_refused(err)),
-    }
+    let card = Card::approval(format!(
+        "Nothing was done. The owner sees an approval card for exactly this call. Tell them \
+         briefly what it will do and why, then end this attempt now; do not wait, poll, or call \
+         more tools. If they approve, you continue automatically: call {name} again with \
+         exactly the same arguments, once. If they decline, do not do it or an equivalent."
+    ))
+    .not_allowed(
+        Refusal::text(format!(
+            "NOT_ALLOWED: this task cannot ask the owner, so this {} action cannot be approved \
+             here. Nothing was done. Report what needs approval in your result.",
+            kind.as_str()
+        ))
+        .logged("rejected NOT_ALLOWED"),
+    );
+    let declined = Declined::Text(format!(
+        "DENIED: the owner declined this {} action for this request. Nothing was done. Do not \
+         run it or an equivalent; continue without it or ask what they want.",
+        kind.as_str()
+    ));
+    Ok(Some(
+        match ask(state, grant, &spec, card, declined).await? {
+            Some(Standing::Bot) => "standing destructive permission",
+            Some(Standing::Routine) => "standing permission for this routine",
+            Some(Standing::Tool) => "standing permission for this tool and effect",
+            Some(Standing::Task) => "standing permission for this task and target",
+            None => "approved by the owner",
+        },
+    ))
 }
 
 /// Run a computer tool once its declared effect allows it: a local call
 /// runs at once, a destructive or external one only with the owner's
 /// approval for exactly this call. The approval is noted in the activity log.
-pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
+pub(crate) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
     if name == "computer_job_start"
         && args["max_minutes"]
             .as_u64()
             .is_some_and(|minutes| minutes > super::MAX_JOB_MINUTES)
     {
-        return (tool_error(super::JOB_TOO_LONG), None);
+        return Err(Refusal::text(super::JOB_TOO_LONG));
     }
     let effect = match declared_effect(name, args) {
         Ok(effect) => effect,
-        Err(message) => return (tool_error(&message), None),
+        Err(message) => return Err(Refusal::text(message)),
     };
     let note = match (effect, args.get("approved_draft").filter(|v| !v.is_null())) {
         (Some(Effect::External), Some(_)) => {
-            match crate::http::outgoing_tools::claim_for_tool(state, grant, name, args).await {
-                Ok(note) => Some(note),
-                Err(outcome) => return outcome,
-            }
+            Some(crate::http::outgoing_tools::claim_for_tool(state, grant, name, args).await?)
         }
         (_, Some(_)) => {
-            return (
-                tool_error(
-                    "approved_draft goes only with effect external: it names the approved \
+            return Err(Refusal::text(
+                "approved_draft goes only with effect external: it names the approved \
                      draft this call sends. Nothing was done.",
-                ),
-                None,
-            );
+            ));
         }
         (effect, None) => match effect.and_then(Effect::approval) {
-            Some(kind) => match approve(state, grant, name, args, kind).await {
-                Ok(note) => note.map(str::to_owned),
-                Err(outcome) => return outcome,
-            },
+            Some(kind) => approve(state, grant, name, args, kind)
+                .await?
+                .map(str::to_owned),
             None => None,
         },
     };
-    let (result, log) = super::execute(state, grant, name, args).await;
+    let result = super::execute(state, grant, name, args).await;
     match note {
-        Some(note) => (result, log.map(|log| format!("{log} [{note}]"))),
-        None => (result, log),
+        Some(note) => tool_result::amend(
+            result,
+            |_| {},
+            |log| log.map(|log| format!("{log} [{note}]")),
+        ),
+        None => result,
     }
 }
 

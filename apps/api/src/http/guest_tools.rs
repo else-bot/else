@@ -4,6 +4,7 @@
 //! the turn's lease (`turn:<id>`), which starts the computer on demand unless
 //! the owner stopped it. Guest output is task data, never instructions.
 
+use crate::http::tool_result::{Done, Refusal, ToolResult};
 use std::mem::DropGuard;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +13,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::AppState;
-use super::mcp::{Outcome, slice, tool_error, tool_image, tool_result, wire_size};
+use super::mcp::{slice, wire_size};
 use crate::app::tools::summarize_input;
 use crate::computers::jobs::CommandOutput;
 use crate::computers::jobs::Started;
@@ -27,7 +28,7 @@ mod job_wait;
 mod resize;
 mod watch;
 
-pub use approval::call;
+pub(crate) use approval::call;
 use approval::{EFFECT_ADVERTISED, MAX_PURPOSE};
 use input_progress::InputProgress;
 
@@ -311,18 +312,16 @@ fn holder(grant: &Grant) -> String {
     format!("turn:{}", grant.turn_id)
 }
 
-fn not_ready(acquired: &Acquire) -> Value {
+fn not_ready(acquired: &Acquire) -> Refusal {
     if let Acquire::DesktopFailed { reason } = acquired {
-        let mut result = tool_result(json!({
+        return Refusal::flagged(json!({
             "error": format!("DESKTOP_FAILED: {reason}. Nothing was done."),
             "next": "Screen, input and browser tools need the desktop. computer_run still \
                 works: inspect the guest (its processes or logs), then retry, which starts \
                 the desktop again.",
         }));
-        result["isError"] = json!(true);
-        return result;
     }
-    tool_error(&match acquired {
+    Refusal::text(match acquired {
         Acquire::OwnerStopped => {
             "COMPUTER_STOPPED: the owner stopped this computer; it does not start until resumed."
                 .to_owned()
@@ -334,9 +333,11 @@ fn not_ready(acquired: &Acquire) -> Value {
     })
 }
 
-fn failure(err: ComputerError) -> Outcome {
-    tracing::warn!(error = %err, "computer tool failed");
-    (tool_error(&format!("COMPUTER_ERROR: {err}")), None)
+impl From<ComputerError> for Refusal {
+    fn from(err: ComputerError) -> Self {
+        tracing::warn!(error = %err, "computer tool failed");
+        Refusal::text(format!("COMPUTER_ERROR: {err}"))
+    }
 }
 
 fn output_json(out: &CommandOutput) -> Value {
@@ -390,11 +391,10 @@ fn fit(mut value: Value) -> Value {
 
 /// The turn's lease on its computer; with `desktop`, its screen and browser
 /// running too.
-async fn lease(state: &AppState, grant: &Grant, desktop: bool) -> Result<Uuid, Outcome> {
+async fn lease(state: &AppState, grant: &Grant, desktop: bool) -> Result<Uuid, Refusal> {
     let Some(computers) = state.computers.manager() else {
-        return Err((
-            tool_error("COMPUTER_UNAVAILABLE: no computer runtime on this host."),
-            None,
+        return Err(Refusal::text(
+            "COMPUTER_UNAVAILABLE: no computer runtime on this host.",
         ));
     };
     let acquired = if desktop {
@@ -406,8 +406,8 @@ async fn lease(state: &AppState, grant: &Grant, desktop: bool) -> Result<Uuid, O
     };
     match acquired {
         Ok(Acquire::Ready { lease_id, .. }) => Ok(lease_id),
-        Ok(other) => Err((not_ready(&other), None)),
-        Err(err) => Err(failure(err)),
+        Ok(other) => Err(not_ready(&other)),
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -416,14 +416,14 @@ async fn lease(state: &AppState, grant: &Grant, desktop: bool) -> Result<Uuid, O
 async fn prepare_desktop(
     computers: &crate::computers::ComputerManager,
     grant: &Grant,
-) -> Result<(), Outcome> {
+) -> Result<(), Refusal> {
     match computers
         .acquire_desktop(grant.bot_id, &holder(grant))
         .await
     {
         Ok(Acquire::Ready { .. } | Acquire::DesktopFailed { .. }) => Ok(()),
-        Ok(other) => Err((not_ready(&other), None)),
-        Err(err) => Err(failure(err)),
+        Ok(other) => Err(not_ready(&other)),
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -459,27 +459,24 @@ async fn screenshot(
     grant: &Grant,
     args: &Value,
     computers: &std::sync::Arc<crate::computers::ComputerManager>,
-) -> Outcome {
+) -> ToolResult {
     use crate::computers::screens::ScreenRefusal;
-    let refusal = |r: ScreenRefusal| -> Outcome {
-        (
-            tool_error(&match r {
-                ScreenRefusal::DisplayUnavailable(m) | ScreenRefusal::TooLarge(m) => m,
-                ScreenRefusal::Invalid(m) => format!("SCREENSHOT_INVALID: {m}"),
-                ScreenRefusal::Stopped => {
-                    "STOPPED: this turn was stopped; nothing was captured.".into()
-                }
-                ScreenRefusal::NoSuchArtifact => {
-                    "No such screenshot: artifact_id must be one you saved.".into()
-                }
-            }),
-            None,
-        )
+    let refusal = |r: ScreenRefusal| -> ToolResult {
+        Err(Refusal::text(match r {
+            ScreenRefusal::DisplayUnavailable(m) | ScreenRefusal::TooLarge(m) => m,
+            ScreenRefusal::Invalid(m) => format!("SCREENSHOT_INVALID: {m}"),
+            ScreenRefusal::Stopped => {
+                "STOPPED: this turn was stopped; nothing was captured.".into()
+            }
+            ScreenRefusal::NoSuchArtifact => {
+                "No such screenshot: artifact_id must be one you saved.".into()
+            }
+        }))
     };
     let share = args["share"].as_bool().unwrap_or(false);
     if let Some(id) = args["artifact_id"].as_str() {
         let Ok(id) = id.parse::<Uuid>() else {
-            return (tool_error("artifact_id must be an artifact ID."), None);
+            return Err(Refusal::text("artifact_id must be an artifact ID."));
         };
         return match computers.saved_screen(grant.bot_id, id).await {
             Ok(Ok((png, meta))) => {
@@ -490,14 +487,11 @@ async fn screenshot(
                 shown(state, grant, share, id, meta, &png, log).await
             }
             Ok(Err(r)) => refusal(r),
-            Err(err) => failure(err),
+            Err(err) => Err(err.into()),
         };
     }
     let save = args["save"].as_bool().unwrap_or(false);
-    let lease = match lease(state, grant, true).await {
-        Ok(lease) => lease,
-        Err(outcome) => return outcome,
-    };
+    let lease = lease(state, grant, true).await?;
     match computers
         .capture_screen(lease, grant.bot_id, Some(grant.turn_id), save)
         .await
@@ -529,7 +523,7 @@ async fn screenshot(
             .await
         }
         Ok(Err(r)) => refusal(r),
-        Err(err) => failure(err),
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -543,11 +537,11 @@ async fn shown(
     mut meta: Value,
     png: &[u8],
     mut log: String,
-) -> Outcome {
+) -> ToolResult {
     if share {
         let rel = match shared(state, grant, id, png).await {
             Ok(rel) => rel,
-            Err(message) => return (tool_error(message), None),
+            Err(message) => return Err(Refusal::text(message)),
         };
         meta["shared"] = json!(rel);
         meta["next"] = json!(format!(
@@ -555,7 +549,7 @@ async fn shown(
         ));
         log.push_str(&format!(", shared as {rel}"));
     }
-    (tool_image(meta, png), Some(log))
+    Ok(Done::image(meta, png.to_vec()).logged(log))
 }
 
 /// Copy a screenshot to `screens/` in the bot's project and return the
@@ -624,39 +618,34 @@ async fn input(
     grant: &Grant,
     args: &Value,
     computers: &std::sync::Arc<crate::computers::ComputerManager>,
-) -> Outcome {
+) -> ToolResult {
     let (Some(frame), Some(actions)) = (args["frame"].as_array(), args["actions"].as_array())
     else {
-        return (tool_error("frame and actions are required."), None);
+        return Err(Refusal::text("frame and actions are required."));
     };
     if frame.len() != 2 || actions.is_empty() || actions.len() > 20 {
-        return (
-            tool_error("frame is [width, height]; actions has 1 to 20 entries."),
-            None,
-        );
+        return Err(Refusal::text(
+            "frame is [width, height]; actions has 1 to 20 entries.",
+        ));
     }
     if !computers.config().desktop {
-        return (
-            tool_error("DISPLAY_UNAVAILABLE: this installation's computers have no desktop."),
-            None,
-        );
+        return Err(Refusal::text(
+            "DISPLAY_UNAVAILABLE: this installation's computers have no desktop.",
+        ));
     }
     let used = match computers.count_input(grant.turn_id).await {
         Ok(used) => used,
-        Err(err) => return failure(err),
+        Err(err) => return Err(err.into()),
     };
     if used > MAX_INPUT_BATCHES {
-        return (
-            tool_error(&format!(
-                "INPUT_LIMIT: this turn already sent {MAX_INPUT_BATCHES} input batches; stop and \
+        return Err(Refusal::text(format!(
+            "INPUT_LIMIT: this turn already sent {MAX_INPUT_BATCHES} input batches; stop and \
                  report to the owner, who can ask you to continue."
-            )),
-            None,
-        );
+        )));
     }
     let batch = json!({ "frame": frame, "actions": actions }).to_string();
     if batch.len() > 16_000 {
-        return (tool_error("the batch is over 16 KB."), None);
+        return Err(Refusal::text("the batch is over 16 KB."));
     }
     let env = Env {
         vars: vec![(
@@ -679,16 +668,13 @@ async fn input(
     DropGuard::dismiss(guard);
     let out = match finished {
         Ok(Ok(Ok(out))) => out,
-        Ok(Ok(Err(acquired))) => return (not_ready(&acquired), None),
+        Ok(Ok(Err(acquired))) => return Err(not_ready(&acquired)),
         Ok(Err(crate::computers::ComputerError::Refused(message))) => {
-            return (tool_error(&message), None);
+            return Err(Refusal::text(message));
         }
-        Ok(Err(err)) => return failure(err),
+        Ok(Err(err)) => return Err(err.into()),
         Err(_) => {
-            return (
-                tool_error("COMPUTER_ERROR: the input did not report."),
-                None,
-            );
+            return Err(Refusal::text("COMPUTER_ERROR: the input did not report."));
         }
     };
     let progress = InputProgress::parse(&out.stdout, actions.len());
@@ -698,35 +684,28 @@ async fn input(
     if matches!(progress, InputProgress::Refused { .. })
         || (matches!(progress, InputProgress::NotStarted) && !killed)
     {
-        return (
-            tool_error(&format!(
-                "{} Nothing was done.",
-                progress
-                    .error()
-                    .unwrap_or("INPUT_FAILED: the input helper did not start.")
-            )),
-            None,
-        );
+        return Err(Refusal::text(format!(
+            "{} Nothing was done.",
+            progress
+                .error()
+                .unwrap_or("INPUT_FAILED: the input helper did not start.")
+        )));
     }
     if out.exit_code == Some(0) && matches!(progress, InputProgress::Completed) {
-        return (
-            tool_result(json!({ "done": done, "of": actions.len(),
-                "next": "take a screenshot to see the result" })),
-            Some(format!("input {done}/{} actions: {summary}", actions.len())),
-        );
+        return Ok(Done::json(json!({ "done": done, "of": actions.len(),
+                "next": "take a screenshot to see the result" }))
+        .logged(format!("input {done}/{} actions: {summary}", actions.len())));
     }
-    (
-        tool_error(&format!(
-            "UNCERTAIN: {done} of {} actions completed; the next may or may not have happened \
+    Err(Refusal::text(format!(
+        "UNCERTAIN: {done} of {} actions completed; the next may or may not have happened \
              ({}). Take a screenshot before repeating anything.",
-            actions.len(),
-            progress.error().unwrap_or("the input was cut off")
-        )),
-        Some(format!(
-            "input cut off after {done}/{} actions: {summary}",
-            actions.len()
-        )),
-    )
+        actions.len(),
+        progress.error().unwrap_or("the input was cut off")
+    ))
+    .logged(format!(
+        "input cut off after {done}/{} actions: {summary}",
+        actions.len()
+    )))
 }
 
 /// One Vault value to type into a page of the entry's website.
@@ -744,7 +723,7 @@ async fn page_redaction(
     state: &AppState,
     grant: &Grant,
     result: &Value,
-) -> Result<Vec<task_secrets::Redact>, Outcome> {
+) -> Result<Vec<task_secrets::Redact>, Refusal> {
     let host = result["url"]
         .as_str()
         .and_then(|url| reqwest::Url::parse(url).ok())
@@ -758,12 +737,9 @@ async fn page_redaction(
     .await
     .map_err(|err| {
         tracing::warn!(error = %err, "vault redaction unavailable");
-        (
-            tool_error(
-                "VAULT_UNAVAILABLE: the page may show a Vault value and the Vault could \
-                 not be read, so the result is withheld. The action itself ran.",
-            ),
-            None,
+        Refusal::text(
+            "VAULT_UNAVAILABLE: the page may show a Vault value and the Vault could not be read, \
+             so the result is withheld. The action itself ran.",
         )
     })
 }
@@ -777,8 +753,8 @@ async fn vault_fill(
     grant: &Grant,
     name: &str,
     field: Option<String>,
-) -> Result<VaultFill, Outcome> {
-    let refused = |text: String| Err((tool_error(&text), None));
+) -> Result<VaultFill, Refusal> {
+    let refused = |text: String| Err(Refusal::text(text));
     let Some(field) = field else {
         return refused("secret needs field, the variable to type, such as PASSWORD.".into());
     };
@@ -839,7 +815,7 @@ async fn secrets_for(
     grant: &Grant,
     args: &Value,
     kind: task_secrets::Use,
-) -> Result<(Env, Vec<String>), Outcome> {
+) -> Result<(Env, Vec<String>), Refusal> {
     let names = secret_names(args)?;
     let env = resolve_secrets(state, &names).await?;
     task_secrets::record_use(&state.db, &names, grant.bot_id, Some(grant.turn_id), kind).await;
@@ -847,7 +823,7 @@ async fn secrets_for(
 }
 
 /// The Vault entry names in `args["secrets"]`, unchecked against the Vault.
-fn secret_names(args: &Value) -> Result<Vec<String>, Outcome> {
+fn secret_names(args: &Value) -> Result<Vec<String>, Refusal> {
     let names: Vec<String> = match &args["secrets"] {
         Value::Null => Vec::new(),
         Value::Array(items) => {
@@ -857,39 +833,35 @@ fn secret_names(args: &Value) -> Result<Vec<String>, Outcome> {
                 .collect();
             match names {
                 Some(names) => names,
-                None => return Err((tool_error("secrets must be a list of names."), None)),
+                None => return Err(Refusal::text("secrets must be a list of names.")),
             }
         }
-        _ => return Err((tool_error("secrets must be a list of names."), None)),
+        _ => return Err(Refusal::text("secrets must be a list of names.")),
     };
     let mut unique = names.clone();
     unique.sort();
     unique.dedup();
     if unique.len() != names.len() {
-        return Err((tool_error("secrets names a secret twice."), None));
+        return Err(Refusal::text("secrets names a secret twice."));
     }
     Ok(names)
 }
 
 /// Decrypt the Vault entries `names`, without recording a use.
-async fn resolve_secrets(state: &AppState, names: &[String]) -> Result<Env, Outcome> {
+async fn resolve_secrets(state: &AppState, names: &[String]) -> Result<Env, Refusal> {
     match task_secrets::resolve(&state.db, Some(&*state.secret_key), names).await {
         Ok(env) => Ok(env),
-        Err(task_secrets::SecretError::Unknown(name)) => Err((
-            tool_error(&format!(
-                "SECRET_UNKNOWN: there is no Vault entry named {name}; search computer_secrets. \
+        Err(task_secrets::SecretError::Unknown(name)) => Err(Refusal::text(format!(
+            "SECRET_UNKNOWN: there is no Vault entry named {name}; search computer_secrets. \
                  Ask the owner with request_secret if the task needs it."
-            )),
-            None,
-        )),
+        ))),
         Err(task_secrets::SecretError::Invalid(reason)) => {
-            Err((tool_error(&format!("SECRET_INVALID: {reason}")), None))
+            Err(Refusal::text(format!("SECRET_INVALID: {reason}")))
         }
         Err(err) => {
             tracing::warn!(error = %err, "task secrets unavailable");
-            Err((
-                tool_error("SECRET_UNAVAILABLE: task secrets could not be read."),
-                None,
+            Err(Refusal::text(
+                "SECRET_UNAVAILABLE: task secrets could not be read.",
             ))
         }
     }
@@ -931,21 +903,18 @@ async fn add_github(
     grant: &Grant,
     args: &Value,
     env: &mut Env,
-) -> Result<(), Outcome> {
+) -> Result<(), Refusal> {
     let id = match &args["github"] {
         Value::Null => return Ok(()),
         Value::String(id) => match crate::mcp::PackageId::try_from(id.clone()) {
             Ok(id) => id,
-            Err(_) => return Err((tool_error("github must be an installed MCP id."), None)),
+            Err(_) => return Err(Refusal::text("github must be an installed MCP id.")),
         },
-        _ => return Err((tool_error("github must be an installed MCP id."), None)),
+        _ => return Err(Refusal::text("github must be an installed MCP id.")),
     };
     if !grant.allows(crate::grants::Tool::Mcp) {
-        return Err((
-            tool_error(
-                "GITHUB_UNAVAILABLE: this request cannot use shared sign-ins. Nothing was run.",
-            ),
-            None,
+        return Err(Refusal::text(
+            "GITHUB_UNAVAILABLE: this request cannot use shared sign-ins. Nothing was run.",
         ));
     }
     match state.mcps.git_token(&id).await {
@@ -962,40 +931,30 @@ async fn add_github(
             "auth_required",
         )
         .await),
-        Err(error) => Err((
-            tool_error(&format!("GITHUB_UNAVAILABLE: {error} Nothing was run.")),
-            None,
-        )),
+        Err(error) => Err(Refusal::text(format!(
+            "GITHUB_UNAVAILABLE: {error} Nothing was run."
+        ))),
     }
 }
 
-async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
+async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
     let Some(computers) = state.computers.manager().cloned() else {
-        return (
-            tool_error("COMPUTER_UNAVAILABLE: no computer runtime on this host."),
-            None,
-        );
+        return Err(Refusal::text(
+            "COMPUTER_UNAVAILABLE: no computer runtime on this host.",
+        ));
     };
     let text = |key: &str| args[key].as_str().map(str::to_owned);
     match name {
         "computer_run" => {
             let Some(command) = text("command") else {
-                return (tool_error("command is required."), None);
+                return Err(Refusal::text("command is required."));
             };
             let timeout = args["timeout_secs"].as_u64().unwrap_or(60).clamp(1, 300);
-            if wants_desktop(&command)
-                && let Err(outcome) = prepare_desktop(&computers, grant).await
-            {
-                return outcome;
+            if wants_desktop(&command) {
+                prepare_desktop(&computers, grant).await?;
             }
-            let (mut env, _) =
-                match secrets_for(state, grant, args, task_secrets::Use::Command).await {
-                    Ok(found) => found,
-                    Err(outcome) => return outcome,
-                };
-            if let Err(outcome) = add_github(state, grant, args, &mut env).await {
-                return outcome;
-            }
+            let (mut env, _) = secrets_for(state, grant, args, task_secrets::Use::Command).await?;
+            add_github(state, grant, args, &mut env).await?;
             let run = {
                 let computers = computers.clone();
                 let (bot, holder) = (grant.bot_id, holder(grant));
@@ -1019,10 +978,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                 Ok(ran) => ran,
                 Err(err) => {
                     tracing::warn!(error = %err, "a computer command task failed");
-                    return (
-                        tool_error("COMPUTER_ERROR: the command did not report."),
-                        None,
-                    );
+                    return Err(Refusal::text("COMPUTER_ERROR: the command did not report."));
                 }
             };
             match ran {
@@ -1037,15 +993,15 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                         value["out_of_memory"] =
                             resize::out_of_memory(&computers, grant.bot_id).await;
                     }
-                    (tool_result(value), Some(log))
+                    Ok(Done::json(value).logged(log))
                 }
-                Ok(Err(acquired)) => (not_ready(&acquired), None),
-                Err(err) => failure(err),
+                Ok(Err(acquired)) => Err(not_ready(&acquired)),
+                Err(err) => Err(err.into()),
             }
         }
         "computer_job_start" => {
             let Some(command) = text("command") else {
-                return (tool_error("command is required."), None);
+                return Err(Refusal::text("command is required."));
             };
             let minutes = args["max_minutes"]
                 .as_u64()
@@ -1054,36 +1010,25 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
             let webhook = match &args["webhook_id"] {
                 Value::Null => None,
                 id => match id.as_str().and_then(|s| s.parse::<Uuid>().ok()) {
-                    None => return (tool_error("webhook_id must be a webhook ID."), None),
+                    None => return Err(Refusal::text("webhook_id must be a webhook ID.")),
                     Some(id) => {
                         match crate::db::webhooks::is_live(&state.db, grant.bot_id, id).await {
                             Ok(true) => Some(id),
                             Ok(false) => {
-                                return (
-                                    tool_error(
-                                        "NOT_FOUND: no such webhook; see webhook_list. No job was started.",
-                                    ),
-                                    None,
-                                );
+                                return Err(Refusal::text(
+                                    "NOT_FOUND: no such webhook; see webhook_list. No job was started.",
+                                ));
                             }
-                            Err(err) => return failure(err.into()),
+                            Err(err) => return Err(ComputerError::from(err).into()),
                         }
                     }
                 },
             };
-            if wants_desktop(&command)
-                && let Err(outcome) = prepare_desktop(&computers, grant).await
-            {
-                return outcome;
+            if wants_desktop(&command) {
+                prepare_desktop(&computers, grant).await?;
             }
-            let (mut env, names) =
-                match secrets_for(state, grant, args, task_secrets::Use::Job).await {
-                    Ok(found) => found,
-                    Err(outcome) => return outcome,
-                };
-            if let Err(outcome) = add_github(state, grant, args, &mut env).await {
-                return outcome;
-            }
+            let (mut env, names) = secrets_for(state, grant, args, task_secrets::Use::Job).await?;
+            add_github(state, grant, args, &mut env).await?;
             match computers
                 .start_job_with(
                     grant.bot_id,
@@ -1103,34 +1048,30 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                         .as_ref()
                         .map(job_json)
                         .unwrap_or(json!({ "job_id": id }));
-                    (
-                        tool_result(value),
-                        Some(format!("job {id} started: {}", slice(&command, 0, 200).1)),
-                    )
+                    Ok(Done::json(value)
+                        .logged(format!("job {id} started: {}", slice(&command, 0, 200).1)))
                 }
-                Ok(Started::TooMany) => (
-                    tool_error("JOB_LIMIT: 4 background jobs already run; wait or cancel one."),
-                    None,
-                ),
-                Ok(Started::NotReady(acquired)) => (not_ready(&acquired), None),
-                Ok(Started::Stopped) => (
-                    tool_error("STOPPED: this turn was stopped; no job was started."),
-                    None,
-                ),
-                Err(err) => failure(err),
+                Ok(Started::TooMany) => Err(Refusal::text(
+                    "JOB_LIMIT: 4 background jobs already run; wait or cancel one.",
+                )),
+                Ok(Started::NotReady(acquired)) => Err(not_ready(&acquired)),
+                Ok(Started::Stopped) => Err(Refusal::text(
+                    "STOPPED: this turn was stopped; no job was started.",
+                )),
+                Err(err) => Err(err.into()),
             }
         }
         resize::NAME => resize::resize(state, grant, &computers, args).await,
         watch::START | watch::LIST | watch::STOP => watch::call(state, grant, name, args).await,
         "computer_job" if args["wait"] == true => {
             let Some(id) = text("job_id").and_then(|s| s.parse::<Uuid>().ok()) else {
-                return (tool_error("job_id must be a job ID."), None);
+                return Err(Refusal::text("job_id must be a job ID."));
             };
             job_wait::wait_job(state, grant, &computers, id).await
         }
         "computer_job" | "computer_job_cancel" => {
             let Some(id) = text("job_id").and_then(|s| s.parse::<Uuid>().ok()) else {
-                return (tool_error("job_id must be a job ID."), None);
+                return Err(Refusal::text("job_id must be a job ID."));
             };
             let result = if name == "computer_job" {
                 computers.job(grant.bot_id, id).await
@@ -1144,47 +1085,38 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                         value["out_of_memory"] =
                             resize::out_of_memory(&computers, grant.bot_id).await;
                     }
-                    (
-                        tool_result(value),
-                        Some(format!("{name} {id}: {}", job.status)),
-                    )
+                    Ok(Done::json(value).logged(format!("{name} {id}: {}", job.status)))
                 }
-                Ok(None) => (tool_error("No such job."), None),
-                Err(err) => failure(err),
+                Ok(None) => Err(Refusal::text("No such job.")),
+                Err(err) => Err(err.into()),
             }
         }
         "computer_write_file" => {
             let (Some(path), Some(content)) = (text("path"), text("content")) else {
-                return (tool_error("path and content are required."), None);
+                return Err(Refusal::text("path and content are required."));
             };
             if content.len() > 65_536 {
-                return (tool_error("content is over 64 KB."), None);
+                return Err(Refusal::text("content is over 64 KB."));
             }
-            let lease = match lease(state, grant, false).await {
-                Ok(lease) => lease,
-                Err(outcome) => return outcome,
-            };
+            let lease = lease(state, grant, false).await?;
             match computers.write_file(lease, &path, &content).await {
-                Ok(out) if out.status == Some(0) => (
-                    tool_result(json!({ "path": path, "bytes": content.len() })),
-                    Some(format!("wrote {} bytes to {path}", content.len())),
-                ),
-                Ok(out) => (
-                    tool_error(&format!("write failed: {}", slice(&out.stderr, 0, 500).1)),
-                    None,
-                ),
-                Err(err) => failure(err),
+                Ok(out) if out.status == Some(0) => {
+                    Ok(Done::json(json!({ "path": path, "bytes": content.len() }))
+                        .logged(format!("wrote {} bytes to {path}", content.len())))
+                }
+                Ok(out) => Err(Refusal::text(format!(
+                    "write failed: {}",
+                    slice(&out.stderr, 0, 500).1
+                ))),
+                Err(err) => Err(err.into()),
             }
         }
         "computer_read_file" => {
             let Some(path) = text("path") else {
-                return (tool_error("path is required."), None);
+                return Err(Refusal::text("path is required."));
             };
             let offset = args["offset"].as_u64().unwrap_or(0);
-            let lease = match lease(state, grant, false).await {
-                Ok(lease) => lease,
-                Err(outcome) => return outcome,
-            };
+            let lease = lease(state, grant, false).await?;
             match computers.read_file(lease, &path, offset, READ_CHUNK).await {
                 Ok(Ok((size, bytes))) => {
                     let (text, consumed, binary) = match std::str::from_utf8(&bytes) {
@@ -1207,28 +1139,23 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                         }
                     };
                     let end = offset + consumed as u64;
-                    (
-                        tool_result(fit(json!({
-                            "path": path, "size_bytes": size, "offset": offset,
-                            "encoding": if binary { "base64" } else { "utf-8" },
-                            "content": text,
-                            "next_offset": (end < size).then_some(end),
-                        }))),
-                        Some(format!("read {path} at {offset}")),
-                    )
+                    Ok(Done::json(fit(json!({
+                        "path": path, "size_bytes": size, "offset": offset,
+                        "encoding": if binary { "base64" } else { "utf-8" },
+                        "content": text,
+                        "next_offset": (end < size).then_some(end),
+                    })))
+                    .logged(format!("read {path} at {offset}")))
                 }
-                Ok(Err(reason)) => (tool_error(&format!("read failed: {reason}")), None),
-                Err(err) => failure(err),
+                Ok(Err(reason)) => Err(Refusal::text(format!("read failed: {reason}"))),
+                Err(err) => Err(err.into()),
             }
         }
         "computer_fetch" => {
             let Some(path) = text("path") else {
-                return (tool_error("path is required."), None);
+                return Err(Refusal::text("path is required."));
             };
-            let lease = match lease(state, grant, false).await {
-                Ok(lease) => lease,
-                Err(outcome) => return outcome,
-            };
+            let lease = lease(state, grant, false).await?;
             match computers
                 .fetch_artifact(
                     lease,
@@ -1239,15 +1166,13 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                 )
                 .await
             {
-                Ok(Ok((id, size, sha256, preview))) => (
-                    tool_result(fit(json!({
-                        "artifact_id": id, "guest_path": path, "size_bytes": size,
-                        "sha256": sha256, "preview": slice(&preview, 0, 2000).1,
-                    }))),
-                    Some(format!("fetched {path}: artifact {id}, {size} bytes")),
-                ),
-                Ok(Err(reason)) => (tool_error(&format!("fetch failed: {reason}")), None),
-                Err(err) => failure(err),
+                Ok(Ok((id, size, sha256, preview))) => Ok(Done::json(fit(json!({
+                    "artifact_id": id, "guest_path": path, "size_bytes": size,
+                    "sha256": sha256, "preview": slice(&preview, 0, 2000).1,
+                })))
+                .logged(format!("fetched {path}: artifact {id}, {size} bytes"))),
+                Ok(Err(reason)) => Err(Refusal::text(format!("fetch failed: {reason}"))),
+                Err(err) => Err(err.into()),
             }
         }
         "computer_browser" => {
@@ -1256,17 +1181,17 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
             let mut argv = match text("dialog").as_deref() {
                 Some("accept") => vec!["--accept-dialogs".to_owned()],
                 None | Some("dismiss") => Vec::new(),
-                Some(_) => return (tool_error("dialog is dismiss or accept."), None),
+                Some(_) => return Err(Refusal::text("dialog is dismiss or accept.")),
             };
             argv.push(action.clone());
             match action.as_str() {
                 "open" => match text("url") {
                     Some(url) => argv.push(url),
-                    None => return (tool_error("open needs url."), None),
+                    None => return Err(Refusal::text("open needs url.")),
                 },
                 "click" => match text("selector") {
                     Some(sel) => argv.push(sel),
-                    None => return (tool_error("click needs selector."), None),
+                    None => return Err(Refusal::text("click needs selector.")),
                 },
                 "type" => match (text("selector"), text("text"), text("secret")) {
                     (Some(sel), Some(t), None) => {
@@ -1274,28 +1199,21 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                         argv.push(t);
                     }
                     (Some(sel), None, Some(name)) => {
-                        let filled = match vault_fill(state, grant, &name, text("field")).await {
-                            Ok(filled) => filled,
-                            Err(outcome) => return outcome,
-                        };
+                        let filled = vault_fill(state, grant, &name, text("field")).await?;
                         argv.pop();
                         argv.extend(["type-secret".to_owned(), sel, filled.site.clone()]);
                         fill = Some(filled);
                     }
                     _ => {
-                        return (
-                            tool_error("type needs selector and either text or secret and field."),
-                            None,
-                        );
+                        return Err(Refusal::text(
+                            "type needs selector and either text or secret and field.",
+                        ));
                     }
                 },
                 "text" | "title" | "snapshot" => {}
-                _ => return (tool_error("unknown action."), None),
+                _ => return Err(Refusal::text("unknown action.")),
             }
-            let lease = match lease(state, grant, true).await {
-                Ok(lease) => lease,
-                Err(outcome) => return outcome,
-            };
+            let lease = lease(state, grant, true).await?;
             let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
             let input = fill.as_ref().map(|f| f.value.as_bytes());
             match computers.browser_with(lease, &argv, input).await {
@@ -1306,29 +1224,24 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                         Some(ref fill) => fill.redaction.clone(),
                         None => Vec::new(),
                     };
-                    match page_redaction(state, grant, &parsed).await {
-                        Ok(more) => redaction.extend(more),
-                        Err(outcome) => return outcome,
-                    }
+                    redaction.extend(page_redaction(state, grant, &parsed).await?);
                     parsed = task_secrets::redact_json(parsed, &redaction);
                     let log = match &fill {
                         Some(fill) => format!("browser type {} from the Vault", fill.label),
                         None => format!("browser {action}"),
                     };
                     if parsed.get("error").is_some() {
-                        (
-                            tool_error(&format!("BROWSER_ERROR: {}", parsed["error"])),
-                            Some(log),
-                        )
+                        Err(Refusal::text(format!("BROWSER_ERROR: {}", parsed["error"]))
+                            .logged(log))
                     } else {
                         if let Some(snapshot) = parsed["snapshot"].as_str() {
                             let refs = crate::computers::browser_refs::parse(snapshot);
                             computers.remember_browser_refs(grant.bot_id, refs).await;
                         }
-                        (tool_result(fit(parsed)), Some(log))
+                        Ok(Done::json(fit(parsed)).logged(log))
                     }
                 }
-                Err(err) => failure(err),
+                Err(err) => Err(err.into()),
             }
         }
         "computer_screenshot" => screenshot(state, grant, args, &computers).await,
@@ -1357,20 +1270,16 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                     "Sign in with computer_browser type, secret and field per input; read \
                      variables from the environment in commands."
                 };
-                (
-                    tool_result(json!({ "secrets": secrets, "next": next })),
-                    Some(log),
-                )
+                Ok(Done::json(json!({ "secrets": secrets, "next": next })).logged(log))
             }
             Err(err) => {
                 tracing::warn!(error = %err, "listing task secrets failed");
-                (
-                    tool_error("SECRET_UNAVAILABLE: task secrets could not be read."),
-                    None,
-                )
+                Err(Refusal::text(
+                    "SECRET_UNAVAILABLE: task secrets could not be read.",
+                ))
             }
         },
-        _ => (tool_error("Unknown tool."), None),
+        _ => Err(Refusal::text("Unknown tool.")),
     }
 }
 

@@ -2,6 +2,7 @@
 //! the owner, and the owner's routes to read the file and its history and
 //! to restore an earlier version.
 
+use crate::http::tool_result::{self, Done, Refusal, ToolResult};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -13,7 +14,6 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::error::{ApiError, ApiJson, ApiPath};
-use super::mcp::{Outcome, tool_error, tool_result};
 use super::{AppState, Routes};
 use crate::app::rules::{
     ChangeKind, Edit, MAX_BODY_CHARS, MAX_OWNER_WORDS_CHARS, MAX_TITLE_CHARS, Rules,
@@ -82,26 +82,20 @@ struct UpdateArgs {
     owner_words: String,
 }
 
-pub(super) async fn update(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    let reject = |code: &str, message: &str| {
-        (
-            tool_error(&format!("{code}: {message}")),
-            Some(format!("rejected {code}")),
-        )
-    };
-    let Ok(parsed) = serde_json::from_value::<UpdateArgs>(args.clone()) else {
-        return reject(
+pub(super) async fn update(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    let parsed: UpdateArgs = tool_result::args(args, || {
+        Refusal::coded(
             "INVALID_ARGUMENTS",
             "pass section, content, and owner_words strings.",
-        );
-    };
+        )
+    })?;
     let edit = match Edit::parse(&parsed.section, &parsed.content) {
         Ok(edit) => edit,
-        Err(err) => return reject("INVALID_RULE", &err.to_string()),
+        Err(err) => return Err(Refusal::coded("INVALID_RULE", err.to_string())),
     };
     let owner_words = match parse_owner_words(&parsed.owner_words) {
         Ok(words) => words,
-        Err(err) => return reject("INVALID_RULE", &err.to_string()),
+        Err(err) => return Err(Refusal::coded("INVALID_RULE", err.to_string())),
     };
     let caller = Caller {
         bot_id: grant.bot_id,
@@ -109,10 +103,10 @@ pub(super) async fn update(state: &AppState, grant: &Grant, args: &Value) -> Out
         turn_id: grant.turn_id,
     };
     match rules::update_for_turn(&state.db, caller, &edit, &owner_words).await {
-        Ok(Saved::Unchanged { version }) => (
-            tool_result(json!({ "version": version, "changed": false })),
-            Some(format!("rules unchanged at version {version}")),
-        ),
+        Ok(Saved::Unchanged { version }) => {
+            Ok(Done::json(json!({ "version": version, "changed": false }))
+                .logged(format!("rules unchanged at version {version}")))
+        }
         Ok(Saved::Saved(update)) => {
             let mut result = json!({
                 "version": update.version,
@@ -125,25 +119,22 @@ pub(super) async fn update(state: &AppState, grant: &Grant, args: &Value) -> Out
             {
                 result["next"] = json!(next);
             }
-            (
-                tool_result(result),
-                Some(format!(
-                    "rules version {}: {} {}",
-                    update.version,
-                    update.change.as_str(),
-                    update.section
-                )),
-            )
+            Ok(Done::json(result).logged(format!(
+                "rules version {}: {} {}",
+                update.version,
+                update.change.as_str(),
+                update.section
+            )))
         }
-        Err(RulesError::Invalid(err)) => reject("INVALID_RULE", &err.to_string()),
-        Err(err @ RulesError::NotAllowed) => reject("NOT_ALLOWED", &err.to_string()),
-        Err(err @ RulesError::NotRunning) => reject("NOT_RUNNING", &err.to_string()),
+        Err(RulesError::Invalid(err)) => Err(Refusal::coded("INVALID_RULE", err.to_string())),
+        Err(err @ RulesError::NotAllowed) => Err(Refusal::coded("NOT_ALLOWED", err.to_string())),
+        Err(err @ RulesError::NotRunning) => Err(Refusal::coded("NOT_RUNNING", err.to_string())),
         Err(err) => {
             tracing::warn!(error = %err, "saving a bot's rules failed");
-            reject(
+            Err(Refusal::coded(
                 "UNAVAILABLE",
                 "rules cannot be saved right now; try again shortly.",
-            )
+            ))
         }
     }
 }

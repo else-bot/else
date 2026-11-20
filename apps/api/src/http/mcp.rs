@@ -20,6 +20,8 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::ApiError;
+use super::owner_tools::{Card, Declined, ask};
+use super::tool_result::{self, Done, Refusal, ToolResult, text_result};
 use super::tools::check;
 use crate::app::memory_tree::NodeId;
 use crate::db::memory::{self, EntryRow, Kind, NewEntry, RESPONSE_BUDGET};
@@ -77,9 +79,9 @@ pub async fn endpoint(
         "tools/call" if params["name"] == super::tool_search::FIND => {
             match params["arguments"]["query"].as_str() {
                 Some(query) if !query.trim().is_empty() && query.len() <= 200 => {
-                    Ok(tool_result(super::tool_search::find(&all_tools(), query)))
+                    Ok(text_result(super::tool_search::find(&all_tools(), query)))
                 }
-                _ => Ok(tool_error("Give a query of at most 200 bytes.")),
+                _ => Ok(refused("Give a query of at most 200 bytes.")),
             }
         }
         "tools/call" => {
@@ -90,7 +92,7 @@ pub async fn endpoint(
                     Ok((name, arguments)) => (Some(name), arguments),
                     Err(message) => {
                         return Json(
-                            json!({ "jsonrpc": "2.0", "id": id, "result": tool_error(message) }),
+                            json!({ "jsonrpc": "2.0", "id": id, "result": refused(message) }),
                         )
                         .into_response();
                     }
@@ -105,7 +107,7 @@ pub async fn endpoint(
                 && !crate::app::tools::DEFERRED_TOOLS.contains(&name)
             {
                 return Json(
-                    json!({ "jsonrpc": "2.0", "id": id, "result": tool_error("Unknown tool.") }),
+                    json!({ "jsonrpc": "2.0", "id": id, "result": refused("Unknown tool.") }),
                 )
                 .into_response();
             }
@@ -199,16 +201,16 @@ async fn task_cannot_delegate(state: &AppState, grant: &Grant) -> Option<Value> 
         .await
         .ok()?;
     if origin == crate::app::providers::Origin::ConnectorEvent {
-        return Some(tool_error(
-            &json!({
+        return Some(refused(
+            json!({
                 "error": "NOT_ALLOWED: a task handed on from email cannot delegate or start a council.",
                 "next": "Do not retry, and list no follow-ups for other bots. Reply with what you took from the task.",
             })
             .to_string(),
         ));
     }
-    Some(tool_error(
-        &json!({
+    Some(refused(
+        json!({
             "error": "NOT_ALLOWED: a delegated task cannot delegate or start a council.",
             "next": format!(
                 "Do not retry. Finish your part, then end your reply with each follow-up \
@@ -539,17 +541,9 @@ fn tool_list() -> Value {
     ])
 }
 
-pub(crate) fn tool_error(message: &str) -> Value {
-    json!({ "content": [{ "type": "text", "text": message }], "isError": true })
-}
-
-pub(crate) fn tool_image(meta: Value, png: &[u8]) -> Value {
-    use base64::Engine;
-    json!({ "content": [
-        { "type": "text", "text": meta.to_string() },
-        { "type": "image", "mimeType": "image/png",
-          "data": base64::engine::general_purpose::STANDARD.encode(png) },
-    ] })
+/// A plain-text tool error outside a handler, rendered like a handler's.
+fn refused(message: impl Into<String>) -> Value {
+    tool_result::render(Err(Refusal::text(message))).0
 }
 
 /// Every else.bot tool definition, listed or deferred.
@@ -565,12 +559,8 @@ pub(super) fn all_tools() -> Vec<Value> {
     tools
 }
 
-pub(crate) fn tool_result(value: Value) -> Value {
-    json!({ "content": [{ "type": "text", "text": value.to_string() }] })
-}
-
 pub(crate) fn wire_size(value: &Value) -> usize {
-    tool_result(value.clone()).to_string().len()
+    text_result(value.clone()).to_string().len()
 }
 
 fn fill(
@@ -602,31 +592,31 @@ fn fill(
     added
 }
 
-async fn target(state: &AppState, grant: &Grant, args: &Value) -> Result<Uuid, Value> {
+async fn target(state: &AppState, grant: &Grant, args: &Value) -> Result<Uuid, Refusal> {
     let target = match args.get("bot_id") {
         None | Some(Value::Null) => grant.bot_id,
         Some(value) => value
             .as_str()
             .and_then(|s| s.parse().ok())
-            .ok_or_else(|| tool_error("bot_id must be a bot ID from memory_bots."))?,
+            .ok_or_else(|| Refusal::text("bot_id must be a bot ID from memory_bots."))?,
     };
     if grant
         .memory_scope
         .as_ref()
         .is_some_and(|scope| !scope.contains(&target))
     {
-        return Err(tool_error(
+        return Err(Refusal::text(
             "No readable memory for that bot. Use memory_bots.",
         ));
     }
     match memory::readable(&state.db, grant.bot_id, target).await {
         Ok(true) => Ok(target),
-        Ok(false) => Err(tool_error(
+        Ok(false) => Err(Refusal::text(
             "No readable memory for that bot. Use memory_bots.",
         )),
         Err(err) => {
             tracing::warn!(error = %err, "memory access check failed");
-            Err(tool_error("Memory is unavailable right now."))
+            Err(Refusal::text("Memory is unavailable right now."))
         }
     }
 }
@@ -670,8 +660,8 @@ fn entry_json(bot_id: Uuid, entry: &EntryRow, offset: usize, max: usize) -> Valu
 
 async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Value {
     use crate::db::owner_questions::{self, UseOutcome};
-    let ((result, log), used) =
-        owner_questions::track_use(dispatch(state, grant, name, args)).await;
+    let (result, used) = owner_questions::track_use(dispatch(state, grant, name, args)).await;
+    let (result, log) = tool_result::render(result);
     // A parked call may or may not have run its effect: its use stays started.
     if let Some(question) = used.filter(|_| !crate::app::tools::parks(name, &result)) {
         let outcome = if result["isError"] == true {
@@ -690,7 +680,7 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
     with_next(name, result)
 }
 
-async fn dispatch(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
+async fn dispatch(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
     match name {
         "memory_bots" => bots(state, grant).await,
         "mcp_list" | "mcp_install" | "mcp_request" | "mcp_connect" | "mcp_connection_status" => {
@@ -705,7 +695,7 @@ async fn dispatch(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
         "memory_view" => view(state, grant, args).await,
         "memory_zoom" => zoom(state, grant, args).await,
         "memory_date" => date(state, grant, args).await,
-        "else_status" => (tool_result(super::status(state).await), None),
+        "else_status" => Ok(Done::json(super::status(state).await)),
         "delegate" => super::delegation_tools::delegate(state, grant, args).await,
         "council" => super::delegation_tools::council(state, grant, args).await,
         "delegation_update" => super::delegation_tools::update(state, grant, args).await,
@@ -754,7 +744,7 @@ async fn dispatch(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
         name if name.starts_with("computer_") => {
             super::guest_tools::call(state, grant, name, args).await
         }
-        _ => (tool_error("Unknown tool."), None),
+        _ => Err(Refusal::text("Unknown tool.")),
     }
 }
 
@@ -791,9 +781,7 @@ fn with_next(name: &str, mut result: Value) -> Value {
     result
 }
 
-pub(crate) type Outcome = (Value, Option<String>);
-
-async fn bots(state: &AppState, grant: &Grant) -> Outcome {
+async fn bots(state: &AppState, grant: &Grant) -> ToolResult {
     match memory::readable_bots(&state.db, grant.bot_id).await {
         Ok(mut rows) => {
             if let Some(scope) = &grant.memory_scope {
@@ -806,9 +794,9 @@ async fn bots(state: &AppState, grant: &Grant) -> Outcome {
             });
             result["more"] = json!(shown < rows.len());
             let log = format!("{shown} readable bots");
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
-        Err(_) => (tool_error("Memory is unavailable right now."), None),
+        Err(_) => Err(Refusal::text("Memory is unavailable right now.")),
     }
 }
 
@@ -818,33 +806,24 @@ fn parse_cursor(cursor: &str) -> Option<(i64, i64)> {
     (pair.0 >= 0 && pair.1 >= 0).then_some(pair)
 }
 
-async fn search(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+async fn search(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let Some(query) = args["query"]
         .as_str()
         .map(str::trim)
         .filter(|q| !q.is_empty())
     else {
-        return (tool_error("query is required."), None);
+        return Err(Refusal::text("query is required."));
     };
     if query.chars().count() > MAX_QUERY {
-        return (
-            tool_error("query is too long (200 characters at most)."),
-            None,
-        );
+        return Err(Refusal::text("query is too long (200 characters at most)."));
     }
-    let bot_id = match target(state, grant, args).await {
-        Ok(bot) => bot,
-        Err(err) => return (err, None),
-    };
+    let bot_id = target(state, grant, args).await?;
     let (watermark, offset) = match args.get("cursor").and_then(Value::as_str) {
         None => (None, 0),
         Some(cursor) => match parse_cursor(cursor) {
             Some((w, o)) => (Some(w), o),
             None => {
-                return (
-                    tool_error("cursor is invalid; search again without it."),
-                    None,
-                );
+                return Err(Refusal::text("cursor is invalid; search again without it."));
             }
         },
     };
@@ -853,7 +832,7 @@ async fn search(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         Ok(page) => page,
         Err(err) => {
             tracing::warn!(error = %err, "memory search failed");
-            return (tool_error("Memory is unavailable right now."), None);
+            return Err(Refusal::text("Memory is unavailable right now."));
         }
     };
     let mut result = json!({ "bot_id": bot_id, "hits": [], "next_cursor": null });
@@ -881,31 +860,24 @@ async fn search(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         seqs.join(", ")
     );
     result["next_cursor"] = json!(next.map(|o| format!("{}.{}", page.watermark, o)));
-    (tool_result(result), Some(log))
+    Ok(Done::json(result).logged(log))
 }
 
-async fn read(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+async fn read(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let Some(start) = args["start_seq"].as_i64().filter(|s| *s >= 0) else {
-        return (
-            tool_error("start_seq must be a non-negative integer."),
-            None,
-        );
+        return Err(Refusal::text("start_seq must be a non-negative integer."));
     };
     let count = args.get("count").and_then(Value::as_i64).unwrap_or(5);
     if !(1..=MAX_READ).contains(&count) {
-        return (tool_error("count must be between 1 and 20."), None);
+        return Err(Refusal::text("count must be between 1 and 20."));
     }
     let offset = args.get("offset").and_then(Value::as_i64).unwrap_or(0);
     if offset < 0 || (offset > 0 && count != 1) {
-        return (
-            tool_error("offset needs count 1 and must not be negative."),
-            None,
-        );
+        return Err(Refusal::text(
+            "offset needs count 1 and must not be negative.",
+        ));
     }
-    let bot_id = match target(state, grant, args).await {
-        Ok(bot) => bot,
-        Err(err) => return (err, None),
-    };
+    let bot_id = target(state, grant, args).await?;
     let (rows, length) = match tokio::try_join!(
         memory::read(&state.db, bot_id, start, count),
         memory::length(&state.db, bot_id)
@@ -913,7 +885,7 @@ async fn read(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         Ok(found) => found,
         Err(err) => {
             tracing::warn!(error = %err, "memory read failed");
-            return (tool_error("Memory is unavailable right now."), None);
+            return Err(Refusal::text("Memory is unavailable right now."));
         }
     };
     let mut result = json!({ "bot_id": bot_id, "entries": [], "length": length,
@@ -937,7 +909,7 @@ async fn read(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         },
         shown
     );
-    (tool_result(result), Some(log))
+    Ok(Done::json(result).logged(log))
 }
 
 async fn record(state: &AppState, grant: &Grant, name: &str, args: &Value, log: &str) {
@@ -976,8 +948,8 @@ pub async fn no_stream() -> ApiError {
     )
 }
 
-fn unavailable() -> Outcome {
-    (tool_error("Memory is unavailable right now."), None)
+fn unavailable() -> ToolResult {
+    Err(Refusal::text("Memory is unavailable right now."))
 }
 
 fn suffix(grant: &Grant, bot_id: Uuid) -> String {
@@ -988,11 +960,8 @@ fn suffix(grant: &Grant, bot_id: Uuid) -> String {
     }
 }
 
-async fn view(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    let bot_id = match target(state, grant, args).await {
-        Ok(bot) => bot,
-        Err(err) => return (err, None),
-    };
+async fn view(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    let bot_id = target(state, grant, args).await?;
     let from = args.get("from_index").and_then(Value::as_u64).unwrap_or(0) as usize;
     let Ok(saved) = memory_tree::load_view(&state.db, bot_id).await else {
         return unavailable();
@@ -1043,7 +1012,7 @@ async fn view(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         shown,
         from
     );
-    (tool_result(result), Some(log))
+    Ok(Done::json(result).logged(log))
 }
 
 fn text_fields(item: &mut Value, node: NodeId, body: &str, max: usize) {
@@ -1060,26 +1029,22 @@ fn text_fields(item: &mut Value, node: NodeId, body: &str, max: usize) {
     }
 }
 
-async fn zoom(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+async fn zoom(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let (Some(start), Some(span)) = (args["start_seq"].as_i64(), args["span"].as_i64()) else {
-        return (tool_error("start_seq and span are required."), None);
+        return Err(Refusal::text("start_seq and span are required."));
     };
     let id = NodeId { start, span };
     if !id.is_valid() {
-        return (
-            tool_error("span must be a power of two and start_seq a multiple of it."),
-            None,
-        );
+        return Err(Refusal::text(
+            "span must be a power of two and start_seq a multiple of it.",
+        ));
     }
-    let bot_id = match target(state, grant, args).await {
-        Ok(bot) => bot,
-        Err(err) => return (err, None),
-    };
+    let bot_id = target(state, grant, args).await?;
     let Ok(saved) = memory_tree::load_view(&state.db, bot_id).await else {
         return unavailable();
     };
     if id.end() > saved.length {
-        return (tool_error("That range is beyond the end of memory."), None);
+        return Err(Refusal::text("That range is beyond the end of memory."));
     }
     let generation = saved.generation;
     let mut result = json!({ "bot_id": bot_id, "generation": generation,
@@ -1090,7 +1055,7 @@ async fn zoom(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 return unavailable();
             };
             let Some(entry) = rows.first() else {
-                return (tool_error("No such entry."), None);
+                return Err(Refusal::text("No such entry."));
             };
             fill(
                 &mut result,
@@ -1126,21 +1091,18 @@ async fn zoom(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         }
     }
     let log = format!("zoom{} {start}+{span}", suffix(grant, bot_id));
-    (tool_result(result), Some(log))
+    Ok(Done::json(result).logged(log))
 }
 
-async fn date(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+async fn date(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let Some(seq) = args["seq"].as_i64().filter(|s| *s >= 0) else {
-        return (tool_error("seq must be a non-negative integer."), None);
+        return Err(Refusal::text("seq must be a non-negative integer."));
     };
     let end = args.get("end_seq").and_then(Value::as_i64);
     if end.is_some_and(|e| e < seq) {
-        return (tool_error("end_seq must not be before seq."), None);
+        return Err(Refusal::text("end_seq must not be before seq."));
     }
-    let bot_id = match target(state, grant, args).await {
-        Ok(bot) => bot,
-        Err(err) => return (err, None),
-    };
+    let bot_id = target(state, grant, args).await?;
     let mut dates = Vec::new();
     for at in std::iter::once(seq).chain(end) {
         let Ok(rows) = memory::read(&state.db, bot_id, at, 1).await else {
@@ -1151,7 +1113,7 @@ async fn date(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 "seq": e.seq, "created_at": e.created_at, "kind": e.kind,
                 "authority": e.authority, "source": e.source,
             })),
-            None => return (tool_error("No such entry."), None),
+            None => return Err(Refusal::text("No such entry.")),
         }
     }
     let log = format!(
@@ -1159,10 +1121,7 @@ async fn date(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         suffix(grant, bot_id),
         end.map(|e| format!("..{e}")).unwrap_or_default()
     );
-    (
-        tool_result(json!({ "bot_id": bot_id, "dates": dates })),
-        Some(log),
-    )
+    Ok(Done::json(json!({ "bot_id": bot_id, "dates": dates })).logged(log))
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1171,17 +1130,16 @@ struct ListBotsArgs {
     category_id: Option<Uuid>,
 }
 
-async fn list_bots(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+async fn list_bots(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let parsed = if args.is_null() {
         Ok(ListBotsArgs::default())
     } else {
         serde_json::from_value(args.clone())
     };
     let Ok(parsed) = parsed else {
-        return (
-            tool_error("Pass an optional category_id from list_bots."),
-            None,
-        );
+        return Err(Refusal::text(
+            "Pass an optional category_id from list_bots.",
+        ));
     };
     match crate::db::bots::list(&state.db, false).await {
         Ok(listing) => {
@@ -1189,10 +1147,9 @@ async fn list_bots(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 .category_id
                 .is_some_and(|id| !listing.categories.iter().any(|c| c.id == id))
             {
-                return (
-                    tool_error("CATEGORY_NOT_FOUND: Use a category_id from list_bots."),
-                    None,
-                );
+                return Err(Refusal::text(
+                    "CATEGORY_NOT_FOUND: Use a category_id from list_bots.",
+                ));
             }
             let bots: Vec<_> = listing
                 .bots
@@ -1205,18 +1162,12 @@ async fn list_bots(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 })
                 .map(|b| json!({"bot_id": b.id, "name": b.name, "category_id": b.category_id}))
                 .collect();
-            (
-                tool_result(
-                    json!({"main_bot_id": listing.default_bot_id, "categories": listing.categories,
+            Ok(Done::json(
+                json!({"main_bot_id": listing.default_bot_id, "categories": listing.categories,
                 "bots": bots}),
-                ),
-                None,
-            )
+            ))
         }
-        Err(_) => (
-            tool_error("UNAVAILABLE: Bot discovery is unavailable."),
-            None,
-        ),
+        Err(_) => Err(Refusal::text("UNAVAILABLE: Bot discovery is unavailable.")),
     }
 }
 
@@ -1232,29 +1183,23 @@ struct CreateBotArgs {
     service_tier: Option<String>,
 }
 
-async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::app::bots::{BotName, BotPurpose};
-    use crate::db::bots::{self, BotError, Created, Refusal};
-    let reject = |code: &str, message: &str| {
-        (
-            tool_error(&format!("{code}: {message}")),
-            Some(format!("rejected {code}")),
-        )
-    };
-    let Ok(parsed) = serde_json::from_value::<CreateBotArgs>(args.clone()) else {
-        return reject(
+    use crate::db::bots::{self, BotError, Created, Refusal as BotRefusal};
+    let parsed: CreateBotArgs = tool_result::args(args, || {
+        Refusal::coded(
             "INVALID_ARGUMENTS",
             "pass a name, and optionally purpose, category_id, and model with provider_id, \
              reasoning_effort, and service_tier.",
-        );
-    };
+        )
+    })?;
     let name = match BotName::parse(&parsed.name) {
         Ok(name) => name,
-        Err(err) => return reject("INVALID_BOT", &err.to_string()),
+        Err(err) => return Err(Refusal::coded("INVALID_BOT", err.to_string())),
     };
     let purpose = match parsed.purpose.as_deref().map(BotPurpose::parse).transpose() {
         Ok(purpose) => purpose,
-        Err(err) => return reject("INVALID_BOT", err),
+        Err(err) => return Err(Refusal::coded("INVALID_BOT", err)),
     };
     let model = match parsed.model.as_deref() {
         Some(model) => {
@@ -1267,14 +1212,14 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             match super::routines::resolve(state, None, &request).await {
                 Ok(model) => Some((request.key(), model)),
                 Err(reason) => {
-                    return reject(
+                    return Err(Refusal::coded(
                         "MODEL_NOT_AVAILABLE",
-                        &format!(
+                        format!(
                             "the model \"{}\" was not applied: {reason}. No bot was created; \
                              retry with an available model or tell the owner.",
                             request.requested()
                         ),
-                    );
+                    ));
                 }
             }
         }
@@ -1282,10 +1227,10 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             || parsed.reasoning_effort.is_some()
             || parsed.service_tier.is_some() =>
         {
-            return reject(
+            return Err(Refusal::coded(
                 "INVALID_ARGUMENTS",
                 "provider_id, reasoning_effort, and service_tier apply only together with model.",
-            );
+            ));
         }
         None => None,
     };
@@ -1334,32 +1279,33 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             if let Ok(Some(own)) = crate::db::bot_profiles::get(&state.db, bot.id).await {
                 result["model"] = super::settings::choice_json(&own.provider_id, &own.profile);
             }
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
         Err(BotError::Refused(refusal)) => {
             let code = match refusal {
-                Refusal::NotOwnerConversation | Refusal::NotOwnerRequest => "NOT_ALLOWED",
-                Refusal::PurposeRequired => "PURPOSE_REQUIRED",
-                Refusal::NotRunning => "NOT_RUNNING",
-                Refusal::AttemptDelegated => "ATTEMPT_PARKED",
-                Refusal::OwnBot => "OWN_BOT",
-                Refusal::Upstream => "UPSTREAM_BOT",
+                BotRefusal::NotOwnerConversation | BotRefusal::NotOwnerRequest => "NOT_ALLOWED",
+                BotRefusal::PurposeRequired => "PURPOSE_REQUIRED",
+                BotRefusal::NotRunning => "NOT_RUNNING",
+                BotRefusal::AttemptDelegated => "ATTEMPT_PARKED",
+                BotRefusal::OwnBot => "OWN_BOT",
+                BotRefusal::Upstream => "UPSTREAM_BOT",
             };
-            reject(code, &refusal.to_string())
+            Err(Refusal::coded(code, refusal.to_string()))
         }
-        Err(BotError::RequestConflict) => reject(
+        Err(BotError::RequestConflict) => Err(Refusal::coded(
             "REQUEST_CONFLICT",
             "This name was already used with another purpose, category, or model in this request.",
-        ),
-        Err(BotError::CategoryNotFound) => {
-            reject("CATEGORY_NOT_FOUND", "Use a category_id from list_bots.")
-        }
+        )),
+        Err(BotError::CategoryNotFound) => Err(Refusal::coded(
+            "CATEGORY_NOT_FOUND",
+            "Use a category_id from list_bots.",
+        )),
         Err(err) => {
             tracing::warn!(error = %err, "creating a bot from a turn failed");
-            reject(
+            Err(Refusal::coded(
                 "UNAVAILABLE",
                 "bots cannot be created right now; try again shortly.",
-            )
+            ))
         }
     }
 }
@@ -1371,42 +1317,36 @@ struct RenameBotArgs {
     name: String,
 }
 
-async fn rename_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+async fn rename_bot(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::app::bots::BotName;
     use crate::db::bots;
-    let reject = |code: &str, message: &str| {
-        (
-            tool_error(&format!("{code}: {message}")),
-            Some(format!("rejected {code}")),
-        )
-    };
-    let Ok(parsed) = serde_json::from_value::<RenameBotArgs>(args.clone()) else {
-        return reject(
+    let parsed: RenameBotArgs = tool_result::args(args, || {
+        Refusal::coded(
             "INVALID_ARGUMENTS",
             "pass a target_bot_id UUID and a name string.",
-        );
-    };
+        )
+    })?;
     let name = match BotName::parse(&parsed.name) {
         Ok(name) => name,
-        Err(err) => return reject("INVALID_BOT", &err.to_string()),
+        Err(err) => return Err(Refusal::coded("INVALID_BOT", err.to_string())),
     };
     match bots::rename_for_turn(&state.db, grant.turn_id, parsed.target_bot_id, &name).await {
         Ok(bot) => {
             let log = format!("renamed {} ({})", bot.name, bot.id);
-            (
-                tool_result(json!({ "bot_id": bot.id, "name": bot.name, "status": bot.status })),
-                Some(log),
+            Ok(
+                Done::json(json!({ "bot_id": bot.id, "name": bot.name, "status": bot.status }))
+                    .logged(log),
             )
         }
         Err(err) => {
             let Some(code) = edit_refusal(&err) else {
                 tracing::warn!(error = %err, "renaming a bot from a turn failed");
-                return reject(
+                return Err(Refusal::coded(
                     "UNAVAILABLE",
                     "bots cannot be renamed right now; try again shortly.",
-                );
+                ));
             };
-            reject(code, &err.to_string())
+            Err(Refusal::coded(code, err.to_string()))
         }
     }
 }
@@ -1452,37 +1392,31 @@ struct SetBotModelArgs {
     service_tier: Option<String>,
 }
 
-async fn set_bot_model(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+async fn set_bot_model(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::db::bots;
-    let reject = |code: &str, message: &str| {
-        (
-            tool_error(&format!("{code}: {message}")),
-            Some(format!("rejected {code}")),
-        )
-    };
-    let Ok(parsed) = serde_json::from_value::<SetBotModelArgs>(args.clone()) else {
-        return reject(
+    let parsed: SetBotModelArgs = tool_result::args(args, || {
+        Refusal::coded(
             "INVALID_ARGUMENTS",
             "pass a target_bot_id UUID, and model, provider_id, reasoning_effort, or \
              service_tier.",
-        );
-    };
+        )
+    })?;
     let current = match parsed.model {
         Some(_) => None,
         None => match current_model(state, parsed.target_bot_id).await {
             Ok(Some(current)) => Some(current),
             Ok(None) => {
-                return reject(
+                return Err(Refusal::coded(
                     "MODEL_REQUIRED",
                     "this bot has no model yet; pass the model the owner wants.",
-                );
+                ));
             }
             Err(err) => {
                 tracing::warn!(error = %err, "reading a bot's model failed");
-                return reject(
+                return Err(Refusal::coded(
                     "UNAVAILABLE",
                     "bot models cannot be changed right now; try again shortly.",
-                );
+                ));
             }
         },
     };
@@ -1502,14 +1436,14 @@ async fn set_bot_model(state: &AppState, grant: &Grant, args: &Value) -> Outcome
     let model = match super::routines::resolve(state, Some(parsed.target_bot_id), &request).await {
         Ok(model) => model,
         Err(reason) => {
-            return reject(
+            return Err(Refusal::coded(
                 "MODEL_NOT_AVAILABLE",
-                &format!(
+                format!(
                     "the model \"{}\" was not applied: {reason}. Nothing changed; retry with an \
                      available model or tell the owner.",
                     request.requested()
                 ),
-            );
+            ));
         }
     };
     match bots::set_model_for_turn(
@@ -1530,25 +1464,23 @@ async fn set_bot_model(state: &AppState, grant: &Grant, args: &Value) -> Outcome
                 saved.profile.reasoning_effort,
                 saved.profile.service_tier,
             );
-            (
-                tool_result(json!({
-                    "bot_id": parsed.target_bot_id,
-                    "model": super::settings::choice_json(&saved.provider_id, &saved.profile),
-                    "next": "Its next turn uses this model. Routines with their own model keep \
-                        it; to change one, delegate to that bot asking it to update the routine.",
-                })),
-                Some(log),
-            )
+            Ok(Done::json(json!({
+                "bot_id": parsed.target_bot_id,
+                "model": super::settings::choice_json(&saved.provider_id, &saved.profile),
+                "next": "Its next turn uses this model. Routines with their own model keep \
+                    it; to change one, delegate to that bot asking it to update the routine.",
+            }))
+            .logged(log))
         }
         Err(err) => {
             let Some(code) = edit_refusal(&err) else {
                 tracing::warn!(error = %err, "setting a bot's model from a turn failed");
-                return reject(
+                return Err(Refusal::coded(
                     "UNAVAILABLE",
                     "bot models cannot be changed right now; try again shortly.",
-                );
+                ));
             };
-            reject(code, &err.to_string())
+            Err(Refusal::coded(code, err.to_string()))
         }
     }
 }
@@ -1560,24 +1492,17 @@ struct DeleteBotArgs {
     reason: Option<String>,
 }
 
-async fn delete_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+async fn delete_bot(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::app::questions::{BotDeletion, MAX_TITLE, Spec};
     use crate::db::bots::{self, Deletion};
-    use crate::db::owner_questions::{self, Gate};
-    let reject = |code: &str, message: &str| {
-        (
-            tool_error(&format!("{code}: {message}")),
-            Some(format!("rejected {code}")),
-        )
-    };
     let parsed = serde_json::from_value::<DeleteBotArgs>(args.clone())
         .ok()
         .filter(|parsed| parsed.reason.as_ref().is_none_or(|r| r.len() <= MAX_TITLE));
     let Some(parsed) = parsed else {
-        return reject(
+        return Err(Refusal::coded(
             "INVALID_ARGUMENTS",
             "pass a target_bot_id UUID and optionally a reason of at most 500 bytes.",
-        );
+        ));
     };
     let target = parsed.target_bot_id;
     let (bot, impact) = match bots::deletion_for_turn(&state.db, grant.turn_id, target).await {
@@ -1586,12 +1511,12 @@ async fn delete_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         Err(err) => {
             let Some(code) = edit_refusal(&err) else {
                 tracing::warn!(error = %err, "reading a bot to delete failed");
-                return reject(
+                return Err(Refusal::coded(
                     "UNAVAILABLE",
                     "bots cannot be deleted right now; try again shortly.",
-                );
+                ));
             };
-            return reject(code, &err.to_string());
+            return Err(Refusal::coded(code, err.to_string()));
         }
     };
     let model = match current_model(state, target).await {
@@ -1616,50 +1541,38 @@ async fn delete_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         },
         deletion_context(reason, &impact),
     );
-    match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
-        Ok(Gate::Pending(question)) => {
-            super::owner_tools::pending_approval(
-                state,
-                grant,
-                &question,
-                "Tell the owner briefly which bot this deletes and why, then end this attempt \
-                 now. Do not wait, poll, or call more tools. If they approve, call delete_bot \
-                 again with the same target_bot_id.",
-            )
-            .await
+    let card = Card::approval(
+        "Tell the owner briefly which bot this deletes and why, then end this attempt now. Do \
+         not wait, poll, or call more tools. If they approve, call delete_bot again with the \
+         same target_bot_id.",
+    );
+    let declined = Declined::Status(
+        "The owner denied deleting this bot. Do not delete it or ask again in this request.",
+    );
+    ask(state, grant, &spec, card, declined).await?;
+    match super::bots::delete_bot(state, target).await {
+        Ok(deleted) => Ok(Done::json(json!({
+            "bot_id": target,
+            "name": deleted.name,
+            "status": deleted.status,
+            "removed": {
+                "routines": impact.routines,
+                "webhooks": impact.webhooks,
+                "mail_triggers": impact.mail_triggers,
+                "social_triggers": impact.social_triggers,
+                "cancelled_tasks": impact.tasks.len(),
+                "memory_readers": impact.memory_readers,
+            },
+            "next": deleted_next(deleted.status),
+        }))
+        .logged(format!("deleted {} ({target})", deleted.name))),
+        Err(err) => {
+            tracing::warn!(error = %err, "deleting a bot from a turn failed");
+            Err(Refusal::coded(
+                "UNAVAILABLE",
+                "the bot was not deleted; tell the owner they can delete it in the app.",
+            ))
         }
-        Ok(Gate::Denied(question)) => (
-            tool_result(json!({ "status": "denied", "question_id": question.id,
-                "next": "The owner denied deleting this bot. Do not delete it or ask again in this request." })),
-            Some(format!("denied {} by the owner", question.id)),
-        ),
-        Ok(Gate::Run { .. }) => match super::bots::delete_bot(state, target).await {
-            Ok(deleted) => (
-                tool_result(json!({
-                    "bot_id": target,
-                    "name": deleted.name,
-                    "status": deleted.status,
-                    "removed": {
-                        "routines": impact.routines,
-                        "webhooks": impact.webhooks,
-                        "mail_triggers": impact.mail_triggers,
-                        "social_triggers": impact.social_triggers,
-                        "cancelled_tasks": impact.tasks.len(),
-                        "memory_readers": impact.memory_readers,
-                    },
-                    "next": deleted_next(deleted.status),
-                })),
-                Some(format!("deleted {} ({target})", deleted.name)),
-            ),
-            Err(err) => {
-                tracing::warn!(error = %err, "deleting a bot from a turn failed");
-                reject(
-                    "UNAVAILABLE",
-                    "the bot was not deleted; tell the owner they can delete it in the app.",
-                )
-            }
-        },
-        Err(err) => super::owner_tools::question_refused(err),
     }
 }
 
@@ -1677,18 +1590,15 @@ fn deleted_next(status: crate::db::bots::BotStatus) -> &'static str {
     }
 }
 
-fn already_deleted(target: Uuid, status: crate::db::bots::BotStatus) -> Outcome {
-    (
-        tool_result(json!({
+fn already_deleted(target: Uuid, status: crate::db::bots::BotStatus) -> ToolResult {
+    Ok(Done::json(json!({
             "bot_id": target,
             "status": status,
             "next": match status {
                 crate::db::bots::BotStatus::Deleted => "This bot is already deleted. Nothing changed.",
                 _ => "This bot is already being deleted; its running work is stopping. Nothing changed.",
             },
-        })),
-        Some(format!("{target} already {status:?}")),
-    )
+        })).logged(format!("{target} already {status:?}")))
 }
 
 fn deletion_context(reason: Option<&str>, impact: &crate::db::bots::Impact) -> String {
@@ -1746,7 +1656,7 @@ mod next_tests {
 
     #[test]
     fn a_parked_result_without_guidance_gets_the_next_step() {
-        let parked = tool_result(json!({ "status": "pending", "parked": true }));
+        let parked = text_result(json!({ "status": "pending", "parked": true }));
         let text = with_next("delegate", parked)["content"][0]["text"]
             .as_str()
             .unwrap()
@@ -1755,9 +1665,9 @@ mod next_tests {
             serde_json::from_str::<Value>(&text).unwrap()["next"],
             PARKED_NEXT
         );
-        let own = tool_result(json!({ "parked": true, "next": "Own guidance." }));
+        let own = text_result(json!({ "parked": true, "next": "Own guidance." }));
         assert_eq!(with_next("ask_owner", own.clone()), own);
-        let done = tool_result(json!({ "status": "done" }));
+        let done = text_result(json!({ "status": "done" }));
         assert_eq!(with_next("delegate", done.clone()), done);
     }
 }
