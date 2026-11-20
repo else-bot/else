@@ -83,6 +83,26 @@ pub(super) fn view(
         "html_omitted":html_omitted,"inline":inline,"attachments":attachments})
 }
 
+/// A new message to `to` with `body` above the parsed one's sender,
+/// subject and text.
+pub(super) fn forward(parsed: &mail_parser::Message<'_>, to: Vec<String>, body: &str) -> Draft {
+    let subject = parsed.subject().unwrap_or_default();
+    Draft {
+        to,
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        attachments: Vec::new(),
+        reply_to: None,
+        message_id: None,
+        subject: format!("Fwd: {subject}"),
+        body: format!(
+            "{body}\n\n---------- Forwarded message ----------\nFrom: {}\nSubject: {subject}\n\n{}",
+            addresses(parsed.from()).join(", "),
+            parsed.body_text(0).unwrap_or_default()
+        ),
+    }
+}
+
 pub(super) struct ThreadHeaders {
     in_reply_to: String,
     references: Vec<String>,

@@ -700,21 +700,7 @@ async fn execute(
             let parsed = MessageParser::default()
                 .parse(&raw)
                 .ok_or_else(|| MailError::new("invalid_email_message"))?;
-            let draft = Draft {
-                to: to.clone(),
-                cc: Vec::new(),
-                bcc: Vec::new(),
-                attachments: Vec::new(),
-                reply_to: None,
-                message_id: None,
-                subject: format!("Fwd: {}", parsed.subject().unwrap_or_default()),
-                body: format!(
-                    "{body}\n\n---------- Forwarded message ----------\nFrom: {}\nSubject: {}\n\n{}",
-                    addresses(parsed.from()).join(", "),
-                    parsed.subject().unwrap_or_default(),
-                    parsed.body_text(0).unwrap_or_default()
-                ),
-            };
+            let draft = mime::forward(&parsed, to.clone(), body);
             let bytes = compose_forward(&config.address, &draft, &raw)?;
             send_prepared(config, auth, &draft, bytes, phase).await
         }
