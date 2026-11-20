@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
-use crate::app::providers::{TurnOutcome, Usage};
+use crate::app::providers::{FailureCode, TurnOutcome, Usage};
 use crate::app::tools::{SERVER_NAME, TOOL_NAMES};
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 
@@ -330,9 +330,10 @@ impl Protocol for Tracker {
             Terminal::Result { success: true, .. } => TurnOutcome::Uncertain {
                 message: "Cursor finished without taking the prompt.".into(),
             },
-            Terminal::Result { text, .. } => {
-                failed("provider_failed", format!("Cursor failed: {text}"))
-            }
+            Terminal::Result { text, .. } => TurnOutcome::failed(
+                FailureCode::ProviderFailed,
+                format!("Cursor failed: {text}"),
+            ),
             Terminal::Exit {
                 code,
                 signal,
@@ -344,18 +345,21 @@ impl Protocol for Tracker {
                 message: format!("Cursor CLI exited with {code} partway through the turn."),
             },
             Terminal::Exit { stderr, .. } if super::cursor_home::refused_login(&stderr) => {
-                failed("provider_unavailable", super::cursor_home::SIGNED_OUT)
+                TurnOutcome::failed(
+                    FailureCode::ProviderUnavailable,
+                    super::cursor_home::SIGNED_OUT,
+                )
             }
-            Terminal::Exit { stderr, .. } if usage_limit(&stderr) => failed(
-                "provider_unavailable",
+            Terminal::Exit { stderr, .. } if usage_limit(&stderr) => TurnOutcome::failed(
+                FailureCode::ProviderUnavailable,
                 format!("Cursor's usage limit is reached: {}", last_line(&stderr)),
             ),
             Terminal::Exit {
                 code: Some(code),
                 stderr,
                 ..
-            } if code != 0 => failed(
-                "provider_failed",
+            } if code != 0 => TurnOutcome::failed(
+                FailureCode::ProviderFailed,
                 format!("Cursor CLI exited with {code}: {}", last_line(&stderr)),
             ),
             Terminal::Exit { code, signal, .. } => TurnOutcome::Uncertain {
@@ -398,11 +402,4 @@ fn last_line(stderr: &str) -> &str {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or("no message")
-}
-
-fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
-    TurnOutcome::Failed {
-        code: code.into(),
-        message: message.into(),
-    }
 }

@@ -34,6 +34,7 @@ use super::definitions::Definition;
 use super::host::{BotDirs, Host, LaunchSpec, Run};
 use super::models::{Listed, Models};
 use super::{attachments, prompt};
+use crate::app::providers::FailureCode;
 use crate::app::providers::{
     Availability, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
 };
@@ -421,26 +422,28 @@ impl Provider for Cursor {
     async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
         let ready = match &self.ready {
             Ok(ready) => ready,
-            Err(reason) => return failed("provider_unavailable", reason.clone()),
+            Err(reason) => {
+                return TurnOutcome::failed(FailureCode::ProviderUnavailable, reason.clone());
+            }
         };
         if cursor_home::signed_out(ready.login.file.as_deref()) {
-            return failed("provider_unavailable", cursor_home::SIGNED_OUT);
+            return TurnOutcome::failed(FailureCode::ProviderUnavailable, cursor_home::SIGNED_OUT);
         }
         let Some(profile) = &input.profile else {
-            return failed(
-                "provider_misconfigured",
+            return TurnOutcome::failed(
+                FailureCode::ProviderMisconfigured,
                 "No execution profile was snapshotted.",
             );
         };
         if let Err(reason) = self.models.validate(profile) {
-            return failed("invalid_profile", reason);
+            return TurnOutcome::failed(FailureCode::InvalidProfile, reason);
         }
         if stop.is_requested() {
             return TurnOutcome::Interrupted;
         }
         let dirs = match ready.host.bot_dirs(input.bot_id, ID) {
             Ok(dirs) => dirs,
-            Err(e) => return failed("provider_unavailable", e.to_string()),
+            Err(e) => return TurnOutcome::failed(FailureCode::ProviderUnavailable, e.to_string()),
         };
         let host_tools = input.delegation.host_tools();
         let workspace = if host_tools {
@@ -448,7 +451,9 @@ impl Provider for Cursor {
         } else {
             match cursor_home::private_workspace(&dirs.provider_home) {
                 Ok(workspace) => workspace,
-                Err(e) => return failed("provider_unavailable", e.to_string()),
+                Err(e) => {
+                    return TurnOutcome::failed(FailureCode::ProviderUnavailable, e.to_string());
+                }
             }
         };
         let fingerprint = self.fingerprint(ready, &input, profile);
@@ -465,19 +470,19 @@ impl Provider for Cursor {
             return TurnOutcome::Interrupted;
         }
         if let Err(e) = attachments::stage(&dirs.project, &input.files).await {
-            return failed("attachment_unavailable", e.to_string());
+            return TurnOutcome::failed(FailureCode::AttachmentUnavailable, e.to_string());
         }
         if let Err(e) =
             cursor_home::prepare(&dirs, &ready.login, self.tool_url.as_deref(), host_tools)
         {
-            return failed("provider_unavailable", e.to_string());
+            return TurnOutcome::failed(FailureCode::ProviderUnavailable, e.to_string());
         }
         let spec = match self
             .launch(ready, &input, profile, dirs, workspace, &turn)
             .await
         {
             Ok(spec) => spec,
-            Err(why) => return failed("provider_unavailable", why),
+            Err(why) => return TurnOutcome::failed(FailureCode::ProviderUnavailable, why),
         };
         if sink.sending().await.is_err() {
             return TurnOutcome::Interrupted;
@@ -491,7 +496,7 @@ impl Provider for Cursor {
         .await
         {
             Ok(attempt) => attempt,
-            Err(e) => return failed("provider_unavailable", e.to_string()),
+            Err(e) => return TurnOutcome::failed(FailureCode::ProviderUnavailable, e.to_string()),
         };
         let mut tracker = Tracker::new(
             &profile.model,
@@ -529,13 +534,6 @@ fn instructions(input: &TurnInput, project: &Path) -> String {
         prompt::instructions(input, &project.to_string_lossy()),
         crate::app::tools::SERVER_NAME,
     )
-}
-
-fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
-    TurnOutcome::Failed {
-        code: code.into(),
-        message: message.into(),
-    }
 }
 
 #[cfg(test)]

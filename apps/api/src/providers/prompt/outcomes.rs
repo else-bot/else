@@ -101,7 +101,7 @@ fn outcomes_without_social(input: &TurnInput) -> String {
             outcome.id,
             outcome.target_name,
             outcome.target_bot_id,
-            outcome.status,
+            outcome.status.as_str(),
             outcome
                 .owner
                 .as_ref()
@@ -275,7 +275,7 @@ fn mcp_waits_block(input: &TurnInput) -> String {
             wait.id,
             wait.mcp_id,
             escape(&wait.tool),
-            wait.status,
+            wait.status.as_str(),
             wait.checks,
             escape(&wait.purpose),
             escape(wait.result.as_deref().unwrap_or("(none)")),

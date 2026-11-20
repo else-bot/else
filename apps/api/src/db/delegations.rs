@@ -887,7 +887,7 @@ pub async fn undelivered(
         target_bot_id: Uuid,
         target_name: String,
         task: String,
-        status: String,
+        status: Status,
         result: Option<String>,
         error: Option<String>,
         earlier_request: bool,

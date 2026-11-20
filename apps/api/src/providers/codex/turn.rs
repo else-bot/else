@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 
 use super::super::codex_rpc::{AppServer, Incoming, RpcError};
 use super::policy::{Refusal, Reported, TurnEvents};
-use super::{Codex, RPC_TIMEOUT, Ready, codex_home, failed, prompt, skills};
-use crate::app::providers::{Profile, Stop, TurnInput, TurnOutcome, TurnSink};
+use super::{Codex, RPC_TIMEOUT, Ready, codex_home, prompt, skills};
+use crate::app::providers::{FailureCode, Profile, Stop, TurnInput, TurnOutcome, TurnSink};
 use crate::providers::cli::attempt::{self, Channel, Ended, SendError};
 use crate::providers::cli::session::{Opened, PreparedTurn};
 
@@ -115,9 +115,14 @@ impl Codex {
         match checked {
             Ok(()) => {}
             Err(Refusal::Unavailable(reason)) => {
-                return Err(failed("provider_unavailable", reason));
+                return Err(TurnOutcome::failed(
+                    FailureCode::ProviderUnavailable,
+                    reason,
+                ));
             }
-            Err(Refusal::Policy(reason)) => return Err(failed("policy_violation", reason)),
+            Err(Refusal::Policy(reason)) => {
+                return Err(TurnOutcome::failed(FailureCode::PolicyViolation, reason));
+            }
         }
         // Codex looks up workspace routing on chatgpt.com here, under its own
         // 15-second timeout, and caches only a successful lookup.
@@ -128,11 +133,11 @@ impl Codex {
             }
             first => first,
         }
-        .map_err(|err| failed("provider_unavailable", err.to_string()))?;
+        .map_err(|err| TurnOutcome::failed(FailureCode::ProviderUnavailable, err.to_string()))?;
         let account = &account["account"];
         if account.is_null() {
-            return Err(failed(
-                "provider_unavailable",
+            return Err(TurnOutcome::failed(
+                FailureCode::ProviderUnavailable,
                 "Codex is not logged in on the host (run `codex login`).",
             ));
         }
@@ -147,7 +152,9 @@ impl Codex {
         let status = server
             .request("mcpServerStatus/list", json!({}), RPC_TIMEOUT)
             .await
-            .map_err(|err| failed("provider_unavailable", err.to_string()))?;
+            .map_err(|err| {
+                TurnOutcome::failed(FailureCode::ProviderUnavailable, err.to_string())
+            })?;
         Ok(self.check_servers(&status["data"], true))
     }
 
@@ -162,7 +169,7 @@ impl Codex {
     ) -> Result<(Opened<'s>, Reported), TurnOutcome> {
         let mut config = skills::config(server)
             .await
-            .map_err(|reason| failed("provider_unavailable", reason))?;
+            .map_err(|reason| TurnOutcome::failed(FailureCode::ProviderUnavailable, reason))?;
         config["model_reasoning_effort"] = json!(profile.reasoning_effort);
         let settings = json!({
             "model": profile.model,
@@ -190,16 +197,28 @@ impl Codex {
                 Err(RpcError::Remote { message, .. }) => {
                     tracing::info!(turn = %input.turn_id, %message, "native session not resumable; rebuilding");
                 }
-                Err(err) => return Err(failed("provider_unavailable", err.to_string())),
+                Err(err) => {
+                    return Err(TurnOutcome::failed(
+                        FailureCode::ProviderUnavailable,
+                        err.to_string(),
+                    ));
+                }
             }
         }
         let response = server
             .request("thread/start", settings, RPC_TIMEOUT)
             .await
-            .map_err(|err| failed("provider_unavailable", err.to_string()))?;
+            .map_err(|err| {
+                TurnOutcome::failed(FailureCode::ProviderUnavailable, err.to_string())
+            })?;
         let thread = response["thread"]["id"]
             .as_str()
-            .ok_or_else(|| failed("provider_protocol", "thread/start returned no thread ID"))?
+            .ok_or_else(|| {
+                TurnOutcome::failed(
+                    FailureCode::ProviderProtocol,
+                    "thread/start returned no thread ID",
+                )
+            })?
             .to_owned();
         Ok((Opened::Fresh(thread), Reported::from_response(&response)))
     }
@@ -213,22 +232,21 @@ impl Codex {
         input: &'s TurnInput,
         profile: &Profile,
     ) -> Result<(String, Opened<'s>, Reported), TurnOutcome> {
-        server
-            .initialize()
-            .await
-            .map_err(|err| failed("provider_unavailable", err.to_string()))?;
+        server.initialize().await.map_err(|err| {
+            TurnOutcome::failed(FailureCode::ProviderUnavailable, err.to_string())
+        })?;
         let account = self.preflight(server).await?;
         if !input.delegation.host_tools() {
             Self::check_catalog(server, &profile.model)
                 .await
-                .map_err(|reason| failed("policy_violation", reason))?;
+                .map_err(|reason| TurnOutcome::failed(FailureCode::PolicyViolation, reason))?;
         }
         let fingerprint = self.fingerprint(ready, profile, input, &account);
         let (opened, reported) = self
             .open_thread(server, input, profile, &fingerprint)
             .await?;
         if let Some(mismatch) = reported.mismatch(profile) {
-            return Err(failed("profile_mismatch", mismatch));
+            return Err(TurnOutcome::failed(FailureCode::ProfileMismatch, mismatch));
         }
         Ok((fingerprint, opened, reported))
     }
@@ -289,7 +307,10 @@ impl Codex {
                 }
             },
             Err(RpcError::Remote { message, .. }) => {
-                return Ended::Undelivered(failed("provider_refused", message));
+                return Ended::Undelivered(TurnOutcome::failed(
+                    FailureCode::ProviderRefused,
+                    message,
+                ));
             }
             Err(err) => {
                 return Ended::Abandoned(TurnOutcome::Uncertain {

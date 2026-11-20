@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::app::providers::{Fenced, Origin, Selection, SessionState, Steer};
+use crate::app::providers::{FailureCode, Fenced, Origin, Selection, SessionState, Steer};
 use crate::providers::cli::attempt::{Event, Protocol, StopCause};
 use protocol::Terminal;
 
@@ -356,7 +356,7 @@ async fn an_event_turn_offers_only_elsebot_tools_and_a_shell_call_fails_it() {
     assert_eq!(
         outcome,
         TurnOutcome::Failed {
-            code: "policy_violation".into(),
+            code: FailureCode::PolicyViolation,
             message: "Cursor called a tool this turn does not allow: shellToolCall".into(),
         }
     );
@@ -461,7 +461,7 @@ async fn a_usage_limit_makes_cursor_unavailable_for_the_turn() {
     assert_eq!(
         outcome,
         TurnOutcome::Failed {
-            code: "provider_unavailable".into(),
+            code: FailureCode::ProviderUnavailable,
             message: "Cursor's usage limit is reached: Error: [resource_exhausted] You've hit your usage limit".into(),
         }
     );
@@ -511,7 +511,7 @@ async fn a_signed_out_host_says_how_to_sign_in() {
         )
         .await;
     let signed_out = TurnOutcome::Failed {
-        code: "provider_unavailable".into(),
+        code: FailureCode::ProviderUnavailable,
         message: "Cursor CLI isn't signed in on this server. Run `cursor-agent login` there, or \
                   switch this bot to another model."
             .into(),
@@ -723,7 +723,7 @@ fn a_web_request_violates_every_turns_policy() {
             .on(&json!({"type":"interaction_query","subtype":"request",
                 "query_type":query,"session_id":"chat"}))
             .unwrap_err();
-        assert_eq!(violation.code, "policy_violation");
+        assert_eq!(violation.code, FailureCode::PolicyViolation);
     }
 }
 
@@ -768,7 +768,7 @@ fn a_tool_call_outside_the_turns_policy_violates_it() {
         ),
     ] {
         let violation = tracker(host).on(&event).unwrap_err();
-        assert_eq!(violation.code, "policy_violation", "{event}");
+        assert_eq!(violation.code, FailureCode::PolicyViolation, "{event}");
     }
     let mut early = Tracker::new(MODEL, "chat", true, true);
     assert!(
@@ -850,7 +850,7 @@ fn an_exit_after_a_stop_interrupts_and_other_exits_name_their_cause() {
             false
         ),
         TurnOutcome::Failed {
-            code: "provider_failed".into(),
+            code: FailureCode::ProviderFailed,
             message: "Cursor CLI exited with 1: Error: Cannot use this model: x".into(),
         }
     );

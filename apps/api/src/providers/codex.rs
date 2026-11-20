@@ -43,6 +43,7 @@ use super::definitions::Definition;
 use super::host::{Host, LaunchSpec, Run};
 use super::models::{Listed, Models};
 use super::prompt;
+use crate::app::providers::FailureCode;
 use crate::app::providers::{
     Availability, CheckpointRequest, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
 };
@@ -201,7 +202,8 @@ impl Codex {
         model: &str,
         stop: &Stop,
     ) -> Result<LaunchSpec, TurnOutcome> {
-        let unavailable = |reason: String| failed("provider_unavailable", reason);
+        let unavailable =
+            |reason: String| TurnOutcome::failed(FailureCode::ProviderUnavailable, reason);
         let dirs = ready
             .host
             .bot_dirs(input.bot_id, ID)
@@ -217,8 +219,8 @@ impl Codex {
         super::attachments::stage(&dirs.project, &input.files)
             .await
             .map_err(|err| {
-                failed(
-                    "attachment_unavailable",
+                TurnOutcome::failed(
+                    FailureCode::AttachmentUnavailable,
                     format!("The attached files could not be prepared: {err}"),
                 )
             })?;
@@ -270,13 +272,6 @@ pub(crate) fn deferred_tools() -> String {
          filtered by a pattern.",
         crate::app::tools::TOOL_NAMES.join(", ")
     )
-}
-
-fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
-    TurnOutcome::Failed {
-        code: code.to_owned(),
-        message: message.into(),
-    }
 }
 
 #[async_trait]
@@ -353,16 +348,18 @@ impl Provider for Codex {
     async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
         let ready = match &self.ready {
             Ok(ready) => ready,
-            Err(reason) => return failed("provider_unavailable", reason.clone()),
+            Err(reason) => {
+                return TurnOutcome::failed(FailureCode::ProviderUnavailable, reason.clone());
+            }
         };
         let Some(profile) = input.profile.clone() else {
-            return failed(
-                "provider_misconfigured",
+            return TurnOutcome::failed(
+                FailureCode::ProviderMisconfigured,
                 "No execution profile was snapshotted.",
             );
         };
         if let Err(reason) = self.models.validate(&profile) {
-            return failed("invalid_profile", reason);
+            return TurnOutcome::failed(FailureCode::InvalidProfile, reason);
         }
         let spec = match self.launch(ready, &input, &profile.model, &stop).await {
             Ok(spec) => spec,
@@ -370,7 +367,9 @@ impl Provider for Codex {
         };
         let mut server = match AppServer::spawn(&ready.host, &spec) {
             Ok(server) => server,
-            Err(err) => return failed("provider_unavailable", err.to_string()),
+            Err(err) => {
+                return TurnOutcome::failed(FailureCode::ProviderUnavailable, err.to_string());
+            }
         };
         let ended = self
             .converse(ready, &mut server, &input, &profile, sink, &stop)

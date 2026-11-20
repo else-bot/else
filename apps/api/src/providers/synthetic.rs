@@ -27,6 +27,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use crate::actor::Actor;
+use crate::app::providers::FailureCode;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -185,13 +186,13 @@ impl Provider for Synthetic {
             .join("\n");
         if directives.contains("[synthetic:policy]") {
             return TurnOutcome::Failed {
-                code: "policy_violation".into(),
+                code: FailureCode::PolicyViolation,
                 message: "The synthetic provider attempted a forbidden tool.".into(),
             };
         }
         if directives.contains("[synthetic:refuse]") {
             return TurnOutcome::Failed {
-                code: "provider_refused".into(),
+                code: FailureCode::ProviderRefused,
                 message: "The synthetic provider refused the message.".into(),
             };
         }
@@ -257,7 +258,7 @@ impl Provider for Synthetic {
         if directives.contains("[synthetic:fail]") {
             let _ = sink.text("Partial output before failure. ").await;
             return TurnOutcome::Failed {
-                code: "provider_failed".into(),
+                code: FailureCode::ProviderFailed,
                 message: "The synthetic provider failed.".into(),
             };
         }

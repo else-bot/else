@@ -29,8 +29,9 @@ pub const MAX_FAILURES: i64 = 3;
 pub const MAX_RESULT: usize = 16 * 1024;
 
 /// A wait's lifecycle, as stored in `mcp_waits.status`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, strum::IntoStaticStr)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum Status {
     Pending,
     Finished,
@@ -40,6 +41,12 @@ pub enum Status {
     Cancelled,
     /// The owner stopped it; delivered like a result.
     Stopped,
+}
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
 }
 
 /// The status call to repeat and when to stop.
@@ -458,7 +465,7 @@ pub async fn undelivered(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
 ) -> Result<Vec<Outcome>, sqlx::Error> {
-    type Row = (Uuid, String, String, String, String, i64, Option<String>);
+    type Row = (Uuid, String, String, String, Status, i64, Option<String>);
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT id, mcp_id, tool, purpose, status, checks, last_result FROM mcp_waits
          WHERE turn_id = ?1 AND delivered_attempt IS NULL

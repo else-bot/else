@@ -167,7 +167,11 @@ async fn bot_edits_leave_one_ordered_notice_in_live_and_paged_history() {
     let (next, _) = h.running(&bot, GATE).await;
     let inputs = h.inputs(next).await;
     let history = &inputs[0].history;
-    assert!(history.iter().any(|entry| entry.kind == "user"));
+    assert!(
+        history
+            .iter()
+            .any(|entry| entry.kind == else_api::db::turns::ItemKind::User)
+    );
     assert!(
         history
             .iter()

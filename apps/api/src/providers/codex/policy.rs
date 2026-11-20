@@ -3,8 +3,8 @@
 use serde_json::{Value, json};
 
 use super::super::codex_rpc::{AppServer, Incoming};
-use super::{Codex, RPC_TIMEOUT, failed};
-use crate::app::providers::{LimitWindow, Profile, Steer, TurnOutcome};
+use super::{Codex, RPC_TIMEOUT};
+use crate::app::providers::{FailureCode, LimitWindow, Profile, Steer, TurnOutcome};
 use crate::app::tools::{SERVER_NAME, TOOL_NAMES};
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 use crate::providers::prompt;
@@ -348,8 +348,8 @@ impl Protocol for TurnEvents<'_> {
         match completed.status.as_deref() {
             Some("completed") => TurnOutcome::Completed,
             Some("interrupted") => TurnOutcome::Interrupted,
-            _ => failed(
-                "provider_failed",
+            _ => TurnOutcome::failed(
+                FailureCode::ProviderFailed,
                 completed
                     .error
                     .unwrap_or_else(|| "Codex reported a failed turn.".to_owned()),

@@ -95,7 +95,7 @@ async fn peer_creation_acknowledges_the_main_bot_once_with_its_purpose() {
         inputs[0]
             .history
             .iter()
-            .any(|e| e.kind == "status" && e.text == notice)
+            .any(|e| e.kind == else_api::db::turns::ItemKind::Status && e.text == notice)
     );
     let found = tool(
         &h.app,
@@ -234,7 +234,12 @@ async fn a_category_council_collects_every_report_with_one_provider_slot() {
     assert_eq!(inputs.len(), 2);
     let outcomes = &inputs[1].delegation.outcomes;
     assert_eq!(outcomes.len(), 3, "{outcomes:?}");
-    assert!(outcomes.iter().all(|o| o.status == "completed" && o.result.as_ref().is_some_and(|r| r.contains(task))));
+    assert!(
+        outcomes
+            .iter()
+            .all(|o| o.status == else_api::db::delegations::Status::Completed
+                && o.result.as_ref().is_some_and(|r| r.contains(task)))
+    );
     let grants: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_read_grants")
         .fetch_one(&h.app.db.pool)
         .await
@@ -379,13 +384,13 @@ async fn a_cancelled_member_is_included_with_the_other_council_reports() {
     assert_eq!(inputs.len(), 2);
     let outcomes = &inputs[1].delegation.outcomes;
     assert_eq!(outcomes.len(), 3);
-    assert!(
+    assert!(outcomes.iter().any(|o| o.target_bot_id == cancelled
+        && o.status == else_api::db::delegations::Status::Cancelled));
+    assert_eq!(
         outcomes
             .iter()
-            .any(|o| o.target_bot_id == cancelled && o.status == "cancelled")
-    );
-    assert_eq!(
-        outcomes.iter().filter(|o| o.status == "completed").count(),
+            .filter(|o| o.status == else_api::db::delegations::Status::Completed)
+            .count(),
         2
     );
 }

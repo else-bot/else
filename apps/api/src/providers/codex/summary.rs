@@ -1,6 +1,7 @@
 use super::super::codex_rpc::{AppServer, Incoming};
 use super::policy::Reported;
 use super::{Codex, ID, LaunchSpec, Profile, RPC_TIMEOUT, codex_home, prompt};
+use crate::providers::cli::attempt::Violation;
 use async_trait::async_trait;
 use serde_json::json;
 use std::ffi::OsString;
@@ -93,7 +94,7 @@ impl Codex {
         self.check_servers(&status["data"], false)?;
         Self::check_catalog(server, &profile.model)
             .await
-            .map_err(|reason| format!("policy_violation: {reason}"))?;
+            .map_err(|reason| Violation::policy(reason).to_string())?;
         let mut config = super::skills::config(server).await?;
         config["model_reasoning_effort"] = json!(profile.reasoning_effort);
         let started = server
@@ -136,27 +137,29 @@ impl Codex {
             .map_err(|e| e.to_string())?;
         let native_turn = turn["turn"]["id"].as_str().unwrap_or_default().to_owned();
         let mut text = String::new();
-        let mut violation: Option<String> = None;
+        let mut violation: Option<Violation> = None;
         loop {
             let Some(message) = server.next().await else {
                 return Err("Codex exited before the summary finished".into());
             };
             let (method, params) = match message {
                 Incoming::Refused { method } => {
-                    violation.get_or_insert(format!("Codex requested {method}"));
+                    violation.get_or_insert(Violation::policy(format!("Codex requested {method}")));
                     continue;
                 }
                 Incoming::Notification { method, params } => (method, params),
             };
             match method.as_str() {
                 "thread/started" if params["thread"]["id"].as_str() != Some(&thread_id) => {
-                    violation.get_or_insert("Codex started another thread".into());
+                    violation.get_or_insert(Violation::policy("Codex started another thread"));
                 }
                 "item/started" | "item/completed" => {
                     let item = &params["item"];
                     let kind = item["type"].as_str().unwrap_or_default();
                     if !matches!(kind, "userMessage" | "agentMessage" | "reasoning") {
-                        violation.get_or_insert(format!("Codex produced a {kind} item"));
+                        violation.get_or_insert(Violation::policy(format!(
+                            "Codex produced a {kind} item"
+                        )));
                     } else if method == "item/completed"
                         && kind == "agentMessage"
                         && item["phase"].as_str() != Some("commentary")
@@ -165,13 +168,13 @@ impl Codex {
                     }
                 }
                 "model/rerouted" if params["toModel"].as_str() != Some(&profile.model) => {
-                    violation.get_or_insert("Codex rerouted the model".into());
+                    violation.get_or_insert(Violation::policy("Codex rerouted the model"));
                 }
                 "thread/settings/updated" => {
                     if let Some(mismatch) =
                         Reported::from_response(&params["threadSettings"]).mismatch(profile)
                     {
-                        violation.get_or_insert(format!("profile_mismatch: {mismatch}"));
+                        violation.get_or_insert(Violation::profile(mismatch));
                     }
                 }
                 "turn/completed"
@@ -180,7 +183,7 @@ impl Codex {
                         .is_none_or(|t| t == native_turn) =>
                 {
                     if let Some(violation) = violation {
-                        return Err(format!("policy_violation: {violation}"));
+                        return Err(violation.to_string());
                     }
                     return match params["turn"]["status"].as_str() {
                         Some("completed") if !text.trim().is_empty() => Ok(text.trim().to_owned()),

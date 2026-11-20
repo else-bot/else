@@ -290,6 +290,20 @@ pub struct ExchangeAsk {
     pub settled_at: Option<DateTime<Utc>>,
 }
 
+/// What a conversation item is, as stored in `items.kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+pub enum ItemKind {
+    /// The owner's message.
+    User,
+    Assistant,
+    /// A delegated task's request, or a receipt or rule update else.bot
+    /// wrote.
+    Status,
+    Routine,
+    Connector,
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ItemRecord {
     pub id: Uuid,
@@ -1163,7 +1177,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         _,
         (
             i64,
-            String,
+            ItemKind,
             String,
             TurnStatus,
             Option<String>,
@@ -1565,7 +1579,7 @@ mod tests {
                 target_bot_id: Uuid::new_v4(),
                 target_name: "Scout".into(),
                 task: "Scout the leads.".into(),
-                status: "completed".into(),
+                status: crate::db::delegations::Status::Completed,
                 result: Some("Done.".into()),
                 error: None,
                 files,

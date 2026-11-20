@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use super::*;
 use crate::app::providers::{HistoryEntry, MemoryContext};
+use crate::db::turns::ItemKind;
 
 pub(crate) fn input() -> TurnInput {
     TurnInput {
@@ -20,14 +21,14 @@ pub(crate) fn input() -> TurnInput {
         files: Vec::new(),
         profile: None,
         history: [
-            (1, "user", "first"),
-            (1, "assistant", "one"),
-            (2, "user", "second"),
+            (1, ItemKind::User, "first"),
+            (1, ItemKind::Assistant, "one"),
+            (2, ItemKind::User, "second"),
         ]
         .into_iter()
         .map(|(turn_no, kind, text)| HistoryEntry {
             turn_no,
-            kind: kind.into(),
+            kind,
             text: text.into(),
             status: crate::db::turns::TurnStatus::Completed,
             error: None,
@@ -245,7 +246,7 @@ async fn a_warm_session_gets_only_what_it_lacks() {
     input.turn_no = 4;
     input.history.push(HistoryEntry {
         turn_no: 3,
-        kind: "user".into(),
+        kind: ItemKind::User,
         text: "third".into(),
         status: crate::db::turns::TurnStatus::Completed,
         error: None,

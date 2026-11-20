@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::providers::Origin;
+use crate::app::providers::{FailureCode, Origin};
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 use protocol::Terminal;
 use serde_json::{Value, json};
@@ -204,11 +204,11 @@ fn errors_are_classified_by_their_cause() {
     let model = tracker(true)
         .on(&json!({"type":"assistant","message":{"model":"grok-4.6","content":[]}}))
         .unwrap_err();
-    assert_eq!(model.code, "profile_mismatch");
+    assert_eq!(model.code, FailureCode::ProfileMismatch);
     let tool = tracker(true)
         .on(&json!({"type":"assistant","message":{"content":[{"type":"server_tool_use"}]}}))
         .unwrap_err();
-    assert_eq!(tool.code, "policy_violation");
+    assert_eq!(tool.code, FailureCode::PolicyViolation);
 }
 
 #[test]
@@ -258,7 +258,7 @@ fn a_grok_that_fails_before_opening_a_session_reports_its_own_error() {
     };
     match t.outcome(terminal, None, false) {
         TurnOutcome::Failed { code, message } => {
-            assert_eq!(code, "provider_failed");
+            assert_eq!(code, FailureCode::ProviderFailed);
             assert!(message.contains("Not signed in."), "{message}");
             assert!(!message.contains("[\""), "{message}");
         }
@@ -312,7 +312,10 @@ fn truncated_refused_or_cancelled_results_do_not_complete() {
     t.on(&init(true)).unwrap();
     assert!(matches!(
         finish(&mut t, &result("cancelled"), None),
-        TurnOutcome::Failed { code, .. } if code == "provider_refused"
+        TurnOutcome::Failed {
+            code: FailureCode::ProviderRefused,
+            ..
+        }
     ));
     assert_eq!(
         finish(&mut t, &result("cancelled"), Some(StopCause::Owner)),
@@ -591,7 +594,7 @@ async fn a_turn_on_a_signed_out_host_fails_before_grok_launches() {
     assert_eq!(
         run().await,
         TurnOutcome::Failed {
-            code: "provider_unavailable".into(),
+            code: FailureCode::ProviderUnavailable,
             message: signed_out.into(),
         },
         "refused before launching the missing binary"

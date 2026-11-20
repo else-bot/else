@@ -12,6 +12,7 @@
 
 use chrono::{DateTime, Utc};
 
+use crate::app::providers::FailureCode;
 use crate::db::turns::TurnStatus;
 
 /// Consecutive failed occurrences after which a routine is paused.
@@ -24,19 +25,20 @@ pub enum Ended<'a> {
     /// Stopped by the owner or a deletion.
     Stopped,
     Failed {
-        code: &'a str,
+        code: &'a FailureCode,
     },
     Uncertain,
 }
 
 impl<'a> Ended<'a> {
     /// `None` while the turn has not ended.
-    pub fn of(status: TurnStatus, code: Option<&'a str>) -> Option<Self> {
+    pub fn of(status: TurnStatus, code: Option<&'a FailureCode>) -> Option<Self> {
+        static UNRECORDED: FailureCode = FailureCode::Other(String::new());
         match status {
             TurnStatus::Completed => Some(Self::Completed),
             TurnStatus::Interrupted => Some(Self::Stopped),
             TurnStatus::Failed => Some(Self::Failed {
-                code: code.unwrap_or_default(),
+                code: code.unwrap_or(&UNRECORDED),
             }),
             TurnStatus::Uncertain => Some(Self::Uncertain),
             TurnStatus::Queued
@@ -56,93 +58,47 @@ pub enum Cause {
     NeedsAction,
 }
 
-struct Code {
-    code: &'static str,
-    cause: Cause,
-    explanation: &'static str,
-}
+impl FailureCode {
+    pub fn cause(&self) -> Cause {
+        match self {
+            Self::ProviderUnavailable
+            | Self::ProviderFailed
+            | Self::TurnDeadline
+            | Self::StartFailed
+            | Self::ApiRestarted
+            | Self::Orphaned
+            | Self::ProviderRefused => Cause::Transient,
+            Self::ProviderProtocol
+            | Self::PolicyViolation
+            | Self::InvalidProfile
+            | Self::ProfileMismatch
+            | Self::ProviderMisconfigured
+            | Self::AttachmentUnavailable => Cause::NeedsAction,
+            // The streak limit still pauses a routine that keeps failing.
+            Self::Other(_) => Cause::Transient,
+        }
+    }
 
-const CODES: &[Code] = &[
-    Code {
-        code: "provider_unavailable",
-        cause: Cause::Transient,
-        explanation: "the AI provider could not be reached or stopped unexpectedly",
-    },
-    Code {
-        code: "provider_failed",
-        cause: Cause::Transient,
-        explanation: "the AI provider reported an error",
-    },
-    Code {
-        code: "turn_deadline",
-        cause: Cause::Transient,
-        explanation: "it ran past its time limit",
-    },
-    Code {
-        code: "start_failed",
-        cause: Cause::Transient,
-        explanation: "else.bot could not start the run",
-    },
-    Code {
-        code: "api_restarted",
-        cause: Cause::Transient,
-        explanation: "else.bot restarted while it ran",
-    },
-    Code {
-        code: "orphaned",
-        cause: Cause::Transient,
-        explanation: "else.bot lost track of the run",
-    },
-    Code {
-        code: "provider_refused",
-        // Covers overload and usage-limit rejections as well as refusals.
-        cause: Cause::Transient,
-        explanation: "the AI provider refused the request",
-    },
-    Code {
-        code: "provider_protocol",
-        cause: Cause::NeedsAction,
-        explanation: "the AI provider sent a reply else.bot could not understand",
-    },
-    Code {
-        code: "policy_violation",
-        cause: Cause::NeedsAction,
-        explanation: "it tried to use a tool it is not allowed to use",
-    },
-    Code {
-        code: "invalid_profile",
-        cause: Cause::NeedsAction,
-        explanation: "its model settings are no longer valid",
-    },
-    Code {
-        code: "profile_mismatch",
-        cause: Cause::NeedsAction,
-        explanation: "the AI provider ran a different model than the one chosen",
-    },
-    Code {
-        code: "provider_misconfigured",
-        cause: Cause::NeedsAction,
-        explanation: "its model settings are missing",
-    },
-    Code {
-        code: "attachment_unavailable",
-        cause: Cause::NeedsAction,
-        explanation: "its files could not be prepared",
-    },
-];
-
-fn known(code: &str) -> Option<&'static Code> {
-    CODES.iter().find(|known| known.code == code)
-}
-
-/// Unknown codes count as transient: the streak limit still pauses a
-/// routine that keeps failing.
-pub fn cause(code: &str) -> Cause {
-    known(code).map_or(Cause::Transient, |known| known.cause)
-}
-
-fn explanation(code: &str) -> &'static str {
-    known(code).map_or("an unexpected error happened", |known| known.explanation)
+    fn explanation(&self) -> &'static str {
+        match self {
+            Self::ProviderUnavailable => {
+                "the AI provider could not be reached or stopped unexpectedly"
+            }
+            Self::ProviderFailed => "the AI provider reported an error",
+            Self::TurnDeadline => "it ran past its time limit",
+            Self::StartFailed => "else.bot could not start the run",
+            Self::ApiRestarted => "else.bot restarted while it ran",
+            Self::Orphaned => "else.bot lost track of the run",
+            Self::ProviderRefused => "the AI provider refused the request",
+            Self::ProviderProtocol => "the AI provider sent a reply else.bot could not understand",
+            Self::PolicyViolation => "it tried to use a tool it is not allowed to use",
+            Self::InvalidProfile => "its model settings are no longer valid",
+            Self::ProfileMismatch => "the AI provider ran a different model than the one chosen",
+            Self::ProviderMisconfigured => "its model settings are missing",
+            Self::AttachmentUnavailable => "its files could not be prepared",
+            Self::Other(_) => "an unexpected error happened",
+        }
+    }
 }
 
 /// Why a run started.
@@ -205,7 +161,7 @@ pub fn react(ended: Ended<'_>, run: Run) -> Reaction {
         Ended::Failed { code } => Some(code),
         Ended::Uncertain => None,
     };
-    let needs_action = code.is_some_and(|code| cause(code) == Cause::NeedsAction);
+    let needs_action = code.is_some_and(|code| code.cause() == Cause::NeedsAction);
     if resumes {
         return Reaction::StayPaused(if needs_action {
             Pause::NeedsAction
@@ -250,7 +206,7 @@ pub fn notice(notice: &Notice<'_>, reaction: Reaction) -> String {
     let name = notice.name;
     let (what, error) = match notice.ended {
         Ended::Failed { code } => (
-            explanation(code),
+            code.explanation(),
             match notice.message {
                 Some(message) if !message.is_empty() => format!("`{code}`: {message}"),
                 _ => format!("`{code}`"),
@@ -334,7 +290,7 @@ mod tests {
         failed_runs: 0,
     };
     const CLOSED: Ended<'static> = Ended::Failed {
-        code: "provider_unavailable",
+        code: &FailureCode::ProviderUnavailable,
     };
 
     #[test]
@@ -369,14 +325,23 @@ mod tests {
 
     #[test]
     fn an_error_retrying_cannot_fix_pauses_at_once() {
-        for code in ["provider_protocol", "policy_violation", "invalid_profile"] {
+        for code in [
+            FailureCode::ProviderProtocol,
+            FailureCode::PolicyViolation,
+            FailureCode::InvalidProfile,
+        ] {
             assert_eq!(
-                react(Ended::Failed { code }, FRESH),
+                react(Ended::Failed { code: &code }, FRESH),
                 Reaction::Pause(Pause::NeedsAction),
                 "{code}"
             );
         }
-        assert_eq!(cause("something_new"), Cause::Transient);
+        let unknown = FailureCode::Other("something_new".into());
+        assert_eq!(
+            react(Ended::Failed { code: &unknown }, FRESH),
+            Reaction::Retry,
+            "a code an older build stored stays transient"
+        );
     }
 
     #[test]
@@ -392,7 +357,7 @@ mod tests {
         assert_eq!(
             react(
                 Ended::Failed {
-                    code: "provider_refused"
+                    code: &FailureCode::ProviderRefused
                 },
                 off
             ),
@@ -412,7 +377,7 @@ mod tests {
         assert_eq!(
             react(
                 Ended::Failed {
-                    code: "policy_violation"
+                    code: &FailureCode::PolicyViolation
                 },
                 paused
             ),

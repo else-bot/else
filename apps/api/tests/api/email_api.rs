@@ -1415,7 +1415,7 @@ async fn a_mail_event_hands_a_notice_to_another_bot_without_its_memory_or_mail()
     let outcomes = &inputs.last().unwrap().delegation.outcomes;
     assert!(
         outcomes.iter().any(|o| o.target_bot_id == marketing_id
-            && o.status == "completed"
+            && o.status == else_api::db::delegations::Status::Completed
             && o.result.is_some()),
         "{outcomes:?}"
     );
