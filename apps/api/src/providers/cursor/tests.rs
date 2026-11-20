@@ -33,6 +33,13 @@ if not os.path.isfile(os.path.join(home, ".config/cursor/auth.json")):
 arg = lambda flag: a[a.index(flag) + 1]
 resumed = "--resume" in a
 chat = arg("--resume") if resumed else arg("--new-session-id")
+if os.path.exists(os.path.join(here, "read-prefix")):
+    os.read(0, 4)
+    os.close(0)
+    for e in [{"type": "system", "subtype": "init"}, {"type": "user", "message": {"role": "user", "content": []}},
+              {"type": "result", "subtype": "success", "is_error": False, "result": "Done"}]:
+        print(json.dumps(dict(e, session_id=chat)), flush=True)
+    sys.exit()
 prompt = sys.stdin.read()
 store = os.path.join(home, ".cursor/chats", hashlib.md5(os.getcwd().encode()).hexdigest(), chat)
 if resumed and not os.path.exists(os.path.join(store, "store.db")):
@@ -497,11 +504,16 @@ async fn a_signed_out_host_says_how_to_sign_in() {
     let server = Server::new();
     std::fs::write(server.path("bin/refuse-login"), "").unwrap();
     let outcome = server
-        .run(input("hi", Origin::OwnerRequest), &Sink::default())
+        .run(
+            input(&unread_prompt(), Origin::OwnerRequest),
+            &Sink::default(),
+        )
         .await;
     let signed_out = TurnOutcome::Failed {
         code: "provider_unavailable".into(),
-        message: cursor_home::SIGNED_OUT.into(),
+        message: "Cursor CLI isn't signed in on this server. Run `cursor-agent login` there, or \
+                  switch this bot to another model."
+            .into(),
     };
     assert_eq!(outcome, signed_out, "a login the CLI refuses");
     assert_eq!(
@@ -519,6 +531,30 @@ async fn a_signed_out_host_says_how_to_sign_in() {
         .await;
     assert_eq!(outcome, signed_out);
     assert_eq!(server.launches().len(), 0, "nothing ran");
+}
+
+/// Longer than a pipe buffer, so a CLI that exits or closes its input
+/// without reading it leaves the write unfinished.
+fn unread_prompt() -> String {
+    "hi ".repeat(1 << 20)
+}
+
+#[tokio::test]
+async fn a_cli_that_stops_reading_its_prompt_does_not_complete_the_turn() {
+    let server = Server::new();
+    std::fs::write(server.path("bin/read-prefix"), "").unwrap();
+    let outcome = server
+        .run(
+            input(&unread_prompt(), Origin::OwnerRequest),
+            &Sink::default(),
+        )
+        .await;
+    assert_eq!(
+        outcome,
+        TurnOutcome::Uncertain {
+            message: "Cursor CLI ended without a result (exit 0).".into()
+        }
+    );
 }
 
 #[tokio::test]
