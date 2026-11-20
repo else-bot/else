@@ -1637,8 +1637,40 @@ async fn the_owner_retries_a_paused_routine_and_a_success_switches_it_back_on() 
 
     let late = retry(&h.app, &main, &id, Uuid::new_v4()).await;
     assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
-    assert_eq!(late.body["error"]["code"], "not_paused");
+    assert_eq!(late.body["error"]["code"], "nothing_to_retry");
     assert_eq!(runs(&h.app, &id).await.len(), 2);
+}
+
+#[tokio::test]
+async fn the_owner_retries_an_enabled_routine_whose_last_run_failed() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let (id, due) = failing_routine(&h, &main, "[synthetic:fail] update the tickets").await;
+    fire(&h.app, due).await;
+    wait_routine(&h.app, &main, |r| r["failed_runs"] == 1).await;
+    set_prompt(&h.app, &id, "Update the tickets.").await;
+
+    let queued = retry(&h.app, &main, &id, Uuid::new_v4()).await;
+    assert_eq!(queued.status, StatusCode::OK, "{}", queued.body);
+    assert_eq!(queued.body["queued"], true);
+    assert_eq!(queued.body["routine"]["enabled"], true);
+    assert_eq!(queued.body["routine"]["retrying"], true);
+
+    let routine = wait_routine(&h.app, &main, |r| r["failed_runs"] == 0).await;
+    assert_eq!(routine["last_run"]["status"], "completed");
+    assert_eq!(routine["enabled"], true);
+    assert_eq!(routine["retrying"], false);
+    assert_eq!(
+        at(&routine["next_run_at"]),
+        due + chrono::Duration::hours(1),
+        "the schedule stays as it was"
+    );
+    assert_eq!(runs(&h.app, &id).await.len(), 3);
+
+    let late = retry(&h.app, &main, &id, Uuid::new_v4()).await;
+    assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
+    assert_eq!(late.body["error"]["code"], "nothing_to_retry");
+    assert_eq!(runs(&h.app, &id).await.len(), 3);
 }
 
 #[tokio::test]
