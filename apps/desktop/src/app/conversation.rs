@@ -515,7 +515,7 @@ fn card_state(c: &Conversation, key: RowKey) -> Option<String> {
             .and_then(|i| c.turn(i.turn_id))
             .map(|t| t.status.clone()),
         RowKey::Task(id) => c.turn(id).map(|t| t.status.clone()),
-        RowKey::Gap(above) => c.gap_below(above).map(|count| count.to_string()),
+        RowKey::Gap(above) => c.gap_below(above).map(|size| format!("{size:?}")),
         RowKey::Pending(_) | RowKey::QuietRun(_) | RowKey::QuietRuns(_) => None,
     }
 }
