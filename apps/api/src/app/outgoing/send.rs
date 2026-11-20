@@ -15,7 +15,11 @@ use crate::db::outgoing_drafts::{
 };
 use crate::socials::types::{Error as SocialError, SendFile, SendMessage};
 
-/// The connected accounts a send reaches, for one caller.
+/// The connected accounts a send reaches, for one caller. A send must
+/// record its action receipt under `action_id` before its external effect
+/// and deduplicate by it, because a resumed claim calls it again with the
+/// same ID. It returns an error that leaves no receipt only when nothing
+/// was sent: the draft then fails.
 #[async_trait]
 pub trait Connected: Sync {
     /// Send through the mail connector as action `action_id`.

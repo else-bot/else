@@ -561,8 +561,10 @@ impl From<SendError> for Refusal {
             ))
             .logged("rejected FILE_CHANGED"),
             SendError::FileChangedAfterClaim(changed) => Refusal::text(format!(
-                "FILE_CHANGED: {changed}. An earlier call already started this send and its \
-                 result is not known; never send it again without the owner's new approval."
+                "FILE_CHANGED: the attachment {} changed or is missing since the owner approved \
+                 it. An earlier call already started this send and its result is not known; \
+                 never send it again without the owner's new approval.",
+                changed.0
             ))
             .logged("rejected FILE_CHANGED"),
         }
