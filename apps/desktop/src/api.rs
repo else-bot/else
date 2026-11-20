@@ -413,6 +413,8 @@ pub struct Bot {
     pub read_state: Option<ReadState>,
     #[serde(default)]
     pub sidebar_status: Option<SidebarStatus>,
+    #[serde(default)]
+    pub watching: usize,
 }
 
 /// A point in a bot's replies: the assistant item, then the UTF-8 bytes of
@@ -542,7 +544,7 @@ struct ErrorBody {
 #[derive(Debug, Clone, Deserialize)]
 struct ErrorDetail {
     code: String,
-    message: String,
+    message: Option<String>,
     #[serde(default)]
     retryable: bool,
 }
@@ -568,6 +570,19 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    fn from_http(status: StatusCode, bytes: &[u8]) -> Self {
+        let fallback = || format!("HTTP {status}");
+        match serde_json::from_slice::<ErrorBody>(bytes) {
+            Ok(body) => Self::Api {
+                status: status.as_u16(),
+                code: body.error.code,
+                message: body.error.message.unwrap_or_else(fallback),
+                retryable: body.error.retryable,
+            },
+            Err(_) => Self::Protocol(fallback()),
+        }
+    }
+
     pub fn code(&self) -> Option<&str> {
         match self {
             Self::Api { code, .. } => Some(code),
@@ -701,15 +716,7 @@ impl Client {
             .await
             .map_err(|err| ClientError::Protocol(err.without_url().to_string()))?;
         if !status.is_success() {
-            return Err(match serde_json::from_slice::<ErrorBody>(&bytes) {
-                Ok(body) => ClientError::Api {
-                    status: status.as_u16(),
-                    code: body.error.code,
-                    message: body.error.message,
-                    retryable: body.error.retryable,
-                },
-                Err(_) => ClientError::Protocol(format!("HTTP {status}")),
-            });
+            return Err(ClientError::from_http(status, &bytes));
         }
         let body = if status == StatusCode::NO_CONTENT && bytes.is_empty() {
             b"null".as_slice()
@@ -1367,6 +1374,20 @@ impl Client {
         .map(|_| ())
     }
 
+    pub async fn stop_watcher(
+        self: Arc<Self>,
+        bot: Uuid,
+        watcher: Uuid,
+    ) -> Result<(), ClientError> {
+        self.call::<serde_json::Value>(
+            Method::POST,
+            format!("/v1/bots/{bot}/watchers/{watcher}/stop"),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Change the owner's read state. Every command is safe to repeat.
     pub async fn read(self: Arc<Self>, bot: Uuid, command: ReadCommand) -> Result<(), ClientError> {
         self.call::<BotEnvelope>(
@@ -1428,6 +1449,27 @@ pub(crate) mod tests {
     fn client(origin: Origin) -> Arc<Client> {
         let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
         Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn watcher_stop_posts_without_a_body_and_reports_an_ended_watcher() {
+        let bot = Uuid::from_u128(1);
+        let watcher = Uuid::from_u128(2);
+        let (origin, server) = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 31\r\n\r\n{\"watcher\":{\"status\":\"waking\"}}",
+        )
+        .await;
+        client(origin).stop_watcher(bot, watcher).await.unwrap();
+        let request = server.await.unwrap();
+        let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with("POST /v1/bots/00000000-0000-0000-0000-000000000001/watchers/00000000-0000-0000-0000-000000000002/stop HTTP/1.1\r\n"));
+        assert_eq!(body, "");
+
+        let (origin, _) = serve_once(
+            "HTTP/1.1 409 Conflict\r\nContent-Length: 31\r\n\r\n{\"error\":{\"code\":\"not_active\"}}",
+        ).await;
+        let error = client(origin).stop_watcher(bot, watcher).await.unwrap_err();
+        assert_eq!(error.code(), Some("not_active"));
     }
 
     #[tokio::test]

@@ -898,6 +898,27 @@ pub struct WebhookWake {
     pub woke_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum WatcherStatus {
+    Waiting {
+        next_check_at: Option<DateTime<Utc>>,
+    },
+    Checking,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Watcher {
+    pub id: Uuid,
+    pub purpose: String,
+    pub until: DateTime<Utc>,
+    #[serde(flatten)]
+    pub status: WatcherStatus,
+    pub last_status: Option<String>,
+    pub last_checked_at: Option<DateTime<Utc>>,
+    pub last_output: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Snapshot {
     pub selected_provider_id: Option<String>,
@@ -917,6 +938,8 @@ pub struct Snapshot {
     /// Absent from servers that don't list webhooks in the snapshot.
     #[serde(default)]
     pub webhooks: Vec<Webhook>,
+    #[serde(default)]
+    pub watchers: Vec<Watcher>,
     /// The kinds of drafts the owner approves always.
     #[serde(default)]
     pub draft_grants: Vec<serde_json::Value>,
@@ -988,6 +1011,7 @@ pub struct Conversation {
     social_triggers: Vec<Trigger>,
     mail_triggers: Vec<MailTrigger>,
     webhooks: Vec<Webhook>,
+    watchers: Vec<Watcher>,
     draft_grants: Vec<serde_json::Value>,
     rules_version: i64,
     /// Read from the page saved on disk, so possibly behind the server.
@@ -1016,6 +1040,7 @@ impl Conversation {
             social_triggers: snapshot.social_triggers,
             mail_triggers: snapshot.mail_triggers,
             webhooks: snapshot.webhooks,
+            watchers: snapshot.watchers,
             draft_grants: snapshot.draft_grants,
             rules_version: snapshot.rules_version,
             saved: false,
@@ -1129,6 +1154,12 @@ impl Conversation {
                 self.webhooks = data
                     .get("webhooks")
                     .map(|webhooks| serde_json::from_value(webhooks.clone()))
+                    .transpose()
+                    .map_err(|_| Reset::Malformed)?
+                    .unwrap_or_default();
+                self.watchers = data
+                    .get("watchers")
+                    .map(|watchers| serde_json::from_value(watchers.clone()))
                     .transpose()
                     .map_err(|_| Reset::Malformed)?
                     .unwrap_or_default();
@@ -1509,6 +1540,10 @@ impl Conversation {
         &self.webhooks
     }
 
+    pub fn watchers(&self) -> &[Watcher] {
+        &self.watchers
+    }
+
     pub fn routines(&self) -> &[Routine] {
         &self.routines
     }
@@ -1628,14 +1663,21 @@ mod tests {
         })
     }
 
-    fn snapshot(seq: i64, items: Vec<serde_json::Value>, older: Option<i64>) -> Snapshot {
-        serde_json::from_value(json!({
+    fn snapshot_json(
+        seq: i64,
+        items: Vec<serde_json::Value>,
+        older: Option<i64>,
+    ) -> serde_json::Value {
+        json!({
             "conversation_id": Uuid::new_v4(), "bot_id": bot(), "selected_provider_id": null,
             "event_cursor": format!("{PREFIX}:{seq}"), "items": items, "turns": [],
             "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 },
             "older_before_seq": older,
-        }))
-        .unwrap()
+        })
+    }
+
+    fn snapshot(seq: i64, items: Vec<serde_json::Value>, older: Option<i64>) -> Snapshot {
+        serde_json::from_value(snapshot_json(seq, items, older)).unwrap()
     }
 
     fn frame(seq: i64, event: &str, data: serde_json::Value) -> Frame {
@@ -2354,6 +2396,59 @@ mod tests {
         assert!(!conversation.webhooks()[0].enabled);
         conversation.apply(&update(3, json!([]))).unwrap();
         assert!(conversation.webhooks().is_empty());
+    }
+
+    #[test]
+    fn watchers_default_to_empty_on_older_servers() {
+        let conversation = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
+        assert!(conversation.watchers().is_empty());
+        let bot: Bot = serde_json::from_value(json!({ "id": bot(), "name": "Assistant" })).unwrap();
+        assert_eq!(bot.watching, 0);
+    }
+
+    #[test]
+    fn watchers_follow_the_snapshot_and_live_updates() {
+        let mut page = snapshot_json(1, vec![], None);
+        let mut watcher = json!({
+            "id": "c7947c9e-2f91-4fb5-8fcc-ec4b20ca9307", "purpose": "Domain availability",
+            "every_minutes": 15, "until": "2026-12-04T10:00:00.000+00:00", "status": "waiting",
+            "last_status": null, "last_checked_at": null, "next_check_at": "2026-11-20T08:13:00Z",
+            "last_output": null, "checks": 0, "failures": 0, "created_at": "2026-11-20T08:00:00Z",
+            "created_turn_id": null,
+        });
+        page["watchers"] = json!([watcher]);
+        let mut conversation =
+            Conversation::from_snapshot(serde_json::from_value(page).unwrap()).unwrap();
+        let [active] = conversation.watchers() else {
+            panic!("expected one active watcher")
+        };
+        assert_eq!(active.purpose, "Domain availability");
+        assert_eq!(active.until.to_rfc3339(), "2026-12-04T10:00:00+00:00");
+        let WatcherStatus::Waiting { next_check_at } = active.status else {
+            panic!("expected a watcher waiting for its next check")
+        };
+        assert_eq!(
+            next_check_at.unwrap().to_rfc3339(),
+            "2026-11-20T08:13:00+00:00"
+        );
+        assert_eq!(active.last_checked_at, None);
+        let update = |seq, count, watchers| {
+            frame(
+                seq,
+                "bot.updated",
+                json!({ "bot": { "id": bot(), "name": "Assistant", "watching": count }, "watchers": watchers }),
+            )
+        };
+        watcher["status"] = json!("checking");
+        watcher["last_status"] = json!("unavailable");
+        watcher["last_output"] = json!("Domain is registered");
+        conversation.apply(&update(2, 1, json!([watcher]))).unwrap();
+        let active = &conversation.watchers()[0];
+        assert_eq!(active.status, WatcherStatus::Checking);
+        assert_eq!(active.last_status.as_deref(), Some("unavailable"));
+        assert_eq!(active.last_output.as_deref(), Some("Domain is registered"));
+        conversation.apply(&update(3, 0, json!([]))).unwrap();
+        assert!(conversation.watchers().is_empty());
     }
 
     #[test]

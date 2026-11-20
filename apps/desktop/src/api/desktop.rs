@@ -1,4 +1,4 @@
-use super::{Client, ClientError, ErrorBody};
+use super::{Client, ClientError};
 use futures_util::{SinkExt as _, StreamExt as _};
 use gpui_kit::{CursorStyle, RenderImage};
 use image::{ImageDecoder as _, ImageReader};
@@ -329,15 +329,7 @@ impl Client {
                 .bytes()
                 .await
                 .map_err(|err| ClientError::Protocol(err.without_url().to_string()))?;
-            Err(match serde_json::from_slice::<ErrorBody>(&bytes) {
-                Ok(body) => ClientError::Api {
-                    status: status.as_u16(),
-                    code: body.error.code,
-                    message: body.error.message,
-                    retryable: body.error.retryable,
-                },
-                Err(_) => ClientError::Protocol(format!("HTTP {status}")),
-            })
+            Err(ClientError::from_http(status, &bytes))
         })
         .await
     }
