@@ -50,6 +50,9 @@ pub struct Version {
     pub restored_from: Option<i64>,
     pub diff: Json<Vec<DiffLine>>,
     pub created_at: DateTime<Utc>,
+    /// When the owner restored the version before this one while it was
+    /// current, which undoes it.
+    pub undone_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,9 +90,12 @@ pub async fn history(
     bot_id: Uuid,
 ) -> Result<Vec<Version>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT version, markdown, section, change, owner_words, author, restored_from, diff,
-             created_at
-         FROM bot_rules WHERE bot_id = ?1 ORDER BY version DESC",
+        "SELECT r.version, r.markdown, r.section, r.change, r.owner_words, r.author,
+             r.restored_from, r.diff, r.created_at, u.created_at AS undone_at
+         FROM bot_rules r
+         LEFT JOIN bot_rules u ON u.bot_id = r.bot_id AND u.version = r.version + 1
+             AND u.change = 'restored' AND u.restored_from = r.version - 1
+         WHERE r.bot_id = ?1 ORDER BY r.version DESC",
     )
     .bind(bot_id)
     .fetch_all(conn)
@@ -242,6 +248,7 @@ pub async fn update_for_turn(
         change,
         owner_words,
         diff,
+        undone_at: None,
     };
     // A task's own conversation is hidden from the owner, so the card goes
     // to the bot's chat with the owner, as a task's routine change does.
@@ -317,6 +324,7 @@ pub async fn restore(
         return Ok(current_version);
     }
     let diff = crate::app::rules::document_diff(&markdown, &target);
+    let undone = (version == current_version - 1).then_some(current_version);
     let saved = append(
         &mut tx,
         NewVersion {
@@ -332,7 +340,37 @@ pub async fn restore(
         },
     )
     .await?;
+    if let Some(undone) = undone {
+        mark_undone(&mut tx, bot_id, undone).await?;
+    }
     events::bot_updated(&mut tx, bot_id).await?;
     tx.commit().await?;
     Ok(saved)
+}
+
+/// Stamp the conversation row for a version the owner just undid with the
+/// time of the restore that undid it, so it reads as undone live and after
+/// a reload. The row keeps its stamp if a later restore brings the text back.
+async fn mark_undone(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+    version: i64,
+) -> Result<(), sqlx::Error> {
+    let items: Vec<Uuid> = sqlx::query_scalar(
+        "UPDATE items SET rules_update = json_set(rules_update, '$.undone_at',
+             (SELECT created_at FROM bot_rules WHERE bot_id = ?1 AND version = ?2 + 1))
+         WHERE conversation_id IN (SELECT id FROM conversations WHERE bot_id = ?1)
+           AND rules_update IS NOT NULL
+           AND json_extract(rules_update, '$.version') = ?2
+           AND json_extract(rules_update, '$.undone_at') IS NULL
+         RETURNING id",
+    )
+    .bind(bot_id)
+    .bind(version)
+    .fetch_all(&mut *conn)
+    .await?;
+    for item in items {
+        events::item_upsert(conn, bot_id, item).await?;
+    }
+    Ok(())
 }

@@ -100,6 +100,9 @@ pub struct RulesUpdate {
     pub change: RuleChange,
     pub owner_words: String,
     pub diff: Vec<DiffLine>,
+    /// When the owner undid this change.
+    #[serde(default)]
+    pub undone_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -119,6 +122,9 @@ pub struct RulesVersion {
     pub restored_from: Option<i64>,
     pub diff: Vec<DiffLine>,
     pub created_at: DateTime<Utc>,
+    /// When the owner undid this version by restoring the one before it.
+    #[serde(default)]
+    pub undone_at: Option<DateTime<Utc>>,
 }
 
 /// A bot's rules file with every saved version, newest first.
