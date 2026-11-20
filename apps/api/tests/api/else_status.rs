@@ -79,6 +79,28 @@ async fn a_bot_reads_the_reason_a_provider_is_unavailable() {
     assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_tool_is_refused_without_consulting_the_grant() {
+    let app = TestApp::installed().await;
+    let token = grant(&app, vec![]).await;
+    let reply = app
+        .call(
+            "POST",
+            "/tools/v1/mcp",
+            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                         "params": { "name": "no_such_tool", "arguments": {} } })),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["result"]["isError"], true, "{}", reply.body);
+    assert_eq!(
+        reply.body["result"]["content"][0]["text"], "Unknown tool.",
+        "{}",
+        reply.body
+    );
+}
+
 fn provider(status: &Value, id: &str) -> Value {
     status["providers"]
         .as_array()
