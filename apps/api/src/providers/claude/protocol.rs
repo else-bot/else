@@ -7,9 +7,13 @@ use serde_json::Value;
 use crate::app::providers::{FailureCode, LimitWindow, Steer, TurnOutcome, Usage};
 use crate::app::tools::SERVER_NAME;
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
+use crate::providers::cli::json::Fields;
+use crate::providers::cli::stream_json;
+
+const FIELDS: Fields = Fields("Claude");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ResultInfo {
+pub struct ResultInfo {
     pub(super) success: bool,
     pub(super) message: String,
     /// Model turns the CLI ran; 0 means it ended before running any.
@@ -25,7 +29,7 @@ enum Call {
     Unoffered(String),
 }
 
-pub(super) struct Tracker {
+pub struct Tracker {
     expected_tools: Vec<String>,
     model: String,
     /// Models the CLI announced it switched to during this turn, latest
@@ -43,37 +47,6 @@ pub(super) struct Tracker {
     steers: HashSet<uuid::Uuid>,
     /// else.bot's own notices written to the CLI and not echoed yet.
     notices: HashSet<uuid::Uuid>,
-}
-
-fn malformed(what: &str) -> Violation {
-    Violation::policy(format!("Claude sent a malformed {what}"))
-}
-
-fn text<'v>(value: &'v Value, what: &str) -> Result<Option<&'v str>, Violation> {
-    match value {
-        Value::Null => Ok(None),
-        Value::String(text) => Ok(Some(text)),
-        _ => Err(malformed(what)),
-    }
-}
-
-fn required<'v>(value: &'v Value, what: &str) -> Result<&'v str, Violation> {
-    text(value, what)?.ok_or_else(|| malformed(what))
-}
-
-fn list<'v>(value: &'v Value, what: &str) -> Result<&'v [Value], Violation> {
-    match value {
-        Value::Null => Ok(&[]),
-        Value::Array(items) => Ok(items),
-        _ => Err(malformed(what)),
-    }
-}
-
-fn inventory<'v>(value: &'v Value, what: &str) -> Result<&'v [Value], Violation> {
-    value
-        .as_array()
-        .map(Vec::as_slice)
-        .ok_or_else(|| malformed(what))
 }
 
 impl Tracker {
@@ -122,8 +95,8 @@ impl Tracker {
         event: &Value,
         events: &mut Vec<Event<ResultInfo>>,
     ) -> Result<(), Violation> {
-        let subtype = required(&event["subtype"], "model fallback")?;
-        let model = required(&event["fallback_model"], "model fallback")?;
+        let subtype = FIELDS.required(&event["subtype"], "model fallback")?;
+        let model = FIELDS.required(&event["fallback_model"], "model fallback")?;
         tracing::warn!(
             event = subtype,
             trigger = event["trigger"].as_str(),
@@ -144,11 +117,12 @@ impl Tracker {
         self.init_seen = true;
         self.check_model(
             "init",
-            Some(text(&event["model"], "model")?.unwrap_or("(none)")),
+            Some(FIELDS.text(&event["model"], "model")?.unwrap_or("(none)")),
         )?;
-        let mut tools = inventory(&event["tools"], "tool inventory")?
+        let mut tools = FIELDS
+            .list(&event["tools"], "tool inventory")?
             .iter()
-            .map(|tool| required(tool, "tool inventory").map(str::to_owned))
+            .map(|tool| FIELDS.required(tool, "tool inventory").map(str::to_owned))
             .collect::<Result<Vec<_>, _>>()?;
         tools.sort();
         if tools != self.expected_tools {
@@ -156,20 +130,9 @@ impl Tracker {
                 "Claude offered unexpected tools: {tools:?}"
             )));
         }
-        let servers = inventory(&event["mcp_servers"], "MCP inventory")?
-            .iter()
-            .map(|server| {
-                Ok((
-                    required(&server["name"], "MCP inventory")?,
-                    required(&server["status"], "MCP inventory")?,
-                ))
-            })
-            .collect::<Result<Vec<_>, Violation>>()?;
-        let ok = if self.expected_tools.is_empty() {
-            servers.is_empty()
-        } else {
-            matches!(servers.as_slice(), [(name, "connected")] if *name == SERVER_NAME)
-        };
+        let servers = stream_json::mcp_servers(FIELDS, event)?;
+        let ok =
+            stream_json::only_elsebot(&servers, !self.expected_tools.is_empty(), &["connected"]);
         if !ok {
             return Err(Violation::policy(format!(
                 "Claude reported MCP servers {servers:?}"
@@ -183,7 +146,7 @@ impl Tracker {
         event: &Value,
         events: &mut Vec<Event<ResultInfo>>,
     ) -> Result<(), Violation> {
-        let uuid = text(&event["uuid"], "user message")?;
+        let uuid = FIELDS.text(&event["uuid"], "user message")?;
         if event["isReplay"].as_bool() == Some(true) {
             if uuid == Some(self.message_uuid.as_str()) {
                 events.push(Event::Accepted {
@@ -201,13 +164,13 @@ impl Tracker {
         let prefix = format!("mcp__{SERVER_NAME}__");
         let blocks = match &event["message"]["content"] {
             Value::String(_) => &[],
-            content => list(content, "user message")?,
+            content => FIELDS.list_or_empty(content, "user message")?,
         };
         for block in blocks {
             if block["type"] != "tool_result" {
                 continue;
             }
-            let id = required(&block["tool_use_id"], "tool result")?;
+            let id = FIELDS.required(&block["tool_use_id"], "tool result")?;
             match self.calls.get(id) {
                 Some(Call::Offered(name))
                     if name
@@ -234,15 +197,18 @@ impl Tracker {
     ) -> Result<(), Violation> {
         self.activity = true;
         let inner = &event["event"];
-        match required(&inner["type"], "stream event")? {
+        match FIELDS.required(&inner["type"], "stream event")? {
             "message_start" => {
-                self.check_model("message_start", text(&inner["message"]["model"], "model")?)?;
+                self.check_model(
+                    "message_start",
+                    FIELDS.text(&inner["message"]["model"], "model")?,
+                )?;
             }
             "content_block_start" if inner["content_block"]["type"] == "text" => {
                 self.separate = self.wrote_text;
             }
             "content_block_delta" if inner["delta"]["type"] == "text_delta" => {
-                let delta = required(&inner["delta"]["text"], "text delta")?;
+                let delta = FIELDS.required(&inner["delta"]["text"], "text delta")?;
                 if self.separate {
                     self.separate = false;
                     events.push(Event::EndMessage);
@@ -264,7 +230,7 @@ impl Tracker {
         if event["type"] != "tool_progress" {
             return Ok(false);
         }
-        let tool = required(&event["tool_name"], "tool progress")?;
+        let tool = FIELDS.required(&event["tool_name"], "tool progress")?;
         Ok(matches!(self.calls.get(parent), Some(Call::Offered(name)) if name == tool))
     }
 
@@ -274,14 +240,17 @@ impl Tracker {
     fn on_assistant(&mut self, event: &Value) -> Result<(), Violation> {
         self.activity = true;
         if event["is_api_error_message"].as_bool() != Some(true) {
-            self.check_model("assistant", text(&event["message"]["model"], "model")?)?;
+            self.check_model(
+                "assistant",
+                FIELDS.text(&event["message"]["model"], "model")?,
+            )?;
         }
-        for block in list(&event["message"]["content"], "assistant message")? {
+        for block in FIELDS.list_or_empty(&event["message"]["content"], "assistant message")? {
             if block["type"] != "tool_use" {
                 continue;
             }
-            let name = required(&block["name"], "tool call")?.to_owned();
-            let id = required(&block["id"], "tool call")?;
+            let name = FIELDS.required(&block["name"], "tool call")?.to_owned();
+            let id = FIELDS.required(&block["id"], "tool call")?;
             let call = if self.expected_tools.contains(&name) {
                 Call::Offered(name)
             } else {
@@ -348,21 +317,24 @@ impl Protocol for Tracker {
     type Terminal = ResultInfo;
 
     fn on(&mut self, event: &Value) -> Result<Vec<Event<ResultInfo>>, Violation> {
-        if let Some(parent) = text(&event["parent_tool_use_id"], "parent tool use")? {
+        if let Some(parent) = stream_json::parent_tool_use(FIELDS, event)? {
             if self.is_heartbeat(event, parent)? {
                 return Ok(Vec::new());
             }
             return Err(Violation::policy("Claude ran a native sub-agent"));
         }
         let mut events = Vec::new();
-        match required(&event["type"], "event")? {
-            "system" => match text(&event["subtype"], "system event")?.unwrap_or_default() {
+        match FIELDS.required(&event["type"], "event")? {
+            "system" => match FIELDS
+                .text(&event["subtype"], "system event")?
+                .unwrap_or_default()
+            {
                 "init" => self.on_init(event)?,
                 "compact_boundary" => events.push(Event::Compacted),
                 "model_fallback" | "model_refusal_fallback" | "model_consent_fallback" => {
                     self.on_fallback(event, &mut events)?;
                 }
-                sub if sub.starts_with("task_") || sub.contains("agent") => {
+                sub if stream_json::agent_activity(sub) => {
                     let detail = ["task_type", "description"]
                         .iter()
                         .filter_map(|key| event[key].as_str())

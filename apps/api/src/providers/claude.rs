@@ -42,7 +42,7 @@
 mod protocol;
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -50,18 +50,15 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::cli::attempt::{Channel, Ended, Event, Protocol};
-use super::cli::files::GRANT_ENV;
-use super::cli::session::{self, Identity, Opened, PreparedTurn};
-use super::cli::stream::{Interrupt, StreamAttempt};
+use super::cli::session::PreparedTurn;
+use super::cli::stream::{Interrupt, Prompt, StreamAttempt};
+use super::cli::turn::{self, Adapter, Cli, Delivery, Launch, Ready, Start, ToolSet};
 use super::definitions::Definition;
 use super::host::{BotDirs, Host, LaunchSpec, Run, RunError};
-use super::models::{Listed, Models};
+use super::models::Listed;
 use super::prompt;
 use super::{attachments, claude_home};
-use crate::app::providers::FailureCode;
-use crate::app::providers::{
-    Availability, CheckpointRequest, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
-};
+use crate::app::providers::{CheckpointRequest, Profile, Stop, TurnSink};
 use protocol::Tracker;
 
 pub const ID: &str = "claude";
@@ -91,18 +88,14 @@ fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'
     Box::pin(async move {
         let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
         let home = std::env::var("HOME").ok();
-        let claude = Claude {
-            models: Models::new(&DEFINITION),
-            ready: Claude::ready(
-                Some(wiring.host.clone()),
-                super::executable(wiring.config.claude_bin.as_deref(), "claude").await,
-                claude_home::host_config(config_dir.as_deref(), home.as_deref()),
-                claude_home::host_account(config_dir.as_deref(), home.as_deref()),
-            )
-            .await,
-            tool_url: None,
-        }
-        .with_tools(wiring.tool_url.clone());
+        let ready = ready(
+            Some(wiring.host.clone()),
+            super::executable(wiring.config.claude_bin.as_deref(), "claude").await,
+            claude_home::host_config(config_dir.as_deref(), home.as_deref()),
+            claude_home::host_account(config_dir.as_deref(), home.as_deref()),
+        )
+        .await;
+        let claude = Claude::new(ClaudeCode, ready).with_tools(wiring.tool_url.clone());
         super::Built {
             provider: std::sync::Arc::new(claude),
             summarizer: None,
@@ -110,41 +103,15 @@ fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'
     })
 }
 
-/// A CLI that runs, logged in with the host configuration.
-struct Ready {
-    host: Host,
-    program: super::Program,
+/// The host login a running CLI uses.
+pub struct Login {
     config: claude_home::HostConfig,
     account: String,
-    version: String,
 }
 
-pub struct Claude {
-    models: Models,
-    ready: Result<Ready, String>,
-    tool_url: Option<String>,
-}
+pub struct ClaudeCode;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tools {
-    None,
-    Elsebot,
-    HostAndElsebot,
-}
-
-impl Tools {
-    fn for_turn(input: &TurnInput) -> Self {
-        if input.delegation.host_tools() {
-            Self::HostAndElsebot
-        } else {
-            Self::Elsebot
-        }
-    }
-
-    fn host(self) -> bool {
-        self == Self::HostAndElsebot
-    }
-}
+pub type Claude = Cli<ClaudeCode>;
 
 impl Claude {
     /// Locate the CLI, check that it runs (`claude --version`), and ask it
@@ -158,192 +125,133 @@ impl Claude {
         config: Option<claude_home::HostConfig>,
         account: String,
     ) -> Self {
-        Self {
-            models: Models::new(&DEFINITION),
-            ready: Self::ready(host, Ok(program.map(Into::into)), config, account).await,
-            tool_url: None,
-        }
-    }
-
-    async fn ready(
-        host: Option<Host>,
-        program: Result<Option<super::Program>, String>,
-        config: Option<claude_home::HostConfig>,
-        account: String,
-    ) -> Result<Ready, String> {
-        let host = host.ok_or("Claude Code is not configured on this host.")?;
-        let program = program?.ok_or("Claude Code (`claude`) was not found on PATH.")?;
-        let env = config
-            .as_ref()
-            .map(claude_home::HostConfig::env)
-            .unwrap_or_default();
-        let version = host
-            .probe(program.path(), &["--version"], &env)
-            .await
-            .map_err(|why| {
-                format!(
-                    "Claude Code does not run (`{} --version`: {why}).",
-                    program.path().display()
-                )
-            })?;
-        let not_logged_in = "Claude Code is not logged in on the host (run `claude` and log in).";
-        let config = config.ok_or(not_logged_in)?;
-        // A logged-out CLI exits with failure; only a check that never
-        // answered says something else.
-        match host.probe(program.path(), &["auth", "status"], &env).await {
-            Ok(status) if claude_home::logged_in(&status) => {}
-            Err(why @ (RunError::TimedOut(_) | RunError::Start(_) | RunError::Read(_))) => {
-                return Err(format!(
-                    "Claude Code could not check its login (`claude auth status`: {why})."
-                ));
-            }
-            _ => return Err(not_logged_in.into()),
-        }
-        Ok(Ready {
-            host,
-            program,
-            config,
-            account,
-            version,
-        })
-    }
-
-    pub fn with_tools(mut self, url: String) -> Self {
-        self.tool_url = Some(url);
-        self
-    }
-
-    fn fingerprint(&self, ready: &Ready, profile: &Profile, input: &TurnInput) -> String {
-        session::fingerprint(
-            input,
-            profile,
-            &Identity {
-                prompt_version: PROMPT_VERSION,
-                version: &ready.version,
-                runtime: &ready.host.runtime(input.bot_id),
-                tools: match (input.delegation.host_tools(), self.tool_url.is_some()) {
-                    (true, true) => "tools:host+elsebot-v5",
-                    (true, false) => "tools:host",
-                    (false, true) => "tools:elsebot-v2",
-                    (false, false) => "tools:none",
-                },
-                policy: &["agents:disabled", &ready.account],
-            },
+        Self::new(
+            ClaudeCode,
+            ready(host, Ok(program.map(Into::into)), config, account).await,
         )
     }
+}
 
-    fn offered_tools(&self, tools: Tools) -> Vec<String> {
-        let mut offered: Vec<String> = Vec::new();
-        if tools.host() {
-            offered.extend(claude_home::HOST_TOOLS.iter().map(|t| (*t).to_owned()));
+async fn ready(
+    host: Option<Host>,
+    program: Result<Option<super::Program>, String>,
+    config: Option<claude_home::HostConfig>,
+    account: String,
+) -> Result<Ready<Login>, String> {
+    let host = host.ok_or("Claude Code is not configured on this host.")?;
+    let program = program?.ok_or("Claude Code (`claude`) was not found on PATH.")?;
+    let env = config
+        .as_ref()
+        .map(claude_home::HostConfig::env)
+        .unwrap_or_default();
+    let version = turn::version(&host, &program, &env, ClaudeCode::PRODUCT).await?;
+    let not_logged_in = "Claude Code is not logged in on the host (run `claude` and log in).";
+    let config = config.ok_or(not_logged_in)?;
+    // A logged-out CLI exits with failure; only a check that never
+    // answered says something else.
+    match host.probe(program.path(), &["auth", "status"], &env).await {
+        Ok(status) if claude_home::logged_in(&status) => {}
+        Err(why @ (RunError::TimedOut(_) | RunError::Start(_) | RunError::Read(_))) => {
+            return Err(format!(
+                "Claude Code could not check its login (`claude auth status`: {why})."
+            ));
         }
-        if tools != Tools::None && self.tool_url.is_some() {
-            offered.extend(claude_home::tool_names());
-        }
-        offered
+        _ => return Err(not_logged_in.into()),
     }
+    Ok(Ready {
+        host,
+        program,
+        version,
+        login: Login { config, account },
+    })
+}
 
-    fn args(
-        &self,
-        profile: &Profile,
-        resume: bool,
-        session: &str,
-        system: &str,
-        tools: Tools,
-    ) -> Vec<OsString> {
-        let host_tools = if tools.host() {
-            claude_home::HOST_TOOLS.join(",")
-        } else {
-            String::new()
-        };
-        let mut args: Vec<OsString> = [
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--replay-user-messages",
-            "--include-partial-messages",
-            "--model",
-            &profile.model,
-            "--effort",
-            &profile.reasoning_effort,
-            "--tools",
-            &host_tools,
-            "--strict-mcp-config",
-            "--setting-sources",
-            "",
-            "--permission-mode",
-            "dontAsk",
-            "--disable-slash-commands",
-            "--system-prompt",
-            system,
-            "--disallowedTools",
-            &claude_home::DENIED_TOOLS.join(","),
-        ]
-        .iter()
-        .map(OsString::from)
-        .collect();
-        let offered = self.offered_tools(tools);
-        if !offered.is_empty() {
-            args.extend(["--allowedTools".into(), offered.join(",").into()]);
-        }
-        let flag = if resume { "--resume" } else { "--session-id" };
-        args.extend([flag.into(), session.into()]);
-        args
+fn offered_tools(tools: ToolSet) -> Vec<String> {
+    let mut offered: Vec<String> = Vec::new();
+    if tools.host() {
+        offered.extend(claude_home::HOST_TOOLS.iter().map(|t| (*t).to_owned()));
     }
+    if tools.elsebot() {
+        offered.extend(claude_home::tool_names());
+    }
+    offered
+}
 
-    /// Prepare the bot's private files and start the CLI.
-    async fn launch(
-        &self,
-        ready: &Ready,
-        turn_id: Uuid,
-        dirs: BotDirs,
-        args: Vec<OsString>,
-        tools: Tools,
-        grant: Option<&str>,
-    ) -> Result<StreamAttempt, String> {
-        let program = ready
-            .program
-            .current()
-            .await
-            .map_err(|why| format!("Could not start Claude Code: {why}"))?;
-        let tool_url = self.tool_url.as_deref().filter(|_| tools != Tools::None);
-        claude_home::prepare(&dirs, tool_url, tools.host()).map_err(|e| e.to_string())?;
-        let mut args = args;
-        let file = |name: &str| dirs.provider_home.join(name).into_os_string();
-        args.extend(["--settings".into(), file(claude_home::SETTINGS_FILE)]);
-        if tool_url.is_some() {
-            args.extend(["--mcp-config".into(), file(claude_home::MCP_FILE)]);
-        }
-        let mut env = ready.config.env();
-        env.push(("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned()));
-        // Otherwise the CLI may move a slow MCP call into a background task
-        // and report task_started, which ends the turn as native agent
-        // activity.
-        env.push((
-            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".to_owned(),
-            "1".to_owned(),
-        ));
-        if let (Some(_), Some(grant)) = (tool_url, grant) {
-            env.push((GRANT_ENV.to_owned(), grant.to_owned()));
-        }
-        let spec = LaunchSpec {
-            turn_id,
-            dirs,
-            program,
-            args,
-            env,
-        };
-        StreamAttempt::spawn(
-            &ready.host,
-            &spec,
-            Interrupt::Line(interrupt_request()),
-            "Claude",
-        )
-        .map_err(|e| e.to_string())
+fn args(
+    profile: &Profile,
+    resume: bool,
+    session: &str,
+    system: &str,
+    tools: ToolSet,
+) -> Vec<OsString> {
+    let host_tools = if tools.host() {
+        claude_home::HOST_TOOLS.join(",")
+    } else {
+        String::new()
+    };
+    let mut args: Vec<OsString> = [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--replay-user-messages",
+        "--include-partial-messages",
+        "--model",
+        &profile.model,
+        "--effort",
+        &profile.reasoning_effort,
+        "--tools",
+        &host_tools,
+        "--strict-mcp-config",
+        "--setting-sources",
+        "",
+        "--permission-mode",
+        "dontAsk",
+        "--disable-slash-commands",
+        "--system-prompt",
+        system,
+        "--disallowedTools",
+        &claude_home::DENIED_TOOLS.join(","),
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect();
+    let offered = offered_tools(tools);
+    if !offered.is_empty() {
+        args.extend(["--allowedTools".into(), offered.join(",").into()]);
     }
+    let flag = if resume { "--resume" } else { "--session-id" };
+    args.extend([flag.into(), session.into()]);
+    args
+}
+
+/// Write the bot's private settings and MCP configuration, point `args`
+/// at them, and return the launch's environment.
+fn configure(
+    login: &Login,
+    dirs: &BotDirs,
+    args: &mut Vec<OsString>,
+    tool_url: Option<&str>,
+    tools: ToolSet,
+) -> Result<Vec<(String, String)>, String> {
+    claude_home::prepare(dirs, tool_url, tools.host()).map_err(|e| e.to_string())?;
+    let file = |name: &str| dirs.provider_home.join(name).into_os_string();
+    args.extend(["--settings".into(), file(claude_home::SETTINGS_FILE)]);
+    if tool_url.is_some() {
+        args.extend(["--mcp-config".into(), file(claude_home::MCP_FILE)]);
+    }
+    let mut env = login.config.env();
+    env.push(("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned()));
+    // Otherwise the CLI may move a slow MCP call into a background task
+    // and report task_started, which ends the turn as native agent
+    // activity.
+    env.push((
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".to_owned(),
+        "1".to_owned(),
+    ));
+    Ok(env)
 }
 
 fn user_message(uuid: &str, content: Value) -> String {
@@ -406,44 +314,88 @@ fn interrupt_request() -> String {
 }
 
 #[async_trait]
-impl Provider for Claude {
-    fn project_dir(&self, bot_id: Uuid) -> Option<std::path::PathBuf> {
-        self.ready
-            .as_ref()
-            .ok()
-            .map(|r| r.host.project_path(bot_id))
-    }
+impl Adapter for ClaudeCode {
+    type Login = Login;
+    type Protocol = Tracker;
 
-    fn id(&self) -> &'static str {
-        ID
-    }
+    const DEFINITION: &'static Definition = &DEFINITION;
+    const PRODUCT: &'static str = "Claude Code";
+    const PROMPT_VERSION: &'static str = PROMPT_VERSION;
 
-    fn label(&self) -> &'static str {
-        DEFINITION.label
-    }
-
-    fn availability(&self) -> Availability {
-        match &self.ready {
-            Ok(_) => Availability::Available,
-            Err(reason) => Availability::Unavailable(reason.clone()),
+    fn tool_tag(&self, tools: ToolSet) -> &'static str {
+        match tools {
+            ToolSet::HostAndElsebot => "tools:host+elsebot-v5",
+            ToolSet::Host => "tools:host",
+            ToolSet::Elsebot => "tools:elsebot-v2",
+            ToolSet::None => "tools:none",
         }
     }
 
-    fn uses_profile(&self) -> bool {
-        true
+    fn policy(&self, ready: &Ready<Login>) -> Vec<String> {
+        vec!["agents:disabled".into(), ready.login.account.clone()]
     }
 
-    fn validate_profile(&self, profile: &Profile) -> Result<(), String> {
-        self.models.validate(profile)
+    fn session_exists(
+        &self,
+        ready: &Ready<Login>,
+        _: &BotDirs,
+        workspace: &Path,
+        id: &str,
+    ) -> bool {
+        claude_home::session_exists(&ready.login.config.dir, workspace, id)
     }
 
-    fn models(&self) -> Option<&Models> {
-        Some(&self.models)
+    async fn launch(
+        &self,
+        ready: &Ready<Login>,
+        start: Start<'_>,
+    ) -> Result<Launch<Tracker>, String> {
+        let turn = start.turn;
+        let system = prompt::instructions(start.input, &start.dirs.project.to_string_lossy());
+        let mut args = args(
+            start.profile,
+            turn.resumed(),
+            turn.native_id(),
+            &system,
+            start.tools,
+        );
+        let env = configure(
+            &ready.login,
+            start.dirs,
+            &mut args,
+            start.tool_url,
+            start.tools,
+        )?;
+        let message_uuid = Uuid::new_v4().to_string();
+        Ok(Launch {
+            args,
+            env,
+            delivery: Delivery::Line {
+                message: user_message(&message_uuid, message_content(&turn.segments)),
+                interrupt: interrupt_request(),
+            },
+            protocol: Tracker::new(
+                offered_tools(start.tools),
+                &start.profile.model,
+                &message_uuid,
+            ),
+        })
     }
 
-    async fn list_models(&self) -> Result<Vec<Listed>, String> {
-        let ready = self.ready.as_ref().map_err(Clone::clone)?;
-        let mut env = ready.config.env();
+    async fn drive(
+        &self,
+        attempt: &mut StreamAttempt,
+        _: Prompt,
+        protocol: &mut Tracker,
+        turn: &mut PreparedTurn<'_>,
+        sink: &dyn TurnSink,
+        stop: &Stop,
+    ) -> Ended {
+        attempt.drive(protocol, turn, sink, stop).await
+    }
+
+    async fn list_models(&self, ready: &Ready<Login>) -> Result<Vec<Listed>, String> {
+        let mut env = ready.login.config.env();
         env.push(("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned()));
         let request = format!("{}\n", protocol::initialize_request(MODELS_REQUEST));
         let run = Run {
@@ -480,169 +432,103 @@ impl Provider for Claude {
 
     async fn checkpoint(
         &self,
+        cli: &Claude,
         request: CheckpointRequest,
         cancel: &CancellationToken,
     ) -> Result<String, String> {
-        let ready = self.ready.as_ref().map_err(Clone::clone)?;
+        let ready = cli.ready()?;
         let profile = request.profile.ok_or("no saved Claude execution profile")?;
-        self.models.validate(&profile)?;
-        let text = self
-            .checkpoint_once(ready, request.bot_id, &profile, &request.prompt, cancel)
-            .await?;
+        cli.models.validate(&profile)?;
+        let text =
+            checkpoint_once(ready, request.bot_id, &profile, &request.prompt, cancel).await?;
         super::bounded_checkpoint(text, request.max_bytes)
-    }
-
-    async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
-        let ready = match &self.ready {
-            Ok(ready) => ready,
-            Err(reason) => {
-                return TurnOutcome::failed(FailureCode::ProviderUnavailable, reason.clone());
-            }
-        };
-        let Some(profile) = input.profile.clone() else {
-            return TurnOutcome::failed(
-                FailureCode::ProviderMisconfigured,
-                "No execution profile was snapshotted.",
-            );
-        };
-        if let Err(reason) = self.models.validate(&profile) {
-            return TurnOutcome::failed(FailureCode::InvalidProfile, reason);
-        }
-        let dirs = match ready.host.bot_dirs(input.bot_id, ID) {
-            Ok(dirs) => dirs,
-            Err(err) => {
-                return TurnOutcome::failed(FailureCode::ProviderUnavailable, err.to_string());
-            }
-        };
-        let fingerprint = self.fingerprint(ready, &profile, &input);
-        let opened = match input.session.as_ref().filter(|s| {
-            s.fingerprint == fingerprint
-                && claude_home::session_exists(&ready.config.dir, &dirs.project, &s.native_id)
-        }) {
-            Some(session) => Opened::Resumed(session),
-            None => Opened::Fresh(Uuid::new_v4().to_string()),
-        };
-        if stop.is_requested() {
-            return TurnOutcome::Interrupted;
-        }
-        let mut turn = PreparedTurn::new(&input, fingerprint, opened);
-        if turn.record(sink).await.is_err() {
-            return TurnOutcome::Interrupted;
-        }
-        if let Err(err) = attachments::stage(&dirs.project, &input.files).await {
-            return TurnOutcome::failed(
-                FailureCode::AttachmentUnavailable,
-                format!("The attached files could not be prepared: {err}"),
-            );
-        }
-        let tools = Tools::for_turn(&input);
-        let system = prompt::instructions(&input, &dirs.project.to_string_lossy());
-        let args = self.args(&profile, turn.resumed(), turn.native_id(), &system, tools);
-        let mut attempt = match self
-            .launch(
-                ready,
-                input.turn_id,
-                dirs,
-                args,
-                tools,
-                input.tool_grant.as_deref(),
-            )
-            .await
-        {
-            Ok(attempt) => attempt,
-            Err(err) => return TurnOutcome::failed(FailureCode::ProviderUnavailable, err),
-        };
-        let message_uuid = Uuid::new_v4().to_string();
-        let mut tracker = Tracker::new(self.offered_tools(tools), &profile.model, &message_uuid);
-        let ended = if sink.sending().await.is_err() {
-            Ended::Undelivered(TurnOutcome::Interrupted)
-        } else {
-            let line = user_message(&message_uuid, message_content(&turn.segments));
-            let written = tokio::select! {
-                written = attempt.write(&line) => written.map_err(|e| e.to_string()),
-                () = stop.escalated() => Err("the stop escalated during delivery".to_owned()),
-            };
-            match written {
-                Ok(()) => attempt.drive(&mut tracker, &mut turn, sink, &stop).await,
-                Err(err) => Ended::Abandoned(TurnOutcome::Uncertain {
-                    message: format!("Delivery to Claude is unknown: {err}"),
-                }),
-            }
-        };
-        attempt.conclude(ended, sink).await
     }
 }
 
-impl Claude {
-    async fn checkpoint_once(
-        &self,
-        ready: &Ready,
-        bot_id: Uuid,
-        profile: &Profile,
-        prompt_text: &str,
-        cancel: &CancellationToken,
-    ) -> Result<String, String> {
-        let session = Uuid::new_v4().to_string();
-        let mut args = self.args(
-            profile,
-            false,
-            &session,
-            prompt::CHECKPOINT_SYSTEM,
-            Tools::None,
-        );
-        args.push("--no-session-persistence".into());
-        let dirs = ready
-            .host
-            .bot_dirs(bot_id, "claude-summary")
-            .map_err(|e| e.to_string())?;
-        let mut attempt = self
-            .launch(ready, Uuid::new_v4(), dirs, args, Tools::None, None)
-            .await?;
-        let uuid = Uuid::new_v4().to_string();
-        let mut tracker = Tracker::new(Vec::new(), &profile.model, &uuid);
-        let deadline = tokio::time::Instant::now() + super::CHECKPOINT_DEADLINE;
-        let result = async {
-            let line = user_message(&uuid, Value::from(prompt_text));
-            tokio::select! {
-                _ = cancel.cancelled() => return Err("cancelled".to_owned()),
-                written = attempt.write(&line) => {
-                    written.map_err(|e| e.to_string())?;
-                }
+async fn checkpoint_once(
+    ready: &Ready<Login>,
+    bot_id: Uuid,
+    profile: &Profile,
+    prompt_text: &str,
+    cancel: &CancellationToken,
+) -> Result<String, String> {
+    let session = Uuid::new_v4().to_string();
+    let mut args = args(
+        profile,
+        false,
+        &session,
+        prompt::CHECKPOINT_SYSTEM,
+        ToolSet::None,
+    );
+    args.push("--no-session-persistence".into());
+    let dirs = ready
+        .host
+        .bot_dirs(bot_id, "claude-summary")
+        .map_err(|e| e.to_string())?;
+    let program = ready
+        .program
+        .current()
+        .await
+        .map_err(|why| format!("Could not start Claude Code: {why}"))?;
+    let env = configure(&ready.login, &dirs, &mut args, None, ToolSet::None)?;
+    let spec = LaunchSpec {
+        turn_id: Uuid::new_v4(),
+        dirs,
+        program,
+        args,
+        env,
+    };
+    let mut attempt = StreamAttempt::spawn(
+        &ready.host,
+        &spec,
+        Interrupt::Line(interrupt_request()),
+        DEFINITION.label,
+    )
+    .map_err(|e| e.to_string())?;
+    let uuid = Uuid::new_v4().to_string();
+    let mut tracker = Tracker::new(Vec::new(), &profile.model, &uuid);
+    let deadline = tokio::time::Instant::now() + super::CHECKPOINT_DEADLINE;
+    let result = async {
+        let line = user_message(&uuid, Value::from(prompt_text));
+        tokio::select! {
+            _ = cancel.cancelled() => return Err("cancelled".to_owned()),
+            written = attempt.write(&line) => {
+                written.map_err(|e| e.to_string())?;
             }
-            loop {
-                let event = tokio::select! {
-                    _ = cancel.cancelled() => return Err("cancelled".to_owned()),
-                    _ = tokio::time::sleep_until(deadline) => {
-                        return Err("the checkpoint exceeded its deadline".to_owned());
-                    }
-                    event = attempt.next() => event?,
-                };
-                let Some(event) = event else {
-                    return Err("Claude exited before the checkpoint finished".to_owned());
-                };
-                let events = tracker
-                    .on(&event)
-                    .map_err(|v| format!("{}: {}", v.code, v.message))?;
-                for event in events {
-                    if let Event::Finished(info) = event {
-                        return if !tracker.init_seen {
-                            Err("Claude did not report its tool set".into())
-                        } else if !info.success {
-                            Err(info.message)
-                        } else if tracker.text.trim().is_empty() {
-                            Ok(info.message)
-                        } else {
-                            Ok(tracker.text.clone())
-                        };
-                    }
+        }
+        loop {
+            let event = tokio::select! {
+                _ = cancel.cancelled() => return Err("cancelled".to_owned()),
+                _ = tokio::time::sleep_until(deadline) => {
+                    return Err("the checkpoint exceeded its deadline".to_owned());
+                }
+                event = attempt.next() => event?,
+            };
+            let Some(event) = event else {
+                return Err("Claude exited before the checkpoint finished".to_owned());
+            };
+            let events = tracker
+                .on(&event)
+                .map_err(|v| format!("{}: {}", v.code, v.message))?;
+            for event in events {
+                if let Event::Finished(info) = event {
+                    return if !tracker.init_seen {
+                        Err("Claude did not report its tool set".into())
+                    } else if !info.success {
+                        Err(info.message)
+                    } else if tracker.text.trim().is_empty() {
+                        Ok(info.message)
+                    } else {
+                        Ok(tracker.text.clone())
+                    };
                 }
             }
         }
-        .await;
-        let closed = attempt.close().await;
-        let text = result?;
-        closed.map(|()| text)
     }
+    .await;
+    let closed = attempt.close().await;
+    let text = result?;
+    closed.map(|()| text)
 }
 
 #[cfg(test)]

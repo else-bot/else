@@ -17,19 +17,16 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use uuid::Uuid;
 
-use super::cli::files::GRANT_ENV;
-use super::cli::session::{self, Identity, Opened, PreparedTurn};
-use super::cli::stream::{Interrupt, StreamAttempt};
+use super::cli::attempt::Ended;
+use super::cli::session::PreparedTurn;
+use super::cli::stream::{Prompt, StreamAttempt};
+use super::cli::turn::{self, Adapter, Cli, Delivery, Launch, Ready, Start, ToolSet};
 use super::definitions::Definition;
-use super::host::{BotDirs, Host, LaunchSpec, Run};
-use super::models::{Listed, Models};
-use super::{attachments, grok_home, prompt};
-use crate::app::providers::FailureCode;
-use crate::app::providers::{
-    Availability, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
-};
+use super::host::{BotDirs, Host, Run};
+use super::models::Listed;
+use super::{grok_home, prompt};
+use crate::app::providers::{FailureCode, Stop, TurnInput, TurnOutcome, TurnSink};
 use protocol::Tracker;
 
 pub const ID: &str = "grok";
@@ -54,11 +51,10 @@ fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'
     Box::pin(async move {
         let home = grok_home::host_home();
         let program = lookup(wiring.config.grok_bin.as_deref(), home.as_deref()).await;
-        let grok = Grok {
-            models: Models::new(&DEFINITION),
-            ready: Grok::ready(Some(wiring.host.clone()), program, home).await,
-            tool_url: None,
-        }
+        let grok = Grok::new(
+            GrokCli,
+            ready(Some(wiring.host.clone()), program, home).await,
+        )
         .with_tools(wiring.tool_url.clone());
         super::Built {
             provider: std::sync::Arc::new(grok),
@@ -131,19 +127,9 @@ fn is_script(path: &Path) -> bool {
         .is_ok_and(|()| &head == b"#!")
 }
 
-/// A CLI that runs, and the host's Grok home, which holds its login.
-struct Ready {
-    host: Host,
-    program: super::Program,
-    version: String,
-    login: PathBuf,
-}
+pub struct GrokCli;
 
-pub struct Grok {
-    models: Models,
-    ready: Result<Ready, String>,
-    tool_url: Option<String>,
-}
+pub type Grok = Cli<GrokCli>;
 
 impl Grok {
     pub async fn detect(
@@ -151,85 +137,101 @@ impl Grok {
         program: Option<PathBuf>,
         login: Option<PathBuf>,
     ) -> Self {
-        Self {
-            models: Models::new(&DEFINITION),
-            ready: Self::ready(host, Ok(program.map(Into::into)), login).await,
-            tool_url: None,
+        Self::new(
+            GrokCli,
+            ready(host, Ok(program.map(Into::into)), login).await,
+        )
+    }
+}
+
+/// A CLI that runs, and the host's Grok home, which holds its login.
+async fn ready(
+    host: Option<Host>,
+    program: Result<Option<super::Program>, String>,
+    login: Option<PathBuf>,
+) -> Result<Ready<PathBuf>, String> {
+    let host = host.ok_or("Grok CLI is not configured on this host.")?;
+    let program = program?.ok_or("Grok CLI (`grok`) was not found on PATH.")?;
+    let version = turn::version(&host, &program, &[], GrokCli::PRODUCT).await?;
+    let login = login.ok_or("Grok CLI's home directory is unknown on the host.")?;
+    Ok(Ready {
+        host,
+        program,
+        version,
+        login,
+    })
+}
+
+#[async_trait]
+impl Adapter for GrokCli {
+    type Login = PathBuf;
+    type Protocol = Tracker;
+
+    const DEFINITION: &'static Definition = &DEFINITION;
+    const PRODUCT: &'static str = "Grok CLI";
+    const PROMPT_VERSION: &'static str = PROMPT_VERSION;
+
+    fn unavailable(&self, ready: &Ready<PathBuf>) -> Option<String> {
+        grok_home::signed_out(&ready.login).then(|| SIGNED_OUT.into())
+    }
+
+    fn tool_tag(&self, tools: ToolSet) -> &'static str {
+        match tools {
+            ToolSet::HostAndElsebot => "tools:host+elsebot-v1",
+            ToolSet::Host => "tools:host",
+            ToolSet::Elsebot => "tools:elsebot-v1",
+            ToolSet::None => "tools:none",
         }
     }
 
-    async fn ready(
-        host: Option<Host>,
-        program: Result<Option<super::Program>, String>,
-        login: Option<PathBuf>,
-    ) -> Result<Ready, String> {
-        let host = host.ok_or("Grok CLI is not configured on this host.")?;
-        let program = program?.ok_or("Grok CLI (`grok`) was not found on PATH.")?;
-        let version = host
-            .probe(program.path(), &["--version"], &[])
-            .await
-            .map_err(|why| {
-                format!(
-                    "Grok CLI does not run (`{} --version`: {why}).",
-                    program.path().display()
-                )
-            })?;
-        let login = login.ok_or("Grok CLI's home directory is unknown on the host.")?;
-        Ok(Ready {
-            host,
-            program,
-            version,
-            login,
-        })
+    fn policy(&self, ready: &Ready<PathBuf>) -> Vec<String> {
+        vec![
+            "agents:disabled".into(),
+            grok_home::host_account(&ready.login),
+        ]
     }
 
-    pub fn with_tools(mut self, url: String) -> Self {
-        self.tool_url = Some(url);
-        self
-    }
-
-    fn fingerprint(&self, ready: &Ready, input: &TurnInput, profile: &Profile) -> String {
-        let account = grok_home::host_account(&ready.login);
-        session::fingerprint(
-            input,
-            profile,
-            &Identity {
-                prompt_version: PROMPT_VERSION,
-                version: &ready.version,
-                runtime: &ready.host.runtime(input.bot_id),
-                tools: match (input.delegation.host_tools(), self.tool_url.is_some()) {
-                    (true, true) => "tools:host+elsebot-v1",
-                    (true, false) => "tools:host",
-                    (false, true) => "tools:elsebot-v1",
-                    (false, false) => "tools:none",
-                },
-                policy: &["agents:disabled", &account],
-            },
-        )
+    fn session_exists(
+        &self,
+        _: &Ready<PathBuf>,
+        dirs: &BotDirs,
+        workspace: &Path,
+        id: &str,
+    ) -> bool {
+        grok_home::session_exists(&dirs.provider_home, workspace, id)
     }
 
     async fn launch(
         &self,
-        ready: &Ready,
-        input: &TurnInput,
-        profile: &Profile,
-        dirs: BotDirs,
-        turn: &PreparedTurn<'_>,
-    ) -> Result<LaunchSpec, String> {
-        let program = ready
-            .program
-            .current()
-            .await
-            .map_err(|why| format!("Could not start Grok CLI: {why}"))?;
-        let host_tools = input.delegation.host_tools();
+        ready: &Ready<PathBuf>,
+        start: Start<'_>,
+    ) -> Result<Launch<Tracker>, String> {
+        let Start {
+            input,
+            profile,
+            dirs,
+            tools,
+            tool_url,
+            turn,
+            ..
+        } = start;
+        grok_home::prepare(
+            dirs,
+            &ready.login,
+            &profile.model,
+            tool_url,
+            &turn.packet,
+            tools.host(),
+        )
+        .map_err(|e| e.to_string())?;
         let system = format!(
             "{}\n{}",
             prompt::instructions(input, &dirs.project.to_string_lossy()),
             tool_note(),
         );
-        let mut tools = grok_home::MCP_TOOLS.to_vec();
-        if host_tools {
-            tools.extend(grok_home::HOST_TOOLS.iter().map(|(flag, _)| *flag));
+        let mut offered = grok_home::MCP_TOOLS.to_vec();
+        if tools.host() {
+            offered.extend(grok_home::HOST_TOOLS.iter().map(|(flag, _)| *flag));
         }
         let mut args: Vec<OsString> = [
             "--output-format",
@@ -240,7 +242,7 @@ impl Grok {
             "--reasoning-effort",
             &profile.reasoning_effort,
             "--tools",
-            &tools.join(","),
+            &offered.join(","),
             "--no-subagents",
             "--no-plan",
             "--disable-web-search",
@@ -263,147 +265,41 @@ impl Grok {
             .into(),
             turn.native_id().into(),
         ]);
-        if host_tools {
+        if tools.host() {
             args.push("--always-approve".into());
         } else {
             args.extend(["--permission-mode".into(), "dontAsk".into()]);
         }
-        let mut env = grok_home::env(&dirs.provider_home);
-        if let (Some(_), Some(grant)) = (&self.tool_url, &input.tool_grant) {
-            env.push((GRANT_ENV.into(), grant.clone()));
-        }
-        Ok(LaunchSpec {
-            turn_id: input.turn_id,
-            dirs,
-            program,
+        Ok(Launch {
             args,
-            env,
+            env: grok_home::env(&dirs.provider_home),
+            delivery: Delivery::Launch,
+            protocol: Tracker::new(&profile.model, turn.native_id(), tools),
         })
     }
-}
 
-#[async_trait]
-impl Provider for Grok {
-    fn id(&self) -> &'static str {
-        ID
-    }
-    fn label(&self) -> &'static str {
-        DEFINITION.label
-    }
-    fn project_dir(&self, bot_id: Uuid) -> Option<PathBuf> {
-        self.ready
-            .as_ref()
-            .ok()
-            .map(|r| r.host.project_path(bot_id))
-    }
-    fn availability(&self) -> Availability {
-        match &self.ready {
-            Ok(ready) if grok_home::signed_out(&ready.login) => {
-                Availability::Unavailable(SIGNED_OUT.into())
-            }
-            Ok(_) => Availability::Available,
-            Err(reason) => Availability::Unavailable(reason.clone()),
-        }
-    }
-    fn uses_profile(&self) -> bool {
-        true
-    }
-    fn validate_profile(&self, profile: &Profile) -> Result<(), String> {
-        self.models.validate(profile)
-    }
-    fn models(&self) -> Option<&Models> {
-        Some(&self.models)
-    }
-    async fn list_models(&self) -> Result<Vec<Listed>, String> {
-        let ready = self.ready.as_ref().map_err(Clone::clone)?;
-        let run = Run {
-            timeout: super::models::ASK_TIMEOUT,
-            ..Run::new(&ready.program.current().await?, &["models"])
-        };
-        let printed = ready
-            .host
-            .run(&run)
-            .await
-            .map_err(|why| format!("`grok models` failed: {why}"))?;
-        let printed = String::from_utf8(printed).map_err(|_| "`grok models` printed non-UTF-8")?;
-        listed_models(&printed)
+    async fn drive(
+        &self,
+        attempt: &mut StreamAttempt,
+        _: Prompt,
+        protocol: &mut Tracker,
+        turn: &mut PreparedTurn<'_>,
+        sink: &dyn TurnSink,
+        stop: &Stop,
+    ) -> Ended {
+        attempt.drive(protocol, turn, sink, stop).await
     }
 
-    async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
-        let ready = match &self.ready {
-            Ok(ready) => ready,
-            Err(reason) => {
-                return TurnOutcome::failed(FailureCode::ProviderUnavailable, reason.clone());
-            }
-        };
-        if grok_home::signed_out(&ready.login) {
-            return TurnOutcome::failed(FailureCode::ProviderUnavailable, SIGNED_OUT);
-        }
-        let Some(profile) = &input.profile else {
-            return TurnOutcome::failed(
-                FailureCode::ProviderMisconfigured,
-                "No execution profile was snapshotted.",
-            );
-        };
-        if let Err(reason) = self.models.validate(profile) {
-            return TurnOutcome::failed(FailureCode::InvalidProfile, reason);
-        }
-        if stop.is_requested() {
-            return TurnOutcome::Interrupted;
-        }
-        let dirs = match ready.host.bot_dirs(input.bot_id, ID) {
-            Ok(dirs) => dirs,
-            Err(e) => return TurnOutcome::failed(FailureCode::ProviderUnavailable, e.to_string()),
-        };
-        let fingerprint = self.fingerprint(ready, &input, profile);
-        let opened = match input.session.as_ref().filter(|s| {
-            s.fingerprint == fingerprint
-                && grok_home::session_exists(&dirs.provider_home, &dirs.project, &s.native_id)
-        }) {
-            Some(session) => Opened::Resumed(session),
-            None => Opened::Fresh(Uuid::new_v4().to_string()),
-        };
-        let mut turn = PreparedTurn::new(&input, fingerprint, opened);
-        if turn.record(sink).await.is_err() {
-            return TurnOutcome::Interrupted;
-        }
-        if let Err(e) = attachments::stage(&dirs.project, &input.files).await {
-            return TurnOutcome::failed(FailureCode::AttachmentUnavailable, e.to_string());
-        }
-        let host_tools = input.delegation.host_tools();
-        if let Err(e) = grok_home::prepare(
-            &dirs,
-            &ready.login,
-            &profile.model,
-            self.tool_url.as_deref(),
-            &turn.packet,
-            host_tools,
-        ) {
-            return TurnOutcome::failed(FailureCode::ProviderUnavailable, e.to_string());
-        }
-        let spec = match self.launch(ready, &input, profile, dirs, &turn).await {
-            Ok(spec) => spec,
-            Err(why) => return TurnOutcome::failed(FailureCode::ProviderUnavailable, why),
-        };
-        if sink.sending().await.is_err() {
-            return TurnOutcome::Interrupted;
-        }
-        let mut attempt = match StreamAttempt::spawn(&ready.host, &spec, Interrupt::Signal, "Grok")
-        {
-            Ok(attempt) => attempt,
-            Err(e) => return TurnOutcome::failed(FailureCode::ProviderUnavailable, e.to_string()),
-        };
-        let mut tracker = Tracker::new(
-            &profile.model,
-            turn.native_id(),
-            host_tools,
-            self.tool_url.is_some(),
-        );
-        let ended = attempt.drive(&mut tracker, &mut turn, sink, &stop).await;
-        let outcome = attempt.conclude(ended, sink).await;
-        // Grok clears the host login in the run it fails for want of one,
-        // before it acknowledges the prompt, so nothing of the turn ran.
-        let unacknowledged = !turn.accepted()
+    /// Grok clears the host login in the run it fails for want of one,
+    /// before it acknowledges the prompt, so nothing of the turn ran.
+    fn concluded(
+        &self,
+        ready: &Ready<PathBuf>,
+        input: &TurnInput,
+        accepted: bool,
+        outcome: TurnOutcome,
+    ) -> TurnOutcome {
+        let unacknowledged = !accepted
             && matches!(
                 outcome,
                 TurnOutcome::Failed {
@@ -417,6 +313,20 @@ impl Provider for Grok {
         }
         outcome
     }
+
+    async fn list_models(&self, ready: &Ready<PathBuf>) -> Result<Vec<Listed>, String> {
+        let run = Run {
+            timeout: super::models::ASK_TIMEOUT,
+            ..Run::new(&ready.program.current().await?, &["models"])
+        };
+        let printed = ready
+            .host
+            .run(&run)
+            .await
+            .map_err(|why| format!("`grok models` failed: {why}"))?;
+        let printed = String::from_utf8(printed).map_err(|_| "`grok models` printed non-UTF-8")?;
+        listed_models(&printed)
+    }
 }
 
 /// How Grok reaches else.bot's tools, appended to the shared instructions.
@@ -428,4 +338,4 @@ pub(crate) fn tool_note() -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

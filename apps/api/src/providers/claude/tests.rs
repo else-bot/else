@@ -1,26 +1,27 @@
 use super::*;
+use crate::app::providers::{Availability, Provider, TurnInput, TurnOutcome};
 use crate::app::providers::{FailureCode, MemoryContext, SessionState};
 use crate::providers::cli::attempt::StopCause;
+use crate::providers::models::Models;
 use protocol::ResultInfo;
 
 type Emitted = Vec<Event<ResultInfo>>;
 
 impl Claude {
     fn offline(account: &str) -> Self {
-        Self {
-            models: Models::new(&DEFINITION),
-            ready: Ok(Ready {
-                host: Host::new(std::path::Path::new("/data"), std::path::Path::new("/bots")),
-                program: PathBuf::new().into(),
+        let ready = Ready {
+            host: Host::new(std::path::Path::new("/data"), std::path::Path::new("/bots")),
+            program: PathBuf::new().into(),
+            version: "2.1.999 (Claude Code)".into(),
+            login: Login {
                 config: claude_home::HostConfig {
                     dir: PathBuf::new(),
                     explicit: false,
                 },
                 account: account.into(),
-                version: "2.1.999 (Claude Code)".into(),
-            }),
-            tool_url: Some("http://127.0.0.1:1/tools/v1/mcp".into()),
-        }
+            },
+        };
+        Self::new(ClaudeCode, Ok(ready)).with_tools("http://127.0.0.1:1/tools/v1/mcp".into())
     }
 }
 
@@ -435,16 +436,12 @@ async fn profiles_need_explicit_supported_values() {
 
 #[tokio::test]
 async fn arguments_offer_only_host_and_elsebot_tools_and_resume_explicitly() {
-    let claude = Claude::detect(None, None, None, String::new())
-        .await
-        .with_tools("http://127.0.0.1:1/tools/v1/mcp".into());
     let profile = Profile {
         model: "claude-sonnet-5-5".into(),
         reasoning_effort: "medium".into(),
         service_tier: "default".into(),
     };
-    let args: Vec<String> = claude
-        .args(&profile, true, "abc", "SYSTEM", Tools::HostAndElsebot)
+    let args: Vec<String> = args(&profile, true, "abc", "SYSTEM", ToolSet::HostAndElsebot)
         .into_iter()
         .map(|a| a.into_string().unwrap())
         .collect();
@@ -460,7 +457,7 @@ async fn arguments_offer_only_host_and_elsebot_tools_and_resume_explicitly() {
         .split(',')
         .map(str::to_owned)
         .collect();
-    assert_eq!(allowed, claude.offered_tools(Tools::HostAndElsebot));
+    assert_eq!(allowed, offered_tools(ToolSet::HostAndElsebot));
     assert!(allowed.iter().all(|t| {
         claude_home::HOST_TOOLS.contains(&t.as_str()) || t.starts_with("mcp__elsebot__")
     }));
@@ -1074,10 +1071,8 @@ fn a_connector_event_never_resumes_a_session_with_host_tools() {
     );
 }
 
-pub(crate) fn pinned_fingerprints() -> [(crate::app::providers::Origin, &'static str, String); 2] {
-    use crate::app::providers::Origin;
-
-    let claude = Claude::offline("acct:org");
+pub(crate) fn pinned_fingerprints() -> Vec<(String, &'static str, String)> {
+    let mut claude = Claude::offline("acct:org");
     let mut input = specialist_turn(None);
     input.bot_id = Uuid::nil();
     input.bot_name = "Golden".into();
@@ -1087,19 +1082,21 @@ pub(crate) fn pinned_fingerprints() -> [(crate::app::providers::Origin, &'static
         reasoning_effort: "high".into(),
         service_tier: "default".into(),
     };
-    let ready = claude.ready.as_ref().unwrap();
-    [
-        (Origin::OwnerRequest, "cc42a604e8a55ac941b487a5da1aec2c"),
-        (Origin::ConnectorEvent, "b0de700ec963e25e9bede87eedadc0fc"),
-    ]
-    .map(|(origin, expected)| {
-        input.delegation.origin = origin;
-        (
-            origin,
-            expected,
-            claude.fingerprint(ready, &profile, &input),
-        )
-    })
+    crate::providers::fingerprints::each_case(
+        &mut input,
+        [
+            "cc42a604e8a55ac941b487a5da1aec2c",
+            "b0de700ec963e25e9bede87eedadc0fc",
+            "1b03e3d631aca27de958e9ace0c63a34",
+            "39ea0d905d81ac43c79d8298858119ce",
+        ],
+        |input, tools| {
+            if !tools {
+                claude.tool_url = None;
+            }
+            claude.fingerprint(claude.ready.as_ref().unwrap(), &profile, input)
+        },
+    )
 }
 
 #[test]

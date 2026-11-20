@@ -22,23 +22,19 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
-use uuid::Uuid;
+use serde_json::Value;
 
-use super::cli::attempt::{self, Channel};
-use super::cli::files::GRANT_ENV;
-use super::cli::session::{self, Identity, Opened, PreparedTurn};
+use super::cli::attempt::{self, Channel, Ended};
+use super::cli::session::PreparedTurn;
 use super::cli::stream::{Prompt, StreamAttempt};
+use super::cli::turn::{self, Adapter, Cli, Delivery, Launch, Ready, Start, ToolSet};
 use super::cursor_home::{self, Login};
 use super::definitions::Definition;
-use super::host::{BotDirs, Host, LaunchSpec, Run};
-use super::models::{Listed, Models};
-use super::{attachments, prompt};
-use crate::app::providers::FailureCode;
-use crate::app::providers::{
-    Availability, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
-};
-use protocol::Tracker;
+use super::host::{BotDirs, Host, Run};
+use super::models::Listed;
+use super::prompt;
+use crate::app::providers::{Stop, TurnInput, TurnSink};
+use protocol::{Message, Tracker};
 
 pub const ID: &str = "cursor";
 const PROMPT_VERSION: &str = "else-cursor-v2";
@@ -64,11 +60,11 @@ fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'
             std::env::var_os("HOME").map(PathBuf::from).as_deref(),
         )
         .await;
-        let cursor = Cursor {
-            models: Models::new(&DEFINITION),
-            ready: Cursor::ready(Some(wiring.host.clone()), program, Login::host()).await,
-            tool_url: Some(wiring.tool_url.clone()),
-        };
+        let cursor = Cursor::new(
+            CursorCli,
+            ready(Some(wiring.host.clone()), program, Login::host()).await,
+        )
+        .with_tools(wiring.tool_url.clone());
         super::Built {
             provider: std::sync::Arc::new(cursor),
             summarizer: None,
@@ -123,149 +119,45 @@ fn listed_models(printed: &str) -> Vec<Listed> {
         .collect()
 }
 
-/// A CLI that runs and is new enough, and how it finds the host's login.
-struct Ready {
-    host: Host,
-    program: super::Program,
-    version: String,
-    login: Login,
-}
+pub struct CursorCli;
 
-pub struct Cursor {
-    models: Models,
-    ready: Result<Ready, String>,
-    tool_url: Option<String>,
-}
+pub type Cursor = Cli<CursorCli>;
 
 impl Cursor {
     pub async fn detect(host: Option<Host>, program: Option<PathBuf>, login: Login) -> Self {
-        Self {
-            models: Models::new(&DEFINITION),
-            ready: Self::ready(host, Ok(program.map(Into::into)), login).await,
-            tool_url: None,
-        }
-    }
-
-    async fn ready(
-        host: Option<Host>,
-        program: Result<Option<super::Program>, String>,
-        login: Login,
-    ) -> Result<Ready, String> {
-        let host = host.ok_or("Cursor CLI is not configured on this host.")?;
-        let program = program?.ok_or(cursor_home::NOT_INSTALLED)?;
-        let version = host
-            .probe(program.path(), &["--version"], &[])
-            .await
-            .map_err(|why| {
-                format!(
-                    "Cursor CLI does not run (`{} --version`: {why}).",
-                    program.path().display()
-                )
-            })?;
-        if !cursor_home::supported(&version) {
-            return Err(format!(
-                "Cursor CLI {version} is older than {}. Run `cursor-agent update` on this server.",
-                cursor_home::MIN_VERSION
-            ));
-        }
-        Ok(Ready {
-            host,
-            program,
-            version,
-            login,
-        })
-    }
-
-    pub fn with_tools(mut self, url: String) -> Self {
-        self.tool_url = Some(url);
-        self
-    }
-
-    fn fingerprint(&self, ready: &Ready, input: &TurnInput, profile: &Profile) -> String {
-        let account = ready
-            .login
-            .file
-            .as_deref()
-            .map(cursor_home::host_account)
-            .unwrap_or_default();
-        session::fingerprint(
-            input,
-            profile,
-            &Identity {
-                prompt_version: PROMPT_VERSION,
-                version: &ready.version,
-                runtime: &ready.host.runtime(input.bot_id),
-                tools: match (input.delegation.host_tools(), self.tool_url.is_some()) {
-                    (true, true) => "tools:host+elsebot-v1",
-                    (true, false) => "tools:host",
-                    (false, true) => "tools:elsebot-v1",
-                    (false, false) => "tools:none",
-                },
-                policy: &["agents:disabled", "home:bot", &account],
-            },
+        Self::new(
+            CursorCli,
+            ready(host, Ok(program.map(Into::into)), login).await,
         )
     }
+}
 
-    async fn launch(
-        &self,
-        ready: &Ready,
-        input: &TurnInput,
-        profile: &Profile,
-        mut dirs: BotDirs,
-        workspace: PathBuf,
-        turn: &PreparedTurn<'_>,
-    ) -> Result<LaunchSpec, String> {
-        let program = ready
-            .program
-            .current()
-            .await
-            .map_err(|why| format!("Could not start Cursor CLI: {why}"))?;
-        let mut args: Vec<OsString> = [
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--stream-partial-output",
-            "--trust",
-            "--disable-project-configs",
-            "--workspace",
-            &workspace.to_string_lossy(),
-            "--sandbox",
-            "disabled",
-            "--allowed-tools",
-            &protocol::allowed_tools(input.delegation.host_tools(), self.tool_url.is_some()),
-            "--model",
-            &profile.model,
-        ]
-        .iter()
-        .map(OsString::from)
-        .collect();
-        args.extend([
-            if turn.resumed() {
-                "--resume"
-            } else {
-                "--new-session-id"
-            }
-            .into(),
-            turn.native_id().into(),
-        ]);
-        dirs.project = workspace;
-        let mut env = cursor_home::env(&dirs.provider_home, &ready.login);
-        if let (Some(_), Some(grant)) = (&self.tool_url, &input.tool_grant) {
-            env.push((GRANT_ENV.into(), grant.clone()));
-        }
-        Ok(LaunchSpec {
-            turn_id: input.turn_id,
-            dirs,
-            program,
-            args,
-            env,
-        })
+/// A CLI that runs and is new enough, and how it finds the host's login.
+async fn ready(
+    host: Option<Host>,
+    program: Result<Option<super::Program>, String>,
+    login: Login,
+) -> Result<Ready<Login>, String> {
+    let host = host.ok_or("Cursor CLI is not configured on this host.")?;
+    let program = program?.ok_or(cursor_home::NOT_INSTALLED)?;
+    let version = turn::version(&host, &program, &[], CursorCli::PRODUCT).await?;
+    if !cursor_home::supported(&version) {
+        return Err(format!(
+            "Cursor CLI {version} is older than {}. Run `cursor-agent update` on this server.",
+            cursor_home::MIN_VERSION
+        ));
     }
+    Ok(Ready {
+        host,
+        program,
+        version,
+        login,
+    })
 }
 
 /// The attempt, reporting how the CLI exited: Cursor writes no result
 /// after an error or SIGINT, and writes its result before storing the chat,
-/// so the result is held until the exit and carries its `exit_code`.
+/// so the result is held until the exit and carries its exit code.
 struct Running<'a> {
     attempt: &'a mut StreamAttempt,
     phase: Phase,
@@ -297,9 +189,9 @@ const SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[async_trait]
 impl Channel for Running<'_> {
-    type Message = Value;
+    type Message = Message;
 
-    async fn next(&mut self) -> Result<Option<Value>, String> {
+    async fn next(&mut self) -> Result<Option<Message>, String> {
         use std::os::unix::process::ExitStatusExt;
         loop {
             let next = match &self.phase {
@@ -309,7 +201,12 @@ impl Channel for Running<'_> {
                 Phase::Settling(_, deadline) => {
                     match tokio::time::timeout_at(*deadline, self.attempt.next()).await {
                         Ok(next) => next?,
-                        Err(_) => return Ok(self.exit()),
+                        Err(_) => {
+                            return Ok(self.exit().map(|event| Message::Result {
+                                event,
+                                exit_code: None,
+                            }));
+                        }
                     }
                 }
             };
@@ -319,7 +216,7 @@ impl Channel for Running<'_> {
                 {
                     self.phase = Phase::Settling(event, tokio::time::Instant::now() + SETTLE);
                 }
-                Some(event) => return Ok(Some(event)),
+                Some(event) => return Ok(Some(Message::Event(event))),
                 None => {
                     let exited = self.attempt.exited();
                     let (status, stderr) = match &self.phase {
@@ -332,16 +229,15 @@ impl Channel for Running<'_> {
                     };
                     let code = status.and_then(|s| s.code());
                     return Ok(Some(match self.exit() {
-                        Some(mut result) => {
-                            result["exit_code"] = json!(code);
-                            result
-                        }
-                        None => json!({
-                            "type": "exit",
-                            "code": code,
-                            "signal": status.and_then(|s| s.signal()),
-                            "stderr": stderr,
-                        }),
+                        Some(event) => Message::Result {
+                            event,
+                            exit_code: code,
+                        },
+                        None => Message::Exit {
+                            code,
+                            signal: status.and_then(|s| s.signal()),
+                            stderr,
+                        },
                     }));
                 }
             }
@@ -354,39 +250,127 @@ impl Channel for Running<'_> {
 }
 
 #[async_trait]
-impl Provider for Cursor {
-    fn id(&self) -> &'static str {
-        ID
+impl Adapter for CursorCli {
+    type Login = Login;
+    type Protocol = Tracker;
+
+    const DEFINITION: &'static Definition = &DEFINITION;
+    const PRODUCT: &'static str = "Cursor CLI";
+    const PROMPT_VERSION: &'static str = PROMPT_VERSION;
+
+    fn unavailable(&self, ready: &Ready<Login>) -> Option<String> {
+        cursor_home::signed_out(ready.login.file.as_deref()).then(|| cursor_home::SIGNED_OUT.into())
     }
-    fn label(&self) -> &'static str {
-        DEFINITION.label
-    }
-    fn project_dir(&self, bot_id: Uuid) -> Option<PathBuf> {
-        self.ready
-            .as_ref()
-            .ok()
-            .map(|r| r.host.project_path(bot_id))
-    }
-    fn availability(&self) -> Availability {
-        match &self.ready {
-            Ok(ready) if cursor_home::signed_out(ready.login.file.as_deref()) => {
-                Availability::Unavailable(cursor_home::SIGNED_OUT.into())
-            }
-            Ok(_) => Availability::Available,
-            Err(reason) => Availability::Unavailable(reason.clone()),
+
+    fn tool_tag(&self, tools: ToolSet) -> &'static str {
+        match tools {
+            ToolSet::HostAndElsebot => "tools:host+elsebot-v1",
+            ToolSet::Host => "tools:host",
+            ToolSet::Elsebot => "tools:elsebot-v1",
+            ToolSet::None => "tools:none",
         }
     }
-    fn uses_profile(&self) -> bool {
-        true
+
+    fn policy(&self, ready: &Ready<Login>) -> Vec<String> {
+        let account = ready
+            .login
+            .file
+            .as_deref()
+            .map(cursor_home::host_account)
+            .unwrap_or_default();
+        vec!["agents:disabled".into(), "home:bot".into(), account]
     }
-    fn validate_profile(&self, profile: &Profile) -> Result<(), String> {
-        self.models.validate(profile)
+
+    /// Owner turns start in the bot's project; other turns in a private
+    /// workspace, so nothing a guest wrote there loads.
+    fn workspace(&self, dirs: &BotDirs, tools: ToolSet) -> std::io::Result<PathBuf> {
+        if tools.host() {
+            Ok(dirs.project.clone())
+        } else {
+            cursor_home::private_workspace(&dirs.provider_home)
+        }
     }
-    fn models(&self) -> Option<&Models> {
-        Some(&self.models)
+
+    fn session_exists(&self, _: &Ready<Login>, dirs: &BotDirs, workspace: &Path, id: &str) -> bool {
+        cursor_home::session_exists(&dirs.provider_home, workspace, id)
     }
-    async fn list_models(&self) -> Result<Vec<Listed>, String> {
-        let ready = self.ready.as_ref().map_err(Clone::clone)?;
+
+    fn prepare_packet(&self, turn: &mut PreparedTurn<'_>, input: &TurnInput, dirs: &BotDirs) {
+        turn.lead_once(INSTRUCTIONS, instructions(input, &dirs.project));
+    }
+
+    async fn launch(
+        &self,
+        ready: &Ready<Login>,
+        start: Start<'_>,
+    ) -> Result<Launch<Tracker>, String> {
+        let Start {
+            profile,
+            dirs,
+            workspace,
+            tools,
+            tool_url,
+            turn,
+            ..
+        } = start;
+        cursor_home::prepare(dirs, &ready.login, tool_url, tools.host())
+            .map_err(|e| e.to_string())?;
+        let mut args: Vec<OsString> = [
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--stream-partial-output",
+            "--trust",
+            "--disable-project-configs",
+            "--workspace",
+            &workspace.to_string_lossy(),
+            "--sandbox",
+            "disabled",
+            "--allowed-tools",
+            &protocol::allowed_tools(tools),
+            "--model",
+            &profile.model,
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        args.extend([
+            if turn.resumed() {
+                "--resume"
+            } else {
+                "--new-session-id"
+            }
+            .into(),
+            turn.native_id().into(),
+        ]);
+        Ok(Launch {
+            args,
+            env: cursor_home::env(&dirs.provider_home, &ready.login),
+            delivery: Delivery::Stdin(turn.packet.clone()),
+            protocol: Tracker::new(&profile.model, turn.native_id(), tools),
+        })
+    }
+
+    async fn drive(
+        &self,
+        attempt: &mut StreamAttempt,
+        prompt: Prompt,
+        protocol: &mut Tracker,
+        turn: &mut PreparedTurn<'_>,
+        sink: &dyn TurnSink,
+        stop: &Stop,
+    ) -> Ended {
+        let mut running = Running {
+            attempt,
+            phase: match prompt {
+                Prompt::Written => Phase::Streaming,
+                Prompt::Refused => Phase::Refused(tokio::time::Instant::now() + SETTLE),
+            },
+        };
+        attempt::drive(&mut running, protocol, turn, sink, stop, DEFINITION.label).await
+    }
+
+    async fn list_models(&self, ready: &Ready<Login>) -> Result<Vec<Listed>, String> {
         // Listing runs no agent, so it reads the host login where it is.
         let mut env = vec![("NO_COLOR".to_owned(), "1".to_owned())];
         if let Some(store) = &ready.login.store {
@@ -418,110 +402,6 @@ impl Provider for Cursor {
             listed => Ok(listed),
         }
     }
-
-    async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
-        let ready = match &self.ready {
-            Ok(ready) => ready,
-            Err(reason) => {
-                return TurnOutcome::failed(FailureCode::ProviderUnavailable, reason.clone());
-            }
-        };
-        if cursor_home::signed_out(ready.login.file.as_deref()) {
-            return TurnOutcome::failed(FailureCode::ProviderUnavailable, cursor_home::SIGNED_OUT);
-        }
-        let Some(profile) = &input.profile else {
-            return TurnOutcome::failed(
-                FailureCode::ProviderMisconfigured,
-                "No execution profile was snapshotted.",
-            );
-        };
-        if let Err(reason) = self.models.validate(profile) {
-            return TurnOutcome::failed(FailureCode::InvalidProfile, reason);
-        }
-        if stop.is_requested() {
-            return TurnOutcome::Interrupted;
-        }
-        let dirs = match ready.host.bot_dirs(input.bot_id, ID) {
-            Ok(dirs) => dirs,
-            Err(e) => return TurnOutcome::failed(FailureCode::ProviderUnavailable, e.to_string()),
-        };
-        let host_tools = input.delegation.host_tools();
-        let workspace = if host_tools {
-            dirs.project.clone()
-        } else {
-            match cursor_home::private_workspace(&dirs.provider_home) {
-                Ok(workspace) => workspace,
-                Err(e) => {
-                    return TurnOutcome::failed(FailureCode::ProviderUnavailable, e.to_string());
-                }
-            }
-        };
-        let fingerprint = self.fingerprint(ready, &input, profile);
-        let opened = match input.session.as_ref().filter(|s| {
-            s.fingerprint == fingerprint
-                && cursor_home::session_exists(&dirs.provider_home, &workspace, &s.native_id)
-        }) {
-            Some(session) => Opened::Resumed(session),
-            None => Opened::Fresh(Uuid::new_v4().to_string()),
-        };
-        let mut turn = PreparedTurn::new(&input, fingerprint, opened);
-        turn.lead_once(INSTRUCTIONS, instructions(&input, &dirs.project));
-        if turn.record(sink).await.is_err() {
-            return TurnOutcome::Interrupted;
-        }
-        if let Err(e) = attachments::stage(&dirs.project, &input.files).await {
-            return TurnOutcome::failed(FailureCode::AttachmentUnavailable, e.to_string());
-        }
-        if let Err(e) =
-            cursor_home::prepare(&dirs, &ready.login, self.tool_url.as_deref(), host_tools)
-        {
-            return TurnOutcome::failed(FailureCode::ProviderUnavailable, e.to_string());
-        }
-        let spec = match self
-            .launch(ready, &input, profile, dirs, workspace, &turn)
-            .await
-        {
-            Ok(spec) => spec,
-            Err(why) => return TurnOutcome::failed(FailureCode::ProviderUnavailable, why),
-        };
-        if sink.sending().await.is_err() {
-            return TurnOutcome::Interrupted;
-        }
-        let (mut attempt, prompt) = match StreamAttempt::spawn_with_prompt(
-            &ready.host,
-            &spec,
-            &turn.packet,
-            DEFINITION.label,
-        )
-        .await
-        {
-            Ok(attempt) => attempt,
-            Err(e) => return TurnOutcome::failed(FailureCode::ProviderUnavailable, e.to_string()),
-        };
-        let mut tracker = Tracker::new(
-            &profile.model,
-            turn.native_id(),
-            host_tools,
-            self.tool_url.is_some(),
-        );
-        let mut running = Running {
-            attempt: &mut attempt,
-            phase: match prompt {
-                Prompt::Written => Phase::Streaming,
-                Prompt::Refused => Phase::Refused(tokio::time::Instant::now() + SETTLE),
-            },
-        };
-        let ended = attempt::drive(
-            &mut running,
-            &mut tracker,
-            &mut turn,
-            sink,
-            &stop,
-            DEFINITION.label,
-        )
-        .await;
-        attempt.conclude(ended, sink).await
-    }
 }
 
 /// The shared instructions, given in the packet: most accounts cannot
@@ -537,4 +417,4 @@ fn instructions(input: &TurnInput, project: &Path) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

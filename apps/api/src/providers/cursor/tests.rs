@@ -4,11 +4,24 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::*;
+use crate::app::providers::{Availability, Profile, Provider, TurnOutcome};
 use crate::app::providers::{FailureCode, Fenced, Origin, Selection, SessionState, Steer};
-use crate::providers::cli::attempt::{Event, Protocol, StopCause};
+use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 use protocol::Terminal;
+use uuid::Uuid;
 
 const MODEL: &str = "composer-2";
+
+/// Feed the tracker one stream-json event.
+trait OnEvent {
+    fn on_event(&mut self, event: &Value) -> Result<Vec<Event<Terminal>>, Violation>;
+}
+
+impl OnEvent for Tracker {
+    fn on_event(&mut self, event: &Value) -> Result<Vec<Event<Terminal>>, Violation> {
+        self.on(&Message::Event(event.clone()))
+    }
+}
 
 /// Cursor CLI 2026.08.11's print mode, reduced to what the adapter reads.
 /// The prompt's markers pick a scenario; every launch is logged beside it.
@@ -656,10 +669,10 @@ fn models_are_read_from_the_listing() {
 }
 
 fn tracker(host: bool) -> Tracker {
-    let mut t = Tracker::new(MODEL, "chat", host, true);
-    t.on(&json!({"type":"system","subtype":"init","session_id":"chat","model":"Composer 2"}))
+    let mut t = Tracker::new(MODEL, "chat", ToolSet::new(host, true));
+    t.on_event(&json!({"type":"system","subtype":"init","session_id":"chat","model":"Composer 2"}))
         .unwrap();
-    t.on(&json!({"type":"user","session_id":"chat","message":{"content":[]}}))
+    t.on_event(&json!({"type":"user","session_id":"chat","message":{"content":[]}}))
         .unwrap();
     t
 }
@@ -678,38 +691,38 @@ fn a_delta_that_repeats_the_text_so_far_is_held_until_the_next_event() {
     let ts = json!({"timestamp_ms": 1});
     let mut t = tracker(true);
     assert_eq!(
-        t.on(&said("ab", ts.clone())),
+        t.on_event(&said("ab", ts.clone())),
         Ok(vec![Event::Text("ab".into())])
     );
     assert_eq!(
-        t.on(&said("ab", ts.clone())),
+        t.on_event(&said("ab", ts.clone())),
         Ok(vec![]),
         "a flush or a delta"
     );
     assert_eq!(
-        t.on(&said("c", ts.clone())),
+        t.on_event(&said("c", ts.clone())),
         Ok(vec![Event::Text("ab".into()), Event::Text("c".into())]),
         "a delta"
     );
-    assert_eq!(t.on(&said("ababc", ts.clone())), Ok(vec![]));
+    assert_eq!(t.on_event(&said("ababc", ts.clone())), Ok(vec![]));
     assert_eq!(
-        t.on(&json!({"type":"retry","subtype":"starting","session_id":"chat"})),
+        t.on_event(&json!({"type":"retry","subtype":"starting","session_id":"chat"})),
         Ok(vec![Event::EndMessage]),
         "a flush before a retry"
     );
     assert_eq!(
-        t.on(&said("d", ts.clone())),
+        t.on_event(&said("d", ts.clone())),
         Ok(vec![Event::Text("d".into())])
     );
     assert_eq!(
-        t.on(&said("d", json!({}))),
+        t.on_event(&said("d", json!({}))),
         Ok(vec![Event::EndMessage]),
         "a flush without a timestamp"
     );
-    t.on(&said("e", ts.clone())).unwrap();
-    assert_eq!(t.on(&said("e", ts.clone())), Ok(vec![]));
+    t.on_event(&said("e", ts.clone())).unwrap();
+    assert_eq!(t.on_event(&said("e", ts.clone())), Ok(vec![]));
     assert_eq!(
-        t.on(&json!({"type":"interaction_query","subtype":"request",
+        t.on_event(&json!({"type":"interaction_query","subtype":"request",
             "query_type":"askQuestionInteractionQuery","session_id":"chat"})),
         Ok(vec![Event::EndMessage]),
         "a flush before a question"
@@ -720,7 +733,7 @@ fn a_delta_that_repeats_the_text_so_far_is_held_until_the_next_event() {
 fn a_web_request_violates_every_turns_policy() {
     for query in ["webSearchRequestQuery", "webFetchRequestQuery"] {
         let violation = tracker(true)
-            .on(&json!({"type":"interaction_query","subtype":"request",
+            .on_event(&json!({"type":"interaction_query","subtype":"request",
                 "query_type":query,"session_id":"chat"}))
             .unwrap_err();
         assert_eq!(violation.code, FailureCode::PolicyViolation);
@@ -739,17 +752,20 @@ fn a_tool_call_outside_the_turns_policy_violates_it() {
             json!({"providerIdentifier": server, "toolName": tool}),
         )
     };
-    assert_eq!(tracker(false).on(&mcp("elsebot", "find_tool")), Ok(vec![]));
     assert_eq!(
-        tracker(false).on(&call("updateTodosToolCall", json!({}))),
+        tracker(false).on_event(&mcp("elsebot", "find_tool")),
         Ok(vec![])
     );
     assert_eq!(
-        tracker(true).on(&call("shellToolCall", json!({}))),
+        tracker(false).on_event(&call("updateTodosToolCall", json!({}))),
         Ok(vec![])
     );
     assert_eq!(
-        tracker(false).on(&call("getMcpToolsToolCall", json!({"server": "elsebot"}))),
+        tracker(true).on_event(&call("shellToolCall", json!({}))),
+        Ok(vec![])
+    );
+    assert_eq!(
+        tracker(false).on_event(&call("getMcpToolsToolCall", json!({"server": "elsebot"}))),
         Ok(vec![])
     );
     for (host, event) in [
@@ -767,18 +783,18 @@ fn a_tool_call_outside_the_turns_policy_violates_it() {
             json!({"type":"tool_call","subtype":"started","call_id":"c","session_id":"chat","tool_call":{}}),
         ),
     ] {
-        let violation = tracker(host).on(&event).unwrap_err();
+        let violation = tracker(host).on_event(&event).unwrap_err();
         assert_eq!(violation.code, FailureCode::PolicyViolation, "{event}");
     }
-    let mut early = Tracker::new(MODEL, "chat", true, true);
+    let mut early = Tracker::new(MODEL, "chat", ToolSet::new(true, true));
     assert!(
-        early.on(&call("shellToolCall", json!({}))).is_err(),
+        early.on_event(&call("shellToolCall", json!({}))).is_err(),
         "before the chat opened"
     );
     let mut other = tracker(true);
     assert!(
         other
-            .on(&said("x", json!({"session_id": "another"})))
+            .on_event(&said("x", json!({"session_id": "another"})))
             .is_err()
     );
 }
@@ -787,7 +803,7 @@ fn a_tool_call_outside_the_turns_policy_violates_it() {
 fn a_parked_elsebot_result_parks_the_turn() {
     let mut t = tracker(false);
     let tool = crate::app::tools::PARKING_TOOLS[0];
-    t.on(
+    t.on_event(
         &json!({"type":"tool_call","subtype":"started","call_id":"c","session_id":"chat",
         "tool_call":{"mcpToolCall":{"args":{"providerIdentifier":"elsebot","toolName":tool}}}}),
     )
@@ -796,9 +812,9 @@ fn a_parked_elsebot_result_parks_the_turn() {
         json!({"type":"tool_call","subtype":"completed","call_id":"c","session_id":"chat",
             "tool_call":{"mcpToolCall":{"args":{},"result":{"success":{"content":[{"text":{"text":payload}}]}}}}})
     };
-    assert_eq!(t.on(&completed(r#"{"status":"done"}"#)), Ok(vec![]));
+    assert_eq!(t.on_event(&completed(r#"{"status":"done"}"#)), Ok(vec![]));
     assert_eq!(
-        t.on(&completed(r#"{"status":"pending","parked":true}"#)),
+        t.on_event(&completed(r#"{"status":"pending","parked":true}"#)),
         Ok(vec![Event::Parked])
     );
 }
@@ -817,7 +833,7 @@ fn an_exit_after_a_stop_interrupts_and_other_exits_name_their_cause() {
     );
     let mut acted = tracker(false);
     acted
-        .on(&json!({"type":"tool_call","subtype":"started","call_id":"c","session_id":"chat",
+        .on_event(&json!({"type":"tool_call","subtype":"started","call_id":"c","session_id":"chat",
             "tool_call":{"mcpToolCall":{"args":{"providerIdentifier":"elsebot","toolName":"find_tool"}}}}))
         .unwrap();
     assert!(
@@ -866,17 +882,55 @@ fn an_exit_after_a_stop_interrupts_and_other_exits_name_their_cause() {
         t.outcome(result(true), None, false),
         TurnOutcome::Uncertain { .. }
     ));
-    let ended = |exit_code: Value| {
+    let ended = |exit_code: Option<i32>| {
         let mut t = tracker(true);
-        t.on(
-            &json!({"type":"result","subtype":"success","is_error":false,
-            "session_id":"chat","exit_code": exit_code}),
-        )
-        .unwrap();
+        let event = json!({"type":"result","subtype":"success","is_error":false,
+            "session_id":"chat"});
+        t.on(&Message::Result { event, exit_code }).unwrap();
         t
     };
-    assert!(ended(json!(0)).resumable(&TurnOutcome::Completed));
-    assert!(!ended(json!(1)).resumable(&TurnOutcome::Completed));
-    assert!(!ended(Value::Null).resumable(&TurnOutcome::Completed));
-    assert!(!ended(json!(0)).resumable(&TurnOutcome::Interrupted));
+    assert!(ended(Some(0)).resumable(&TurnOutcome::Completed));
+    assert!(!ended(Some(1)).resumable(&TurnOutcome::Completed));
+    assert!(!ended(None).resumable(&TurnOutcome::Completed));
+    assert!(!ended(Some(0)).resumable(&TurnOutcome::Interrupted));
+}
+
+pub(crate) fn pinned_fingerprints() -> Vec<(String, &'static str, String)> {
+    let mut cursor = Cursor::new(
+        CursorCli,
+        Ok(Ready {
+            host: Host::new(std::path::Path::new("/data"), std::path::Path::new("/bots")),
+            program: PathBuf::new().into(),
+            version: "2026.08.11".into(),
+            login: Login {
+                macos: false,
+                store: None,
+                file: None,
+            },
+        }),
+    )
+    .with_tools("http://127.0.0.1:9/mcp".into());
+    let mut input = crate::providers::cli::session::tests::input();
+    input.bot_name = "Golden".into();
+    input.delegation.registry = vec![(Uuid::from_u128(7), "Other".into())];
+    let profile = Profile {
+        model: MODEL.into(),
+        reasoning_effort: "default".into(),
+        service_tier: "default".into(),
+    };
+    crate::providers::fingerprints::each_case(
+        &mut input,
+        [
+            "6af7c5dd6f9f79213a040834575580c3",
+            "2e26d0c1972fb8512fda34db6145b045",
+            "5d8355ccde5ffa2b77111ae64bc1bbb5",
+            "e217587a431378fbbbcbb806d3836f30",
+        ],
+        |input, tools| {
+            if !tools {
+                cursor.tool_url = None;
+            }
+            cursor.fingerprint(cursor.ready.as_ref().unwrap(), &profile, input)
+        },
+    )
 }

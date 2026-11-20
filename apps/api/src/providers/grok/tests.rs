@@ -1,11 +1,13 @@
 use super::*;
+use crate::app::providers::{Availability, Profile, Provider};
 use crate::app::providers::{FailureCode, Origin};
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
 use protocol::Terminal;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 fn tracker(host: bool) -> Tracker {
-    Tracker::new("grok-4.7", "session", host, true)
+    Tracker::new("grok-4.7", "session", ToolSet::new(host, true))
 }
 
 fn init(host: bool) -> Value {
@@ -454,16 +456,16 @@ fn the_fingerprint_follows_the_account_not_the_login_path() {
         )
         .unwrap();
     };
-    let grok = Grok {
-        models: Models::new(&DEFINITION),
-        ready: Ok(Ready {
+    let grok = Grok::new(
+        GrokCli,
+        Ok(Ready {
             host: Host::new(&root.path().join("data"), &root.path().join("bots")),
             program: PathBuf::new().into(),
             version: "grok 1.0".into(),
             login: login.clone(),
         }),
-        tool_url: Some("http://127.0.0.1:1/mcp".into()),
-    };
+    )
+    .with_tools("http://127.0.0.1:1/mcp".into());
     let ready = grok.ready.as_ref().unwrap();
     let mut input = crate::providers::cli::session::tests::input();
     let profile = Profile {
@@ -472,16 +474,16 @@ fn the_fingerprint_follows_the_account_not_the_login_path() {
         service_tier: "default".into(),
     };
     auth("alice");
-    let alice = grok.fingerprint(ready, &input, &profile);
-    assert_eq!(alice, grok.fingerprint(ready, &input, &profile));
+    let alice = grok.fingerprint(ready, &profile, &input);
+    assert_eq!(alice, grok.fingerprint(ready, &profile, &input));
     assert!(!grok_home::host_account(&login).contains("secret"));
     auth("bob");
-    assert_ne!(alice, grok.fingerprint(ready, &input, &profile), "account");
-    let bob = grok.fingerprint(ready, &input, &profile);
+    assert_ne!(alice, grok.fingerprint(ready, &profile, &input), "account");
+    let bob = grok.fingerprint(ready, &profile, &input);
     input.delegation.origin = Origin::ConnectorEvent;
     assert_ne!(
         bob,
-        grok.fingerprint(ready, &input, &profile),
+        grok.fingerprint(ready, &profile, &input),
         "tool policy"
     );
 }
@@ -568,16 +570,15 @@ async fn a_turn_on_a_signed_out_host_fails_before_grok_launches() {
     let root = tempfile::tempdir().unwrap();
     let login = root.path().join("login");
     std::fs::create_dir(&login).unwrap();
-    let grok = Grok {
-        models: Models::new(&DEFINITION),
-        ready: Ok(Ready {
+    let grok = Grok::new(
+        GrokCli,
+        Ok(Ready {
             host: Host::new(&root.path().join("data"), &root.path().join("bots")),
             program: root.path().join("missing-grok").into(),
             version: "grok 1.0".into(),
             login: login.clone(),
         }),
-        tool_url: None,
-    };
+    );
     let signed_out = "Grok isn't signed in on this server. Run `grok login --device-code` there, \
                       or switch this bot to another model.";
     let run = || async {
@@ -606,4 +607,68 @@ async fn a_turn_on_a_signed_out_host_fails_before_grok_launches() {
         Availability::Available,
         "a login read mid-write is not a sign-out"
     );
+}
+
+pub(crate) fn pinned_fingerprints() -> Vec<(String, &'static str, String)> {
+    let mut grok = Grok::new(
+        GrokCli,
+        Ok(Ready {
+            host: Host::new(std::path::Path::new("/data"), std::path::Path::new("/bots")),
+            program: PathBuf::new().into(),
+            version: "grok 1.0".into(),
+            login: PathBuf::from("/nonexistent-grok-login"),
+        }),
+    )
+    .with_tools("http://127.0.0.1:1/mcp".into());
+    let mut input = crate::providers::cli::session::tests::input();
+    input.bot_name = "Golden".into();
+    input.delegation.registry = vec![(Uuid::from_u128(7), "Other".into())];
+    let profile = Profile {
+        model: "grok-4.7".into(),
+        reasoning_effort: "high".into(),
+        service_tier: "default".into(),
+    };
+    crate::providers::fingerprints::each_case(
+        &mut input,
+        [
+            "e64ddd27a41dbc4be4d537dea26e8d9c",
+            "7cda1561948c0939ddff36e3532677cc",
+            "266993374504c5b9dfdbb6d1de8618e4",
+            "6da951cc652b462267413106803eb5a3",
+        ],
+        |input, tools| {
+            if !tools {
+                grok.tool_url = None;
+            }
+            grok.fingerprint(grok.ready.as_ref().unwrap(), &profile, input)
+        },
+    )
+}
+
+#[tokio::test]
+async fn a_stopped_turn_records_no_session() {
+    let root = tempfile::tempdir().unwrap();
+    let login = root.path().join("login");
+    std::fs::create_dir(&login).unwrap();
+    std::fs::write(login.join("auth.json"), r#"{"a": {"user_id": "u"}}"#).unwrap();
+    let grok = Grok::new(
+        GrokCli,
+        Ok(Ready {
+            host: Host::new(&root.path().join("data"), &root.path().join("bots")),
+            program: root.path().join("missing-grok").into(),
+            version: "grok 1.0".into(),
+            login,
+        }),
+    );
+    let mut input = crate::providers::cli::session::tests::input();
+    input.profile = Some(Profile {
+        model: "grok-4.7".into(),
+        reasoning_effort: "high".into(),
+        service_tier: "default".into(),
+    });
+    let sink = crate::providers::recording::Recorded::default();
+    let stop = Stop::new(Default::default());
+    stop.request();
+    assert_eq!(grok.run(input, &sink, stop).await, TurnOutcome::Interrupted);
+    assert!(sink.sessions.lock().unwrap().is_empty());
 }
