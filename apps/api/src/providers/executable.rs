@@ -9,9 +9,10 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-/// A provider CLI to launch. One found by [`executable`] remembers where:
-/// a version manager's upgrade can remove the version a shim resolved to
-/// while the API runs, so [`Program::current`] resolves the shim again.
+/// A provider CLI to launch. One found by [`executable`] remembers how: a
+/// version manager's upgrade can remove the version a shim resolved to,
+/// and a reinstall can move the CLI to another `PATH` directory, while the
+/// API runs. [`Program::current`] looks it up again then.
 #[derive(Debug, Clone)]
 pub struct Program {
     path: PathBuf,
@@ -21,6 +22,7 @@ pub struct Program {
 #[derive(Debug, Clone)]
 struct Lookup {
     given: PathBuf,
+    configured: bool,
     name: String,
     setting: String,
 }
@@ -34,15 +36,23 @@ impl Program {
     /// The executable to launch now, or why there is none, naming the file
     /// tried and the setting that overrides it.
     pub fn current(&self) -> Result<PathBuf, String> {
+        self.current_in(std::env::var_os("PATH").as_deref())
+    }
+
+    fn current_in(&self, path: Option<&OsStr>) -> Result<PathBuf, String> {
         let Some(found) = &self.found else {
             return Ok(self.path.clone());
         };
         if is_executable(&self.path) {
             return Ok(self.path.clone());
         }
-        if found.given != self.path && is_executable(&found.given) {
-            let path = std::env::var_os("PATH");
-            return locate(&found.given, &found.name, &found.setting, path.as_deref());
+        let given = if is_executable(&found.given) || found.configured {
+            Some(found.given.clone())
+        } else {
+            find(None, &found.name, &found.setting, path)?
+        };
+        if let Some(given) = given.filter(|given| is_executable(given)) {
+            return locate(&given, &found.name, &found.setting, path);
         }
         Err(format!(
             "`{}` was not found at {}. Install it or set {}.",
@@ -81,15 +91,28 @@ pub fn executable_as(
     name: &str,
     setting: &str,
 ) -> Result<Option<Program>, String> {
-    let path = std::env::var_os("PATH");
-    let Some(given) = find(configured, name, setting, path.as_deref())? else {
+    program(
+        configured,
+        name,
+        setting,
+        std::env::var_os("PATH").as_deref(),
+    )
+}
+
+fn program(
+    configured: Option<&Path>,
+    name: &str,
+    setting: &str,
+    path: Option<&OsStr>,
+) -> Result<Option<Program>, String> {
+    let Some(given) = find(configured, name, setting, path)? else {
         return Ok(None);
     };
-    let path = locate(&given, name, setting, path.as_deref())?;
     Ok(Some(Program {
-        path,
+        path: locate(&given, name, setting, path)?,
         found: Some(Lookup {
             given,
+            configured: configured.is_some(),
             name: name.to_owned(),
             setting: setting.to_owned(),
         }),
@@ -263,9 +286,7 @@ mod tests {
         path: Option<&OsStr>,
     ) -> Result<Option<PathBuf>, String> {
         let setting = format!("ELSE_{}_BIN", name.to_uppercase());
-        find(configured, name, &setting, path)?
-            .map(|given| locate(&given, name, &setting, path))
-            .transpose()
+        program(configured, name, &setting, path).map(|p| p.map(|p| p.path))
     }
 
     struct Tree(tempfile::TempDir);
@@ -397,12 +418,41 @@ mod tests {
         let program = executable(Some(&link), "codex").unwrap().unwrap();
         assert_eq!(program.path(), link);
 
-        let new = tree.file("Caskroom/codex/0.171.0/bin/codex", "new", 0o755);
+        let new = tree.file(
+            "Caskroom/codex/0.171.0/bin/codex",
+            "#!/bin/sh\necho 0.171.0\n",
+            0o755,
+        );
         std::fs::remove_dir_all(tree.at("Caskroom/codex/0.142.0")).unwrap();
         std::fs::remove_file(&link).unwrap();
         symlink(&new, &link).unwrap();
-        let current = program.current().unwrap();
-        assert_eq!(std::fs::read_to_string(current).unwrap(), "new");
+        let ran = std::process::Command::new(program.current().unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&ran.stdout), "0.171.0\n");
+    }
+
+    #[test]
+    fn a_cli_reinstalled_elsewhere_on_path_is_found_again() {
+        let tree = Tree::new();
+        let old = tree.file("npm/bin/codex", "old", 0o755);
+        let path = tree.path(&["npm/bin", "homebrew/bin"]);
+        let program = program(None, "codex", "ELSE_CODEX_BIN", Some(&path))
+            .unwrap()
+            .unwrap();
+        assert_eq!(program.current_in(Some(&path)), Ok(old.clone()));
+
+        std::fs::remove_file(&old).unwrap();
+        let new = tree.file("homebrew/bin/codex", "new", 0o755);
+        assert_eq!(program.current_in(Some(&path)), Ok(new.clone()));
+        std::fs::remove_file(&new).unwrap();
+        assert_eq!(
+            program.current_in(Some(&path)),
+            Err(format!(
+                "`codex` was not found at {}. Install it or set ELSE_CODEX_BIN.",
+                old.display()
+            ))
+        );
     }
 
     #[test]
