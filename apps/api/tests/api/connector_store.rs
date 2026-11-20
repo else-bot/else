@@ -1195,3 +1195,21 @@ async fn a_restored_database_stays_passive_until_resumed() {
         "a re-added account starts quiet"
     );
 }
+
+#[tokio::test]
+async fn the_store_accepts_every_config_the_mail_validator_accepts() {
+    let db = TestDb::migrated().await;
+    let mut long = config("long@example.test");
+    long.archive_folder = "a".repeat(300);
+    long.validate().unwrap();
+    let account = store::create(&db.pool, &key(), &long, &password(PASSWORD))
+        .await
+        .unwrap();
+    let mut moved = account.config.clone();
+    moved.trash_folder = "t".repeat(300);
+    moved.validate().unwrap();
+    let configured = store::configure_folders(&db.pool, account.id, &moved)
+        .await
+        .unwrap();
+    assert_eq!(configured.config.trash_folder, "t".repeat(300));
+}
