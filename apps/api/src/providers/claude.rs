@@ -54,7 +54,7 @@ use super::cli::files::GRANT_ENV;
 use super::cli::session::{self, Identity, Opened, PreparedTurn};
 use super::cli::stream::{Interrupt, StreamAttempt};
 use super::definitions::Definition;
-use super::host::{BotDirs, Host, LaunchSpec};
+use super::host::{BotDirs, Host, LaunchSpec, Run, RunError};
 use super::models::{Listed, Models};
 use super::prompt;
 use super::{attachments, claude_home};
@@ -86,24 +86,27 @@ pub static DEFINITION: Definition = Definition {
     build,
 };
 
-fn build(wiring: &super::Wiring) -> super::Built {
-    let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
-    let home = std::env::var("HOME").ok();
-    let claude = Claude {
-        models: Models::new(&DEFINITION),
-        ready: Claude::ready(
-            Some(wiring.host.clone()),
-            super::executable(wiring.config.claude_bin.as_deref(), "claude"),
-            claude_home::host_config(config_dir.as_deref(), home.as_deref()),
-            claude_home::host_account(config_dir.as_deref(), home.as_deref()),
-        ),
-        tool_url: None,
-    }
-    .with_tools(wiring.tool_url.clone());
-    super::Built {
-        provider: std::sync::Arc::new(claude),
-        summarizer: None,
-    }
+fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'w, super::Built> {
+    Box::pin(async move {
+        let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+        let home = std::env::var("HOME").ok();
+        let claude = Claude {
+            models: Models::new(&DEFINITION),
+            ready: Claude::ready(
+                Some(wiring.host.clone()),
+                super::executable(wiring.config.claude_bin.as_deref(), "claude").await,
+                claude_home::host_config(config_dir.as_deref(), home.as_deref()),
+                claude_home::host_account(config_dir.as_deref(), home.as_deref()),
+            )
+            .await,
+            tool_url: None,
+        }
+        .with_tools(wiring.tool_url.clone());
+        super::Built {
+            provider: std::sync::Arc::new(claude),
+            summarizer: None,
+        }
+    })
 }
 
 /// A CLI that runs, logged in with the host configuration.
@@ -148,7 +151,7 @@ impl Claude {
     /// configuration turns use). Anything missing makes the provider
     /// unavailable with a reason instead of failing startup. The version is
     /// only session identity.
-    pub fn detect(
+    pub async fn detect(
         host: Option<Host>,
         program: Option<PathBuf>,
         config: Option<claude_home::HostConfig>,
@@ -156,12 +159,12 @@ impl Claude {
     ) -> Self {
         Self {
             models: Models::new(&DEFINITION),
-            ready: Self::ready(host, Ok(program.map(Into::into)), config, account),
+            ready: Self::ready(host, Ok(program.map(Into::into)), config, account).await,
             tool_url: None,
         }
     }
 
-    fn ready(
+    async fn ready(
         host: Option<Host>,
         program: Result<Option<super::Program>, String>,
         config: Option<claude_home::HostConfig>,
@@ -175,6 +178,7 @@ impl Claude {
             .unwrap_or_default();
         let version = host
             .probe(program.path(), &["--version"], &env)
+            .await
             .map_err(|why| {
                 format!(
                     "Claude Code does not run (`{} --version`: {why}).",
@@ -183,11 +187,16 @@ impl Claude {
             })?;
         let not_logged_in = "Claude Code is not logged in on the host (run `claude` and log in).";
         let config = config.ok_or(not_logged_in)?;
-        if !host
-            .probe(program.path(), &["auth", "status"], &env)
-            .is_ok_and(|s| claude_home::logged_in(&s))
-        {
-            return Err(not_logged_in.into());
+        // A logged-out CLI exits with failure; only a check that never
+        // answered says something else.
+        match host.probe(program.path(), &["auth", "status"], &env).await {
+            Ok(status) if claude_home::logged_in(&status) => {}
+            Err(why @ (RunError::TimedOut(_) | RunError::Start(_) | RunError::Read(_))) => {
+                return Err(format!(
+                    "Claude Code could not check its login (`claude auth status`: {why})."
+                ));
+            }
+            _ => return Err(not_logged_in.into()),
         }
         Ok(Ready {
             host,
@@ -285,7 +294,7 @@ impl Claude {
     }
 
     /// Prepare the bot's private files and start the CLI.
-    fn launch(
+    async fn launch(
         &self,
         ready: &Ready,
         turn_id: Uuid,
@@ -297,6 +306,7 @@ impl Claude {
         let program = ready
             .program
             .current()
+            .await
             .map_err(|why| format!("Could not start Claude Code: {why}"))?;
         let tool_url = self.tool_url.as_deref().filter(|_| tools != Tools::None);
         claude_home::prepare(&dirs, tool_url, tools.host()).map_err(|e| e.to_string())?;
@@ -442,10 +452,13 @@ impl Provider for Claude {
         let mut env = ready.config.env();
         env.push(("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned()));
         let request = format!("{}\n", protocol::initialize_request(MODELS_REQUEST));
-        ready
-            .host
-            .ask(
-                &ready.program.current()?,
+        let run = Run {
+            env,
+            input: request.into_bytes(),
+            limit: protocol::MODELS_LIMIT,
+            timeout: super::models::ASK_TIMEOUT,
+            ..Run::new(
+                &ready.program.current().await?,
                 &[
                     "-p",
                     "--input-format",
@@ -460,12 +473,13 @@ impl Provider for Claude {
                     "",
                     "--no-session-persistence",
                 ],
-                &env,
-                &request,
-                protocol::MODELS_LIMIT,
-                |line| protocol::listed_models(line, MODELS_REQUEST),
             )
+        };
+        ready
+            .host
+            .ask(&run, |line| protocol::listed_models(line, MODELS_REQUEST))
             .await
+            .map_err(|e| e.to_string())
             .and_then(|listed| listed)
             .map_err(|why| format!("Claude Code did not list its models: {why}"))
     }
@@ -526,14 +540,17 @@ impl Provider for Claude {
         let tools = Tools::for_turn(&input);
         let system = prompt::instructions(&input, &dirs.project.to_string_lossy());
         let args = self.args(&profile, turn.resumed(), turn.native_id(), &system, tools);
-        let mut attempt = match self.launch(
-            ready,
-            input.turn_id,
-            dirs,
-            args,
-            tools,
-            input.tool_grant.as_deref(),
-        ) {
+        let mut attempt = match self
+            .launch(
+                ready,
+                input.turn_id,
+                dirs,
+                args,
+                tools,
+                input.tool_grant.as_deref(),
+            )
+            .await
+        {
             Ok(attempt) => attempt,
             Err(err) => return failed("provider_unavailable", err),
         };
@@ -580,7 +597,9 @@ impl Claude {
             .host
             .bot_dirs(bot_id, "claude-summary")
             .map_err(|e| e.to_string())?;
-        let mut attempt = self.launch(ready, Uuid::new_v4(), dirs, args, Tools::None, None)?;
+        let mut attempt = self
+            .launch(ready, Uuid::new_v4(), dirs, args, Tools::None, None)
+            .await?;
         let uuid = Uuid::new_v4().to_string();
         let mut tracker = Tracker::new(Vec::new(), &profile.model, &uuid);
         let deadline = tokio::time::Instant::now() + super::CHECKPOINT_DEADLINE;

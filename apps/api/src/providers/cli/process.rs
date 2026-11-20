@@ -48,12 +48,20 @@ impl Scope {
     ) -> std::io::Result<Self> {
         let mut command = host.command(spec);
         command.stdin(stdin).stdout(Stdio::piped()).stderr(stderr);
+        Self::supervise(host, spec.turn_id, command)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", spec.program.display())))
+    }
+
+    /// Spawn `command`, which [`Host`] built with `marker`.
+    pub fn supervise(
+        host: &Host,
+        marker: Uuid,
+        command: tokio::process::Command,
+    ) -> std::io::Result<Self> {
         Ok(Self {
             host: host.clone(),
-            marker: spec.turn_id,
-            process: Supervised::spawn(command).map_err(|e| {
-                std::io::Error::new(e.kind(), format!("{}: {e}", spec.program.display()))
-            })?,
+            marker,
+            process: Supervised::spawn(command)?,
             finished: false,
         })
     }
@@ -114,9 +122,8 @@ impl Drop for Scope {
 pub struct Stderr(watch::Receiver<String>);
 
 impl Stderr {
-    pub fn collect(stderr: ChildStderr, spec: &LaunchSpec) -> Self {
-        let grant = spec
-            .env
+    pub fn collect(stderr: ChildStderr, env: &[(String, String)]) -> Self {
+        let grant = env
             .iter()
             .find(|(key, value)| key == GRANT_ENV && !value.is_empty())
             .map(|(_, value)| value.clone().into_bytes());

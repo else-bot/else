@@ -99,6 +99,7 @@ async fn fixture() -> Fixture {
     std::fs::write(login.join("auth.json"), SIGNED_IN).unwrap();
     let host = Host::new(&root.join("data"), &root.join("projects"));
     let grok = Grok::detect(Some(host.clone()), Some(program), Some(login.clone()))
+        .await
         .with_tools("http://127.0.0.1:9/tools/v1/mcp".into());
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();

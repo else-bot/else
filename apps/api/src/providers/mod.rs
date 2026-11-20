@@ -47,7 +47,7 @@ pub struct Built {
 /// The registry, one provider per [`definitions::DEFINITIONS`] entry in its
 /// order and then the optional synthetic one, and the no-tools summarizer
 /// for memory.
-pub fn build(config: &Config) -> (Registry, Option<Arc<dyn Summarizer>>) {
+pub async fn build(config: &Config) -> (Registry, Option<Arc<dyn Summarizer>>) {
     let mut tool_addr = config.bind;
     if tool_addr.ip().is_unspecified() {
         tool_addr.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
@@ -59,8 +59,13 @@ pub fn build(config: &Config) -> (Registry, Option<Arc<dyn Summarizer>>) {
     };
     let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
     let mut summarizer = None;
-    for definition in definitions::DEFINITIONS {
-        let built = (definition.build)(&wiring);
+    let built = futures_util::future::join_all(
+        definitions::DEFINITIONS
+            .iter()
+            .map(|definition| (definition.build)(&wiring)),
+    )
+    .await;
+    for built in built {
         summarizer = summarizer.or(built.summarizer);
         providers.push(built.provider);
     }
@@ -153,7 +158,7 @@ mod registration_tests {
             ("ELSE_SYNTHETIC_PROVIDER", "true".into()),
         ]))
         .unwrap();
-        let (registry, summarizer) = build(&config);
+        let (registry, summarizer) = build(&config).await;
 
         let ids: Vec<&str> = registry.all().iter().map(|p| p.id()).collect();
         let mut expected: Vec<&str> = definitions::DEFINITIONS.iter().map(|d| d.id).collect();
@@ -193,6 +198,49 @@ mod registration_tests {
             Arc::as_ptr(&summarizer).cast::<()>(),
             Arc::as_ptr(codex).cast::<()>(),
             "the summarizer is the registered Codex"
+        );
+    }
+
+    /// Each fake CLI waits until both have started `--version`, so
+    /// probes run one after another would log an end before the next start.
+    #[tokio::test]
+    async fn startup_probes_run_concurrently() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| dir.path().join(name).display().to_string();
+        let log = dir.path().join("log");
+        let script = format!(
+            "#!/bin/sh\n\
+             echo \"start $(basename \"$0\") $*\" >> {log}\n\
+             i=0\n\
+             while [ \"$(grep -c -- '--version' {log})\" -lt 2 ] && [ $i -lt 200 ]; do sleep 0.1; i=$((i+1)); done\n\
+             echo \"end $(basename \"$0\")\" >> {log}\n\
+             echo 2099.1.1\n",
+            log = log.display()
+        );
+        for name in ["claude", "cursor-agent"] {
+            let program = dir.path().join(name);
+            std::fs::write(&program, &script).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let config = Config::load(&Env(vec![
+            ("HOME", path("home")),
+            ("ELSE_DATA_DIR", path("data")),
+            ("ELSE_BOTS_DIR", path("bots")),
+            ("ELSE_CODEX_BIN", path("missing/codex")),
+            ("ELSE_CLAUDE_BIN", path("claude")),
+            ("ELSE_GROK_BIN", path("missing/grok")),
+            ("ELSE_CURSOR_BIN", path("cursor-agent")),
+        ]))
+        .unwrap();
+        build(&config).await;
+        let log = std::fs::read_to_string(&log).unwrap();
+        let mut first: Vec<&str> = log.lines().take(2).collect();
+        first.sort_unstable();
+        assert_eq!(
+            first,
+            ["start claude --version", "start cursor-agent --version"],
+            "every CLI started its probe before any finished:\n{log}"
         );
     }
 }

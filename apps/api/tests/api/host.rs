@@ -12,7 +12,7 @@ use else_api::grants::{DEFAULT_TTL, Tool};
 use else_api::providers::codex_home;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use else_api::providers::host::Supervised;
-use else_api::providers::host::{Host, LaunchSpec, MARKER_VAR};
+use else_api::providers::host::{Host, LaunchSpec, MARKER_VAR, Run};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -60,8 +60,8 @@ async fn output(fx: &Fixture, spec: &LaunchSpec) -> String {
 }
 
 #[cfg(target_os = "linux")]
-#[test]
-fn a_probe_waits_for_an_executable_writer_to_close() {
+#[tokio::test]
+async fn a_probe_waits_for_an_executable_writer_to_close() {
     let fx = fixture();
     let program = fx.data.join("provider");
     std::fs::write(&program, "#!/bin/sh\necho provider-version\n").unwrap();
@@ -72,20 +72,18 @@ fn a_probe_waits_for_an_executable_writer_to_close() {
         .unwrap();
     let error = std::process::Command::new(&program).output().unwrap_err();
     assert_eq!(error.raw_os_error(), Some(libc::ETXTBSY));
-    std::thread::scope(|scope| {
-        scope.spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
-            drop(writer);
-        });
-        assert_eq!(
-            fx.host.probe(&program, &["--version"], &[]).as_deref(),
-            Ok("provider-version")
-        );
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        drop(writer);
     });
+    assert_eq!(
+        fx.host.probe(&program, &["--version"], &[]).await.unwrap(),
+        "provider-version"
+    );
 }
 
-#[test]
-fn a_probe_does_not_repeat_a_command_that_exits_with_failure() {
+#[tokio::test]
+async fn a_probe_does_not_repeat_a_command_that_exits_with_failure() {
     let fx = fixture();
     let calls = fx.data.join("probe-calls");
     assert!(
@@ -95,35 +93,44 @@ fn a_probe_does_not_repeat_a_command_that_exits_with_failure() {
                 &["-c", "echo called >> \"$CALLS\"; exit 1"],
                 &[("CALLS".into(), calls.to_str().unwrap().into())],
             )
+            .await
             .is_err()
     );
     assert_eq!(std::fs::read_to_string(calls).unwrap(), "called\n");
 }
 
-#[test]
-fn a_failed_probe_says_why() {
+#[tokio::test]
+async fn a_failed_probe_says_why() {
     let fx = fixture();
-    let probe =
-        |program: &str, script: &str| fx.host.probe(Path::new(program), &["-c", script], &[]);
+    let probe = async |program: &str, script: &str| {
+        fx.host
+            .probe(Path::new(program), &["-c", script], &[])
+            .await
+            .map_err(|e| e.to_string())
+    };
     assert_eq!(
         probe(
             "/bin/sh",
             "echo ignored >&2; echo 'error: no config' >&2; exit 3"
-        ),
+        )
+        .await,
         Err("exit status: 3: error: no config".into())
     );
     assert_eq!(
-        probe("/bin/sh", "kill -9 $$"),
+        probe("/bin/sh", "kill -9 $$").await,
         Err("signal: 9 (SIGKILL)".into())
     );
-    assert_eq!(probe("/bin/sh", "true"), Err("printed nothing".into()));
+    assert_eq!(
+        probe("/bin/sh", "true").await,
+        Err("printed nothing".into())
+    );
     let started = std::time::Instant::now();
     assert_eq!(
-        probe("/bin/sh", "sleep 30 >/dev/null & echo provider-version"),
+        probe("/bin/sh", "sleep 30 >/dev/null & echo provider-version").await,
         Ok("provider-version".into())
     );
     assert!(started.elapsed() < Duration::from_secs(10));
-    let missing = probe("/nonexistent/grok", "true").unwrap_err();
+    let missing = probe("/nonexistent/grok", "true").await.unwrap_err();
     assert!(missing.starts_with("could not start ("), "{missing}");
 }
 
@@ -224,8 +231,8 @@ async fn orphans_are_swept() {
     assert!(fx.host.live_processes(spec.turn_id).is_empty());
 }
 
-fn installed_codex() -> Option<(PathBuf, PathBuf)> {
-    let codex = codex_on_path()?;
+async fn installed_codex() -> Option<(PathBuf, PathBuf)> {
+    let codex = codex_on_path().await?;
     let auth = codex_home::host_auth_file(
         std::env::var("CODEX_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
@@ -235,12 +242,12 @@ fn installed_codex() -> Option<(PathBuf, PathBuf)> {
 
 #[tokio::test]
 async fn codex_runs_with_host_tools_and_the_shared_login() {
-    let Some((codex, auth)) = installed_codex() else {
+    let Some((codex, auth)) = installed_codex().await else {
         eprintln!("SKIPPED: codex CLI or its login is not installed on this host");
         return;
     };
     let fx = fixture();
-    if !codex_supports_startup_config(&fx.host, &codex) {
+    if !codex_supports_startup_config(&fx.host, &codex).await {
         return;
     }
     let dirs = fx.host.bot_dirs(Uuid::new_v4(), "codex").unwrap();
@@ -294,20 +301,22 @@ async fn codex_runs_with_host_tools_and_the_shared_login() {
     );
 }
 
-fn codex_on_path() -> Option<PathBuf> {
+async fn codex_on_path() -> Option<PathBuf> {
     let configured = std::env::var_os("ELSE_CODEX_BIN").map(PathBuf::from);
     else_api::providers::executable::executable(configured.as_deref(), "codex")
+        .await
         .unwrap_or_else(|reason| panic!("Codex CLI resolution failed: {reason}"))
         .map(|codex| codex.path().to_owned())
 }
 
-fn codex_supports_startup_config(host: &Host, codex: &Path) -> bool {
+async fn codex_supports_startup_config(host: &Host, codex: &Path) -> bool {
     for (args, flag) in [
         (&["--help"][..], "--strict-config"),
         (&["app-server", "--help"][..], "--print-startup-config"),
     ] {
         let help = host
             .probe(codex, args, &[])
+            .await
             .unwrap_or_else(|why| panic!("{} {}: {why}", codex.display(), args.join(" ")));
         if !help.split_whitespace().any(|word| word == flag) {
             eprintln!(
@@ -320,8 +329,8 @@ fn codex_supports_startup_config(host: &Host, codex: &Path) -> bool {
     true
 }
 
-#[test]
-fn startup_config_checks_skip_only_clis_without_the_required_flags() {
+#[tokio::test]
+async fn startup_config_checks_skip_only_clis_without_the_required_flags() {
     let fx = fixture();
     for (name, strict, startup, supported) in [
         ("current", "--strict-config", "--print-startup-config", true),
@@ -337,15 +346,18 @@ fn startup_config_checks_skip_only_clis_without_the_required_flags() {
         )
         .unwrap();
         std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!(codex_supports_startup_config(&fx.host, &codex), supported);
+        assert_eq!(
+            codex_supports_startup_config(&fx.host, &codex).await,
+            supported
+        );
     }
 }
 
-#[test]
+#[tokio::test]
 #[should_panic(expected = "/usr/bin/false --help: exit status: 1")]
-fn a_broken_codex_cli_does_not_skip_startup_config_checks() {
+async fn a_broken_codex_cli_does_not_skip_startup_config_checks() {
     let fx = fixture();
-    codex_supports_startup_config(&fx.host, Path::new("/usr/bin/false"));
+    codex_supports_startup_config(&fx.host, Path::new("/usr/bin/false")).await;
 }
 
 type Recorded = Arc<Mutex<Vec<serde_json::Value>>>;
@@ -520,12 +532,12 @@ async fn first_model_request(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn codex_offers_a_connector_event_no_native_tools() {
-    let Some(codex) = codex_on_path() else {
+    let Some(codex) = codex_on_path().await else {
         eprintln!("SKIPPED: codex CLI is not installed on this host");
         return;
     };
     let fx = fixture();
-    if !codex_supports_startup_config(&fx.host, &codex) {
+    if !codex_supports_startup_config(&fx.host, &codex).await {
         return;
     }
     let dirs = fx.host.bot_dirs(Uuid::new_v4(), "codex").unwrap();
@@ -637,18 +649,19 @@ async fn codex_offers_a_connector_event_no_native_tools() {
 }
 
 #[tokio::test]
-async fn bounded_output_stops_long_or_large_runs() {
+async fn launch_runs_stop_long_or_large_output() {
     let fx = fixture();
     let bot = Uuid::new_v4();
     let run = |script: &str, timeout_ms: u64, limit: usize| {
-        let spec = shell(&fx, bot, script);
+        let run = Run {
+            limit,
+            timeout: Duration::from_millis(timeout_ms),
+            ..Run::launch(&shell(&fx, bot, script))
+        };
         let host = fx.host.clone();
-        async move {
-            host.bounded_output(&spec, Duration::from_millis(timeout_ms), limit)
-                .await
-        }
+        async move { host.run(&run).await }
     };
-    assert_eq!(run("printf ok", 5000, 2).await, Ok(b"ok".to_vec()));
+    assert_eq!(run("printf ok", 5000, 2).await.unwrap(), b"ok");
     assert!(run("printf too-long", 5000, 2).await.is_err());
     assert!(run("yes", 5000, 1 << 16).await.is_err());
     assert!(run("printf ok; exit 3", 5000, 16).await.is_err());
@@ -671,8 +684,11 @@ async fn cancelling_metadata_export_kills_descendants_after_the_leader_exits() {
         .push(("CHILD_PID_FILE".into(), pid_file.to_str().unwrap().into()));
     let host = fx.host.clone();
     let exporting = tokio::spawn(async move {
-        host.bounded_output(&spec, Duration::from_secs(30), 1024)
-            .await
+        let run = Run {
+            limit: 1024,
+            ..Run::launch(&spec)
+        };
+        host.run(&run).await
     });
     let (leader, child) = tokio::time::timeout(Duration::from_secs(5), async {
         loop {

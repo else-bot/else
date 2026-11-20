@@ -19,24 +19,26 @@ fn live() -> bool {
 
 const MODEL: &str = "claude-haiku-5-5";
 
-fn installed(name: &str) -> PathBuf {
+async fn installed(name: &str) -> PathBuf {
     let setting = format!("ELSE_{}_BIN", name.to_uppercase());
     let configured = std::env::var_os(&setting).map(PathBuf::from);
     else_api::providers::executable::executable(configured.as_deref(), name)
+        .await
         .unwrap_or_else(|reason| panic!("{reason}"))
         .unwrap_or_else(|| panic!("{name} on PATH or {setting}"))
         .path()
         .to_owned()
 }
 
-fn claude(data: &Path, tool_url: &str) -> Claude {
+async fn claude(data: &Path, tool_url: &str) -> Claude {
     let home = std::env::var("HOME").ok();
     Claude::detect(
         Some(Host::new(data, &data.join("bots"))),
-        Some(installed("claude")),
+        Some(installed("claude").await),
         claude_home::host_config(None, home.as_deref()),
         claude_home::host_account(None, home.as_deref()),
     )
+    .await
     .with_tools(tool_url.to_owned())
 }
 
@@ -136,7 +138,11 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     save_claude_profile(&db).await;
-    let app = TestApp::with_registry(db, 2, Registry::new(vec![Arc::new(claude(&data, &url))]));
+    let app = TestApp::with_registry(
+        db,
+        2,
+        Registry::new(vec![Arc::new(claude(&data, &url).await)]),
+    );
     serve(&app, listener).await;
     let caps = app.owner("GET", "/v1/capabilities", None).await;
     eprintln!("capabilities: {}", caps.body["providers"]);
@@ -303,7 +309,11 @@ async fn a_newer_owner_message_joins_a_running_claude_reply() {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     save_claude_profile(&db).await;
-    let app = TestApp::with_registry(db, 2, Registry::new(vec![Arc::new(claude(&data, &url))]));
+    let app = TestApp::with_registry(
+        db,
+        2,
+        Registry::new(vec![Arc::new(claude(&data, &url).await)]),
+    );
     serve(&app, listener).await;
 
     common::steer::joins_mid_tool_and_mid_text(&app, "claude", true).await;
@@ -320,7 +330,7 @@ async fn a_claude_checkpoint_runs_with_no_tools() {
     use else_api::app::providers::{CheckpointRequest, Profile, Provider};
     let dir = tempfile::tempdir().unwrap();
     let data = private_dir(dir.path());
-    let claude = claude(&data, "http://127.0.0.1:9/tools/v1/mcp");
+    let claude = claude(&data, "http://127.0.0.1:9/tools/v1/mcp").await;
     let text = claude
         .checkpoint(
             CheckpointRequest {
@@ -388,9 +398,10 @@ async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
     .unwrap();
     let codex = Codex::detect(
         Some(Host::new(&data, &data.join("bots"))),
-        Some(installed("codex")),
+        Some(installed("codex").await),
         Some(auth),
     )
+    .await
     .with_tools(url.clone());
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
@@ -409,7 +420,7 @@ async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
     let app = TestApp::with_parts(
         db,
         2,
-        Registry::new(vec![Arc::new(codex), Arc::new(claude(&data, &url))]),
+        Registry::new(vec![Arc::new(codex), Arc::new(claude(&data, &url).await)]),
         Some(computers.clone()),
     );
     serve(&app, listener).await;

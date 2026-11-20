@@ -31,7 +31,7 @@ use super::cli::session::{self, Identity, Opened, PreparedTurn};
 use super::cli::stream::{Prompt, StreamAttempt};
 use super::cursor_home::{self, Login};
 use super::definitions::Definition;
-use super::host::{BotDirs, Host, LaunchSpec};
+use super::host::{BotDirs, Host, LaunchSpec, Run};
 use super::models::{Listed, Models};
 use super::{attachments, prompt};
 use crate::app::providers::{
@@ -56,27 +56,30 @@ pub static DEFINITION: Definition = Definition {
     build,
 };
 
-fn build(wiring: &super::Wiring) -> super::Built {
-    let program = lookup(
-        wiring.config.cursor_bin.as_deref(),
-        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
-    );
-    let cursor = Cursor {
-        models: Models::new(&DEFINITION),
-        ready: Cursor::ready(Some(wiring.host.clone()), program, Login::host()),
-        tool_url: Some(wiring.tool_url.clone()),
-    };
-    super::Built {
-        provider: std::sync::Arc::new(cursor),
-        summarizer: None,
-    }
+fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'w, super::Built> {
+    Box::pin(async move {
+        let program = lookup(
+            wiring.config.cursor_bin.as_deref(),
+            std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+        )
+        .await;
+        let cursor = Cursor {
+            models: Models::new(&DEFINITION),
+            ready: Cursor::ready(Some(wiring.host.clone()), program, Login::host()).await,
+            tool_url: Some(wiring.tool_url.clone()),
+        };
+        super::Built {
+            provider: std::sync::Arc::new(cursor),
+            summarizer: None,
+        }
+    })
 }
 
 /// `ELSE_CURSOR_BIN`, else the link Cursor's installer keeps in
 /// `~/.local/bin`, which a service's `PATH` often lacks, else
 /// `cursor-agent` on `PATH`. A link is kept, not resolved: an update points
 /// it at a new versioned directory and removes the old one.
-fn lookup(
+async fn lookup(
     configured: Option<&Path>,
     home: Option<&Path>,
 ) -> Result<Option<super::Program>, String> {
@@ -101,7 +104,7 @@ fn lookup(
     else {
         return Ok(None);
     };
-    super::executable_as(Some(&given), "cursor-agent", "ELSE_CURSOR_BIN")
+    super::executable_as(Some(&given), "cursor-agent", "ELSE_CURSOR_BIN").await
 }
 
 /// The models `cursor-agent models` prints after "Available models", one
@@ -134,15 +137,15 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    pub fn detect(host: Option<Host>, program: Option<PathBuf>, login: Login) -> Self {
+    pub async fn detect(host: Option<Host>, program: Option<PathBuf>, login: Login) -> Self {
         Self {
             models: Models::new(&DEFINITION),
-            ready: Self::ready(host, Ok(program.map(Into::into)), login),
+            ready: Self::ready(host, Ok(program.map(Into::into)), login).await,
             tool_url: None,
         }
     }
 
-    fn ready(
+    async fn ready(
         host: Option<Host>,
         program: Result<Option<super::Program>, String>,
         login: Login,
@@ -151,6 +154,7 @@ impl Cursor {
         let program = program?.ok_or(cursor_home::NOT_INSTALLED)?;
         let version = host
             .probe(program.path(), &["--version"], &[])
+            .await
             .map_err(|why| {
                 format!(
                     "Cursor CLI does not run (`{} --version`: {why}).",
@@ -201,7 +205,7 @@ impl Cursor {
         )
     }
 
-    fn launch(
+    async fn launch(
         &self,
         ready: &Ready,
         input: &TurnInput,
@@ -213,6 +217,7 @@ impl Cursor {
         let program = ready
             .program
             .current()
+            .await
             .map_err(|why| format!("Could not start Cursor CLI: {why}"))?;
         let mut args: Vec<OsString> = [
             "--print",
@@ -382,15 +387,21 @@ impl Provider for Cursor {
     async fn list_models(&self) -> Result<Vec<Listed>, String> {
         let ready = self.ready.as_ref().map_err(Clone::clone)?;
         // Listing runs no agent, so it reads the host login where it is.
-        // `probe` keeps the line that says why it failed.
-        let (host, program) = (ready.host.clone(), ready.program.current()?);
         let mut env = vec![("NO_COLOR".to_owned(), "1".to_owned())];
         if let Some(store) = &ready.login.store {
             env.push(("AGENT_CLI_CREDENTIAL_STORE".into(), store.clone()));
         }
-        let printed = tokio::task::spawn_blocking(move || host.probe(&program, &["models"], &env))
+        let run = Run {
+            env,
+            timeout: super::models::ASK_TIMEOUT,
+            ..Run::new(&ready.program.current().await?, &["models"])
+        };
+        let printed = ready
+            .host
+            .run(&run)
             .await
-            .map_err(|e| e.to_string())?
+            .map(|out| String::from_utf8_lossy(&out).into_owned())
+            .map_err(|e| e.to_string())
             .map_err(|why| {
                 if cursor_home::refused_login(&why) {
                     cursor_home::SIGNED_OUT.to_owned()
@@ -461,7 +472,10 @@ impl Provider for Cursor {
         {
             return failed("provider_unavailable", e.to_string());
         }
-        let spec = match self.launch(ready, &input, profile, dirs, workspace, &turn) {
+        let spec = match self
+            .launch(ready, &input, profile, dirs, workspace, &turn)
+            .await
+        {
             Ok(spec) => spec,
             Err(why) => return failed("provider_unavailable", why),
         };

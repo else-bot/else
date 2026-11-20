@@ -107,7 +107,7 @@ struct Server {
 }
 
 impl Server {
-    fn new() -> Self {
+    async fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("bin/cursor-agent");
         std::fs::create_dir_all(program.parent().unwrap()).unwrap();
@@ -124,6 +124,7 @@ impl Server {
             file: Some(login),
         };
         let cursor = Cursor::detect(Some(host), Some(program), login)
+            .await
             .with_tools("http://127.0.0.1:9/mcp".into());
         Self { dir, cursor }
     }
@@ -225,7 +226,7 @@ fn has(args: &Value, flag: &str) -> bool {
 
 #[tokio::test]
 async fn an_owner_turn_creates_a_chat_and_the_next_turn_resumes_it() {
-    let server = Server::new();
+    let server = Server::new().await;
     let sink = Sink::default();
     let outcome = server.run(input("hi", Origin::OwnerRequest), &sink).await;
     assert_eq!(outcome, TurnOutcome::Completed);
@@ -302,7 +303,7 @@ async fn an_owner_turn_creates_a_chat_and_the_next_turn_resumes_it() {
 
 #[tokio::test]
 async fn a_result_the_cli_did_not_store_completes_without_resuming() {
-    let server = Server::new();
+    let server = Server::new().await;
     let sink = Sink::default();
     let outcome = server
         .run(input("[unsaved]", Origin::OwnerRequest), &sink)
@@ -318,7 +319,7 @@ async fn a_result_the_cli_did_not_store_completes_without_resuming() {
 
 #[tokio::test]
 async fn a_lost_chat_or_changed_profile_starts_a_new_chat() {
-    let server = Server::new();
+    let server = Server::new().await;
     let sink = Sink::default();
     server.run(input("hi", Origin::OwnerRequest), &sink).await;
     let first = sink.last_session();
@@ -347,7 +348,7 @@ async fn a_lost_chat_or_changed_profile_starts_a_new_chat() {
 
 #[tokio::test]
 async fn an_event_turn_offers_only_elsebot_tools_and_a_shell_call_fails_it() {
-    let server = Server::new();
+    let server = Server::new().await;
     let sink = Sink::default();
     let outcome = server
         .run(input("[shell]", Origin::ConnectorEvent), &sink)
@@ -394,7 +395,7 @@ async fn an_event_turn_offers_only_elsebot_tools_and_a_shell_call_fails_it() {
 
 #[tokio::test]
 async fn stop_interrupts_the_running_cli() {
-    let server = Server::new();
+    let server = Server::new().await;
     let sink = Sink::default();
     let stop = Stop::default();
     let requester = {
@@ -423,7 +424,7 @@ async fn stop_interrupts_the_running_cli() {
 
 #[tokio::test]
 async fn stop_while_the_cli_stores_its_result_keeps_the_result_but_not_the_chat() {
-    let server = Server::new();
+    let server = Server::new().await;
     let sink = Sink::default();
     let stop = Stop::default();
     let sent = server.path("bin/result-sent");
@@ -453,7 +454,7 @@ async fn stop_while_the_cli_stores_its_result_keeps_the_result_but_not_the_chat(
 
 #[tokio::test]
 async fn a_usage_limit_makes_cursor_unavailable_for_the_turn() {
-    let server = Server::new();
+    let server = Server::new().await;
     let outcome = server
         .run(input("[limit]", Origin::ConnectorEvent), &Sink::default())
         .await;
@@ -468,7 +469,7 @@ async fn a_usage_limit_makes_cursor_unavailable_for_the_turn() {
 
 #[tokio::test]
 async fn a_lost_stream_ends_uncertain_and_retires_the_chat() {
-    let server = Server::new();
+    let server = Server::new().await;
     let sink = Sink::default();
     let outcome = server
         .run(input("[lost]", Origin::OwnerRequest), &sink)
@@ -484,7 +485,7 @@ async fn a_lost_stream_ends_uncertain_and_retires_the_chat() {
 
 #[tokio::test]
 async fn a_cli_that_fails_after_using_a_tool_ends_uncertain() {
-    let server = Server::new();
+    let server = Server::new().await;
     let sink = Sink::default();
     let outcome = server
         .run(input("[crash]", Origin::OwnerRequest), &sink)
@@ -501,7 +502,7 @@ async fn a_cli_that_fails_after_using_a_tool_ends_uncertain() {
 
 #[tokio::test]
 async fn a_signed_out_host_says_how_to_sign_in() {
-    let server = Server::new();
+    let server = Server::new().await;
     std::fs::write(server.path("bin/refuse-login"), "").unwrap();
     let outcome = server
         .run(
@@ -541,7 +542,7 @@ fn unread_prompt() -> String {
 
 #[tokio::test]
 async fn a_cli_that_stops_reading_its_prompt_does_not_complete_the_turn() {
-    let server = Server::new();
+    let server = Server::new().await;
     std::fs::write(server.path("bin/read-prefix"), "").unwrap();
     let outcome = server
         .run(
@@ -559,15 +560,15 @@ async fn a_cli_that_stops_reading_its_prompt_does_not_complete_the_turn() {
 
 #[tokio::test]
 async fn the_cli_lists_the_accounts_models() {
-    let server = Server::new();
+    let server = Server::new().await;
     assert_eq!(
         server.cursor.list_models().await,
         Ok(vec![Listed::id("composer-2.5"), Listed::id("gpt-5.5-high")])
     );
 }
 
-#[test]
-fn a_missing_or_old_cli_names_its_fix() {
+#[tokio::test]
+async fn a_missing_or_old_cli_names_its_fix() {
     let dir = tempfile::tempdir().unwrap();
     let host = Host::new(&dir.path().join("data"), &dir.path().join("bots"));
     let login = Login {
@@ -575,7 +576,7 @@ fn a_missing_or_old_cli_names_its_fix() {
         store: None,
         file: None,
     };
-    let missing = Cursor::detect(Some(host.clone()), None, login.clone());
+    let missing = Cursor::detect(Some(host.clone()), None, login.clone()).await;
     assert_eq!(
         missing.availability(),
         Availability::Unavailable(cursor_home::NOT_INSTALLED.into())
@@ -585,7 +586,7 @@ fn a_missing_or_old_cli_names_its_fix() {
     let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
     std::fs::set_permissions(&old, mode).unwrap();
     assert_eq!(
-        Cursor::detect(Some(host), Some(old), login).availability(),
+        Cursor::detect(Some(host), Some(old), login).await.availability(),
         Availability::Unavailable(
             "Cursor CLI 2026.07.30-abc is older than 2026.08.11. Run `cursor-agent update` on this server."
                 .into()
@@ -593,8 +594,8 @@ fn a_missing_or_old_cli_names_its_fix() {
     );
 }
 
-#[test]
-fn the_installers_link_is_used_and_kept_unresolved() {
+#[tokio::test]
+async fn the_installers_link_is_used_and_kept_unresolved() {
     let dir = tempfile::tempdir().unwrap();
     let version = dir
         .path()
@@ -607,13 +608,15 @@ fn the_installers_link_is_used_and_kept_unresolved() {
     std::fs::create_dir_all(link.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&version, &link).unwrap();
     let home = Some(dir.path());
-    let found = |configured: Option<&Path>, home| {
-        lookup(configured, home).map(|p| p.map(|p| p.path().to_owned()))
+    let found = async |configured: Option<&Path>, home| {
+        lookup(configured, home)
+            .await
+            .map(|p| p.map(|p| p.path().to_owned()))
     };
-    assert_eq!(found(None, home), Ok(Some(link.clone())));
-    assert_eq!(found(Some(&link), None), Ok(Some(link)));
+    assert_eq!(found(None, home).await, Ok(Some(link.clone())));
+    assert_eq!(found(Some(&link), None).await, Ok(Some(link)));
     let missing = dir.path().join("missing");
-    let err = lookup(Some(&missing), home).unwrap_err();
+    let err = lookup(Some(&missing), home).await.unwrap_err();
     assert!(err.contains("ELSE_CURSOR_BIN"), "{err}");
 }
 

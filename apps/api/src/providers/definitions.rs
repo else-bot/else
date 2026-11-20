@@ -26,7 +26,8 @@ pub struct Definition {
     pub tier_note: &'static str,
     /// Construct the running adapter. Only [`super::build`] calls it;
     /// offline checks never do.
-    pub build: fn(&super::Wiring) -> super::Built,
+    pub build:
+        for<'w, 'c> fn(&'w super::Wiring<'c>) -> futures_util::future::BoxFuture<'w, super::Built>,
 }
 
 /// Every provider CLI. Registration order is default-selection order.

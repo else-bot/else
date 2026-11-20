@@ -63,8 +63,8 @@ fn paths(found: Result<Option<super::super::Program>, String>) -> Result<Option<
     found.map(|p| p.map(|p| p.path().to_owned()))
 }
 
-#[test]
-fn a_configured_npm_script_gives_way_to_the_installed_binary() {
+#[tokio::test]
+async fn a_configured_npm_script_gives_way_to_the_installed_binary() {
     let dir = tempfile::tempdir().unwrap();
     let file = |name: &str, body: &str| {
         let path = dir.path().join(name);
@@ -78,15 +78,21 @@ fn a_configured_npm_script_gives_way_to_the_installed_binary() {
     let native = file("opt/grok", "\x7fELF");
     let home = dir.path().join("home");
     assert_eq!(
-        paths(lookup(Some(&script), Some(&home))),
+        paths(lookup(Some(&script), Some(&home)).await),
         Ok(Some(script.clone()))
     );
     let binary = file("home/bin/grok", "\x7fELF");
     let home = std::fs::canonicalize(home).unwrap();
-    assert_eq!(paths(lookup(Some(&script), Some(&home))), Ok(Some(binary)));
-    assert_eq!(paths(lookup(Some(&native), Some(&home))), Ok(Some(native)));
+    assert_eq!(
+        paths(lookup(Some(&script), Some(&home)).await),
+        Ok(Some(binary))
+    );
+    assert_eq!(
+        paths(lookup(Some(&native), Some(&home)).await),
+        Ok(Some(native))
+    );
     let missing = dir.path().join("missing/grok");
-    assert!(lookup(Some(&missing), Some(&home)).is_err());
+    assert!(lookup(Some(&missing), Some(&home)).await.is_err());
 }
 
 #[test]
@@ -387,14 +393,14 @@ fn a_claude_spelled_elsebot_tool_is_left_to_grok_to_reject() {
     }
 }
 
-#[test]
-fn profiles_reject_settings_the_cli_cannot_apply() {
+#[tokio::test]
+async fn profiles_reject_settings_the_cli_cannot_apply() {
     let profile = Profile {
         model: "grok-4.7".into(),
         reasoning_effort: "high".into(),
         service_tier: "default".into(),
     };
-    let grok = Grok::detect(None, None, None);
+    let grok = Grok::detect(None, None, None).await;
     assert!(grok.validate_profile(&profile).is_ok());
     for bad in [
         Profile {

@@ -40,7 +40,7 @@ use super::cli::session::{self, Identity};
 use super::codex_home;
 use super::codex_rpc::AppServer;
 use super::definitions::Definition;
-use super::host::{Host, LaunchSpec};
+use super::host::{Host, LaunchSpec, Run};
 use super::models::{Listed, Models};
 use super::prompt;
 use crate::app::providers::{
@@ -76,27 +76,30 @@ pub static DEFINITION: Definition = Definition {
 };
 
 /// The one Codex is both a provider and the memory summarizer.
-fn build(wiring: &super::Wiring) -> super::Built {
-    let auth = codex_home::host_auth_file(
-        std::env::var("CODEX_HOME").ok().as_deref(),
-        std::env::var("HOME").ok().as_deref(),
-    );
-    let codex = std::sync::Arc::new(
-        Codex {
-            models: Models::new(&DEFINITION),
-            ready: Codex::ready(
-                Some(wiring.host.clone()),
-                super::executable(wiring.config.codex_bin.as_deref(), "codex"),
-                auth,
-            ),
-            tool_url: None,
+fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'w, super::Built> {
+    Box::pin(async move {
+        let auth = codex_home::host_auth_file(
+            std::env::var("CODEX_HOME").ok().as_deref(),
+            std::env::var("HOME").ok().as_deref(),
+        );
+        let codex = std::sync::Arc::new(
+            Codex {
+                models: Models::new(&DEFINITION),
+                ready: Codex::ready(
+                    Some(wiring.host.clone()),
+                    super::executable(wiring.config.codex_bin.as_deref(), "codex").await,
+                    auth,
+                )
+                .await,
+                tool_url: None,
+            }
+            .with_tools(wiring.tool_url.clone()),
+        );
+        super::Built {
+            provider: codex.clone(),
+            summarizer: Some(codex),
         }
-        .with_tools(wiring.tool_url.clone()),
-    );
-    super::Built {
-        provider: codex.clone(),
-        summarizer: Some(codex),
-    }
+    })
 }
 
 /// A CLI that runs and a host login.
@@ -117,15 +120,19 @@ impl Codex {
     /// Locate the CLI and the host login and check that the CLI runs. A
     /// missing piece makes the provider unavailable with a reason instead of
     /// failing startup. The version is only session identity.
-    pub fn detect(host: Option<Host>, program: Option<PathBuf>, auth: Option<PathBuf>) -> Self {
+    pub async fn detect(
+        host: Option<Host>,
+        program: Option<PathBuf>,
+        auth: Option<PathBuf>,
+    ) -> Self {
         Self {
             models: Models::new(&DEFINITION),
-            ready: Self::ready(host, Ok(program.map(Into::into)), auth),
+            ready: Self::ready(host, Ok(program.map(Into::into)), auth).await,
             tool_url: None,
         }
     }
 
-    fn ready(
+    async fn ready(
         host: Option<Host>,
         program: Result<Option<super::Program>, String>,
         auth: Option<PathBuf>,
@@ -138,6 +145,7 @@ impl Codex {
         }
         let version = host
             .probe(program.path(), &["--version"], &[])
+            .await
             .map_err(|why| {
                 format!(
                     "the codex executable does not run (`{} --version`: {why}); \
@@ -201,6 +209,7 @@ impl Codex {
         let program = ready
             .program
             .current()
+            .await
             .map_err(|why| unavailable(format!("Could not start Codex: {why}")))?;
         let host_tools = input.delegation.host_tools();
         codex_home::prepare(&dirs, &ready.auth, self.tool_url.as_deref(), host_tools)
@@ -308,13 +317,18 @@ impl Provider for Codex {
 
     async fn list_models(&self) -> Result<Vec<Listed>, String> {
         let ready = self.ready.as_ref().map_err(Clone::clone)?;
-        let program = ready.program.current()?;
+        let program = ready.program.current().await?;
+        let run = Run {
+            limit: 16 * 1024 * 1024,
+            timeout: super::models::ASK_TIMEOUT,
+            ..Run::new(&program, &["debug", "models"])
+        };
         let exported = ready
             .host
-            .output(&program, &["debug", "models"], &[], 16 * 1024 * 1024)
+            .run(&run)
             .await
             .map_err(|why| format!("`codex debug models` failed: {why}"))?;
-        codex_home::listed_models(exported.as_bytes())
+        codex_home::listed_models(&exported)
     }
 
     async fn checkpoint(

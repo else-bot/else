@@ -124,7 +124,7 @@ async fn unavailable_providers_do_not_starve_other_mail_when_admission_is_limite
     .unwrap();
     sqlx::query("UPDATE connector_deliveries SET created_at=CASE WHEN bot_id=?1 THEN '2000-01-01T00:00:00Z' ELSE '2001-01-01T00:00:00Z' END").bind(blocked).execute(&db.pool).await.unwrap();
     let registry = Registry::new(vec![
-        Arc::new(else_api::providers::codex::Codex::detect(None, None, None)),
+        Arc::new(else_api::providers::codex::Codex::detect(None, None, None).await),
         Arc::new(Synthetic::new(Duration::from_millis(5))),
     ]);
     assert_eq!(
