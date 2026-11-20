@@ -52,6 +52,7 @@ use crate::app::questions::{
     DESTRUCTIVE_SCOPE, GrantReach, Kind, MAX_PER_TURN, Outcome, PermissionTarget, Spec, Standing,
     Status, approval_choices, says_always_allow,
 };
+use crate::db::in_ids;
 
 /// A question as shown to the owner and recorded in events.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -592,8 +593,9 @@ pub async fn for_turns(
 ) -> Result<HashMap<Uuid, Vec<QuestionInfo>>, sqlx::Error> {
     let rows: Vec<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM owner_questions
-         WHERE lower(hex(turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))
-         ORDER BY created_at, id"
+         WHERE {}
+         ORDER BY created_at, id",
+        in_ids("turn_id", "?1")
     )))
     .bind(Json(turn_ids))
     .fetch_all(&mut *conn)
@@ -973,14 +975,15 @@ pub async fn mark_delivered(
     attempt: i32,
     ids: &[Uuid],
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE owner_questions SET delivered_attempt = ?3,
              consumed_attempt = CASE WHEN json_type(action, '$.host') = 'text'
                  AND answer IN ('approve', 'approve_forever', 'approve_routine', 'approve_task')
                  THEN ?3 ELSE consumed_attempt END
          WHERE turn_id = ?1 AND delivered_attempt IS NULL
-           AND lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?2))",
-    )
+           AND {}",
+        in_ids("id", "?2")
+    )))
     .bind(turn_id)
     .bind(Json(ids))
     .bind(attempt)

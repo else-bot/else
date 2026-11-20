@@ -43,6 +43,7 @@ use super::events;
 use super::turns::TurnStatus;
 use crate::app::messages::{Attachment, MessagePart};
 use crate::app::providers::Profile;
+use crate::db::in_ids;
 use crate::providers::output_files::OutputFile;
 
 mod control;
@@ -165,7 +166,7 @@ pub async fn for_turns(
     conn: &mut SqliteConnection,
     turn_ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Vec<Handoff>>, sqlx::Error> {
-    let rows: Vec<Handoff> = sqlx::query_as(
+    let rows: Vec<Handoff> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT d.id, d.root_turn_id AS turn_id, d.parent_attempt AS attempt, d.target_bot_id,
                 b.name AS target_name, d.task, d.status, d.created_at, d.finished_at,
                 d.delivered_attempt IS NOT NULL AS seen,
@@ -179,9 +180,10 @@ pub async fn for_turns(
                      ORDER BY i.seq DESC LIMIT 1)
                 END AS progress
          FROM delegations d JOIN bots b ON b.id = d.target_bot_id
-         WHERE lower(hex(d.root_turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))
+         WHERE {}
          ORDER BY d.created_at, d.id",
-    )
+        in_ids("d.root_turn_id", "?1")
+    )))
     .bind(sqlx::types::Json(turn_ids))
     .fetch_all(&mut *conn)
     .await?;
@@ -1029,11 +1031,11 @@ pub async fn mark_delivered(
     }
     let rows: Vec<DeliveredRow> =
         sqlx::query_as(
-            "UPDATE delegations AS d SET delivered_attempt = ?3
+            sqlx::AssertSqlSafe(format!("UPDATE delegations AS d SET delivered_attempt = ?3
              FROM turns r
-             WHERE lower(hex(d.id)) IN (SELECT replace(value, '-', '') FROM json_each(?2)) AND d.root_turn_id = ?1 AND d.delivered_attempt IS NULL
+             WHERE {} AND d.root_turn_id = ?1 AND d.delivered_attempt IS NULL
                AND r.id = d.root_turn_id
-             RETURNING id, parent_bot_id, (SELECT conversation_id FROM turns WHERE id = root_turn_id) AS conversation_id, status, task, result, error",
+             RETURNING id, parent_bot_id, (SELECT conversation_id FROM turns WHERE id = root_turn_id) AS conversation_id, status, task, result, error", in_ids("d.id", "?2"))),
         )
         .bind(root)
         .bind(sqlx::types::Json(ids))
@@ -1258,11 +1260,12 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
     if !context.can_delegate() {
         return Ok(context);
     }
-    let registry: Vec<(Uuid, String)> = sqlx::query_as(
+    let registry: Vec<(Uuid, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT id, name FROM bots WHERE status = 'active' AND id <> ?1
-             AND NOT (lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?2)))
+             AND NOT ({})
          ORDER BY created_at, id",
-    )
+        in_ids("id", "?2")
+    )))
     .bind(bot)
     .bind(sqlx::types::Json(&chain.upstream))
     .fetch_all(&mut *conn)

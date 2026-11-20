@@ -17,6 +17,7 @@ use uuid::Uuid;
 use super::events;
 use super::task_secrets::{self, SecretError};
 use crate::credentials::SecretKey;
+use crate::db::in_ids;
 use crate::skills::{FileInfo, Package, Source, secret_name};
 
 /// Install cards per owner request (turn).
@@ -255,8 +256,9 @@ pub async fn for_turns(
 ) -> Result<HashMap<Uuid, Vec<InstallInfo>>, sqlx::Error> {
     let rows: Vec<InstallRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {INSTALL_COLUMNS} FROM skill_installs
-         WHERE lower(hex(turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))
-         ORDER BY created_at, id"
+         WHERE {}
+         ORDER BY created_at, id",
+        in_ids("turn_id", "?1")
     )))
     .bind(Json(turn_ids))
     .fetch_all(&mut *conn)
@@ -513,11 +515,12 @@ pub async fn mark_delivered(
     attempt: i32,
     ids: &[Uuid],
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE skill_installs SET delivered_attempt = ?3
          WHERE turn_id = ?1 AND delivered_attempt IS NULL
-           AND lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?2))",
-    )
+           AND {}",
+        in_ids("id", "?2")
+    )))
     .bind(turn_id)
     .bind(Json(ids))
     .bind(attempt)

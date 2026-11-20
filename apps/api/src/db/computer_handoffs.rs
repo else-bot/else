@@ -18,7 +18,7 @@ use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use super::events;
+use super::{events, in_ids};
 
 pub const MAX_REASON: usize = 200;
 
@@ -210,8 +210,9 @@ pub async fn for_turns(
 ) -> Result<HashMap<Uuid, Vec<Handoff>>, sqlx::Error> {
     let rows: Vec<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM computer_handoffs
-         WHERE lower(hex(turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))
-         ORDER BY created_at, id"
+         WHERE {}
+         ORDER BY created_at, id",
+        in_ids("turn_id", "?1")
     )))
     .bind(Json(turn_ids))
     .fetch_all(&mut *conn)
@@ -264,11 +265,12 @@ pub async fn mark_delivered(
     attempt: i32,
     ids: &[Uuid],
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE computer_handoffs SET delivered_attempt = ?3
          WHERE turn_id = ?1 AND delivered_attempt IS NULL
-           AND lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?2))",
-    )
+           AND {}",
+        in_ids("id", "?2")
+    )))
     .bind(turn_id)
     .bind(Json(ids))
     .bind(attempt)

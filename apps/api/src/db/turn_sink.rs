@@ -10,6 +10,7 @@ use uuid::Uuid;
 use super::turns::{ACTIVE_STATUSES, TurnStatus};
 use crate::actor::Actor;
 use crate::app::providers::{Fenced, SessionState, TurnInput, TurnOutcome, TurnSink};
+use crate::db::in_ids;
 
 mod steers;
 
@@ -650,7 +651,7 @@ impl SinkState {
                             &self.delivered_drafts,
                         )
                         .await?;
-                        sqlx::query("UPDATE social_setups SET delivered_attempt=?3 WHERE turn_id=?1 AND delivered_attempt IS NULL AND lower(hex(id)) IN (SELECT replace(value,'-','') FROM json_each(?2))").bind(self.turn_id).bind(sqlx::types::Json(&self.delivered_socials)).bind(self.attempt).execute(&mut *tx).await?;
+                        sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE social_setups SET delivered_attempt=?3 WHERE turn_id=?1 AND delivered_attempt IS NULL AND {}", in_ids("id", "?2")))).bind(self.turn_id).bind(sqlx::types::Json(&self.delivered_socials)).bind(self.attempt).execute(&mut *tx).await?;
                         crate::db::mcp_waits::mark_delivered(
                             &mut tx,
                             self.turn_id,

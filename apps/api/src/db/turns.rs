@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::app::messages::{MessagePart, Reaction};
 use crate::app::providers::{HistoryEntry, Profile, SessionState, TurnInput};
+use crate::db::in_ids;
 pub use crate::db::steers::Placement;
 use crate::db::steers::STEERED;
 
@@ -1020,10 +1021,10 @@ pub async fn claim_next(
                                                      WHERE s.turn_id = q.id))
                    AND NOT EXISTS (SELECT 1 FROM turns q
                                    WHERE q.bot_id = t.bot_id
-                                     AND lower(hex(q.id)) IN (SELECT replace(value, '-', '') FROM json_each(?1)))))
+                                     AND {})))
          ) oldest WHERE queue_rank = 1
-           AND NOT (lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?1)))
-         ORDER BY created_at, id LIMIT 8"
+           AND NOT ({})
+         ORDER BY created_at, id LIMIT 8", in_ids("q.id", "?1"), in_ids("id", "?1")
     )))
     .bind(sqlx::types::Json(busy))
     .bind(background)
@@ -1468,7 +1469,8 @@ It was not resent; send a follow-up to continue.',
 /// `uncertain` (never resent). Pending stops and deletions then complete.
 pub async fn settle_orphans(pool: &SqlitePool, live: &[Uuid]) -> Result<u64, sqlx::Error> {
     let orphans: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT id, bot_id FROM turns WHERE status IN {ACTIVE_STATUSES} AND NOT (lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?1)))"
+        "SELECT id, bot_id FROM turns WHERE status IN {ACTIVE_STATUSES} AND NOT ({})",
+        in_ids("id", "?1")
     )))
     .bind(sqlx::types::Json(live))
     .fetch_all(pool)
