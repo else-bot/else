@@ -384,6 +384,30 @@ async fn a_pending_handoff_shows_in_the_sidebar_until_it_is_settled() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_taken_handoff_shows_the_owner_has_the_computer_until_hand_back() {
+    let app = app().await;
+    let bot = app.main_bot().await;
+    let (turn, token) = running(&app, &bot).await;
+    let handoff = hand_off(&app, &token, "Log in to X as @scout.").await;
+    wait(&app, turn, "waiting").await;
+    let taken = settle(&app, &bot, &handoff["handoff_id"], "take").await;
+    assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
+
+    let shown = sidebar_status(&app, &bot).await;
+    assert_eq!(shown["kind"], "has_computer", "{shown}");
+    assert!(
+        shown["since"]
+            .as_str()
+            .is_some_and(|at| at.parse::<chrono::DateTime<chrono::Utc>>().is_ok()),
+        "{shown}"
+    );
+
+    let back = settle(&app, &bot, &handoff["handoff_id"], "hand-back").await;
+    assert_eq!(back.status, StatusCode::OK, "{}", back.body);
+    assert_ne!(sidebar_status(&app, &bot).await["kind"], "has_computer");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_request_from_before_hand_back_still_tells_later_turns_who_holds_the_computer() {
     let (app, synthetic) = harness().await;
     let bot = app.main_bot().await;
