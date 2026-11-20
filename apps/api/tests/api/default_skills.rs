@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use common::{TestApp, TestDb};
 use else_api::db;
-use else_api::providers::{Registry, synthetic::Synthetic};
+use else_api::providers::synthetic::Synthetic;
 use sqlx::types::Json;
 use uuid::Uuid;
 
@@ -14,9 +14,13 @@ async fn fixture() -> (TestApp, Arc<Synthetic>) {
     let db = TestDb::migrated().await;
     db::installation::setup(&db.pool).await.unwrap();
     let synthetic = Arc::new(Synthetic::new(Duration::from_millis(1)));
-    let registry = Registry::new(vec![synthetic.clone()]);
+    let registry: common::Providers = vec![synthetic.clone()];
     (
-        TestApp::with_registry(Arc::new(db), 4, registry).await,
+        TestApp::builder()
+            .db(Arc::new(db))
+            .providers(registry)
+            .start()
+            .await,
         synthetic,
     )
 }

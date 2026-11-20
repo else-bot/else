@@ -58,7 +58,7 @@ async fn with_routine(h: &Harness, bot: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_approved_card_deletes_the_bot_once_even_with_a_broad_grant() {
-    let h = harness(4).await;
+    let h = harness(common::TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let growth = h.app.create_bot("Growth").await;
     with_routine(&h, &growth).await;
@@ -119,7 +119,7 @@ async fn an_approved_card_deletes_the_bot_once_even_with_a_broad_grant() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn refused_targets_and_a_denial_leave_the_bot_active() {
-    let h = harness(4).await;
+    let h = harness(common::TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let growth = h.app.create_bot("Growth").await;
 
@@ -169,7 +169,7 @@ async fn refused_targets_and_a_denial_leave_the_bot_active() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_task_cannot_delete_the_bot_that_delegated_it() {
-    let h = harness(4).await;
+    let h = harness(common::TestApp::builder()).await;
     let growth = h.app.create_bot("Growth").await;
     let worker = h.app.create_bot("Worker").await;
     let spare = h.app.create_bot("Spare").await;
@@ -219,7 +219,7 @@ async fn a_task_cannot_delete_the_bot_that_delegated_it() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_retry_reports_shutdown_pending_until_the_bot_is_deleted() {
-    let h = harness(4).await;
+    let h = harness(common::TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let growth = h.app.create_bot("Growth").await;
     let (busy, _) = h.running(&growth, GATE).await;

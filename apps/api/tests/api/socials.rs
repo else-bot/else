@@ -1,8 +1,10 @@
 use crate::common;
 
 use async_trait::async_trait;
-use common::TestDb;
+use common::recorder::{Called, GATE, GATE_AFTER_OPENING, GATE_EVERY_ATTEMPT, harness, tool};
+use common::{TestApp, TestDb};
 use else_api::connector_core::actions::Start;
+use else_api::grants::Tool;
 use else_api::{
     credentials::SecretKey,
     socials::{
@@ -69,20 +71,6 @@ pub(crate) async fn bot(db: &TestDb) -> Uuid {
     bot
 }
 /// An owner turn the scheduler runs until the app stops.
-pub(crate) async fn running_turn(app: &common::TestApp, bot: Uuid) -> Uuid {
-    let sent = app
-        .send(
-            &bot.to_string(),
-            Uuid::new_v4(),
-            "[synthetic:hang]",
-            Some("synthetic"),
-        )
-        .await;
-    let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
-    app.wait_turn(&turn, &["running"]).await;
-    turn.parse().unwrap()
-}
-
 pub(crate) async fn turn(db: &TestDb, bot: Uuid, kind: &str) -> Uuid {
     insert_turn(db, bot, kind, "running", "test").await
 }
@@ -753,18 +741,12 @@ async fn changing_generation_cancels_inflight_sdk_wait_and_records_uncertainty()
 async fn stopping_work_cancels_an_inflight_send_and_records_uncertainty() {
     let fake = Arc::new(Fake::default());
     let db = Arc::new(TestDb::migrated().await);
-    let app = common::TestApp::start(
-        db.clone(),
-        common::Setup {
-            social: Some(fake.clone()),
-            ..common::Setup::default()
-        },
-    )
-    .await;
+    let h = harness(TestApp::builder().db(db.clone()).social(fake.clone())).await;
+    let app = &h.app;
     let c = account(&db, "stop").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
-    let turn = running_turn(&app, bot).await;
+    let (turn, _) = h.running(&bot.to_string(), GATE).await;
     fake.blocked.store(true, Ordering::SeqCst);
     let id = Uuid::new_v4();
     let running = app.state.socials.clone();
@@ -911,45 +893,27 @@ pub(crate) async fn http(
         serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     )
 }
-async fn rpc(router: &axum::Router, bearer: &str, name: &str, args: Value) -> Value {
-    let(status,body)=http(router,"POST","/tools/v1/mcp",bearer,json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}})).await;
-    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
-    assert_ne!(body["result"]["isError"], true, "{body}");
-    serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+fn social_result(called: Called) -> Value {
+    assert_eq!(called.status, axum::http::StatusCode::OK, "{}", called.body);
+    assert!(!called.error, "{}", called.body);
+    called.result
 }
 
 #[tokio::test]
 async fn owner_credentials_task_authority_and_approved_native_send_stay_separate() {
-    use else_api::grants::Tool;
     let fake = Arc::new(Fake::default());
-    let db = Arc::new(TestDb::migrated().await);
-    let app = common::TestApp::start(
-        db.clone(),
-        common::Setup {
-            social: Some(fake.clone()),
-            ..common::Setup::default()
-        },
+    let h = harness(
+        TestApp::builder()
+            .db(Arc::new(TestDb::migrated().await))
+            .social(fake.clone()),
     )
     .await;
+    let app = &h.app;
+    let db = &app.db;
     let router = app.router.clone();
-    let bot = bot(&db).await;
-    let turn = running_turn(&app, bot).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?1")
-        .bind(turn)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-    let grant = app
-        .state
-        .grants
-        .issue(
-            bot,
-            conversation,
-            turn,
-            vec![Tool::Social, Tool::AskOwner, Tool::DraftEmail],
-            Duration::from_secs(300),
-        )
-        .await;
+    let bot = bot(db).await;
+    let (turn, grant) = h.running(&bot.to_string(), GATE_EVERY_ATTEMPT).await;
+
     let denied = http(
         &router,
         "GET",
@@ -977,15 +941,26 @@ async fn owner_credentials_task_authority_and_approved_native_send_stay_separate
         .unwrap()
         .parse()
         .unwrap();
-    destinations(&db, connection).await;
-    let discovery = rpc(&router, &grant, "social_connections", json!({})).await;
+    destinations(db, connection).await;
+    let discovery = social_result(tool(app, &grant, "social_connections", json!({})).await);
     assert_eq!(
         discovery["connections"][0]["destinations"][0]["id"], "100",
         "any bot working for the owner sees the connection's chats: {discovery}"
     );
-    let proposed=rpc(&router,&grant,"draft_message",json!({"platform":"telegram","account_id":connection,"destination":"100","body":"Original draft","reply_to":"10"})).await;
+    let proposed = social_result(
+        tool(
+            app,
+            &grant,
+            "draft_message",
+            json!({ "platform": "telegram", "account_id": connection, "destination": "100",
+                    "body": "Original draft", "reply_to": "10" }),
+        )
+        .await,
+    );
     let draft = proposed["draft"]["draft_id"].as_str().unwrap();
     assert_eq!(fake.sends.load(Ordering::SeqCst), 0);
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
     let (status, approved) = http(
         &router,
         "POST",
@@ -995,26 +970,11 @@ async fn owner_credentials_task_authority_and_approved_native_send_stay_separate
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{approved}");
-    sqlx::query("UPDATE turns SET attempt=2 WHERE id=?1")
-        .bind(turn)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    let grant = app
-        .state
-        .grants
-        .issue(
-            bot,
-            conversation,
-            turn,
-            vec![Tool::Social, Tool::AskOwner, Tool::DraftEmail],
-            Duration::from_secs(300),
-        )
-        .await;
-    let result = rpc(&router, &grant, "send_draft", json!({"draft_id":draft})).await;
+    let grant = h.continued(turn, &grant).await;
+    let result = social_result(tool(app, &grant, "send_draft", json!({"draft_id":draft})).await);
     assert_eq!(result["status"], "sent", "{result}");
     assert_eq!(
-        rpc(&router, &grant, "send_draft", json!({"draft_id":draft})).await["status"],
+        social_result(tool(app, &grant, "send_draft", json!({"draft_id":draft})).await)["status"],
         "sent"
     );
     assert_eq!(fake.sends.load(Ordering::SeqCst), 1);
@@ -1030,40 +990,19 @@ async fn owner_credentials_task_authority_and_approved_native_send_stay_separate
 
 #[tokio::test]
 async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
-    use else_api::grants::Tool;
     let fake = Arc::new(Fake::default());
-    let db = Arc::new(TestDb::migrated().await);
-    let app = common::TestApp::start(
-        db.clone(),
-        common::Setup {
-            social: Some(fake.clone()),
-            ..common::Setup::default()
-        },
+    let h = harness(
+        TestApp::builder()
+            .db(Arc::new(TestDb::migrated().await))
+            .social(fake.clone()),
     )
     .await;
+    let app = &h.app;
+    let db = &app.db;
     let router = app.router.clone();
-    let bot = bot(&db).await;
-    let turn = running_turn(&app, bot).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?1")
-        .bind(turn)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-    let issue = || {
-        app.state.grants.issue(
-            bot,
-            conversation,
-            turn,
-            vec![
-                Tool::Social,
-                Tool::Routines,
-                Tool::AskOwner,
-                Tool::DraftEmail,
-            ],
-            Duration::from_secs(300),
-        )
-    };
-    let grant = issue().await;
+    let bot = bot(db).await;
+    let (turn, grant) = h.running(&bot.to_string(), GATE_EVERY_ATTEMPT).await;
+
     let (status, created) = http(
         &router,
         "POST",
@@ -1075,13 +1014,16 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
     assert_eq!(status, axum::http::StatusCode::OK, "{created}");
     let connection = created["connection"]["id"].as_str().unwrap().to_owned();
 
-    let set = rpc(
-        &router,
-        &grant,
-        "social_trigger_set",
-        json!({"connection_id":connection,"destination":"@team_alerts","wake":"mentions","instructions":"Summarize alerts for me."}),
-    )
-    .await;
+    let set = social_result(
+        tool(
+            app,
+            &grant,
+            "social_trigger_set",
+            json!({ "connection_id": connection, "destination": "@team_alerts",
+                    "wake": "mentions", "instructions": "Summarize alerts for me." }),
+        )
+        .await,
+    );
     assert_eq!(
         (
             set["trigger"]["destination"].as_str(),
@@ -1090,25 +1032,30 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
         (Some("-100777"), Some("Team alerts")),
         "a trigger keys on the chat ID incoming messages carry: {set}"
     );
-    let discovery = rpc(&router, &grant, "social_connections", json!({})).await;
+    let discovery = social_result(tool(app, &grant, "social_connections", json!({})).await);
     assert_eq!(
         discovery["connections"][0]["destinations"][0],
         json!({"id":"-100777","name":"Team alerts","kind":"group","can_send":true}),
         "a looked-up chat is listed before it posts anything: {discovery}"
     );
 
-    let proposed = rpc(
-        &router,
-        &grant,
-        "draft_message",
-        json!({"platform":"telegram","account_id":connection,"destination":"https://t.me/team_alerts","body":"Test"}),
-    )
-    .await;
+    let proposed = social_result(
+        tool(
+            app,
+            &grant,
+            "draft_message",
+            json!({ "platform": "telegram", "account_id": connection,
+                    "destination": "https://t.me/team_alerts", "body": "Test" }),
+        )
+        .await,
+    );
     let draft = proposed["draft"]["draft_id"].as_str().unwrap();
     assert_eq!(
         proposed["draft"]["content"]["destination"], "-100777",
         "the owner approves the chat the username named when drafted: {proposed}"
     );
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
     let (status, approved) = http(
         &router,
         "POST",
@@ -1118,13 +1065,8 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{approved}");
-    sqlx::query("UPDATE turns SET attempt=2 WHERE id=?1")
-        .bind(turn)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    let grant = issue().await;
-    let result = rpc(&router, &grant, "send_draft", json!({"draft_id":draft})).await;
+    let grant = h.continued(turn, &grant).await;
+    let result = social_result(tool(app, &grant, "send_draft", json!({"draft_id":draft})).await);
     assert_eq!(result["status"], "sent", "{result}");
     assert_eq!(*fake.sent_to.lock().unwrap(), vec!["-100777".to_owned()]);
 
@@ -1138,25 +1080,22 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
     .await;
     assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{stopped}");
     app.wait_turn(&turn.to_string(), &["interrupted"]).await;
-    let woken = insert_turn(&db, bot, "connector", "queued", "[synthetic:hang]").await;
+    let woken = insert_turn(db, bot, "connector", "queued", GATE).await;
     app.scheduler.wake();
-    app.wait_turn(&woken.to_string(), &["running"]).await;
-    let grant = app
-        .state
-        .grants
-        .issue(
-            bot,
-            conversation,
-            woken,
-            vec![Tool::Social],
-            Duration::from_secs(300),
-        )
-        .await;
-    let (_, refused) = http(&router, "POST", "/tools/v1/mcp", &grant, json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"social_action","arguments":{"connection_id":connection,"command":{"operation":"chat","destination":"@other_channel"}}}})).await;
-    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    h.started(woken).await;
+    let grant = h.grant_with(woken, vec![Tool::Social]).await;
+    let refused = tool(
+        app,
+        &grant,
+        "social_action",
+        json!({"connection_id":connection,"command":{"operation":"chat","destination":"@other_channel"}}),
+    )
+    .await;
+    assert!(refused.error, "{}", refused.body);
     assert!(
-        refused.to_string().contains("no permission"),
-        "a woken turn cannot look up another chat: {refused}"
+        refused.result.to_string().contains("no permission"),
+        "a woken turn cannot look up another chat: {}",
+        refused.body
     );
 }
 
@@ -1401,21 +1340,20 @@ async fn upgrading_turns_wake_access_into_triggers_and_drops_bindings() {
 #[tokio::test]
 async fn completing_another_bots_setup_keeps_an_approved_send_running() {
     let fake = Arc::new(Fake::default());
-    let db = Arc::new(TestDb::migrated().await);
-    let app = common::TestApp::start(
-        db.clone(),
-        common::Setup {
-            social: Some(fake.clone()),
-            ..common::Setup::default()
-        },
+    let h = harness(
+        TestApp::builder()
+            .db(Arc::new(TestDb::migrated().await))
+            .social(fake.clone()),
     )
     .await;
+    let app = &h.app;
+    let db = &app.db;
     let router = app.router.clone();
-    let c = account(&db, "shared").await;
-    destinations(&db, c.id).await;
-    let (sender, asker) = (bot(&db).await, bot(&db).await);
-    let sending = running_turn(&app, sender).await;
-    let asking = running_turn(&app, asker).await;
+    let c = account(db, "shared").await;
+    destinations(db, c.id).await;
+    let (sender, asker) = (bot(db).await, bot(db).await);
+    let (sending, _) = h.running(&sender.to_string(), GATE).await;
+    let (asking, _) = h.running(&asker.to_string(), GATE).await;
     let setup = store::request_setup(&db.pool, asking, Provider::Telegram, "Post updates")
         .await
         .unwrap();
@@ -1555,22 +1493,20 @@ fn connection_state_transitions() {
 
 #[tokio::test]
 async fn an_approved_message_sends_exactly_its_approved_picture() {
-    use else_api::{grants::Tool, providers::Registry, providers::synthetic::Synthetic};
     let fake = Arc::new(Fake::default());
     let root = tempfile::tempdir().unwrap();
-    let synthetic = Synthetic::new(Duration::from_millis(5)).with_projects(root.path().into());
-    let db = Arc::new(TestDb::migrated().await);
-    let app = common::TestApp::start(
-        db.clone(),
-        common::Setup {
-            social: Some(fake.clone()),
-            ..common::Setup::with_registry(Registry::new(vec![Arc::new(synthetic)]))
-        },
+    let h = harness(
+        TestApp::builder()
+            .db(Arc::new(TestDb::migrated().await))
+            .social(fake.clone())
+            .projects(root.path()),
     )
     .await;
+    let app = &h.app;
+    let db = &app.db;
     let router = app.router.clone();
-    let bot = bot(&db).await;
-    let turn = running_turn(&app, bot).await;
+    let bot = bot(db).await;
+    let (turn, grant) = h.running(&bot.to_string(), GATE_EVERY_ATTEMPT).await;
     let dir = else_api::providers::host::project_dir(root.path(), bot).unwrap();
     let mut flyer = std::io::Cursor::new(Vec::new());
     image::RgbImage::from_pixel(3, 2, image::Rgb([0, 90, 200]))
@@ -1578,23 +1514,7 @@ async fn an_approved_message_sends_exactly_its_approved_picture() {
         .unwrap();
     let flyer = flyer.into_inner();
     std::fs::write(dir.join("flyer.png"), &flyer).unwrap();
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?1")
-        .bind(turn)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-    let tools = vec![Tool::Social, Tool::AskOwner, Tool::DraftEmail];
-    let grant = app
-        .state
-        .grants
-        .issue(
-            bot,
-            conversation,
-            turn,
-            tools.clone(),
-            Duration::from_secs(300),
-        )
-        .await;
+
     let (status, created) = http(
         &router,
         "POST",
@@ -1605,15 +1525,17 @@ async fn an_approved_message_sends_exactly_its_approved_picture() {
     .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{created}");
     let connection = created["connection"]["id"].as_str().unwrap().to_owned();
-    destinations(&db, connection.parse().unwrap()).await;
-    let proposed = rpc(
-        &router,
-        &grant,
-        "draft_message",
-        json!({"platform":"telegram","account_id":connection,"destination":"100",
+    destinations(db, connection.parse().unwrap()).await;
+    let proposed = social_result(
+        tool(
+            app,
+            &grant,
+            "draft_message",
+            json!({"platform":"telegram","account_id":connection,"destination":"100",
                "body":"Rue aux enfants samedi !","attachments":[{"path":"flyer.png"}]}),
-    )
-    .await;
+        )
+        .await,
+    );
     let draft = proposed["draft"]["draft_id"].as_str().unwrap().to_owned();
     let file = proposed["draft"]["content"]["attachments"][0].clone();
     assert_eq!(file["media_type"], "image/png", "{proposed}");
@@ -1621,6 +1543,8 @@ async fn an_approved_message_sends_exactly_its_approved_picture() {
         proposed["draft"].get("attachment_paths").is_none(),
         "a connected draft is never sent by the bot's own tools"
     );
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
     let (status, approved) = http(
         &router,
         "POST",
@@ -1630,18 +1554,9 @@ async fn an_approved_message_sends_exactly_its_approved_picture() {
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{approved}");
-    sqlx::query("UPDATE turns SET attempt=2 WHERE id=?1")
-        .bind(turn)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    let grant = app
-        .state
-        .grants
-        .issue(bot, conversation, turn, tools, Duration::from_secs(300))
-        .await;
+    let grant = h.continued(turn, &grant).await;
     std::fs::write(dir.join("flyer.png"), b"changed after approval").unwrap();
-    let result = rpc(&router, &grant, "send_draft", json!({"draft_id":draft})).await;
+    let result = social_result(tool(app, &grant, "send_draft", json!({"draft_id":draft})).await);
     assert_eq!(result["status"], "sent", "{result}");
     assert_eq!(
         *fake.sent_files.lock().unwrap(),
@@ -1652,24 +1567,15 @@ async fn an_approved_message_sends_exactly_its_approved_picture() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pending_setup_shows_in_the_sidebar_as_a_request_until_it_is_settled() {
-    let db = Arc::new(TestDb::migrated().await);
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    let synthetic = Arc::new(else_api::providers::synthetic::Synthetic::new(
-        Duration::from_millis(5),
-    ));
-    let registry = else_api::providers::Registry::new(vec![synthetic]);
-    let app = common::TestApp::with_registry(db, 4, registry).await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.main_bot().await;
-    let sent = app
-        .send(
+    let (turn, _) = h
+        .running(
             &bot,
-            Uuid::new_v4(),
-            "[synthetic:slow] post the update to the team chat.",
-            Some("synthetic"),
+            &format!("{GATE_AFTER_OPENING} post the update to the team chat."),
         )
         .await;
-    let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
-    app.wait_turn(&turn, &["running"]).await;
     tokio::time::timeout(common::SETTLE, async {
         loop {
             let snapshot = app
@@ -1690,7 +1596,7 @@ async fn a_pending_setup_shows_in_the_sidebar_as_a_request_until_it_is_settled()
     .expect("the reply started");
     let setup = store::request_setup(
         &app.db.pool,
-        turn.parse().unwrap(),
+        turn,
         Provider::Telegram,
         "Post updates to the team chat.",
     )

@@ -2,8 +2,9 @@ use crate::common;
 
 use axum::http::StatusCode;
 use common::TestApp;
+use common::recorder::{Called, GATE, harness, tool};
 use else_api::db::memory::{self, AppendError, Kind, NewEntry};
-use else_api::grants::{DEFAULT_TTL, Tool};
+use else_api::grants::Tool;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -271,7 +272,7 @@ async fn only_explicit_owner_corrections_supersede_owner_entries() {
 }
 
 fn owner_hit(hits: &Value) -> Value {
-    hits["structuredContent"]["hits"]
+    hits["hits"]
         .as_array()
         .unwrap()
         .iter()
@@ -280,60 +281,18 @@ fn owner_hit(hits: &Value) -> Value {
         .unwrap()
 }
 
-async fn rpc(app: &TestApp, token: &str, method: &str, params: Value) -> common::Reply {
-    app.call(
-        "POST",
-        "/tools/v1/mcp",
-        Some(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })),
-        Some(token),
-    )
-    .await
-}
-
-async fn tool(app: &TestApp, token: &str, name: &str, args: Value) -> Value {
-    let reply = rpc(
-        app,
-        token,
-        "tools/call",
-        json!({ "name": name, "arguments": args }),
-    )
-    .await;
-    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    let mut result = reply.body["result"].clone();
+fn assert_memory_reply(called: &Called) {
+    assert_eq!(called.status, StatusCode::OK, "{}", called.body);
     assert!(
-        result.to_string().len() <= memory::RESPONSE_BUDGET,
+        called.body["result"].to_string().len() <= memory::RESPONSE_BUDGET,
         "budget"
     );
-    if result["isError"] != true {
-        let text = result["content"][0]["text"].as_str().unwrap();
-        result["structuredContent"] = serde_json::from_str(text).unwrap();
-    }
-    result
 }
 
-async fn running_grant(app: &TestApp, bot: &str) -> (Uuid, String) {
-    let reply = app
-        .send(bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
-        .await;
-    let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    app.wait_turn(&turn.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-        .bind(turn)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    let token = app
-        .state
-        .grants
-        .issue(
-            bot.parse().unwrap(),
-            conversation,
-            turn,
-            vec![Tool::ReadMemory],
-            DEFAULT_TTL,
-        )
-        .await;
-    (turn, token)
+fn bounded_memory_result(called: Called) -> Value {
+    assert_memory_reply(&called);
+    assert!(!called.error, "{}", called.body);
+    called.result
 }
 
 fn owner_entry<'a>(key: &'a str, body: &'a str, supersedes: Option<i64>) -> NewEntry<'a> {
@@ -352,54 +311,55 @@ fn owner_entry<'a>(key: &'a str, body: &'a str, supersedes: Option<i64>) -> NewE
 
 #[tokio::test(flavor = "multi_thread")]
 async fn responses_stay_within_budget_even_with_escaped_text() {
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("Big").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let body = "\"\u{1}".repeat(400);
     for i in 0..20 {
         append(
-            &app,
+            app,
             bot_id,
             &entry(&format!("e{i}"), &format!("needle {i} {body}")),
         )
         .await
         .unwrap();
     }
-    let (_, token) = running_grant(&app, &bot).await;
-    let read = tool(
-        &app,
-        &token,
-        "memory_read",
-        json!({ "start_seq": 0, "count": 20 }),
-    )
-    .await;
-    let shown = read["structuredContent"]["entries"]
-        .as_array()
-        .unwrap()
-        .len();
+    let (_, token) = h.running(&bot, GATE).await;
+    let read = bounded_memory_result(
+        tool(
+            app,
+            &token,
+            "memory_read",
+            json!({ "start_seq": 0, "count": 20 }),
+        )
+        .await,
+    );
+    let shown = read["entries"].as_array().unwrap().len();
     assert!(shown >= 1);
     if shown < 20 {
-        assert_eq!(read["structuredContent"]["next_start_seq"], shown as i64);
+        assert_eq!(read["next_start_seq"], shown as i64);
     }
-    let search = tool(&app, &token, "memory_search", json!({ "query": "needle" })).await;
-    let hits = search["structuredContent"]["hits"]
-        .as_array()
-        .unwrap()
-        .len();
+    let search = bounded_memory_result(
+        tool(app, &token, "memory_search", json!({ "query": "needle" })).await,
+    );
+    let hits = search["hits"].as_array().unwrap().len();
     assert!((1..=20).contains(&hits));
     let long = format!("é{}", "x".repeat(30_000));
-    let seq = append(&app, bot_id, &entry("long", &long)).await.unwrap()[0];
+    let seq = append(app, bot_id, &entry("long", &long)).await.unwrap()[0];
     let mut offset = 1;
     let mut text = String::new();
     loop {
-        let page = tool(
-            &app,
-            &token,
-            "memory_read",
-            json!({ "start_seq": seq, "count": 1, "offset": offset }),
-        )
-        .await;
-        let e = &page["structuredContent"]["entries"][0];
+        let page = bounded_memory_result(
+            tool(
+                app,
+                &token,
+                "memory_read",
+                json!({ "start_seq": seq, "count": 1, "offset": offset }),
+            )
+            .await,
+        );
+        let e = &page["entries"][0];
         if text.is_empty() {
             assert_eq!(e["offset"], 0, "normalized to the character start");
         }
@@ -495,9 +455,10 @@ async fn an_append_racing_a_deletion_never_lands_after_it() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn malformed_json_rpc_is_rejected_before_dispatch() {
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("Rpc").await;
-    let (_, token) = running_grant(&app, &bot).await;
+    let (_, token) = h.running(&bot, GATE).await;
     let send = |body: Value| app.call("POST", "/tools/v1/mcp", Some(body), Some(&token));
     for (body, code) in [
         (json!({ "id": 1, "method": "tools/list" }), -32600),
@@ -537,7 +498,8 @@ async fn malformed_json_rpc_is_rejected_before_dispatch() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mcp_tools_read_own_memory_and_shared_memory_only() {
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let me = app.create_bot("Family").await;
     let work = app.create_bot("Work").await;
     let fact = app
@@ -561,34 +523,17 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
     app.wait_turn(own.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
 
-    let reply = app
-        .send(&me, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
-        .await;
-    let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    app.wait_turn(&turn.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-        .bind(turn)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    let grants = &app.state.grants;
-    let token = grants
-        .issue(
-            me.parse().unwrap(),
-            conversation,
-            turn,
-            vec![Tool::ReadMemory],
-            DEFAULT_TTL,
+    let (turn, token) = h.running(&me, GATE).await;
+
+    let init = app
+        .call(
+            "POST",
+            "/tools/v1/mcp",
+            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                         "params": { "protocolVersion": "2025-06-18" } })),
+            Some(&token),
         )
         .await;
-
-    let init = rpc(
-        &app,
-        &token,
-        "initialize",
-        json!({ "protocolVersion": "2025-06-18" }),
-    )
-    .await;
     assert_eq!(init.body["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(init.body["result"]["serverInfo"]["name"], "elsebot");
     // Codex copies the server instructions into every tool's description.
@@ -603,7 +548,15 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         )
         .await;
     assert_eq!(note.status, StatusCode::ACCEPTED);
-    let listed = rpc(&app, &token, "tools/list", json!({})).await;
+    let list_tools = |token| {
+        app.call(
+            "POST",
+            "/tools/v1/mcp",
+            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} })),
+            Some(token),
+        )
+    };
+    let listed = list_tools(&token).await;
     let names: Vec<&str> = listed.body["result"]["tools"]
         .as_array()
         .unwrap()
@@ -640,58 +593,51 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         assert_eq!(tool["annotations"]["readOnlyHint"], read_only, "{tool}");
     }
 
-    let hits = tool(&app, &token, "memory_search", json!({ "query": "pickup" })).await;
-    let hit = &owner_hit(&hits);
+    let hits = tool(app, &token, "memory_search", json!({ "query": "pickup" })).await;
+    assert_memory_reply(&hits);
+    let hit = &owner_hit(&hits.result);
     assert_eq!(hit["body"], "School pickup is at 15:30.");
     assert_eq!(hit["authority"], "owner");
     assert_eq!(hit["bot_id"], me);
     assert_eq!(hit["source"]["item_id"], own.body["item"]["id"]);
 
     let denied = tool(
-        &app,
+        app,
         &token,
         "memory_search",
         json!({ "query": "codename", "bot_id": work }),
     )
     .await;
-    assert_eq!(denied["isError"], true);
-    let listed = tool(&app, &token, "memory_bots", json!({})).await;
-    assert_eq!(
-        listed["structuredContent"]["bots"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_memory_reply(&denied);
+    assert!(denied.error, "{}", denied.body);
+    let listed = tool(app, &token, "memory_bots", json!({})).await;
+    assert_memory_reply(&listed);
+    assert_eq!(listed.result["bots"].as_array().unwrap().len(), 1);
     let granted = app
         .owner("PUT", &format!("/v1/bots/{me}/memory-access/{work}"), None)
         .await;
     assert_eq!(granted.status, StatusCode::NO_CONTENT);
     let hits = tool(
-        &app,
+        app,
         &token,
         "memory_search",
         json!({ "query": "codename", "bot_id": work }),
     )
     .await;
-    let hit = &owner_hit(&hits);
+    assert_memory_reply(&hits);
+    let hit = &owner_hit(&hits.result);
     assert_eq!(hit["body"], "Project codename is BLUEFIN.");
     assert_eq!(hit["bot_id"], work, "results keep their originating bot");
     let read = tool(
-        &app,
+        app,
         &token,
         "memory_read",
         json!({ "start_seq": 0, "count": 2, "bot_id": work }),
     )
     .await;
-    assert_eq!(
-        read["structuredContent"]["entries"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    assert_eq!(read["structuredContent"]["length"], 2);
+    assert_memory_reply(&read);
+    assert_eq!(read.result["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(read.result["length"], 2);
 
     let logged: Vec<(String, String)> = sqlx::query_as(
         "SELECT kind, authority FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity'",
@@ -702,7 +648,7 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
     .unwrap();
     assert!(logged.len() >= 4);
     assert!(logged.iter().all(|(_, authority)| authority == "tool"));
-    let work_entries = seqs(&app, work.parse().unwrap()).await;
+    let work_entries = seqs(app, work.parse().unwrap()).await;
     assert_eq!(
         work_entries,
         vec![0, 1],
@@ -711,44 +657,29 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
 
     app.owner("DELETE", &format!("/v1/bots/{work}"), None).await;
     let gone = tool(
-        &app,
+        app,
         &token,
         "memory_search",
         json!({ "query": "codename", "bot_id": work }),
     )
     .await;
-    assert_eq!(gone["isError"], true);
-    assert_eq!(seqs(&app, work.parse().unwrap()).await, vec![0, 1]);
+    assert_memory_reply(&gone);
+    assert!(gone.error, "{}", gone.body);
+    assert_eq!(seqs(app, work.parse().unwrap()).await, vec![0, 1]);
     let owner_read = app
         .owner("GET", &format!("/v1/bots/{work}/memory"), None)
         .await;
     assert_eq!(owner_read.status, StatusCode::GONE);
 
-    let history_only = grants
-        .issue(
-            me.parse().unwrap(),
-            conversation,
-            turn,
-            vec![Tool::ReadHistory],
-            DEFAULT_TTL,
-        )
-        .await;
-    let refused = rpc(
-        &app,
-        &history_only,
-        "tools/call",
-        json!({ "name": "memory_bots", "arguments": {} }),
-    )
-    .await;
+    let history_only = h.grant_with(turn, vec![Tool::ReadHistory]).await;
+    let refused = tool(app, &history_only, "memory_bots", json!({})).await;
     assert_eq!(refused.status, StatusCode::FORBIDDEN);
     assert_eq!(
-        rpc(&app, common::TOKEN, "tools/list", json!({}))
-            .await
-            .status,
+        list_tools(common::TOKEN).await.status,
         StatusCode::FORBIDDEN
     );
     assert_eq!(
-        rpc(&app, "tg_forged", "tools/list", json!({})).await.status,
+        list_tools("tg_forged").await.status,
         StatusCode::UNAUTHORIZED
     );
 
@@ -759,12 +690,6 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
     )
     .await;
     app.wait_turn(&turn.to_string(), &["interrupted"]).await;
-    let after = rpc(
-        &app,
-        &token,
-        "tools/call",
-        json!({ "name": "memory_bots", "arguments": {} }),
-    )
-    .await;
+    let after = tool(app, &token, "memory_bots", json!({})).await;
     assert_eq!(after.status, StatusCode::UNAUTHORIZED);
 }

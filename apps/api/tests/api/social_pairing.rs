@@ -1,5 +1,5 @@
 use crate::common::{self, TestDb};
-use crate::socials::{bot, http, key, running_turn, turn};
+use crate::socials::{bot, http, key, turn};
 
 use async_trait::async_trait;
 use else_api::socials::{
@@ -630,16 +630,16 @@ async fn a_secret_must_match_how_its_provider_connects() {
 async fn the_card_pairs_a_setup_and_a_connection_through_one_pairing_route_each() {
     let db = Arc::new(TestDb::migrated().await);
     let phone = Phone::new("33612345678");
-    let app = common::TestApp::start(
-        db.clone(),
-        common::Setup {
-            social: Some(phone.clone()),
-            ..common::Setup::default()
-        },
+    let h = common::recorder::harness(
+        common::TestApp::builder()
+            .db(db.clone())
+            .social(phone.clone()),
     )
     .await;
-    let router = app.router.clone();
-    let turn = running_turn(&app, bot(&db).await).await;
+    let router = h.app.router.clone();
+    let (turn, _) = h
+        .running(&bot(&db).await.to_string(), common::recorder::GATE)
+        .await;
     let setup = store::request_setup(&db.pool, turn, Provider::WhatsApp, "Watch the Family group")
         .await
         .unwrap();
@@ -678,7 +678,7 @@ async fn the_card_pairs_a_setup_and_a_connection_through_one_pairing_route_each(
     assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
 
     let bot = bot(&db).await;
-    let turn = running_turn(&app, bot).await;
+    let (turn, _) = h.running(&bot.to_string(), common::recorder::GATE).await;
     let telegram = store::request_setup(&db.pool, turn, Provider::Telegram, "Team support")
         .await
         .unwrap();

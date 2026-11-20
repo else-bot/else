@@ -1,104 +1,15 @@
 use crate::common;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use common::{TestApp, TestDb};
-use else_api::grants::{DEFAULT_TTL, Tool};
-use else_api::providers::synthetic::Synthetic;
+use common::TestApp;
+use common::recorder::{
+    Called, GATE, GATE_AFTER_OPENING, GATE_EVERY_ATTEMPT, Harness, harness, tool,
+};
+use else_api::grants::Tool;
 use serde_json::{Value, json};
 use uuid::Uuid;
-
-const SLOW: &str = "[synthetic:slow] send the newsletter to the subscribers list.";
-
-struct Harness {
-    app: TestApp,
-    synthetic: Arc<Synthetic>,
-}
-
-async fn harness() -> Harness {
-    let db = Arc::new(TestDb::migrated().await);
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
-    let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
-    Harness {
-        app: TestApp::with_registry(db, 4, registry).await,
-        synthetic,
-    }
-}
-
-async fn grant(app: &TestApp, turn_id: Uuid, tools: Vec<Tool>) -> String {
-    let (bot, conversation): (Uuid, Uuid) =
-        sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
-            .bind(turn_id)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
-    app.state
-        .grants
-        .issue(bot, conversation, turn_id, tools, DEFAULT_TTL)
-        .await
-}
-
-/// Mark a finished turn running again with a fresh owner grant, as if it
-/// resumed. The scheduler revokes a turn's grants after it records the final
-/// status, so this waits until the scheduler has let the turn go.
-async fn resume_finished(app: &TestApp, turn_id: Uuid) -> String {
-    tokio::time::timeout(common::SETTLE, async {
-        while app.scheduler.running_count().await > 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the scheduler released the finished turn");
-    let token = grant(app, turn_id, owner_tools()).await;
-    sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
-        .bind(turn_id)
-        .execute(&app.db.pool)
-        .await
-        .unwrap();
-    token
-}
-
-fn owner_tools() -> Vec<Tool> {
-    vec![
-        Tool::ReadMemory,
-        Tool::AskOwner,
-        Tool::AskPermission,
-        Tool::Computer,
-    ]
-}
-
-async fn running(app: &TestApp, bot: &str) -> (Uuid, String) {
-    let sent = app.send(bot, Uuid::new_v4(), SLOW, Some("synthetic")).await;
-    let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
-    app.wait_turn(&turn, &["running"]).await;
-    let turn_id: Uuid = turn.parse().unwrap();
-    (turn_id, grant(app, turn_id, owner_tools()).await)
-}
-
-async fn tool(app: &TestApp, token: &str, name: &str, args: Value) -> common::Reply {
-    app.call(
-        "POST",
-        "/tools/v1/mcp",
-        Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                     "params": { "name": name, "arguments": args } })),
-        Some(token),
-    )
-    .await
-}
-
-fn tool_text(reply: &common::Reply) -> Value {
-    let text = reply.body["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default();
-    serde_json::from_str(text).unwrap_or_else(|_| json!(text))
-}
-
-fn is_error(reply: &common::Reply) -> bool {
-    reply.body["result"]["isError"] == true
-}
 
 fn choice_args() -> Value {
     json!({ "question": "Which template for the newsletter?",
@@ -224,21 +135,23 @@ fn without_since(mut status: Value) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_choice_parks_the_turn_and_the_answer_continues_it() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    let asked = tool(&app, &token, "ask_owner", choice_args()).await;
-    let result = tool_text(&asked);
+    let (turn, token) = h.running(&main, GATE).await;
+    let asked = tool(app, &token, "ask_owner", choice_args()).await;
+    let result = asked.result;
     assert_eq!(result["status"], "pending", "{}", asked.body);
     assert_eq!(result["parked"], true);
     let question: Uuid = result["question_id"].as_str().unwrap().parse().unwrap();
     assert_eq!(result["choices"][1]["id"], "b");
-    let more = tool(&app, &token, "memory_bots", json!({})).await;
+    let more = tool(app, &token, "memory_bots", json!({})).await;
     assert_eq!(more.status, StatusCode::CONFLICT, "{}", more.body);
     assert_eq!(more.body["error"]["code"], "attempt_parked");
 
-    wait(&app, turn, "waiting").await;
-    let shown = shown_turn(&app, &main, turn).await;
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
+    let shown = shown_turn(app, &main, turn).await;
     let card = &shown["questions"][0];
     assert_eq!(card["id"], question.to_string());
     assert_eq!(card["kind"], "choice");
@@ -247,47 +160,48 @@ async fn a_choice_parks_the_turn_and_the_answer_continues_it() {
     assert_eq!(card["context"], "Draft: Hello everyone, this month...");
     assert_eq!(card["choices"][0]["label"], "Plain text");
     assert_eq!(card["answer"], Value::Null);
-    assert_eq!(journaled(&app, &main, question).await["status"], "pending");
+    assert_eq!(journaled(app, &main, question).await["status"], "pending");
     assert_eq!(
-        sidebar_status(&app, &main).await,
+        sidebar_status(app, &main).await,
         json!({ "kind": "waiting_for_answer", "preview": "Which template for the newsletter?" })
     );
 
-    let bad = answer(&app, &main, question, "c").await;
+    let bad = answer(app, &main, question, "c").await;
     assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.body);
     assert_eq!(bad.body["error"]["code"], "invalid_choice");
-    let chosen = answer(&app, &main, question, "b").await;
+    let chosen = answer(app, &main, question, "b").await;
     assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.body);
     assert_eq!(chosen.body["question"]["status"], "answered");
     assert_eq!(chosen.body["question"]["answer"], "b");
     assert_eq!(chosen.body["requeued"], true);
-    wait(&app, turn, "completed").await;
-    assert_eq!(sidebar_status(&app, &main).await, Value::Null);
-    let shown = shown_turn(&app, &main, turn).await;
+    wait(app, turn, "completed").await;
+    assert_eq!(sidebar_status(app, &main).await, Value::Null);
+    let shown = shown_turn(app, &main, turn).await;
     assert_eq!(shown["questions"][0]["status"], "answered");
-    assert_eq!(journaled(&app, &main, question).await["answer"], "b");
-    let (_, _, consumed) = question_row(&app, question).await;
+    assert_eq!(journaled(app, &main, question).await["answer"], "b");
+    let (_, _, consumed) = question_row(app, question).await;
     assert_eq!(consumed, None, "a choice is not an action approval");
 
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("[else.bot owner answers]"), "{packet}");
     assert!(packet.contains("The owner chose: HTML digest"), "{packet}");
     assert!(packet.contains("kind=\"choice\""), "{packet}");
 
-    let again = answer(&app, &main, question, "b").await;
+    let again = answer(app, &main, question, "b").await;
     assert_eq!(again.status, StatusCode::OK);
     assert_eq!(again.body["requeued"], false);
-    let stale = answer(&app, &main, question, "a").await;
+    let stale = answer(app, &main, question, "a").await;
     assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
     assert_eq!(stale.body["error"]["code"], "question_settled");
-    assert_eq!(question_row(&app, question).await.1, Some("b".into()));
+    assert_eq!(question_row(app, question).await.1, Some("b".into()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reply_turns_unread_when_its_turn_parks_on_a_question() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
+    let (turn, token) = h.running(&main, GATE_AFTER_OPENING).await;
     let read_state = || async {
         app.owner("GET", &format!("/v1/bots/{main}"), None)
             .await
@@ -312,9 +226,10 @@ async fn a_reply_turns_unread_when_its_turn_parks_on_a_question() {
     assert_eq!(working["latest"], Value::Null, "{working}");
     assert_eq!(working["unread"], false);
 
-    let asked = tool(&app, &token, "ask_owner", choice_args()).await;
-    assert_eq!(tool_text(&asked)["parked"], true, "{}", asked.body);
-    wait(&app, turn, "waiting").await;
+    let asked = tool(app, &token, "ask_owner", choice_args()).await;
+    assert_eq!(asked.result["parked"], true, "{}", asked.body);
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
     let parked = read_state().await;
     assert_eq!(parked["latest"]["turn_id"], turn.to_string(), "{parked}");
     assert_eq!(parked["unread"], true);
@@ -323,10 +238,11 @@ async fn a_reply_turns_unread_when_its_turn_parks_on_a_question() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn five_options_accept_exactly_one_answer_by_default_or_explicitly() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
     for multiple in [None, Some(false)] {
-        let (turn, token) = running(&app, &main).await;
+        let (turn, token) = h.running(&main, GATE).await;
         let mut args = json!({
             "question": "What should I prepare for the changelog?",
             "choices": ["Skip posting", "Prepare a Discord + Telegram draft",
@@ -335,11 +251,12 @@ async fn five_options_accept_exactly_one_answer_by_default_or_explicitly() {
         if let Some(multiple) = multiple {
             args["multiple"] = json!(multiple);
         }
-        let pending = tool_text(&tool(&app, &token, "ask_owner", args).await);
+        let pending = tool(app, &token, "ask_owner", args).await.result;
         let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
         assert_eq!(pending["multiple"], false);
-        wait(&app, turn, "waiting").await;
-        let shown = shown_turn(&app, &main, turn).await;
+        h.release(turn).await;
+        wait(app, turn, "waiting").await;
+        let shown = shown_turn(app, &main, turn).await;
         let card = &shown["questions"][0];
         assert_eq!(card["multiple"], false);
         assert_eq!(card["choices"].as_array().unwrap().len(), 5);
@@ -353,30 +270,30 @@ async fn five_options_accept_exactly_one_answer_by_default_or_explicitly() {
         );
 
         for invalid in [json!(["d"]), json!(["a", "d"])] {
-            let refused = select(&app, &main, question, invalid).await;
+            let refused = select(app, &main, question, invalid).await;
             assert_eq!(refused.status, StatusCode::BAD_REQUEST);
             assert_eq!(refused.body["error"]["code"], "invalid_choice");
         }
-        assert_eq!(status(&app, turn).await, "waiting");
-        let chosen = answer(&app, &main, question, "d").await;
+        assert_eq!(status(app, turn).await, "waiting");
+        let chosen = answer(app, &main, question, "d").await;
         assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.body);
         assert_eq!(chosen.body["question"]["answer"], "d");
         assert_eq!(chosen.body["requeued"], true);
-        wait(&app, turn, "completed").await;
-        let shown = shown_turn(&app, &main, turn).await;
+        wait(app, turn, "completed").await;
+        let shown = shown_turn(app, &main, turn).await;
         assert_eq!(shown["questions"][0]["status"], "answered");
         assert_eq!(shown["questions"][0]["answer"], "d");
-        assert_eq!(journaled(&app, &main, question).await["answer"], "d");
-        let packet = synthetic.packets().await.last().unwrap().clone();
+        assert_eq!(journaled(app, &main, question).await["answer"], "d");
+        let packet = h.packets().await.last().unwrap().clone();
         assert!(
             packet.contains("The owner chose: Edit the draft first"),
             "{packet}"
         );
         assert_eq!(
-            answer(&app, &main, question, "a").await.status,
+            answer(app, &main, question, "a").await.status,
             StatusCode::CONFLICT
         );
-        assert_eq!(question_row(&app, question).await.1, Some("d".into()));
+        assert_eq!(question_row(app, question).await.1, Some("d".into()));
     }
 }
 
@@ -401,18 +318,20 @@ async fn select(app: &TestApp, bot: &str, question: Uuid, choices: Value) -> com
 
 #[tokio::test(flavor = "multi_thread")]
 async fn multiple_choices_wait_for_done_and_deliver_only_selected_actions() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    let pending = tool_text(&tool(&app, &token, "ask_owner", multiple_args()).await);
+    let (turn, token) = h.running(&main, GATE).await;
+    let pending = tool(app, &token, "ask_owner", multiple_args()).await.result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     assert_eq!(pending["multiple"], true);
     assert_eq!(pending["choices"].as_array().unwrap().len(), 5);
-    wait(&app, turn, "waiting").await;
-    let shown = shown_turn(&app, &main, turn).await;
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
+    let shown = shown_turn(app, &main, turn).await;
     assert_eq!(shown["questions"][0]["multiple"], true);
     assert_eq!(shown["questions"][0]["answer"], Value::Null);
-    assert_eq!(journaled(&app, &main, question).await["multiple"], true);
+    assert_eq!(journaled(app, &main, question).await["multiple"], true);
 
     for invalid in [
         json!([]),
@@ -420,27 +339,27 @@ async fn multiple_choices_wait_for_done_and_deliver_only_selected_actions() {
         json!(["f"]),
         json!(["a", "b", "c", "d", "e", "f"]),
     ] {
-        let refused = select(&app, &main, question, invalid).await;
+        let refused = select(app, &main, question, invalid).await;
         assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{}", refused.body);
     }
     assert_eq!(
-        answer(&app, &main, question, "a").await.status,
+        answer(app, &main, question, "a").await.status,
         StatusCode::BAD_REQUEST
     );
-    assert_eq!(status(&app, turn).await, "waiting");
-    let chosen = select(&app, &main, question, json!(["e", "c"])).await;
+    assert_eq!(status(app, turn).await, "waiting");
+    let chosen = select(app, &main, question, json!(["e", "c"])).await;
     assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.body);
     assert_eq!(chosen.body["question"]["answer"], json!(["c", "e"]));
     assert_eq!(chosen.body["requeued"], true);
-    wait(&app, turn, "completed").await;
-    let card = &shown_turn(&app, &main, turn).await["questions"][0];
+    wait(app, turn, "completed").await;
+    let card = &shown_turn(app, &main, turn).await["questions"][0];
     assert_eq!(card["status"], "answered");
     assert_eq!(card["answer"], json!(["c", "e"]));
     assert_eq!(
-        journaled(&app, &main, question).await["answer"],
+        journaled(app, &main, question).await["answer"],
         json!(["c", "e"])
     );
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("Label receipts and invoices"), "{packet}");
     assert!(packet.contains("Summarize unread threads"), "{packet}");
     assert!(
@@ -452,23 +371,25 @@ async fn multiple_choices_wait_for_done_and_deliver_only_selected_actions() {
         !packet.contains("Draft replies to starred emails"),
         "{packet}"
     );
-    assert_eq!(permissions(&app, &main).await, 0);
-    let again = select(&app, &main, question, json!(["e", "c"])).await;
+    assert_eq!(permissions(app, &main).await, 0);
+    let again = select(app, &main, question, json!(["e", "c"])).await;
     assert_eq!(again.status, StatusCode::OK);
     assert_eq!(again.body["requeued"], false);
-    let stale = select(&app, &main, question, json!(["a"])).await;
+    let stale = select(app, &main, question, json!(["a"])).await;
     assert_eq!(stale.status, StatusCode::CONFLICT);
     assert_eq!(stale.body["error"]["code"], "question_settled");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn chat_closes_a_multiple_choice_card_without_selecting_actions() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    let pending = tool_text(&tool(&app, &token, "ask_owner", multiple_args()).await);
+    let (turn, token) = h.running(&main, GATE).await;
+    let pending = tool(app, &token, "ask_owner", multiple_args()).await.result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
-    wait(&app, turn, "waiting").await;
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
     let sent = app
         .send(
             &main,
@@ -478,27 +399,29 @@ async fn chat_closes_a_multiple_choice_card_without_selecting_actions() {
         )
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED);
-    let stale = select(&app, &main, question, json!(["a", "b"])).await;
+    let stale = select(app, &main, question, json!(["a", "b"])).await;
     assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
     assert_eq!(stale.body["error"]["code"], "question_settled");
-    let shown = shown_turn(&app, &main, turn).await;
+    let shown = shown_turn(app, &main, turn).await;
     assert_eq!(shown["questions"][0]["status"], "skipped");
     assert_eq!(shown["questions"][0]["answer"], Value::Null);
-    assert_eq!(permissions(&app, &main).await, 0);
+    assert_eq!(permissions(app, &main).await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn asking_the_same_question_again_returns_it_and_other_shapes_conflict() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
+    let (turn, token) = h.running(&main, GATE).await;
     for bad in [
         json!({ "question": "q", "choices": ["only one"] }),
         json!({ "question": "q", "choices": ["a", "b"], "extra": 1 }),
     ] {
-        let refused = tool(&app, &token, "ask_owner", bad).await;
+        let refused = tool(app, &token, "ask_owner", bad).await;
         assert!(
-            tool_text(&refused)
+            refused
+                .result
                 .as_str()
                 .unwrap()
                 .starts_with("INVALID_QUESTION"),
@@ -506,30 +429,29 @@ async fn asking_the_same_question_again_returns_it_and_other_shapes_conflict() {
             refused.body
         );
     }
-    let first = tool_text(&tool(&app, &token, "ask_owner", choice_args()).await);
+    let first = tool(app, &token, "ask_owner", choice_args()).await.result;
     assert_eq!(first["status"], "pending", "{first}");
-    let parked = tool(&app, &token, "ask_owner", choice_args()).await;
+    let parked = tool(app, &token, "ask_owner", choice_args()).await;
     assert_eq!(parked.status, StatusCode::CONFLICT, "{}", parked.body);
-    let token = grant(&app, turn, owner_tools()).await;
-    let again = tool_text(&tool(&app, &token, "ask_owner", choice_args()).await);
-    assert_eq!(again["question_id"], first["question_id"]);
-    assert_eq!(again["status"], "pending");
+    use else_api::app::questions::{Spec, Status};
+    use else_api::db::owner_questions::{RequestError, create};
+
+    let again = create(&app.db.pool, turn, &Spec::choice(&choice_args()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(again.id.to_string(), first["question_id"]);
+    assert_eq!(again.status, Status::Pending);
     let mut multiple = choice_args();
     multiple["multiple"] = json!(true);
-    let token = grant(&app, turn, owner_tools()).await;
-    let conflict = tool(&app, &token, "ask_owner", multiple).await;
-    assert!(is_error(&conflict), "{}", conflict.body);
-    let token = grant(&app, turn, owner_tools()).await;
     let mut other = choice_args();
     other["choices"] = json!(["Plain text", "Both"]);
-    let conflict = tool(&app, &token, "ask_owner", other).await;
-    assert!(is_error(&conflict), "{}", conflict.body);
-    assert!(
-        tool_text(&conflict)
-            .as_str()
-            .unwrap()
-            .starts_with("CONFLICT")
-    );
+    for changed in [multiple, other] {
+        let spec = Spec::choice(&changed).unwrap();
+        assert_eq!(
+            create(&app.db.pool, turn, &spec).await.unwrap_err(),
+            RequestError::Conflict
+        );
+    }
     let cards: i64 = sqlx::query_scalar("SELECT count(*) FROM owner_questions")
         .fetch_one(&app.db.pool)
         .await
@@ -539,13 +461,17 @@ async fn asking_the_same_question_again_returns_it_and_other_shapes_conflict() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owner_follow_up_skips_the_card_and_grants_nothing() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    let pending = tool_text(&tool(&app, &token, "computer_run", delete_args()).await);
+    let (turn, token) = h.running(&main, GATE).await;
+    let pending = tool(app, &token, "computer_run", delete_args())
+        .await
+        .result;
     assert_eq!(pending["status"], "pending", "{pending}");
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
-    wait(&app, turn, "waiting").await;
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
 
     let follow_up = "Actually, keep the old site for now and just archive it.";
     let sent = app
@@ -553,26 +479,26 @@ async fn an_owner_follow_up_skips_the_card_and_grants_nothing() {
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
     assert_eq!(sent.body["turn"]["steered_into"], turn.to_string());
-    let (row_status, row_answer, consumed) = question_row(&app, question).await;
+    let (row_status, row_answer, consumed) = question_row(app, question).await;
     assert_eq!(
         (row_status.as_str(), row_answer, consumed),
         ("skipped", None, None)
     );
-    assert_eq!(permissions(&app, &main).await, 0);
-    assert_eq!(journaled(&app, &main, question).await["status"], "skipped");
+    assert_eq!(permissions(app, &main).await, 0);
+    assert_eq!(journaled(app, &main, question).await["status"], "skipped");
 
-    let late = answer(&app, &main, question, "approve").await;
+    let late = answer(app, &main, question, "approve").await;
     assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
     assert_eq!(
         late.body["error"]["message"],
         "This question was already skipped."
     );
-    assert_eq!(question_row(&app, question).await.0, "skipped");
-    wait(&app, turn, "completed").await;
+    assert_eq!(question_row(app, question).await.0, "skipped");
+    wait(app, turn, "completed").await;
     app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    assert_eq!(attempts(&app, turn).await, 2, "the reply continued with it");
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert_eq!(attempts(app, turn).await, 2, "the reply continued with it");
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains(follow_up));
     assert!(
         packet.contains(&format!(
@@ -592,41 +518,43 @@ async fn attempts(app: &TestApp, turn: Uuid) -> i32 {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_follow_up_while_the_asking_attempt_still_runs_skips_the_card_too() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    let pending = tool_text(&tool(&app, &token, "ask_owner", choice_args()).await);
+    let (turn, token) = h.running(&main, GATE).await;
+    let pending = tool(app, &token, "ask_owner", choice_args()).await.result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
-    assert_eq!(status(&app, turn).await, "running");
+    assert_eq!(status(app, turn).await, "running");
     let sent = app
         .send(&main, Uuid::new_v4(), "Use plain text.", Some("synthetic"))
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
     assert_eq!(sent.body["turn"]["steered_into"], turn.to_string());
-    assert_eq!(question_row(&app, question).await.0, "skipped");
-    wait(&app, turn, "completed").await;
+    assert_eq!(question_row(app, question).await.0, "skipped");
+    h.release(turn).await;
+    wait(app, turn, "completed").await;
     app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    assert_eq!(attempts(&app, turn).await, 2, "the reply continued with it");
+    assert_eq!(attempts(app, turn).await, 2, "the reply continued with it");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_open_question_uses_a_card_and_chat_supersedes_it_without_approval() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    let pending = tool_text(
-        &tool(
-            &app,
-            &token,
-            "ask_owner",
-            json!({ "question": "Who should receive the draft?" }),
-        )
-        .await,
-    );
+    let (turn, token) = h.running(&main, GATE).await;
+    let pending = tool(
+        app,
+        &token,
+        "ask_owner",
+        json!({ "question": "Who should receive the draft?" }),
+    )
+    .await
+    .result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     assert_eq!(pending["status"], "pending");
-    let shown = shown_turn(&app, &main, turn).await;
+    let shown = shown_turn(app, &main, turn).await;
     assert_eq!(
         shown["questions"][0]["title"],
         "Who should receive the draft?"
@@ -641,63 +569,66 @@ async fn an_open_question_uses_a_card_and_chat_supersedes_it_without_approval() 
         )
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED);
-    assert_eq!(question_row(&app, question).await.0, "skipped");
-    assert_eq!(permissions(&app, &main).await, 0);
+    assert_eq!(question_row(app, question).await.0, "skipped");
+    assert_eq!(permissions(app, &main).await, 0);
     assert_eq!(
-        answer(&app, &main, question, "approve").await.status,
+        answer(app, &main, question, "approve").await.status,
         StatusCode::BAD_REQUEST
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn destructive_file_writes_wait_for_owner_approval() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
+    let (turn, token) = h.running(&main, GATE).await;
     let refused = tool(
-        &app,
+        app,
         &token,
         "computer_write_file",
         json!({ "path": "important.txt", "content": "replacement" }),
     )
     .await;
-    assert!(is_error(&refused));
-    let pending = tool_text(&tool(&app, &token, "computer_write_file", json!({
+    assert!(refused.error);
+    let pending = tool(app, &token, "computer_write_file", json!({
         "path": "important.txt", "content": "replacement", "effect": "destructive", "purpose": "Replace important.txt"
-    })).await);
+    })).await.result;
     assert_eq!(pending["status"], "pending");
     assert_eq!(pending["parked"], true);
-    let shown = shown_turn(&app, &main, turn).await;
+    let shown = shown_turn(app, &main, turn).await;
     let card = &shown["questions"][0];
     assert_eq!(card["kind"], "destructive");
     assert_eq!(card["title"], "Replace important.txt");
     assert_eq!(card["context"], "Write 11 bytes to important.txt");
     let question: Uuid = card["id"].as_str().unwrap().parse().unwrap();
-    let invalid = select(&app, &main, question, json!(["approve", "approve_forever"])).await;
+    let invalid = select(app, &main, question, json!(["approve", "approve_forever"])).await;
     assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
-    assert_eq!(permissions(&app, &main).await, 0);
+    assert_eq!(permissions(app, &main).await, 0);
     assert_eq!(
-        sidebar_status(&app, &main).await,
+        sidebar_status(app, &main).await,
         json!({ "kind": "needs_approval", "preview": "Replace important.txt" })
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_external_action_needs_approval_for_exactly_that_call_once() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
 
     let undeclared = tool(
-        &app,
+        app,
         &token,
         "computer_run",
         json!({ "command": "node send.js --all" }),
     )
     .await;
-    assert!(is_error(&undeclared));
+    assert!(undeclared.error);
     assert!(
-        tool_text(&undeclared)
+        undeclared
+            .result
             .as_str()
             .unwrap()
             .starts_with("EFFECT_REQUIRED"),
@@ -710,19 +641,33 @@ async fn an_external_action_needs_approval_for_exactly_that_call_once() {
         .unwrap();
     assert_eq!(none, 0, "a missing effect asks nothing and runs nothing");
 
-    let pending = tool(&app, &token, "computer_run", send_args()).await;
-    let result = tool_text(&pending);
+    let pending = tool(app, &token, "computer_run", send_args()).await;
+    let result = pending.result;
     assert_eq!(result["status"], "pending", "{}", pending.body);
     assert_eq!(result["kind"], "external");
     let question: Uuid = result["question_id"].as_str().unwrap().parse().unwrap();
-    let parked = tool(&app, &token, "computer_run", send_args()).await;
+    let parked = tool(app, &token, "computer_run", send_args()).await;
     assert_eq!(parked.status, StatusCode::CONFLICT, "the attempt must end");
-    let retry = grant(&app, turn, owner_tools()).await;
-    let same = tool_text(&tool(&app, &retry, "computer_run", send_args()).await);
-    assert_eq!(same["question_id"], question.to_string(), "no second card");
+    let args = send_args();
+    let spec = else_api::app::questions::Spec::tool_approval(
+        else_api::app::questions::Kind::External,
+        "computer_run",
+        &args,
+        None,
+        args["purpose"].as_str().unwrap().to_owned(),
+        args["context"].as_str().unwrap().to_owned(),
+    );
+    let same = else_api::db::owner_questions::gate(&app.db.pool, turn, &spec, None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(same, else_api::db::owner_questions::Gate::Pending(card) if card.id == question),
+        "a repeated request uses the existing card"
+    );
 
-    wait(&app, turn, "waiting").await;
-    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
+    let card = shown_turn(app, &main, turn).await["questions"][0].clone();
     assert_eq!(card["kind"], "external");
     assert_eq!(card["title"], "Send the newsletter to 120 subscribers");
     assert_eq!(
@@ -743,14 +688,14 @@ async fn an_external_action_needs_approval_for_exactly_that_call_once() {
         "only a grant for this tool's external calls"
     );
 
-    let forever = answer(&app, &main, question, "approve_forever").await;
+    let forever = answer(app, &main, question, "approve_forever").await;
     assert_eq!(forever.status, StatusCode::BAD_REQUEST, "{}", forever.body);
-    assert_eq!(permissions(&app, &main).await, 0);
-    let approved = answer(&app, &main, question, "approve").await;
+    assert_eq!(permissions(app, &main).await, 0);
+    let approved = answer(app, &main, question, "approve").await;
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
     assert_eq!(approved.body["requeued"], true);
-    wait(&app, turn, "completed").await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let token = h.continued(turn, &token).await;
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("kind=\"external\" status=\"answered\" answer=\"approve\""),
         "{packet}"
@@ -762,9 +707,8 @@ async fn an_external_action_needs_approval_for_exactly_that_call_once() {
         "{packet}"
     );
 
-    let token = resume_finished(&app, turn).await;
-    let ran = tool(&app, &token, "computer_run", send_args()).await;
-    let text = tool_text(&ran);
+    let ran = tool(app, &token, "computer_run", send_args()).await;
+    let text = ran.result;
     assert!(
         text.as_str()
             .is_some_and(|t| t.starts_with("COMPUTER_UNAVAILABLE")),
@@ -772,11 +716,11 @@ async fn an_external_action_needs_approval_for_exactly_that_call_once() {
         ran.body
     );
     assert_eq!(
-        question_row(&app, question).await.2,
+        question_row(app, question).await.2,
         Some(2),
         "consumed once"
     );
-    let again = tool_text(&tool(&app, &token, "computer_run", send_args()).await);
+    let again = tool(app, &token, "computer_run", send_args()).await.result;
     assert_eq!(
         again["status"], "pending",
         "the same action again is a new card: {again}"
@@ -784,15 +728,11 @@ async fn an_external_action_needs_approval_for_exactly_that_call_once() {
     assert_ne!(again["question_id"], question.to_string());
 }
 
-fn mcp_tools() -> Vec<Tool> {
-    vec![Tool::Mcp, Tool::ManageMcp, Tool::AskOwner, Tool::ReadMemory]
-}
-
 /// Installs the fixture MCP, asks for `call` (an external MCP request),
 /// approves its card, and runs it again in the resumed attempt.
-async fn approved_mcp_call(app: &TestApp, bot: &str, call: Value) -> (Uuid, Uuid, common::Reply) {
-    let (turn, _) = running(app, bot).await;
-    let token = grant(app, turn, mcp_tools()).await;
+async fn approved_mcp_call(h: &Harness, bot: &str, call: Value) -> (Uuid, Uuid, Called) {
+    let app = &h.app;
+    let (turn, token) = h.running(bot, GATE_EVERY_ATTEMPT).await;
     let installed = tool(
         app,
         &token,
@@ -800,20 +740,21 @@ async fn approved_mcp_call(app: &TestApp, bot: &str, call: Value) -> (Uuid, Uuid
         crate::shared_mcp::installation(),
     )
     .await;
-    assert!(!is_error(&installed), "{}", installed.body);
-    let pending = tool_text(&tool(app, &token, "mcp_request", call.clone()).await);
+    assert!(!installed.error, "{}", installed.body);
+    let pending = tool(app, &token, "mcp_request", call.clone()).await.result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
+    h.release(turn).await;
     wait(app, turn, "waiting").await;
     assert_eq!(
         answer(app, bot, question, "approve").await.status,
         StatusCode::OK
     );
-    wait(app, turn, "completed").await;
+    let token = h.continued(turn, &token).await;
     let card = shown_turn(app, bot, turn).await["questions"][0].clone();
     assert_eq!(card["used"], Value::Null, "approved but not yet run");
-    resume_finished(app, turn).await;
-    let token = grant(app, turn, mcp_tools()).await;
     let ran = tool(app, &token, "mcp_request", call).await;
+    h.release(turn).await;
+    wait(app, turn, "completed").await;
     (turn, question, ran)
 }
 
@@ -825,17 +766,18 @@ fn echo_call(tool: &str) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_approved_call_that_ran_before_a_failure_stays_visible() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, question, ran) = approved_mcp_call(&app, &main, echo_call("echo")).await;
-    assert!(!is_error(&ran), "the approved call ran: {}", ran.body);
-    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    let (turn, question, ran) = approved_mcp_call(&h, &main, echo_call("echo")).await;
+    assert!(!ran.error, "the approved call ran: {}", ran.body);
+    let card = shown_turn(app, &main, turn).await["questions"][0].clone();
     assert_eq!(card["used"]["outcome"], "completed", "{card}");
     let ran_at = card["used"]["at"]
         .as_str()
         .and_then(|at| at.parse::<chrono::DateTime<chrono::Utc>>().ok())
         .unwrap_or_else(|| panic!("the card records when the call ran: {card}"));
-    assert_eq!(journaled(&app, &main, question).await["used"], card["used"]);
+    assert_eq!(journaled(app, &main, question).await["used"], card["used"]);
 
     sqlx::query(
         "UPDATE turns SET status = 'failed', error_code = 'provider_policy',
@@ -857,7 +799,7 @@ async fn an_approved_call_that_ran_before_a_failure_stays_visible() {
             .await;
         app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
             .await;
-        let packet = synthetic.packets().await.last().unwrap().clone();
+        let packet = h.packets().await.last().unwrap().clone();
         assert_eq!(
             packet.contains("[else.bot approved actions]") && packet.contains(&records),
             told,
@@ -868,40 +810,40 @@ async fn an_approved_call_that_ran_before_a_failure_stays_visible() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_approved_mcp_call_the_upstream_tool_rejects_records_an_error() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, _, ran) = approved_mcp_call(&app, &main, echo_call("reject")).await;
-    assert!(
-        is_error(&ran),
-        "the upstream error is visible: {}",
-        ran.body
-    );
-    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    let (turn, _, ran) = approved_mcp_call(&h, &main, echo_call("reject")).await;
+    assert!(ran.error, "the upstream error is visible: {}", ran.body);
+    let card = shown_turn(app, &main, turn).await["questions"][0].clone();
     assert_eq!(card["used"]["outcome"], "error", "{card}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_approved_call_records_what_its_tool_returned_once() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    let pending = tool_text(&tool(&app, &token, "computer_run", delete_args()).await);
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let pending = tool(app, &token, "computer_run", delete_args())
+        .await
+        .result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
-    wait(&app, turn, "waiting").await;
-    let approved = answer(&app, &main, question, "approve_forever").await;
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
+    let approved = answer(app, &main, question, "approve_forever").await;
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
-    wait(&app, turn, "completed").await;
+    let token = h.continued(turn, &token).await;
 
-    let token = resume_finished(&app, turn).await;
-    let ran = tool(&app, &token, "computer_run", delete_args()).await;
+    let ran = tool(app, &token, "computer_run", delete_args()).await;
     assert!(
-        tool_text(&ran)
+        ran.result
             .as_str()
             .is_some_and(|t| t.starts_with("COMPUTER_UNAVAILABLE")),
         "the call under the standing grant failed before running: {}",
         ran.body
     );
-    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    let card = shown_turn(app, &main, turn).await["questions"][0].clone();
     assert_eq!(
         card["used"]["outcome"], "error",
         "a broad grant still marks its own card, with the tool's error: {card}"
@@ -915,33 +857,34 @@ async fn an_approved_call_records_what_its_tool_returned_once() {
     .await
     .unwrap();
     assert!(!again, "a recorded outcome is final");
-    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    let card = shown_turn(app, &main, turn).await["questions"][0].clone();
     assert_eq!(card["used"]["outcome"], "error");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_denied_action_stays_denied_for_the_request() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    let pending = tool_text(&tool(&app, &token, "computer_run", send_args()).await);
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let pending = tool(app, &token, "computer_run", send_args()).await.result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
-    wait(&app, turn, "waiting").await;
-    let denied = answer(&app, &main, question, "deny").await;
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
+    let denied = answer(app, &main, question, "deny").await;
     assert_eq!(denied.status, StatusCode::OK, "{}", denied.body);
-    wait(&app, turn, "completed").await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let token = h.continued(turn, &token).await;
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("answer=\"deny\""), "{packet}");
     assert!(
         packet.contains("Denied: do not do this external action"),
         "{packet}"
     );
 
-    let token = resume_finished(&app, turn).await;
-    let retry = tool(&app, &token, "computer_run", send_args()).await;
-    assert!(is_error(&retry));
+    let retry = tool(app, &token, "computer_run", send_args()).await;
+    assert!(retry.error);
     assert!(
-        tool_text(&retry).as_str().unwrap().starts_with("DENIED"),
+        retry.result.as_str().unwrap().starts_with("DENIED"),
         "{}",
         retry.body
     );
@@ -954,50 +897,54 @@ async fn a_denied_action_stays_denied_for_the_request() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn always_allow_covers_destructive_actions_only_until_revoked() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    let pending = tool_text(&tool(&app, &token, "computer_run", delete_args()).await);
+    let (turn, token) = h.running(&main, GATE).await;
+    let pending = tool(app, &token, "computer_run", delete_args())
+        .await
+        .result;
     assert_eq!(pending["kind"], "destructive");
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
-    wait(&app, turn, "waiting").await;
-    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
+    let card = shown_turn(app, &main, turn).await["questions"][0].clone();
     assert_eq!(card["choices"][2]["id"], "approve_forever");
     assert_eq!(card["title"], "Run a command in the bot's computer");
 
-    let forever = answer(&app, &main, question, "approve_forever").await;
+    let forever = answer(app, &main, question, "approve_forever").await;
     assert_eq!(forever.status, StatusCode::OK, "{}", forever.body);
-    assert_eq!(permissions(&app, &main).await, 1);
+    assert_eq!(permissions(app, &main).await, 1);
     let listed = app
         .owner("GET", &format!("/v1/bots/{main}/permissions"), None)
         .await;
     assert_eq!(listed.body["permissions"][0]["scope"], "destructive");
-    wait(&app, turn, "completed").await;
+    wait(app, turn, "completed").await;
 
-    let (turn, token) = running(&app, &main).await;
+    let (turn, token) = h.running(&main, GATE).await;
     let other_delete = json!({ "command": "rm -rf ~/work/cache", "effect": "destructive" });
-    let ran = tool(&app, &token, "computer_run", other_delete.clone()).await;
+    let ran = tool(app, &token, "computer_run", other_delete.clone()).await;
     assert!(
-        tool_text(&ran)
+        ran.result
             .as_str()
             .is_some_and(|t| t.starts_with("COMPUTER_UNAVAILABLE")),
         "{}",
         ran.body
     );
-    let host = tool_text(
-        &tool(
-            &app,
-            &token,
-            "ask_permission",
-            json!({ "kind": "destructive", "action": "rm -rf ~/old", "reason": "Clean up" }),
-        )
-        .await,
-    );
+    let host = tool(
+        app,
+        &token,
+        "ask_permission",
+        json!({ "kind": "destructive", "action": "rm -rf ~/old", "reason": "Clean up" }),
+    )
+    .await
+    .result;
     assert_eq!(host["status"], "approved");
     assert_eq!(host["standing"], true);
-    let external = tool_text(&tool(&app, &token, "computer_run", send_args()).await);
+    let external = tool(app, &token, "computer_run", send_args()).await.result;
     assert_eq!(external["status"], "pending", "{external}");
-    wait(&app, turn, "waiting").await;
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
 
     let revoked = app
         .owner(
@@ -1007,7 +954,7 @@ async fn always_allow_covers_destructive_actions_only_until_revoked() {
         )
         .await;
     assert_eq!(revoked.status, StatusCode::NO_CONTENT);
-    assert_eq!(permissions(&app, &main).await, 0);
+    assert_eq!(permissions(app, &main).await, 0);
     let stop = app
         .owner(
             "POST",
@@ -1016,11 +963,12 @@ async fn always_allow_covers_destructive_actions_only_until_revoked() {
         )
         .await;
     assert!(stop.status.is_success());
-    wait(&app, turn, "interrupted").await;
-    let (turn, token) = running(&app, &main).await;
-    let asks = tool_text(&tool(&app, &token, "computer_run", other_delete).await);
+    wait(app, turn, "interrupted").await;
+    let (turn, token) = h.running(&main, GATE).await;
+    let asks = tool(app, &token, "computer_run", other_delete).await.result;
     assert_eq!(asks["status"], "pending", "revoked: asks again");
-    wait(&app, turn, "waiting").await;
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
 }
 
 fn unfollow_args(accounts: &str, target: &str, effect: &str) -> Value {
@@ -1040,17 +988,19 @@ fn choice_ids(card: &Value) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_scoped_computer_call_can_be_always_allowed_for_its_task_and_target() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
     let account = "X account @proliquid_xyz";
-    let (turn, token) = running(&app, &main).await;
+    let (turn, token) = h.running(&main, GATE).await;
 
     let mut malformed = unfollow_args("@a", account, "external");
     malformed["task_scope"]["target"] = json!(" ");
-    let refused = tool(&app, &token, "computer_run", malformed).await;
-    assert!(is_error(&refused), "{}", refused.body);
+    let refused = tool(app, &token, "computer_run", malformed).await;
+    assert!(refused.error, "{}", refused.body);
     assert!(
-        tool_text(&refused)
+        refused
+            .result
             .as_str()
             .unwrap()
             .starts_with("task_scope is {task, target}"),
@@ -1058,24 +1008,24 @@ async fn a_scoped_computer_call_can_be_always_allowed_for_its_task_and_target() 
         refused.body
     );
 
-    let pending = tool_text(
-        &tool(
-            &app,
-            &token,
-            "computer_run",
-            unfollow_args("@UST_mean @rahulxero", account, "external"),
-        )
-        .await,
-    );
+    let pending = tool(
+        app,
+        &token,
+        "computer_run",
+        unfollow_args("@UST_mean @rahulxero", account, "external"),
+    )
+    .await
+    .result;
     assert_eq!(pending["status"], "pending", "{pending}");
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
-    wait(&app, turn, "waiting").await;
-    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
+    let card = shown_turn(app, &main, turn).await["questions"][0].clone();
     assert_eq!(choice_ids(&card), ["approve", "deny", "approve_task"]);
     assert_eq!(card["action"]["tool"], "computer_run");
     assert_eq!(card["action"]["task_scope"]["target"], account);
 
-    let always = answer(&app, &main, question, "approve_task").await;
+    let always = answer(app, &main, question, "approve_task").await;
     assert_eq!(always.status, StatusCode::OK, "{}", always.body);
     let listed = app
         .owner("GET", &format!("/v1/bots/{main}/permissions"), None)
@@ -1087,23 +1037,23 @@ async fn a_scoped_computer_call_can_be_always_allowed_for_its_task_and_target() 
         "{}",
         listed.body
     );
-    wait(&app, turn, "completed").await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    wait(app, turn, "completed").await;
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("Task scope: {\"task\":\"Unfollow X accounts that never replied\""),
         "{packet}"
     );
 
-    let (turn, token) = running(&app, &main).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let ran = tool(
-        &app,
+        app,
         &token,
         "computer_run",
         unfollow_args("@someone_else", account, "external"),
     )
     .await;
     assert!(
-        tool_text(&ran)
+        ran.result
             .as_str()
             .is_some_and(|t| t.starts_with("COMPUTER_UNAVAILABLE")),
         "a later batch in the saved scope runs without a card: {}",
@@ -1125,17 +1075,20 @@ async fn a_scoped_computer_call_can_be_always_allowed_for_its_task_and_target() 
         ),
     ] {
         let (turn, token) = turn_token;
-        let asks = tool_text(&tool(&app, &token, "computer_run", other.clone()).await);
+        let asks = tool(app, &token, "computer_run", other.clone())
+            .await
+            .result;
         assert_eq!(asks["status"], "pending", "{other}: {asks}");
-        wait(&app, turn, "waiting").await;
-        let card = shown_turn(&app, &main, turn).await["questions"]
+        h.release(turn).await;
+        wait(app, turn, "waiting").await;
+        let card = shown_turn(app, &main, turn).await["questions"]
             .as_array()
             .unwrap()
             .last()
             .unwrap()
             .clone();
         assert_eq!(choice_ids(&card), choices, "{other}");
-        turn_token = (turn, follow(&app, &main, turn).await);
+        turn_token = (turn, follow(&h, &main, turn, &token).await);
     }
     app.wait_turn(&turn_token.0.to_string(), &["running"]).await;
 }
@@ -1143,19 +1096,20 @@ async fn a_scoped_computer_call_can_be_always_allowed_for_its_task_and_target() 
 /// Send a follow-up while `turn` waits on a card: it joins the reply,
 /// skips the card, and the reply continues. Returns a grant for the
 /// continuation.
-async fn follow(app: &TestApp, bot: &str, turn: Uuid) -> String {
+async fn follow(h: &Harness, bot: &str, turn: Uuid, token: &str) -> String {
+    let app = &h.app;
     let sent = app
         .send(bot, Uuid::new_v4(), "Try the next one.", Some("synthetic"))
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
     assert_eq!(sent.body["turn"]["steered_into"], turn.to_string());
-    wait(app, turn, "running").await;
-    grant(app, turn, owner_tools()).await
+    h.continued(turn, token).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn approval_records_never_store_typed_text() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
     let canary = "PRIVATE-TYPED-TEXT-934f";
     for (name, args) in [
@@ -1168,13 +1122,13 @@ async fn approval_records_never_store_typed_text() {
             json!({ "action": "type", "selector": "#message", "text": canary, "effect": "external" }),
         ),
     ] {
-        let (turn, token) = running(&app, &main).await;
-        let pending = tool_text(&tool(&app, &token, name, args).await);
+        let (turn, token) = h.running(&main, GATE).await;
+        let pending = tool(app, &token, name, args).await.result;
         let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
-        let snapshot = shown_turn(&app, &main, turn).await;
+        let snapshot = shown_turn(app, &main, turn).await;
         assert!(!snapshot.to_string().contains(canary));
         assert!(
-            !journaled(&app, &main, question)
+            !journaled(app, &main, question)
                 .await
                 .to_string()
                 .contains(canary)
@@ -1185,13 +1139,14 @@ async fn approval_records_never_store_typed_text() {
             .await
             .unwrap();
         assert!(!stored.contains(canary), "{stored}");
-        wait(&app, turn, "waiting").await;
+        h.release(turn).await;
+        wait(app, turn, "waiting").await;
         assert_eq!(
-            answer(&app, &main, question, "approve").await.status,
+            answer(app, &main, question, "approve").await.status,
             StatusCode::OK
         );
-        wait(&app, turn, "completed").await;
-        let packet = synthetic.packets().await.last().unwrap().clone();
+        wait(app, turn, "completed").await;
+        let packet = h.packets().await.last().unwrap().clone();
         assert!(packet.contains("[else.bot owner answers]"));
         assert!(!packet.contains(canary), "{packet}");
     }
@@ -1199,16 +1154,18 @@ async fn approval_records_never_store_typed_text() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_turn_continues_only_after_all_owner_requests_settle() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    let pending = tool_text(&tool(&app, &token, "ask_owner", choice_args()).await);
+    let (turn, token) = h.running(&main, GATE).await;
+    let pending = tool(app, &token, "ask_owner", choice_args()).await.result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     let secret = Uuid::new_v4();
     sqlx::query("INSERT INTO secret_requests (id, bot_id, turn_id, attempt, name, reason, env_names)
         SELECT ?1, bot_id, id, attempt, 'login', 'Authenticate', '[\"LOGIN_TOKEN\"]' FROM turns WHERE id = ?2")
         .bind(secret).bind(turn).execute(&app.db.pool).await.unwrap();
-    wait(&app, turn, "waiting").await;
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
     let declined = app
         .owner(
             "POST",
@@ -1217,28 +1174,32 @@ async fn a_turn_continues_only_after_all_owner_requests_settle() {
         )
         .await;
     assert_eq!(declined.status, StatusCode::OK, "{}", declined.body);
-    assert_eq!(status(&app, turn).await, "waiting");
-    assert_eq!(question_row(&app, question).await.0, "pending");
+    assert_eq!(status(app, turn).await, "waiting");
+    assert_eq!(question_row(app, question).await.0, "pending");
     assert_eq!(
-        answer(&app, &main, question, "a").await.status,
+        answer(app, &main, question, "a").await.status,
         StatusCode::OK
     );
-    wait(&app, turn, "completed").await;
+    wait(app, turn, "completed").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_host_permission_waits_and_the_answer_names_the_action() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let args = json!({ "kind": "external", "action": "mail -s 'Invoice' client@example.com < invoice.txt",
                        "reason": "Email the invoice to the client" });
-    let pending = tool_text(&tool(&app, &token, "ask_permission", args.clone()).await);
+    let pending = tool(app, &token, "ask_permission", args.clone())
+        .await
+        .result;
     assert_eq!(pending["status"], "pending", "{pending}");
     assert_eq!(pending["parked"], true);
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
-    wait(&app, turn, "waiting").await;
-    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
+    let card = shown_turn(app, &main, turn).await["questions"][0].clone();
     assert_eq!(card["title"], "Email the invoice to the client");
     assert_eq!(
         card["action"]["host"],
@@ -1247,11 +1208,11 @@ async fn a_host_permission_waits_and_the_answer_names_the_action() {
     assert_eq!(card["choices"].as_array().unwrap().len(), 2);
 
     assert_eq!(
-        answer(&app, &main, question, "approve").await.status,
+        answer(app, &main, question, "approve").await.status,
         StatusCode::OK
     );
-    wait(&app, turn, "completed").await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let token = h.continued(turn, &token).await;
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("Host action: mail -s 'Invoice' client@example.com"),
         "{packet}"
@@ -1261,19 +1222,23 @@ async fn a_host_permission_waits_and_the_answer_names_the_action() {
         "{packet}"
     );
 
-    let token = resume_finished(&app, turn).await;
-    let again = tool_text(&tool(&app, &token, "ask_permission", args).await);
+    let again = tool(app, &token, "ask_permission", args).await.result;
     assert_eq!(again["status"], "pending");
     assert_ne!(again["question_id"], question.to_string());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn only_the_owner_answers_and_only_for_the_asking_bot() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
     let other = app.create_bot("Home").await;
-    let (turn, token) = running(&app, &main).await;
-    let pending = tool_text(&tool(&app, &token, "ask_owner", choice_args()).await);
+    let (turn, token) = h.running(&main, GATE).await;
+    let bare = h.grant_with(turn, vec![Tool::ReadMemory]).await;
+    let refused = tool(app, &bare, "ask_owner", choice_args()).await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+
+    let pending = tool(app, &token, "ask_owner", choice_args()).await.result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
     let path = format!("/v1/bots/{main}/questions/{question}/answer");
     for bearer in [Some(token.as_str()), None, Some("wrong")] {
@@ -1290,39 +1255,38 @@ async fn only_the_owner_answers_and_only_for_the_asking_bot() {
         );
     }
     assert_eq!(
-        answer(&app, &other, question, "a").await.status,
+        answer(app, &other, question, "a").await.status,
         StatusCode::NOT_FOUND,
         "another bot's question looks like none"
     );
     assert_eq!(
-        answer(&app, &main, Uuid::new_v4(), "a").await.status,
+        answer(app, &main, Uuid::new_v4(), "a").await.status,
         StatusCode::NOT_FOUND
     );
     let malformed = app
         .owner("POST", &path, Some(json!({ "choice": "a", "note": "x" })))
         .await;
     assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
-    assert_eq!(question_row(&app, question).await.0, "pending");
-
-    let bare = grant(&app, turn, vec![Tool::ReadMemory]).await;
-    let refused = tool(&app, &bare, "ask_owner", choice_args()).await;
-    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    assert_eq!(question_row(app, question).await.0, "pending");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_task_delegated_for_an_owner_request_asks_open_questions_in_its_bot_chat() {
-    let Harness { app, .. } = harness().await;
-    let (leaf, child) = delegated_task(&app).await;
-    let child_token = grant(&app, child, owner_tools()).await;
-    let asked = tool_text(&tool(&app, &child_token, "ask_owner", choice_args()).await);
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
+    let (leaf, child, child_token) = delegated_task(&h).await;
+    let asked = tool(app, &child_token, "ask_owner", choice_args())
+        .await
+        .result;
     assert_eq!(asked["parked"], true, "{asked}");
-    let shown = shown_turn(&app, &leaf, child).await;
+    let shown = shown_turn(app, &leaf, child).await;
     assert_eq!(shown["questions"][0]["status"], "pending", "{shown}");
 }
 
 /// A running task the main bot delegated to another bot while serving an
 /// owner message: that bot's ID and the task's turn.
-async fn delegated_task(app: &TestApp) -> (String, Uuid) {
+async fn delegated_task(h: &Harness) -> (String, Uuid, String) {
+    let app = &h.app;
     let main = app.main_bot().await;
     let leaf = app.create_bot("Ops").await;
     let warm = app
@@ -1330,16 +1294,16 @@ async fn delegated_task(app: &TestApp) -> (String, Uuid) {
         .await;
     app.wait_turn(warm.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    let (turn, _) = running(app, &main).await;
-    let parent = grant(app, turn, vec![Tool::ReadMemory, Tool::Delegate]).await;
+    let (turn, parent) = h.running(&main, GATE).await;
     let delegated = tool(
         app,
         &parent,
         "delegate",
-        json!({ "target_bot_id": leaf, "task": "[synthetic:slow] clean the server disk now" }),
+        json!({ "target_bot_id": leaf, "task": format!("{GATE_EVERY_ATTEMPT} clean the server disk now") }),
     )
     .await;
-    let task: Uuid = tool_text(&delegated)["task_id"]
+    h.release(turn).await;
+    let task: Uuid = delegated.result["task_id"]
         .as_str()
         .unwrap()
         .parse()
@@ -1349,39 +1313,39 @@ async fn delegated_task(app: &TestApp) -> (String, Uuid) {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    wait(app, child, "running").await;
-    (leaf, child)
+    let (_, token) = h.started(child).await;
+    (leaf, child, token)
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delegated_tasks_ask_for_approval_in_their_bot_chat_but_cannot_record_a_bot_grant() {
-    let Harness { app, .. } = harness().await;
-    let (leaf, child) = delegated_task(&app).await;
-    let child_token = grant(&app, child, owner_tools()).await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
+    let (leaf, child, child_token) = delegated_task(&h).await;
     let refused = tool(
-        &app,
+        app,
         &child_token,
         "confirm_permission",
         json!({ "target": { "scope": "bot" }, "authorization": "Always allow destructive actions" }),
     )
     .await;
-    assert!(is_error(&refused), "{}", refused.body);
+    assert!(refused.error, "{}", refused.body);
     assert!(
-        tool_text(&refused)
-            .as_str()
-            .unwrap()
-            .starts_with("NOT_ALLOWED"),
+        refused.result.as_str().unwrap().starts_with("NOT_ALLOWED"),
         "{}",
         refused.body
     );
-    let pending = tool_text(&tool(&app, &child_token, "computer_run", delete_args()).await);
+    let pending = tool(app, &child_token, "computer_run", delete_args())
+        .await
+        .result;
     let question: Uuid = pending["question_id"]
         .as_str()
         .unwrap_or_else(|| panic!("an approval card: {pending}"))
         .parse()
         .unwrap();
-    wait(&app, child, "waiting").await;
-    let shown = shown_turn(&app, &leaf, child).await;
+    h.release(child).await;
+    wait(app, child, "waiting").await;
+    let shown = shown_turn(app, &leaf, child).await;
     let choices: Vec<&str> = shown["questions"][0]["choices"]
         .as_array()
         .unwrap()
@@ -1399,31 +1363,32 @@ async fn delegated_tasks_ask_for_approval_in_their_bot_chat_but_cannot_record_a_
         "the card shows in the target bot's chat: {shown}"
     );
     assert_eq!(
-        answer(&app, &leaf, question, "approve").await.status,
+        answer(app, &leaf, question, "approve").await.status,
         StatusCode::OK
     );
-    wait(&app, child, "running").await;
-    let resumed = grant(&app, child, owner_tools()).await;
-    let ran = tool(&app, &resumed, "computer_run", delete_args()).await;
+    let resumed = h.continued(child, &child_token).await;
+    let ran = tool(app, &resumed, "computer_run", delete_args()).await;
     assert!(
-        tool_text(&ran)
+        ran.result
             .as_str()
             .is_some_and(|t| t.starts_with("COMPUTER_UNAVAILABLE")),
         "the approved call runs: {}",
         ran.body
     );
-    assert_eq!(question_row(&app, question).await.0, "answered");
+    assert_eq!(question_row(app, question).await.0, "answered");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_and_restart_settle_or_keep_pending_cards() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
 
-    let (turn, token) = running(&app, &main).await;
-    let pending = tool_text(&tool(&app, &token, "ask_owner", choice_args()).await);
+    let (turn, token) = h.running(&main, GATE).await;
+    let pending = tool(app, &token, "ask_owner", choice_args()).await.result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
-    wait(&app, turn, "waiting").await;
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
     let stop = app
         .owner(
             "POST",
@@ -1432,31 +1397,35 @@ async fn stop_and_restart_settle_or_keep_pending_cards() {
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    wait(&app, turn, "interrupted").await;
-    assert_eq!(question_row(&app, question).await.0, "cancelled");
+    wait(app, turn, "interrupted").await;
+    assert_eq!(question_row(app, question).await.0, "cancelled");
     assert_eq!(
-        answer(&app, &main, question, "a").await.status,
+        answer(app, &main, question, "a").await.status,
         StatusCode::CONFLICT
     );
 
-    let (turn, token) = running(&app, &main).await;
-    let pending = tool_text(&tool(&app, &token, "computer_run", delete_args()).await);
+    let (turn, token) = h.running(&main, GATE).await;
+    let pending = tool(app, &token, "computer_run", delete_args())
+        .await
+        .result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
-    wait(&app, turn, "waiting").await;
-    let app = app.restart().await;
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
+    let h = harness(TestApp::builder().db(h.app.stop().await)).await;
+    let app = &h.app;
     assert_eq!(
         app.wait_turn(&turn.to_string(), &["waiting"]).await,
         "waiting"
     );
-    assert_eq!(question_row(&app, question).await.0, "pending");
+    assert_eq!(question_row(app, question).await.0, "pending");
     assert_eq!(
-        shown_turn(&app, &main, turn).await["questions"][0]["status"],
+        shown_turn(app, &main, turn).await["questions"][0]["status"],
         "pending",
         "the card survives a restart"
     );
-    let approved = answer(&app, &main, question, "approve").await;
+    let approved = answer(app, &main, question, "approve").await;
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
-    wait(&app, turn, "completed").await;
+    wait(app, turn, "completed").await;
     let attempts: i32 = sqlx::query_scalar("SELECT attempt FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
@@ -1467,7 +1436,8 @@ async fn stop_and_restart_settle_or_keep_pending_cards() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stopping_the_delegated_task_closes_its_card() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
     let leaf = app.create_bot("Ops").await;
     let warm = app
@@ -1475,16 +1445,16 @@ async fn stopping_the_delegated_task_closes_its_card() {
         .await;
     app.wait_turn(warm.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    let (turn, _) = running(&app, &main).await;
-    let parent = grant(&app, turn, vec![Tool::ReadMemory, Tool::Delegate]).await;
+    let (turn, parent) = h.running(&main, GATE).await;
     let delegated = tool(
-        &app,
+        app,
         &parent,
         "delegate",
-        json!({ "target_bot_id": leaf, "task": "[synthetic:slow] clean the server disk now" }),
+        json!({ "target_bot_id": leaf, "task": format!("{GATE} clean the server disk now") }),
     )
     .await;
-    let task: Uuid = tool_text(&delegated)["task_id"]
+    h.release(turn).await;
+    let task: Uuid = delegated.result["task_id"]
         .as_str()
         .unwrap()
         .parse()
@@ -1494,12 +1464,14 @@ async fn stopping_the_delegated_task_closes_its_card() {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    wait(&app, child, "running").await;
-    let child_token = grant(&app, child, owner_tools()).await;
-    let pending = tool_text(&tool(&app, &child_token, "computer_run", delete_args()).await);
+    let (_, child_token) = h.started(child).await;
+    let pending = tool(app, &child_token, "computer_run", delete_args())
+        .await
+        .result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
-    wait(&app, child, "waiting").await;
-    wait(&app, turn, "waiting").await;
+    h.release(child).await;
+    wait(app, child, "waiting").await;
+    wait(app, turn, "waiting").await;
     let stop = app
         .owner(
             "POST",
@@ -1508,9 +1480,9 @@ async fn stopping_the_delegated_task_closes_its_card() {
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    wait(&app, turn, "waiting").await;
+    wait(app, turn, "waiting").await;
     assert_eq!(
-        question_row(&app, question).await.0,
+        question_row(app, question).await.0,
         "pending",
         "Stop leaves the task and its card"
     );
@@ -1522,19 +1494,20 @@ async fn stopping_the_delegated_task_closes_its_card() {
         )
         .await;
     assert_eq!(cancel.status, StatusCode::OK, "{}", cancel.body);
-    wait(&app, child, "interrupted").await;
-    assert_eq!(question_row(&app, question).await.0, "cancelled");
+    wait(app, child, "interrupted").await;
+    assert_eq!(question_row(app, question).await.0, "cancelled");
     assert_eq!(
-        answer(&app, &leaf, question, "approve").await.status,
+        answer(app, &leaf, question, "approve").await.status,
         StatusCode::CONFLICT,
         "a stopped request cannot be resumed through its card"
     );
-    assert_eq!(status(&app, child).await, "interrupted");
+    assert_eq!(status(app, child).await, "interrupted");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_message_in_the_target_chat_skips_a_delegated_card() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
     let leaf = app.create_bot("Ops").await;
     let warm = app
@@ -1542,16 +1515,16 @@ async fn a_new_message_in_the_target_chat_skips_a_delegated_card() {
         .await;
     app.wait_turn(warm.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    let (turn, _) = running(&app, &main).await;
-    let parent = grant(&app, turn, vec![Tool::ReadMemory, Tool::Delegate]).await;
+    let (turn, parent) = h.running(&main, GATE).await;
     let delegated = tool(
-        &app,
+        app,
         &parent,
         "delegate",
-        json!({ "target_bot_id": leaf, "task": "[synthetic:slow] clean the server disk now" }),
+        json!({ "target_bot_id": leaf, "task": format!("{GATE} clean the server disk now") }),
     )
     .await;
-    let task: Uuid = tool_text(&delegated)["task_id"]
+    h.release(turn).await;
+    let task: Uuid = delegated.result["task_id"]
         .as_str()
         .unwrap()
         .parse()
@@ -1561,11 +1534,13 @@ async fn a_new_message_in_the_target_chat_skips_a_delegated_card() {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    wait(&app, child, "running").await;
-    let child_token = grant(&app, child, owner_tools()).await;
-    let pending = tool_text(&tool(&app, &child_token, "computer_run", delete_args()).await);
+    let (_, child_token) = h.started(child).await;
+    let pending = tool(app, &child_token, "computer_run", delete_args())
+        .await
+        .result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
-    wait(&app, child, "waiting").await;
+    h.release(child).await;
+    wait(app, child, "waiting").await;
 
     let reply = app
         .send(
@@ -1582,43 +1557,43 @@ async fn a_new_message_in_the_target_chat_skips_a_delegated_card() {
         "the message joins the task that asked"
     );
     assert_eq!(
-        question_row(&app, question).await.0,
+        question_row(app, question).await.0,
         "skipped",
         "the owner answered in chat instead of on the card"
     );
     assert_eq!(
-        shown_turn(&app, &leaf, child).await["questions"][0]["status"],
+        shown_turn(app, &leaf, child).await["questions"][0]["status"],
         "skipped",
         "the card in the target bot's chat closes"
     );
     assert_eq!(
-        answer(&app, &leaf, question, "approve").await.status,
+        answer(app, &leaf, question, "approve").await.status,
         StatusCode::CONFLICT,
         "a skipped card cannot approve"
     );
-    wait(&app, child, "completed").await;
+    wait(app, child, "completed").await;
     app.wait_turn(reply.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    assert_eq!(attempts(&app, child).await, 2, "the task continued with it");
+    assert_eq!(attempts(app, child).await, 2, "the task continued with it");
 }
 
-async fn delegated_card(app: &TestApp, leaf: &str) -> (Uuid, Uuid, Uuid, Uuid) {
+async fn delegated_card(h: &Harness, leaf: &str) -> (Uuid, Uuid, Uuid, Uuid, String) {
+    let app = &h.app;
     let main = app.main_bot().await;
     let warm = app
         .send(leaf, Uuid::new_v4(), "hello", Some("synthetic"))
         .await;
     app.wait_turn(warm.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    let (root, _) = running(app, &main).await;
-    let parent = grant(app, root, vec![Tool::ReadMemory, Tool::Delegate]).await;
+    let (root, parent) = h.running(&main, GATE).await;
     let delegated = tool(
         app,
         &parent,
         "delegate",
-        json!({ "target_bot_id": leaf, "task": "[synthetic:slow] publish the patch release" }),
+        json!({ "target_bot_id": leaf, "task": format!("{GATE_EVERY_ATTEMPT} publish the patch release") }),
     )
     .await;
-    let task: Uuid = tool_text(&delegated)["task_id"]
+    let task: Uuid = delegated.result["task_id"]
         .as_str()
         .unwrap()
         .parse()
@@ -1628,21 +1603,25 @@ async fn delegated_card(app: &TestApp, leaf: &str) -> (Uuid, Uuid, Uuid, Uuid) {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    wait(app, child, "running").await;
-    let child_token = grant(app, child, owner_tools()).await;
-    let pending = tool_text(&tool(app, &child_token, "computer_run", delete_args()).await);
+    let (_, child_token) = h.started(child).await;
+    let pending = tool(app, &child_token, "computer_run", delete_args())
+        .await
+        .result;
     let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
+    h.release(child).await;
     wait(app, child, "waiting").await;
+    h.release(root).await;
     wait(app, root, "waiting").await;
-    (root, task, child, question)
+    (root, task, child, question, child_token)
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owner_reply_in_chat_joins_a_delegated_card_and_the_task_reports_back() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
     let leaf = app.create_bot("Release").await;
-    let (root, task, child, question) = delegated_card(&app, &leaf).await;
+    let (root, task, child, question, _) = delegated_card(&h, &leaf).await;
 
     let follow_up = "Always approve the patch releases.";
     let sent = app
@@ -1650,17 +1629,14 @@ async fn an_owner_reply_in_chat_joins_a_delegated_card_and_the_task_reports_back
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
     assert_eq!(sent.body["turn"]["steered_into"], child.to_string());
-    assert_eq!(question_row(&app, question).await.0, "skipped");
+    assert_eq!(question_row(app, question).await.0, "skipped");
     let reply = sent.body["turn"]["id"].as_str().unwrap().to_owned();
-    wait(&app, child, "completed").await;
+    h.release(child).await;
+    wait(app, child, "completed").await;
     app.wait_turn(&reply, &["completed"]).await;
-    wait(&app, root, "completed").await;
+    wait(app, root, "completed").await;
     assert!(
-        synthetic
-            .packets()
-            .await
-            .iter()
-            .any(|p| p.contains(follow_up)),
+        h.packets().await.iter().any(|p| p.contains(follow_up)),
         "the task continued with the owner's message"
     );
 
@@ -1677,31 +1653,27 @@ async fn an_owner_reply_in_chat_joins_a_delegated_card_and_the_task_reports_back
         "the task reports back to the reply that delegated it"
     );
     assert_eq!(
-        answer(&app, &leaf, question, "approve").await.status,
+        answer(app, &leaf, question, "approve").await.status,
         StatusCode::CONFLICT,
         "the stale card cannot run the task again"
     );
-    assert_eq!(permissions(&app, &main).await, 0);
+    assert_eq!(permissions(app, &main).await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stopping_a_task_ends_the_message_that_joined_it() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
     let leaf = app.create_bot("Release").await;
-    let (_, task, child, _) = delegated_card(&app, &leaf).await;
+    let (_, task, child, _, child_token) = delegated_card(&h, &leaf).await;
 
     let sent = app
-        .send(
-            &leaf,
-            Uuid::new_v4(),
-            "[synthetic:hang] Yes, publish it.",
-            Some("synthetic"),
-        )
+        .send(&leaf, Uuid::new_v4(), "Yes, publish it.", Some("synthetic"))
         .await;
     assert_eq!(sent.body["turn"]["steered_into"], child.to_string());
     let reply: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    wait(&app, child, "running").await;
+    h.continued(child, &child_token).await;
     let stop = app
         .owner(
             "POST",
@@ -1710,8 +1682,8 @@ async fn stopping_a_task_ends_the_message_that_joined_it() {
         )
         .await;
     assert_eq!(stop.status, StatusCode::OK, "{}", stop.body);
-    wait(&app, child, "interrupted").await;
-    wait(&app, reply, "interrupted").await;
+    wait(app, child, "interrupted").await;
+    wait(app, reply, "interrupted").await;
     let state: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
         .bind(task)
         .fetch_one(&app.db.pool)
@@ -1722,16 +1694,17 @@ async fn stopping_a_task_ends_the_message_that_joined_it() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_newer_chat_message_leaves_the_task_its_first_message_joined() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let leaf = app.create_bot("Release").await;
-    let (root, task, child, _) = delegated_card(&app, &leaf).await;
+    let (root, task, child, _, child_token) = delegated_card(&h, &leaf).await;
 
     let first = app
         .send(&leaf, Uuid::new_v4(), "Yes, publish it.", Some("synthetic"))
         .await;
     assert_eq!(first.body["turn"]["steered_into"], child.to_string());
     let first: Uuid = first.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    wait(&app, child, "running").await;
+    h.continued(child, &child_token).await;
     let correction = "Publish it as a patch release.";
     let second = app
         .send(&leaf, Uuid::new_v4(), correction, Some("synthetic"))
@@ -1741,10 +1714,11 @@ async fn a_newer_chat_message_leaves_the_task_its_first_message_joined() {
         Value::Null,
         "the task no longer waits on the owner, so the message runs on its own"
     );
+    h.release(child).await;
     app.wait_turn(second.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    wait(&app, first, "completed").await;
-    wait(&app, root, "completed").await;
+    wait(app, first, "completed").await;
+    wait(app, root, "completed").await;
     let state: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
         .bind(task)
         .fetch_one(&app.db.pool)
@@ -1752,8 +1726,7 @@ async fn a_newer_chat_message_leaves_the_task_its_first_message_joined() {
         .unwrap();
     assert_eq!(state, "completed");
     assert!(
-        synthetic
-            .packets()
+        h.packets()
             .await
             .iter()
             .any(|p| p.contains("Yes, publish it.")),
@@ -1763,18 +1736,14 @@ async fn a_newer_chat_message_leaves_the_task_its_first_message_joined() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_follow_up_to_the_delegating_bot_joins_the_reply_that_receives_the_task() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
     let leaf = app.create_bot("Telegram").await;
-    let (root, task, child, _) = delegated_card(&app, &leaf).await;
+    let (root, task, child, _, child_token) = delegated_card(&h, &leaf).await;
 
     let approval = app
-        .send(
-            &leaf,
-            Uuid::new_v4(),
-            "[synthetic:slow] Yes, publish it.",
-            Some("synthetic"),
-        )
+        .send(&leaf, Uuid::new_v4(), "Yes, publish it.", Some("synthetic"))
         .await;
     assert_eq!(approval.body["turn"]["steered_into"], child.to_string());
     let approval: Uuid = approval.body["turn"]["id"]
@@ -1782,7 +1751,7 @@ async fn a_follow_up_to_the_delegating_bot_joins_the_reply_that_receives_the_tas
         .unwrap()
         .parse()
         .unwrap();
-    wait(&app, child, "running").await;
+    h.continued(child, &child_token).await;
     let follow = app
         .send(
             &main,
@@ -1794,9 +1763,10 @@ async fn a_follow_up_to_the_delegating_bot_joins_the_reply_that_receives_the_tas
     assert_eq!(follow.status, StatusCode::ACCEPTED, "{}", follow.body);
     assert_eq!(follow.body["turn"]["steered_into"], root.to_string());
     let follow: Uuid = follow.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    wait(&app, approval, "completed").await;
-    wait(&app, root, "completed").await;
-    wait(&app, follow, "completed").await;
+    h.release(child).await;
+    wait(app, approval, "completed").await;
+    wait(app, root, "completed").await;
+    wait(app, follow, "completed").await;
 
     let (state, carrier, delivered): (String, Uuid, Option<i64>) = sqlx::query_as(
         "SELECT status, root_turn_id, delivered_attempt FROM delegations WHERE id = ?1",

@@ -1,9 +1,9 @@
 use crate::common;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
+use common::recorder::{self, GATE_AFTER_OPENING};
 use common::{TOKEN, TestApp};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -14,14 +14,13 @@ use uuid::Uuid;
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-struct Server {
-    app: Arc<TestApp>,
+struct Server<'a> {
+    app: &'a TestApp,
     addr: String,
 }
 
-impl Server {
-    async fn start() -> Self {
-        let app = Arc::new(TestApp::installed().await);
+impl<'a> Server<'a> {
+    async fn start(app: &'a TestApp) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let router = app.router.clone();
@@ -210,7 +209,7 @@ async fn read_until(socket: &mut Socket, model: &mut Model, done: impl Fn(&Model
     }
 }
 
-async fn wait_completed(server: &Server, reply: &common::Reply) {
+async fn wait_completed(server: &Server<'_>, reply: &common::Reply) {
     server
         .app
         .wait_turn(reply.body["turn"]["id"].as_str().unwrap(), &["completed"])
@@ -219,20 +218,17 @@ async fn wait_completed(server: &Server, reply: &common::Reply) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_then_subscribe_replays_everything_in_between() {
-    let server = Server::start().await;
+    let h = recorder::harness(TestApp::builder()).await;
+    let server = Server::start(&h.app).await;
     let bot = server.app.main_bot().await;
     let snapshot = server.snapshot(&bot).await;
     let mut model = Model::from_snapshot(&snapshot);
-    let sent = server
-        .app
-        .send(
-            &bot,
-            Uuid::new_v4(),
-            "[synthetic:slow] héllo ✓ wörld",
-            Some("synthetic"),
-        )
+    let (turn, _) = h
+        .running(&bot, &format!("{GATE_AFTER_OPENING} héllo ✓ wörld"))
         .await;
-    wait_completed(&server, &sent).await;
+    common::steer::wait_for_text(&h.app, turn, 0).await;
+    h.release(turn).await;
+    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
     let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
     subscribe_bot(&mut socket, &bot, &model.cursor()).await;
     let latest = server.snapshot(&bot).await;
@@ -244,28 +240,27 @@ async fn snapshot_then_subscribe_replays_everything_in_between() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_events_reconnect_and_replay_without_duplicates() {
-    let server = Server::start().await;
+    let h = recorder::harness(TestApp::builder()).await;
+    let server = Server::start(&h.app).await;
     let bot = server.app.main_bot().await;
     let snapshot = server.snapshot(&bot).await;
     let mut model = Model::from_snapshot(&snapshot);
     let start = model.cursor();
     let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
     subscribe_bot(&mut socket, &bot, &start).await;
-    let sent = server
-        .app
-        .send(
-            &bot,
-            Uuid::new_v4(),
-            "[synthetic:slow] stream me",
-            Some("synthetic"),
-        )
+    let (turn, _) = h
+        .running(&bot, &format!("{GATE_AFTER_OPENING} stream me"))
         .await;
     read_until(&mut socket, &mut model, |m| {
         m.items.values().any(|i| i["kind"] == "assistant")
     })
     .await;
     drop(socket);
-    wait_completed(&server, &sent).await;
+    h.release(turn).await;
+    server
+        .app
+        .wait_turn(&turn.to_string(), &["completed"])
+        .await;
     let latest = server.snapshot(&bot).await;
     let target = latest_seq(&latest);
     let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
@@ -284,7 +279,8 @@ async fn live_events_reconnect_and_replay_without_duplicates() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn one_socket_carries_several_channels_and_unsubscribe_stops_one() {
-    let server = Server::start().await;
+    let app = TestApp::installed().await;
+    let server = Server::start(&app).await;
     let a = server.app.main_bot().await;
     let b = server.app.create_bot("B").await;
     let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
@@ -324,7 +320,8 @@ async fn one_socket_carries_several_channels_and_unsubscribe_stops_one() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bots_channel_pushes_list_changes() {
-    let server = Server::start().await;
+    let app = TestApp::installed().await;
+    let server = Server::start(&app).await;
     let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
     op(&mut socket, json!({ "op": "subscribe", "channel": "bots" })).await;
     let first = next(&mut socket, Duration::from_secs(5)).await.unwrap();
@@ -399,7 +396,8 @@ async fn bots_channel_pushes_list_changes() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bots_channel_carries_background_replies_and_reads() {
-    let server = Server::start().await;
+    let app = TestApp::installed().await;
+    let server = Server::start(&app).await;
     let background = server.app.create_bot("Background").await;
     let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
     op(&mut socket, json!({ "op": "subscribe", "channel": "bots" })).await;
@@ -470,7 +468,8 @@ async fn bots_channel_carries_background_replies_and_reads() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cursor_errors_are_reported_per_channel() {
-    let server = Server::start().await;
+    let app = TestApp::installed().await;
+    let server = Server::start(&app).await;
     let bot = server.app.main_bot().await;
     let other = server.app.create_bot("Other").await;
     let cursor = server.snapshot(&bot).await["event_cursor"]
@@ -522,7 +521,8 @@ async fn cursor_errors_are_reported_per_channel() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ended_channels_do_not_use_up_the_subscription_limit() {
-    let server = Server::start().await;
+    let app = TestApp::installed().await;
+    let server = Server::start(&app).await;
     let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
     for _ in 0..40 {
         op(
@@ -542,7 +542,8 @@ async fn ended_channels_do_not_use_up_the_subscription_limit() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn deletion_ends_a_bot_channel_even_for_a_stalled_reader() {
-    let server = Server::start().await;
+    let app = TestApp::installed().await;
+    let server = Server::start(&app).await;
     let bot = server.app.create_bot("Temp").await;
     let cursor = server.snapshot(&bot).await["event_cursor"]
         .as_str()
@@ -582,7 +583,8 @@ async fn deletion_ends_a_bot_channel_even_for_a_stalled_reader() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn upgrade_requires_the_owner_token_and_no_browser_origin() {
-    let server = Server::start().await;
+    let app = TestApp::installed().await;
+    let server = Server::start(&app).await;
     assert_eq!(server.connect(None, None).await.err(), Some(401));
     assert_eq!(
         server
@@ -621,7 +623,8 @@ async fn upgrade_requires_the_owner_token_and_no_browser_origin() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bots_channel_carries_categories_to_every_client() {
-    let server = Server::start().await;
+    let app = TestApp::installed().await;
+    let server = Server::start(&app).await;
     let mut clients = Vec::new();
     for _ in 0..2 {
         let mut socket = server.connect(Some(TOKEN), None).await.unwrap();

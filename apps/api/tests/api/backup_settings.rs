@@ -14,11 +14,11 @@ use tokio_util::sync::CancellationToken;
 const SECRET: &str = "secret-that-must-never-be-returned";
 const KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
-fn setup() -> common::Setup {
-    common::Setup {
-        backups: true,
-        ..common::Setup::default()
-    }
+fn setup(config: &Config, db: Arc<common::TestDb>) -> common::Builder {
+    common::TestApp::builder()
+        .db(db)
+        .config(config.clone())
+        .backups()
 }
 
 struct Env(BTreeMap<String, String>);
@@ -44,7 +44,7 @@ impl Harness {
             ("ELSE_BACKUP_INTERVAL_SECS".into(), "0".into()),
         ])))
         .unwrap();
-        let app = common::TestApp::start_in(config.clone(), Arc::new(db), setup()).await;
+        let app = setup(&config, Arc::new(db)).start().await;
         Self {
             app,
             config,
@@ -55,7 +55,7 @@ impl Harness {
     async fn restart(self) -> Self {
         let Self { app, config, _dir } = self;
         let db = app.stop().await;
-        let app = common::TestApp::start_in(config.clone(), db, setup()).await;
+        let app = setup(&config, db).start().await;
         Self { app, config, _dir }
     }
     async fn snapshot(&self) -> Value {

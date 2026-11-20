@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::http::StatusCode;
 use else_api::app::providers::{
@@ -12,9 +11,13 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
-use super::{TestApp, TestDb};
+use super::{Builder, SETTLE, TestApp};
 
 pub const GATE: &str = "[gate]";
+/// Like [`GATE`], but the reply's opening chunks ("Synthetic reply ✓ fro")
+/// reach the turn in one write before the hold, so a sink that throttles
+/// its events still reports them.
+pub const GATE_AFTER_OPENING: &str = "[gate:after-opening]";
 pub const GATE_EVERY_ATTEMPT: &str = "[gate:every-attempt]";
 
 enum Message {
@@ -62,14 +65,16 @@ impl State {
                     self.held.insert(turn, open);
                 }
             }
-            Message::Release(turn) => match self.held.remove(&turn) {
-                Some(open) => {
-                    let _ = open.send(());
-                }
-                None => {
+            Message::Release(turn) => {
+                if !self
+                    .held
+                    .remove(&turn)
+                    .is_some_and(|open| open.send(()).is_ok())
+                {
+                    // An interrupted attempt may have dropped its receiver.
                     self.released.insert(turn);
                 }
-            },
+            }
         }
     }
 }
@@ -90,6 +95,8 @@ impl Recorder {
 struct Gated<'a> {
     inner: &'a dyn TurnSink,
     gate: Option<(&'a Recorder, Uuid)>,
+    /// The opening chunks still to collect, and those collected so far.
+    opening: std::sync::Mutex<Option<(usize, String)>>,
     open: tokio::sync::OnceCell<()>,
     stop: else_api::app::providers::Stop,
 }
@@ -109,6 +116,23 @@ impl TurnSink for Gated<'_> {
         self.inner.running().await
     }
     async fn text(&self, chunk: &str) -> Result<(), Fenced> {
+        let opened = {
+            let mut opening = self.opening.lock().unwrap();
+            match opening.as_mut() {
+                Some((left, text)) => {
+                    text.push_str(chunk);
+                    *left -= 1;
+                    if *left > 0 {
+                        return Ok(());
+                    }
+                    opening.take().map(|(_, text)| text)
+                }
+                None => None,
+            }
+        };
+        if let Some(text) = opened {
+            return self.inner.text(&text).await;
+        }
         if let Some((recorder, turn)) = self.gate {
             let held = self
                 .open
@@ -121,6 +145,10 @@ impl TurnSink for Gated<'_> {
         self.inner.text(chunk).await
     }
     async fn end_message(&self) -> Result<(), Fenced> {
+        let opened = self.opening.lock().unwrap().take();
+        if let Some((_, text)) = opened {
+            self.inner.text(&text).await?;
+        }
         self.inner.end_message().await
     }
     async fn usage(&self, usage: Usage) {
@@ -141,6 +169,9 @@ impl Provider for Recorder {
     }
     fn label(&self) -> &'static str {
         self.inner.label()
+    }
+    fn project_dir(&self, bot: Uuid) -> Option<std::path::PathBuf> {
+        self.inner.project_dir(bot)
     }
     fn availability(&self) -> Availability {
         Availability::Available
@@ -168,15 +199,24 @@ impl Provider for Recorder {
             .send(Message::Record(Box::new(input.clone())))
             .await
             .unwrap();
+        let opening = input.attempt == 1 && input.text.contains(GATE_AFTER_OPENING);
         let gated = input.text.contains(GATE_EVERY_ATTEMPT)
-            || (input.text.contains(GATE) && input.attempt == 1);
+            || opening
+            || (input.attempt == 1 && input.text.contains(GATE));
         let sink = Gated {
             inner: sink,
             gate: gated.then_some((self, input.turn_id)),
+            opening: std::sync::Mutex::new(opening.then(|| (3, String::new()))),
             open: tokio::sync::OnceCell::new(),
             stop: stop.clone(),
         };
-        self.inner.run(input, &sink, stop).await
+        let outcome = self.inner.run(input, &sink, stop).await;
+        // A reply that ended inside its opening still reaches the turn.
+        let opened = sink.opening.lock().unwrap().take();
+        if let Some((_, text)) = opened {
+            let _ = sink.inner.text(&text).await;
+        }
+        outcome
     }
 }
 
@@ -185,26 +225,9 @@ pub struct Harness {
     pub recorder: Arc<Recorder>,
 }
 
-pub async fn harness(max_active: usize) -> Harness {
-    harness_with(max_active, None).await
-}
-
-pub async fn harness_with(
-    max_active: usize,
-    mail: Option<Arc<dyn else_api::connectors::types::MailTransport>>,
-) -> Harness {
-    harness_with_providers(max_active, mail, Vec::new()).await
-}
-
-/// A recorder harness whose registry also has `extra` providers after the
-/// default recorder.
-pub async fn harness_with_providers(
-    max_active: usize,
-    mail: Option<Arc<dyn else_api::connectors::types::MailTransport>>,
-    extra: Vec<Arc<dyn Provider>>,
-) -> Harness {
-    let db = Arc::new(TestDb::migrated().await);
-    else_api::db::installation::setup(&db.pool).await.unwrap();
+/// A running app whose first provider is a recorder, the default for turns.
+pub async fn harness(mut builder: Builder) -> Harness {
+    let db = builder.database().await;
     sqlx::query("UPDATE installation SET default_provider_id = 'synthetic'")
         .execute(&db.pool)
         .await
@@ -217,16 +240,12 @@ pub async fn harness_with_providers(
         }
     });
     let recorder = Arc::new(Recorder {
-        inner: Synthetic::new(Duration::from_millis(5)),
+        inner: builder.synthetic(),
         mailbox,
     });
     let mut providers: Vec<Arc<dyn Provider>> = vec![recorder.clone()];
-    providers.extend(extra);
-    let registry = else_api::providers::Registry::new(providers);
-    let app = match mail {
-        Some(mail) => TestApp::with_mail(db, max_active, registry, mail).await,
-        None => TestApp::with_registry(db, max_active, registry).await,
-    };
+    providers.extend(builder.extra_providers());
+    let app = builder.start_with(providers).await;
     Harness { app, recorder }
 }
 
@@ -234,7 +253,7 @@ impl Harness {
     async fn grant(&self, turn: Uuid, old: Option<&str>) -> String {
         let mut updates = self.recorder.ask(|r| Message::Grant(turn, r)).await;
         let token = tokio::time::timeout(
-            Duration::from_secs(20),
+            SETTLE,
             updates.wait_for(|token| token.as_deref().is_some_and(|token| Some(token) != old)),
         )
         .await
@@ -245,9 +264,7 @@ impl Harness {
 
     pub async fn continued(&self, turn: Uuid, old: &str) -> String {
         let token = self.grant(turn, Some(old)).await;
-        self.app
-            .wait_turn_for(&turn.to_string(), &["running"], Duration::from_secs(20))
-            .await;
+        self.app.wait_turn(&turn.to_string(), &["running"]).await;
         token
     }
 
@@ -271,10 +288,30 @@ impl Harness {
     }
 
     pub async fn started(&self, turn: Uuid) -> (Uuid, String) {
-        self.app
-            .wait_turn_for(&turn.to_string(), &["running"], Duration::from_secs(20))
-            .await;
+        self.app.wait_turn(&turn.to_string(), &["running"]).await;
         (turn, self.grant(turn, None).await)
+    }
+
+    /// A grant for `turn` with exactly `tools`, for a test that checks a
+    /// tool set other than the one the scheduler issued.
+    pub async fn grant_with(&self, turn: Uuid, tools: Vec<else_api::grants::Tool>) -> String {
+        let (bot, conversation): (Uuid, Uuid) =
+            sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
+                .bind(turn)
+                .fetch_one(&self.app.db.pool)
+                .await
+                .unwrap();
+        self.app
+            .state
+            .grants
+            .issue(
+                bot,
+                conversation,
+                turn,
+                tools,
+                else_api::grants::DEFAULT_TTL,
+            )
+            .await
     }
 
     pub async fn inputs(&self, turn: Uuid) -> Vec<TurnInput> {

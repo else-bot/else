@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use common::recorder::{self, GATE};
 use common::{TestApp, TestDb};
 use serde_json::json;
 use uuid::Uuid;
@@ -235,39 +236,39 @@ async fn bots_keep_separate_histories_and_order() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn one_active_turn_per_bot_while_newer_messages_steer() {
-    let app = TestApp::installed().await;
+    let h = recorder::harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.main_bot().await;
-    let mut turns = Vec::new();
-    for i in 0..3 {
-        let reply = app
-            .send(
-                &bot,
-                Uuid::new_v4(),
-                &format!("[synthetic:slow] m{i}"),
-                Some("synthetic"),
-            )
-            .await;
-        assert_eq!(reply.status, StatusCode::ACCEPTED);
-        turns.push(reply.body["turn"]["id"].as_str().unwrap().to_owned());
-    }
+    let (first, _) = h.running(&bot, &format!("{GATE} m0")).await;
     let pool = app.db.pool.clone();
-    let monitor = tokio::spawn(async move {
-        let mut max_active = 0i64;
-        for _ in 0..200 {
-            let active: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM turns WHERE status IN ('preparing','sending','running','cancelling')",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            max_active = max_active.max(active);
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    let done = tokio_util::sync::CancellationToken::new();
+    let monitor = tokio::spawn({
+        let done = done.clone();
+        async move {
+            let mut max_active = 0i64;
+            while !done.is_cancelled() {
+                let active: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM turns WHERE status IN ('preparing','sending','running','cancelling')",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                max_active = max_active.max(active);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            max_active
         }
-        max_active
     });
-    for turn in &turns {
-        assert_eq!(app.wait_turn(turn, &["completed"]).await, "completed");
+    let second = h.send(&bot, "m1").await;
+    let third = h.send(&bot, "m2").await;
+    h.release(first).await;
+    for turn in [first, second, third] {
+        assert_eq!(
+            app.wait_turn(&turn.to_string(), &["completed"]).await,
+            "completed"
+        );
     }
+    done.cancel();
     assert_eq!(
         monitor.await.unwrap(),
         1,
@@ -277,34 +278,15 @@ async fn one_active_turn_per_bot_while_newer_messages_steer() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rapid_corrections_all_join_the_running_reply() {
-    let db = Arc::new(TestDb::migrated().await);
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    let synthetic = Arc::new(else_api::providers::synthetic::Synthetic::new(
-        Duration::from_millis(5),
-    ));
-    let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
-    let app = TestApp::with_registry(db, 4, registry).await;
+    let h = recorder::harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.main_bot().await;
     let other = app.create_bot("Other").await;
-    let elsewhere = app
-        .send(
-            &other,
-            Uuid::new_v4(),
-            "[synthetic:hang] elsewhere",
-            Some("synthetic"),
-        )
+    let (elsewhere, _) = h.running(&other, &format!("{GATE} elsewhere")).await;
+    let (turn, _) = h
+        .running(&bot, &format!("{GATE} publish the release notes"))
         .await;
-    let elsewhere = elsewhere.body["turn"]["id"].as_str().unwrap().to_owned();
-    let publish = format!(
-        "[synthetic:slow] publish {}",
-        "the release notes ".repeat(10)
-    );
-    let sent = app
-        .send(&bot, Uuid::new_v4(), &publish, Some("synthetic"))
-        .await;
-    let answer = sent.body["turn"]["id"].as_str().unwrap().to_owned();
-    app.wait_turn(&answer, &["running"]).await;
-    app.wait_turn(&elsewhere, &["running"]).await;
+    let answer = turn.to_string();
 
     let corrections: Vec<String> = Vec::from_fn(6, |i| format!("correction {i}"));
     let mut requests = Vec::new();
@@ -318,6 +300,7 @@ async fn rapid_corrections_all_join_the_running_reply() {
             reply.body["turn"]["id"].as_str().unwrap().to_owned(),
         ));
     }
+    h.release(turn).await;
     assert_eq!(app.wait_turn(&answer, &["completed"]).await, "completed");
     for (request, turn) in &requests {
         assert_eq!(app.wait_turn(turn, &["completed"]).await, "completed");
@@ -330,25 +313,26 @@ async fn rapid_corrections_all_join_the_running_reply() {
             .await;
         assert_eq!(lookup.body["turn"]["steered_into"], answer.as_str());
     }
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let packet = h.packets().await.last().unwrap().clone();
     for text in &corrections {
         assert!(
             packet.contains(text.as_str()),
             "{text} missing from {packet}"
         );
     }
-    let owner_messages = items(&app, &bot)
+    let owner_messages = items(app, &bot)
         .await
         .into_iter()
         .filter(|(_, kind, _)| kind == "user")
         .count();
     assert_eq!(owner_messages, 7, "every message is kept in history");
     let other_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
-        .bind(elsewhere.parse::<Uuid>().unwrap())
+        .bind(elsewhere)
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
     assert_eq!(other_status, "running", "another bot's work is untouched");
+    h.release(elsewhere).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -405,7 +389,7 @@ async fn a_retry_of_an_older_message_does_not_preempt_the_newer_one() {
 async fn different_bots_run_concurrently_within_the_global_limit() {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_options(db, 2).await;
+    let app = TestApp::builder().db(db).max_active(2).start().await;
     let bots = [
         app.main_bot().await,
         app.create_bot("B").await,
@@ -720,7 +704,7 @@ async fn restart_requeues_undelivered_and_marks_delivered_uncertain() {
         .await
         .unwrap();
     assert_eq!((requeued, uncertain), (0, 1));
-    let app = TestApp::with_options(db, 4).await;
+    let app = TestApp::builder().db(db).start().await;
     let status = app.wait_turn(&hang_id, &["uncertain"]).await;
     assert_eq!(status, "uncertain");
     app.wait_turn(&waiting_id, &["completed"]).await;
@@ -802,7 +786,7 @@ async fn retry_succeeds_after_provider_removed_and_patch_needs_adapter() {
         .await;
     let db = app.db.clone();
     drop(app);
-    let app = TestApp::with_registry(db, 4, else_api::providers::Registry::new(vec![])).await;
+    let app = TestApp::builder().db(db).providers(vec![]).start().await;
     let retry = app
         .send(&bot, request, "before removal", Some("synthetic"))
         .await;

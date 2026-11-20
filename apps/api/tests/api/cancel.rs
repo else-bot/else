@@ -3,6 +3,7 @@ use crate::common;
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use common::recorder::{self, GATE, GATE_AFTER_OPENING};
 use common::{ApiProcess, TestApp, TestDb};
 use reqwest::Method;
 use serde_json::json;
@@ -42,8 +43,10 @@ fn turn_id(reply: &common::Reply) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_work_cancels_through_its_boundary_only() {
-    let app = TestApp::installed().await;
+    let h = recorder::harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.main_bot().await;
+    h.recorder.inner.hold_hangs(true).await;
     let running = app
         .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
         .await;
@@ -56,7 +59,7 @@ async fn stop_work_cancels_through_its_boundary_only() {
         .await;
 
     let request = Uuid::new_v4();
-    let first = stop(&app, &bot, request).await;
+    let first = stop(app, &bot, request).await;
     assert_eq!(first.status, StatusCode::ACCEPTED, "{:?}", first.body);
     assert_eq!(first.body["state"], "pending");
     let rejected = app
@@ -66,7 +69,8 @@ async fn stop_work_cancels_through_its_boundary_only() {
     assert_eq!(rejected.body["error"]["code"], "cancellation_pending");
     let bot_view = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
     assert_eq!(bot_view.body["bot"]["activity"]["phase"], "cancelling");
-    let done = wait_receipt(&app, &bot, request).await;
+    h.recorder.inner.hold_hangs(false).await;
+    let done = wait_receipt(app, &bot, request).await;
     assert_eq!(done.status, StatusCode::OK);
     for turn in [&running, &queued_a, &queued_b] {
         let (status, _, uncertain) = status_of(&app.db.pool, &turn_id(turn)).await;
@@ -87,64 +91,43 @@ async fn stop_work_cancels_through_its_boundary_only() {
         "history is retained; the rejected send added nothing"
     );
 
-    let after = app
-        .send(
-            &bot,
-            Uuid::new_v4(),
-            "[synthetic:slow] after stop",
-            Some("synthetic"),
-        )
-        .await;
-    assert_eq!(after.status, StatusCode::ACCEPTED);
-    app.wait_turn(&turn_id(&after), &["running"]).await;
-    let retry = stop(&app, &bot, request).await;
+    let (after, _) = h.running(&bot, &format!("{GATE} after stop")).await;
+    let retry = stop(app, &bot, request).await;
     assert_eq!(retry.status, StatusCode::OK);
     assert_eq!(retry.body["state"], "done");
+    h.release(after).await;
     assert_eq!(
-        app.wait_turn(&turn_id(&after), &["completed", "interrupted"])
+        app.wait_turn(&after.to_string(), &["completed", "interrupted"])
             .await,
         "completed"
     );
     let other = app.create_bot("Other").await;
     assert_eq!(
-        stop(&app, &other, request).await.status,
+        stop(app, &other, request).await.status,
         StatusCode::CONFLICT
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_with_no_work_completes_at_once_and_keeps_partial_text() {
-    let app = TestApp::installed().await;
+    let h = recorder::harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.main_bot().await;
-    let idle = stop(&app, &bot, Uuid::new_v4()).await;
+    let idle = stop(app, &bot, Uuid::new_v4()).await;
     assert_eq!(
         (idle.status, idle.body["state"].clone()),
         (StatusCode::OK, json!("done"))
     );
 
-    let slow = app
-        .send(
-            &bot,
-            Uuid::new_v4(),
-            "[synthetic:slow] partial",
-            Some("synthetic"),
-        )
+    let (turn, _) = h
+        .running(&bot, &format!("{GATE_AFTER_OPENING} partial"))
         .await;
-    for _ in 0..200 {
-        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM items WHERE kind = 'assistant'")
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
-        if n > 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    common::steer::wait_for_text(app, turn, 0).await;
     let request = Uuid::new_v4();
-    stop(&app, &bot, request).await;
-    wait_receipt(&app, &bot, request).await;
+    stop(app, &bot, request).await;
+    wait_receipt(app, &bot, request).await;
     assert_eq!(
-        status_of(&app.db.pool, &turn_id(&slow)).await.0,
+        status_of(&app.db.pool, &turn.to_string()).await.0,
         "interrupted"
     );
     let text: String = sqlx::query_scalar("SELECT text FROM items WHERE kind = 'assistant'")
@@ -277,17 +260,10 @@ async fn deletion_during_work_blocks_late_output_and_never_reactivates() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn late_output_after_deletion_is_fenced() {
-    let app = TestApp::installed().await;
+    let h = recorder::harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("Streaming").await;
-    let slow = app
-        .send(
-            &bot,
-            Uuid::new_v4(),
-            "[synthetic:slow] a long reply",
-            Some("synthetic"),
-        )
-        .await;
-    app.wait_turn(&turn_id(&slow), &["running"]).await;
+    let (turn, _) = h.running(&bot, &format!("{GATE} a long reply")).await;
     app.owner("DELETE", &format!("/v1/bots/{bot}"), None).await;
     let count = || async {
         sqlx::query_scalar::<_, String>(
@@ -298,7 +274,8 @@ async fn late_output_after_deletion_is_fenced() {
         .unwrap()
     };
     let at_delete = count().await;
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["interrupted"]).await;
     assert_eq!(
         count().await,
         at_delete,

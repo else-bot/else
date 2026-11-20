@@ -8,7 +8,7 @@ use common::{TestApp, TestDb};
 use else_api::app::providers::Provider;
 use else_api::providers::cursor::Cursor;
 use else_api::providers::cursor_home::{self, Login};
-use else_api::providers::{Registry, host::Host};
+use else_api::providers::host::Host;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -91,7 +91,12 @@ async fn cursor_conversations_stream_resume_use_host_and_mcp_tools_and_cancel() 
     let (provider, model) = cursor(&host, &url).await;
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(db, 2, Registry::new(vec![Arc::new(provider)])).await;
+    let app = TestApp::builder()
+        .db(db)
+        .max_active(2)
+        .providers(vec![Arc::new(provider)])
+        .start()
+        .await;
     let (calls, mut observed_calls) = tokio::sync::mpsc::channel(64);
     let router = app.router.clone().layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
@@ -236,7 +241,12 @@ async fn a_newer_owner_message_joins_a_running_cursor_reply() {
     let (provider, model) = cursor(&host, &url).await;
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(db, 2, Registry::new(vec![Arc::new(provider)])).await;
+    let app = TestApp::builder()
+        .db(db)
+        .max_active(2)
+        .providers(vec![Arc::new(provider)])
+        .start()
+        .await;
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let saved = app

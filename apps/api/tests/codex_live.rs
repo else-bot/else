@@ -57,7 +57,12 @@ async fn with_memory_tools_host_tools_still_run_and_agents_still_cannot() {
     let port = listener.local_addr().unwrap().port();
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(db, 1, Registry::new(vec![])).await;
+    let app = TestApp::builder()
+        .db(db)
+        .max_active(1)
+        .providers(vec![])
+        .start()
+        .await;
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let grant = app
@@ -228,7 +233,6 @@ async fn probe_native_tools(tools: Option<(String, String)>) {
 mod common;
 
 use common::{TestApp, TestDb};
-use else_api::providers::Registry;
 use else_api::providers::codex::Codex;
 use std::sync::Arc;
 
@@ -239,13 +243,13 @@ fn codex_host(data: &Path) -> Host {
 async fn codex_app(db: Arc<TestDb>, data: &Path) -> TestApp {
     let sandbox = codex_host(data);
     let (codex, auth) = codex_and_auth().await;
-    let registry = Registry::new(vec![
+    let registry: common::Providers = vec![
         Arc::new(Codex::detect(Some(sandbox), Some(codex), Some(auth)).await),
         Arc::new(else_api::providers::synthetic::Synthetic::new(
             Duration::from_millis(5),
         )),
-    ]);
-    TestApp::with_registry(db, 4, registry).await
+    ];
+    TestApp::builder().db(db).providers(registry).start().await
 }
 
 const FINISHED: &[&str] = &["completed", "failed", "interrupted", "uncertain"];
@@ -609,7 +613,7 @@ async fn codex_retrieves_a_saved_fact_through_memory_tools() {
     let port = listener.local_addr().unwrap().port();
     let sandbox = codex_host(&data);
     let (codex, auth) = codex_and_auth().await;
-    let registry = Registry::new(vec![
+    let registry: common::Providers = vec![
         Arc::new(
             Codex::detect(Some(sandbox), Some(codex), Some(auth))
                 .await
@@ -618,10 +622,15 @@ async fn codex_retrieves_a_saved_fact_through_memory_tools() {
         Arc::new(else_api::providers::synthetic::Synthetic::new(
             Duration::from_millis(5),
         )),
-    ]);
+    ];
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(db, 2, registry).await;
+    let app = TestApp::builder()
+        .db(db)
+        .max_active(2)
+        .providers(registry)
+        .start()
+        .await;
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
@@ -703,14 +712,19 @@ async fn code_mode_reaches_only_elsebot_tools() {
     let port = listener.local_addr().unwrap().port();
     let sandbox = codex_host(&data);
     let (codex, auth) = codex_and_auth().await;
-    let registry = Registry::new(vec![Arc::new(
+    let registry: common::Providers = vec![Arc::new(
         Codex::detect(Some(sandbox), Some(codex), Some(auth))
             .await
             .with_tools(format!("http://127.0.0.1:{port}/tools/v1/mcp")),
-    )]);
+    )];
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(db, 2, registry).await;
+    let app = TestApp::builder()
+        .db(db)
+        .max_active(2)
+        .providers(registry)
+        .start()
+        .await;
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let bot = app.create_bot("Probe").await;
@@ -819,7 +833,12 @@ async fn a_synthetic_corpus_is_summarized_faithfully_and_recalled() {
     );
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(db, 2, Registry::new(vec![codex.clone()])).await;
+    let app = TestApp::builder()
+        .db(db)
+        .max_active(2)
+        .providers(vec![codex.clone()])
+        .start()
+        .await;
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let reply = app
@@ -968,7 +987,12 @@ async fn main_bot_creates_a_github_specialist_on_request() {
     );
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(db, 1, Registry::new(vec![provider])).await;
+    let app = TestApp::builder()
+        .db(db)
+        .max_active(1)
+        .providers(vec![provider])
+        .start()
+        .await;
     let router = app.router.clone();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let main = app.main_bot().await;
@@ -1050,7 +1074,12 @@ async fn main_bot_delegates_by_name_with_one_provider_slot() {
     );
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(db, 1, Registry::new(vec![codex])).await;
+    let app = TestApp::builder()
+        .db(db)
+        .max_active(1)
+        .providers(vec![codex])
+        .start()
+        .await;
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let main = app.main_bot().await;
@@ -1176,7 +1205,13 @@ async fn codex_uses_its_guest_computer_through_tools() {
         },
     ));
     computers.reconcile_startup().await.unwrap();
-    let app = TestApp::with_parts(db, 2, Registry::new(vec![codex]), Some(computers.clone())).await;
+    let app = TestApp::builder()
+        .db(db)
+        .max_active(2)
+        .providers(vec![codex])
+        .computers(computers.clone())
+        .start()
+        .await;
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let bot = app.create_bot("Builder").await;

@@ -76,7 +76,7 @@ async fn routine(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_external_routine_card_always_allows_that_routine_until_revoked() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let (report, due) = routine(&h, &main, "Send the build report.", false).await;
@@ -126,7 +126,7 @@ async fn an_external_routine_card_always_allows_that_routine_until_revoked() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_mcp_tool_card_in_a_routine_run_saves_a_tool_grant_the_next_run_uses() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let (daily, due) = routine(&h, &main, "Create the daily ticket.", true).await;
@@ -176,7 +176,7 @@ async fn an_mcp_tool_card_in_a_routine_run_saves_a_tool_grant_the_next_run_uses(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_external_computer_call_without_a_task_scope_offers_a_grant_for_that_tool() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let (turn, token) = h.running(&main, &format!("{GATE} send the report")).await;
@@ -221,7 +221,7 @@ async fn an_external_computer_call_without_a_task_scope_offers_a_grant_for_that_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn typing_always_allow_answers_the_waiting_card_with_its_grant_and_nothing_wider() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let (turn, token) = h
@@ -271,7 +271,7 @@ async fn typing_always_allow_answers_the_waiting_card_with_its_grant_and_nothing
 
 #[tokio::test(flavor = "multi_thread")]
 async fn typing_always_approve_answers_a_waiting_routine_card() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let (report, due) = routine(&h, &main, "Send the build report.", false).await;
@@ -291,7 +291,7 @@ async fn typing_always_approve_answers_a_waiting_routine_card() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_typed_reply_after_another_owner_message_answers_no_older_card() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let (report, due) = routine(&h, &main, "Send the build report.", false).await;

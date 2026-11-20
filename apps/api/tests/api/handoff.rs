@@ -3,14 +3,13 @@ use crate::common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{TestApp, TestDb};
-use else_api::providers::Registry;
+use common::TestApp;
+use common::recorder::{self, GATE, Harness};
 use else_api::providers::synthetic::Synthetic;
 use uuid::Uuid;
 
 struct Two {
-    app: TestApp,
-    a: Arc<Synthetic>,
+    h: Harness,
     b: Arc<Synthetic>,
 }
 
@@ -18,16 +17,9 @@ const A: &str = "synthetic";
 const B: &str = "synthetic-b";
 
 async fn two() -> Two {
-    let db = TestDb::migrated().await;
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    two_on(Arc::new(db)).await
-}
-
-async fn two_on(db: Arc<TestDb>) -> Two {
-    let a = Arc::new(Synthetic::named(A, "Synthetic A", Duration::from_millis(1)));
     let b = Arc::new(Synthetic::named(B, "Synthetic B", Duration::from_millis(1)));
-    let app = TestApp::with_registry(db, 4, Registry::new(vec![a.clone(), b.clone()])).await;
-    Two { app, a, b }
+    let h = recorder::harness(TestApp::builder().providers(vec![b.clone()])).await;
+    Two { h, b }
 }
 
 async fn say(app: &TestApp, bot: &str, provider: &str, text: &str) -> (Uuid, String) {
@@ -75,7 +67,9 @@ async fn handoff(app: &TestApp, turn: Uuid) -> Option<Handoff> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta() {
-    let Two { app, a, b } = two().await;
+    let Two { h, b } = two().await;
+    let app = h.app;
+    let a = &h.recorder.inner;
     let bot = app.create_bot("Planner").await;
     say(&app, &bot, A, "Owner fact: the code word is PURPLE-7.").await;
     let first = last(&a.packets().await);
@@ -167,7 +161,9 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_or_missing_source_uses_the_recorded_history() {
-    let Two { app, a, b } = two().await;
+    let Two { h, b } = two().await;
+    let app = h.app;
+    let a = &h.recorder.inner;
     let bot = app.create_bot("Planner").await;
     say(&app, &bot, A, "Remember BLUE-3.").await;
     a.fail_checkpoints(Some("cannot prove a no-tool run")).await;
@@ -190,7 +186,11 @@ async fn a_failing_or_missing_source_uses_the_recorded_history() {
     drop(app);
     tokio::time::sleep(Duration::from_millis(200)).await;
     let b2 = Arc::new(Synthetic::named(B, "Synthetic B", Duration::from_millis(1)));
-    let app = TestApp::with_registry(db, 4, Registry::new(vec![b2.clone()])).await;
+    let app = TestApp::builder()
+        .db(db)
+        .providers(vec![b2.clone()])
+        .start()
+        .await;
     let (t4, status) = say(&app, &bot, B, "B after a restart without A.").await;
     assert_eq!(status, "completed");
     let h = handoff(&app, t4).await.unwrap();
@@ -207,7 +207,8 @@ async fn a_failing_or_missing_source_uses_the_recorded_history() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_missing_target_session_is_rebuilt_from_the_full_conversation() {
-    let Two { app, a, b } = two().await;
+    let Two { h, b } = two().await;
+    let app = h.app;
     let bot = app.create_bot("Planner").await;
     say(&app, &bot, B, "First on B.").await;
     say(&app, &bot, A, "Then A.").await;
@@ -238,12 +239,13 @@ async fn a_missing_target_session_is_rebuilt_from_the_full_conversation() {
     .unwrap();
     assert_eq!(active.len(), 1);
     assert!(!natives.contains(&active[0]), "a replacement session");
-    let _ = a;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_turn_reaches_the_next_message_with_its_error() {
-    let Two { app, a, b } = two().await;
+    let Two { h, b } = two().await;
+    let app = h.app;
+    let a = &h.recorder.inner;
     let bot = app.create_bot("Scout").await;
     say(&app, &bot, A, "Plain first turn.").await;
     let (_, status) = say(&app, &bot, A, "Benchmark daily [synthetic:refuse]").await;
@@ -262,7 +264,9 @@ async fn a_failed_turn_reaches_the_next_message_with_its_error() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn interrupted_and_uncertain_turns_are_history_not_replayed() {
-    let Two { app, a, b } = two().await;
+    let Two { h, b } = two().await;
+    let app = h.app;
+    let a = &h.recorder.inner;
     let bot = app.create_bot("Planner").await;
     say(&app, &bot, A, "Plain first turn.").await;
     let reply = app
@@ -333,7 +337,8 @@ async fn interrupted_and_uncertain_turns_are_history_not_replayed() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_uncertain_handoff_is_recorded_and_its_session_retired() {
-    let Two { app, a, b } = two().await;
+    let Two { h, b } = two().await;
+    let app = h.app;
     let bot = app.create_bot("Planner").await;
     say(&app, &bot, A, "On A.").await;
     let reply = app
@@ -359,7 +364,6 @@ async fn an_uncertain_handoff_is_recorded_and_its_session_retired() {
     ),
     "{packet}");
     assert!(packet.ends_with("Next on B."));
-    let _ = a;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -430,7 +434,8 @@ async fn a_profile_provider_is_unavailable_until_an_explicit_profile_is_saved() 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_switch_waits_for_the_other_providers_turn_and_carries_job_records() {
-    let Two { app, a, b } = two().await;
+    let Two { h, b } = two().await;
+    let app = &h.app;
     let bot = app.create_bot("Planner").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let job = Uuid::new_v4();
@@ -451,22 +456,22 @@ async fn a_switch_waits_for_the_other_providers_turn_and_carries_job_records() {
     .execute(&app.db.pool)
     .await
     .unwrap();
+    let (first, _) = h.running(&bot, &format!("Working {GATE}")).await;
     let reply = app
-        .send(&bot, Uuid::new_v4(), "Working [synthetic:slow]", Some(A))
+        .send(&bot, Uuid::new_v4(), "Switching to B.", Some(B))
         .await;
-    let first = reply.body["turn"]["id"].as_str().unwrap().to_owned();
-    let (_, status) = say(&app, &bot, B, "Switching to B.").await;
-    assert_eq!(status, "completed");
+    assert!(reply.status.is_success(), "{:?}", reply.body);
+    assert_eq!(reply.body["turn"]["status"], "queued");
+    let second = reply.body["turn"]["id"].as_str().unwrap();
+    h.release(first).await;
     assert_eq!(
-        app.wait_turn(&first, &["completed"]).await,
+        app.wait_turn(&first.to_string(), &["completed"]).await,
         "completed",
         "the switch waits for the other provider's reply instead of stopping it"
     );
+    assert_eq!(app.wait_turn(second, &["completed"]).await, "completed");
     let packet = last(&b.packets().await);
-    assert!(
-        packet.contains("Owner: Working [synthetic:slow]"),
-        "{packet}"
-    );
+    assert!(packet.contains("Owner: Working [gate]"), "{packet}");
     assert!(
         packet.contains(&format!("- job {job} (running, started "))
             && packet.contains("make release"),
@@ -478,14 +483,14 @@ async fn a_switch_waits_for_the_other_providers_turn_and_carries_job_records() {
         .await
         .unwrap();
     assert_eq!(status, "running");
-    let (_, status) = say(&app, &bot, B, "Still B.").await;
+    let (_, status) = say(app, &bot, B, "Still B.").await;
     assert_eq!(status, "completed");
-    let _ = a;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_restart_after_sending_makes_the_handoff_uncertain() {
-    let Two { app, a, b } = two().await;
+    let Two { h, .. } = two().await;
+    let app = h.app;
     let bot = app.create_bot("Planner").await;
     say(&app, &bot, A, "On A.").await;
     let reply = app
@@ -526,5 +531,4 @@ async fn a_restart_after_sending_makes_the_handoff_uncertain() {
         .await
         .unwrap();
     assert_eq!(state, "uncertain");
-    let _ = (a, b);
 }

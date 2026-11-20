@@ -1,13 +1,11 @@
 use crate::common;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::http::StatusCode;
-use common::{TestApp, TestDb};
+use common::TestApp;
+use common::recorder::{GATE, GATE_EVERY_ATTEMPT, Harness, harness, tool};
 use else_api::connectors::{store, types::*};
-use else_api::grants::{DEFAULT_TTL, Tool};
-use else_api::providers::synthetic::Synthetic;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -16,37 +14,6 @@ const MAIL: else_api::app::outgoing::Channels = else_api::app::outgoing::Channel
     mail: true,
     social: false,
 };
-
-const SLOW: &str = "[synthetic:slow] email Ada about lunch on Friday, and keep it short.";
-
-struct Harness {
-    app: TestApp,
-    synthetic: Arc<Synthetic>,
-}
-
-async fn harness() -> Harness {
-    harness_with(None).await
-}
-
-async fn harness_with(mail: Option<Arc<FakeMail>>) -> Harness {
-    harness_in(mail, None).await
-}
-
-async fn harness_in(mail: Option<Arc<FakeMail>>, projects: Option<&std::path::Path>) -> Harness {
-    let db = Arc::new(TestDb::migrated().await);
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    let mut synthetic = Synthetic::new(Duration::from_millis(5));
-    if let Some(root) = projects {
-        synthetic = synthetic.with_projects(root.to_owned());
-    }
-    let synthetic = Arc::new(synthetic);
-    let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
-    let app = match mail {
-        Some(mail) => TestApp::with_mail(db, 4, registry, mail).await,
-        None => TestApp::with_registry(db, 4, registry).await,
-    };
-    Harness { app, synthetic }
-}
 
 #[derive(Default)]
 struct FakeMail {
@@ -195,47 +162,13 @@ fn connected_reply(account: Uuid) -> Value {
             "body": "Hi Ada,\n\nFriday at noon works.\n\nMain" })
 }
 
-async fn grant(app: &TestApp, turn_id: Uuid) -> String {
-    let (bot, conversation): (Uuid, Uuid) =
-        sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
-            .bind(turn_id)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
-    app.state
-        .grants
-        .issue(
-            bot,
-            conversation,
-            turn_id,
-            vec![
-                Tool::ReadMemory,
-                Tool::AskOwner,
-                Tool::DraftEmail,
-                Tool::Computer,
-                Tool::Mail,
-            ],
-            DEFAULT_TTL,
-        )
-        .await
-}
-
-async fn send(app: &TestApp, bot: &str, text: &str, draft: Option<Value>) -> common::Reply {
-    let mut body =
-        json!({ "request_id": Uuid::new_v4(), "text": text, "provider_id": "synthetic" });
-    if let Some(draft) = draft {
-        body["open_draft"] = draft;
-    }
-    app.owner("POST", &format!("/v1/bots/{bot}/turns"), Some(body))
-        .await
-}
-
-async fn running(app: &TestApp, bot: &str, text: &str, draft: Option<Value>) -> (Uuid, String) {
-    let sent = send(app, bot, text, draft).await;
-    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
-    let turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    wait(app, turn, "running").await;
-    (turn, grant(app, turn).await)
+async fn send_with_draft(app: &TestApp, bot: &str, text: &str, draft: Value) -> common::Reply {
+    app.owner(
+        "POST",
+        &format!("/v1/bots/{bot}/turns"),
+        Some(json!({ "request_id": Uuid::new_v4(), "text": text, "open_draft": draft })),
+    )
+    .await
 }
 
 async fn attempt(app: &TestApp, turn: Uuid) -> i32 {
@@ -246,18 +179,21 @@ async fn attempt(app: &TestApp, turn: Uuid) -> i32 {
         .unwrap()
 }
 
-/// Send `text` with `draft` open while `into` is unfinished: the message
-/// joins that reply, which runs its next attempt with it. Returns the
-/// message's own turn and a grant for the continued reply.
+/// Send an owner message that joins an unfinished reply, optionally with a draft open.
 async fn joined(
-    app: &TestApp,
+    h: &Harness,
     bot: &str,
     into: Uuid,
+    previous: &str,
     text: &str,
     draft: Option<Value>,
 ) -> (Uuid, String) {
-    let before = attempt(app, into).await;
-    let sent = send(app, bot, text, draft).await;
+    let app = &h.app;
+    let active = status(app, into).await == "running";
+    let sent = match draft {
+        Some(draft) => send_with_draft(app, bot, text, draft).await,
+        None => app.send(bot, Uuid::new_v4(), text, None).await,
+    };
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
     assert_eq!(
         sent.body["turn"]["steered_into"],
@@ -265,16 +201,11 @@ async fn joined(
         "{}",
         sent.body
     );
-    let turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    let deadline = std::time::Instant::now() + common::SETTLE;
-    while attempt(app, into).await <= before || status(app, into).await != "running" {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the message never continued the reply"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    let turn = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    if active {
+        h.release(into).await;
     }
-    (turn, grant(app, into).await)
+    (turn, h.continued(into, previous).await)
 }
 
 fn card_of(cards: &[Value], id: Uuid) -> Value {
@@ -283,29 +214,6 @@ fn card_of(cards: &[Value], id: Uuid) -> Value {
         .find(|c| c["id"] == id.to_string())
         .unwrap_or_else(|| panic!("no card {id} in {cards:?}"))
         .clone()
-}
-
-async fn tool(app: &TestApp, token: &str, name: &str, args: Value) -> common::Reply {
-    app.call(
-        "POST",
-        "/tools/v1/mcp",
-        Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                     "params": { "name": name, "arguments": args } })),
-        Some(token),
-    )
-    .await
-}
-
-fn tool_text(reply: &common::Reply) -> Value {
-    let text = reply.body["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default();
-    serde_json::from_str(text).unwrap_or_else(|_| json!(text))
-}
-
-fn refusal(reply: &common::Reply) -> String {
-    assert_eq!(reply.body["result"]["isError"], true, "{}", reply.body);
-    tool_text(reply).as_str().unwrap().to_owned()
 }
 
 fn lunch() -> Value {
@@ -329,7 +237,7 @@ async fn draft(app: &TestApp, token: &str, args: Value) -> Uuid {
         "draft_email"
     };
     let drafted = tool(app, token, name, args).await;
-    let result = tool_text(&drafted);
+    let result = &drafted.result;
     assert_eq!(result["status"], "pending", "{}", drafted.body);
     assert_eq!(result["parked"], true);
     result["draft"]["draft_id"]
@@ -362,11 +270,6 @@ async fn status(app: &TestApp, turn: Uuid) -> String {
         .fetch_one(&app.db.pool)
         .await
         .unwrap()
-}
-
-async fn wait(app: &TestApp, turn: Uuid, status: &str) {
-    app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(30))
-        .await;
 }
 
 async fn shown(app: &TestApp, bot: &str, turn: Uuid) -> Vec<Value> {
@@ -418,18 +321,25 @@ fn send_args(draft: Uuid) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_approve_button_sends_the_owners_edited_version_once() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let mut bad = lunch();
     bad["subject"] = json!("Hi\r\nBcc: everyone@example.com");
-    assert!(refusal(&tool(&app, &token, "draft_email", bad).await).starts_with("INVALID_DRAFT"));
-    let id = draft(&app, &token, lunch()).await;
-    let parked = tool(&app, &token, "memory_bots", json!({})).await;
+    let refused = tool(app, &token, "draft_email", bad).await;
+    assert!(
+        refused.error && refused.code() == "INVALID_DRAFT",
+        "{}",
+        refused.body
+    );
+    let id = draft(app, &token, lunch()).await;
+    let parked = tool(app, &token, "memory_bots", json!({})).await;
     assert_eq!(parked.status, StatusCode::CONFLICT, "the attempt must end");
 
-    wait(&app, turn, "waiting").await;
-    let card = shown(&app, &main, turn).await[0].clone();
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    let card = shown(app, &main, turn).await[0].clone();
     assert_eq!(card["id"], id.to_string());
     assert_eq!(card["revision"], 1);
     assert_eq!(card["content"]["channel"], "email");
@@ -441,10 +351,10 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
     assert_eq!(card["status"], "pending");
     assert_eq!(card["version"], 1);
     assert_eq!(card["can_approve"], true);
-    assert_eq!(journaled(&app, &main, id).await["status"], "pending");
+    assert_eq!(journaled(app, &main, id).await["status"], "pending");
 
     let edited = owner_action(
-        &app,
+        app,
         &main,
         id,
         "edit",
@@ -453,11 +363,11 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
     .await;
     assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
     assert_eq!(edited.body["draft"]["version"], 2);
-    let stale = owner_action(&app, &main, id, "approve", json!({ "version": 1 })).await;
+    let stale = owner_action(app, &main, id, "approve", json!({ "version": 1 })).await;
     assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
     assert_eq!(stale.body["error"]["code"], "draft_changed");
     let bad_edit = owner_action(
-        &app,
+        app,
         &main,
         id,
         "edit",
@@ -472,7 +382,7 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
     );
 
     let approved = owner_action(
-        &app,
+        app,
         &main,
         id,
         "approve",
@@ -487,7 +397,7 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
     assert_eq!(shown_draft["approval_source"], "button");
     assert_eq!(approved.body["requeued"], true);
     let replay = owner_action(
-        &app,
+        app,
         &main,
         id,
         "approve",
@@ -502,7 +412,7 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
     );
     assert_eq!(replay.body["requeued"], false);
     let changed_replay = owner_action(
-        &app,
+        app,
         &main,
         id,
         "approve",
@@ -510,11 +420,11 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
     )
     .await;
     assert_eq!(changed_replay.status, StatusCode::CONFLICT);
-    let replay = owner_action(&app, &main, id, "approve", json!({ "version": 3 })).await;
+    let replay = owner_action(app, &main, id, "approve", json!({ "version": 3 })).await;
     assert_eq!(replay.status, StatusCode::OK, "{}", replay.body);
     assert_eq!(replay.body["requeued"], false);
     let late_edit = owner_action(
-        &app,
+        app,
         &main,
         id,
         "edit",
@@ -523,8 +433,8 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
     .await;
     assert_eq!(late_edit.body["error"]["code"], "draft_settled");
 
-    wait(&app, turn, "running").await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let token = h.continued(turn, &token).await;
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("[else.bot outgoing drafts]"), "{packet}");
     assert!(
         packet.contains("Subject: Lunch Friday\n\nHi Ada, lunch Friday?"),
@@ -535,151 +445,165 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
         "{packet}"
     );
 
-    let token = grant(&app, turn).await;
     let local = tool(
-        &app,
+        app,
         &token,
         "computer_run",
         json!({ "command": "true", "effect": "local", "approved_draft": id }),
     )
     .await;
-    assert!(refusal(&local).contains("only with effect external"));
-    let claimed = tool(&app, &token, "computer_run", send_args(id)).await;
     assert!(
-        refusal(&claimed).starts_with("COMPUTER_UNAVAILABLE"),
+        local.error
+            && local
+                .result
+                .as_str()
+                .unwrap()
+                .contains("only with effect external")
+    );
+    let claimed = tool(app, &token, "computer_run", send_args(id)).await;
+    assert!(
+        claimed.error && claimed.code() == "COMPUTER_UNAVAILABLE",
         "the claim passed the gate and reached the computer: {}",
         claimed.body
     );
-    assert_eq!(questions(&app).await, 0, "no second approval card");
-    let again = tool(&app, &token, "computer_run", send_args(id)).await;
+    assert_eq!(questions(app).await, 0, "no second approval card");
+    let again = tool(app, &token, "computer_run", send_args(id)).await;
     assert!(
-        refusal(&again).starts_with("DRAFT_SETTLED"),
+        again.error && again.code() == "DRAFT_SETTLED",
         "one send per approval"
     );
-    let generic = tool(
-        &app,
-        &token,
-        "computer_run",
-        json!({ "command": "python3 send_mail.py", "effect": "external" }),
-    )
-    .await;
-    assert_eq!(tool_text(&generic)["status"], "pending", "{}", generic.body);
-    assert_eq!(
-        questions(&app).await,
-        1,
-        "other external calls still need their card"
-    );
-
-    let token = grant(&app, turn).await;
     let sent = tool(
-        &app,
+        app,
         &token,
         "report_draft_send",
         json!({ "draft_id": id, "status": "sent", "detail": "250 OK id=abc" }),
     )
     .await;
-    assert_eq!(tool_text(&sent)["status"], "sent", "{}", sent.body);
+    assert_eq!(sent.result["status"], "sent", "{}", sent.body);
     let replayed = tool(
-        &app,
+        app,
         &token,
         "report_draft_send",
         json!({ "draft_id": id, "status": "sent" }),
     )
     .await;
-    assert_eq!(tool_text(&replayed)["status"], "sent", "{}", replayed.body);
+    assert_eq!(replayed.result["status"], "sent", "{}", replayed.body);
     let contradicted = tool(
-        &app,
+        app,
         &token,
         "report_draft_send",
         json!({ "draft_id": id, "status": "failed" }),
     )
     .await;
-    assert!(refusal(&contradicted).starts_with("DRAFT_SETTLED"));
+    assert!(contradicted.error && contradicted.code() == "DRAFT_SETTLED");
 
-    let receipt = journaled(&app, &main, id).await;
+    let receipt = journaled(app, &main, id).await;
     assert_eq!(receipt["status"], "sent");
     assert_eq!(receipt["result_detail"], "250 OK id=abc");
     assert_eq!(receipt["delivery"]["via"], "tool");
     assert_eq!(receipt["delivery"]["tool"], "computer_run");
     assert!(receipt["settled_at"].is_string());
-    let card = shown(&app, &main, turn).await[0].clone();
+    let card = shown(app, &main, turn).await[0].clone();
     assert_eq!(card["status"], "sent");
     assert_eq!(card["can_approve"], false);
+
+    let generic = tool(
+        app,
+        &token,
+        "computer_run",
+        json!({ "command": "python3 send_mail.py", "effect": "external" }),
+    )
+    .await;
+    assert_eq!(generic.result["status"], "pending", "{}", generic.body);
+    assert_eq!(
+        questions(app).await,
+        1,
+        "other external calls still need their card"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn discarding_continues_the_turn_and_nothing_can_send_it() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main, SLOW, None).await;
-    let id = draft(&app, &token, lunch()).await;
-    let early = tool(
-        &app,
-        &grant(&app, turn).await,
-        "start_draft_send",
-        json!({ "draft_id": id }),
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let id = draft(app, &token, lunch()).await;
+    let early = else_api::db::outgoing_drafts::claim(
+        &app.db.pool,
+        turn,
+        id,
+        &else_api::app::outgoing::Delivery::Host,
     )
     .await;
     assert!(
-        refusal(&early).starts_with("DRAFT_SETTLED"),
-        "a pending draft cannot be sent"
+        matches!(
+            early,
+            Err(else_api::db::outgoing_drafts::DraftError::Settled(
+                else_api::app::outgoing::Status::Pending
+            ))
+        ),
+        "a pending draft cannot be sent: {early:?}"
     );
-    wait(&app, turn, "waiting").await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
 
-    let discarded = owner_action(&app, &main, id, "discard", json!({})).await;
+    let discarded = owner_action(app, &main, id, "discard", json!({})).await;
     assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
     assert_eq!(discarded.body["draft"]["status"], "discarded");
     assert_eq!(discarded.body["requeued"], true);
-    let replay = owner_action(&app, &main, id, "discard", json!({})).await;
+    let replay = owner_action(app, &main, id, "discard", json!({})).await;
     assert_eq!(replay.status, StatusCode::OK);
     assert_eq!(replay.body["requeued"], false);
-    let approve = owner_action(&app, &main, id, "approve", json!({ "version": 1 })).await;
+    let approve = owner_action(app, &main, id, "approve", json!({ "version": 1 })).await;
     assert_eq!(
         approve.body["error"]["code"], "draft_settled",
         "{}",
         approve.body
     );
 
-    wait(&app, turn, "running").await;
-    let token = grant(&app, turn).await;
-    let send = tool(&app, &token, "computer_run", send_args(id)).await;
-    assert!(refusal(&send).starts_with("DRAFT_SETTLED"));
+    let token = h.continued(turn, &token).await;
+    let send = tool(app, &token, "computer_run", send_args(id)).await;
+    assert!(send.error && send.code() == "DRAFT_SETTLED");
     let report = tool(
-        &app,
+        app,
         &token,
         "report_draft_send",
         json!({ "draft_id": id, "status": "sent" }),
     )
     .await;
     assert!(
-        refusal(&report).starts_with("OTHER_REQUEST"),
+        report.error && report.code() == "OTHER_REQUEST",
         "a report cannot invent a send"
     );
-    wait(&app, turn, "completed").await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("The owner discarded it on its card"),
         "{packet}"
     );
-    assert_eq!(journaled(&app, &main, id).await["status"], "discarded");
+    assert_eq!(journaled(app, &main, id).await["status"], "discarded");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_joined_message_carries_the_owners_edits_and_a_revision_replaces_the_card() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (first, token) = running(&app, &main, SLOW, None).await;
-    let id = draft(&app, &token, lunch()).await;
-    wait(&app, first, "waiting").await;
+    let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let id = draft(app, &token, lunch()).await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["waiting"]).await;
     let turns_before: i64 = sqlx::query_scalar("SELECT count(*) FROM turns")
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    let stale = send(
-        &app,
+    let stale = send_with_draft(
+        app,
         &main,
         "Shorter please.",
-        Some(json!({ "id": id, "version": 2 })),
+        json!({ "id": id, "version": 2 }),
     )
     .await;
     assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
@@ -693,17 +617,18 @@ async fn a_joined_message_carries_the_owners_edits_and_a_revision_replaces_the_c
         "a stale draft refuses the whole message"
     );
 
-    let follow_up = "[synthetic:slow] Make it warmer and mention the new place.";
+    let follow_up = "Make it warmer and mention the new place.";
     let (second, token) = joined(
-        &app,
+        &h,
         &main,
         first,
+        &token,
         follow_up,
         Some(json!({ "id": id, "version": 1, "body": "Hi Ada, lunch Friday? My treat." })),
     )
     .await;
-    assert_eq!(status(&app, second).await, "queued");
-    let old = shown(&app, &main, first).await[0].clone();
+    assert_eq!(status(app, second).await, "queued");
+    let old = shown(app, &main, first).await[0].clone();
     assert_eq!(old["status"], "pending");
     assert_eq!(
         old["version"], 2,
@@ -711,7 +636,7 @@ async fn a_joined_message_carries_the_owners_edits_and_a_revision_replaces_the_c
     );
     assert_eq!(old["content"]["body"], "Hi Ada, lunch Friday? My treat.");
     assert_eq!(old["in_reply"], true, "{old}");
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("in_context=\"true\""), "{packet}");
     assert!(
         packet.contains("Hi Ada, lunch Friday? My treat."),
@@ -722,7 +647,7 @@ async fn a_joined_message_carries_the_owners_edits_and_a_revision_replaces_the_c
     let mut revised = lunch();
     revised["body"] = json!("Hi Ada,\n\nLunch Friday at the new ramen place? My treat.\n\nMain");
     revised["replaces"] = json!(id);
-    let drafted = tool_text(&tool(&app, &token, "draft_email", revised).await);
+    let drafted = tool(app, &token, "draft_email", revised).await.result;
     assert_eq!(drafted["status"], "pending", "{drafted}");
     assert_eq!(drafted["draft"]["revision"], 2);
     let new_id: Uuid = drafted["draft"]["draft_id"]
@@ -732,84 +657,69 @@ async fn a_joined_message_carries_the_owners_edits_and_a_revision_replaces_the_c
         .unwrap();
     assert_eq!(drafted["draft"]["lineage_id"], old["lineage_id"]);
 
-    let cards = shown(&app, &main, first).await;
+    let cards = shown(app, &main, first).await;
     let old = card_of(&cards, id);
     assert_eq!(old["status"], "superseded");
     assert_eq!(old["superseded_by"], new_id.to_string());
     assert_eq!(card_of(&cards, new_id)["status"], "pending");
-    assert!(shown(&app, &main, second).await.is_empty());
-    assert_eq!(journaled(&app, &main, id).await["status"], "superseded");
-    let obsolete = send(
-        &app,
-        &main,
-        "Send it.",
-        Some(json!({ "id": id, "version": 2 })),
-    )
-    .await;
+    assert!(shown(app, &main, second).await.is_empty());
+    assert_eq!(journaled(app, &main, id).await["status"], "superseded");
+    let obsolete = send_with_draft(app, &main, "Send it.", json!({ "id": id, "version": 2 })).await;
     assert_eq!(
         obsolete.body["error"]["code"], "draft_settled",
         "{}",
         obsolete.body
     );
-    let obsolete = owner_action(
-        &app,
-        &main,
-        id,
-        "edit",
-        json!({ "version": 2, "body": "x" }),
-    )
-    .await;
+    let obsolete = owner_action(app, &main, id, "edit", json!({ "version": 2, "body": "x" })).await;
     assert_eq!(obsolete.body["error"]["code"], "draft_settled");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_clear_chat_approval_confirms_exactly_the_open_version() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (first, token) = running(&app, &main, SLOW, None).await;
-    let id = draft(&app, &token, lunch()).await;
-    wait(&app, first, "waiting").await;
+    let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let id = draft(app, &token, lunch()).await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["waiting"]).await;
 
     let (second, token) = joined(
-        &app,
+        &h,
         &main,
         first,
-        "[synthetic:slow] Looks good, send it.",
+        &token,
+        "Looks good, send it.",
         Some(json!({ "id": id, "version": 1 })),
     )
     .await;
-    let early = tool(&app, &token, "computer_run", send_args(id)).await;
+    let early = tool(app, &token, "computer_run", send_args(id)).await;
     assert!(
-        refusal(&early).starts_with("DRAFT_SETTLED"),
+        early.error && early.code() == "DRAFT_SETTLED",
         "chat words alone send nothing"
     );
     let confirmed = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
-    assert_eq!(
-        tool_text(&confirmed)["status"],
-        "approved",
-        "{}",
-        confirmed.body
-    );
+    assert_eq!(confirmed.result["status"], "approved", "{}", confirmed.body);
     let replay = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
-    assert_eq!(tool_text(&replay)["status"], "approved", "{}", replay.body);
+    assert_eq!(replay.result["status"], "approved", "{}", replay.body);
 
     assert!(
-        shown(&app, &main, second).await.is_empty(),
+        shown(app, &main, second).await.is_empty(),
         "the card stays with the reply the message joined"
     );
-    let card = shown(&app, &main, first).await[0].clone();
+    let card = shown(app, &main, first).await[0].clone();
     assert_eq!(card["status"], "approved");
     assert_eq!(card["approval_source"], "message");
     assert_eq!(card["approved_version"], 1);
@@ -824,62 +734,64 @@ async fn a_clear_chat_approval_confirms_exactly_the_open_version() {
         item
     );
 
-    let started = tool(&app, &token, "start_draft_send", json!({ "draft_id": id })).await;
-    let started = tool_text(&started);
+    let started = tool(app, &token, "start_draft_send", json!({ "draft_id": id })).await;
+    let started = started.result;
     assert_eq!(started["status"], "sending", "{started}");
     assert_eq!(started["draft"]["content"]["subject"], "Lunch on Friday?");
-    let twice = tool(&app, &token, "start_draft_send", json!({ "draft_id": id })).await;
-    assert!(refusal(&twice).starts_with("DRAFT_SETTLED"));
+    let twice = tool(app, &token, "start_draft_send", json!({ "draft_id": id })).await;
+    assert!(twice.error && twice.code() == "DRAFT_SETTLED");
     let uncertain = tool(
-        &app,
+        app,
         &token,
         "report_draft_send",
         json!({ "draft_id": id, "status": "uncertain", "detail": "SMTP timeout after DATA" }),
     )
     .await;
     assert_eq!(
-        tool_text(&uncertain)["status"],
-        "uncertain",
+        uncertain.result["status"], "uncertain",
         "{}",
         uncertain.body
     );
-    let receipt = journaled(&app, &main, id).await;
+    let receipt = journaled(app, &main, id).await;
     assert_eq!(receipt["status"], "uncertain");
     assert_eq!(receipt["delivery"]["via"], "host");
-    assert_eq!(questions(&app).await, 0);
+    assert_eq!(questions(app).await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn only_the_message_sent_with_the_unchanged_draft_can_approve_it() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (first, token) = running(&app, &main, SLOW, None).await;
-    let id = draft(&app, &token, lunch()).await;
-    wait(&app, first, "waiting").await;
+    let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let id = draft(app, &token, lunch()).await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["waiting"]).await;
 
-    let (_, plain) = joined(&app, &main, first, "[synthetic:slow] Send it.", None).await;
+    let (_, plain) = joined(&h, &main, first, &token, "Send it.", None).await;
     let unbound = tool(
-        &app,
+        app,
         &plain,
         "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
     assert!(
-        refusal(&unbound).starts_with("NOT_IN_CONTEXT"),
+        unbound.error && unbound.code() == "NOT_IN_CONTEXT",
         "a message without the draft"
     );
 
     let (_, token) = joined(
-        &app,
+        &h,
         &main,
         first,
-        "[synthetic:slow] Send it.",
+        &plain,
+        "Send it.",
         Some(json!({ "id": id, "version": 1 })),
     )
     .await;
     let edited = owner_action(
-        &app,
+        app,
         &main,
         id,
         "edit",
@@ -888,47 +800,38 @@ async fn only_the_message_sent_with_the_unchanged_draft_can_approve_it() {
     .await;
     assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
     let changed = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
     assert!(
-        refusal(&changed).starts_with("NOT_IN_CONTEXT"),
+        changed.error && changed.code() == "NOT_IN_CONTEXT",
         "the owner changed it after sending"
     );
     let unknown = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": Uuid::new_v4() }),
     )
     .await;
-    assert!(refusal(&unknown).starts_with("NOT_FOUND"));
-    assert_eq!(journaled(&app, &main, id).await["status"], "pending");
+    assert!(unknown.error && unknown.code() == "NOT_FOUND");
+    assert_eq!(journaled(app, &main, id).await["status"], "pending");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_draft_sent_with_a_message_the_reply_has_not_taken_yet_cannot_be_approved() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (first, token) = running(&app, &main, SLOW, None).await;
-    let id = draft(&app, &token, lunch()).await;
-    let sent = send(
-        &app,
-        &main,
-        "Send it.",
-        Some(json!({ "id": id, "version": 1 })),
-    )
-    .await;
+    let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let id = draft(app, &token, lunch()).await;
+    let sent = send_with_draft(app, &main, "Send it.", json!({ "id": id, "version": 1 })).await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
     assert_eq!(sent.body["turn"]["steered_into"], first.to_string());
-    assert_eq!(
-        attempt(&app, first).await,
-        1,
-        "the attempt is still running"
-    );
+    assert_eq!(attempt(app, first).await, 1, "the attempt is still running");
     let early = else_api::db::outgoing_drafts::confirm(&app.db.pool, first, id, None).await;
     assert!(
         matches!(
@@ -938,40 +841,33 @@ async fn a_draft_sent_with_a_message_the_reply_has_not_taken_yet_cannot_be_appro
         "the reply has not read the message yet: {early:?}"
     );
 
-    let deadline = std::time::Instant::now() + common::SETTLE;
-    while attempt(&app, first).await < 2 || status(&app, first).await != "running" {
-        assert!(std::time::Instant::now() < deadline, "never continued");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let token = grant(&app, first).await;
+    h.release(first).await;
+    let token = h.continued(first, &token).await;
     let confirmed = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
-    assert_eq!(
-        tool_text(&confirmed)["status"],
-        "approved",
-        "{}",
-        confirmed.body
-    );
+    assert_eq!(confirmed.result["status"], "approved", "{}", confirmed.body);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unreported_send_is_uncertain_and_an_unused_approval_fails() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main, SLOW, None).await;
-    let id = draft(&app, &token, lunch()).await;
-    wait(&app, turn, "waiting").await;
-    owner_action(&app, &main, id, "approve", json!({ "version": 1 })).await;
-    wait(&app, turn, "running").await;
-    let token = grant(&app, turn).await;
-    tool(&app, &token, "computer_run", send_args(id)).await;
-    wait(&app, turn, "completed").await;
-    let receipt = journaled(&app, &main, id).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let id = draft(app, &token, lunch()).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    owner_action(app, &main, id, "approve", json!({ "version": 1 })).await;
+    let token = h.continued(turn, &token).await;
+    tool(app, &token, "computer_run", send_args(id)).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    let receipt = journaled(app, &main, id).await;
     assert_eq!(receipt["status"], "uncertain", "{receipt}");
     assert!(
         receipt["result_detail"]
@@ -980,14 +876,16 @@ async fn an_unreported_send_is_uncertain_and_an_unused_approval_fails() {
             .contains("before the bot reported")
     );
 
-    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let mut other = lunch();
     other["to"] = json!(["carol@example.com"]);
-    let id = draft(&app, &token, other).await;
-    wait(&app, turn, "waiting").await;
-    owner_action(&app, &main, id, "approve", json!({ "version": 1 })).await;
-    wait(&app, turn, "completed").await;
-    let receipt = journaled(&app, &main, id).await;
+    let id = draft(app, &token, other).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    owner_action(app, &main, id, "approve", json!({ "version": 1 })).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    let receipt = journaled(app, &main, id).await;
     assert_eq!(receipt["status"], "failed", "{receipt}");
     assert!(
         receipt["result_detail"]
@@ -996,38 +894,37 @@ async fn an_unreported_send_is_uncertain_and_an_unused_approval_fails() {
             .contains("Nothing was sent")
     );
 
-    let (retry, token) = running(
-        &app,
+    let sent = send_with_draft(
+        app,
         &main,
-        "[synthetic:slow] Try sending it again.",
-        Some(json!({ "id": id, "version": 1 })),
+        &format!("{GATE} Try sending it again."),
+        json!({ "id": id, "version": 1 }),
     )
     .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    let (retry, token) = h
+        .started(sent.body["turn"]["id"].as_str().unwrap().parse().unwrap())
+        .await;
     let confirmed = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
-    assert_eq!(
-        tool_text(&confirmed)["status"],
-        "approved",
-        "{}",
-        confirmed.body
-    );
+    assert_eq!(confirmed.result["status"], "approved", "{}", confirmed.body);
     let failed = tool(
-        &app,
+        app,
         &token,
         "report_draft_send",
         json!({ "draft_id": id, "status": "failed", "detail": "No SMTP credentials stored." }),
     )
     .await;
-    assert_eq!(tool_text(&failed)["status"], "failed", "{}", failed.body);
-    let card = shown(&app, &main, retry).await[0].clone();
+    assert_eq!(failed.result["status"], "failed", "{}", failed.body);
+    let card = shown(app, &main, retry).await[0].clone();
     assert_eq!(card["status"], "failed");
     assert_eq!(card["result_detail"], "No SMTP credentials stored.");
-    let discarded = owner_action(&app, &main, id, "discard", json!({})).await;
+    let discarded = owner_action(app, &main, id, "discard", json!({})).await;
     assert_eq!(
         discarded.body["draft"]["status"], "discarded",
         "{}",
@@ -1037,17 +934,20 @@ async fn an_unreported_send_is_uncertain_and_an_unused_approval_fails() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_x_post_needs_no_destination_and_its_card_approval_sends_it_once() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let emailish = json!({ "platform": "x", "body": "Hi", "subject": "Launch" });
+    let refused = tool(app, &token, "draft_message", emailish).await;
     assert!(
-        refusal(&tool(&app, &token, "draft_message", emailish).await).starts_with("INVALID_DRAFT"),
+        refused.error && refused.code() == "INVALID_DRAFT",
         "a post has no subject"
     );
-    let id = draft(&app, &token, ship_post()).await;
-    wait(&app, turn, "waiting").await;
-    let card = shown(&app, &main, turn).await[0].clone();
+    let id = draft(app, &token, ship_post()).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    let card = shown(app, &main, turn).await[0].clone();
     assert_eq!(
         card["content"],
         json!({ "channel": "message", "platform": "x", "account": null, "destination": null,
@@ -1057,7 +957,7 @@ async fn an_x_post_needs_no_destination_and_its_card_approval_sends_it_once() {
     assert_eq!(card["can_approve"], true);
 
     let subject = owner_action(
-        &app,
+        app,
         &main,
         id,
         "approve",
@@ -1067,12 +967,12 @@ async fn an_x_post_needs_no_destination_and_its_card_approval_sends_it_once() {
     assert_eq!(subject.status, StatusCode::BAD_REQUEST, "{}", subject.body);
     assert_eq!(subject.body["error"]["code"], "invalid_draft");
     assert_eq!(
-        shown(&app, &main, turn).await[0]["status"],
+        shown(app, &main, turn).await[0]["status"],
         "pending",
         "a refused approval approves nothing"
     );
     let edited = owner_action(
-        &app,
+        app,
         &main,
         id,
         "edit",
@@ -1080,10 +980,10 @@ async fn an_x_post_needs_no_destination_and_its_card_approval_sends_it_once() {
     )
     .await;
     assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
-    let stale = owner_action(&app, &main, id, "approve", json!({ "version": 1 })).await;
+    let stale = owner_action(app, &main, id, "approve", json!({ "version": 1 })).await;
     assert_eq!(stale.body["error"]["code"], "draft_changed");
     let approved = owner_action(
-        &app,
+        app,
         &main,
         id,
         "approve",
@@ -1097,7 +997,7 @@ async fn an_x_post_needs_no_destination_and_its_card_approval_sends_it_once() {
         "Native drafts shipped today!"
     );
     let replay = owner_action(
-        &app,
+        app,
         &main,
         id,
         "approve",
@@ -1107,8 +1007,8 @@ async fn an_x_post_needs_no_destination_and_its_card_approval_sends_it_once() {
     assert_eq!(replay.status, StatusCode::OK, "{}", replay.body);
     assert_eq!(replay.body["requeued"], false);
 
-    wait(&app, turn, "running").await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let token = h.continued(turn, &token).await;
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("channel=\"message\" platform=\"x\""),
         "{packet}"
@@ -1117,29 +1017,26 @@ async fn an_x_post_needs_no_destination_and_its_card_approval_sends_it_once() {
     assert!(!packet.contains("Subject:"), "{packet}");
     assert!(packet.contains("send exactly this X post now"), "{packet}");
 
-    let token = grant(&app, turn).await;
-    let claimed = tool(&app, &token, "computer_run", send_args(id)).await;
+    let claimed = tool(app, &token, "computer_run", send_args(id)).await;
     assert!(
-        refusal(&claimed).starts_with("COMPUTER_UNAVAILABLE"),
+        claimed.error && claimed.code() == "COMPUTER_UNAVAILABLE",
         "{}",
         claimed.body
     );
-    let again = tool(&app, &token, "computer_run", send_args(id)).await;
-    assert!(refusal(&again).starts_with("DRAFT_SETTLED"));
-    assert_eq!(questions(&app).await, 0, "no second approval card");
-    let token = grant(&app, turn).await;
-    let sent = tool_text(
-        &tool(
-            &app,
-            &token,
-            "report_draft_send",
-            json!({ "draft_id": id, "status": "sent", "detail": "post id 1890" }),
-        )
-        .await,
-    );
+    let again = tool(app, &token, "computer_run", send_args(id)).await;
+    assert!(again.error && again.code() == "DRAFT_SETTLED");
+    assert_eq!(questions(app).await, 0, "no second approval card");
+    let sent = tool(
+        app,
+        &token,
+        "report_draft_send",
+        json!({ "draft_id": id, "status": "sent", "detail": "post id 1890" }),
+    )
+    .await
+    .result;
     assert_eq!(sent["status"], "sent");
     assert_eq!(sent["medium"], "X post");
-    let receipt = journaled(&app, &main, id).await;
+    let receipt = journaled(app, &main, id).await;
     assert_eq!(receipt["status"], "sent");
     assert_eq!(receipt["result_detail"], "post id 1890");
     assert_eq!(receipt["delivery"]["via"], "tool");
@@ -1148,18 +1045,21 @@ async fn an_x_post_needs_no_destination_and_its_card_approval_sends_it_once() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_telegram_message_keeps_its_channel_and_owner_edits_across_revisions() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (first, token) = running(&app, &main, SLOW, None).await;
+    let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let mut nowhere = family_message();
     nowhere["destination"] = Value::Null;
+    let refused = tool(app, &token, "draft_message", nowhere).await;
     assert!(
-        refusal(&tool(&app, &token, "draft_message", nowhere).await).starts_with("INVALID_DRAFT"),
+        refused.error && refused.code() == "INVALID_DRAFT",
         "a telegram message names its chat"
     );
-    let id = draft(&app, &token, family_message()).await;
-    wait(&app, first, "waiting").await;
-    let card = shown(&app, &main, first).await[0].clone();
+    let id = draft(app, &token, family_message()).await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    let card = shown(app, &main, first).await[0].clone();
     assert_eq!(card["content"]["channel"], "message");
     assert_eq!(card["content"]["platform"], "telegram");
     assert_eq!(card["content"]["destination"], "Family group");
@@ -1168,11 +1068,11 @@ async fn a_telegram_message_keeps_its_channel_and_owner_edits_across_revisions()
         assert!(card["content"].get(key).is_none(), "{key} in {card}");
     }
 
-    let with_subject = send(
-        &app,
+    let with_subject = send_with_draft(
+        app,
         &main,
         "Make it 9.",
-        Some(json!({ "id": id, "version": 1, "subject": "Dinner" })),
+        json!({ "id": id, "version": 1, "subject": "Dinner" }),
     )
     .await;
     assert_eq!(
@@ -1183,23 +1083,24 @@ async fn a_telegram_message_keeps_its_channel_and_owner_edits_across_revisions()
     );
     assert_eq!(with_subject.body["error"]["code"], "invalid_draft");
     assert_eq!(
-        status(&app, first).await,
+        status(app, first).await,
         "waiting",
         "the message was refused"
     );
 
     let (_, token) = joined(
-        &app,
+        &h,
         &main,
         first,
-        "[synthetic:slow] Make it 9 and ask who brings dessert.",
+        &token,
+        "Make it 9 and ask who brings dessert.",
         Some(json!({ "id": id, "version": 1, "body": "Dinner at 9 on Friday?" })),
     )
     .await;
-    let old = shown(&app, &main, first).await[0].clone();
+    let old = shown(app, &main, first).await[0].clone();
     assert_eq!(old["version"], 2, "the owner's edits were saved");
     assert_eq!(old["content"]["body"], "Dinner at 9 on Friday?");
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("channel=\"message\" platform=\"telegram\""),
         "{packet}"
@@ -1215,24 +1116,24 @@ async fn a_telegram_message_keeps_its_channel_and_owner_edits_across_revisions()
 
     let mut as_email = lunch();
     as_email["replaces"] = json!(id);
-    let switched = tool(&app, &token, "draft_email", as_email).await;
+    let switched = tool(app, &token, "draft_email", as_email).await;
     assert!(
-        refusal(&switched).starts_with("CHANNEL_CHANGED"),
+        switched.error && switched.code() == "CHANNEL_CHANGED",
         "a message cannot become an email"
     );
     let mut as_post = ship_post();
     as_post["replaces"] = json!(id);
-    let switched = tool(&app, &token, "draft_message", as_post).await;
+    let switched = tool(app, &token, "draft_message", as_post).await;
     assert!(
-        refusal(&switched).starts_with("CHANNEL_CHANGED"),
+        switched.error && switched.code() == "CHANNEL_CHANGED",
         "a Telegram message cannot become an X post"
     );
-    assert_eq!(shown(&app, &main, first).await[0]["status"], "pending");
+    assert_eq!(shown(app, &main, first).await[0]["status"], "pending");
 
     let mut revised = family_message();
     revised["body"] = json!("Dinner at 9 on Friday? Who brings dessert?");
     revised["replaces"] = json!(id);
-    let revised = tool_text(&tool(&app, &token, "draft_message", revised).await);
+    let revised = tool(app, &token, "draft_message", revised).await.result;
     assert_eq!(revised["status"], "pending", "{revised}");
     assert_eq!(revised["draft"]["revision"], 2);
     assert_eq!(revised["draft"]["lineage_id"], old["lineage_id"]);
@@ -1242,16 +1143,10 @@ async fn a_telegram_message_keeps_its_channel_and_owner_edits_across_revisions()
         .unwrap()
         .parse()
         .unwrap();
-    let cards = shown(&app, &main, first).await;
+    let cards = shown(app, &main, first).await;
     assert_eq!(card_of(&cards, id)["status"], "superseded");
     assert_eq!(card_of(&cards, new_id)["status"], "pending");
-    let obsolete = send(
-        &app,
-        &main,
-        "Send it.",
-        Some(json!({ "id": id, "version": 2 })),
-    )
-    .await;
+    let obsolete = send_with_draft(app, &main, "Send it.", json!({ "id": id, "version": 2 })).await;
     assert_eq!(obsolete.body["error"]["code"], "draft_settled");
 
     let moved = sqlx::query(
@@ -1271,24 +1166,25 @@ async fn a_telegram_message_keeps_its_channel_and_owner_edits_across_revisions()
     .await;
     assert!(to_email.is_err(), "a revision's channel is fixed");
 
-    wait(&app, first, "waiting").await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["waiting"]).await;
     let (_, token) = joined(
-        &app,
+        &h,
         &main,
         first,
-        "[synthetic:slow] Perfect, send it.",
+        &token,
+        "Perfect, send it.",
         Some(json!({ "id": new_id, "version": 1 })),
     )
     .await;
-    let confirmed = tool_text(
-        &tool(
-            &app,
-            &token,
-            "confirm_draft_approval",
-            json!({ "draft_id": new_id }),
-        )
-        .await,
-    );
+    let confirmed = tool(
+        app,
+        &token,
+        "confirm_draft_approval",
+        json!({ "draft_id": new_id }),
+    )
+    .await
+    .result;
     assert_eq!(confirmed["status"], "approved", "{confirmed}");
     assert!(
         confirmed["next"]
@@ -1296,59 +1192,60 @@ async fn a_telegram_message_keeps_its_channel_and_owner_edits_across_revisions()
             .unwrap()
             .contains("Telegram message")
     );
-    let approved = card_of(&shown(&app, &main, first).await, new_id);
+    let approved = card_of(&shown(app, &main, first).await, new_id);
     assert_eq!(approved["approval_source"], "message");
     assert_eq!(approved["approved_version"], 1);
-    let started = tool_text(
-        &tool(
-            &app,
-            &token,
-            "start_draft_send",
-            json!({ "draft_id": new_id }),
-        )
-        .await,
-    );
+    let started = tool(
+        app,
+        &token,
+        "start_draft_send",
+        json!({ "draft_id": new_id }),
+    )
+    .await
+    .result;
     assert_eq!(started["status"], "sending", "{started}");
     assert_eq!(
         started["draft"]["content"]["body"],
         "Dinner at 9 on Friday? Who brings dessert?"
     );
-    let uncertain = tool_text(
-        &tool(
-            &app,
-            &token,
-            "report_draft_send",
-            json!({ "draft_id": new_id, "status": "uncertain", "detail": "Bot API timed out" }),
-        )
-        .await,
-    );
+    let uncertain = tool(
+        app,
+        &token,
+        "report_draft_send",
+        json!({ "draft_id": new_id, "status": "uncertain", "detail": "Bot API timed out" }),
+    )
+    .await
+    .result;
     assert_eq!(uncertain["status"], "uncertain");
     assert_eq!(uncertain["medium"], "Telegram message");
-    let receipt = journaled(&app, &main, new_id).await;
+    let receipt = journaled(app, &main, new_id).await;
     assert_eq!(receipt["status"], "uncertain");
     assert_eq!(receipt["delivery"]["via"], "host");
     assert_eq!(receipt["content"]["destination"], "Family group");
-    assert_eq!(questions(&app).await, 0);
+    assert_eq!(questions(app).await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_chat_approval_binds_the_open_message_version_only() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (first, token) = running(&app, &main, SLOW, None).await;
-    let id = draft(&app, &token, family_message()).await;
-    wait(&app, first, "waiting").await;
+    let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let id = draft(app, &token, family_message()).await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["waiting"]).await;
 
     let (_, token) = joined(
-        &app,
+        &h,
         &main,
         first,
-        "[synthetic:slow] Send it.",
+        &token,
+        "Send it.",
         Some(json!({ "id": id, "version": 1 })),
     )
     .await;
     let edited = owner_action(
-        &app,
+        app,
         &main,
         id,
         "edit",
@@ -1357,32 +1254,33 @@ async fn a_chat_approval_binds_the_open_message_version_only() {
     .await;
     assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
     let changed = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
     assert!(
-        refusal(&changed).starts_with("NOT_IN_CONTEXT"),
+        changed.error && changed.code() == "NOT_IN_CONTEXT",
         "the owner changed it after sending"
     );
-    let send = tool(&app, &token, "computer_run", send_args(id)).await;
-    assert!(refusal(&send).starts_with("DRAFT_SETTLED"));
-    assert_eq!(journaled(&app, &main, id).await["status"], "pending");
+    let send = tool(app, &token, "computer_run", send_args(id)).await;
+    assert!(send.error && send.code() == "DRAFT_SETTLED");
+    assert_eq!(journaled(app, &main, id).await["status"], "pending");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_connected_email_sends_the_owners_approved_edit_once_through_its_account() {
     let mail = Arc::new(FakeMail::default());
-    let Harness { app, synthetic } = harness_with(Some(mail.clone())).await;
+    let h = harness(TestApp::builder().mail(mail.clone())).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let account = connect(&app, &main, "main@owner.example", true).await;
-    let unpermitted = connect(&app, &main, "other@owner.example", false).await;
-    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let unpermitted = connect(app, &main, "other@owner.example", false).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
 
     let direct = tool(
-        &app,
+        app,
         &token,
         "mail_action",
         json!({ "account_id": account, "action_id": Uuid::new_v4(),
@@ -1390,9 +1288,10 @@ async fn a_connected_email_sends_the_owners_approved_edit_once_through_its_accou
                     "to": ["ada@example.com"], "subject": "Hi", "body": "Unapproved" } } }),
     )
     .await;
-    assert_eq!(refusal(&direct), "mail_send_needs_approved_draft");
+    assert!(direct.error);
+    assert_eq!(direct.result, "mail_send_needs_approved_draft");
     let reply = tool(
-        &app,
+        app,
         &token,
         "mail_action",
         json!({ "account_id": account, "action_id": Uuid::new_v4(),
@@ -1400,24 +1299,28 @@ async fn a_connected_email_sends_the_owners_approved_edit_once_through_its_accou
                              "message": { "folder": "INBOX", "uid_validity": 7, "uid": 42 } } }),
     )
     .await;
-    assert_eq!(refusal(&reply), "mail_send_needs_approved_draft");
+    assert!(reply.error);
+    assert_eq!(reply.result, "mail_send_needs_approved_draft");
     assert!(
         mail.commands.lock().unwrap().is_empty(),
         "nothing reached the server"
     );
-    let forbidden = tool(&app, &token, "draft_email", connected_reply(unpermitted)).await;
+    let forbidden = tool(app, &token, "draft_email", connected_reply(unpermitted)).await;
     assert!(
-        refusal(&forbidden).starts_with("MAIL_FORBIDDEN"),
+        forbidden.error && forbidden.code() == "MAIL_FORBIDDEN",
         "{}",
         forbidden.body
     );
     let mut spoofed = connected_reply(account);
     spoofed["from"] = json!("ceo@owner.example");
+    let refused = tool(app, &token, "draft_email", spoofed).await;
     assert!(
-        refusal(&tool(&app, &token, "draft_email", spoofed).await).starts_with("INVALID_DRAFT")
+        refused.error && refused.code() == "INVALID_DRAFT",
+        "{}",
+        refused.body
     );
 
-    let paused = connect(&app, &main, "paused@owner.example", true).await;
+    let paused = connect(app, &main, "paused@owner.example", true).await;
     let paused_response = app
         .owner(
             "PATCH",
@@ -1426,17 +1329,20 @@ async fn a_connected_email_sends_the_owners_approved_edit_once_through_its_accou
         )
         .await;
     assert_eq!(paused_response.status, StatusCode::OK);
+    let refused = tool(app, &token, "draft_email", connected_reply(paused)).await;
     assert!(
-        refusal(&tool(&app, &token, "draft_email", connected_reply(paused)).await)
-            .starts_with("MAIL_FORBIDDEN")
+        refused.error && refused.code() == "MAIL_FORBIDDEN",
+        "{}",
+        refused.body
     );
 
     let folder = "Projects/\"urgent\"/INBOX";
     let mut args = connected_reply(account);
     args["reply_to"]["folder"] = json!(folder);
-    let id = draft(&app, &token, args).await;
-    wait(&app, turn, "waiting").await;
-    let card = shown(&app, &main, turn).await[0].clone();
+    let id = draft(app, &token, args).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    let card = shown(app, &main, turn).await[0].clone();
     assert_eq!(
         card["content"]["from"], "main@owner.example",
         "the account's own address"
@@ -1446,7 +1352,7 @@ async fn a_connected_email_sends_the_owners_approved_edit_once_through_its_accou
     assert!(!card.to_string().contains("private-app-password"));
 
     let approved = owner_action(
-        &app,
+        app,
         &main,
         id,
         "approve",
@@ -1454,8 +1360,8 @@ async fn a_connected_email_sends_the_owners_approved_edit_once_through_its_accou
     )
     .await;
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
-    wait(&app, turn, "running").await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let token = h.continued(turn, &token).await;
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains(&format!("account_id=\"{account}\"")),
         "{packet}"
@@ -1472,34 +1378,29 @@ async fn a_connected_email_sends_the_owners_approved_edit_once_through_its_accou
     let reference: Value = serde_json::from_str(reference).unwrap();
     assert_eq!(reference["folder"], folder);
 
-    let token = grant(&app, turn).await;
     for (name, args) in [
         ("computer_run", send_args(id)),
         ("start_draft_send", json!({ "draft_id": id })),
     ] {
-        let other = tool(&app, &token, name, args).await;
+        let other = tool(app, &token, name, args).await;
         assert!(
-            refusal(&other).starts_with("CONNECTED_ACCOUNT"),
+            other.error && other.code() == "CONNECTED_ACCOUNT",
             "{name}: {}",
             other.body
         );
     }
-    let sent = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
-    assert_eq!(tool_text(&sent)["status"], "sent", "{}", sent.body);
-    let again = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
-    assert_eq!(
-        tool_text(&again)["status"],
-        "sent",
-        "a repeat reads the receipt"
-    );
+    let sent = tool(app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert_eq!(sent.result["status"], "sent", "{}", sent.body);
+    let again = tool(app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert_eq!(again.result["status"], "sent", "a repeat reads the receipt");
     let contradicted = tool(
-        &app,
+        app,
         &token,
         "report_draft_send",
         json!({ "draft_id": id, "status": "failed" }),
     )
     .await;
-    assert!(refusal(&contradicted).starts_with("DRAFT_SETTLED"));
+    assert!(contradicted.error && contradicted.code() == "DRAFT_SETTLED");
 
     let sends = mail.sends();
     assert_eq!(sends.len(), 1, "one transport send");
@@ -1512,7 +1413,7 @@ async fn a_connected_email_sends_the_owners_approved_edit_once_through_its_accou
         sends[0].reply_to.as_ref().map(|m| (m.uid_validity, m.uid)),
         Some((7, 42))
     );
-    let receipt = journaled(&app, &main, id).await;
+    let receipt = journaled(app, &main, id).await;
     assert_eq!(receipt["status"], "sent");
     assert_eq!(receipt["delivery"]["via"], "mail");
     assert_eq!(receipt["delivery"]["account_id"], account.to_string());
@@ -1540,48 +1441,49 @@ async fn uncertain_revoked_and_revised_connected_emails_never_send_twice() {
     let mail = Arc::new(FakeMail::default());
     mail.connection_lost
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let h = harness(TestApp::builder().mail(mail.clone())).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let account = connect(&app, &main, "main@owner.example", true).await;
-    let (first, token) = running(&app, &main, SLOW, None).await;
-    let id = draft(&app, &token, connected_reply(account)).await;
-    wait(&app, first, "waiting").await;
-    owner_action(&app, &main, id, "approve", json!({ "version": 1 })).await;
-    wait(&app, first, "running").await;
-    let token = grant(&app, first).await;
-    let lost = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
-    assert_eq!(tool_text(&lost)["status"], "uncertain", "{}", lost.body);
-    let again = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
-    assert_eq!(tool_text(&again)["status"], "uncertain");
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let id = draft(app, &token, connected_reply(account)).await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    owner_action(app, &main, id, "approve", json!({ "version": 1 })).await;
+    let token = h.continued(first, &token).await;
+    let lost = tool(app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert_eq!(lost.result["status"], "uncertain", "{}", lost.body);
+    let again = tool(app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert_eq!(again.result["status"], "uncertain");
     assert_eq!(mail.sends().len(), 1, "an uncertain send is never repeated");
-    wait(&app, first, "completed").await;
-    assert_eq!(journaled(&app, &main, id).await["status"], "uncertain");
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["completed"]).await;
+    assert_eq!(journaled(app, &main, id).await["status"], "uncertain");
 
     mail.connection_lost
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    let (second, token) = running(
-        &app,
+    let sent = send_with_draft(
+        app,
         &main,
-        "[synthetic:slow] I checked Sent, it is not there. Send it again.",
-        Some(json!({ "id": id, "version": 1 })),
+        &format!("{GATE} I checked Sent, it is not there. Send it again."),
+        json!({ "id": id, "version": 1 }),
     )
     .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    let (second, token) = h
+        .started(sent.body["turn"]["id"].as_str().unwrap().parse().unwrap())
+        .await;
     let confirmed = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
-    assert_eq!(
-        tool_text(&confirmed)["status"],
-        "approved",
-        "{}",
-        confirmed.body
-    );
-    permit(&app, account, &main, false).await;
-    let revoked = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
-    let revoked = tool_text(&revoked);
+    assert_eq!(confirmed.result["status"], "approved", "{}", confirmed.body);
+    permit(app, account, &main, false).await;
+    let revoked = tool(app, &token, "send_draft", json!({ "draft_id": id })).await;
+    let revoked = revoked.result;
     assert_eq!(
         revoked["status"], "uncertain",
         "the earlier send stays uncertain: {revoked}"
@@ -1594,34 +1496,39 @@ async fn uncertain_revoked_and_revised_connected_emails_never_send_twice() {
         "{revoked}"
     );
     assert_eq!(mail.sends().len(), 1, "a revoked account sends nothing");
-    wait(&app, second, "completed").await;
+    h.release(second).await;
+    app.wait_turn(&second.to_string(), &["completed"]).await;
 
-    permit(&app, account, &main, true).await;
-    let (_, token) = running(
-        &app,
+    permit(app, account, &main, true).await;
+    let sent = send_with_draft(
+        app,
         &main,
-        "[synthetic:slow] Make it shorter.",
-        Some(json!({ "id": id, "version": 1 })),
+        &format!("{GATE} Make it shorter."),
+        json!({ "id": id, "version": 1 }),
     )
     .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    let (_, token) = h
+        .started(sent.body["turn"]["id"].as_str().unwrap().parse().unwrap())
+        .await;
     let mut unbound = connected_reply(account);
     unbound["account_id"] = Value::Null;
     unbound["reply_to"] = Value::Null;
     unbound["from"] = json!("main@owner.example");
     unbound["replaces"] = json!(id);
-    let changed = tool(&app, &token, "draft_email", unbound).await;
+    let changed = tool(app, &token, "draft_email", unbound).await;
     assert!(
-        refusal(&changed).starts_with("CHANNEL_CHANGED"),
+        changed.error && changed.code() == "CHANNEL_CHANGED",
         "{}",
         changed.body
     );
     let mut revision = connected_reply(account);
     revision["body"] = json!("Friday works.");
     revision["replaces"] = json!(id);
-    let revised = tool(&app, &token, "draft_email", revision).await;
+    let revised = tool(app, &token, "draft_email", revision).await;
+    assert!(revised.error);
     assert_eq!(
-        refusal(&revised),
-        "DRAFT_SETTLED: the draft is uncertain",
+        revised.result, "DRAFT_SETTLED: the draft is uncertain",
         "an email that may have gone out is never revised into a second send"
     );
     assert_eq!(mail.sends().len(), 1);
@@ -1631,10 +1538,11 @@ async fn uncertain_revoked_and_revised_connected_emails_never_send_twice() {
 async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_ends() {
     use else_api::db::outgoing_drafts::{self, Claim, Claimed, Payload};
     let mail = Arc::new(FakeMail::default());
-    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let h = harness(TestApp::builder().mail(mail.clone())).await;
+    let app = &h.app;
     let main = app.main_bot().await;
     let bot: Uuid = main.parse().unwrap();
-    let account = connect(&app, &main, "main@owner.example", true).await;
+    let account = connect(app, &main, "main@owner.example", true).await;
     let generation = store::account(&app.db.pool, account)
         .await
         .unwrap()
@@ -1642,13 +1550,14 @@ async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_e
         .generation;
     let mut outcomes = Vec::new();
     for dispatched in [false, true] {
-        let (turn, token) = running(&app, &main, SLOW, None).await;
+        let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
         let mut args = connected_reply(account);
         args["body"] = json!(format!("Dispatched: {dispatched}"));
-        let id = draft(&app, &token, args).await;
-        wait(&app, turn, "waiting").await;
-        owner_action(&app, &main, id, "approve", json!({ "version": 1 })).await;
-        wait(&app, turn, "running").await;
+        let id = draft(app, &token, args).await;
+        h.release(turn).await;
+        app.wait_turn(&turn.to_string(), &["waiting"]).await;
+        owner_action(app, &main, id, "approve", json!({ "version": 1 })).await;
+        h.continued(turn, &token).await;
         let Claim::Fresh(Claimed {
             action_id,
             payload: Payload::Mail(email),
@@ -1676,8 +1585,9 @@ async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_e
                 else_api::connector_core::actions::Start::Dispatch
             ));
         }
-        wait(&app, turn, "completed").await;
-        let ended = journaled(&app, &main, id).await;
+        h.release(turn).await;
+        app.wait_turn(&turn.to_string(), &["completed"]).await;
+        let ended = journaled(app, &main, id).await;
         outcomes.push((id, action_id, ended["status"].as_str().unwrap().to_owned()));
         assert!(ended["result_detail"].is_string(), "{ended}");
     }
@@ -1704,7 +1614,7 @@ async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_e
         .unwrap();
     assert_eq!(status, "sent", "the late receipt settles it");
     assert_eq!(
-        journaled(&app, &main, id).await["status"],
+        journaled(app, &main, id).await["status"],
         "sent",
         "the late receipt reaches the live conversation without a reload"
     );
@@ -1717,38 +1627,21 @@ async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_e
 /// A task the main bot delegated to another bot while serving an owner
 /// message, running: the bot's ID, the root turn, the delegation, and the
 /// task's turn.
-async fn delegated_task(app: &TestApp, task: &str) -> (String, Uuid, Uuid, Uuid) {
+async fn delegated_task(h: &Harness) -> (String, Uuid, Uuid, Uuid) {
+    let app = &h.app;
     let main = app.main_bot().await;
     let leaf = app.create_bot("Telegram").await;
-    let warm = app
-        .send(&leaf, Uuid::new_v4(), "hello", Some("synthetic"))
-        .await;
-    app.wait_turn(warm.body["turn"]["id"].as_str().unwrap(), &["completed"])
-        .await;
-    let (root, _) = running(app, &main, SLOW, None).await;
-    let parent = app
-        .state
-        .grants
-        .issue(
-            main.parse().unwrap(),
-            sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-                .bind(root)
-                .fetch_one(&app.db.pool)
-                .await
-                .unwrap(),
-            root,
-            vec![Tool::ReadMemory, Tool::Delegate],
-            DEFAULT_TTL,
-        )
-        .await;
+    let warm = h.send(&leaf, "hello").await;
+    app.wait_turn(&warm.to_string(), &["completed"]).await;
+    let (root, parent) = h.running(&main, GATE).await;
     let delegated = tool(
         app,
         &parent,
         "delegate",
-        json!({ "target_bot_id": leaf, "task": task }),
+        json!({ "target_bot_id": leaf, "task": GATE_EVERY_ATTEMPT }),
     )
     .await;
-    let task: Uuid = tool_text(&delegated)["task_id"]
+    let task: Uuid = delegated.result["task_id"]
         .as_str()
         .unwrap_or_else(|| panic!("delegated: {}", delegated.body))
         .parse()
@@ -1758,7 +1651,7 @@ async fn delegated_task(app: &TestApp, task: &str) -> (String, Uuid, Uuid, Uuid)
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    wait(app, child, "running").await;
+    h.release(root).await;
     (leaf, root, task, child)
 }
 
@@ -1773,20 +1666,24 @@ async fn a_chat_approval_before_the_task_parks_still_answers_the_delegating_requ
 }
 
 async fn chat_approval_of_a_delegated_draft(parked: bool) {
-    let Harness { app, .. } = harness().await;
-    let (leaf, root, task, child) = delegated_task(&app, SLOW).await;
-    let id = draft(&app, &grant(&app, child).await, lunch()).await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
+    let (leaf, root, task, child) = delegated_task(&h).await;
+    let (_, token) = h.started(child).await;
+    let id = draft(app, &token, lunch()).await;
     if parked {
-        wait(&app, child, "waiting").await;
+        h.release(child).await;
+        app.wait_turn(&child.to_string(), &["waiting"]).await;
     }
 
     // Before it parks, the message waits for the task's attempt to end,
     // which then continues at once instead of parking.
     let (reply, token) = joined(
-        &app,
+        &h,
         &leaf,
         child,
-        "[synthetic:slow] Looks good, send it.",
+        &token,
+        "Looks good, send it.",
         Some(json!({ "id": id, "version": 1 })),
     )
     .await;
@@ -1797,23 +1694,19 @@ async fn chat_approval_of_a_delegated_draft(parked: bool) {
             .await
             .unwrap();
     assert_eq!(takeover, None, "the task keeps its own turn");
-    assert_eq!(attempt(&app, child).await, 2);
+    assert_eq!(attempt(app, child).await, 2);
 
     let confirmed = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
-    assert_eq!(
-        tool_text(&confirmed)["status"],
-        "approved",
-        "{}",
-        confirmed.body
-    );
-    wait(&app, child, "completed").await;
-    wait(&app, reply, "completed").await;
+    assert_eq!(confirmed.result["status"], "approved", "{}", confirmed.body);
+    h.release(child).await;
+    app.wait_turn(&child.to_string(), &["completed"]).await;
+    app.wait_turn(&reply.to_string(), &["completed"]).await;
     let outcome: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
         .bind(task)
         .fetch_one(&app.db.pool)
@@ -1821,7 +1714,7 @@ async fn chat_approval_of_a_delegated_draft(parked: bool) {
         .unwrap();
     assert_eq!(outcome, "completed");
     assert_ne!(
-        status(&app, root).await,
+        status(app, root).await,
         "waiting",
         "the delegating request continues"
     );
@@ -1829,21 +1722,24 @@ async fn chat_approval_of_a_delegated_draft(parked: bool) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stopping_a_continued_reply_ends_the_message_then_the_reply_closes_its_card() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (first, token) = running(&app, &main, SLOW, None).await;
-    let id = draft(&app, &token, family_message()).await;
-    wait(&app, first, "waiting").await;
+    let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let id = draft(app, &token, family_message()).await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["waiting"]).await;
 
     let (reply, _) = joined(
-        &app,
+        &h,
         &main,
         first,
-        "[synthetic:slow] Offer me a choice of channels instead.",
+        &token,
+        "Offer me a choice of channels instead.",
         Some(json!({ "id": id, "version": 1 })),
     )
     .await;
-    let card = shown(&app, &main, first).await[0].clone();
+    let card = shown(app, &main, first).await[0].clone();
     assert_eq!(card["status"], "pending", "the reply may still confirm it");
     assert_eq!(card["in_reply"], true, "{card}");
 
@@ -1855,9 +1751,9 @@ async fn stopping_a_continued_reply_ends_the_message_then_the_reply_closes_its_c
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    wait(&app, reply, "interrupted").await;
-    wait(&app, first, "waiting").await;
-    let card = shown(&app, &main, first).await[0].clone();
+    app.wait_turn(&reply.to_string(), &["interrupted"]).await;
+    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    let card = shown(app, &main, first).await[0].clone();
     assert_eq!(
         card["status"], "pending",
         "Stop ends the attempt, not its card"
@@ -1872,8 +1768,8 @@ async fn stopping_a_continued_reply_ends_the_message_then_the_reply_closes_its_c
         )
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
-    wait(&app, first, "interrupted").await;
-    let card = journaled(&app, &main, id).await;
+    app.wait_turn(&first.to_string(), &["interrupted"]).await;
+    let card = journaled(app, &main, id).await;
     assert_eq!(
         card["status"], "discarded",
         "once the reply and its message have both ended, the card closes: {card}"
@@ -1883,29 +1779,34 @@ async fn stopping_a_continued_reply_ends_the_message_then_the_reply_closes_its_c
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reply_that_moves_on_keeps_its_card_for_the_owner() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (first, token) = running(&app, &main, SLOW, None).await;
-    let id = draft(&app, &token, family_message()).await;
-    wait(&app, first, "waiting").await;
+    let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let id = draft(app, &token, family_message()).await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["waiting"]).await;
     let (done, _) = joined(
-        &app,
+        &h,
         &main,
         first,
+        &token,
         "Make it a poll instead.",
         Some(json!({ "id": id, "version": 1 })),
     )
     .await;
-    wait(&app, first, "waiting").await;
-    assert_eq!(status(&app, done).await, "queued", "it ends with its reply");
-    let card = shown(&app, &main, first).await[0].clone();
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    assert_eq!(status(app, done).await, "queued", "it ends with its reply");
+    let card = shown(app, &main, first).await[0].clone();
     assert_eq!(card["status"], "pending", "{card}");
     assert_eq!(card["can_approve"], true, "the reply still waits on it");
 
-    let discarded = owner_action(&app, &main, id, "discard", json!({})).await;
+    let discarded = owner_action(app, &main, id, "discard", json!({})).await;
     assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
-    wait(&app, first, "completed").await;
-    wait(&app, done, "completed").await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["completed"]).await;
+    app.wait_turn(&done.to_string(), &["completed"]).await;
 }
 
 async fn granted(app: &TestApp, bot: &str) -> Value {
@@ -1917,20 +1818,22 @@ async fn granted(app: &TestApp, bot: &str) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let reply = draft(
-        &app,
+        app,
         &token,
         json!({ "platform": "x", "account": "@Proliquid_xyz", "body": "Agreed.",
                 "destination": "https://x.com/someone/status/1" }),
     )
     .await;
-    wait(&app, turn, "waiting").await;
-    assert_eq!(shown(&app, &main, turn).await[0]["kind"], Value::Null);
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    assert_eq!(shown(app, &main, turn).await[0]["kind"], Value::Null);
     let refused = owner_action(
-        &app,
+        app,
         &main,
         reply,
         "approve",
@@ -1940,31 +1843,27 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
     assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{}", refused.body);
     assert_eq!(refused.body["error"]["code"], "no_kind");
     assert_eq!(
-        shown(&app, &main, turn).await[0]["status"],
+        shown(app, &main, turn).await[0]["status"],
         "pending",
         "an X reply cannot be approved always, and the refusal approves nothing"
     );
-    let discarded = owner_action(&app, &main, reply, "discard", json!({})).await;
+    let discarded = owner_action(app, &main, reply, "discard", json!({})).await;
     assert_eq!(discarded.body["requeued"], true, "{}", discarded.body);
 
-    wait(&app, turn, "running").await;
+    let token = h.continued(turn, &token).await;
     let post = |body: &str| json!({ "platform": "x", "account": "@Proliquid_xyz", "body": body });
-    let first = draft(
-        &app,
-        &grant(&app, turn).await,
-        post("A whale flipped long."),
-    )
-    .await;
-    wait(&app, turn, "waiting").await;
-    let card = shown(&app, &main, turn).await[1].clone();
+    let first = draft(app, &token, post("A whale flipped long.")).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    let card = shown(app, &main, turn).await[1].clone();
     assert_eq!(
         card["kind"],
         json!({ "platform": "x", "account_id": null, "account": "@proliquid_xyz",
                 "destination": null })
     );
-    assert_eq!(granted(&app, &main).await, json!([]));
+    assert_eq!(granted(app, &main).await, json!([]));
     let approved = owner_action(
-        &app,
+        app,
         &main,
         first,
         "approve",
@@ -1975,12 +1874,12 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
     assert_eq!(approved.body["draft"]["status"], "approved");
     assert_eq!(approved.body["draft"]["approval_source"], "button");
     assert_eq!(
-        granted(&app, &main).await,
+        granted(app, &main).await,
         json!([{ "platform": "x", "account_id": null, "account": "@proliquid_xyz",
                  "destination": null }])
     );
     let replay = owner_action(
-        &app,
+        app,
         &main,
         first,
         "approve",
@@ -1990,16 +1889,15 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
     assert_eq!(replay.status, StatusCode::OK, "{}", replay.body);
     assert_eq!(replay.body["requeued"], false);
 
-    wait(&app, turn, "running").await;
-    let token = grant(&app, turn).await;
+    let token = h.continued(turn, &token).await;
     let drafted = tool(
-        &app,
+        app,
         &token,
         "draft_message",
         json!({ "platform": "x", "account": "@PROLIQUID_XYZ", "body": "A whale flipped short." }),
     )
     .await;
-    let result = tool_text(&drafted);
+    let result = &drafted.result;
     assert_eq!(result["status"], "approved", "{}", drafted.body);
     assert!(result.get("parked").is_none(), "nothing waits on the owner");
     assert!(
@@ -2014,34 +1912,33 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
         .unwrap()
         .parse()
         .unwrap();
-    let card = journaled(&app, &main, second).await;
+    let card = journaled(app, &main, second).await;
     assert_eq!(card["approval_source"], "standing");
     assert_eq!(card["can_approve"], false);
     let claimed = tool(
-        &app,
+        app,
         &token,
         "start_draft_send",
         json!({ "draft_id": second }),
     )
     .await;
-    assert_eq!(tool_text(&claimed)["status"], "sending", "{}", claimed.body);
+    assert_eq!(claimed.result["status"], "sending", "{}", claimed.body);
     let sent = tool(
-        &app,
+        app,
         &token,
         "report_draft_send",
         json!({ "draft_id": second, "status": "sent", "detail": "post id 7" }),
     )
     .await;
-    assert_eq!(tool_text(&sent)["status"], "sent", "{}", sent.body);
-    let third = tool(&app, &token, "draft_message", post("A third whale.")).await;
+    assert_eq!(sent.result["status"], "sent", "{}", sent.body);
+    let third = tool(app, &token, "draft_message", post("A third whale.")).await;
     assert_eq!(
-        tool_text(&third)["status"],
-        "approved",
+        third.result["status"], "approved",
         "an approved-always draft parks nothing, so the request can send more: {}",
         third.body
     );
     let reply = tool(
-        &app,
+        app,
         &token,
         "draft_message",
         json!({ "platform": "x", "account": "@proliquid_xyz", "reply_to": "1890",
@@ -2049,24 +1946,24 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
     )
     .await;
     assert_eq!(
-        tool_text(&reply)["status"],
-        "pending",
+        reply.result["status"], "pending",
         "an X reply named only by reply_to is not a post: {}",
         reply.body
     );
-    let reply: Uuid = tool_text(&reply)["draft"]["draft_id"]
+    let reply: Uuid = reply.result["draft"]["draft_id"]
         .as_str()
         .unwrap()
         .parse()
         .unwrap();
-    wait(&app, turn, "waiting").await;
-    let discarded = owner_action(&app, &main, reply, "discard", json!({})).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    let discarded = owner_action(app, &main, reply, "discard", json!({})).await;
     assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
 
     let stop = format!("/v1/bots/{main}/outgoing-drafts/{second}/always");
     let stopped = app.owner("DELETE", &stop, None).await;
     assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);
-    assert_eq!(granted(&app, &main).await, json!([]));
+    assert_eq!(granted(app, &main).await, json!([]));
     assert_eq!(
         stopped.body["draft"]["status"], "sent",
         "a sent post stays sent"
@@ -2078,12 +1975,14 @@ async fn approving_always_approves_later_drafts_of_that_kind_until_stopped() {
         "stopping twice changes nothing"
     );
 
-    wait(&app, turn, "completed").await;
-    let (next, token) = running(&app, &main, SLOW, None).await;
-    draft(&app, &token, post("Another whale.")).await;
-    wait(&app, next, "waiting").await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    let (next, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    draft(app, &token, post("Another whale.")).await;
+    h.release(next).await;
+    app.wait_turn(&next.to_string(), &["waiting"]).await;
     assert_eq!(
-        shown(&app, &main, next).await[0]["status"],
+        shown(app, &main, next).await[0]["status"],
         "pending",
         "after stopping, the kind waits for approval again"
     );
@@ -2129,25 +2028,29 @@ async fn scheduled_run(app: &TestApp, root: Uuid) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_task_a_routine_run_delegated_drafts_for_the_owners_approval() {
-    let Harness { app, synthetic } = harness().await;
-    let (leaf, root, _, child) = delegated_task(&app, SLOW).await;
-    scheduled_run(&app, root).await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
+    let (leaf, root, _, child) = delegated_task(&h).await;
+    let (_, token) = h.started(child).await;
+    scheduled_run(app, root).await;
 
-    let id = draft(&app, &grant(&app, child).await, ship_post()).await;
-    wait(&app, child, "waiting").await;
-    let card = shown(&app, &leaf, child).await[0].clone();
+    let id = draft(app, &token, ship_post()).await;
+    h.release(child).await;
+    app.wait_turn(&child.to_string(), &["waiting"]).await;
+    let card = shown(app, &leaf, child).await[0].clone();
     assert_eq!(
         card["status"], "pending",
         "the owner still approves the post"
     );
     assert_eq!(card["id"], id.to_string(), "{card}");
 
-    let approved = owner_action(&app, &leaf, id, "approve", json!({ "version": 1 })).await;
+    let approved = owner_action(app, &leaf, id, "approve", json!({ "version": 1 })).await;
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
-    wait(&app, child, "running").await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    h.continued(child, &token).await;
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("send exactly this X post now"), "{packet}");
-    wait(&app, child, "completed").await;
+    h.release(child).await;
+    app.wait_turn(&child.to_string(), &["completed"]).await;
     let delegation: String =
         sqlx::query_scalar("SELECT status FROM delegations WHERE child_turn_id = ?1")
             .bind(child)
@@ -2161,17 +2064,20 @@ async fn a_task_a_routine_run_delegated_drafts_for_the_owners_approval() {
 /// or a webhook wake, clicks Approve always on its card, and returns the
 /// next draft's result in the same task.
 async fn delegated_draft_after_approving_always(scheduled: bool) -> Value {
-    let Harness { app, .. } = harness().await;
-    let (leaf, root, _, child) = delegated_task(&app, SLOW).await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
+    let (leaf, root, _, child) = delegated_task(&h).await;
+    let (_, token) = h.started(child).await;
     if scheduled {
-        scheduled_run(&app, root).await;
+        scheduled_run(app, root).await;
     } else {
-        root_source(&app, root, "routine").await;
+        root_source(app, root, "routine").await;
     }
-    let first = draft(&app, &grant(&app, child).await, family_message()).await;
-    wait(&app, child, "waiting").await;
+    let first = draft(app, &token, family_message()).await;
+    h.release(child).await;
+    app.wait_turn(&child.to_string(), &["waiting"]).await;
     let approved = owner_action(
-        &app,
+        app,
         &leaf,
         first,
         "approve",
@@ -2179,11 +2085,11 @@ async fn delegated_draft_after_approving_always(scheduled: bool) -> Value {
     )
     .await;
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
-    wait(&app, child, "running").await;
+    let token = h.continued(child, &token).await;
     let mut next = family_message();
     next["body"] = json!("Pick-up moved to 16:30.");
-    let drafted = tool(&app, &grant(&app, child).await, "draft_message", next).await;
-    tool_text(&drafted)
+    let drafted = tool(app, &token, "draft_message", next).await;
+    drafted.result
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2204,24 +2110,26 @@ async fn a_task_a_webhook_wake_delegated_still_asks_for_each_message() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_whatsapp_draft_is_approved_always_for_its_chat_only() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let to = |chat: &str, body: &str| {
         json!({ "platform": "whatsapp", "account": "+33612345678", "destination": chat,
                 "body": body })
     };
     let family = "120363041234567890@g.us";
     let unsigned = draft(
-        &app,
+        app,
         &token,
         json!({ "platform": "whatsapp", "destination": family, "body": "Bonjour" }),
     )
     .await;
-    wait(&app, turn, "waiting").await;
-    assert_eq!(shown(&app, &main, turn).await[0]["kind"], Value::Null);
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    assert_eq!(shown(app, &main, turn).await[0]["kind"], Value::Null);
     let refused = owner_action(
-        &app,
+        app,
         &main,
         unsigned,
         "approve",
@@ -2233,21 +2141,21 @@ async fn a_whatsapp_draft_is_approved_always_for_its_chat_only() {
         "without its sending account, consent could outlive a switch of account: {}",
         refused.body
     );
-    let discarded = owner_action(&app, &main, unsigned, "discard", json!({})).await;
+    let discarded = owner_action(app, &main, unsigned, "discard", json!({})).await;
     assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
-    wait(&app, turn, "running").await;
-    let token = grant(&app, turn).await;
-    let first = draft(&app, &token, to(family, "Nouvel article sur le blog.")).await;
-    wait(&app, turn, "waiting").await;
+    let token = h.continued(turn, &token).await;
+    let first = draft(app, &token, to(family, "Nouvel article sur le blog.")).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
     let kind = json!({ "platform": "whatsapp", "account_id": null, "account": "+33612345678",
                        "destination": family });
     assert_eq!(
-        shown(&app, &main, turn).await[1]["kind"],
+        shown(app, &main, turn).await[1]["kind"],
         kind,
         "a WhatsApp card offers Approve always for its one chat"
     );
     let approved = owner_action(
-        &app,
+        app,
         &main,
         first,
         "approve",
@@ -2255,28 +2163,26 @@ async fn a_whatsapp_draft_is_approved_always_for_its_chat_only() {
     )
     .await;
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
-    assert_eq!(granted(&app, &main).await, json!([kind]));
+    assert_eq!(granted(app, &main).await, json!([kind]));
 
-    wait(&app, turn, "running").await;
-    let token = grant(&app, turn).await;
+    let token = h.continued(turn, &token).await;
     let same = tool(
-        &app,
+        app,
         &token,
         "draft_message",
         to(family, "Sortie scolaire vendredi."),
     )
     .await;
-    assert_eq!(tool_text(&same)["status"], "approved", "{}", same.body);
+    assert_eq!(same.result["status"], "approved", "{}", same.body);
     let other = tool(
-        &app,
+        app,
         &token,
         "draft_message",
         to("33698765432@s.whatsapp.net", "Bonjour"),
     )
     .await;
     assert_eq!(
-        tool_text(&other)["status"],
-        "pending",
+        other.result["status"], "pending",
         "another chat still waits for the owner: {}",
         other.body
     );
@@ -2284,173 +2190,166 @@ async fn a_whatsapp_draft_is_approved_always_for_its_chat_only() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owner_reply_saying_always_approves_a_delegated_chat_always() {
-    let Harness { app, .. } = harness().await;
-    let (leaf, _, _, child) = delegated_task(&app, SLOW).await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
+    let (leaf, _, _, child) = delegated_task(&h).await;
+    let (_, token) = h.started(child).await;
     let school = "120363431565310389@g.us";
     let to = |chat: &str, body: &str| {
         json!({ "platform": "whatsapp", "account": "+33612345678", "destination": chat,
                 "body": body })
     };
-    let first = draft(
-        &app,
-        &grant(&app, child).await,
-        to(school, "Rue aux enfants vendredi."),
-    )
-    .await;
-    wait(&app, child, "waiting").await;
+    let first = draft(app, &token, to(school, "Rue aux enfants vendredi.")).await;
+    h.release(child).await;
+    app.wait_turn(&child.to_string(), &["waiting"]).await;
 
     let reply = child;
     let (_, token) = joined(
-        &app,
+        &h,
         &leaf,
         child,
-        "[synthetic:slow] Always approve posting messages",
+        &token,
+        "Always approve posting messages",
         Some(json!({ "id": first, "version": 1 })),
     )
     .await;
     let unquoted = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": first, "always": "approve everything always" }),
     )
     .await;
     assert!(
-        refusal(&unquoted).starts_with("NOT_QUOTED"),
+        unquoted.error && unquoted.code() == "NOT_QUOTED",
         "only the owner's own words can approve always: {}",
         unquoted.body
     );
-    assert_eq!(granted(&app, &leaf).await, json!([]));
-    assert_eq!(shown(&app, &leaf, child).await[0]["status"], "pending");
+    assert_eq!(granted(app, &leaf).await, json!([]));
+    assert_eq!(shown(app, &leaf, child).await[0]["status"], "pending");
 
     let confirmed = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": first, "always": "Always approve posting messages" }),
     )
     .await;
-    let result = tool_text(&confirmed);
+    let result = confirmed.result;
     assert_eq!(result["status"], "approved", "{}", confirmed.body);
     let kind = json!({ "platform": "whatsapp", "account_id": null, "account": "+33612345678",
                        "destination": school });
     assert_eq!(result["always"], kind, "{result}");
-    assert_eq!(granted(&app, &leaf).await, json!([kind]));
-    let card = shown(&app, &leaf, reply).await[0].clone();
+    assert_eq!(granted(app, &leaf).await, json!([kind]));
+    let card = shown(app, &leaf, reply).await[0].clone();
     assert_eq!(card["approval_source"], "message");
     let replay = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": first, "always": "Always approve posting messages" }),
     )
     .await;
-    assert_eq!(tool_text(&replay)["status"], "approved", "{}", replay.body);
+    assert_eq!(replay.result["status"], "approved", "{}", replay.body);
 
     let same = tool(
-        &app,
+        app,
         &token,
         "draft_message",
         to(school, "Invitation de la CAF."),
     )
     .await;
     assert_eq!(
-        tool_text(&same)["status"],
-        "approved",
+        same.result["status"], "approved",
         "the next post to that chat needs no card: {}",
         same.body
     );
-    let same: Uuid = tool_text(&same)["draft"]["draft_id"]
+    let same: Uuid = same.result["draft"]["draft_id"]
         .as_str()
         .unwrap()
         .parse()
         .unwrap();
     let other = tool(
-        &app,
+        app,
         &token,
         "draft_message",
         to("33698765432@s.whatsapp.net", "Bonjour"),
     )
     .await;
     assert_eq!(
-        tool_text(&other)["status"],
-        "pending",
+        other.result["status"], "pending",
         "another chat still waits for the owner: {}",
         other.body
     );
-    let other: Uuid = tool_text(&other)["draft"]["draft_id"]
+    let other: Uuid = other.result["draft"]["draft_id"]
         .as_str()
         .unwrap()
         .parse()
         .unwrap();
-    wait(&app, reply, "waiting").await;
-    let discarded = owner_action(&app, &leaf, other, "discard", json!({})).await;
+    h.release(reply).await;
+    app.wait_turn(&reply.to_string(), &["waiting"]).await;
+    let discarded = owner_action(app, &leaf, other, "discard", json!({})).await;
     assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.body);
-    wait(&app, reply, "running").await;
-    let token = grant(&app, reply).await;
+    let token = h.continued(reply, &token).await;
 
     let stop = format!("/v1/bots/{leaf}/outgoing-drafts/{same}/always");
     let stopped = app.owner("DELETE", &stop, None).await;
     assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);
-    assert_eq!(granted(&app, &leaf).await, json!([]));
+    assert_eq!(granted(app, &leaf).await, json!([]));
     let after = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": first, "always": "Always approve posting messages" }),
     )
     .await;
     assert!(
-        refusal(&after).starts_with("NOT_ALWAYS"),
+        after.error && after.code() == "NOT_ALWAYS",
         "a retry never brings back what the owner stopped: {}",
         after.body
     );
     let claimed = tool(
-        &app,
+        app,
         &token,
         "start_draft_send",
         json!({ "draft_id": first }),
     )
     .await;
-    assert_eq!(tool_text(&claimed)["status"], "sending", "{}", claimed.body);
+    assert_eq!(claimed.result["status"], "sending", "{}", claimed.body);
     let failed = tool(
-        &app,
+        app,
         &token,
         "report_draft_send",
         json!({ "draft_id": first, "status": "failed", "detail": "offline" }),
     )
     .await;
-    assert_eq!(tool_text(&failed)["status"], "failed", "{}", failed.body);
+    assert_eq!(failed.result["status"], "failed", "{}", failed.body);
     let retried = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": first, "always": "Always approve posting messages" }),
     )
     .await;
     assert!(
-        refusal(&retried).starts_with("NOT_ALWAYS"),
+        retried.error && retried.code() == "NOT_ALWAYS",
         "nor does a retry after its send failed: {}",
         retried.body
     );
-    assert_eq!(granted(&app, &leaf).await, json!([]));
+    assert_eq!(granted(app, &leaf).await, json!([]));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_task_rooted_in_neither_the_owner_nor_a_routine_cannot_draft() {
-    let Harness { app, .. } = harness().await;
-    let (_, root, _, child) = delegated_task(&app, SLOW).await;
-    root_source(&app, root, "status").await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
+    let (_, root, _, child) = delegated_task(&h).await;
+    let (_, token) = h.started(child).await;
+    root_source(app, root, "status").await;
 
-    let refused = tool(
-        &app,
-        &grant(&app, child).await,
-        "draft_message",
-        ship_post(),
-    )
-    .await;
+    let refused = tool(app, &token, "draft_message", ship_post()).await;
     assert!(
-        refusal(&refused).starts_with("NOT_ALLOWED"),
+        refused.error && refused.code() == "NOT_ALLOWED",
         "{}",
         refused.body
     );
@@ -2473,20 +2372,23 @@ async fn sidebar_status(app: &TestApp, bot: &str) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delegated_draft_marks_its_bot_as_needing_approval_until_approved() {
-    let Harness { app, .. } = harness().await;
-    let (leaf, _, _, child) = delegated_task(&app, SLOW).await;
-    let id = draft(&app, &grant(&app, child).await, family_message()).await;
-    wait(&app, child, "waiting").await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
+    let (leaf, _, _, child) = delegated_task(&h).await;
+    let (_, token) = h.started(child).await;
+    let id = draft(app, &token, family_message()).await;
+    h.release(child).await;
+    app.wait_turn(&child.to_string(), &["waiting"]).await;
     assert_eq!(
-        sidebar_status(&app, &leaf).await,
+        sidebar_status(app, &leaf).await,
         json!({ "kind": "needs_approval", "preview": "Telegram message to Family group" }),
         "the card in the bot's chat waits on the owner"
     );
 
-    let approved = owner_action(&app, &leaf, id, "approve", json!({ "version": 1 })).await;
+    let approved = owner_action(app, &leaf, id, "approve", json!({ "version": 1 })).await;
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
     assert_ne!(
-        sidebar_status(&app, &leaf).await["kind"],
+        sidebar_status(app, &leaf).await["kind"],
         "needs_approval",
         "an approved draft no longer waits on the owner"
     );
@@ -2494,19 +2396,22 @@ async fn a_delegated_draft_marks_its_bot_as_needing_approval_until_approved() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delegated_question_marks_its_bot_as_waiting_for_the_owner() {
-    let Harness { app, .. } = harness().await;
-    let (leaf, _, _, child) = delegated_task(&app, SLOW).await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
+    let (leaf, _, _, child) = delegated_task(&h).await;
+    let (_, token) = h.started(child).await;
     let asked = tool(
-        &app,
-        &grant(&app, child).await,
+        app,
+        &token,
         "ask_owner",
         json!({ "question": "Which account?", "choices": ["Main", "Alt"] }),
     )
     .await;
-    assert_eq!(tool_text(&asked)["status"], "pending", "{}", asked.body);
-    wait(&app, child, "waiting").await;
+    assert_eq!(asked.result["status"], "pending", "{}", asked.body);
+    h.release(child).await;
+    app.wait_turn(&child.to_string(), &["waiting"]).await;
     assert_eq!(
-        sidebar_status(&app, &leaf).await,
+        sidebar_status(app, &leaf).await,
         json!({ "kind": "waiting_for_answer", "preview": "Which account?" }),
         "the card in the bot's chat waits on the owner"
     );
@@ -2514,15 +2419,16 @@ async fn a_delegated_question_marks_its_bot_as_waiting_for_the_owner() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn approving_a_task_always_approves_its_later_messages_to_anyone() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let dm = |to: &str, task: &str| {
         json!({ "platform": "x", "account": "@Proliquid_xyz", "destination": to,
                 "task": task, "body": format!("Hey {to}, want VIP access?") })
     };
     let unowned = tool(
-        &app,
+        app,
         &token,
         "draft_message",
         json!({ "platform": "x", "destination": "@ada", "task": "Initial lead DMs",
@@ -2530,21 +2436,27 @@ async fn approving_a_task_always_approves_its_later_messages_to_anyone() {
     )
     .await;
     assert!(
-        refusal(&unowned).contains("a task needs the account it sends from"),
+        unowned.error
+            && unowned
+                .result
+                .as_str()
+                .unwrap()
+                .contains("a task needs the account it sends from"),
         "{}",
         unowned.body
     );
-    let first = draft(&app, &token, dm("@ada", "Initial  lead DMs")).await;
-    wait(&app, turn, "waiting").await;
+    let first = draft(app, &token, dm("@ada", "Initial  lead DMs")).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
     let kind = json!({ "platform": "x", "account_id": null, "account": "@proliquid_xyz",
                        "destination": null, "task": "initial lead dms" });
     assert_eq!(
-        shown(&app, &main, turn).await[0]["kind"],
+        shown(app, &main, turn).await[0]["kind"],
         kind,
         "a DM filed under a task can be approved always"
     );
     let approved = owner_action(
-        &app,
+        app,
         &main,
         first,
         "approve",
@@ -2552,33 +2464,24 @@ async fn approving_a_task_always_approves_its_later_messages_to_anyone() {
     )
     .await;
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
-    assert_eq!(granted(&app, &main).await, json!([kind]));
+    assert_eq!(granted(app, &main).await, json!([kind]));
 
-    wait(&app, turn, "running").await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let token = h.continued(turn, &token).await;
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("[else.bot always-approved message tasks]")
             && packet.contains("\"task\":\"initial lead dms\""),
         "the next attempt learns the saved task to reuse: {packet}"
     );
-    let token = grant(&app, turn).await;
-    let next = tool(
-        &app,
-        &token,
-        "draft_message",
-        dm("@bob", "initial lead dms"),
-    )
-    .await;
+    let next = tool(app, &token, "draft_message", dm("@bob", "initial lead dms")).await;
     assert_eq!(
-        tool_text(&next)["status"],
-        "approved",
+        next.result["status"], "approved",
         "the same task from the same account reaches a new lead without a card: {}",
         next.body
     );
-    let other = tool(&app, &token, "draft_message", dm("@cy", "Follow-ups")).await;
+    let other = tool(app, &token, "draft_message", dm("@cy", "Follow-ups")).await;
     assert_eq!(
-        tool_text(&other)["status"],
-        "pending",
+        other.result["status"], "pending",
         "another task still waits for the owner: {}",
         other.body
     );
@@ -2613,23 +2516,25 @@ fn files_of(card: &Value) -> Vec<Value> {
 async fn a_connected_email_sends_its_approved_pdf_from_the_account() {
     let root = tempfile::tempdir().unwrap();
     let mail = Arc::new(FakeMail::default());
-    let Harness { app, synthetic } = harness_in(Some(mail.clone()), Some(root.path())).await;
+    let h = harness(TestApp::builder().mail(mail.clone()).projects(root.path())).await;
+    let app = &h.app;
     let main = app.main_bot().await;
     project(root.path(), &main, &[("report.pdf", PDF)]);
-    let account = connect(&app, &main, "main@owner.example", true).await;
-    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
 
     let mut args = connected_reply(account);
     args["attachments"] = json!([{ "path": "~/work/missing.pdf" }]);
+    let refused = tool(app, &token, "draft_email", args.clone()).await;
     assert!(
-        refusal(&tool(&app, &token, "draft_email", args.clone()).await)
-            .starts_with("FILE_UNAVAILABLE"),
+        refused.error && refused.code() == "FILE_UNAVAILABLE",
         "a missing file is refused when drafting"
     );
     args["attachments"] = json!([{ "path": "report.pdf" }]);
-    let id = draft(&app, &token, args).await;
-    wait(&app, turn, "waiting").await;
-    let card = shown(&app, &main, turn).await[0].clone();
+    let id = draft(app, &token, args).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    let card = shown(app, &main, turn).await[0].clone();
     let files = files_of(&card);
     assert_eq!(files.len(), 1, "{card}");
     assert_eq!(files[0]["name"], "report.pdf");
@@ -2646,11 +2551,11 @@ async fn a_connected_email_sends_its_approved_pdf_from_the_account() {
         .await;
     assert_eq!(bytes.status, StatusCode::OK, "the card can fetch the file");
 
-    let unseen = owner_action(&app, &main, id, "approve", json!({ "version": 1 })).await;
+    let unseen = owner_action(app, &main, id, "approve", json!({ "version": 1 })).await;
     assert_eq!(unseen.status, StatusCode::CONFLICT, "{}", unseen.body);
     assert_eq!(unseen.body["error"]["code"], "attachments_unseen");
     let approved = owner_action(
-        &app,
+        app,
         &main,
         id,
         "approve",
@@ -2658,15 +2563,14 @@ async fn a_connected_email_sends_its_approved_pdf_from_the_account() {
     )
     .await;
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
-    wait(&app, turn, "running").await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let token = h.continued(turn, &token).await;
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("Attachments: report.pdf (application/pdf, 1 KB)"),
         "{packet}"
     );
-    let token = grant(&app, turn).await;
-    let sent = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
-    assert_eq!(tool_text(&sent)["status"], "sent", "{}", sent.body);
+    let sent = tool(app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert_eq!(sent.result["status"], "sent", "{}", sent.body);
     let sends = mail.sends();
     assert_eq!(sends.len(), 1);
     assert_eq!(sends[0].attachments.len(), 1);
@@ -2687,7 +2591,8 @@ async fn a_connected_email_sends_its_approved_pdf_from_the_account() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_x_post_takes_pictures_the_owner_may_remove_and_stages_them_for_its_send() {
     let root = tempfile::tempdir().unwrap();
-    let Harness { app, .. } = harness_in(None, Some(root.path())).await;
+    let h = harness(TestApp::builder().projects(root.path())).await;
+    let app = &h.app;
     let main = app.main_bot().await;
     let (first, second) = (png(10), png(200));
     project(
@@ -2695,19 +2600,22 @@ async fn an_x_post_takes_pictures_the_owner_may_remove_and_stages_them_for_its_s
         &main,
         &[("a.png", &first), ("b.png", &second), ("report.pdf", PDF)],
     );
-    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
 
     let mut post = ship_post();
     post["attachments"] = json!([{ "path": "report.pdf" }]);
-    let refused = refusal(&tool(&app, &token, "draft_message", post.clone()).await);
+    let refused = tool(app, &token, "draft_message", post.clone()).await;
+    assert!(refused.error, "{}", refused.body);
+    let refused = refused.result.as_str().unwrap();
     assert!(
         refused.contains("an X post takes only PNG, JPEG, GIF, or WebP images"),
         "{refused}"
     );
     post["attachments"] = json!([{ "path": "a.png" }, { "path": "~/work/b.png" }]);
-    let id = draft(&app, &token, post).await;
-    wait(&app, turn, "waiting").await;
-    let files = files_of(&shown(&app, &main, turn).await[0]);
+    let id = draft(app, &token, post).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    let files = files_of(&shown(app, &main, turn).await[0]);
     assert_eq!(files.len(), 2);
     assert!(files.iter().all(|f| f["media_type"] == "image/png"));
     let keep = files[1]["id"].as_str().unwrap().to_owned();
@@ -2738,7 +2646,7 @@ async fn an_x_post_takes_pictures_the_owner_may_remove_and_stages_them_for_its_s
     }
 
     let added = owner_action(
-        &app,
+        app,
         &main,
         id,
         "edit",
@@ -2747,7 +2655,7 @@ async fn an_x_post_takes_pictures_the_owner_may_remove_and_stages_them_for_its_s
     .await;
     assert_eq!(added.status, StatusCode::BAD_REQUEST, "{}", added.body);
     let removed = owner_action(
-        &app,
+        app,
         &main,
         id,
         "edit",
@@ -2768,7 +2676,7 @@ async fn an_x_post_takes_pictures_the_owner_may_remove_and_stages_them_for_its_s
     assert!(changed.is_err(), "a stored file never changes");
 
     let approved = owner_action(
-        &app,
+        app,
         &main,
         id,
         "approve",
@@ -2776,12 +2684,11 @@ async fn an_x_post_takes_pictures_the_owner_may_remove_and_stages_them_for_its_s
     )
     .await;
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
-    wait(&app, turn, "running").await;
-    let token = grant(&app, turn).await;
+    let token = h.continued(turn, &token).await;
     std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
     std::fs::write(&staged, b"tampered").unwrap();
-    let started = tool(&app, &token, "start_draft_send", json!({ "draft_id": id })).await;
-    let result = tool_text(&started);
+    let started = tool(app, &token, "start_draft_send", json!({ "draft_id": id })).await;
+    let result = started.result;
     assert_eq!(result["status"], "sending", "{}", started.body);
     assert_eq!(
         result["draft"]["attachment_paths"],
@@ -2798,21 +2705,23 @@ async fn an_x_post_takes_pictures_the_owner_may_remove_and_stages_them_for_its_s
 async fn a_changed_attachment_fails_the_send_and_nothing_leaves() {
     let root = tempfile::tempdir().unwrap();
     let mail = Arc::new(FakeMail::default());
-    let Harness { app, .. } = harness_in(Some(mail.clone()), Some(root.path())).await;
+    let h = harness(TestApp::builder().mail(mail.clone()).projects(root.path())).await;
+    let app = &h.app;
     let main = app.main_bot().await;
     project(root.path(), &main, &[("report.pdf", PDF)]);
-    let account = connect(&app, &main, "main@owner.example", true).await;
-    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let mut args = connected_reply(account);
     args["attachments"] = json!([{ "path": "report.pdf" }]);
-    let id = draft(&app, &token, args).await;
-    wait(&app, turn, "waiting").await;
-    let file_id = files_of(&shown(&app, &main, turn).await[0])[0]["id"]
+    let id = draft(app, &token, args).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    let file_id = files_of(&shown(app, &main, turn).await[0])[0]["id"]
         .as_str()
         .unwrap()
         .to_owned();
     let approved = owner_action(
-        &app,
+        app,
         &main,
         id,
         "approve",
@@ -2820,15 +2729,14 @@ async fn a_changed_attachment_fails_the_send_and_nothing_leaves() {
     )
     .await;
     assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
-    wait(&app, turn, "running").await;
+    let token = h.continued(turn, &token).await;
     sqlx::query("UPDATE attachments SET data = zeroblob(size) WHERE id = ?1")
         .bind(file_id.parse::<Uuid>().unwrap())
         .execute(&app.db.pool)
         .await
         .unwrap();
-    let token = grant(&app, turn).await;
-    let sent = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
-    assert!(refusal(&sent).starts_with("FILE_CHANGED"), "{}", sent.body);
+    let sent = tool(app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert!(sent.error && sent.code() == "FILE_CHANGED", "{}", sent.body);
     assert!(mail.commands.lock().unwrap().is_empty(), "nothing was sent");
     let status: String = sqlx::query_scalar("SELECT status FROM outgoing_drafts WHERE id = ?1")
         .bind(id)
@@ -2842,62 +2750,59 @@ async fn a_changed_attachment_fails_the_send_and_nothing_leaves() {
 async fn a_chat_approval_of_a_draft_with_files_needs_the_files_the_owner_saw() {
     let root = tempfile::tempdir().unwrap();
     let mail = Arc::new(FakeMail::default());
-    let Harness { app, .. } = harness_in(Some(mail.clone()), Some(root.path())).await;
+    let h = harness(TestApp::builder().mail(mail.clone()).projects(root.path())).await;
+    let app = &h.app;
     let main = app.main_bot().await;
     project(root.path(), &main, &[("report.pdf", PDF)]);
-    let account = connect(&app, &main, "main@owner.example", true).await;
-    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
     let mut args = connected_reply(account);
     args["attachments"] = json!([{ "path": "report.pdf" }]);
-    let id = draft(&app, &token, args).await;
-    wait(&app, turn, "waiting").await;
-    let file_id = files_of(&shown(&app, &main, turn).await[0])[0]["id"].clone();
+    let id = draft(app, &token, args).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    let file_id = files_of(&shown(app, &main, turn).await[0])[0]["id"].clone();
 
-    let unseen = send(
-        &app,
-        &main,
-        "Send it.",
-        Some(json!({ "id": id, "version": 1 })),
-    )
-    .await;
+    let unseen = send_with_draft(app, &main, "Send it.", json!({ "id": id, "version": 1 })).await;
     assert_eq!(unseen.status, StatusCode::CONFLICT, "{}", unseen.body);
     assert_eq!(unseen.body["error"]["code"], "attachments_unseen");
     let (_, token) = joined(
-        &app,
+        &h,
         &main,
         turn,
-        "[synthetic:slow] Send it.",
+        &token,
+        "Send it.",
         Some(json!({ "id": id, "version": 1, "attachments": [file_id] })),
     )
     .await;
     let confirmed = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
-    assert_eq!(
-        tool_text(&confirmed)["status"],
-        "approved",
-        "{}",
-        confirmed.body
-    );
-    let sent = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
-    assert_eq!(tool_text(&sent)["status"], "sent", "{}", sent.body);
+    assert_eq!(confirmed.result["status"], "approved", "{}", confirmed.body);
+    let sent = tool(app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert_eq!(sent.result["status"], "sent", "{}", sent.body);
     assert_eq!(mail.sends()[0].attachments.len(), 1);
 }
 
 /// Starts a request whose owner message approves the open draft `id`, and
 /// confirms that approval.
-async fn approve_again(app: &TestApp, bot: &str, id: Uuid) -> (Uuid, String) {
-    let (turn, token) = running(
+async fn approve_again(h: &Harness, bot: &str, id: Uuid) -> (Uuid, String) {
+    let app = &h.app;
+    let sent = send_with_draft(
         app,
         bot,
-        "[synthetic:slow] Send it again.",
-        Some(json!({ "id": id, "version": 1 })),
+        &format!("{GATE} Send it again."),
+        json!({ "id": id, "version": 1 }),
     )
     .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    let (turn, token) = h
+        .started(sent.body["turn"]["id"].as_str().unwrap().parse().unwrap())
+        .await;
     let confirmed = tool(
         app,
         &token,
@@ -2905,23 +2810,19 @@ async fn approve_again(app: &TestApp, bot: &str, id: Uuid) -> (Uuid, String) {
         json!({ "draft_id": id }),
     )
     .await;
-    assert_eq!(
-        tool_text(&confirmed)["status"],
-        "approved",
-        "{}",
-        confirmed.body
-    );
+    assert_eq!(confirmed.result["status"], "approved", "{}", confirmed.body);
     (turn, token)
 }
 
 /// A connected reply, approved on its card and claimed by a running request.
-async fn approved_connected_reply(app: &TestApp, bot: &str, account: Uuid) -> (Uuid, Uuid, String) {
-    let (turn, token) = running(app, bot, SLOW, None).await;
+async fn approved_connected_reply(h: &Harness, bot: &str, account: Uuid) -> (Uuid, Uuid, String) {
+    let app = &h.app;
+    let (turn, token) = h.running(bot, GATE_EVERY_ATTEMPT).await;
     let id = draft(app, &token, connected_reply(account)).await;
-    wait(app, turn, "waiting").await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
     owner_action(app, bot, id, "approve", json!({ "version": 1 })).await;
-    wait(app, turn, "running").await;
-    (id, turn, grant(app, turn).await)
+    (id, turn, h.continued(turn, &token).await)
 }
 
 async fn action_statuses(app: &TestApp, account: Uuid) -> Vec<String> {
@@ -2938,12 +2839,15 @@ async fn action_statuses(app: &TestApp, account: Uuid) -> Vec<String> {
 async fn a_send_that_stops_before_the_message_is_written_fails_with_its_reason() {
     let mail = Arc::new(FakeMail::default());
     mail.fail_at(Some(SendPhase::Envelope));
-    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let h = harness(TestApp::builder().mail(mail.clone())).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let account = connect(&app, &main, "main@owner.example", true).await;
-    let (id, first, token) = approved_connected_reply(&app, &main, account).await;
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let (id, first, token) = approved_connected_reply(&h, &main, account).await;
 
-    let refused = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    let refused = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
     assert_eq!(refused["status"], "failed", "{refused}");
     assert_eq!(
         refused["detail"],
@@ -2951,12 +2855,15 @@ async fn a_send_that_stops_before_the_message_is_written_fails_with_its_reason()
          recipients.",
     );
     assert_eq!(refused["sends"][0]["phase"], "envelope", "{refused}");
-    assert_eq!(action_statuses(&app, account).await, ["failed"]);
-    wait(&app, first, "completed").await;
+    assert_eq!(action_statuses(app, account).await, ["failed"]);
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["completed"]).await;
 
     mail.fail_at(None);
-    let (_, token) = approve_again(&app, &main, id).await;
-    let sent = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    let (_, token) = approve_again(&h, &main, id).await;
+    let sent = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
     assert_eq!(sent["status"], "sent", "{sent}");
     assert!(
         mail.searches().is_empty(),
@@ -2971,22 +2878,22 @@ async fn a_send_that_stops_before_the_message_is_written_fails_with_its_reason()
         "a retry keeps its Message-ID"
     );
     assert_eq!(sent["sends"].as_array().unwrap().len(), 2, "{sent}");
-    assert_eq!(
-        action_statuses(&app, account).await,
-        ["failed", "succeeded"]
-    );
+    assert_eq!(action_statuses(app, account).await, ["failed", "succeeded"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_uncertain_send_found_in_sent_is_never_sent_again() {
     let mail = Arc::new(FakeMail::default());
     mail.fail_at(Some(SendPhase::Reply));
-    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let h = harness(TestApp::builder().mail(mail.clone())).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let account = connect(&app, &main, "main@owner.example", true).await;
-    let (id, first, token) = approved_connected_reply(&app, &main, account).await;
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let (id, first, token) = approved_connected_reply(&h, &main, account).await;
 
-    let lost = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    let lost = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
     assert_eq!(lost["status"], "uncertain", "{lost}");
     assert!(
         lost["detail"].as_str().unwrap().starts_with(
@@ -2995,13 +2902,16 @@ async fn an_uncertain_send_found_in_sent_is_never_sent_again() {
         ),
         "{lost}"
     );
-    wait(&app, first, "completed").await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["completed"]).await;
 
     mail.fail_at(None);
     mail.search_fails
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let (second, token) = approve_again(&app, &main, id).await;
-    let unsearched = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    let (second, token) = approve_again(&h, &main, id).await;
+    let unsearched = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
     assert_eq!(unsearched["status"], "uncertain", "{unsearched}");
     assert!(
         unsearched["detail"]
@@ -3011,14 +2921,17 @@ async fn an_uncertain_send_found_in_sent_is_never_sent_again() {
         "{unsearched}"
     );
     assert_eq!(mail.sends().len(), 1, "a failed search sends nothing");
-    wait(&app, second, "completed").await;
+    h.release(second).await;
+    app.wait_turn(&second.to_string(), &["completed"]).await;
 
     mail.search_fails
         .store(false, std::sync::atomic::Ordering::SeqCst);
     mail.in_sent
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let (_, token) = approve_again(&app, &main, id).await;
-    let found = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    let (_, token) = approve_again(&h, &main, id).await;
+    let found = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
     assert_eq!(found["status"], "sent", "{found}");
     assert!(
         found["detail"]
@@ -3030,8 +2943,8 @@ async fn an_uncertain_send_found_in_sent_is_never_sent_again() {
     let message_id = format!("draft-{}@owner.example", id.simple());
     assert_eq!(mail.searches(), [message_id.clone(), message_id]);
     assert_eq!(mail.sends().len(), 1, "found in Sent, so never sent again");
-    assert_eq!(action_statuses(&app, account).await, ["succeeded"]);
-    let receipt = journaled(&app, &main, id).await;
+    assert_eq!(action_statuses(app, account).await, ["succeeded"]);
+    let receipt = journaled(app, &main, id).await;
     assert_eq!(receipt["status"], "sent");
     assert_eq!(
         receipt["delivery"]["action_id"], found["sends"][0]["action_id"],
@@ -3043,17 +2956,23 @@ async fn an_uncertain_send_found_in_sent_is_never_sent_again() {
 async fn an_uncertain_send_missing_from_sent_waits_for_a_new_approval() {
     let mail = Arc::new(FakeMail::default());
     mail.fail_at(Some(SendPhase::Reply));
-    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let h = harness(TestApp::builder().mail(mail.clone())).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let account = connect(&app, &main, "main@owner.example", true).await;
-    let (id, first, token) = approved_connected_reply(&app, &main, account).await;
-    let lost = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let (id, first, token) = approved_connected_reply(&h, &main, account).await;
+    let lost = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
     assert_eq!(lost["status"], "uncertain", "{lost}");
-    wait(&app, first, "completed").await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["completed"]).await;
 
     mail.fail_at(None);
-    let (second, token) = approve_again(&app, &main, id).await;
-    let absent = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    let (second, token) = approve_again(&h, &main, id).await;
+    let absent = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
     assert_eq!(absent["status"], "uncertain", "{absent}");
     assert!(
         absent["detail"]
@@ -3062,21 +2981,23 @@ async fn an_uncertain_send_missing_from_sent_waits_for_a_new_approval() {
             .starts_with("Its Sent folder does not hold it"),
         "{absent}"
     );
-    let again = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    let again = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
     assert_eq!(
         again["status"], "uncertain",
         "the same approval never sends it"
     );
     let reconfirmed = tool(
-        &app,
+        app,
         &token,
         "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
+    assert!(reconfirmed.error);
     assert_eq!(
-        refusal(&reconfirmed),
-        "DRAFT_SETTLED: the draft is uncertain",
+        reconfirmed.result, "DRAFT_SETTLED: the draft is uncertain",
         "the owner message that led to the search cannot approve it again"
     );
     let earlier: Uuid = absent["sends"][0]["action_id"]
@@ -3098,13 +3019,16 @@ async fn an_uncertain_send_missing_from_sent_waits_for_a_new_approval() {
         "uncertain",
         "a search for another claim changes nothing"
     );
-    assert_eq!(action_statuses(&app, account).await, ["uncertain"]);
+    assert_eq!(action_statuses(app, account).await, ["uncertain"]);
     assert_eq!(mail.sends().len(), 1);
     assert_eq!(mail.searches().len(), 1);
-    wait(&app, second, "completed").await;
+    h.release(second).await;
+    app.wait_turn(&second.to_string(), &["completed"]).await;
 
-    let (_, token) = approve_again(&app, &main, id).await;
-    let sent = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    let (_, token) = approve_again(&h, &main, id).await;
+    let sent = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
     assert_eq!(sent["status"], "sent", "{sent}");
     assert_eq!(
         mail.searches().len(),
@@ -3134,34 +3058,44 @@ async fn an_uncertain_send_missing_from_sent_waits_for_a_new_approval() {
 async fn an_unsent_retry_keeps_the_earlier_send_uncertain() {
     let mail = Arc::new(FakeMail::default());
     mail.fail_at(Some(SendPhase::Reply));
-    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let h = harness(TestApp::builder().mail(mail.clone())).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let account = connect(&app, &main, "main@owner.example", true).await;
-    let (id, first, token) = approved_connected_reply(&app, &main, account).await;
-    let lost = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let (id, first, token) = approved_connected_reply(&h, &main, account).await;
+    let lost = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
     assert_eq!(lost["status"], "uncertain", "{lost}");
-    wait(&app, first, "completed").await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["completed"]).await;
 
-    let (second, _) = approve_again(&app, &main, id).await;
-    wait(&app, second, "completed").await;
-    let receipt = journaled(&app, &main, id).await;
+    let (second, _) = approve_again(&h, &main, id).await;
+    h.release(second).await;
+    app.wait_turn(&second.to_string(), &["completed"]).await;
+    let receipt = journaled(app, &main, id).await;
     assert_eq!(receipt["status"], "uncertain", "{receipt}");
     assert_eq!(
         receipt["delivery"]["action_id"], lost["sends"][0]["action_id"],
         "the card names the send that may have gone out"
     );
 
-    let (_, token) = running(
-        &app,
+    let sent = send_with_draft(
+        app,
         &main,
-        "[synthetic:slow] Make it shorter.",
-        Some(json!({ "id": id, "version": 1 })),
+        &format!("{GATE} Make it shorter."),
+        json!({ "id": id, "version": 1 }),
     )
     .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    let (_, token) = h
+        .started(sent.body["turn"]["id"].as_str().unwrap().parse().unwrap())
+        .await;
     let mut revision = connected_reply(account);
     revision["replaces"] = json!(id);
-    let revised = tool(&app, &token, "draft_email", revision).await;
-    assert_eq!(refusal(&revised), "DRAFT_SETTLED: the draft is uncertain");
+    let revised = tool(app, &token, "draft_email", revision).await;
+    assert!(revised.error);
+    assert_eq!(revised.result, "DRAFT_SETTLED: the draft is uncertain");
     assert_eq!(mail.sends().len(), 1);
 }
 
@@ -3169,13 +3103,17 @@ async fn an_unsent_retry_keeps_the_earlier_send_uncertain() {
 async fn an_uncertain_send_without_a_message_id_is_never_sent_again() {
     let mail = Arc::new(FakeMail::default());
     mail.fail_at(Some(SendPhase::Reply));
-    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let h = harness(TestApp::builder().mail(mail.clone())).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let account = connect(&app, &main, "main@owner.example", true).await;
-    let (id, first, token) = approved_connected_reply(&app, &main, account).await;
-    let lost = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let (id, first, token) = approved_connected_reply(&h, &main, account).await;
+    let lost = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
     assert_eq!(lost["status"], "uncertain", "{lost}");
-    wait(&app, first, "completed").await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["completed"]).await;
     sqlx::query("UPDATE draft_mail_sends SET message_id = NULL")
         .execute(&app.db.pool)
         .await
@@ -3183,8 +3121,10 @@ async fn an_uncertain_send_without_a_message_id_is_never_sent_again() {
 
     mail.fail_at(None);
     for _ in 0..2 {
-        let (turn, token) = approve_again(&app, &main, id).await;
-        let blocked = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+        let (turn, token) = approve_again(&h, &main, id).await;
+        let blocked = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+            .await
+            .result;
         assert_eq!(blocked["status"], "uncertain", "{blocked}");
         assert!(
             blocked["detail"].as_str().unwrap().starts_with(
@@ -3192,7 +3132,8 @@ async fn an_uncertain_send_without_a_message_id_is_never_sent_again() {
             ),
             "{blocked}"
         );
-        wait(&app, turn, "completed").await;
+        h.release(turn).await;
+        app.wait_turn(&turn.to_string(), &["completed"]).await;
     }
     assert!(mail.searches().is_empty());
     assert_eq!(mail.sends().len(), 1, "no approval sends it again");
@@ -3203,15 +3144,19 @@ async fn a_retry_failing_before_its_send_keeps_the_earlier_send_uncertain() {
     use else_api::db::outgoing_drafts;
     let mail = Arc::new(FakeMail::default());
     mail.fail_at(Some(SendPhase::Reply));
-    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let h = harness(TestApp::builder().mail(mail.clone())).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let account = connect(&app, &main, "main@owner.example", true).await;
-    let (id, first, token) = approved_connected_reply(&app, &main, account).await;
-    let lost = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let (id, first, token) = approved_connected_reply(&h, &main, account).await;
+    let lost = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
     let earlier = lost["sends"][0]["action_id"].clone();
-    wait(&app, first, "completed").await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["completed"]).await;
 
-    let (second, _) = approve_again(&app, &main, id).await;
+    let (second, _) = approve_again(&h, &main, id).await;
     outgoing_drafts::claim_connected(&app.db.pool, second, id, MAIL)
         .await
         .unwrap();
@@ -3240,22 +3185,28 @@ async fn a_retry_failing_before_its_send_keeps_the_earlier_send_uncertain() {
 async fn a_retry_after_the_earlier_send_succeeded_sends_nothing() {
     let mail = Arc::new(FakeMail::default());
     mail.fail_at(Some(SendPhase::Reply));
-    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let h = harness(TestApp::builder().mail(mail.clone())).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let account = connect(&app, &main, "main@owner.example", true).await;
-    let (id, first, token) = approved_connected_reply(&app, &main, account).await;
-    let lost = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    let account = connect(app, &main, "main@owner.example", true).await;
+    let (id, first, token) = approved_connected_reply(&h, &main, account).await;
+    let lost = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
     assert_eq!(lost["status"], "uncertain", "{lost}");
-    wait(&app, first, "completed").await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["completed"]).await;
 
     mail.fail_at(None);
-    let (_, token) = approve_again(&app, &main, id).await;
+    let (_, token) = approve_again(&h, &main, id).await;
     sqlx::query("UPDATE connector_actions SET status = 'succeeded' WHERE account_id = ?1")
         .bind(account)
         .execute(&app.db.pool)
         .await
         .unwrap();
-    let sent = tool_text(&tool(&app, &token, "send_draft", json!({ "draft_id": id })).await);
+    let sent = tool(app, &token, "send_draft", json!({ "draft_id": id }))
+        .await
+        .result;
     assert_eq!(sent["status"], "sent", "{sent}");
     assert_eq!(
         sent["detail"],

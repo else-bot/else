@@ -47,7 +47,8 @@ async fn triggers(app: &TestApp, bot: &str) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_approved_card_removes_the_inbox_and_its_triggers_even_with_a_broad_grant() {
-    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+    let h =
+        recorder::harness(common::TestApp::builder().mail(Arc::new(QuietInbox::default()))).await;
     let app = &h.app;
     let account = connect(app).await;
     let main = app.main_bot().await;
@@ -126,7 +127,8 @@ async fn an_approved_card_removes_the_inbox_and_its_triggers_even_with_a_broad_g
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_bot_cannot_remove_an_inbox_it_cannot_read_or_one_the_owner_kept() {
-    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+    let h =
+        recorder::harness(common::TestApp::builder().mail(Arc::new(QuietInbox::default()))).await;
     let app = &h.app;
     let account = connect(app).await;
     let main = app.main_bot().await;

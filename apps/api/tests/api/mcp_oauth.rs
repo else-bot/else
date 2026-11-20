@@ -2,11 +2,10 @@ use crate::common;
 
 use std::path::Path;
 use std::process::Stdio;
-use std::time::Duration;
 
 use axum::http::StatusCode;
+use common::recorder::{GATE, GATE_EVERY_ATTEMPT, harness, tool};
 use common::{Reply, TestApp};
-use else_api::grants::{DEFAULT_TTL, Tool};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use uuid::Uuid;
@@ -29,7 +28,7 @@ impl Fixture {
             .spawn()
             .unwrap();
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-        let base = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        let base = tokio::time::timeout(common::SETTLE, lines.next_line())
             .await
             .expect("Python fixture starts")
             .unwrap()
@@ -102,51 +101,9 @@ impl Fixture {
     }
 }
 
-async fn grant(app: &TestApp, bot: &str, slow: bool) -> (Uuid, String) {
-    let text = if slow {
-        "[synthetic:slow] Connect the fixture MCP so I can read its tools after I authorize it in my browser."
-    } else {
-        "[synthetic:hang] Read the fixture MCP."
-    };
-    let sent = app.send(bot, Uuid::new_v4(), text, Some("synthetic")).await;
-    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
-    let turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    app.wait_turn(&turn.to_string(), &["running"]).await;
-    (turn, continuation_grant(app, bot, turn).await)
-}
-
-async fn continuation_grant(app: &TestApp, bot: &str, turn: Uuid) -> String {
-    let conversation = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-        .bind(turn)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    app.state
-        .grants
-        .issue(
-            bot.parse().unwrap(),
-            conversation,
-            turn,
-            vec![Tool::Mcp, Tool::ManageMcp, Tool::AskOwner],
-            DEFAULT_TTL,
-        )
-        .await
-}
-
-async fn tool(app: &TestApp, token: &str, name: &str, arguments: Value) -> Reply {
-    app.call("POST", "/tools/v1/mcp",
-        Some(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}})), Some(token)).await
-}
-
-fn result(reply: &Reply) -> Value {
-    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    assert_ne!(reply.body["result"]["isError"], true, "{}", reply.body);
-    serde_json::from_str(reply.body["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
-}
-
 async fn list_tools(app: &TestApp, token: &str) -> Value {
-    result(&tool(app, token, "mcp_request",
-        json!({"id":"oauth-fixture","method":"tools/list","params":{},"purpose":"Read fixture tools"})).await)
+    tool(app, token, "mcp_request",
+        json!({"id":"oauth-fixture","method":"tools/list","params":{},"purpose":"Read fixture tools"})).await.result
 }
 
 fn connection_path(bot: &str) -> String {
@@ -221,34 +178,31 @@ fn assert_private_files(dir: &Path) {
 #[tokio::test(flavor = "multi_thread")]
 async fn owner_consent_resumes_a_parked_read_and_one_sign_in_serves_every_bot() {
     let fixture = Fixture::start().await;
-    let db = std::sync::Arc::new(common::TestDb::migrated().await);
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    let synthetic = std::sync::Arc::new(else_api::providers::synthetic::Synthetic::new(
-        Duration::from_millis(5),
-    ));
-    let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
-    let app = TestApp::with_registry(db, 4, registry).await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("OAuth owner").await;
     let other = app.create_bot("Other bot").await;
-    let (turn, token) = grant(&app, &bot, true).await;
-    result(&tool(&app, &token, "mcp_install", fixture.installation()).await);
-    let initial = result(
-        &tool(
-            &app,
-            &token,
-            "mcp_connection_status",
-            json!({"id":"oauth-fixture"}),
-        )
-        .await,
-    );
+    let (turn, token) = h.running(&bot, GATE_EVERY_ATTEMPT).await;
+    let installed = tool(app, &token, "mcp_install", fixture.installation()).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
+    let initial = tool(
+        app,
+        &token,
+        "mcp_connection_status",
+        json!({"id":"oauth-fixture"}),
+    )
+    .await
+    .result;
     assert_eq!(initial["status"], "disconnected");
-    let required = list_tools(&app, &token).await;
+    let required = list_tools(app, &token).await;
     assert_eq!(required["status"], "auth_required", "{required}");
     assert_eq!(required["mcp_id"], "oauth-fixture");
     assert_eq!(required["parked"], true);
     assert!(!required.to_string().contains("authorization_url"));
     assert!(!required.to_string().contains("code_verifier"));
     assert!(app.state.grants.is_parked(turn).await);
+    h.release(turn).await;
     app.wait_turn(&turn.to_string(), &["waiting"]).await;
     let question = required["question_id"].as_str().unwrap();
     let snapshot = app
@@ -275,7 +229,7 @@ async fn owner_consent_resumes_a_parked_read_and_one_sign_in_serves_every_bot() 
     );
     assert!(card["context"].as_str().unwrap().contains("fixture.read"));
     assert!(!card["context"].as_str().unwrap().contains("fixture.write"));
-    connect(&app, &fixture, &bot).await;
+    connect(app, &fixture, &bot).await;
     let answered = app
         .owner(
             "POST",
@@ -285,26 +239,16 @@ async fn owner_consent_resumes_a_parked_read_and_one_sign_in_serves_every_bot() 
         .await;
     assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
     assert_eq!(answered.body["requeued"], true);
-    app.wait_turn(&turn.to_string(), &["running"]).await;
-    let packet = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(packet) = synthetic
-                .packets()
-                .await
-                .into_iter()
-                .find(|p| p.contains("Account sign-in completed."))
-            {
-                break packet;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the resumed provider receives the connection outcome");
+    let resumed = h.continued(turn, &token).await;
+    let packet = h
+        .packets()
+        .await
+        .into_iter()
+        .find(|p| p.contains("Account sign-in completed."))
+        .expect("the resumed provider receives the connection outcome");
     assert!(packet.contains("Retry the original read using mcp_request."));
     assert!(!packet.contains("Approved: call mcp_connect"));
-    let resumed = continuation_grant(&app, &bot, turn).await;
-    let tools = list_tools(&app, &resumed).await;
+    let tools = list_tools(app, &resumed).await;
     assert_eq!(tools["result"]["tools"][0]["name"], "fixture_read");
     let attempt: i32 = sqlx::query_scalar("SELECT attempt FROM turns WHERE id=?1")
         .bind(turn)
@@ -312,8 +256,8 @@ async fn owner_consent_resumes_a_parked_read_and_one_sign_in_serves_every_bot() 
         .await
         .unwrap();
     assert!(attempt >= 2);
-    assert_eq!(owner_connection(&app, &bot).await["status"], "connected");
-    assert_eq!(owner_connection(&app, &other).await["status"], "connected");
+    assert_eq!(owner_connection(app, &bot).await["status"], "connected");
+    assert_eq!(owner_connection(app, &other).await["status"], "connected");
     let events = fixture.events().await;
     assert!(
         events
@@ -334,39 +278,45 @@ async fn owner_consent_resumes_a_parked_read_and_one_sign_in_serves_every_bot() 
     let shared = root.join(format!("oauth-{}.json", Uuid::nil()));
     assert!(shared.is_file());
     assert!(!root.join(format!("oauth-{bot}.json")).exists());
-    let app = app.restart().await;
-    assert_eq!(owner_connection(&app, &bot).await["status"], "connected");
-    let (_, token) = grant(&app, &bot, false).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    let db = h.app.stop().await;
+    let h = harness(TestApp::builder().db(db)).await;
+    let app = &h.app;
+    assert_eq!(owner_connection(app, &bot).await["status"], "connected");
+    let (_, token) = h.running(&bot, GATE).await;
     assert_eq!(
-        list_tools(&app, &token).await["result"]["tools"][0]["name"],
+        list_tools(app, &token).await["result"]["tools"][0]["name"],
         "fixture_read"
     );
-    let (_, other_token) = grant(&app, &other, true).await;
-    let other_connected = result(
-        &tool(
-            &app,
-            &other_token,
-            "mcp_connect",
-            json!({"id":"oauth-fixture","purpose":"Read fixture tools for this bot"}),
-        )
-        .await,
-    );
+    let (_, other_token) = h.running(&other, GATE).await;
+    let other_connected = tool(
+        app,
+        &other_token,
+        "mcp_connect",
+        json!({"id":"oauth-fixture","purpose":"Read fixture tools for this bot"}),
+    )
+    .await
+    .result;
     assert_eq!(other_connected["status"], "connected", "{other_connected}");
     let disconnected = app.owner("DELETE", &connection_path(&other), None).await;
     assert_eq!(disconnected.status, StatusCode::NO_CONTENT);
     assert!(!shared.exists());
     for bot in [&bot, &other] {
-        assert_eq!(owner_connection(&app, bot).await["status"], "disconnected");
+        assert_eq!(owner_connection(app, bot).await["status"], "disconnected");
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn callback_state_issuer_replay_and_owner_auth_are_enforced() {
     let fixture = Fixture::start().await;
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("Callback checks").await;
-    let (_, token) = grant(&app, &bot, false).await;
-    result(&tool(&app, &token, "mcp_install", fixture.installation()).await);
+    let (_, token) = h.running(&bot, GATE).await;
+    let installed = tool(app, &token, "mcp_install", fixture.installation()).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
     let denied = app
         .call(
             "POST",
@@ -394,22 +344,22 @@ async fn callback_state_issuer_replay_and_owner_auth_are_enforced() {
             response.body
         );
     }
-    let authorization = authorize(&app, &bot).await;
+    let authorization = authorize(app, &bot).await;
     let mut wrong = fixture.browser_callback(&authorization, false).await;
     wrong["state"] = json!("forged-state");
-    let response = complete(&app, &bot, wrong).await;
+    let response = complete(app, &bot, wrong).await;
     assert_eq!(
         response.status,
         StatusCode::BAD_REQUEST,
         "{}",
         response.body
     );
-    assert_ne!(owner_connection(&app, &bot).await["status"], "connected");
-    cancel(&app, &bot, &authorization).await;
-    let authorization = authorize(&app, &bot).await;
+    assert_ne!(owner_connection(app, &bot).await["status"], "connected");
+    cancel(app, &bot, &authorization).await;
+    let authorization = authorize(app, &bot).await;
     let mut wrong = fixture.browser_callback(&authorization, false).await;
     wrong["iss"] = json!("https://wrong-issuer.example");
-    let response = complete(&app, &bot, wrong).await;
+    let response = complete(app, &bot, wrong).await;
     assert_eq!(
         response.status,
         StatusCode::BAD_REQUEST,
@@ -423,10 +373,10 @@ async fn callback_state_issuer_replay_and_owner_auth_are_enforced() {
             .iter()
             .any(|event| event["kind"] == "token")
     );
-    cancel(&app, &bot, &authorization).await;
-    let authorization = authorize(&app, &bot).await;
+    cancel(app, &bot, &authorization).await;
+    let authorization = authorize(app, &bot).await;
     let callback = fixture.browser_callback(&authorization, false).await;
-    let response = complete(&app, &bot, callback.clone()).await;
+    let response = complete(app, &bot, callback.clone()).await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
     let cancellation = app
         .owner("DELETE", oauth_path(&bot, "").trim_end_matches('/'), None)
@@ -436,7 +386,7 @@ async fn callback_state_issuer_replay_and_owner_auth_are_enforced() {
         cancellation.body["status"], "connected",
         "cancelling a pending flow cannot revoke a completed account"
     );
-    let replay = complete(&app, &bot, callback).await;
+    let replay = complete(app, &bot, callback).await;
     assert_eq!(replay.status, StatusCode::BAD_REQUEST, "{}", replay.body);
     assert_eq!(
         fixture
@@ -452,16 +402,19 @@ async fn callback_state_issuer_replay_and_owner_auth_are_enforced() {
 #[tokio::test(flavor = "multi_thread")]
 async fn expired_access_refreshes_once_and_revoked_consent_requires_owner_auth() {
     let fixture = Fixture::start().await;
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("Refresh checks").await;
-    let (_, token) = grant(&app, &bot, false).await;
-    result(&tool(&app, &token, "mcp_install", fixture.installation()).await);
+    let (_, token) = h.running(&bot, GATE).await;
+    let installed = tool(app, &token, "mcp_install", fixture.installation()).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
     fixture.control(json!({"next_ttl":1})).await;
-    connect(&app, &fixture, &bot).await;
+    connect(app, &fixture, &bot).await;
     fixture.control(json!({"next_ttl":3600})).await;
     let before = fixture.events().await;
     assert_eq!(
-        list_tools(&app, &token).await["result"]["tools"][0]["name"],
+        list_tools(app, &token).await["result"]["tools"][0]["name"],
         "fixture_read"
     );
     let proactive = fixture.events().await;
@@ -484,7 +437,7 @@ async fn expired_access_refreshes_once_and_revoked_consent_requires_owner_auth()
     );
     fixture.control(json!({"expire_access":true})).await;
     assert_eq!(
-        list_tools(&app, &token).await["result"]["tools"][0]["name"],
+        list_tools(app, &token).await["result"]["tools"][0]["name"],
         "fixture_read"
     );
     assert_eq!(
@@ -499,10 +452,10 @@ async fn expired_access_refreshes_once_and_revoked_consent_requires_owner_auth()
     fixture
         .control(json!({"expire_access":true,"revoked":true}))
         .await;
-    let required = list_tools(&app, &token).await;
+    let required = list_tools(app, &token).await;
     assert_eq!(required["status"], "auth_required");
     assert_eq!(
-        owner_connection(&app, &bot).await["status"],
+        owner_connection(app, &bot).await["status"],
         "reauth_required"
     );
     assert!(!required.to_string().contains("fixture-refresh-"));
@@ -512,11 +465,14 @@ async fn expired_access_refreshes_once_and_revoked_consent_requires_owner_auth()
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelled_consent_never_connects_or_exchanges_a_code() {
     let fixture = Fixture::start().await;
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("Cancelled consent").await;
-    let (_, token) = grant(&app, &bot, false).await;
-    result(&tool(&app, &token, "mcp_install", fixture.installation()).await);
-    let abandoned = authorize(&app, &bot).await;
+    let (_, token) = h.running(&bot, GATE).await;
+    let installed = tool(app, &token, "mcp_install", fixture.installation()).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
+    let abandoned = authorize(app, &bot).await;
     let abandoned_callback = fixture.browser_callback(&abandoned, false).await;
     let cleared = app
         .owner("DELETE", oauth_path(&bot, "").trim_end_matches('/'), None)
@@ -524,14 +480,14 @@ async fn cancelled_consent_never_connects_or_exchanges_a_code() {
     assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
     assert_eq!(cleared.body["status"], "disconnected");
     assert_eq!(
-        complete(&app, &bot, abandoned_callback).await.status,
+        complete(app, &bot, abandoned_callback).await.status,
         StatusCode::BAD_REQUEST
     );
-    let authorization = authorize(&app, &bot).await;
+    let authorization = authorize(app, &bot).await;
     let callback = fixture.browser_callback(&authorization, true).await;
-    let response = complete(&app, &bot, callback).await;
+    let response = complete(app, &bot, callback).await;
     assert!(response.status.is_client_error(), "{}", response.body);
-    assert_ne!(owner_connection(&app, &bot).await["status"], "connected");
+    assert_ne!(owner_connection(app, &bot).await["status"], "connected");
     assert!(
         !fixture
             .events()
@@ -544,19 +500,24 @@ async fn cancelled_consent_never_connects_or_exchanges_a_code() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unauthorized_mutation_is_not_replayed_after_token_refresh() {
     let fixture = Fixture::start().await;
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("Mutation checks").await;
-    let (_, token) = grant(&app, &bot, true).await;
-    result(&tool(&app, &token, "mcp_install", fixture.installation()).await);
-    connect(&app, &fixture, &bot).await;
+    let (_, token) = h.running(&bot, GATE).await;
+    let installed = tool(app, &token, "mcp_install", fixture.installation()).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
+    connect(app, &fixture, &bot).await;
     let arguments = json!({
         "id":"oauth-fixture", "method":"tools/call",
         "params":{"name":"fixture_read","arguments":{}}, "effect":"local"
     });
-    let first = result(&tool(&app, &token, "mcp_request", arguments.clone()).await);
+    let first = tool(app, &token, "mcp_request", arguments.clone())
+        .await
+        .result;
     assert_eq!(first["result"]["content"][0]["text"], "fixture-value");
     fixture.control(json!({"expire_access":true})).await;
-    let second = result(&tool(&app, &token, "mcp_request", arguments).await);
+    let second = tool(app, &token, "mcp_request", arguments).await.result;
     assert_eq!(second["status"], "auth_required");
     let events = fixture.events().await;
     assert_eq!(
@@ -585,13 +546,16 @@ async fn a_provider_advertising_hundreds_of_scopes_still_shows_the_sign_in_card(
     let fixture = Fixture::start().await;
     let scopes: Vec<String> = Vec::from_fn(250, |index| format!("resource_{index}:read"));
     fixture.control(json!({"scopes": scopes})).await;
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("Large scope list").await;
-    let (_, token) = grant(&app, &bot, false).await;
-    result(&tool(&app, &token, "mcp_install", fixture.installation()).await);
-    let required = list_tools(&app, &token).await;
+    let (_, token) = h.running(&bot, GATE).await;
+    let installed = tool(app, &token, "mcp_install", fixture.installation()).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
+    let required = list_tools(app, &token).await;
     assert_eq!(required["status"], "auth_required", "{required}");
     assert_eq!(required["parked"], true, "{required}");
-    let authorization = authorize(&app, &bot).await;
+    let authorization = authorize(app, &bot).await;
     assert_eq!(authorization["scopes"], json!(scopes));
 }

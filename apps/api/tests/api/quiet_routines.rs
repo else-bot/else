@@ -97,7 +97,7 @@ async fn start_run(h: &Harness, bot: &str, quiet: bool, task: &str) -> (Value, U
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_quiet_run_with_no_news_alerts_no_one() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let (_, run, token) = start_run(&h, &main, true, UPTIME).await;
     let before = shown_bot(&h.app, &main).await;
@@ -136,7 +136,7 @@ async fn a_quiet_run_with_no_news_alerts_no_one() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_quiet_run_that_asks_the_owner_still_reports() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let (_, run, token) = start_run(&h, &main, true, UPTIME).await;
     assert!(!no_news(&h.app, &token).await.error);
@@ -182,7 +182,7 @@ async fn a_quiet_run_that_asks_the_owner_still_reports() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn only_a_run_of_a_quiet_routine_can_end_with_no_news() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let (saved, run, token) = start_run(&h, &main, false, UPTIME).await;
     let refused = no_news(&h.app, &token).await;
@@ -229,7 +229,7 @@ async fn only_a_run_of_a_quiet_routine_can_end_with_no_news() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_quiet_run_that_fails_still_reports() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let task = format!("{GATE} [synthetic:fail] Check that example.com answers.");
     let (_, run, token) = start_run(&h, &main, true, &task).await;
@@ -248,7 +248,7 @@ async fn a_quiet_run_that_fails_still_reports() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_that_ran_an_allowed_action_cannot_end_with_no_news() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let task = format!("{GATE_EVERY_ATTEMPT} Delete merged branches on origin.");
     let (_, run, token) = start_run(&h, &main, true, &task).await;

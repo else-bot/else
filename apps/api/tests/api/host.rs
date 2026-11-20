@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use common::TestApp;
+use common::recorder::{GATE, harness};
 use else_api::grants::{DEFAULT_TTL, Tool};
 use else_api::providers::codex_home;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -743,23 +744,10 @@ async fn cancelling_metadata_export_kills_descendants_after_the_leader_exits() {
     .expect("cancelled exporter left a descendant running");
 }
 
-async fn hanging_turn(app: &TestApp, bot: &str) -> (Uuid, Uuid) {
-    let reply = app
-        .send(bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
-        .await;
-    let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    app.wait_turn(&turn.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-        .bind(turn)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    (turn, conversation)
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn task_grants_are_scoped_to_their_turn() {
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.main_bot().await;
     let other = app.create_bot("Other").await;
     let foreign = app
@@ -769,19 +757,10 @@ async fn task_grants_are_scoped_to_their_turn() {
         .await;
     let foreign_item = foreign.body["item"]["id"].as_str().unwrap().to_owned();
 
-    let (turn, conversation) = hanging_turn(&app, &bot).await;
-    let grants = &app.state.grants;
-    let token = grants
-        .issue(
-            bot.parse().unwrap(),
-            conversation,
-            turn,
-            vec![Tool::ReadHistory],
-            DEFAULT_TTL,
-        )
+    let (turn, token) = h.running(&bot, GATE).await;
+    let history = app
+        .call("GET", "/tools/v1/history", None, Some(&token))
         .await;
-
-    let history = tool(&app, "/tools/v1/history", Some(&token)).await;
     assert_eq!(history.status, StatusCode::OK);
     let texts: Vec<_> = history.body["items"]
         .as_array()
@@ -789,24 +768,24 @@ async fn task_grants_are_scoped_to_their_turn() {
         .iter()
         .map(|i| i["text"].clone())
         .collect();
-    assert_eq!(
-        texts,
-        vec![json!("[synthetic:hang]")],
-        "only its own conversation"
-    );
-    let forged = tool(
-        &app,
-        &format!("/tools/v1/history?bot_id={other}"),
-        Some(&token),
-    )
-    .await;
+    assert_eq!(texts, vec![json!(GATE)], "only its own conversation");
+    let forged = app
+        .call(
+            "GET",
+            &format!("/tools/v1/history?bot_id={other}"),
+            None,
+            Some(&token),
+        )
+        .await;
     assert_eq!(forged.status, StatusCode::BAD_REQUEST);
-    let item = tool(
-        &app,
-        &format!("/tools/v1/items/{foreign_item}"),
-        Some(&token),
-    )
-    .await;
+    let item = app
+        .call(
+            "GET",
+            &format!("/tools/v1/items/{foreign_item}"),
+            None,
+            Some(&token),
+        )
+        .await;
     assert_eq!(
         item.status,
         StatusCode::NOT_FOUND,
@@ -839,30 +818,28 @@ async fn task_grants_are_scoped_to_their_turn() {
         StatusCode::FORBIDDEN,
         "task grants cannot update settings"
     );
-    let with_owner = tool(&app, "/tools/v1/history", Some(common::TOKEN)).await;
+    let with_owner = app
+        .call("GET", "/tools/v1/history", None, Some(common::TOKEN))
+        .await;
     assert_eq!(with_owner.status, StatusCode::FORBIDDEN);
     assert_eq!(
-        tool(&app, "/tools/v1/history", Some("tg_forged"))
+        app.call("GET", "/tools/v1/history", None, Some("tg_forged"))
             .await
             .status,
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(
-        tool(&app, "/tools/v1/history", None).await.status,
+        app.call("GET", "/tools/v1/history", None, None)
+            .await
+            .status,
         StatusCode::UNAUTHORIZED
     );
 
-    let narrow = grants
-        .issue(
-            bot.parse().unwrap(),
-            conversation,
-            turn,
-            vec![],
-            DEFAULT_TTL,
-        )
-        .await;
+    let narrow = h.grant_with(turn, vec![]).await;
     assert_eq!(
-        tool(&app, "/tools/v1/history", Some(&narrow)).await.status,
+        app.call("GET", "/tools/v1/history", None, Some(&narrow))
+            .await
+            .status,
         StatusCode::FORBIDDEN
     );
 
@@ -874,57 +851,15 @@ async fn task_grants_are_scoped_to_their_turn() {
     )
     .await;
     assert_eq!(
-        tool(&app, "/tools/v1/history", Some(&token)).await.status,
+        app.call("GET", "/tools/v1/history", None, Some(&token))
+            .await
+            .status,
         StatusCode::UNAUTHORIZED
     );
 
     app.wait_turn(&turn.to_string(), &["interrupted"]).await;
-    let stale = grants
-        .issue(
-            bot.parse().unwrap(),
-            conversation,
-            turn,
-            vec![Tool::ReadHistory],
-            DEFAULT_TTL,
-        )
-        .await;
-    assert_eq!(
-        tool(&app, "/tools/v1/history", Some(&stale)).await.status,
-        StatusCode::UNAUTHORIZED
-    );
-
-    let (newer, conversation) = hanging_turn(&app, &bot).await;
-    let newer_grant = grants
-        .issue(
-            bot.parse().unwrap(),
-            conversation,
-            newer,
-            vec![Tool::ReadHistory],
-            DEFAULT_TTL,
-        )
-        .await;
-    let retry = app
-        .owner(
-            "POST",
-            &format!("/v1/bots/{bot}/cancel"),
-            Some(json!({ "request_id": stop_request })),
-        )
-        .await;
-    assert_eq!(retry.body["state"], "done");
-    assert_eq!(
-        tool(&app, "/tools/v1/history", Some(&newer_grant))
-            .await
-            .status,
-        StatusCode::OK
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn deleting_a_bot_revokes_its_grants() {
-    let app = TestApp::installed().await;
-    let bot = app.create_bot("Temp").await;
-    let (turn, conversation) = hanging_turn(&app, &bot).await;
-    let token = app
+    let conversation = h.inputs(turn).await[0].conversation_id;
+    let stale = app
         .state
         .grants
         .issue(
@@ -935,6 +870,36 @@ async fn deleting_a_bot_revokes_its_grants() {
             DEFAULT_TTL,
         )
         .await;
+    assert_eq!(
+        app.call("GET", "/tools/v1/history", None, Some(&stale))
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let (_, newer_grant) = h.running(&bot, GATE).await;
+    let retry = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{bot}/cancel"),
+            Some(json!({ "request_id": stop_request })),
+        )
+        .await;
+    assert_eq!(retry.body["state"], "done");
+    assert_eq!(
+        app.call("GET", "/tools/v1/history", None, Some(&newer_grant))
+            .await
+            .status,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_bot_revokes_its_grants() {
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
+    let bot = app.create_bot("Temp").await;
+    let (_, token) = h.running(&bot, GATE).await;
     assert_eq!(
         app.call("GET", "/tools/v1/history", None, Some(&token))
             .await
@@ -948,10 +913,6 @@ async fn deleting_a_bot_revokes_its_grants() {
             .status,
         StatusCode::UNAUTHORIZED
     );
-}
-
-async fn tool(app: &TestApp, path: &str, token: Option<&str>) -> common::Reply {
-    app.call("GET", path, None, token).await
 }
 
 #[cfg(target_os = "linux")]

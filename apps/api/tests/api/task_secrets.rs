@@ -6,10 +6,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use common::TestApp;
+use common::recorder::{GATE, Harness, harness, tool};
 use else_api::computers::{
     ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, RuntimeError, RuntimeState, Spec,
 };
-use else_api::grants::{DEFAULT_TTL, Tool};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -191,7 +191,7 @@ impl ComputerRuntime for Guest {
 }
 
 struct Setup {
-    app: TestApp,
+    h: Harness,
     guest: Arc<Guest>,
     manager: Arc<ComputerManager>,
 }
@@ -210,40 +210,8 @@ async fn setup() -> Setup {
         },
     ));
     manager.reconcile_startup().await.unwrap();
-    let registry = else_api::providers::Registry::new(vec![Arc::new(
-        else_api::providers::synthetic::Synthetic::new(Duration::from_millis(5)),
-    )]);
-    let app = TestApp::with_parts(db, 4, registry, Some(manager.clone())).await;
-    Setup {
-        app,
-        guest,
-        manager,
-    }
-}
-
-async fn grant(app: &TestApp, bot: &str) -> (Uuid, String) {
-    let reply = app
-        .send(bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
-        .await;
-    let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    app.wait_turn(&turn.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-        .bind(turn)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    let token = app
-        .state
-        .grants
-        .issue(
-            bot.parse().unwrap(),
-            conversation,
-            turn,
-            vec![Tool::Computer],
-            DEFAULT_TTL,
-        )
-        .await;
-    (turn, token)
+    let h = harness(TestApp::builder().db(db).computers(manager.clone())).await;
+    Setup { h, guest, manager }
 }
 
 /// Stop the bot's work, so the next message starts a turn of its own.
@@ -263,29 +231,10 @@ async fn stop(app: &TestApp, bot: &str, turn: Uuid) {
     .await;
 }
 
-async fn tool(app: &TestApp, token: &str, name: &str, arguments: Value) -> Value {
-    let reply = app
-        .call(
-            "POST",
-            "/tools/v1/mcp",
-            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                         "params": { "name": name, "arguments": arguments } })),
-            Some(token),
-        )
-        .await;
-    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
-    let result = reply.body["result"].clone();
-    let text = result["content"][0]["text"].as_str().unwrap_or_default();
-    if result["isError"] == true {
-        json!({ "error": text })
-    } else {
-        serde_json::from_str(text).unwrap()
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn secrets_are_write_only_encrypted_and_shared_by_every_bot() {
-    let Setup { app, .. } = setup().await;
+    let Setup { h, .. } = setup().await;
+    let app = &h.app;
     let bot = app.create_bot("Mailer").await;
     let other = app.create_bot("Other").await;
     let path = "/v1/task-secrets/smtp";
@@ -309,9 +258,11 @@ async fn secrets_are_write_only_encrypted_and_shared_by_every_bot() {
         .unwrap();
     assert!(!String::from_utf8_lossy(&stored).contains(PASSWORD));
     assert!(stored.starts_with(b"age-encryption.org/v1"));
-    let (_, other_token) = grant(&app, &other).await;
+    let (_, other_token) = h.running(&other, GATE).await;
     assert_eq!(
-        tool(&app, &other_token, "computer_secrets", json!({})).await["secrets"],
+        tool(app, &other_token, "computer_secrets", json!({}))
+            .await
+            .result["secrets"],
         json!([{ "name": "smtp", "description": "", "website": null,
                  "env": ["SMTP_PASSWORD", "SMTP_USER"], "last_used_at": null }]),
         "another bot sees the same secret"
@@ -326,7 +277,7 @@ async fn secrets_are_write_only_encrypted_and_shared_by_every_bot() {
             .await;
         assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{env}");
     }
-    let (_, token) = grant(&app, &bot).await;
+    let (_, token) = h.running(&bot, GATE).await;
     let as_task = app
         .call("GET", "/v1/task-secrets", None, Some(&token))
         .await;
@@ -343,7 +294,8 @@ async fn secrets_are_write_only_encrypted_and_shared_by_every_bot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
-    let Setup { app, guest, .. } = setup().await;
+    let Setup { h, guest, .. } = setup().await;
+    let app = &h.app;
     let bot = app.create_bot("Mailer").await;
     let put = app
         .owner(
@@ -353,33 +305,34 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
         )
         .await;
     assert_eq!(put.status, StatusCode::CREATED);
-    let (_, token) = grant(&app, &bot).await;
+    let (_, token) = h.running(&bot, GATE).await;
 
-    let listed = tool(&app, &token, "computer_secrets", json!({})).await;
+    let listed = tool(app, &token, "computer_secrets", json!({}))
+        .await
+        .result;
     assert_eq!(listed["secrets"][0]["env"], json!(["SMTP_PASSWORD"]));
     let unknown = tool(
-        &app,
+        app,
         &token,
         "computer_run",
         json!({ "command": "true", "secrets": ["missing"], "effect": "local" }),
     )
-    .await;
+    .await
+    .result;
     assert!(
-        unknown["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("SECRET_UNKNOWN"),
+        unknown.as_str().unwrap().starts_with("SECRET_UNKNOWN"),
         "{unknown}"
     );
 
     let ran = tool(
-        &app,
+        app,
         &token,
         "computer_run",
         json!({ "command": "./send.sh", "secrets": ["smtp"], "effect": "local",
                 "purpose": "Send the report" }),
     )
-    .await;
+    .await
+    .result;
     assert_eq!(
         ran["stdout"], "SMTP_PASSWORD=[secret SMTP_PASSWORD]",
         "{ran}"
@@ -406,13 +359,14 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
     );
 
     let job = tool(
-        &app,
+        app,
         &token,
         "computer_job_start",
         json!({ "command": "./send.sh", "secrets": ["smtp"], "effect": "local",
                 "purpose": "Send the report" }),
     )
-    .await;
+    .await
+    .result;
     let id: Uuid = job["job_id"].as_str().unwrap().parse().unwrap();
     let row: Value = sqlx::query_scalar("SELECT json_object('command', command, 'output_tail', output_tail, 'error', error, 'secrets', json(secrets)) FROM guest_jobs WHERE id = ?1")
         .bind(id)
@@ -429,13 +383,14 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
     assert!(launch.args.iter().all(|a| !a.contains(PASSWORD)));
     assert!(String::from_utf8_lossy(&launch.input).contains(&encoded));
     let failed = tool(
-        &app,
+        app,
         &token,
         "computer_job_start",
         json!({ "command": "LAUNCH_ERROR", "secrets": ["smtp"], "effect": "local",
                 "purpose": "Send the report" }),
     )
-    .await;
+    .await
+    .result;
     let id: Uuid = failed["job_id"].as_str().unwrap().parse().unwrap();
     let error: String = sqlx::query_scalar("SELECT error FROM guest_jobs WHERE id = ?1")
         .bind(id)
@@ -455,25 +410,22 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_work_ends_a_running_foreground_command() {
-    let Setup {
-        app,
-        guest,
-        manager,
-    } = setup().await;
-    let bot = app.create_bot("Worker").await;
-    let (_, token) = grant(&app, &bot).await;
-    let app = Arc::new(app);
+    let Setup { h, guest, manager } = setup().await;
+    let bot = h.app.create_bot("Worker").await;
+    let (_, token) = h.running(&bot, GATE).await;
+    let h = Arc::new(h);
+    let app = &h.app;
     let call = {
-        let app = app.clone();
+        let h = h.clone();
         let token = token.clone();
         tokio::spawn(async move {
             tool(
-                &app,
+                &h.app,
                 &token,
                 "computer_run",
                 json!({ "command": "HANG for a long time", "timeout_secs": 300, "effect": "local" }),
             )
-            .await
+            .await.result
         })
     };
     tokio::time::timeout(Duration::from_secs(10), guest.started.notified())
@@ -557,26 +509,24 @@ async fn stop_work_ends_a_running_foreground_command() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn one_stalled_kill_does_not_delay_another_bots_stop() {
-    let Setup {
-        app,
-        guest,
-        manager,
-    } = setup().await;
-    let slow = app.create_bot("Slow").await;
-    let fast = app.create_bot("Fast").await;
-    let app = Arc::new(app);
+    let Setup { h, guest, manager } = setup().await;
+    let slow = h.app.create_bot("Slow").await;
+    let fast = h.app.create_bot("Fast").await;
+    let h = Arc::new(h);
+    let app = &h.app;
     let mut calls = Vec::new();
     for bot in [&slow, &fast] {
-        let (_, token) = grant(&app, bot).await;
-        let app = app.clone();
+        let (_, token) = h.running(bot, GATE).await;
+        let h = h.clone();
         calls.push(tokio::spawn(async move {
             tool(
-                &app,
+                &h.app,
                 &token,
                 "computer_run",
                 json!({ "command": "HANG", "timeout_secs": 300, "effect": "local" }),
             )
             .await
+            .result
         }));
         tokio::time::timeout(Duration::from_secs(10), guest.started.notified())
             .await
@@ -626,26 +576,24 @@ async fn one_stalled_kill_does_not_delay_another_bots_stop() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() {
-    let Setup {
-        app,
-        guest,
-        manager,
-    } = setup().await;
-    let bot = app.create_bot("Clicker").await;
+    let Setup { h, guest, manager } = setup().await;
+    let bot = h.app.create_bot("Clicker").await;
     let bot_id: Uuid = bot.parse().unwrap();
-    let (_, token) = grant(&app, &bot).await;
-    let app = Arc::new(app);
+    let (_, token) = h.running(&bot, GATE).await;
+    let h = Arc::new(h);
+    let app = &h.app;
     let call = |command: &'static str| {
-        let app = app.clone();
+        let h = h.clone();
         let token = token.clone();
         tokio::spawn(async move {
             tool(
-                &app,
+                &h.app,
                 &token,
                 "computer_run",
                 json!({ "command": command, "timeout_secs": 300, "effect": "local" }),
             )
             .await
+            .result
         })
     };
     let kills = || {
@@ -724,10 +672,7 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
         .unwrap()
         .unwrap();
     assert!(
-        refused["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("STOPPED"),
+        refused.as_str().unwrap_or_default().contains("STOPPED"),
         "{refused}"
     );
     assert!(
@@ -744,32 +689,35 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
 /// with the startup error and say how to inspect it.
 #[tokio::test(flavor = "multi_thread")]
 async fn shell_commands_run_while_the_desktop_fails_to_start() {
-    let Setup { app, guest, .. } = setup().await;
+    let Setup { h, guest, .. } = setup().await;
+    let app = &h.app;
     let bot = app.create_bot("Fixer").await;
-    let (_, token) = grant(&app, &bot).await;
+    let (_, token) = h.running(&bot, GATE).await;
     guest
         .fail_desktop
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
     let ran = tool(
-        &app,
+        app,
         &token,
         "computer_run",
         json!({ "command": "pgrep -af chromium", "effect": "local" }),
     )
-    .await;
+    .await
+    .result;
     assert_eq!(ran["exit_code"], 0, "{ran}");
     let job = tool(
-        &app,
+        app,
         &token,
         "computer_job_start",
         json!({ "command": "chromium --version", "effect": "local", "purpose": "Chromium version" }),
     )
-    .await;
+    .await.result;
     assert!(job["job_id"].is_string(), "{job}");
 
-    let shot = tool(&app, &token, "computer_screenshot", json!({})).await;
-    let refusal: Value = serde_json::from_str(shot["error"].as_str().unwrap()).unwrap();
+    let shot = tool(app, &token, "computer_screenshot", json!({})).await;
+    assert!(shot.error, "{}", shot.body);
+    let refusal = shot.result;
     let error = refusal["error"].as_str().unwrap();
     assert!(
         error.starts_with("DESKTOP_FAILED:") && error.contains("Xvfb did not start"),
@@ -785,7 +733,8 @@ async fn shell_commands_run_while_the_desktop_fails_to_start() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn category_changes_leave_guest_jobs_running() {
-    let Setup { app, manager, .. } = setup().await;
+    let Setup { h, manager, .. } = setup().await;
+    let app = &h.app;
     let bot = app.create_bot("Jobs").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let else_api::computers::jobs::Started::Job(job) = manager
@@ -839,9 +788,10 @@ async fn category_changes_leave_guest_jobs_running() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn input_allowances_survive_counter_cleanup() {
-    let Setup { app, manager, .. } = setup().await;
+    let Setup { h, manager, .. } = setup().await;
+    let app = &h.app;
     let bot = app.create_bot("Input").await;
-    let (turn, _) = grant(&app, &bot).await;
+    let (turn, _) = h.running(&bot, GATE).await;
     for expected in 1..=41 {
         assert_eq!(manager.count_input(turn).await.unwrap(), expected);
     }
@@ -964,15 +914,17 @@ async fn upgrading_keeps_every_bots_secrets_under_distinct_shared_names() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_browser_approval_card_names_the_control_a_snapshot_ref_points_at() {
-    let Setup { app, .. } = setup().await;
+    let Setup { h, .. } = setup().await;
+    let app = &h.app;
     let bot = app.create_bot("Browser").await;
     // A pending card parks its attempt, so each call gets a fresh turn,
     // stopped once its card is read.
     let card = |args: Value| {
-        let (app, bot) = (&app, &bot);
+        let (h, bot) = (&h, &bot);
         async move {
-            let (turn, token) = grant(app, bot).await;
-            let question = tool(app, &token, "computer_browser", args).await;
+            let app = &h.app;
+            let (turn, token) = h.running(bot, GATE).await;
+            let question = tool(app, &token, "computer_browser", args).await.result;
             let id: Uuid = question["question_id"].as_str().unwrap().parse().unwrap();
             let context = sqlx::query_scalar::<_, String>(
                 "SELECT context FROM owner_questions WHERE id = ?1",
@@ -991,19 +943,20 @@ async fn a_browser_approval_card_names_the_control_a_snapshot_ref_points_at() {
         "Browser: click @kqvzb5",
         "before a snapshot the ref is shown as given"
     );
-    let (turn, token) = grant(&app, &bot).await;
+    let (turn, token) = h.running(&bot, GATE).await;
     let snapshot = tool(
-        &app,
+        app,
         &token,
         "computer_browser",
         json!({ "action": "snapshot" }),
     )
-    .await;
+    .await
+    .result;
     assert!(
         snapshot["snapshot"].as_str().unwrap().contains("@kqvzb5"),
         "{snapshot}"
     );
-    stop(&app, &bot, turn).await;
+    stop(app, &bot, turn).await;
     assert_eq!(
         card(click("@kqvzb5")).await,
         "Browser: click button \"Delete project\" (@kqvzb5)"
@@ -1025,36 +978,40 @@ async fn put_login(app: &TestApp, name: &str, website: Option<&str>) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_vault_is_searched_edited_and_revealed_to_the_owner_only() {
-    let Setup { app, .. } = setup().await;
+    let Setup { h, .. } = setup().await;
+    let app = &h.app;
     let bot = app.create_bot("Poster").await;
-    put_login(&app, "x-login", Some("https://www.x.com/home")).await;
-    let (_, token) = grant(&app, &bot).await;
+    put_login(app, "x-login", Some("https://www.x.com/home")).await;
+    let (_, token) = h.running(&bot, GATE).await;
 
     let found = tool(
-        &app,
+        app,
         &token,
         "computer_secrets",
         json!({ "query": "https://mobile.x.com/i/flow/login" }),
     )
-    .await;
+    .await
+    .result;
     assert_eq!(found["secrets"][0]["name"], "x-login", "{found}");
     assert_eq!(found["secrets"][0]["website"], "x.com");
     assert!(!found.to_string().contains(PASSWORD));
     let by_words = tool(
-        &app,
+        app,
         &token,
         "computer_secrets",
         json!({ "query": "X account" }),
     )
-    .await;
+    .await
+    .result;
     assert_eq!(by_words["secrets"].as_array().unwrap().len(), 1);
     let none = tool(
-        &app,
+        app,
         &token,
         "computer_secrets",
         json!({ "query": "gmail.com" }),
     )
-    .await;
+    .await
+    .result;
     assert_eq!(none["secrets"], json!([]));
     assert!(none["next"].as_str().unwrap().contains("request_secret"));
 
@@ -1146,11 +1103,12 @@ async fn the_vault_is_searched_edited_and_revealed_to_the_owner_only() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_vault_login_is_typed_from_stdin_only_into_its_website_and_never_shown() {
-    let Setup { app, guest, .. } = setup().await;
+    let Setup { h, guest, .. } = setup().await;
+    let app = &h.app;
     let bot = app.create_bot("Poster").await;
-    put_login(&app, "x-login", Some("x.com")).await;
-    put_login(&app, "no-site", None).await;
-    let (_, token) = grant(&app, &bot).await;
+    put_login(app, "x-login", Some("x.com")).await;
+    put_login(app, "no-site", None).await;
+    let (_, token) = h.running(&bot, GATE).await;
     let typed = |secret: &str, field: Option<&str>| {
         let mut args = json!({ "action": "type", "selector": "#password", "secret": secret,
                                "effect": "local" });
@@ -1160,14 +1118,15 @@ async fn a_vault_login_is_typed_from_stdin_only_into_its_website_and_never_shown
         args
     };
 
-    let result = tool(
-        &app,
+    let filled = tool(
+        app,
         &token,
         "computer_browser",
         typed("x-login", Some("PASSWORD")),
     )
     .await;
-    assert!(result.get("error").is_none(), "{result}");
+    assert!(!filled.error, "{}", filled.body);
+    let result = filled.result;
     assert_eq!(
         result["added"],
         json!(["Signed in as [secret PASSWORD]"]),
@@ -1193,24 +1152,21 @@ async fn a_vault_login_is_typed_from_stdin_only_into_its_website_and_never_shown
             .ends_with(&["type-secret".into(), "#password".into(), "x.com".into()])
     );
 
-    let later = tool(
-        &app,
-        &token,
-        "computer_browser",
-        json!({ "action": "text" }),
-    )
-    .await;
+    let later = tool(app, &token, "computer_browser", json!({ "action": "text" }))
+        .await
+        .result;
     assert_eq!(
         later["text"], "Signed in as [secret USERNAME] with [secret PASSWORD]",
         "a later read of the same site hides what was filled: {later}"
     );
     let echoed = tool(
-        &app,
+        app,
         &token,
         "computer_browser",
         json!({ "action": "click", "selector": "#echoes", "effect": "local" }),
     )
-    .await;
+    .await
+    .result;
     assert!(
         !echoed.to_string().contains(PASSWORD),
         "an error without a page URL is redacted for what this bot filled: {echoed}"
@@ -1231,11 +1187,8 @@ async fn a_vault_login_is_typed_from_stdin_only_into_its_website_and_never_shown
         (typed("x-login", None), "secret needs field"),
         (typed("missing", Some("PASSWORD")), "SECRET_UNKNOWN"),
     ] {
-        let refused = tool(&app, &token, "computer_browser", args).await;
-        assert!(
-            refused["error"].as_str().unwrap().contains(code),
-            "{refused}"
-        );
+        let refused = tool(app, &token, "computer_browser", args).await.result;
+        assert!(refused.as_str().unwrap().contains(code), "{refused}");
     }
 
     let listed = app.owner("GET", "/v1/task-secrets", None).await;
@@ -1249,7 +1202,7 @@ async fn a_vault_login_is_typed_from_stdin_only_into_its_website_and_never_shown
     assert_eq!(entry["last_used"]["use"], "browser", "{entry}");
     assert_eq!(entry["last_used"]["bot_name"], "Poster");
     tool(
-        &app,
+        app,
         &token,
         "computer_run",
         json!({ "command": "true", "secrets": ["x-login"], "effect": "local" }),

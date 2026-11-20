@@ -177,7 +177,7 @@ fn messages_path(account: Uuid, uid: u32) -> String {
 #[tokio::test]
 async fn the_owner_reads_the_email_behind_a_mail_turn_and_its_bot_cannot() {
     let mailbox = Arc::new(Mailbox::default());
-    let h = recorder::harness_with(4, Some(mailbox.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(mailbox.clone())).await;
     let bot: Uuid = h.app.main_bot().await.parse().unwrap();
     let account = account(&h.app).await;
     store::set_permissions(&h.app.db.pool, account.id, bot, &permissions())
@@ -259,7 +259,7 @@ async fn set_active(h: &recorder::Harness, account: Uuid, active: bool) -> commo
 #[tokio::test]
 async fn emails_the_bot_never_read_share_one_signed_in_session() {
     let mailbox = Arc::new(Mailbox::default());
-    let h = recorder::harness_with(4, Some(mailbox.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(mailbox.clone())).await;
     let account = account(&h.app).await;
     for uid in [9, 11] {
         let view = h
@@ -275,7 +275,7 @@ async fn emails_the_bot_never_read_share_one_signed_in_session() {
 #[tokio::test]
 async fn the_owner_reads_while_a_bot_command_holds_the_account() {
     let mailbox = Arc::new(Mailbox::default());
-    let h = recorder::harness_with(4, Some(mailbox.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(mailbox.clone())).await;
     let bot: Uuid = h.app.main_bot().await.parse().unwrap();
     let account = account(&h.app).await;
     store::set_permissions(&h.app.db.pool, account.id, bot, &permissions())
@@ -310,7 +310,7 @@ async fn the_owner_reads_while_a_bot_command_holds_the_account() {
 #[tokio::test]
 async fn pausing_an_inbox_drops_its_cached_email_and_session() {
     let mailbox = Arc::new(Mailbox::default());
-    let h = recorder::harness_with(4, Some(mailbox.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(mailbox.clone())).await;
     let account = account(&h.app).await;
     h.app
         .owner("GET", &messages_path(account.id, 9), None)
@@ -334,7 +334,7 @@ async fn pausing_an_inbox_drops_its_cached_email_and_session() {
 #[tokio::test]
 async fn a_sign_in_rejected_while_reading_marks_the_inbox_and_drops_its_mail() {
     let mailbox = Arc::new(Mailbox::default());
-    let h = recorder::harness_with(4, Some(mailbox.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(mailbox.clone())).await;
     let account = account(&h.app).await;
     h.app
         .owner("GET", &messages_path(account.id, 9), None)
@@ -381,7 +381,7 @@ async fn a_sign_in_rejected_while_reading_marks_the_inbox_and_drops_its_mail() {
 #[tokio::test]
 async fn the_owner_opens_an_email_the_bot_already_read_without_fetching_it_again() {
     let mailbox = Arc::new(Mailbox::default());
-    let h = recorder::harness_with(4, Some(mailbox.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(mailbox.clone())).await;
     let bot: Uuid = h.app.main_bot().await.parse().unwrap();
     let account = account(&h.app).await;
     store::set_permissions(&h.app.db.pool, account.id, bot, &permissions())
@@ -430,7 +430,7 @@ async fn the_owner_opens_an_email_the_bot_already_read_without_fetching_it_again
 #[tokio::test]
 async fn a_rejected_sign_in_is_reported_even_for_a_cached_email() {
     let mailbox = Arc::new(Mailbox::default());
-    let h = recorder::harness_with(4, Some(mailbox.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(mailbox.clone())).await;
     let account = account(&h.app).await;
     let first = h
         .app
@@ -456,7 +456,7 @@ async fn a_rejected_sign_in_is_reported_even_for_a_cached_email() {
 #[tokio::test]
 async fn the_reader_says_why_a_message_cannot_be_shown() {
     let mailbox = Arc::new(Mailbox::default());
-    let h = recorder::harness_with(4, Some(mailbox.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(mailbox.clone())).await;
     let account = account(&h.app).await;
 
     let gone = h
@@ -518,7 +518,7 @@ fn arrived() -> MessageRef {
 
 /// A mail turn on an inbox the main bot can read and change.
 async fn mail_turn(mailbox: &Arc<Mailbox>) -> (recorder::Harness, Uuid, Account, Uuid) {
-    let h = recorder::harness_with(4, Some(mailbox.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(mailbox.clone())).await;
     let bot: Uuid = h.app.main_bot().await.parse().unwrap();
     let account = account(&h.app).await;
     store::set_permissions(&h.app.db.pool, account.id, bot, &permissions())

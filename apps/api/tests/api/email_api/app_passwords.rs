@@ -30,7 +30,7 @@ async fn parked_card(app: &TestApp, token: &str, args: Value) -> (String, Value)
 #[tokio::test(flavor = "multi_thread")]
 async fn an_icloud_card_takes_an_app_password_and_reopens_in_the_same_turn_when_apple_rejects_it() {
     let inbox = Arc::new(QuietInbox::default());
-    let h = recorder::harness_with(4, Some(inbox.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(inbox.clone())).await;
     let app = &h.app;
     let bot = app.main_bot().await;
     let approve = |path: String| async move {
@@ -203,7 +203,7 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_in_the_same_turn_when_
 #[tokio::test(flavor = "multi_thread")]
 async fn a_revoked_inbox_password_reopens_the_card_until_a_sign_in_succeeds() {
     let inbox = Arc::new(QuietInbox::default());
-    let h = recorder::harness_with(4, Some(inbox.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(inbox.clone())).await;
     let app = &h.app;
     let bot = app.main_bot().await;
     let (_, token) = h.running(&bot, GATE).await;
@@ -278,7 +278,7 @@ async fn a_revoked_inbox_password_reopens_the_card_until_a_sign_in_succeeds() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_scan_that_signed_in_before_revocation_cannot_hide_the_rejection() {
     let inbox = Arc::new(QuietInbox::default());
-    let h = recorder::harness_with(4, Some(inbox.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(inbox.clone())).await;
     let app = &h.app;
     let bot = app.main_bot().await;
     let (_, token) = h.running(&bot, GATE).await;

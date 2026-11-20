@@ -3,7 +3,7 @@ use crate::common;
 use axum::http::StatusCode;
 use common::TestApp;
 use common::recorder::{GATE, GATE_EVERY_ATTEMPT, harness, tool};
-use else_api::grants::{DEFAULT_TTL, Tool};
+use else_api::grants::Tool;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -41,7 +41,7 @@ fn update(section: &str, content: &str, words: &str) -> Value {
 
 #[tokio::test]
 async fn a_bot_saves_a_rule_from_the_owner_and_reads_it_verbatim_next_turn() {
-    let h = harness(2).await;
+    let h = harness(common::TestApp::builder().max_active(2)).await;
     let main = h.app.main_bot().await;
     let (turn, token) = h.running(&main, GATE).await;
 
@@ -136,7 +136,7 @@ async fn a_bot_saves_a_rule_from_the_owner_and_reads_it_verbatim_next_turn() {
 
 #[tokio::test]
 async fn a_saved_rule_points_the_bot_at_its_enabled_routines() {
-    let h = harness(2).await;
+    let h = harness(common::TestApp::builder().max_active(2)).await;
     let main = h.app.main_bot().await;
     let (turn, token) = h.running(&main, GATE).await;
     let without = tool(
@@ -214,7 +214,7 @@ async fn a_saved_rule_points_the_bot_at_its_enabled_routines() {
 
 #[tokio::test]
 async fn the_owner_restores_an_earlier_version_or_the_empty_file() {
-    let h = harness(2).await;
+    let h = harness(common::TestApp::builder().max_active(2)).await;
     let main = h.app.main_bot().await;
     let (turn, token) = h.running(&main, GATE).await;
     for (content, words) in [(OLD_RULE, "first"), (NEW_RULE, "second")] {
@@ -319,7 +319,7 @@ fn undone(row: &Value) -> Option<&Value> {
 
 #[tokio::test]
 async fn undoing_a_rule_change_marks_its_row_undone_live_and_after_reload() {
-    let h = harness(2).await;
+    let h = harness(common::TestApp::builder().max_active(2)).await;
     let main = h.app.main_bot().await;
     let (turn, token) = h.running(&main, GATE).await;
     for (section, content) in [
@@ -425,7 +425,7 @@ async fn undoing_a_rule_change_marks_its_row_undone_live_and_after_reload() {
 
 #[tokio::test]
 async fn a_cleared_file_still_tells_the_next_turn_that_no_rules_apply() {
-    let h = harness(2).await;
+    let h = harness(common::TestApp::builder().max_active(2)).await;
     let main = h.app.main_bot().await;
     let (turn, token) = h.running(&main, GATE).await;
     let saved = tool(
@@ -458,7 +458,7 @@ async fn a_cleared_file_still_tells_the_next_turn_that_no_rules_apply() {
 
 #[tokio::test]
 async fn delegated_tasks_and_routine_runs_cannot_edit_rules() {
-    let h = harness(2).await;
+    let h = harness(common::TestApp::builder().max_active(2)).await;
     let main = h.app.main_bot().await;
     let worker = h.app.create_bot("Work").await;
     let (root, token) = h.running(&main, GATE).await;
@@ -481,19 +481,7 @@ async fn delegated_tasks_and_routine_runs_cannot_edit_rules() {
     let denied = tool(&h.app, &child_token, "rules_update", args.clone()).await;
     assert_eq!(denied.status, StatusCode::FORBIDDEN);
 
-    let conversation = h.inputs(child).await[0].conversation_id;
-    let forged = h
-        .app
-        .state
-        .grants
-        .issue(
-            worker.parse().unwrap(),
-            conversation,
-            child,
-            vec![Tool::Rules],
-            DEFAULT_TTL,
-        )
-        .await;
+    let forged = h.grant_with(child, vec![Tool::Rules]).await;
     let refused = tool(&h.app, &forged, "rules_update", args).await;
     assert_eq!(refused.code(), "NOT_ALLOWED");
     assert_eq!(rules(&h.app, &worker).await["version"], 0);
@@ -503,7 +491,7 @@ async fn delegated_tasks_and_routine_runs_cannot_edit_rules() {
 
 #[tokio::test]
 async fn an_owner_answer_lets_the_delegated_bot_save_its_rule_in_the_owners_words() {
-    let h = harness(2).await;
+    let h = harness(common::TestApp::builder().max_active(2)).await;
     let manager = h.app.main_bot().await;
     let scout = h.app.create_bot("Scout").await;
     let (root, token) = h.running(&manager, GATE_EVERY_ATTEMPT).await;
@@ -592,7 +580,7 @@ async fn an_owner_answer_lets_the_delegated_bot_save_its_rule_in_the_owners_word
 
 #[tokio::test]
 async fn invalid_rules_are_refused_without_a_version() {
-    let h = harness(2).await;
+    let h = harness(common::TestApp::builder().max_active(2)).await;
     let main = h.app.main_bot().await;
     let (turn, token) = h.running(&main, GATE).await;
     for args in [

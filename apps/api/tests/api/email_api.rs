@@ -117,7 +117,7 @@ async fn microsoft_desktop_sign_in_uses_public_client_pkce_and_outlook_scopes() 
 
 #[tokio::test]
 async fn desktop_oauth_can_choose_google_account_and_cancel_owner_only() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let bot = h.app.main_bot().await;
     let (_, task_token) = h.running(&bot, GATE).await;
     let start = h.app.owner("POST", "/v1/connectors/email/oauth/start", Some(json!({
@@ -169,7 +169,8 @@ async fn desktop_oauth_can_choose_google_account_and_cancel_owner_only() {
 
 #[tokio::test]
 async fn owner_can_connect_pause_replace_credentials_and_disconnect_privately() {
-    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+    let h =
+        recorder::harness(common::TestApp::builder().mail(Arc::new(QuietInbox::default()))).await;
     let app = &h.app;
     let config = config();
     let rejected = app
@@ -274,7 +275,7 @@ async fn owner_can_connect_pause_replace_credentials_and_disconnect_privately() 
 
 #[tokio::test]
 async fn owner_routes_never_return_credentials_and_task_tokens_cannot_manage_accounts() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let bot = h.app.main_bot().await;
     let (_, token) = h.running(&bot, GATE).await;
     let account = account(&h.app).await;
@@ -334,7 +335,7 @@ async fn owner_routes_never_return_credentials_and_task_tokens_cannot_manage_acc
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_bot_sets_a_mail_trigger_the_owner_approved_and_the_owner_pauses_or_deletes_it() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let account = account(&h.app).await;
     let bot = h.app.create_bot("Mail helper").await;
     let triggers = || async {
@@ -468,7 +469,7 @@ async fn a_bot_sets_a_mail_trigger_the_owner_approved_and_the_owner_pauses_or_de
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_longest_trigger_instructions_fit_the_approval_card() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let account = account(&h.app).await;
     let bot = h.app.create_bot("Mail helper").await;
     let (turn, token) = h.running(&bot, GATE).await;
@@ -494,7 +495,7 @@ async fn the_longest_trigger_instructions_fit_the_approval_card() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delegated_task_cannot_change_mail_triggers() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let account = account(&h.app).await;
     let main = h.app.main_bot().await;
     let (root, token) = h
@@ -548,7 +549,7 @@ async fn a_delegated_task_cannot_change_mail_triggers() {
 
 #[tokio::test]
 async fn accounts_are_available_to_bots_created_later_without_waking_them() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let account = account(&h.app).await;
     let bot = h.app.create_bot("Mail helper").await;
     let (_, token) = h.running(&bot, GATE).await;
@@ -596,7 +597,7 @@ async fn accounts_are_available_to_bots_created_later_without_waking_them() {
 
 #[tokio::test]
 async fn introduction_leaves_busy_work_running_and_can_be_retried_when_idle() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let bot = h.app.main_bot().await;
     let account = account(&h.app).await;
     let (running, _) = h.running(&bot, GATE).await;
@@ -633,7 +634,7 @@ async fn introduction_leaves_busy_work_running_and_can_be_retried_when_idle() {
 
 #[tokio::test]
 async fn introduction_is_private_idempotent_and_reaches_the_model_and_history() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let bot = h.app.main_bot().await;
     let account = account(&h.app).await;
     let path = format!("/v1/connectors/email/accounts/{}/introduction", account.id);
@@ -804,7 +805,7 @@ impl MailTransport for QuietInbox {
 #[tokio::test]
 async fn quiet_watchers_survive_bot_commands_and_never_queue_empty_turns() {
     let transport = Arc::new(QuietInbox::default());
-    let h = recorder::harness_with(4, Some(transport.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(transport.clone())).await;
     let bot: Uuid = h.app.main_bot().await.parse().unwrap();
     let (turn, _) = h.running(&bot.to_string(), GATE).await;
     let account = account(&h.app).await;
@@ -843,7 +844,7 @@ async fn a_scan_that_began_before_a_rejection_never_reports_connected() {
 async fn scan_then_rejection(already_rejected: bool) {
     let inbox = Arc::new(QuietInbox::default());
     inbox.hold_scan.store(true, Ordering::SeqCst);
-    let h = recorder::harness_with(4, Some(inbox.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(inbox.clone())).await;
     let account = account(&h.app).await;
     let reject = || async {
         store::set_health(
@@ -929,7 +930,8 @@ impl MailTransport for Transport {
 #[tokio::test]
 async fn duplicate_and_uncertain_send_retries_never_repeat_transport_effects() {
     for uncertain in [false, true] {
-        let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+        let h = recorder::harness(common::TestApp::builder().mail(Arc::new(QuietInbox::default())))
+            .await;
         let bot: Uuid = h.app.main_bot().await.parse().unwrap();
         let (turn, _) = h.running(&bot.to_string(), GATE).await;
         let account = account(&h.app).await;
@@ -1001,7 +1003,8 @@ async fn duplicate_and_uncertain_send_retries_never_repeat_transport_effects() {
 
 #[tokio::test]
 async fn an_action_recovery_settled_first_reports_the_recorded_receipt() {
-    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+    let h =
+        recorder::harness(common::TestApp::builder().mail(Arc::new(QuietInbox::default()))).await;
     let bot: Uuid = h.app.main_bot().await.parse().unwrap();
     let (turn, _) = h.running(&bot.to_string(), GATE).await;
     let account = account(&h.app).await;
@@ -1044,7 +1047,8 @@ async fn an_action_recovery_settled_first_reports_the_recorded_receipt() {
 
 #[tokio::test]
 async fn store_refusals_reach_the_bot_under_their_own_codes() {
-    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+    let h =
+        recorder::harness(common::TestApp::builder().mail(Arc::new(QuietInbox::default()))).await;
     let bot: Uuid = h.app.main_bot().await.parse().unwrap();
     let (turn, _) = h.running(&bot.to_string(), GATE).await;
     let account = account(&h.app).await;
@@ -1185,7 +1189,7 @@ async fn mail_event_origin_removes_computer_authority() {
         uncertain: false,
         recovers: None,
     });
-    let h = recorder::harness_with(4, Some(transport.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(transport.clone())).await;
     let bot: Uuid = h.app.main_bot().await.parse().unwrap();
     let account = account(&h.app).await;
     store::set_permissions(&h.app.db.pool, account.id, bot, &permissions())
@@ -1298,7 +1302,7 @@ async fn mail_event_origin_removes_computer_authority() {
 /// bot's memory or mail, which the email could then have read back.
 #[tokio::test]
 async fn a_mail_event_hands_a_notice_to_another_bot_without_its_memory_or_mail() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let inbox: Uuid = h.app.main_bot().await.parse().unwrap();
     let marketing = h.app.create_bot("Marketing Manager").await;
     let marketing_id: Uuid = marketing.parse().unwrap();
@@ -1431,7 +1435,7 @@ async fn a_mail_event_drafts_a_reply_the_owner_approves_in_a_card() {
         uncertain: false,
         recovers: None,
     });
-    let h = recorder::harness_with(4, Some(transport.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(transport.clone())).await;
     let bot = h.app.main_bot().await;
     let account = account(&h.app).await;
     store::set_permissions(
@@ -1732,7 +1736,8 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_bot_asks_the_owner_to_sign_in_to_an_inbox_from_chat() {
-    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+    let h =
+        recorder::harness(common::TestApp::builder().mail(Arc::new(QuietInbox::default()))).await;
     let app = &h.app;
     let bot = app.main_bot().await;
     let (turn, token) = h
@@ -1937,7 +1942,8 @@ async fn inbox_card(h: &recorder::Harness) -> (String, String) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_inbox_card_wakes_no_bot_when_its_inbox_is_ambiguous() {
-    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+    let h =
+        recorder::harness(common::TestApp::builder().mail(Arc::new(QuietInbox::default()))).await;
     let (bot, path) = inbox_card(&h).await;
     let mut ids = vec![];
     for address in ["first@gmail.com", "second@gmail.com"] {
@@ -1968,7 +1974,8 @@ async fn an_inbox_card_wakes_no_bot_when_its_inbox_is_ambiguous() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_inbox_card_never_restores_read_the_owner_withdrew() {
-    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+    let h =
+        recorder::harness(common::TestApp::builder().mail(Arc::new(QuietInbox::default()))).await;
     let (bot, path) = inbox_card(&h).await;
     let (config, credential) = gmail("owner@gmail.com");
     let key = &h.app.state.secret_key;

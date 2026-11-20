@@ -31,7 +31,7 @@ pub(super) fn create(effect: &str, title: &str) -> Value {
 }
 
 async fn setup() -> (Harness, String, uuid::Uuid, String) {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let bot = h.app.main_bot().await;
     let (turn, token) = h.running(&bot, GATE_EVERY_ATTEMPT).await;
     let installed = tool(

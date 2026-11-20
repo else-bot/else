@@ -73,10 +73,6 @@ impl Provider for Catalogued {
     }
 }
 
-async fn harness() -> Harness {
-    recorder::harness_with_providers(4, None, vec![Arc::new(Catalogued)]).await
-}
-
 fn digest(name: &str, extra: Value) -> Value {
     let mut args = json!({ "name": name, "prompt": "Summarize my unread mail.", "cron": YEARLY });
     args.as_object_mut()
@@ -138,7 +134,8 @@ async fn count(app: &TestApp, sql: &str, bind: &str) -> i64 {
 
 #[tokio::test]
 async fn a_named_model_runs_the_routine_without_touching_the_bot_or_its_chat_session() {
-    let h = harness().await;
+    let h =
+        recorder::harness(common::TestApp::builder().providers(vec![Arc::new(Catalogued)])).await;
     let bot = h.app.main_bot().await;
     let (turn, token) = h.running(&bot, GATE).await;
     let created = create(
@@ -252,7 +249,8 @@ async fn a_named_model_runs_the_routine_without_touching_the_bot_or_its_chat_ses
 
 #[tokio::test]
 async fn create_retry_describes_the_saved_model_after_an_owner_edit() {
-    let h = harness().await;
+    let h =
+        recorder::harness(common::TestApp::builder().providers(vec![Arc::new(Catalogued)])).await;
     let bot = h.app.main_bot().await;
     let (turn, token) = h.running(&bot, GATE).await;
     let args = digest("Digest", json!({ "model": "GPT 6.1 Sol" }));
@@ -299,7 +297,8 @@ async fn create_retry_describes_the_saved_model_after_an_owner_edit() {
 
 #[tokio::test]
 async fn two_models_on_one_provider_keep_separate_native_sessions() {
-    let h = harness().await;
+    let h =
+        recorder::harness(common::TestApp::builder().providers(vec![Arc::new(Catalogued)])).await;
     let bot = h.app.main_bot().await;
     let (turn, token) = h.running(&bot, GATE).await;
     let routine = create(
@@ -362,7 +361,8 @@ async fn two_models_on_one_provider_keep_separate_native_sessions() {
 
 #[tokio::test]
 async fn an_admitted_run_keeps_its_model_after_the_routine_is_edited() {
-    let h = harness().await;
+    let h =
+        recorder::harness(common::TestApp::builder().providers(vec![Arc::new(Catalogued)])).await;
     let bot = h.app.main_bot().await;
     let (turn, token) = h.running(&bot, GATE).await;
     let routine = create(
@@ -393,7 +393,8 @@ async fn an_admitted_run_keeps_its_model_after_the_routine_is_edited() {
 
 #[tokio::test]
 async fn unknown_or_omitted_models_never_block_creation() {
-    let h = harness().await;
+    let h =
+        recorder::harness(common::TestApp::builder().providers(vec![Arc::new(Catalogued)])).await;
     let bot = h.app.main_bot().await;
     let (turn, token) = h.running(&bot, GATE).await;
 
@@ -460,7 +461,8 @@ async fn unknown_or_omitted_models_never_block_creation() {
 
 #[tokio::test]
 async fn the_owner_sets_keeps_and_resets_a_routine_model() {
-    let h = harness().await;
+    let h =
+        recorder::harness(common::TestApp::builder().providers(vec![Arc::new(Catalogued)])).await;
     let bot = h.app.main_bot().await;
     let (turn, token) = h.running(&bot, GATE).await;
     let routine = create(
@@ -519,7 +521,8 @@ async fn the_owner_sets_keeps_and_resets_a_routine_model() {
 
 #[tokio::test]
 async fn the_bot_keeps_resets_or_changes_a_routine_model() {
-    let h = harness().await;
+    let h =
+        recorder::harness(common::TestApp::builder().providers(vec![Arc::new(Catalogued)])).await;
     let bot = h.app.main_bot().await;
     let (turn, token) = h.running(&bot, GATE).await;
     let routine = create(
@@ -558,7 +561,8 @@ async fn the_bot_keeps_resets_or_changes_a_routine_model() {
 
 #[tokio::test]
 async fn an_unavailable_saved_model_skips_runs_and_keeps_the_choice() {
-    let h = harness().await;
+    let h =
+        recorder::harness(common::TestApp::builder().providers(vec![Arc::new(Catalogued)])).await;
     let bot = h.app.main_bot().await;
     let (turn, token) = h.running(&bot, GATE).await;
     let routine = create(&h.app, &token, digest("Digest", json!({}))).await["routine"].clone();
@@ -584,7 +588,8 @@ async fn an_unavailable_saved_model_skips_runs_and_keeps_the_choice() {
 
 #[tokio::test]
 async fn a_bot_created_with_a_named_model_runs_on_it() {
-    let h = harness().await;
+    let h =
+        recorder::harness(common::TestApp::builder().providers(vec![Arc::new(Catalogued)])).await;
     let main = h.app.main_bot().await;
     let (turn, token) = h.running(&main, GATE).await;
     let args = json!({ "name": "Sol", "purpose": "Answers with Sol.", "model": "GPT 6.1 Sol" });
@@ -673,7 +678,8 @@ async fn a_bot_created_with_a_named_model_runs_on_it() {
 
 #[tokio::test]
 async fn a_bot_is_not_created_on_a_model_that_is_not_available() {
-    let h = harness().await;
+    let h =
+        recorder::harness(common::TestApp::builder().providers(vec![Arc::new(Catalogued)])).await;
     let main = h.app.main_bot().await;
     let (turn, token) = h.running(&main, GATE).await;
     let before = count(&h.app, "SELECT count(*) FROM bots WHERE id != ?1", &main).await;
@@ -717,7 +723,8 @@ async fn a_bot_is_not_created_on_a_model_that_is_not_available() {
 
 #[tokio::test]
 async fn a_bot_sets_another_bots_model_and_its_next_turn_runs_on_it() {
-    let h = harness().await;
+    let h =
+        recorder::harness(common::TestApp::builder().providers(vec![Arc::new(Catalogued)])).await;
     let main = h.app.main_bot().await;
     let dev = h.app.create_bot("Dev").await;
     let profile = |bot: String| {
@@ -850,7 +857,8 @@ async fn run_once(app: &TestApp, routine: Uuid) -> Uuid {
 
 #[tokio::test]
 async fn each_routine_run_starts_fresh_with_only_the_last_report() {
-    let h = harness().await;
+    let h =
+        recorder::harness(common::TestApp::builder().providers(vec![Arc::new(Catalogued)])).await;
     let bot = h.app.main_bot().await;
     let (turn, token) = h
         .running(&bot, "The planetarium trip leaves Friday. [gate]")

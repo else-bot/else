@@ -5,7 +5,7 @@ use common::TestApp;
 use common::recorder::{GATE, harness, tool};
 use else_api::app::bots::BotName;
 use else_api::db::bots::{self, BotError, Refusal};
-use else_api::grants::{DEFAULT_TTL, Tool};
+use else_api::grants::Tool;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -30,7 +30,7 @@ async fn updates(app: &TestApp, bot: &str) -> Vec<Value> {
 
 #[tokio::test]
 async fn any_bot_can_rename_a_peer_the_main_bot_or_itself() {
-    let h = harness(2).await;
+    let h = harness(common::TestApp::builder().max_active(2)).await;
     let main = h.app.main_bot().await;
     let (github, same_name) = tokio::join!(h.app.create_bot("GitHub"), h.app.create_bot("GitHub"));
     let before = snapshot(&h.app, &github).await;
@@ -82,7 +82,7 @@ async fn any_bot_can_rename_a_peer_the_main_bot_or_itself() {
 
 #[tokio::test]
 async fn invalid_targets_and_names_leave_metadata_unchanged() {
-    let h = harness(2).await;
+    let h = harness(common::TestApp::builder().max_active(2)).await;
     let main = h.app.main_bot().await;
     let github = h.app.create_bot("GitHub").await;
     let (turn, token) = h.running(&main, GATE).await;
@@ -128,7 +128,7 @@ async fn invalid_targets_and_names_leave_metadata_unchanged() {
 
 #[tokio::test]
 async fn delegated_owner_request_can_rename_a_bot() {
-    let h = harness(2).await;
+    let h = harness(common::TestApp::builder().max_active(2)).await;
     let main = h.app.main_bot().await;
     let worker = h.app.create_bot("Work").await;
     let (root, token) = h.running(&main, GATE).await;
@@ -180,7 +180,7 @@ async fn delegated_owner_request_can_rename_a_bot() {
 
 #[tokio::test]
 async fn routine_runs_cannot_rename_even_with_a_forged_capability() {
-    let h = harness(2).await;
+    let h = harness(common::TestApp::builder().max_active(2)).await;
     let main = h.app.main_bot().await;
     let (owner, token) = h.running(&main, GATE).await;
     let saved = tool(
@@ -218,19 +218,7 @@ async fn routine_runs_cannot_rename_even_with_a_forged_capability() {
     let args = json!({ "target_bot_id": main, "name": "Unasked" });
     let denied = tool(&h.app, &token, "rename_bot", args.clone()).await;
     assert_eq!(denied.status, StatusCode::FORBIDDEN);
-    let conversation = h.inputs(routine).await[0].conversation_id;
-    let forged = h
-        .app
-        .state
-        .grants
-        .issue(
-            main.parse().unwrap(),
-            conversation,
-            routine,
-            vec![Tool::EditBot],
-            DEFAULT_TTL,
-        )
-        .await;
+    let forged = h.grant_with(routine, vec![Tool::EditBot]).await;
     let denied = tool(&h.app, &forged, "rename_bot", args).await;
     assert_eq!(denied.code(), "NOT_ALLOWED");
     let model = json!({ "target_bot_id": main, "model": "anything" });
@@ -266,7 +254,7 @@ async fn routine_runs_cannot_rename_even_with_a_forged_capability() {
 
 #[tokio::test]
 async fn completed_turn_cannot_rename_a_bot() {
-    let h = harness(2).await;
+    let h = harness(common::TestApp::builder().max_active(2)).await;
     let main = h.app.main_bot().await;
     let (turn, token) = h.running(&main, GATE).await;
     h.release(turn).await;
