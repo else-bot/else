@@ -110,25 +110,33 @@ async fn started(s: &Setup) -> Uuid {
 
 const TOKEN: &str = "rgx-7f3a9c21-token";
 
-/// Save the Vault entry `registrar` and start a watcher whose checks get it.
-async fn started_with_token(s: &Setup) -> Uuid {
+async fn save_secret(s: &Setup, name: &str, env: Value) {
     let saved = s
         .app
         .owner(
             "PUT",
-            "/v1/task-secrets/registrar",
-            Some(json!({ "env": { "REGISTRAR_TOKEN": TOKEN } })),
+            &format!("/v1/task-secrets/{name}"),
+            Some(json!({ "env": env })),
         )
         .await;
-    assert_eq!(saved.status, StatusCode::CREATED, "{}", saved.body);
-    let called = tool(
+    assert!(saved.status.is_success(), "{}", saved.body);
+}
+
+async fn start_with_secrets(s: &Setup, secrets: Value) -> common::recorder::Called {
+    tool(
         &s.app,
         &s.token,
         "computer_watch_start",
         json!({ "check": CHECK, "hours": 240, "purpose": "example.com becomes available",
-                "prompt": PROMPT, "secrets": ["registrar"] }),
+                "prompt": PROMPT, "secrets": secrets }),
     )
-    .await;
+    .await
+}
+
+/// Save the Vault entry `registrar` and start a watcher whose checks get it.
+async fn started_with_token(s: &Setup) -> Uuid {
+    save_secret(s, "registrar", json!({ "REGISTRAR_TOKEN": TOKEN })).await;
+    let called = start_with_secrets(s, json!(["registrar"])).await;
     assert!(!called.error, "{}", called.body);
     assert_eq!(called.result["secrets"], json!(["registrar"]));
     called.result["watch_id"].as_str().unwrap().parse().unwrap()
@@ -625,7 +633,21 @@ async fn a_check_whose_vault_entry_was_deleted_fails_and_says_why() {
         .owner("DELETE", "/v1/task-secrets/registrar", None)
         .await;
     assert!(deleted.status.is_success(), "{}", deleted.body);
+    let retried = start_with_secrets(&s, json!(["registrar"])).await;
+    assert!(
+        !retried.error,
+        "a retry still finds its watcher: {}",
+        retried.body
+    );
+    assert_eq!(retried.result["watch_id"], id.to_string());
     let launched = s.guest.launches().len();
+    let jobs = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM guest_jobs")
+            .fetch_one(&s.app.db.pool)
+            .await
+            .unwrap()
+    };
+    let reserved = jobs().await;
 
     for failures in 1..=3_i64 {
         sqlx::query(
@@ -673,6 +695,53 @@ async fn a_check_whose_vault_entry_was_deleted_fails_and_says_why() {
         launched,
         "no check ran without it"
     );
+    assert_eq!(jobs().await, reserved, "nor was one reserved");
     let ended = settled(&s, id, "ended").await;
     assert!(ended.wake_turn_id.is_some(), "the bot is woken to say why");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_whose_vault_entries_cannot_be_read_fails_and_says_why() {
+    let s = setup().await;
+    save_secret(&s, "registrar", json!({ "REGISTRAR_TOKEN": TOKEN })).await;
+    save_secret(&s, "dns", json!({ "DNS_TOKEN": "dns-0123456789" })).await;
+    let called = start_with_secrets(&s, json!(["registrar", "dns"])).await;
+    assert!(!called.error, "{}", called.body);
+    let id: Uuid = called.result["watch_id"].as_str().unwrap().parse().unwrap();
+    let job = running_check(&s, id).await;
+    check_ends(&s, job, "done 0\n").await;
+    settled(&s, id, "waiting").await;
+    save_secret(&s, "dns", json!({ "REGISTRAR_TOKEN": "other-0123456789" })).await;
+    let launched = s.guest.launches().len();
+
+    sqlx::query(
+        "UPDATE watchers SET next_check_at = '2000-01-01T00:00:00.000+00:00' WHERE id = ?1",
+    )
+    .bind(id)
+    .execute(&s.app.db.pool)
+    .await
+    .unwrap();
+    s.app.scheduler.wake();
+    let last_status: Option<String> = until("counted the failed check", || async {
+        let (failures, last, status): (i64, Option<String>, String) =
+            sqlx::query_as("SELECT failures, last_status, status FROM watchers WHERE id = ?1")
+                .bind(id)
+                .fetch_one(&s.app.db.pool)
+                .await
+                .unwrap();
+        (failures == 1 && status == "waiting").then_some(last)
+    })
+    .await;
+    assert_eq!(
+        last_status.as_deref(),
+        Some(
+            "check failed: its Vault entries could not be read: two secrets set REGISTRAR_TOKEN; \
+             name only one of them"
+        )
+    );
+    assert_eq!(
+        s.guest.launches().len(),
+        launched,
+        "the check never launched"
+    );
 }

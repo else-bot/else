@@ -138,11 +138,21 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                 }
                 Err(err) => return failed(err),
             }
-            let secrets = match super::secrets_for(state, grant, args, task_secrets::Use::Job).await
-            {
-                Ok((_, names)) => names,
+            let secrets = match super::secret_names(args) {
+                Ok(names) => names,
                 Err(outcome) => return outcome,
             };
+            // A retry answers with its watcher even if an entry was deleted
+            // since; only a new watcher's entries must exist now.
+            match watchers::retry_of(&state.db, grant.turn_id, &check, &purpose).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    if let Err(outcome) = super::resolve_secrets(state, &secrets).await {
+                        return outcome;
+                    }
+                }
+                Err(err) => return failed(err),
+            }
             let until = chrono::Utc::now() + chrono::Duration::hours(hours);
             let started = watchers::start(
                 &state.db,
@@ -158,6 +168,16 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                 },
             )
             .await;
+            if let Ok(Started::Created(_)) = &started {
+                task_secrets::record_use(
+                    &state.db,
+                    &secrets,
+                    grant.bot_id,
+                    Some(grant.turn_id),
+                    task_secrets::Use::Job,
+                )
+                .await;
+            }
             match started {
                 Ok(Started::Created(watcher) | Started::Existing(watcher)) => {
                     state.scheduler.wake();
@@ -180,8 +200,8 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
                 Ok(Started::Conflict(watcher)) => {
                     let mut result = tool_result(fit(json!({
                         "error": "CONFLICT: this request already started a watcher with this \
-                            check and purpose but another prompt, interval or secrets. Stop it first to \
-                            change it. No watcher was started.",
+                            check and purpose but another prompt, interval or secrets. To watch \
+                            differently, give it another purpose. No watcher was started.",
                         "watcher": watcher_result(&watcher),
                     })));
                     result["isError"] = json!(true);

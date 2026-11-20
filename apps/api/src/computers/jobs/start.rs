@@ -5,7 +5,10 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use super::{End, FILTER, JOBS_DIR, MAX_JOB_DURATION, MAX_JOBS, Started, env_input, with_env};
+use super::{
+    End, FILTER, JOBS_DIR, MAX_JOB_DURATION, MAX_JOBS, SECRETS_UNREADABLE, Started, env_input,
+    with_env,
+};
 use crate::computers::{Acquire, ComputerError, ComputerManager};
 use crate::db::task_secrets::{Env, redact};
 
@@ -197,7 +200,7 @@ impl ComputerManager {
             {
                 Ok(env) => env,
                 Err(err) => {
-                    self.fail_start(id, &format!("its Vault entries could not be read: {err}"))
+                    self.fail_start(id, &format!("{SECRETS_UNREADABLE}: {err}"))
                         .await?;
                     return Ok(());
                 }

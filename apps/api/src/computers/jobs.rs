@@ -307,6 +307,10 @@ pub struct Rerun {
     pub max_duration: Duration,
 }
 
+/// How the error of a check job whose Vault entries could not be read
+/// starts.
+pub const SECRETS_UNREADABLE: &str = "its Vault entries could not be read";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Started {
     Job(Uuid),

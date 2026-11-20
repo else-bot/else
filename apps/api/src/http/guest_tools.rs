@@ -841,6 +841,14 @@ async fn secrets_for(
     args: &Value,
     kind: task_secrets::Use,
 ) -> Result<(Env, Vec<String>), Outcome> {
+    let names = secret_names(args)?;
+    let env = resolve_secrets(state, &names).await?;
+    task_secrets::record_use(&state.db, &names, grant.bot_id, Some(grant.turn_id), kind).await;
+    Ok((env, names))
+}
+
+/// The Vault entry names in `args["secrets"]`, unchecked against the Vault.
+fn secret_names(args: &Value) -> Result<Vec<String>, Outcome> {
     let names: Vec<String> = match &args["secrets"] {
         Value::Null => Vec::new(),
         Value::Array(items) => {
@@ -861,12 +869,13 @@ async fn secrets_for(
     if unique.len() != names.len() {
         return Err((tool_error("secrets names a secret twice."), None));
     }
-    match task_secrets::resolve(&state.db, state.secret_key.as_deref(), &names).await {
-        Ok(env) => {
-            task_secrets::record_use(&state.db, &names, grant.bot_id, Some(grant.turn_id), kind)
-                .await;
-            Ok((env, names))
-        }
+    Ok(names)
+}
+
+/// Decrypt the Vault entries `names`, without recording a use.
+async fn resolve_secrets(state: &AppState, names: &[String]) -> Result<Env, Outcome> {
+    match task_secrets::resolve(&state.db, state.secret_key.as_deref(), names).await {
+        Ok(env) => Ok(env),
         Err(task_secrets::SecretError::Unknown(name)) => Err((
             tool_error(&format!(
                 "SECRET_UNKNOWN: there is no Vault entry named {name}; search computer_secrets. \

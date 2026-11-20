@@ -173,11 +173,24 @@ pub fn checked(
 /// A check that could not run because the Vault entry `name` it needs was
 /// deleted. It counts as failed, like a check that exits non-zero.
 pub fn missing_secret(name: &str, failures: i64) -> Checked {
-    let failures = failures + 1;
-    Checked {
-        status: format!(
+    unrun(
+        format!(
             "check failed: the Vault entry {name} was deleted; save it again or stop this watcher"
         ),
+        failures,
+    )
+}
+
+/// A check job that failed to start because its Vault entries could not
+/// be read (`error`). It counts as failed.
+pub fn secrets_unreadable(error: &str, failures: i64) -> Checked {
+    unrun(format!("check failed: {error}"), failures)
+}
+
+fn unrun(status: String, failures: i64) -> Checked {
+    let failures = failures + 1;
+    Checked {
+        status,
         output: String::new(),
         failures,
         ran: true,

@@ -24,10 +24,11 @@ use super::events;
 use super::routines::{Check, RunOn, queue_saved_task, ts};
 use crate::app::providers::WatcherRun;
 use crate::app::watchers::{
-    CHECK_DURATION, Checked, MAX_PER_BOT, Outcome, Status, checked, missing_secret, wake_text,
+    CHECK_DURATION, Checked, MAX_PER_BOT, Outcome, Status, checked, missing_secret,
+    secrets_unreadable, wake_text,
 };
 use crate::computers::ComputerManager;
-use crate::computers::jobs::{JobStatus, MAX_JOBS};
+use crate::computers::jobs::{JobStatus, MAX_JOBS, SECRETS_UNREADABLE};
 use crate::providers::Registry;
 
 /// Due watchers admitted, checks settled, and wakes queued per scan.
@@ -105,15 +106,7 @@ pub async fn start(pool: &SqlitePool, new: NewWatcher<'_>) -> Result<Started, sq
     .bind(new.bot_id)
     .fetch_one(&mut *tx)
     .await?;
-    let existing: Option<Watcher> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM watchers
-         WHERE created_turn_id = ?1 AND check_command = ?2 AND purpose = ?3"
-    )))
-    .bind(new.turn_id)
-    .bind(new.check)
-    .bind(new.purpose)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let existing = retry_of(&mut *tx, new.turn_id, new.check, new.purpose).await?;
     if let Some(existing) = existing {
         let same = existing.prompt == new.prompt
             && existing.every_minutes == new.every_minutes
@@ -153,6 +146,25 @@ pub async fn start(pool: &SqlitePool, new: NewWatcher<'_>) -> Result<Started, sq
     events::bot_updated(&mut tx, new.bot_id).await?;
     tx.commit().await?;
     Ok(Started::Created(watcher))
+}
+
+/// The watcher `turn` already started with this check and purpose: a
+/// retry of that call, or a conflicting one.
+pub async fn retry_of<'c>(
+    conn: impl sqlx::SqliteExecutor<'c>,
+    turn: Uuid,
+    check: &str,
+    purpose: &str,
+) -> Result<Option<Watcher>, sqlx::Error> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLUMNS} FROM watchers
+         WHERE created_turn_id = ?1 AND check_command = ?2 AND purpose = ?3"
+    )))
+    .bind(turn)
+    .bind(check)
+    .bind(purpose)
+    .fetch_optional(conn)
+    .await
 }
 
 /// The bot's active watchers, newest first.
@@ -492,6 +504,7 @@ struct EndedCheck {
     job_status: JobStatus,
     exit_code: Option<i32>,
     output_tail: Option<String>,
+    error: Option<String>,
     leased: bool,
     /// It finished after the watcher's deadline, so it reports nothing.
     late: bool,
@@ -523,7 +536,7 @@ async fn settle(pool: &SqlitePool, id: Uuid, now: DateTime<Utc>) -> Result<(), s
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row: Option<EndedCheck> = sqlx::query_as(
         "SELECT w.bot_id, w.check_job_id, w.every_minutes, w.failures, j.status AS job_status,
-                j.exit_code, j.output_tail, j.lease_id IS NOT NULL AS leased,
+                j.exit_code, j.output_tail, j.error, j.lease_id IS NOT NULL AS leased,
                 coalesce(j.finished_at, ?2) >= w.watch_until AS late
          FROM watchers w JOIN guest_jobs j ON j.id = w.check_job_id
          WHERE w.id = ?1 AND w.status = 'checking'",
@@ -535,13 +548,21 @@ async fn settle(pool: &SqlitePool, id: Uuid, now: DateTime<Utc>) -> Result<(), s
     let Some(row) = row else {
         return Ok(());
     };
-    let Some(check) = checked(
-        row.job_status,
-        row.exit_code,
-        row.output_tail,
-        row.leased,
-        row.failures,
-    ) else {
+    let unreadable = row
+        .error
+        .as_deref()
+        .filter(|e| !row.leased && e.starts_with(SECRETS_UNREADABLE));
+    let check = match unreadable {
+        Some(error) => Some(secrets_unreadable(error, row.failures)),
+        None => checked(
+            row.job_status,
+            row.exit_code,
+            row.output_tail,
+            row.leased,
+            row.failures,
+        ),
+    };
+    let Some(check) = check else {
         return Ok(());
     };
     let ends = if row.late {
