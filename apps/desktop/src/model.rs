@@ -1042,6 +1042,15 @@ pub struct SearchHit {
     pub count: usize,
 }
 
+/// How many shown items an unloaded stretch holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GapSize {
+    Counted(i64),
+    /// A live item landed inside a counted stretch and split it; loading
+    /// either side counts it again.
+    Uncounted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reset {
     Gap { expected: i64, got: i64 },
@@ -1069,8 +1078,8 @@ pub struct Conversation {
     turns: HashMap<Uuid, Turn>,
     pub older_before_seq: Option<i64>,
     /// Unloaded stretches between loaded items, keyed by the seq of the
-    /// loaded item just above each, with how many shown items each holds.
-    gaps: BTreeMap<i64, i64>,
+    /// loaded item just above each.
+    gaps: BTreeMap<i64, GapSize>,
     pub selected_provider_id: Option<String>,
     pub activity: Option<Activity>,
     routines: Vec<Routine>,
@@ -1172,6 +1181,9 @@ impl Conversation {
             "item.upsert" => {
                 let item: Item =
                     serde_json::from_value(data["item"].clone()).map_err(|_| Reset::Malformed)?;
+                if !self.seq_of.contains_key(&item.id) {
+                    self.split_gap(item.seq);
+                }
                 self.upsert_item(item);
             }
             "item.delta" => {
@@ -1280,11 +1292,11 @@ impl Conversation {
             return true;
         };
         if let Some(above) = above.filter(|_| window.newer_gap > 0) {
-            self.gaps.insert(above, window.newer_gap);
+            self.gaps.insert(above, GapSize::Counted(window.newer_gap));
         }
         match below {
             Some(_) if window.older_gap > 0 => {
-                self.gaps.insert(first, window.older_gap);
+                self.gaps.insert(first, GapSize::Counted(window.older_gap));
             }
             Some(_) => {}
             None => self.older_before_seq = (window.older_gap > 0).then_some(first),
@@ -1300,8 +1312,24 @@ impl Conversation {
         true
     }
 
+    /// Keep both sides of a gap loadable when a live item lands inside it.
+    fn split_gap(&mut self, seq: i64) {
+        let (below, Some(above)) = self.loaded_around(seq) else {
+            return;
+        };
+        if self.gaps.remove(&above).is_none() {
+            return;
+        }
+        if above > seq + 1 {
+            self.gaps.insert(above, GapSize::Uncounted);
+        }
+        if below.is_none_or(|below| below < seq - 1) {
+            self.gaps.insert(seq, GapSize::Uncounted);
+        }
+    }
+
     /// How many shown items are missing just below the loaded item `seq`.
-    pub fn gap_below(&self, seq: i64) -> Option<i64> {
+    pub fn gap_below(&self, seq: i64) -> Option<GapSize> {
         self.gaps.get(&seq).copied()
     }
 
@@ -1781,14 +1809,14 @@ mod tests {
         assert!(c.merge_window(window(found, 12, 30), None, Some(90)));
         assert_eq!(loaded(&c), [40, 41, 90]);
         assert_eq!(c.older_before_seq, Some(40));
-        assert_eq!(c.gap_below(90), Some(30));
+        assert_eq!(c.gap_below(90), Some(GapSize::Counted(30)));
         assert_eq!(c.cursor(), format!("{PREFIX}:5"), "the live cursor stays");
 
         let between = vec![item(60, 60, "user", "c"), item(70, 70, "user", "d")];
         assert!(c.merge_window(window(between, 3, 0), Some(41), Some(90)));
         assert_eq!(loaded(&c), [40, 41, 60, 70, 90]);
         assert_eq!(c.gap_below(90), None);
-        assert_eq!(c.gap_below(60), Some(3));
+        assert_eq!(c.gap_below(60), Some(GapSize::Counted(3)));
 
         let rest = vec![item(50, 50, "user", "e")];
         assert!(c.merge_window(window(rest, 0, 0), Some(41), Some(60)));
@@ -1824,8 +1852,8 @@ mod tests {
         let stale = vec![item(50, 50, "user", "c")];
         assert!(!c.merge_window(window(stale, 0, 0), Some(40), Some(90)));
         assert_eq!(loaded(&c), [40, 60, 90]);
-        assert_eq!(c.gap_below(90), Some(19));
-        assert_eq!(c.gap_below(60), Some(10));
+        assert_eq!(c.gap_below(90), Some(GapSize::Counted(19)));
+        assert_eq!(c.gap_below(60), Some(GapSize::Counted(10)));
         let gone = vec![item(85, 85, "user", "d")];
         assert!(!c.merge_window(window(gone, 0, 0), Some(80), Some(90)));
     }
@@ -1844,13 +1872,16 @@ mod tests {
         );
         assert_eq!(c.apply(&edit), Ok(Applied::Changed));
         assert_eq!(loaded(&c), [20, 50, 90]);
-        assert!(c.gap_below(90).is_some());
-        assert!(c.gap_below(50).is_some());
+        assert_eq!(c.gap_below(90), Some(GapSize::Uncounted));
+        assert_eq!(c.gap_below(50), Some(GapSize::Uncounted));
+        let read_before_the_edit = vec![item(50, 50, "user", "old")];
+        assert!(!c.merge_window(window(read_before_the_edit, 0, 0), Some(20), Some(90)));
+        assert_eq!(c.item(Uuid::from_u128(50)).unwrap().text, "undone");
 
         let upper = vec![item(51, 51, "user", "b"), item(89, 89, "user", "c")];
         assert!(c.merge_window(window(upper, 0, 0), Some(50), Some(90)));
         assert_eq!(c.gap_below(90), None);
-        assert!(c.gap_below(50).is_some());
+        assert_eq!(c.gap_below(50), Some(GapSize::Uncounted));
         let lower = vec![item(21, 21, "user", "d"), item(49, 49, "user", "e")];
         assert!(c.merge_window(window(lower, 0, 0), Some(20), Some(50)));
         assert_eq!(c.gap_below(50), None);
@@ -1871,7 +1902,7 @@ mod tests {
         );
         assert_eq!(c.apply(&delta(7, 21, 0, "hi")), Ok(Applied::Changed));
         assert_eq!(c.gap_below(21), None);
-        assert!(c.gap_below(90).is_some());
+        assert_eq!(c.gap_below(90), Some(GapSize::Uncounted));
 
         let edit = item(89, 89, "user", "top");
         assert_eq!(
@@ -1879,7 +1910,7 @@ mod tests {
             Ok(Applied::Changed)
         );
         assert_eq!(c.gap_below(90), None);
-        assert!(c.gap_below(89).is_some());
+        assert_eq!(c.gap_below(89), Some(GapSize::Uncounted));
     }
 
     #[test]

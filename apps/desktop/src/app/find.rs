@@ -5,7 +5,7 @@ use super::ElseApp;
 use super::conversation::RowKey;
 use super::row_text::{Highlights, RowText};
 use crate::controls::{Control as _, Scale, Tier, text_field};
-use crate::model::SearchHit;
+use crate::model::{GapSize, SearchHit};
 use else_plain_text::find::Needle;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
@@ -346,16 +346,17 @@ impl ElseApp {
 
     pub(super) fn render_gap(&self, above: i64, cx: &mut Context<Self>) -> AnyElement {
         let view = self.view.as_ref();
-        let count = view
+        let size = view
             .and_then(|view| view.conversation.as_ref())
             .and_then(|c| c.gap_below(above))
-            .unwrap_or_default();
+            .unwrap_or(GapSize::Uncounted);
         let loading =
             view.is_some_and(|view| matches!(view.loading_gap, Some((at, _)) if at == above));
-        let label = match (loading, count) {
+        let label = match (loading, size) {
             (true, _) => "Loading…".to_owned(),
-            (false, 1) => "… 1 earlier message …".to_owned(),
-            (false, count) => format!("… {count} earlier messages …"),
+            (false, GapSize::Counted(1)) => "… 1 earlier message …".to_owned(),
+            (false, GapSize::Counted(count)) => format!("… {count} earlier messages …"),
+            (false, GapSize::Uncounted) => "… earlier messages …".to_owned(),
         };
         h_flex()
             .w_full()
