@@ -608,6 +608,73 @@ async fn scheduling_serializes_runs_and_keeps_the_newest_sets() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_restore_ends_every_lease_claim_and_native_session() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let (bot, conversation): (Uuid, Uuid) =
+        sqlx::query_as("SELECT bot_id, id FROM conversations ORDER BY created_at LIMIT 1")
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    for sql in [
+        "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib, observed_state)
+         VALUES (?1, 'restore-leases', 'image', 1, 512, 'running')",
+        "INSERT INTO computer_leases (id, bot_id, holder, generation, expires_at)
+         VALUES (randomblob(16), ?1, 'test:held', 0, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '+1 hours'))",
+        "INSERT OR IGNORE INTO memory_store (bot_id) VALUES (?1)",
+        "INSERT OR IGNORE INTO memory_generation (bot_id, generation, recipe) VALUES (?1, 1, '{}')",
+        "INSERT INTO memory_job (bot_id, generation, start_seq, span, lease_token, lease_until)
+         VALUES (?1, 1, 1024, 1, randomblob(16), strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '+1 hours'))",
+        "INSERT INTO provider_sessions (id, bot_id, conversation_id, provider_id, native_session_id, fingerprint)
+         VALUES (randomblob(16), ?1, ?2, 'synthetic', 'native', 'fingerprint')",
+    ] {
+        sqlx::query(sql)
+            .bind(bot)
+            .bind(conversation)
+            .execute(&app.db.pool)
+            .await
+            .unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let summary = worker(&app, key(1), config(dir.path()))
+        .run_once()
+        .await
+        .unwrap();
+    let target = Target::new(&app);
+    restore_into(&app, &summary.path, &key(1), &target, &dir.path().join("s"))
+        .await
+        .unwrap();
+    for (sql, expected) in [
+        (
+            "SELECT holder || ':' || end_reason FROM computer_leases WHERE released_at IS NOT NULL",
+            vec![r#"["test:held:restored"]"#],
+        ),
+        (
+            "SELECT holder FROM computer_leases WHERE released_at IS NULL",
+            vec![],
+        ),
+        (
+            "SELECT start_seq FROM memory_job WHERE lease_token IS NOT NULL",
+            vec![],
+        ),
+        (
+            "SELECT start_seq FROM memory_job WHERE start_seq = 1024",
+            vec!["[1024]"],
+        ),
+        (
+            "SELECT native_session_id FROM provider_sessions WHERE status = 'active'",
+            vec![],
+        ),
+        (
+            "SELECT observed_state FROM bot_computers",
+            vec![r#"["missing"]"#],
+        ),
+    ] {
+        assert_eq!(rows(&target.url(), sql).await, expected, "{sql}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_restored_profile_cannot_enable_native_agents() {
     let _serial = SERIAL.lock().await;
     let app = populated().await;

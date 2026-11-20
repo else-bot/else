@@ -2,6 +2,18 @@ use super::{ComputerError, ComputerManager, ExecOutput, OwnedSemaphorePermit, Sq
 use std::time::Duration;
 use uuid::Uuid;
 
+/// End every live lease of a restored database: no holder survives a
+/// restore.
+pub(super) async fn end_restored(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'restored'
+         WHERE released_at IS NULL",
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 impl ComputerManager {
     pub(super) async fn lease(
         &self,

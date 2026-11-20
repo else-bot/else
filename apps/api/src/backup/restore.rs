@@ -718,31 +718,15 @@ async fn reconcile(
     let target = request.server.with_database(request.target_database);
     let mut conn = SqliteConnection::connect_with(&options(&target)).await?;
     let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
-    let tracked = crate::computers::state::restored(&mut tx, restored).await?;
+    let tracked = crate::computers::restore_passive(&mut tx, restored).await?;
     if tracked != restored.len() as u64 {
         return Err(BackupError::Invalid(format!(
             "{} restored computer disks have no computer in the database",
             restored.len() as u64 - tracked
         )));
     }
-    sqlx::query(
-        "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'restored'
-         WHERE released_at IS NULL",
-    )
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "UPDATE memory_job SET lease_token = NULL, lease_until = NULL
-         WHERE lease_token IS NOT NULL",
-    )
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "UPDATE provider_sessions SET status = 'retired', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE status = 'active'",
-    )
-    .execute(&mut *tx)
-    .await?;
+    crate::db::memory_tree::restore_passive(&mut tx).await?;
+    crate::db::turn_sink::restore_passive(&mut tx).await?;
     sqlx::query(
         "UPDATE backup_runs SET local_status = 'completed', finished_at = coalesce(finished_at, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
              error = NULL

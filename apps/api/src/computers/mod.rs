@@ -954,6 +954,20 @@ impl ComputerManager {
     }
 }
 
+/// Make a restored database passive before any manager uses it: the
+/// computers whose disks the restore brought back (`disks`) are stopped,
+/// every other created computer is missing, and every lease ends. Returns
+/// how many of `disks` had a computer row; the caller refuses a restore
+/// where one did not.
+pub async fn restore_passive(
+    conn: &mut SqliteConnection,
+    disks: &[Uuid],
+) -> Result<u64, sqlx::Error> {
+    let tracked = state::restored(conn, disks).await?;
+    leases::end_restored(conn).await?;
+    Ok(tracked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
