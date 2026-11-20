@@ -196,6 +196,7 @@ fn scan(uid_validity: u32, last_uid: u32, uids: &[u32]) -> Scan {
             .iter()
             .map(|&uid| Arrival {
                 message: message(uid_validity, uid),
+                envelope: Default::default(),
             })
             .collect(),
         more: false,
@@ -755,6 +756,7 @@ async fn scans_are_fenced_bounded_and_quiet_at_first() {
     let mut noisy = scan(7, 14, &[9, 11, 11, 12, 15]);
     noisy.arrivals.push(Arrival {
         message: message(6, 13),
+        envelope: Default::default(),
     });
     assert!(
         store::record_scan(&db.pool, account.id, 1, Some(&start), &noisy)

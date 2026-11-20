@@ -544,6 +544,204 @@ impl Imap {
     }
 }
 
+impl Imap {
+    /// Each listed message's Message-ID, subject and sender, by UID, in
+    /// the selected folder.
+    async fn envelopes(
+        &mut self,
+        uids: &[u32],
+    ) -> Result<std::collections::HashMap<u32, Envelope>, MailError> {
+        if uids.is_empty() {
+            return Ok(Default::default());
+        }
+        let set = SequenceSet::try_from(
+            uids.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+                .as_str(),
+        )
+        .map_err(invalid)?;
+        let rows = self
+            .fetch(
+                set,
+                items(vec![
+                    MessageDataItemName::Uid,
+                    MessageDataItemName::Envelope,
+                ]),
+                ImapMessageFetchOptions {
+                    uid: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(failure)?;
+        Ok(rows
+            .values()
+            .filter_map(|row| {
+                let mut uid = None;
+                let mut envelope = None;
+                for item in row.as_ref().iter() {
+                    match item {
+                        MessageDataItem::Uid(id) => uid = Some(id.get()),
+                        MessageDataItem::Envelope(e) => envelope = Some(envelope_of(e)),
+                        _ => (),
+                    }
+                }
+                Some((uid?, envelope?))
+            })
+            .collect())
+    }
+
+    /// The first folder holding a message whose Message-ID is exactly
+    /// `message_id`, searched in `hint` first, then where a moved message
+    /// most likely sits. Only folders the server lists are searched, and
+    /// one that fails to open fails the search: `None` means it is in
+    /// none of them.
+    async fn locate(
+        &mut self,
+        config: &MailConfig,
+        message_id: &str,
+        hint: Option<&str>,
+    ) -> Result<Option<MessageRef>, MailError> {
+        let listed = self
+            .list(mailbox("")?, ListMailbox::try_from("*").map_err(invalid)?)
+            .await
+            .map_err(failure)?;
+        let special = |attribute: &str| {
+            listed
+                .iter()
+                .filter(|(_, _, attributes)| {
+                    attributes
+                        .iter()
+                        .any(|a| a.to_string().eq_ignore_ascii_case(attribute))
+                })
+                .map(|(name, _, _)| mailbox_name(name))
+                .collect::<Vec<_>>()
+        };
+        let names: std::collections::HashSet<String> = listed
+            .iter()
+            .map(|(name, _, _)| mailbox_name(name))
+            .collect();
+        let mut folders: Vec<String> = hint.map(str::to_owned).into_iter().collect();
+        folders.extend([config.archive_folder.clone(), config.trash_folder.clone()]);
+        folders.extend(special("\\All"));
+        folders.extend(special("\\Archive"));
+        folders.extend(special("\\Trash"));
+        folders.extend(special("\\Junk"));
+        folders.push("INBOX".into());
+        let mut searched = std::collections::HashSet::new();
+        for folder in folders {
+            if !(names.contains(&folder) || folder == "INBOX") || !searched.insert(folder.clone()) {
+                continue;
+            }
+            let selected = self
+                .examine(mailbox(&folder)?, Default::default())
+                .await
+                .map_err(failure)?;
+            let uid_validity = selected
+                .uid_validity
+                .ok_or_else(|| MailError::new("mail_missing_uid_validity"))?
+                .get();
+            let key = SearchKey::Header(
+                "Message-ID".try_into().map_err(invalid)?,
+                message_id.to_owned().try_into().map_err(invalid)?,
+            );
+            let found: Vec<u32> = self
+                .search(
+                    Vec1::try_from(vec![key]).expect("one search key"),
+                    ImapMessageSearchOptions { uid: true },
+                )
+                .await
+                .map_err(failure)?
+                .into_iter()
+                .map(NonZeroU32::get)
+                .take(100)
+                .collect();
+            // SEARCH HEADER matches substrings, so each hit's own
+            // Message-ID must be the one sought.
+            let exact = self
+                .envelopes(&found)
+                .await?
+                .into_iter()
+                .filter(|(_, e)| e.message_id.as_deref() == Some(message_id))
+                .map(|(uid, _)| uid)
+                .max();
+            if let Some(uid) = exact {
+                return Ok(Some(MessageRef {
+                    folder,
+                    uid_validity,
+                    uid,
+                }));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// An IMAP envelope's Message-ID, subject and sender, with encoded words
+/// decoded.
+fn envelope_of(e: &io_imap::types::envelope::Envelope<'_>) -> Envelope {
+    let from = e.from.first();
+    let name = from
+        .and_then(|f| nstring(&f.name))
+        .and_then(|n| decoded(&n));
+    let address = from.map(|f| {
+        format!(
+            "{}@{}",
+            nstring(&f.mailbox).unwrap_or_default(),
+            nstring(&f.host).unwrap_or_default()
+        )
+    });
+    Envelope {
+        message_id: nstring(&e.message_id).and_then(|id| bare_message_id(&id)),
+        subject: nstring(&e.subject).and_then(|s| decoded(&s)),
+        sender: name.or_else(|| address.and_then(|a| one_line(&a))),
+    }
+}
+
+/// A raw header value with its encoded words decoded, as one bounded line.
+fn decoded(raw: &str) -> Option<String> {
+    let header = format!("Subject: {}\r\n\r\n", raw.replace(['\r', '\n'], " "));
+    let parsed = MessageParser::default().parse(header.as_bytes())?;
+    one_line(parsed.subject()?)
+}
+
+fn one_line(text: &str) -> Option<String> {
+    let text: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(256)
+        .collect();
+    (!text.is_empty()).then_some(text)
+}
+
+/// A Message-ID without its angle brackets, when it is one this runtime
+/// can search for.
+fn bare_message_id(raw: &str) -> Option<String> {
+    let id = raw.trim().trim_start_matches('<').trim_end_matches('>');
+    super::config::message_id(id).then(|| id.to_owned())
+}
+
+/// What a fetched message says of itself: its Message-ID, subject and
+/// sender, for a mail trigger recorded before scans kept them.
+pub fn envelope(fetched: &Fetched) -> Envelope {
+    let Ok(parsed) = parse(fetched) else {
+        return Envelope::default();
+    };
+    let sender = parsed.from().and_then(|a| a.first());
+    Envelope {
+        message_id: parsed.message_id().and_then(bare_message_id),
+        subject: parsed.subject().and_then(one_line),
+        sender: sender
+            .and_then(|a| a.name.as_deref().or(a.address.as_deref()))
+            .and_then(one_line),
+    }
+}
+
 async fn scan(client: &mut Imap, cursor: Option<&Cursor>) -> Result<Scan, MailError> {
     let data = client
         .examine(mailbox("INBOX")?, Default::default())
@@ -584,15 +782,21 @@ async fn scan(client: &mut Imap, cursor: Option<&Cursor>) -> Result<Scan, MailEr
         .search(criteria, ImapMessageSearchOptions { uid: true })
         .await
         .map_err(failure)?;
-    let arrivals = found
+    let uids: Vec<u32> = found
         .into_iter()
-        .filter(|uid| uid.get() > previous.last_uid && uid.get() <= end)
+        .map(NonZeroU32::get)
+        .filter(|&uid| uid > previous.last_uid && uid <= end)
+        .collect();
+    let mut envelopes = client.envelopes(&uids).await?;
+    let arrivals = uids
+        .into_iter()
         .map(|uid| Arrival {
             message: MessageRef {
                 folder: "INBOX".into(),
                 uid_validity,
-                uid: uid.get(),
+                uid,
             },
+            envelope: envelopes.remove(&uid).unwrap_or_default(),
         })
         .collect();
     Ok(Scan {
@@ -718,6 +922,10 @@ async fn execute(
         MailCommand::DeleteFolder { folder } => {
             client.delete(mailbox(folder)?).await.map_err(failure)?;
             Ok(json!({"deleted":true}))
+        }
+        MailCommand::Locate { message_id, folder } => {
+            let message = client.locate(config, message_id, folder.as_deref()).await?;
+            Ok(json!({"message": message}))
         }
         MailCommand::FindSent { message_id } => {
             client

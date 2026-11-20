@@ -101,7 +101,7 @@ impl ElseApp {
             .as_ref()
             .and_then(|view| view.conversation.as_ref())
             .and_then(|c| super::conversation::opened_mail(c, row.opens_turn))
-            .and_then(|turn| super::email_reader::mail_banner(turn, cx));
+            .and_then(|turn| super::email_reader::mail_banner(turn, &self.bots, cx));
         let body = match banner {
             Some(banner) => gpui_kit::component::v_flex()
                 .w_full()

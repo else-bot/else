@@ -294,7 +294,10 @@ impl ElseApp {
                     div()
                         .text_size(px(13.))
                         .text_color(theme.muted_foreground)
-                        .child("Finished without a text reply.")
+                        .child(
+                            super::email_reader::mail_outcome(turn)
+                                .unwrap_or_else(|| "Finished without a text reply.".to_owned()),
+                        )
                         .into_any_element(),
                 )
             } else {
