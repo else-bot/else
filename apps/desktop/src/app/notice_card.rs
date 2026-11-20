@@ -22,7 +22,7 @@ impl ElseApp {
             let _ = this.update_in(cx, |app, window, cx| {
                 match result {
                     Ok(notice) => {
-                        if let Some(view) = app.view.as_mut().filter(|v| v.bot_id == bot)
+                        if let Some(view) = app.view_of(bot)
                             && let Some(c) = view.conversation.as_mut()
                         {
                             c.apply_owner_notice(notice);

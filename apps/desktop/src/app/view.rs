@@ -831,7 +831,10 @@ impl ElseApp {
                 .into_any_element(),
         };
         let mut notices = v_flex().gap_1();
-        if view.is_some_and(|v| v.stale) {
+        if view
+            .and_then(|v| v.conversation.as_ref())
+            .is_some_and(crate::model::Conversation::is_saved)
+        {
             notices = notices.child(
                 div()
                     .text_xs()

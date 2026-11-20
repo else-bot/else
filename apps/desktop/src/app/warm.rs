@@ -8,7 +8,7 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use super::ElseApp;
-use super::conversation::ConversationView;
+use super::conversation::{ConversationView, Load};
 use crate::api::LiveCommand;
 
 /// How many conversations a server keeps besides the shown one.
@@ -73,9 +73,11 @@ pub(super) enum Resume {
 
 impl ConversationView {
     pub(super) fn resume(&self) -> Resume {
-        match (&self.conversation, &self._load) {
-            (_, Some(_)) => Resume::Wait,
-            (Some(conversation), None) if !self.stale => Resume::Follow(conversation.cursor()),
+        match (&self.load, &self.conversation) {
+            (Load::Running { .. }, _) => Resume::Wait,
+            (Load::Settled, Some(conversation)) if !conversation.is_saved() => {
+                Resume::Follow(conversation.cursor())
+            }
             _ => Resume::Load,
         }
     }
@@ -86,7 +88,6 @@ impl ElseApp {
         self.view.as_ref().is_some_and(|view| view.bot_id == bot)
     }
 
-    /// `bot`'s view, shown or warm.
     pub(super) fn view_of(&mut self, bot: Uuid) -> Option<&mut ConversationView> {
         match self.view.as_mut() {
             Some(view) if view.bot_id == bot => Some(view),
@@ -94,19 +95,18 @@ impl ElseApp {
         }
     }
 
-    /// Moves the shown view to the warm views and shows `bot`'s instead:
-    /// its warm view, or a new one.
     pub(super) fn swap_view(&mut self, bot: Option<Uuid>, cx: &mut Context<Self>) {
-        if let Some(mut old) = self.view.take() {
-            self.live_command(LiveCommand::Unsubscribe { bot: old.bot_id });
-            old.park();
-            self.warm.keep(old.bot_id, old);
-        }
-        self.view = bot.map(|bot| {
+        // Taken before parking the shown view, which could evict it.
+        let next = bot.map(|bot| {
             self.warm
                 .take(bot)
                 .unwrap_or_else(|| self.new_view(bot, cx))
         });
+        if let Some(mut old) = std::mem::replace(&mut self.view, next) {
+            self.live_command(LiveCommand::Unsubscribe { bot: old.bot_id });
+            old.park();
+            self.warm.keep(old.bot_id, old);
+        }
     }
 
     fn new_view(&self, bot: Uuid, cx: &mut Context<Self>) -> ConversationView {
@@ -125,11 +125,11 @@ impl ElseApp {
         view
     }
 
-    /// Catches the shown view up with the server.
     pub(super) fn resume_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = self.view.as_ref() else {
             return;
         };
+        let bot = view.bot_id;
         match view.resume() {
             Resume::Follow(cursor) => self.live_command(LiveCommand::Subscribe {
                 bot: view.bot_id,
@@ -138,6 +138,7 @@ impl ElseApp {
             Resume::Wait => {}
             Resume::Load => self.load_conversation(window, cx),
         }
+        self.ensure_rules(bot, window, cx);
     }
 
     /// Preloads `bot`'s conversation once the pointer or the quick
@@ -170,7 +171,7 @@ impl ElseApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConversationView, Resume, Warm};
+    use super::{ConversationView, Load, Resume, Warm};
     use crate::model::Conversation;
     use gpui_kit::Task;
     use uuid::Uuid;
@@ -193,33 +194,38 @@ mod tests {
         assert!(!warm.contains(Uuid::from_u128(8)));
     }
 
-    fn conversation(applied: i64) -> Conversation {
-        Conversation::from_snapshot(
-            serde_json::from_value(serde_json::json!({
-                "event_cursor": format!("server:bot:{applied}"),
-                "items": [], "turns": [],
-                "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
-            }))
-            .unwrap(),
-        )
+    fn page(applied: i64) -> crate::model::Snapshot {
+        serde_json::from_value(serde_json::json!({
+            "event_cursor": format!("server:bot:{applied}"),
+            "items": [], "turns": [],
+            "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
+        }))
         .unwrap()
     }
 
     #[test]
     fn a_view_shown_again_follows_from_its_cursor_unless_it_needs_a_load() {
-        let bot = Uuid::from_u128(1);
-        let mut view = ConversationView::new(bot);
+        let mut view = ConversationView::new(Uuid::from_u128(1));
         assert_eq!(view.resume(), Resume::Load, "nothing loaded yet");
-        view._load = Some(Task::ready(()));
+        view.load = Load::Running {
+            _task: Task::ready(()),
+        };
         assert_eq!(
             view.resume(),
             Resume::Wait,
             "its load subscribes on landing"
         );
-        view._load = None;
-        view.conversation = Some(conversation(42));
+        view.load = Load::Settled;
+        view.conversation = Some(Conversation::from_snapshot(page(42)).unwrap());
         assert_eq!(view.resume(), Resume::Follow("server:bot:42".into()));
-        view.stale = true;
+        view.load = Load::Failed { _retry: None };
+        assert_eq!(
+            view.resume(),
+            Resume::Load,
+            "a failed load or a reset reloads"
+        );
+        view.load = Load::Settled;
+        view.conversation = Some(Conversation::from_saved(page(42)).unwrap());
         assert_eq!(view.resume(), Resume::Load, "a saved page is replaced");
     }
 }

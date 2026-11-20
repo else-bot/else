@@ -166,12 +166,7 @@ impl ElseApp {
                 cx.background_executor().timer(DEBOUNCE).await;
                 let hits = client.search(bot, query).await;
                 let _ = this.update_in(cx, |app, window, cx| {
-                    let Some(find) = app
-                        .view
-                        .as_mut()
-                        .filter(|view| view.bot_id == bot)
-                        .and_then(|view| view.find.as_mut())
-                    else {
+                    let Some(find) = app.view_of(bot).and_then(|view| view.find.as_mut()) else {
                         return;
                     };
                     find.phase = match hits {
@@ -185,7 +180,9 @@ impl ElseApp {
                         }),
                         Err(_) => Phase::Failed,
                     };
-                    app.show_match(window, cx);
+                    if app.shows(bot) {
+                        app.show_match(window, cx);
+                    }
                 });
             }),
         };

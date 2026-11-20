@@ -398,6 +398,12 @@ impl ElseApp {
         self.connection == Connection::Connected
     }
 
+    pub(crate) fn saved_conversations(
+        &self,
+    ) -> Option<crate::saved_conversations::SavedConversations> {
+        self.saved.clone()
+    }
+
     pub(crate) fn social_client(&self) -> Arc<Client> {
         self.client.clone()
     }
@@ -992,12 +998,7 @@ impl ElseApp {
 
     fn accept_sent(&mut self, bot: Uuid, sent: Sent, window: &mut Window, cx: &mut Context<Self>) {
         let Sent { item, turn } = sent;
-        if let Some(conversation) = self
-            .view
-            .as_mut()
-            .filter(|v| v.bot_id == bot)
-            .and_then(|v| v.conversation.as_mut())
-        {
+        if let Some(conversation) = self.view_of(bot).and_then(|v| v.conversation.as_mut()) {
             conversation.insert_item(item);
             conversation.insert_turn(turn);
         } else if let Some(list) = self.pending.get_mut(&bot) {

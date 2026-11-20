@@ -124,7 +124,7 @@ impl ElseApp {
         cx.spawn_in(window, async move |this, cx| {
             let result = client.cancel_wait(bot, wait).await;
             let _ = this.update_in(cx, |app, _, cx| {
-                if let Some(view) = app.view.as_mut().filter(|v| v.bot_id == bot) {
+                if let Some(view) = app.view_of(bot) {
                     view.stopping_waits.remove(&wait);
                 }
                 match result {

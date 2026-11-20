@@ -1,8 +1,11 @@
 //! The latest conversation page of each bot, saved per server as the API
 //! sent it, so a bot not in memory draws at once while live data loads.
 
+use std::collections::HashMap;
 use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use uuid::Uuid;
 
@@ -13,14 +16,41 @@ const MAX_PAGE_BYTES: u64 = 1024 * 1024;
 /// How many bots' pages a server keeps; the least recently saved go first.
 const KEPT_PAGES: usize = 32;
 
+/// One server connection's pages. Clones share one writer, so saves land
+/// in the order their pages were fetched and none lands once retired.
 #[derive(Debug, Clone)]
 pub struct SavedConversations {
+    server: PathBuf,
     dir: PathBuf,
+    tickets: Arc<AtomicU64>,
+    writer: Arc<Mutex<Writer>>,
 }
 
+#[derive(Debug, Default)]
+struct Writer {
+    retired: bool,
+    /// The ticket of the page last saved for each bot.
+    saved: HashMap<Uuid, u64>,
+}
+
+/// A fetched page's place in fetch order.
+#[derive(Debug, Clone, Copy)]
+pub struct Ticket(u64);
+
 impl SavedConversations {
-    pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+    /// Pages for the server saved under `server`, reached at `origin`; a
+    /// connection edited to another address starts with none.
+    pub fn new(server: PathBuf, origin: &str) -> Self {
+        let address: String = origin
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        Self {
+            dir: server.join(address),
+            server,
+            tickets: Default::default(),
+            writer: Default::default(),
+        }
     }
 
     fn page(&self, bot: Uuid) -> PathBuf {
@@ -35,10 +65,21 @@ impl SavedConversations {
         serde_json::from_str(&text).ok()
     }
 
+    /// Takes a place in fetch order for a page just fetched.
+    pub fn ticket(&self) -> Ticket {
+        Ticket(self.tickets.fetch_add(1, Ordering::Relaxed))
+    }
+
     /// Saves `raw`, the API's response for `bot`'s latest page, readable
-    /// only by the current user. A page over the size limit removes the
-    /// older one instead, so a stale page never stands in for it.
-    pub fn save(&self, bot: Uuid, raw: &str) -> Result<(), String> {
+    /// only by the current user, unless a page fetched later is already
+    /// saved. A page over the size limit removes the older one instead, so
+    /// a stale page never stands in for it.
+    pub fn save(&self, bot: Uuid, raw: &str, ticket: Ticket) -> Result<(), String> {
+        let mut writer = self.writer.lock().map_err(|_| "The page writer failed.")?;
+        if writer.retired || writer.saved.get(&bot).is_some_and(|&last| last > ticket.0) {
+            return Ok(());
+        }
+        writer.saved.insert(bot, ticket.0);
         let path = self.page(bot);
         if raw.len() as u64 > MAX_PAGE_BYTES {
             return remove(&path);
@@ -69,11 +110,20 @@ impl SavedConversations {
         Ok(())
     }
 
-    /// Removes every page saved for a server.
-    pub fn forget(dir: &Path) -> Result<(), String> {
-        match std::fs::remove_dir_all(dir) {
+    /// Stops saving and removes every page the server saved, under any
+    /// address.
+    pub fn retire(&self) -> Result<(), String> {
+        let mut writer = self.writer.lock().map_err(|_| "The page writer failed.")?;
+        writer.retired = true;
+        Self::forget(&self.server)
+    }
+
+    /// Removes every page saved under `server`, for a server with no
+    /// session to retire.
+    pub fn forget(server: &Path) -> Result<(), String> {
+        match std::fs::remove_dir_all(server) {
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-                Err(format!("Cannot remove {}: {err}", dir.display()))
+                Err(format!("Cannot remove {}: {err}", server.display()))
             }
             _ => Ok(()),
         }
@@ -93,6 +143,8 @@ fn remove(path: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    const ORIGIN: &str = "http://127.0.0.1:7879";
 
     fn page(text: &str) -> String {
         serde_json::json!({
@@ -114,10 +166,10 @@ mod tests {
     #[test]
     fn a_saved_page_loads_back_readable_only_by_its_owner() {
         let dir = tempfile::tempdir().unwrap();
-        let saved = SavedConversations::new(dir.path().join("server.conversations"));
+        let saved = SavedConversations::new(dir.path().join("server.conversations"), ORIGIN);
         let bot = Uuid::from_u128(1);
         assert!(saved.load(bot).is_none());
-        saved.save(bot, &page("hello")).unwrap();
+        saved.save(bot, &page("hello"), saved.ticket()).unwrap();
         let snapshot = saved.load(bot).expect("saved page loads");
         assert_eq!(snapshot.items[0].text, "hello");
         assert_eq!(mode(&saved.dir), 0o700);
@@ -127,9 +179,9 @@ mod tests {
     #[test]
     fn a_page_shared_with_other_users_is_not_shown() {
         let dir = tempfile::tempdir().unwrap();
-        let saved = SavedConversations::new(dir.path().to_owned());
+        let saved = SavedConversations::new(dir.path().to_owned(), ORIGIN);
         let bot = Uuid::from_u128(1);
-        saved.save(bot, &page("hello")).unwrap();
+        saved.save(bot, &page("hello"), saved.ticket()).unwrap();
         std::fs::set_permissions(saved.page(bot), std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(saved.load(bot).is_none());
     }
@@ -137,11 +189,15 @@ mod tests {
     #[test]
     fn an_oversized_page_replaces_the_saved_one_with_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let saved = SavedConversations::new(dir.path().to_owned());
+        let saved = SavedConversations::new(dir.path().to_owned(), ORIGIN);
         let bot = Uuid::from_u128(1);
-        saved.save(bot, &page("hello")).unwrap();
+        saved.save(bot, &page("hello"), saved.ticket()).unwrap();
         saved
-            .save(bot, &page(&"x".repeat(MAX_PAGE_BYTES as usize)))
+            .save(
+                bot,
+                &page(&"x".repeat(MAX_PAGE_BYTES as usize)),
+                saved.ticket(),
+            )
             .unwrap();
         assert!(saved.load(bot).is_none());
     }
@@ -149,9 +205,9 @@ mod tests {
     #[test]
     fn a_server_keeps_only_its_most_recently_saved_pages() {
         let dir = tempfile::tempdir().unwrap();
-        let saved = SavedConversations::new(dir.path().to_owned());
+        let saved = SavedConversations::new(dir.path().to_owned(), ORIGIN);
         let oldest = Uuid::from_u128(1000);
-        saved.save(oldest, &page("first")).unwrap();
+        saved.save(oldest, &page("first"), saved.ticket()).unwrap();
         let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
         std::fs::File::options()
             .write(true)
@@ -160,21 +216,57 @@ mod tests {
             .set_modified(past)
             .unwrap();
         for n in 0..KEPT_PAGES as u128 {
-            saved.save(Uuid::from_u128(n), &page("later")).unwrap();
+            saved
+                .save(Uuid::from_u128(n), &page("later"), saved.ticket())
+                .unwrap();
         }
         assert!(saved.load(oldest).is_none(), "the oldest page is pruned");
         assert!(saved.load(Uuid::from_u128(0)).is_some());
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 32);
+        assert_eq!(std::fs::read_dir(&saved.dir).unwrap().count(), 32);
     }
 
     #[test]
-    fn forgetting_a_server_removes_its_pages() {
+    fn a_page_fetched_earlier_does_not_replace_a_later_one() {
         let dir = tempfile::tempdir().unwrap();
-        let pages = dir.path().join("server.conversations");
-        let saved = SavedConversations::new(pages.clone());
-        saved.save(Uuid::from_u128(1), &page("hello")).unwrap();
-        SavedConversations::forget(&pages).unwrap();
-        assert!(!pages.exists());
-        SavedConversations::forget(&pages).unwrap();
+        let saved = SavedConversations::new(dir.path().to_owned(), ORIGIN);
+        let bot = Uuid::from_u128(1);
+        let (earlier, later) = (saved.ticket(), saved.ticket());
+        saved.save(bot, &page("later"), later).unwrap();
+        saved.save(bot, &page("earlier"), earlier).unwrap();
+        assert_eq!(saved.load(bot).unwrap().items[0].text, "later");
+    }
+
+    #[test]
+    fn retiring_a_server_removes_its_pages_and_refuses_later_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = dir.path().join("server.conversations");
+        let saved = SavedConversations::new(server.clone(), ORIGIN);
+        let elsewhere = SavedConversations::new(server.clone(), "https://other.example");
+        let ticket = saved.ticket();
+        saved
+            .save(Uuid::from_u128(1), &page("hello"), saved.ticket())
+            .unwrap();
+        elsewhere
+            .save(Uuid::from_u128(2), &page("hello"), elsewhere.ticket())
+            .unwrap();
+        saved.clone().retire().unwrap();
+        assert!(!server.exists(), "every address's pages are gone");
+        saved
+            .save(Uuid::from_u128(3), &page("late"), ticket)
+            .unwrap();
+        assert!(
+            !server.exists(),
+            "a save queued before removal lands nowhere"
+        );
+    }
+
+    #[test]
+    fn another_address_for_the_server_starts_without_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let bot = Uuid::from_u128(1);
+        let saved = SavedConversations::new(dir.path().to_owned(), ORIGIN);
+        saved.save(bot, &page("hello"), saved.ticket()).unwrap();
+        let moved = SavedConversations::new(dir.path().to_owned(), "https://other.example");
+        assert!(moved.load(bot).is_none());
     }
 }

@@ -1021,12 +1021,18 @@ impl Shell {
                                         let _ = shell.update(cx, |shell, cx| {
                                             match shell.commit_registry(|r| r.remove(id)) {
                                                 Ok(()) => {
+                                                    let saved = shell.inactive.get(&id).and_then(
+                                                        |session| session.app.read(cx).saved_conversations(),
+                                                    );
                                                     if let Ok(store) = &shell.launch.store
                                                         && let Err(err) =
                                                             shell.rail.icons.forget(store, id).and(
-                                                                crate::saved_conversations::SavedConversations::forget(
-                                                                    &store.saved_conversations_dir(id),
-                                                                ),
+                                                                match saved {
+                                                                    Some(saved) => saved.retire(),
+                                                                    None => crate::saved_conversations::SavedConversations::forget(
+                                                                        &store.saved_conversations_dir(id),
+                                                                    ),
+                                                                },
                                                             )
                                                     {
                                                         shell.connection_error = Some(err);
