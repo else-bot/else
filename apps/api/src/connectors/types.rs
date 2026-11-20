@@ -293,11 +293,13 @@ pub enum MailCommand {
     FindSent {
         message_id: String,
     },
-    /// Where the message with this Message-ID is now, searched in the
-    /// Inbox, Archive, Trash, All Mail and Junk folders. Only the owner's
-    /// reader calls it, after a mail trigger's message left its folder.
+    /// Where the message with this Message-ID is now, searched in
+    /// `folder` first, then the Archive, Trash, All Mail, Junk and Inbox
+    /// folders. Only the owner's reader calls it, after a mail trigger's
+    /// message left its folder.
     Locate {
         message_id: String,
+        folder: Option<String>,
     },
     /// The whole message for the owner's reader: headers, full text, the
     /// HTML part with the images it shows, and the attachment list. Only

@@ -145,7 +145,9 @@ async fn imap_fixture_serving(start_tls: bool, uid_next: u32, raw: Vec<u8>) -> I
                 )
             } else {
                 recorded.lock().unwrap().push(command.into());
-                if upper.starts_with("EXAMINE ") || upper.starts_with("SELECT ") {
+                if upper == "EXAMINE BROKEN" {
+                    format!("{tag} NO [UNAVAILABLE] try later\r\n")
+                } else if upper.starts_with("EXAMINE ") || upper.starts_with("SELECT ") {
                     selected = command.split_once(' ').unwrap().1.to_owned();
                     format!(
                         "* 3 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT {uid_next}] next\r\n{tag} OK selected\r\n"
@@ -153,6 +155,9 @@ async fn imap_fixture_serving(start_tls: bool, uid_next: u32, raw: Vec<u8>) -> I
                 } else if upper.starts_with("LIST ") {
                     format!(
                         "* LIST (\\HasNoChildren) \"/\" INBOX\r\n\
+                         * LIST (\\HasNoChildren) \"/\" Archive\r\n\
+                         * LIST (\\HasNoChildren) \"/\" Trash\r\n\
+                         * LIST (\\HasNoChildren) \"/\" Broken\r\n\
                          * LIST (\\HasNoChildren \\All) \"/\" \"[Gmail]/All Mail\"\r\n\
                          {tag} OK list\r\n"
                     )
@@ -165,6 +170,12 @@ async fn imap_fixture_serving(start_tls: bool, uid_next: u32, raw: Vec<u8>) -> I
                     format!("* SEARCH{hit}\r\n{tag} OK search\r\n")
                 } else if upper.starts_with("UID SEARCH ") {
                     format!("* SEARCH 11 12 13\r\n{tag} OK search\r\n")
+                } else if upper.starts_with("UID FETCH 42") && upper.contains("ENVELOPE") {
+                    format!(
+                        "* 1 FETCH (UID 42 ENVELOPE (NIL \"Moved\" NIL NIL NIL NIL NIL NIL NIL \"<moved@example.org>\"))\r\n\
+                         * 2 FETCH (UID 43 ENVELOPE (NIL \"Decoy\" NIL NIL NIL NIL NIL NIL NIL \"<xmoved@example.org>\"))\r\n\
+                         {tag} OK fetch\r\n"
+                    )
                 } else if upper.starts_with("UID FETCH ") && upper.contains("ENVELOPE") {
                     format!(
                         "* 1 FETCH (UID 11 FLAGS (\\Seen) INTERNALDATE \"16-Nov-2026 09:00:00 +0000\" ENVELOPE (\"Mon, 16 Nov 2026 10:00:00 +0100\" \"Morning\" ((\"=?UTF-8?Q?Caf=C3=A9_Bot?=\" NIL \"a\" \"example.org\")) NIL NIL NIL NIL NIL NIL \"<scan-11@example.org>\"))\r\n\
@@ -1320,7 +1331,7 @@ fn every_inline_html_part_gives_its_links() {
 }
 
 #[tokio::test]
-async fn locate_searches_archive_and_trash_before_all_mail() {
+async fn locate_finds_the_exact_message_id_after_archive_and_trash() {
     let fixture = imap_fixture().await;
     let mut client = Imap::connect(&fixture.endpoint, &auth(), &fixture.connector)
         .await
@@ -1331,7 +1342,7 @@ async fn locate_searches_archive_and_trash_before_all_mail() {
         ..Provider::Gmail.config("owner@example.org".into()).unwrap()
     };
     let found = client
-        .locate(&config, "moved@example.org")
+        .locate(&config, "moved@example.org", Some("Receipts"))
         .await
         .unwrap()
         .unwrap();
@@ -1341,7 +1352,8 @@ async fn locate_searches_archive_and_trash_before_all_mail() {
             folder: "[Gmail]/All Mail".into(),
             uid_validity: 77,
             uid: 42,
-        }
+        },
+        "43's Message-ID only contains the one sought"
     );
     let examined: Vec<String> = fixture
         .commands
@@ -1353,7 +1365,14 @@ async fn locate_searches_archive_and_trash_before_all_mail() {
     assert_eq!(
         examined,
         ["Archive", "Trash", "\"[Gmail]/All Mail\""],
-        "{examined:?}"
+        "an unlisted folder is not searched"
+    );
+    let unreadable = client
+        .locate(&config, "moved@example.org", Some("Broken"))
+        .await;
+    assert!(
+        unreadable.is_err(),
+        "a folder that fails to open fails the search instead of reading as empty"
     );
     fixture.task.abort();
 }

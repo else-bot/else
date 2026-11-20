@@ -45,7 +45,7 @@ enum Reading {
 }
 
 /// Why an email did not open, and whether asking again could help: not
-/// when the server looked for the email and it is gone.
+/// when the email is gone, too large, or its inbox is disconnected.
 #[derive(Clone)]
 struct FetchError {
     message: String,
@@ -54,11 +54,12 @@ struct FetchError {
 
 impl From<crate::api::ClientError> for FetchError {
     fn from(error: crate::api::ClientError) -> Self {
-        let gone = matches!(&error, crate::api::ClientError::Api { code, .. }
-            if matches!(code.as_str(), "message_deleted" | "message_not_found" | "stale_message_reference"));
+        let lasting = matches!(&error, crate::api::ClientError::Api { code, .. }
+            if matches!(code.as_str(), "message_deleted" | "message_not_found"
+                | "stale_message_reference" | "mail_forbidden" | "mail_message_too_large"));
         Self {
             message: error.to_string(),
-            retry: !gone,
+            retry: !lasting,
         }
     }
 }

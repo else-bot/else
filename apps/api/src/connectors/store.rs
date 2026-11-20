@@ -28,8 +28,8 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::types::{
-    Account, Arrival, Credential, Cursor, Health, MailCommand, MailConfig, MailTrigger, MessageRef,
-    MoveKind, Permissions, Place, Provider, Scan,
+    Account, Arrival, Credential, Cursor, Envelope, Health, MailCommand, MailConfig, MailTrigger,
+    MessageRef, MoveKind, Permissions, Place, Provider, Scan,
 };
 use crate::credentials::SecretKey;
 use crate::db::turns::TurnStatus;
@@ -1584,7 +1584,9 @@ pub async fn relocate(
         return Err(StoreError::Invalid("a message never moves back to arrived"));
     }
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let event: Option<Uuid> = sqlx::query_scalar(
+    // A message that left and came back to the Inbox arrived twice, and
+    // both triggers follow it.
+    let events: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM connector_events WHERE account_id = ?1 AND (
              (location = 'arrived' AND folder = ?2 AND uid_validity = ?3 AND uid = ?4)
           OR (location IN ('archived', 'trashed', 'moved')
@@ -1594,12 +1596,12 @@ pub async fn relocate(
     .bind(&from.folder)
     .bind(i64::from(from.uid_validity))
     .bind(i64::from(from.uid))
-    .fetch_optional(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
-    let Some(event) = event else {
-        return Ok(false);
-    };
-    let moved = place_in(&mut tx, event, None, to, Some(turn_id)).await?;
+    let mut moved = false;
+    for event in events {
+        moved |= place_in(&mut tx, event, None, to, Some(turn_id)).await?;
+    }
     tx.commit().await?;
     Ok(moved)
 }
@@ -1619,9 +1621,67 @@ pub async fn found(
         ));
     }
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let moved = place_in(&mut tx, event_id, Some(seen), now, None).await?;
+    let moved = match (seen, now) {
+        // Only the UID was unknown: who moved it, and when, still hold.
+        (
+            Place::Moved {
+                folder,
+                message: None,
+                ..
+            },
+            Place::Moved {
+                folder: found,
+                message: Some(message),
+                ..
+            },
+        ) if folder == found => {
+            sqlx::query(
+                "UPDATE connector_events SET moved_uid_validity = ?3, moved_uid = ?4
+                 WHERE id = ?1 AND location = ?2 AND moved_folder = ?5 AND moved_uid IS NULL",
+            )
+            .bind(event_id)
+            .bind(seen.as_str())
+            .bind(i64::from(message.uid_validity))
+            .bind(i64::from(message.uid))
+            .bind(folder)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+                == 1
+        }
+        _ => place_in(&mut tx, event_id, Some(seen), now, None).await?,
+    };
     tx.commit().await?;
     Ok(moved)
+}
+
+/// Keeps what an opened message says of itself on a mail trigger that
+/// arrived before scans kept it, so a later move can be followed.
+pub async fn remember(
+    pool: &SqlitePool,
+    event_id: Uuid,
+    envelope: &Envelope,
+) -> Result<bool, StoreError> {
+    let Some(message_id) = envelope.message_id.as_deref() else {
+        return Ok(false);
+    };
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let done = sqlx::query(
+        "UPDATE connector_events SET message_id = ?2, subject = coalesce(subject, ?3),
+             sender = coalesce(sender, ?4)
+         WHERE id = ?1 AND message_id IS NULL",
+    )
+    .bind(event_id)
+    .bind(message_id)
+    .bind(envelope.subject.as_deref())
+    .bind(envelope.sender.as_deref())
+    .execute(&mut *tx)
+    .await?;
+    if done.rows_affected() == 1 {
+        turns_changed(&mut tx, event_id).await?;
+    }
+    tx.commit().await?;
+    Ok(done.rows_affected() == 1)
 }
 
 /// Moves `event` to `to`, when it is at `from` (any place but deleted when
@@ -1657,6 +1717,12 @@ async fn place_in(
     if done.rows_affected() == 0 {
         return Ok(false);
     }
+    turns_changed(tx, event).await?;
+    Ok(true)
+}
+
+/// Shows each turn the mail trigger `event` started its new row.
+async fn turns_changed(tx: &mut SqliteConnection, event: Uuid) -> Result<(), StoreError> {
     let turns: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT bot_id, turn_id FROM connector_deliveries WHERE event_id = ?1 AND turn_id IS NOT NULL",
     )
@@ -1666,5 +1732,5 @@ async fn place_in(
     for (bot_id, turn_id) in turns {
         crate::db::events::turn_changed(tx, bot_id, turn_id).await?;
     }
-    Ok(true)
+    Ok(())
 }

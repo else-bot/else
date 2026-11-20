@@ -4,11 +4,12 @@
 use super::*;
 
 const RAW: &str = "From: Coupon Co <hello@coupons.test>\r\nSubject: Verify your email\r\n\
+    Message-ID: <fixture@coupons.test>\r\n\
     MIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Hi</p>";
 
 /// Holds messages 9 and 11 in any folder, counting the sessions it signs
 /// in and the messages it serves. `trash` moves a message to Trash as UID
-/// 21, `gone` lists messages that left their folder, and `locate` finds
+/// 21, `archive` to Archive as UID 31 without saying so, `gone` lists messages that left their folder, and `locate` finds
 /// the message in `found` unless it is `unsearchable`. `folders` says it is `holding` and waits for
 /// `release`, standing in for a long bot command, and `reject` refuses new
 /// sign-ins and drops open sessions.
@@ -103,6 +104,17 @@ impl MailTransport for Mailbox {
                 };
                 self.leave(message, trashed.clone());
                 Ok(json!({"moved":true,"destination":"Trash","message":trashed}))
+            }
+            MailCommand::Archive { message } => {
+                self.leave(
+                    message,
+                    MessageRef {
+                        folder: "Archive".into(),
+                        uid_validity: 1,
+                        uid: 31,
+                    },
+                );
+                Ok(json!({"moved":true,"destination":"Archive","message":null}))
             }
             MailCommand::Locate { .. }
                 if self.unsearchable.load(std::sync::atomic::Ordering::SeqCst) =>
@@ -576,7 +588,7 @@ async fn an_email_moved_by_another_client_is_found_by_its_message_id() {
     assert_eq!(mail["location"]["by_bot_id"], Value::Null);
     assert_eq!(
         mailbox.commands.lock().unwrap()[0],
-        json!({"operation":"locate","message_id":"fixture@coupons.test"})
+        json!({"operation":"locate","message_id":"fixture@coupons.test","folder":null})
     );
 
     let whereabouts = store::whereabouts(&h.app.db.pool, account.id, &arrived())
@@ -655,5 +667,70 @@ async fn a_failed_search_leaves_the_email_where_it_was() {
     assert_eq!(
         turn_mail(&h, bot, turn).await["location"]["state"],
         "arrived"
+    );
+}
+
+#[tokio::test]
+async fn finding_a_bot_archived_email_keeps_who_archived_it() {
+    let mailbox = Arc::new(Mailbox::default());
+    let (h, bot, account, turn) = mail_turn(&mailbox).await;
+    let (_, token) = h.started(turn).await;
+    let archived = tool(
+        &h.app,
+        &token,
+        "mail_action",
+        json!({"account_id":account.id,"action_id":Uuid::new_v4(),
+               "command":{"operation":"archive","message":arrived()}}),
+    )
+    .await;
+    assert!(!archived.error, "{}", archived.body);
+
+    let view = h
+        .app
+        .owner("GET", &messages_path(account.id, 9), None)
+        .await;
+    assert_eq!(view.status, StatusCode::OK, "{}", view.body);
+    assert_eq!(
+        view.body["message"],
+        json!({"folder":"Archive","uid_validity":1,"uid":31})
+    );
+    assert!(
+        mailbox.commands.lock().unwrap().contains(
+            &json!({"operation":"locate","message_id":"fixture@coupons.test","folder":"Archive"})
+        ),
+        "the search starts where the bot put it"
+    );
+    let mail = turn_mail(&h, bot, turn).await;
+    assert_eq!(mail["location"]["state"], "archived");
+    assert_eq!(mail["location"]["by_bot_id"], bot.to_string());
+    assert_eq!(mail["location"]["by_turn_id"], turn.to_string());
+}
+
+#[tokio::test]
+async fn opening_an_email_from_before_the_upgrade_keeps_its_message_id() {
+    let mailbox = Arc::new(Mailbox::default());
+    let (h, _, account, _) = mail_turn(&mailbox).await;
+    sqlx::query("UPDATE connector_events SET message_id = NULL, subject = NULL, sender = NULL")
+        .execute(&h.app.db.pool)
+        .await
+        .unwrap();
+
+    let view = h
+        .app
+        .owner("GET", &messages_path(account.id, 9), None)
+        .await;
+    assert_eq!(view.status, StatusCode::OK, "{}", view.body);
+    let row: (Option<String>, Option<String>, Option<String>) =
+        sqlx::query_as("SELECT message_id, subject, sender FROM connector_events")
+            .fetch_one(&h.app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        row,
+        (
+            Some("fixture@coupons.test".into()),
+            Some("Verify your email".into()),
+            Some("Coupon Co".into())
+        )
     );
 }

@@ -397,11 +397,18 @@ impl ConnectorManager {
         let at = match whereabouts.as_ref().map(|w| &w.place) {
             Some(Place::Deleted) => return Err(MailError::new("message_deleted")),
             Some(Place::Moved { message, .. }) => message.clone(),
-            Some(Place::Arrived) | None => Some(message),
+            Some(Place::Arrived) | None => Some(message.clone()),
         };
         let error = match at {
             Some(at) => match self.read_for_owner(&account, &at, epoch).await {
-                Ok(fetched) => return pimalaya::view(&fetched, &at),
+                Ok(fetched) => {
+                    if let Some(w) = whereabouts.as_ref().filter(|w| w.message_id.is_none()) {
+                        let _ =
+                            store::remember(&self.db, w.event_id, &pimalaya::envelope(&fetched))
+                                .await;
+                    }
+                    return pimalaya::view(&fetched, &at);
+                }
                 Err(error) => error,
             },
             None => MailError::new("message_not_found"),
@@ -415,10 +422,18 @@ impl ConnectorManager {
         else {
             return Err(error);
         };
+        let folder = match &place {
+            Place::Moved { folder, .. } => Some(folder.clone()),
+            Place::Arrived | Place::Deleted => None,
+        };
         let auth = self.auth(&account).await?;
         let located = self
             .transport
-            .execute(&account.config, &auth, &MailCommand::Locate { message_id })
+            .execute(
+                &account.config,
+                &auth,
+                &MailCommand::Locate { message_id, folder },
+            )
             .await?;
         let found = serde_json::from_value::<Option<MessageRef>>(located["message"].clone())
             .map_err(|_| MailError::new("mail_transport_failed"))?;
@@ -430,11 +445,26 @@ impl ConnectorManager {
             },
             None => Place::Deleted,
         };
-        store::found(&self.db, event_id, &place, &now)
+        let recorded = store::found(&self.db, event_id, &place, &now)
             .await
             .map_err(|_| MailError::new("mail_unavailable"))?;
-        let Some(found) = found else {
-            return Err(MailError::new("message_deleted"));
+        // A bot moved it while the search ran: its record wins.
+        let now = if recorded {
+            now
+        } else {
+            store::whereabouts(&self.db, account_id, &message)
+                .await
+                .ok()
+                .flatten()
+                .map_or(Place::Arrived, |w| w.place)
+        };
+        let found = match now {
+            Place::Deleted => return Err(MailError::new("message_deleted")),
+            Place::Moved {
+                message: Some(found),
+                ..
+            } => found,
+            Place::Moved { message: None, .. } | Place::Arrived => return Err(error),
         };
         let fetched = self.read_for_owner(&account, &found, epoch).await?;
         pimalaya::view(&fetched, &found)
