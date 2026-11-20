@@ -13,7 +13,7 @@ const SLOW: &str = "[synthetic:slow] fix the checkout errors; ask the right bot 
 async fn app() -> TestApp {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    TestApp::with_options(db, 2)
+    TestApp::with_options(db, 2).await
 }
 
 async fn grant(app: &TestApp, turn: Uuid, tools: Vec<Tool>) -> String {
@@ -23,8 +23,8 @@ async fn grant(app: &TestApp, turn: Uuid, tools: Vec<Tool>) -> String {
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
-    app.scheduler
-        .grants()
+    app.state
+        .grants
         .issue(bot, conversation, turn, tools, DEFAULT_TTL)
         .await
 }

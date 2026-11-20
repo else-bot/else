@@ -46,7 +46,7 @@ fn config() -> MailConfig {
 async fn account(app: &TestApp) -> Account {
     store::create(
         &app.db.pool,
-        app.state.secret_key.as_ref().unwrap(),
+        &app.state.secret_key,
         &config(),
         &Credential::Password {
             password: "private-app-password".into(),
@@ -480,7 +480,7 @@ async fn the_longest_trigger_instructions_fit_the_approval_card() {
     )
     .await;
     assert!(long.error, "{}", long.body);
-    assert!(!h.app.scheduler.grants().is_parked(turn).await);
+    assert!(!h.app.state.grants.is_parked(turn).await);
     let fits = tool(
         &h.app,
         &token,
@@ -803,22 +803,16 @@ impl MailTransport for QuietInbox {
 
 #[tokio::test]
 async fn quiet_watchers_survive_bot_commands_and_never_queue_empty_turns() {
-    let h = recorder::harness(4).await;
+    let transport = Arc::new(QuietInbox::default());
+    let h = recorder::harness_with(4, Some(transport.clone())).await;
     let bot: Uuid = h.app.main_bot().await.parse().unwrap();
     let (turn, _) = h.running(&bot.to_string(), GATE).await;
     let account = account(&h.app).await;
     store::set_permissions(&h.app.db.pool, account.id, bot, &permissions())
         .await
         .unwrap();
-    let transport = Arc::new(QuietInbox::default());
-    let manager = Arc::new(ConnectorManager::with_transport(
-        h.app.db.pool.clone(),
-        h.app.state.secret_key.clone().unwrap(),
-        h.app.scheduler.clone(),
-        transport.clone(),
-    ));
-    let stop = CancellationToken::new();
-    let running = tokio::spawn(manager.clone().run(stop.clone()));
+    let manager = h.app.state.connectors.clone();
+    manager.changed(account.id).await;
     tokio::time::timeout(
         std::time::Duration::from_secs(3),
         transport.ready.notified(),
@@ -838,8 +832,6 @@ async fn quiet_watchers_survive_bot_commands_and_never_queue_empty_turns() {
         .await
         .unwrap();
     assert_eq!(events, 0);
-    stop.cancel();
-    running.await.unwrap();
 }
 #[tokio::test]
 async fn a_scan_that_began_before_a_rejection_never_reports_connected() {
@@ -849,7 +841,9 @@ async fn a_scan_that_began_before_a_rejection_never_reports_connected() {
 }
 
 async fn scan_then_rejection(already_rejected: bool) {
-    let h = recorder::harness(4).await;
+    let inbox = Arc::new(QuietInbox::default());
+    inbox.hold_scan.store(true, Ordering::SeqCst);
+    let h = recorder::harness_with(4, Some(inbox.clone())).await;
     let account = account(&h.app).await;
     let reject = || async {
         store::set_health(
@@ -864,16 +858,8 @@ async fn scan_then_rejection(already_rejected: bool) {
     if already_rejected {
         assert!(reject().await);
     }
-    let inbox = Arc::new(QuietInbox::default());
-    inbox.hold_scan.store(true, Ordering::SeqCst);
-    let manager = Arc::new(ConnectorManager::with_transport(
-        h.app.db.pool.clone(),
-        h.app.state.secret_key.clone().unwrap(),
-        h.app.scheduler.clone(),
-        inbox.clone(),
-    ));
-    let stop = CancellationToken::new();
-    let running = tokio::spawn(manager.clone().run(stop.clone()));
+    let manager = h.app.state.connectors.clone();
+    manager.changed(account.id).await;
     tokio::time::timeout(common::SETTLE, inbox.scan_held.notified())
         .await
         .expect("the watch signs in and scans");
@@ -894,8 +880,6 @@ async fn scan_then_rejection(already_rejected: bool) {
 
     manager.changed(account.id).await;
     health_becomes(&h.app, account.id, Health::Connected).await;
-    stop.cancel();
-    running.await.unwrap();
 }
 
 #[async_trait::async_trait]
@@ -945,7 +929,7 @@ impl MailTransport for Transport {
 #[tokio::test]
 async fn duplicate_and_uncertain_send_retries_never_repeat_transport_effects() {
     for uncertain in [false, true] {
-        let h = recorder::harness(4).await;
+        let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
         let bot: Uuid = h.app.main_bot().await.parse().unwrap();
         let (turn, _) = h.running(&bot.to_string(), GATE).await;
         let account = account(&h.app).await;
@@ -959,7 +943,7 @@ async fn duplicate_and_uncertain_send_retries_never_repeat_transport_effects() {
         });
         let manager = Arc::new(ConnectorManager::with_transport(
             h.app.db.pool.clone(),
-            h.app.state.secret_key.clone().unwrap(),
+            h.app.state.secret_key.clone(),
             h.app.scheduler.clone(),
             transport.clone(),
         ));
@@ -1017,7 +1001,7 @@ async fn duplicate_and_uncertain_send_retries_never_repeat_transport_effects() {
 
 #[tokio::test]
 async fn an_action_recovery_settled_first_reports_the_recorded_receipt() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
     let bot: Uuid = h.app.main_bot().await.parse().unwrap();
     let (turn, _) = h.running(&bot.to_string(), GATE).await;
     let account = account(&h.app).await;
@@ -1026,7 +1010,7 @@ async fn an_action_recovery_settled_first_reports_the_recorded_receipt() {
         .unwrap();
     let manager = Arc::new(ConnectorManager::with_transport(
         h.app.db.pool.clone(),
-        h.app.state.secret_key.clone().unwrap(),
+        h.app.state.secret_key.clone(),
         h.app.scheduler.clone(),
         Arc::new(Transport {
             sends: AtomicUsize::new(0),
@@ -1059,7 +1043,7 @@ async fn an_action_recovery_settled_first_reports_the_recorded_receipt() {
 
 #[tokio::test]
 async fn store_refusals_reach_the_bot_under_their_own_codes() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
     let bot: Uuid = h.app.main_bot().await.parse().unwrap();
     let (turn, _) = h.running(&bot.to_string(), GATE).await;
     let account = account(&h.app).await;
@@ -1069,7 +1053,7 @@ async fn store_refusals_reach_the_bot_under_their_own_codes() {
         .unwrap();
     let manager = Arc::new(ConnectorManager::with_transport(
         pool.clone(),
-        h.app.state.secret_key.clone().unwrap(),
+        h.app.state.secret_key.clone(),
         h.app.scheduler.clone(),
         Arc::new(Transport {
             sends: AtomicUsize::new(0),
@@ -1183,7 +1167,7 @@ async fn mail_event(
     )
     .await
     .unwrap();
-    else_api::connectors::delivery::admit_pending(&h.app.db.pool, h.app.scheduler.registry(), 32)
+    else_api::connectors::delivery::admit_pending(&h.app.db.pool, &h.app.state.registry, 32)
         .await
         .unwrap();
     h.app.scheduler.wake();
@@ -1224,7 +1208,7 @@ async fn mail_event_origin_removes_computer_authority() {
         "{notice}"
     );
     let (_, token) = h.started(turn).await;
-    let grant = h.app.scheduler.grants().resolve(&token).await.unwrap();
+    let grant = h.app.state.grants.resolve(&token).await.unwrap();
     assert!(grant.allows(Tool::Mail));
     assert!(
         grant.allows(Tool::DraftEmail),
@@ -1394,13 +1378,7 @@ async fn a_mail_event_hands_a_notice_to_another_bot_without_its_memory_or_mail()
     h.release(turn).await;
     h.app.wait_turn(&turn.to_string(), &["waiting"]).await;
     let (_, child_token) = h.started(child).await;
-    let grant = h
-        .app
-        .scheduler
-        .grants()
-        .resolve(&child_token)
-        .await
-        .unwrap();
+    let grant = h.app.state.grants.resolve(&child_token).await.unwrap();
     assert!(grant.allows(Tool::ReadHistory));
     for forbidden in [
         Tool::ReadMemory,
@@ -1585,8 +1563,8 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
         let app = TestApp::installed().await;
         let bot: Uuid = app.main_bot().await.parse().unwrap();
         let _closed = app
-            .scheduler
-            .gate()
+            .state
+            .gate
             .close(
                 Duration::from_secs(2),
                 else_api::maintenance::Pause::backup(None),
@@ -1633,7 +1611,7 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
         )
         .await
         .unwrap();
-        else_api::connectors::delivery::admit_pending(&app.db.pool, app.scheduler.registry(), 32)
+        else_api::connectors::delivery::admit_pending(&app.db.pool, &app.state.registry, 32)
             .await
             .unwrap();
         let mail_turn: Uuid = sqlx::query_scalar(
@@ -1665,7 +1643,7 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
         }
         let dir = tempfile::tempdir().unwrap();
         let params = DatabaseParams::parse(app.db.url.expose()).unwrap();
-        let key = app.state.secret_key.clone().unwrap();
+        let key = app.state.secret_key.clone();
         let worker = BackupWorker::new(
             app.db.pool.clone(),
             params.clone(),
@@ -1742,7 +1720,7 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
                 .wake
         );
         assert_eq!(
-            else_api::connectors::delivery::admit_pending(&restored, app.scheduler.registry(), 32)
+            else_api::connectors::delivery::admit_pending(&restored, &app.state.registry, 32)
                 .await
                 .unwrap(),
             0
@@ -1769,7 +1747,7 @@ async fn a_bot_asks_the_owner_to_sign_in_to_an_inbox_from_chat() {
     )
     .await;
     assert!(unsupported.error, "{}", unsupported.body);
-    assert!(!app.scheduler.grants().is_parked(turn).await);
+    assert!(!app.state.grants.is_parked(turn).await);
 
     let parked = tool(
         app,
@@ -1784,7 +1762,7 @@ async fn a_bot_asks_the_owner_to_sign_in_to_an_inbox_from_chat() {
         parked.body
     );
     assert_eq!(parked.result["parked"], true);
-    assert!(app.scheduler.grants().is_parked(turn).await);
+    assert!(app.state.grants.is_parked(turn).await);
     let question: Uuid = parked.result["question_id"]
         .as_str()
         .unwrap()
@@ -1840,7 +1818,7 @@ async fn a_bot_asks_the_owner_to_sign_in_to_an_inbox_from_chat() {
     );
     let other_mailbox = store::create(
         &app.db.pool,
-        app.state.secret_key.as_ref().unwrap(),
+        &app.state.secret_key,
         &Provider::Gmail.config("other@gmail.com".into()).unwrap(),
         &Credential::OAuth2 {
             client_id: "desktop".into(),
@@ -1962,7 +1940,7 @@ async fn an_inbox_card_wakes_no_bot_when_its_inbox_is_ambiguous() {
     let mut ids = vec![];
     for address in ["first@gmail.com", "second@gmail.com"] {
         let (config, credential) = gmail(address);
-        let key = h.app.state.secret_key.as_ref().unwrap();
+        let key = &h.app.state.secret_key;
         ids.push(
             store::create(&h.app.db.pool, key, &config, &credential)
                 .await
@@ -1991,7 +1969,7 @@ async fn an_inbox_card_never_restores_read_the_owner_withdrew() {
     let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
     let (bot, path) = inbox_card(&h).await;
     let (config, credential) = gmail("owner@gmail.com");
-    let key = h.app.state.secret_key.as_ref().unwrap();
+    let key = &h.app.state.secret_key;
     let id = store::create(&h.app.db.pool, key, &config, &credential)
         .await
         .unwrap()

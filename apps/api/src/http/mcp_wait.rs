@@ -273,9 +273,7 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         Ok(parsed) => parsed,
         Err(message) => return (tool_error(&message), None),
     };
-    let Some(library) = state.mcps.get() else {
-        return (tool_error("The shared MCP library is unavailable."), None);
-    };
+    let library = &state.mcps;
     let log = format!("{} {} on {}", NAME, spec.tool, spec.mcp_id);
     let caller = match mcp_waits::caller(&state.db, grant.turn_id).await {
         Ok(caller) => caller,
@@ -366,7 +364,7 @@ async fn park(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     };
     match mcp_waits::create(&state.db, grant.turn_id, caller.attempt, &spec, &first).await {
         Ok(wait_id) => {
-            state.scheduler.grants().park(grant.turn_id).await;
+            state.grants.park(grant.turn_id).await;
             (
                 tool_result(json!({
                     "status": "waiting",
@@ -394,9 +392,7 @@ fn refused(error: CreateError, log: &str) -> Outcome {
 }
 
 async fn check_and_record(state: Arc<AppState>, wait: Due) {
-    let Some(library) = state.mcps.get() else {
-        return;
-    };
+    let library = &state.mcps;
     let result = match qualify(library, &wait.mcp_id, &wait.tool).await {
         Ok(()) => {
             let checked = check(
@@ -453,7 +449,7 @@ pub async fn run(state: Arc<AppState>, stop: CancellationToken) {
             Err(error) => tracing::warn!(%error, "expiring MCP waits failed"),
         }
         let free = CONCURRENT_CHECKS.saturating_sub(checks.len());
-        if free == 0 || state.mcps.get().is_none() {
+        if free == 0 {
             continue;
         }
         let busy_packages: Vec<String> = busy.values().cloned().collect();

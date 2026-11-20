@@ -224,8 +224,8 @@ pub async fn harness_with_providers(
     providers.extend(extra);
     let registry = else_api::providers::Registry::new(providers);
     let app = match mail {
-        Some(mail) => TestApp::with_mail(db, max_active, registry, mail),
-        None => TestApp::with_registry(db, max_active, registry),
+        Some(mail) => TestApp::with_mail(db, max_active, registry, mail).await,
+        None => TestApp::with_registry(db, max_active, registry).await,
     };
     Harness { app, recorder }
 }

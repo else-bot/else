@@ -56,7 +56,7 @@ async fn wait_for_wakes(app: &TestApp, id: &str, count: usize) -> Vec<(Uuid, Dat
 }
 
 async fn admit(app: &TestApp, now: DateTime<Utc>) -> usize {
-    else_api::db::webhooks::admit_requested(&app.db.pool, app.scheduler.registry(), now, 8)
+    else_api::db::webhooks::admit_requested(&app.db.pool, &app.state.registry, now, 8)
         .await
         .unwrap()
 }

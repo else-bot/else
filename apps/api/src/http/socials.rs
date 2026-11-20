@@ -2,7 +2,7 @@ use super::{
     AppState,
     error::{ApiError, ApiJson, ApiPath, SecretJson},
 };
-use crate::socials::{Manager, pairing::Purpose, store, types::*};
+use crate::socials::{pairing::Purpose, store, types::*};
 use axum::{
     Json, Router,
     extract::{Query, State},
@@ -69,14 +69,6 @@ pub(super) fn error(e: Error) -> ApiError {
         _ => ApiError::unavailable("social_unavailable", e.to_string()),
     }
 }
-pub(super) fn manager(s: &AppState) -> Result<&Arc<Manager>, ApiError> {
-    s.socials.as_ref().ok_or_else(|| {
-        ApiError::unavailable(
-            "social_unavailable",
-            "Native socials require the API installation encryption key.",
-        )
-    })
-}
 async fn list(State(s): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     Ok(Json(
         json!({"connections":store::connections(&s.db).await.map_err(error)?}),
@@ -101,7 +93,7 @@ async fn connect(
     State(s): State<Arc<AppState>>,
     SecretJson(request): SecretJson<Connect>,
 ) -> Result<Json<Value>, ApiError> {
-    let m = manager(&s)?;
+    let m = &s.socials;
     if request.provider.setup() != SetupKind::Token {
         return Err(error(Error::Invalid(
             "Pair this provider from its connection card instead of submitting a token.",
@@ -133,7 +125,7 @@ async fn active(
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(request): ApiJson<Active>,
 ) -> Result<Json<Value>, ApiError> {
-    let m = manager(&s)?;
+    let m = &s.socials;
     let to = if request.active {
         ConnectionState::Active
     } else {
@@ -152,7 +144,7 @@ async fn remove(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let m = manager(&s)?;
+    let m = &s.socials;
     store::set_state(&s.db, id, ConnectionState::Removed)
         .await
         .map_err(error)?;
@@ -169,7 +161,7 @@ async fn credential(
     ApiPath(id): ApiPath<Uuid>,
     SecretJson(request): SecretJson<Replacement>,
 ) -> Result<Json<Value>, ApiError> {
-    let m = manager(&s)?;
+    let m = &s.socials;
     let c = store::connection(&s.db, id).await.map_err(error)?;
     if c.provider.setup() != SetupKind::Token {
         return Err(error(Error::Invalid(
@@ -193,7 +185,7 @@ async fn destinations(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let list = manager(&s)?.discover(id).await.map_err(error)?;
+    let list = s.socials.discover(id).await.map_err(error)?;
     Ok(Json(json!({"destinations":list})))
 }
 #[derive(Deserialize)]
@@ -235,7 +227,7 @@ async fn complete(
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<Complete>,
 ) -> Result<Json<Value>, ApiError> {
-    let m = manager(&s)?;
+    let m = &s.socials;
     let setup = store::settle_setup(&s.db, id, Some(input.connection_id), input.note.as_deref())
         .await
         .map_err(error)?;
@@ -250,9 +242,7 @@ async fn cancel(
     let setup = store::settle_setup(&s.db, id, None, None)
         .await
         .map_err(error)?;
-    if let Some(m) = s.socials.as_ref() {
-        m.stop_pairing(Purpose::Setup(id)).await;
-    }
+    s.socials.stop_pairing(Purpose::Setup(id)).await;
     s.scheduler.wake();
     Ok(Json(json!({"setup":setup})))
 }
@@ -270,10 +260,7 @@ async fn start_pairing(
     ApiPath(id): ApiPath<Uuid>,
     purpose: fn(Uuid) -> Purpose,
 ) -> Result<Json<Value>, ApiError> {
-    let view = manager(&s)?
-        .start_pairing(purpose(id))
-        .await
-        .map_err(error)?;
+    let view = s.socials.start_pairing(purpose(id)).await.map_err(error)?;
     Ok(Json(json!({ "pairing": view })))
 }
 async fn pairing(
@@ -282,7 +269,8 @@ async fn pairing(
     Query(after): Query<After>,
     purpose: fn(Uuid) -> Purpose,
 ) -> Result<Json<Value>, ApiError> {
-    let view = manager(&s)?
+    let view = s
+        .socials
         .pairing(purpose(id), after.after)
         .await
         .map_err(error)?;
@@ -292,6 +280,6 @@ async fn stop_repair_pairing(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    manager(&s)?.stop_pairing(Purpose::Repair(id)).await;
+    s.socials.stop_pairing(Purpose::Repair(id)).await;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -213,7 +213,7 @@ async fn setup() -> Setup {
     let registry = else_api::providers::Registry::new(vec![Arc::new(
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(5)),
     )]);
-    let app = TestApp::with_parts(db, 4, registry, Some(manager.clone()));
+    let app = TestApp::with_parts(db, 4, registry, Some(manager.clone())).await;
     Setup {
         app,
         guest,
@@ -233,8 +233,8 @@ async fn grant(app: &TestApp, bot: &str) -> (Uuid, String) {
         .await
         .unwrap();
     let token = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             bot.parse().unwrap(),
             conversation,

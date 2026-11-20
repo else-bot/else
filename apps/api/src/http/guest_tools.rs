@@ -391,7 +391,7 @@ fn fit(mut value: Value) -> Value {
 /// The turn's lease on its computer; with `desktop`, its screen and browser
 /// running too.
 async fn lease(state: &AppState, grant: &Grant, desktop: bool) -> Result<Uuid, Outcome> {
-    let Some(computers) = state.computers.as_ref() else {
+    let Some(computers) = state.computers.manager() else {
         return Err((
             tool_error("COMPUTER_UNAVAILABLE: no computer runtime on this host."),
             None,
@@ -567,8 +567,7 @@ pub(super) async fn shared(
     png: &[u8],
 ) -> Result<String, &'static str> {
     let project = state
-        .scheduler
-        .registry()
+        .registry
         .all()
         .iter()
         .find_map(|provider| provider.project_dir(grant.bot_id))
@@ -593,7 +592,7 @@ pub(super) async fn shared(
 /// what it asks about. `None` unless the desktop already runs: a handoff
 /// never wakes a computer.
 pub(super) async fn current_screen(state: &AppState, grant: &Grant) -> Option<(Uuid, Vec<u8>)> {
-    let computers = state.computers.as_ref()?;
+    let computers = state.computers.manager()?;
     let lease = computers
         .lease_running_desktop(grant.bot_id, &holder(grant))
         .await
@@ -752,7 +751,7 @@ async fn page_redaction(
         .and_then(|url| url.host_str().map(str::to_owned));
     task_secrets::browser_redaction(
         &state.db,
-        state.secret_key.as_deref(),
+        Some(&*state.secret_key),
         grant.bot_id,
         host.as_deref(),
     )
@@ -784,7 +783,7 @@ async fn vault_fill(
         return refused("secret needs field, the variable to type, such as PASSWORD.".into());
     };
     let (website, mut env) =
-        match task_secrets::login(&state.db, state.secret_key.as_deref(), name).await {
+        match task_secrets::login(&state.db, Some(&*state.secret_key), name).await {
             Ok(found) => found,
             Err(task_secrets::SecretError::Unknown(_)) => {
                 return refused(format!(
@@ -874,7 +873,7 @@ fn secret_names(args: &Value) -> Result<Vec<String>, Outcome> {
 
 /// Decrypt the Vault entries `names`, without recording a use.
 async fn resolve_secrets(state: &AppState, names: &[String]) -> Result<Env, Outcome> {
-    match task_secrets::resolve(&state.db, state.secret_key.as_deref(), names).await {
+    match task_secrets::resolve(&state.db, Some(&*state.secret_key), names).await {
         Ok(env) => Ok(env),
         Err(task_secrets::SecretError::Unknown(name)) => Err((
             tool_error(&format!(
@@ -949,7 +948,7 @@ async fn add_github(
             None,
         ));
     }
-    match super::shared_mcp::library(state).git_token(&id).await {
+    match state.mcps.git_token(&id).await {
         Ok(token) => {
             env.vars.extend(github_env(token));
             Ok(())
@@ -971,7 +970,7 @@ async fn add_github(
 }
 
 async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
-    let Some(computers) = state.computers.clone() else {
+    let Some(computers) = state.computers.manager().cloned() else {
         return (
             tool_error("COMPUTER_UNAVAILABLE: no computer runtime on this host."),
             None,

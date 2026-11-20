@@ -5,16 +5,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use else_api::backup::capture::Coordinator;
-use else_api::backup::service::Backups;
 use else_api::config::{Config, Source};
-use else_api::credentials::{OwnerToken, SecretKey};
+use else_api::credentials::SecretKey;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 const SECRET: &str = "secret-that-must-never-be-returned";
 const KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
+fn setup() -> common::Setup {
+    common::Setup {
+        backups: true,
+        ..common::Setup::default()
+    }
+}
 
 struct Env(BTreeMap<String, String>);
 impl Source for Env {
@@ -26,79 +31,32 @@ impl Source for Env {
 struct Harness {
     app: common::TestApp,
     config: Config,
-    cancel: CancellationToken,
-    task: tokio::task::JoinHandle<()>,
     _dir: tempfile::TempDir,
-}
-impl Drop for Harness {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-    }
 }
 impl Harness {
     async fn new() -> Self {
-        let mut app = common::TestApp::installed().await;
+        let db = common::TestDb::migrated().await;
+        else_api::db::installation::setup(&db.pool).await.unwrap();
         let dir = tempfile::tempdir().unwrap();
         let config = Config::load(&Env(BTreeMap::from([
             ("ELSE_DATA_DIR".into(), dir.path().display().to_string()),
-            ("DATABASE_URL".into(), app.db.url.expose().to_owned()),
+            ("DATABASE_URL".into(), db.url.expose().to_owned()),
             ("ELSE_BACKUP_INTERVAL_SECS".into(), "0".into()),
         ])))
         .unwrap();
-        let cancel = CancellationToken::new();
-        let key = Arc::new(SecretKey::parse(KEY).unwrap());
-        let (backups, task) = Backups::start(
-            &config,
-            app.db.pool.clone(),
-            key.clone(),
-            Coordinator::default(),
-            cancel.clone(),
-        )
-        .await
-        .unwrap();
-        let mut state = else_api::http::AppState::new(
-            OwnerToken::parse(common::TOKEN).unwrap(),
-            app.db.pool.clone(),
-            app.scheduler.clone(),
-            app.state.events.clone(),
-        )
-        .with_secret_key(key);
-        state.backups = Some(backups);
-        app.state = Arc::new(state);
-        app.router = else_api::http::router(&config, app.state.clone());
+        let app = common::TestApp::start_in(config.clone(), Arc::new(db), setup()).await;
         Self {
             app,
             config,
-            cancel,
-            task,
             _dir: dir,
         }
     }
-    async fn restart(&mut self) {
-        self.cancel.cancel();
-        (&mut self.task).await.unwrap();
-        self.cancel = CancellationToken::new();
-        let key = Arc::new(SecretKey::parse(KEY).unwrap());
-        let (backups, task) = Backups::start(
-            &self.config,
-            self.app.db.pool.clone(),
-            key.clone(),
-            Coordinator::default(),
-            self.cancel.clone(),
-        )
-        .await
-        .unwrap();
-        self.task = task;
-        let mut state = else_api::http::AppState::new(
-            OwnerToken::parse(common::TOKEN).unwrap(),
-            self.app.db.pool.clone(),
-            self.app.scheduler.clone(),
-            self.app.state.events.clone(),
-        )
-        .with_secret_key(key);
-        state.backups = Some(backups);
-        self.app.state = Arc::new(state);
-        self.app.router = else_api::http::router(&self.config, self.app.state.clone());
+    /// Stop the API and start it again with `self.config`.
+    async fn restart(self) -> Self {
+        let Self { app, config, _dir } = self;
+        let db = app.stop().await;
+        let app = common::TestApp::start_in(config.clone(), db, setup()).await;
+        Self { app, config, _dir }
     }
     async fn snapshot(&self) -> Value {
         let response = self.app.owner("GET", "/v1/settings/backups", None).await;
@@ -146,6 +104,10 @@ struct Store {
     endpoint: String,
     task: tokio::task::JoinHandle<BTreeMap<String, Vec<u8>>>,
     stop: CancellationToken,
+    /// While true, an arriving upload waits until it is released.
+    held: Arc<tokio::sync::watch::Sender<bool>>,
+    /// How many uploads have arrived.
+    puts: tokio::sync::watch::Receiver<usize>,
 }
 impl Drop for Store {
     fn drop(&mut self) {
@@ -158,6 +120,9 @@ impl Store {
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let stop = CancellationToken::new();
         let quit = stop.clone();
+        let held = Arc::new(tokio::sync::watch::Sender::new(false));
+        let hold = held.clone();
+        let (arrived, puts) = tokio::sync::watch::channel(0usize);
         let task = tokio::spawn(async move {
             let mut objects = BTreeMap::<String, Vec<u8>>::new();
             loop {
@@ -237,6 +202,8 @@ impl Store {
                     )
                     .into_bytes();
                 } else if method == "PUT" {
+                    arrived.send_modify(|n| *n += 1);
+                    let _ = hold.subscribe().wait_for(|held| !*held).await;
                     tokio::time::sleep(Duration::from_millis(30)).await;
                     if headers.to_ascii_lowercase().contains("if-none-match: *")
                         && objects.contains_key(&key)
@@ -272,7 +239,26 @@ impl Store {
             endpoint,
             task,
             stop,
+            held,
+            puts,
         }
+    }
+
+    /// Hold uploads that arrive from now on until [`Store::release`].
+    fn hold(&self) {
+        self.held.send_replace(true);
+    }
+
+    fn release(&self) {
+        self.held.send_replace(false);
+    }
+
+    /// Wait until more than `seen` uploads have arrived.
+    async fn upload_arrived(&mut self, seen: usize) {
+        tokio::time::timeout(common::SETTLE, self.puts.wait_for(|n| *n > seen))
+            .await
+            .expect("an upload reached the store")
+            .unwrap();
     }
 }
 
@@ -356,7 +342,7 @@ async fn settings_are_owner_only_validated_revisioned_and_secret_redacted() {
             .await
             .is_err()
     );
-    h.restart().await;
+    h = h.restart().await;
     let restarted = h.snapshot().await;
     assert_eq!(restarted["revision"], 2);
     assert_eq!(restarted["keep"], 4);
@@ -427,7 +413,7 @@ async fn rejected_connection_never_returns_remote_response_secrets() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn manual_backup_is_nonblocking_verified_destination_scoped_and_retained() {
     let h = Harness::new().await;
-    let store = Store::new(false).await;
+    let mut store = Store::new(false).await;
     let save = h
         .app
         .owner(
@@ -442,10 +428,16 @@ async fn manual_backup_is_nonblocking_verified_destination_scoped_and_retained()
         "manual policy has no scheduled run"
     );
     for count in 1..=3 {
+        let seen = *store.puts.borrow();
+        store.hold();
         let start = h.app.owner("POST", "/v1/settings/backups/run", None).await;
         assert_eq!(start.status, StatusCode::ACCEPTED, "{}", start.body);
+        // The capture holds the maintenance gate; the upload after it does
+        // not, and the store keeps the upload open.
+        store.upload_arrived(seen).await;
         let duplicate = h.app.owner("POST", "/v1/settings/backups/run", None).await;
-        assert_eq!(duplicate.status, StatusCode::CONFLICT);
+        assert_eq!(duplicate.status, StatusCode::CONFLICT, "{}", duplicate.body);
+        assert_eq!(duplicate.body["error"]["code"], "backup_running");
         let current = tokio::time::timeout(Duration::from_secs(1), h.snapshot())
             .await
             .unwrap();
@@ -463,6 +455,8 @@ async fn manual_backup_is_nonblocking_verified_destination_scoped_and_retained()
             StatusCode::CONFLICT,
             "settings cannot race an active upload"
         );
+        assert_eq!(saving.body["error"]["code"], "backup_running");
+        store.release();
         let done = h.wait_idle().await;
         assert!(done["last_error"].is_null(), "{done}");
         assert_eq!(done["remote_count"], count.min(2));
@@ -498,7 +492,7 @@ async fn pausing_remote_backups_preserves_the_local_capture_schedule_and_retenti
     assert_eq!(saved.status, StatusCode::OK);
     h.config.backup.cadence = else_api::backup::capture::Cadence::Every(Duration::from_millis(50));
     h.config.backup.keep = 2;
-    h.restart().await;
+    h = h.restart().await;
     tokio::time::timeout(common::SETTLE, async {
         loop {
             let count: i64 = sqlx::query_scalar(
@@ -519,12 +513,10 @@ async fn pausing_remote_backups_preserves_the_local_capture_schedule_and_retenti
     assert_eq!(snapshot["enabled"], false);
     assert_eq!(snapshot["remote_count"], 0);
     assert!(snapshot["next_backup_at"].is_null());
-    h.cancel.cancel();
-    (&mut h.task).await.unwrap();
+    let backup_dir = h.config.backup.dir.clone();
+    h.app.stop().await;
     assert_eq!(
-        else_api::backup::completed_sets(&h.config.backup.dir)
-            .unwrap()
-            .len(),
+        else_api::backup::completed_sets(&backup_dir).unwrap().len(),
         2
     );
 }
@@ -580,7 +572,7 @@ async fn restart_uploads_pending_sets_without_waiting_for_the_next_remote_interv
             .status,
         StatusCode::OK
     );
-    h.restart().await;
+    h = h.restart().await;
     tokio::time::timeout(common::SETTLE, async {
         loop {
             let snapshot = h.snapshot().await;
@@ -620,7 +612,7 @@ async fn invalid_environment_destination_keeps_local_backups_and_api_available()
         path_style: true,
     });
     h.config.backup.cadence = else_api::backup::capture::Cadence::Every(Duration::from_millis(50));
-    h.restart().await;
+    h = h.restart().await;
     let snapshot = h.snapshot().await;
     assert_eq!(snapshot["enabled"], false);
     assert!(snapshot["destination"].is_null());
@@ -670,7 +662,7 @@ async fn a_failed_capture_retries_capture_before_the_full_remote_interval() {
         .unwrap();
     h.config.backup.dir = h._dir.path().join("blocked-backups");
     std::fs::write(&h.config.backup.dir, b"not a directory").unwrap();
-    h.restart().await;
+    h = h.restart().await;
     tokio::time::timeout(common::SETTLE, async {
         loop {
             let snapshot = h.snapshot().await;
@@ -705,7 +697,7 @@ async fn a_successful_local_capture_does_not_clear_a_failed_remote_upload() {
     let mut h = Harness::new().await;
     let store = Store::new(true).await;
     h.config.backup.cadence = else_api::backup::capture::Cadence::Every(Duration::from_secs(1));
-    h.restart().await;
+    h = h.restart().await;
     tokio::time::timeout(common::SETTLE, async {
         loop {
             let count: i64 = sqlx::query_scalar(
@@ -848,7 +840,7 @@ async fn the_owner_picks_the_daily_local_backup_time() {
     assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{}", refused.body);
 
     h.config.backup.cadence = else_api::backup::capture::Cadence::Daily;
-    h.restart().await;
+    h = h.restart().await;
     let initial = h.snapshot().await;
     let local = &initial["local"];
     assert_eq!(local["managed_by_env"], false);
@@ -925,7 +917,7 @@ async fn the_owner_picks_the_daily_local_backup_time() {
     assert_eq!(off.body["local"]["enabled"], false);
     assert!(off.body["local"]["next_at"].is_null());
 
-    h.restart().await;
+    h = h.restart().await;
     let reloaded = h.snapshot().await;
     assert_eq!(reloaded["local"]["time"], "04:15", "the schedule is stored");
     assert_eq!(reloaded["local"]["enabled"], false);

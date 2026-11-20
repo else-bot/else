@@ -161,9 +161,7 @@ pub async fn open(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             MailError::new("invalid_mail_request").detail("open_attachments takes no action_id"),
         );
     }
-    let Some(manager) = state.connectors.as_ref() else {
-        return mail_error(MailError::new("connectors_unavailable"));
-    };
+    let manager = &state.connectors;
     if let Err(error) = readable(state, grant, request.account_id).await {
         return mail_error(error);
     }

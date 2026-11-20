@@ -37,9 +37,20 @@ pub struct Scheduler {
     background: Arc<Semaphore>,
     summaries: AtomicUsize,
     gate: Arc<crate::maintenance::Gate>,
-    /// The shared MCP library's directory, set by the router.
-    mcp_root: std::sync::OnceLock<std::path::PathBuf>,
-    computers: std::sync::OnceLock<Arc<crate::computers::ComputerManager>>,
+    mcp_root: std::path::PathBuf,
+    computers: Option<Arc<crate::computers::ComputerManager>>,
+}
+
+/// What the scheduler runs turns with, built before it.
+pub struct Services {
+    pub pool: SqlitePool,
+    pub registry: Registry,
+    pub gate: Arc<crate::maintenance::Gate>,
+    pub grants: Arc<Grants>,
+    /// The shared MCP library's directory, so turns can list its packages.
+    pub mcp_root: std::path::PathBuf,
+    /// Where routine and watcher checks run, when bot computers started.
+    pub computers: Option<Arc<crate::computers::ComputerManager>>,
 }
 
 /// A provider slot held by one memory summary. Released on drop.
@@ -62,41 +73,30 @@ impl Drop for SummaryPermit {
 pub const DEFAULT_CANCEL_GRACE: Duration = Duration::from_secs(10);
 
 impl Scheduler {
-    pub fn new(pool: SqlitePool, registry: Registry, max_active: usize) -> Arc<Self> {
-        Self::with_cancel_grace(pool, registry, max_active, DEFAULT_CANCEL_GRACE)
-    }
-
-    pub fn with_cancel_grace(
-        pool: SqlitePool,
-        registry: Registry,
-        max_active: usize,
-        cancel_grace: Duration,
-    ) -> Arc<Self> {
+    pub fn new(services: Services, max_active: usize, cancel_grace: Duration) -> Arc<Self> {
+        let Services {
+            pool,
+            registry,
+            gate,
+            grants,
+            mcp_root,
+            computers,
+        } = services;
         Arc::new(Self {
             pool,
             registry,
             wake: Notify::new(),
             running: Actor::default(),
             cancel_grace,
-            grants: Arc::new(Grants::default()),
+            grants,
             tasks: TaskTracker::new(),
             slots: Arc::new(Semaphore::new(max_active)),
             background: Arc::new(Semaphore::new(max_active.saturating_sub(1).max(1))),
             summaries: AtomicUsize::new(0),
-            gate: Arc::default(),
-            mcp_root: std::sync::OnceLock::new(),
-            computers: std::sync::OnceLock::new(),
+            gate,
+            mcp_root,
+            computers,
         })
-    }
-
-    /// Where the shared MCP library lives, so turns can list its packages.
-    pub fn use_mcp_library(&self, root: std::path::PathBuf) {
-        let _ = self.mcp_root.set(root);
-    }
-
-    /// Where routine checks run.
-    pub fn use_computers(&self, computers: Arc<crate::computers::ComputerManager>) {
-        let _ = self.computers.set(computers);
     }
 
     /// Turns this process is running now.
@@ -104,8 +104,9 @@ impl Scheduler {
         self.running.call(|running| running.len()).await
     }
 
-    /// The maintenance gate shared with the HTTP layer.
-    pub fn gate(&self) -> &Arc<crate::maintenance::Gate> {
+    /// The gate turns are admitted through, which a backup closes before
+    /// it drains them.
+    pub(crate) fn gate(&self) -> &Arc<crate::maintenance::Gate> {
         &self.gate
     }
 
@@ -129,15 +130,6 @@ impl Scheduler {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-    }
-
-    pub fn registry(&self) -> &Registry {
-        &self.registry
-    }
-
-    /// Task grants issued to running turns. Revoked when a turn ends.
-    pub fn grants(&self) -> &Arc<Grants> {
-        &self.grants
     }
 
     /// Take a provider slot for one memory summary if one is free. Summaries
@@ -282,7 +274,7 @@ impl Scheduler {
             {
                 tracing::warn!(error = %err, "settling watcher checks failed");
             }
-            let computers = self.computers.get();
+            let computers = self.computers.as_ref();
             match crate::db::watchers::admit_due(
                 &self.pool,
                 computers.map(Arc::as_ref),
@@ -386,7 +378,7 @@ impl Scheduler {
     }
 
     fn launch_check(&self, check: crate::db::routines::Check) {
-        let Some(computers) = self.computers.get().cloned() else {
+        let Some(computers) = self.computers.clone() else {
             return;
         };
         tokio::spawn(async move {
@@ -473,10 +465,8 @@ impl Scheduler {
                 )
                 .await,
         );
-        if let Some(root) = self.mcp_root.get()
-            && turn_tools(&input.delegation).contains(&Tool::Mcp)
-        {
-            match crate::mcp::installed(root.clone()).await {
+        if turn_tools(&input.delegation).contains(&Tool::Mcp) {
+            match crate::mcp::installed(self.mcp_root.clone()).await {
                 Ok(summaries) => {
                     input.mcps = Some(
                         summaries

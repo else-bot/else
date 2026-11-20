@@ -142,7 +142,8 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
         db,
         2,
         Registry::new(vec![Arc::new(claude(&data, &url).await)]),
-    );
+    )
+    .await;
     serve(&app, listener).await;
     let caps = app.owner("GET", "/v1/capabilities", None).await;
     eprintln!("capabilities: {}", caps.body["providers"]);
@@ -313,7 +314,8 @@ async fn a_newer_owner_message_joins_a_running_claude_reply() {
         db,
         2,
         Registry::new(vec![Arc::new(claude(&data, &url).await)]),
-    );
+    )
+    .await;
     serve(&app, listener).await;
 
     common::steer::joins_mid_tool_and_mid_text(&app, "claude", true).await;
@@ -422,7 +424,8 @@ async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
         2,
         Registry::new(vec![Arc::new(codex), Arc::new(claude(&data, &url).await)]),
         Some(computers.clone()),
-    );
+    )
+    .await;
     serve(&app, listener).await;
     let bot = app.create_bot("Builder").await;
     let bot_id: Uuid = bot.parse().unwrap();

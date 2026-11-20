@@ -97,7 +97,7 @@ async fn prepare(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiE
                 let state = owner;
                 if hold.is_none() {
                     let pause = crate::maintenance::Pause::update();
-                    let closed = match state.scheduler.gate().close(ADMITTED_GRACE, pause).await {
+                    let closed = match state.gate.close(ADMITTED_GRACE, pause).await {
                         Ok(Some(closed)) => closed,
                         Ok(None) => {
                             return Err(busy("A backup is running; update once it has finished."));

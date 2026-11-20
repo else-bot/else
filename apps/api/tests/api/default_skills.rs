@@ -15,7 +15,10 @@ async fn fixture() -> (TestApp, Arc<Synthetic>) {
     db::installation::setup(&db.pool).await.unwrap();
     let synthetic = Arc::new(Synthetic::new(Duration::from_millis(1)));
     let registry = Registry::new(vec![synthetic.clone()]);
-    (TestApp::with_registry(Arc::new(db), 4, registry), synthetic)
+    (
+        TestApp::with_registry(Arc::new(db), 4, registry).await,
+        synthetic,
+    )
 }
 
 async fn send(app: &TestApp, bot: &str, text: &str) -> Uuid {

@@ -113,7 +113,7 @@ async fn harness() -> Harness {
     let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
     let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
     Harness {
-        app: TestApp::with_skill_sources(db, registry, fake_github().await),
+        app: TestApp::with_skill_sources(db, registry, fake_github().await).await,
         synthetic,
     }
 }
@@ -142,8 +142,8 @@ async fn grant(app: &TestApp, turn_id: Uuid) -> String {
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
-    app.scheduler
-        .grants()
+    app.state
+        .grants
         .issue(owner, conversation, turn_id, tools(), DEFAULT_TTL)
         .await
 }
@@ -307,7 +307,7 @@ async fn an_approved_card_installs_the_reviewed_files_stores_the_key_and_continu
 
     let env = else_api::db::task_secrets::resolve(
         &app.db.pool,
-        app.state.secret_key.as_deref(),
+        Some(&*app.state.secret_key),
         &["skill-rea-growth".to_owned()],
     )
     .await

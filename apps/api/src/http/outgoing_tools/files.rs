@@ -41,8 +41,7 @@ pub(super) async fn snapshot(
 
 async fn project_file(state: &AppState, grant: &Grant, path: &str) -> Result<Read, String> {
     let project = state
-        .scheduler
-        .registry()
+        .registry
         .all()
         .iter()
         .find_map(|provider| provider.project_dir(grant.bot_id))
@@ -66,11 +65,10 @@ async fn project_file(state: &AppState, grant: &Grant, path: &str) -> Result<Rea
 /// file on the draft card before anything leaves.
 async fn email_file(state: &AppState, grant: &Grant, part: &EmailPart) -> Result<Read, String> {
     let refused = |code: &str| format!("FILE_UNAVAILABLE: email attachment {}: {code}", part.part);
-    let manager = state
-        .connectors
-        .as_ref()
-        .filter(|_| grant.allows(Tool::Mail))
-        .ok_or_else(|| refused("mail_forbidden"))?;
+    if !grant.allows(Tool::Mail) {
+        return Err(refused("mail_forbidden"));
+    }
+    let manager = &state.connectors;
     super::super::mail_attachments::readable(state, grant, part.account_id)
         .await
         .map_err(|error| refused(error.code))?;
@@ -194,8 +192,7 @@ pub(super) async fn stage(
         return Ok(());
     }
     let project = state
-        .scheduler
-        .registry()
+        .registry
         .all()
         .iter()
         .find_map(|provider| provider.project_dir(bot_id))

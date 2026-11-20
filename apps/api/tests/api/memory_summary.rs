@@ -84,6 +84,21 @@ async fn add(app: &TestApp, bot: Uuid, key: &str, body: &str) {
     tx.commit().await.unwrap();
 }
 
+/// An app whose memory each test compacts with its own summarizer.
+async fn app(max_active: usize) -> TestApp {
+    let db = common::TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    TestApp::start(
+        Arc::new(db),
+        common::Setup {
+            max_active,
+            memory: else_api::runtime::Memory::Manual,
+            ..common::Setup::default()
+        },
+    )
+    .await
+}
+
 fn compactor(app: &TestApp, summarizer: Arc<Scripted>) -> Compactor {
     Compactor::with_summaries(app.db.pool.clone(), summarizer, app.scheduler.clone())
 }
@@ -103,7 +118,7 @@ async fn summary_slot(app: &TestApp, limit: usize) -> else_api::scheduler::Summa
 
 #[tokio::test(flavor = "multi_thread")]
 async fn summaries_fill_long_ranges_with_a_complete_audit() {
-    let app = TestApp::installed().await;
+    let app = app(4).await;
     recipe(&app, 64).await;
     let bot: Uuid = app.create_bot("Sum").await.parse().unwrap();
     add(&app, bot, "a", "short").await;
@@ -145,7 +160,7 @@ async fn summaries_fill_long_ranges_with_a_complete_audit() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn oversized_or_failed_summaries_are_never_installed() {
-    let app = TestApp::installed().await;
+    let app = app(4).await;
     recipe(&app, 64).await;
     let bot: Uuid = app.create_bot("Big").await.parse().unwrap();
     add(&app, bot, "a", &"x".repeat(200)).await;
@@ -203,9 +218,7 @@ async fn oversized_or_failed_summaries_are_never_installed() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn summaries_yield_to_turns_and_share_the_provider_budget() {
-    let db = Arc::new(common::TestDb::migrated().await);
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_options(db, 1);
+    let app = app(1).await;
     recipe(&app, 64).await;
     let bot = app.create_bot("Busy").await;
     let bot_id: Uuid = bot.parse().unwrap();
@@ -252,7 +265,7 @@ async fn summaries_yield_to_turns_and_share_the_provider_budget() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn new_sessions_get_bounded_memory_once() {
-    let app = TestApp::installed().await;
+    let app = app(4).await;
     recipe(&app, 64).await;
     let bot = app.create_bot("Mem").await;
     let bot_id: Uuid = bot.parse().unwrap();
@@ -284,7 +297,7 @@ async fn new_sessions_get_bounded_memory_once() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn work_in_another_conversation_refreshes_a_warm_session() {
-    let app = TestApp::installed().await;
+    let app = app(4).await;
     let bot: Uuid = app.create_bot("GitHub").await.parse().unwrap();
     add(&app, bot, "owner", "Keep the repositories tidy.").await;
     else_api::memory_worker::drain(&app.db.pool).await.unwrap();
@@ -348,7 +361,7 @@ async fn work_in_another_conversation_refreshes_a_warm_session() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn copies_continue_while_a_summary_runs() {
-    let app = TestApp::installed().await;
+    let app = app(4).await;
     recipe(&app, 64).await;
     let slow: Uuid = app.create_bot("Slow").await.parse().unwrap();
     let quick: Uuid = app.create_bot("Quick").await.parse().unwrap();
@@ -394,7 +407,7 @@ async fn copies_continue_while_a_summary_runs() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn shutdown_cancels_an_active_summary_promptly() {
-    let app = TestApp::installed().await;
+    let app = app(4).await;
     recipe(&app, 64).await;
     let bot: Uuid = app.create_bot("Stop").await.parse().unwrap();
     add(&app, bot, "long", &"x".repeat(200)).await;
@@ -439,7 +452,7 @@ async fn shutdown_cancels_an_active_summary_promptly() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn capacity_waits_do_not_lengthen_the_failure_backoff() {
-    let app = TestApp::installed().await;
+    let app = app(4).await;
     recipe(&app, 64).await;
     let bot: Uuid = app.create_bot("Wait").await.parse().unwrap();
     add(&app, bot, "long", &"x".repeat(200)).await;
@@ -485,7 +498,7 @@ async fn capacity_waits_do_not_lengthen_the_failure_backoff() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_node_larger_than_the_session_budget_is_reported_omitted() {
-    let app = TestApp::installed().await;
+    let app = app(4).await;
     let reply = app
         .owner(
             "PATCH",

@@ -484,8 +484,8 @@ async fn delegated_tasks_and_routine_runs_cannot_edit_rules() {
     let conversation = h.inputs(child).await[0].conversation_id;
     let forged = h
         .app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             worker.parse().unwrap(),
             conversation,

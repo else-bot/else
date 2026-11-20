@@ -21,7 +21,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 fn service(state: &AppState) -> Result<&Backups, ApiError> {
-    state.backups.as_ref().ok_or_else(|| {
+    state.backups.as_ref().map_err(|_| {
         ApiError::unavailable(
             "backups_unavailable",
             "Backups are unavailable on this server.",

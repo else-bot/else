@@ -1,5 +1,5 @@
 use crate::common::{self, TestDb};
-use crate::socials::{TestEnv, bot, http, key, turn};
+use crate::socials::{bot, http, key, running_turn, turn};
 
 use async_trait::async_trait;
 use else_api::socials::{
@@ -628,24 +628,21 @@ async fn a_secret_must_match_how_its_provider_connects() {
 
 #[tokio::test]
 async fn the_card_pairs_a_setup_and_a_connection_through_one_pairing_route_each() {
-    use else_api::{
-        credentials::OwnerToken, http::AppState, providers::Registry, scheduler::Scheduler,
-    };
-    let db = TestDb::migrated().await;
+    let db = Arc::new(TestDb::migrated().await);
     let phone = Phone::new("33612345678");
-    let m = manager(&db, &phone);
-    let state = Arc::new(
-        AppState::new(
-            OwnerToken::parse(common::TOKEN).unwrap(),
-            db.pool.clone(),
-            Scheduler::new(db.pool.clone(), Registry::new(vec![]), 1),
-            else_api::events::EventHub::start(db.pool.clone(), CancellationToken::new()),
-        )
-        .with_secret_key(Arc::new(key()))
-        .with_socials(m.clone()),
-    );
-    let router = else_api::http::router(&else_api::config::Config::load(&TestEnv).unwrap(), state);
-    let (_, setup) = whatsapp_setup(&db).await;
+    let app = common::TestApp::start(
+        db.clone(),
+        common::Setup {
+            social: Some(phone.clone()),
+            ..common::Setup::default()
+        },
+    )
+    .await;
+    let router = app.router.clone();
+    let turn = running_turn(&app, bot(&db).await).await;
+    let setup = store::request_setup(&db.pool, turn, Provider::WhatsApp, "Watch the Family group")
+        .await
+        .unwrap();
     let path = format!("/v1/connectors/socials/setups/{}/pairing", setup.id);
     let (status, started) = http(&router, "POST", &path, common::TOKEN, Value::Null).await;
     assert_eq!(status, axum::http::StatusCode::OK, "{started}");
@@ -681,7 +678,7 @@ async fn the_card_pairs_a_setup_and_a_connection_through_one_pairing_route_each(
     assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
 
     let bot = bot(&db).await;
-    let turn = turn(&db, bot, "user").await;
+    let turn = running_turn(&app, bot).await;
     let telegram = store::request_setup(&db.pool, turn, Provider::Telegram, "Team support")
         .await
         .unwrap();

@@ -68,8 +68,7 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> O
         Vec::new()
     } else {
         let Some(project) = state
-            .scheduler
-            .registry()
+            .registry
             .all()
             .iter()
             .find_map(|provider| provider.project_dir(grant.bot_id))
@@ -133,7 +132,7 @@ pub(super) async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> O
             (tool_result(result), Some(log))
         }
         Ok(accepted) => {
-            state.scheduler.grants().park(grant.turn_id).await;
+            state.grants.park(grant.turn_id).await;
             state.scheduler.wake();
             let log = format!(
                 "pending {} to {} ({})",
@@ -325,7 +324,7 @@ pub(super) async fn council(state: &AppState, grant: &Grant, args: &Value) -> Ou
                 .iter()
                 .any(|a| matches!(a.status.as_str(), "queued" | "running"));
             if pending {
-                state.scheduler.grants().park(grant.turn_id).await;
+                state.grants.park(grant.turn_id).await;
                 state.scheduler.wake();
             }
             let tasks: Vec<_> = accepted

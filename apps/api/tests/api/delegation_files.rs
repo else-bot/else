@@ -107,7 +107,8 @@ async fn setup() -> Setup {
         Arc::new(db),
         2,
         else_api::providers::Registry::new(vec![provider.clone()]),
-    );
+    )
+    .await;
     let main = app.main_bot().await;
     let twitter = app.create_bot("Twitter").await;
     let card = png();
@@ -130,8 +131,8 @@ async fn setup() -> Setup {
         .await
         .unwrap();
     let token = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             main.parse().unwrap(),
             conversation,
@@ -333,8 +334,8 @@ async fn owner_message_reaches_the_task_with_its_files(updated: bool) {
                 .await
                 .unwrap();
         let token = app
-            .scheduler
-            .grants()
+            .state
+            .grants
             .issue(
                 main.parse().unwrap(),
                 conversation,
@@ -367,8 +368,8 @@ async fn owner_message_reaches_the_task_with_its_files(updated: bool) {
             .await
             .unwrap();
     let ask_token = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             twitter.parse().unwrap(),
             task_conversation,

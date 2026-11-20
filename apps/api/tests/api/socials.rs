@@ -67,7 +67,27 @@ pub(crate) async fn bot(db: &TestDb) -> Uuid {
         .unwrap();
     bot
 }
+/// An owner turn the scheduler runs until the app stops.
+pub(crate) async fn running_turn(app: &common::TestApp, bot: Uuid) -> Uuid {
+    let sent = app
+        .send(
+            &bot.to_string(),
+            Uuid::new_v4(),
+            "[synthetic:hang]",
+            Some("synthetic"),
+        )
+        .await;
+    let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
+    app.wait_turn(&turn, &["running"]).await;
+    turn.parse().unwrap()
+}
+
 pub(crate) async fn turn(db: &TestDb, bot: Uuid, kind: &str) -> Uuid {
+    insert_turn(db, bot, kind, "running", "test").await
+}
+
+/// A turn whose owner item has `kind`, inserted with `status`.
+async fn insert_turn(db: &TestDb, bot: Uuid, kind: &str, status: &str, text: &str) -> Uuid {
     let (conversation, last, seq): (Uuid, i64, i64) =
         sqlx::query_as("SELECT id,last_turn_no,last_item_seq FROM conversations WHERE bot_id=?1")
             .bind(bot)
@@ -76,15 +96,16 @@ pub(crate) async fn turn(db: &TestDb, bot: Uuid, kind: &str) -> Uuid {
             .unwrap();
     let id = Uuid::new_v4();
     let item = Uuid::new_v4();
-    sqlx::query("INSERT INTO turns(id,bot_id,conversation_id,request_id,request_hash,turn_no,owner_item_id,provider_id,status,attempt) VALUES(?1,?2,?3,?4,zeroblob(32),?5,?6,'synthetic','running',1)").bind(id).bind(bot).bind(conversation).bind(Uuid::new_v4()).bind(last+1).bind(item).execute(&db.pool).await.unwrap();
+    sqlx::query("INSERT INTO turns(id,bot_id,conversation_id,request_id,request_hash,turn_no,owner_item_id,provider_id,status,attempt) VALUES(?1,?2,?3,?4,zeroblob(32),?5,?6,'synthetic',?7,1)").bind(id).bind(bot).bind(conversation).bind(Uuid::new_v4()).bind(last+1).bind(item).bind(status).execute(&db.pool).await.unwrap();
     sqlx::query(
-        "INSERT INTO items(id,conversation_id,seq,turn_id,kind,text) VALUES(?1,?2,?3,?4,?5,'test')",
+        "INSERT INTO items(id,conversation_id,seq,turn_id,kind,text) VALUES(?1,?2,?3,?4,?5,?6)",
     )
     .bind(item)
     .bind(conversation)
     .bind(seq + 1)
     .bind(id)
     .bind(kind)
+    .bind(text)
     .execute(&db.pool)
     .await
     .unwrap();
@@ -802,13 +823,6 @@ async fn restored_connections_are_passive_and_credentials_are_removed_on_disconn
     assert!(secret.is_none());
 }
 
-pub(crate) struct TestEnv;
-impl else_api::config::Source for TestEnv {
-    fn get(&self, name: &str) -> Option<String> {
-        (name == "HOME").then(|| "/tmp".into())
-    }
-}
-
 pub(crate) async fn http(
     router: &axum::Router,
     method: &str,
@@ -843,39 +857,28 @@ async fn rpc(router: &axum::Router, bearer: &str, name: &str, args: Value) -> Va
 
 #[tokio::test]
 async fn owner_credentials_task_authority_and_approved_native_send_stay_separate() {
-    use else_api::{
-        credentials::OwnerToken, grants::Tool, http::AppState, providers::Registry,
-        scheduler::Scheduler,
-    };
-    let db = TestDb::migrated().await;
-    let bot = bot(&db).await;
-    let turn = turn(&db, bot, "user").await;
+    use else_api::grants::Tool;
     let fake = Arc::new(Fake::default());
-    let manager = Arc::new(Manager::with_transport(
-        db.pool.clone(),
-        Arc::new(key()),
-        fake.clone(),
-    ));
-    let scheduler = Scheduler::new(db.pool.clone(), Registry::new(vec![]), 1);
-    let stop = CancellationToken::new();
-    let state = Arc::new(
-        AppState::new(
-            OwnerToken::parse(common::TOKEN).unwrap(),
-            db.pool.clone(),
-            scheduler.clone(),
-            else_api::events::EventHub::start(db.pool.clone(), stop.clone()),
-        )
-        .with_secret_key(Arc::new(key()))
-        .with_socials(manager),
-    );
-    let router = else_api::http::router(&else_api::config::Config::load(&TestEnv).unwrap(), state);
+    let db = Arc::new(TestDb::migrated().await);
+    let app = common::TestApp::start(
+        db.clone(),
+        common::Setup {
+            social: Some(fake.clone()),
+            ..common::Setup::default()
+        },
+    )
+    .await;
+    let router = app.router.clone();
+    let bot = bot(&db).await;
+    let turn = running_turn(&app, bot).await;
     let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?1")
         .bind(turn)
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    let grant = scheduler
-        .grants()
+    let grant = app
+        .state
+        .grants
         .issue(
             bot,
             conversation,
@@ -934,8 +937,9 @@ async fn owner_credentials_task_authority_and_approved_native_send_stay_separate
         .execute(&db.pool)
         .await
         .unwrap();
-    let grant = scheduler
-        .grants()
+    let grant = app
+        .state
+        .grants
         .issue(
             bot,
             conversation,
@@ -959,44 +963,31 @@ async fn owner_credentials_task_authority_and_approved_native_send_stay_separate
     .await
     .unwrap();
     assert_eq!(body, "The owner's exact approved revision");
-    stop.cancel();
 }
 
 #[tokio::test]
 async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
-    use else_api::{
-        credentials::OwnerToken, grants::Tool, http::AppState, providers::Registry,
-        scheduler::Scheduler,
-    };
-    let db = TestDb::migrated().await;
-    let bot = bot(&db).await;
-    let turn = turn(&db, bot, "user").await;
+    use else_api::grants::Tool;
     let fake = Arc::new(Fake::default());
-    let manager = Arc::new(Manager::with_transport(
-        db.pool.clone(),
-        Arc::new(key()),
-        fake.clone(),
-    ));
-    let scheduler = Scheduler::new(db.pool.clone(), Registry::new(vec![]), 1);
-    let stop = CancellationToken::new();
-    let state = Arc::new(
-        AppState::new(
-            OwnerToken::parse(common::TOKEN).unwrap(),
-            db.pool.clone(),
-            scheduler.clone(),
-            else_api::events::EventHub::start(db.pool.clone(), stop.clone()),
-        )
-        .with_secret_key(Arc::new(key()))
-        .with_socials(manager),
-    );
-    let router = else_api::http::router(&else_api::config::Config::load(&TestEnv).unwrap(), state);
+    let db = Arc::new(TestDb::migrated().await);
+    let app = common::TestApp::start(
+        db.clone(),
+        common::Setup {
+            social: Some(fake.clone()),
+            ..common::Setup::default()
+        },
+    )
+    .await;
+    let router = app.router.clone();
+    let bot = bot(&db).await;
+    let turn = running_turn(&app, bot).await;
     let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?1")
         .bind(turn)
         .fetch_one(&db.pool)
         .await
         .unwrap();
     let issue = || {
-        scheduler.grants().issue(
+        app.state.grants.issue(
             bot,
             conversation,
             turn,
@@ -1074,14 +1065,22 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
     assert_eq!(result["status"], "sent", "{result}");
     assert_eq!(*fake.sent_to.lock().unwrap(), vec!["-100777".to_owned()]);
 
-    sqlx::query("UPDATE turns SET status='completed' WHERE id=?1")
-        .bind(turn)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    let woken = self::turn(&db, bot, "connector").await;
-    let grant = scheduler
-        .grants()
+    let (status, stopped) = http(
+        &router,
+        "POST",
+        &format!("/v1/bots/{bot}/cancel"),
+        common::TOKEN,
+        json!({"request_id":Uuid::new_v4()}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{stopped}");
+    app.wait_turn(&turn.to_string(), &["interrupted"]).await;
+    let woken = insert_turn(&db, bot, "connector", "queued", "[synthetic:hang]").await;
+    app.scheduler.wake();
+    app.wait_turn(&woken.to_string(), &["running"]).await;
+    let grant = app
+        .state
+        .grants
         .issue(
             bot,
             conversation,
@@ -1096,7 +1095,6 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
         refused.to_string().contains("no permission"),
         "a woken turn cannot look up another chat: {refused}"
     );
-    stop.cancel();
 }
 
 #[tokio::test]
@@ -1339,40 +1337,28 @@ async fn upgrading_turns_wake_access_into_triggers_and_drops_bindings() {
 
 #[tokio::test]
 async fn completing_another_bots_setup_keeps_an_approved_send_running() {
-    use else_api::{
-        credentials::OwnerToken, http::AppState, providers::Registry, scheduler::Scheduler,
-    };
-    let db = TestDb::migrated().await;
+    let fake = Arc::new(Fake::default());
+    let db = Arc::new(TestDb::migrated().await);
+    let app = common::TestApp::start(
+        db.clone(),
+        common::Setup {
+            social: Some(fake.clone()),
+            ..common::Setup::default()
+        },
+    )
+    .await;
+    let router = app.router.clone();
     let c = account(&db, "shared").await;
     destinations(&db, c.id).await;
     let (sender, asker) = (bot(&db).await, bot(&db).await);
-    let sending = turn(&db, sender, "user").await;
-    let asking = turn(&db, asker, "user").await;
+    let sending = running_turn(&app, sender).await;
+    let asking = running_turn(&app, asker).await;
     let setup = store::request_setup(&db.pool, asking, Provider::Telegram, "Post updates")
         .await
         .unwrap();
-    let fake = Arc::new(Fake::default());
     fake.blocked.store(true, Ordering::SeqCst);
-    let manager = Arc::new(Manager::with_transport(
-        db.pool.clone(),
-        Arc::new(key()),
-        fake.clone(),
-    ));
-    let scheduler = Scheduler::new(db.pool.clone(), Registry::new(vec![]), 1);
-    let stop = CancellationToken::new();
-    let state = Arc::new(
-        AppState::new(
-            OwnerToken::parse(common::TOKEN).unwrap(),
-            db.pool.clone(),
-            scheduler,
-            else_api::events::EventHub::start(db.pool.clone(), stop.clone()),
-        )
-        .with_secret_key(Arc::new(key()))
-        .with_socials(manager.clone()),
-    );
-    let router = else_api::http::router(&else_api::config::Config::load(&TestEnv).unwrap(), state);
     let action = Uuid::new_v4();
-    let running = manager.clone();
+    let running = app.state.socials.clone();
     let send = tokio::spawn(async move {
         running
             .send(
@@ -1513,14 +1499,22 @@ fn connection_state_transitions() {
 
 #[tokio::test]
 async fn an_approved_message_sends_exactly_its_approved_picture() {
-    use else_api::{
-        credentials::OwnerToken, grants::Tool, http::AppState, providers::Registry,
-        providers::synthetic::Synthetic, scheduler::Scheduler,
-    };
-    let db = TestDb::migrated().await;
-    let bot = bot(&db).await;
-    let turn = turn(&db, bot, "user").await;
+    use else_api::{grants::Tool, providers::Registry, providers::synthetic::Synthetic};
+    let fake = Arc::new(Fake::default());
     let root = tempfile::tempdir().unwrap();
+    let synthetic = Synthetic::new(Duration::from_millis(5)).with_projects(root.path().into());
+    let db = Arc::new(TestDb::migrated().await);
+    let app = common::TestApp::start(
+        db.clone(),
+        common::Setup {
+            social: Some(fake.clone()),
+            ..common::Setup::with_registry(Registry::new(vec![Arc::new(synthetic)]))
+        },
+    )
+    .await;
+    let router = app.router.clone();
+    let bot = bot(&db).await;
+    let turn = running_turn(&app, bot).await;
     let dir = else_api::providers::host::project_dir(root.path(), bot).unwrap();
     let mut flyer = std::io::Cursor::new(Vec::new());
     image::RgbImage::from_pixel(3, 2, image::Rgb([0, 90, 200]))
@@ -1528,34 +1522,15 @@ async fn an_approved_message_sends_exactly_its_approved_picture() {
         .unwrap();
     let flyer = flyer.into_inner();
     std::fs::write(dir.join("flyer.png"), &flyer).unwrap();
-    let fake = Arc::new(Fake::default());
-    let manager = Arc::new(Manager::with_transport(
-        db.pool.clone(),
-        Arc::new(key()),
-        fake.clone(),
-    ));
-    let synthetic = Synthetic::new(Duration::from_millis(5)).with_projects(root.path().into());
-    let scheduler = Scheduler::new(db.pool.clone(), Registry::new(vec![Arc::new(synthetic)]), 1);
-    let stop = CancellationToken::new();
-    let state = Arc::new(
-        AppState::new(
-            OwnerToken::parse(common::TOKEN).unwrap(),
-            db.pool.clone(),
-            scheduler.clone(),
-            else_api::events::EventHub::start(db.pool.clone(), stop.clone()),
-        )
-        .with_secret_key(Arc::new(key()))
-        .with_socials(manager),
-    );
-    let router = else_api::http::router(&else_api::config::Config::load(&TestEnv).unwrap(), state);
     let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?1")
         .bind(turn)
         .fetch_one(&db.pool)
         .await
         .unwrap();
     let tools = vec![Tool::Social, Tool::AskOwner, Tool::DraftEmail];
-    let grant = scheduler
-        .grants()
+    let grant = app
+        .state
+        .grants
         .issue(
             bot,
             conversation,
@@ -1604,8 +1579,9 @@ async fn an_approved_message_sends_exactly_its_approved_picture() {
         .execute(&db.pool)
         .await
         .unwrap();
-    let grant = scheduler
-        .grants()
+    let grant = app
+        .state
+        .grants
         .issue(bot, conversation, turn, tools, Duration::from_secs(300))
         .await;
     std::fs::write(dir.join("flyer.png"), b"changed after approval").unwrap();
@@ -1616,7 +1592,6 @@ async fn an_approved_message_sends_exactly_its_approved_picture() {
         vec![("flyer.png".to_owned(), "image/png".to_owned(), flyer)],
         "the snapshot the owner approved, not the file as it is now"
     );
-    stop.cancel();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1627,7 +1602,7 @@ async fn a_pending_setup_shows_in_the_sidebar_as_a_request_until_it_is_settled()
         Duration::from_millis(5),
     ));
     let registry = else_api::providers::Registry::new(vec![synthetic]);
-    let app = common::TestApp::with_registry(db, 4, registry);
+    let app = common::TestApp::with_registry(db, 4, registry).await;
     let bot = app.main_bot().await;
     let sent = app
         .send(

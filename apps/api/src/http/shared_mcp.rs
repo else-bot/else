@@ -12,7 +12,7 @@ use super::AppState;
 use super::error::{ApiError, ApiPath};
 use super::mcp::{Outcome, tool_result};
 use crate::grants::Grant;
-use crate::mcp::{Error, Installation, Library, PackageId};
+use crate::mcp::{Error, Installation, PackageId};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -34,10 +34,6 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
 }
 
-pub(super) fn library(state: &AppState) -> &Library {
-    state.mcps.get().expect("MCP library initialized by router")
-}
-
 fn api_error(error: Error) -> ApiError {
     match error {
         Error::Invalid(message) => ApiError::bad_request("invalid_mcp", message),
@@ -48,7 +44,7 @@ fn api_error(error: Error) -> ApiError {
 }
 
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let packages = library(&state).listings().await.map_err(api_error)?;
+    let packages = state.mcps.listings().await.map_err(api_error)?;
     Ok(Json(json!({"mcps": packages})))
 }
 
@@ -62,7 +58,7 @@ async fn remove(
         .bind(format!("mcp:{}:%", String::from(id.clone())))
         .execute(&state.db)
         .await?;
-    library(&state).remove(&id).await.map_err(api_error)?;
+    state.mcps.remove(&id).await.map_err(api_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -119,7 +115,7 @@ async fn list_or_request(
 ) -> Result<(Value, bool), Error> {
     use super::mcp_result::{IndexCursor, named_response, named_tools, tool_index};
     if method != "tools/list" {
-        return Ok((library(state).request(id, method, params).await?, true));
+        return Ok((state.mcps.request(id, method, params).await?, true));
     }
     // Unwrap a cursor this index issued before either branch forwards it.
     let at = IndexCursor::parse(params["cursor"].as_str());
@@ -130,7 +126,7 @@ async fn list_or_request(
         };
     }
     let Some(names) = params.as_object_mut().and_then(|p| p.remove("names")) else {
-        let listed = library(state).request(id, method, params).await?;
+        let listed = state.mcps.request(id, method, params).await?;
         return Ok((tool_index(listed, &at), true));
     };
     let names: Vec<String> = match serde_json::from_value(names) {
@@ -139,7 +135,8 @@ async fn list_or_request(
     };
     let mut found: Vec<Value> = Vec::new();
     for _ in 0..MAX_TOOL_PAGES {
-        let page = library(state)
+        let page = state
+            .mcps
             .request(id, "tools/list".into(), params.clone())
             .await?;
         found.extend(named_tools(&page, &names).cloned());
@@ -204,12 +201,14 @@ async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outco
                 }
             };
             if name == "mcp_connection_status" {
-                library(state)
+                state
+                    .mcps
                     .connection_status(&input.id)
                     .await
                     .and_then(|status| serde_json::to_value(status).map_err(|_| Error::Connection))
             } else {
-                match library(state)
+                match state
+                    .mcps
                     .request(&input.id, "tools/list".into(), json!({}))
                     .await
                 {
@@ -230,13 +229,12 @@ async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outco
             }
         }
         "mcp_list" => match serde_json::from_value::<ListArgs>(args.clone()) {
-            Ok(ListArgs { id: Some(id) }) => library(state)
+            Ok(ListArgs { id: Some(id) }) => state
+                .mcps
                 .read(&id)
                 .await
                 .and_then(|p| serde_json::to_value(p).map_err(|_| Error::Connection)),
-            Ok(ListArgs { id: None }) => {
-                library(state).list().await.map(|mcps| json!({"mcps":mcps}))
-            }
+            Ok(ListArgs { id: None }) => state.mcps.list().await.map(|mcps| json!({"mcps":mcps})),
             Err(_) => Err(Error::Invalid("Use an optional MCP id only.")),
         },
         "mcp_install" => match install(state, grant, args).await {
@@ -448,8 +446,7 @@ async fn save_whole(
         return None;
     }
     let project = state
-        .scheduler
-        .registry()
+        .registry
         .all()
         .iter()
         .find_map(|provider| provider.project_dir(grant.bot_id))?;
@@ -505,7 +502,7 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> Result<Instal
     if let Err(error) = input.validate() {
         return Ok(Install::Done(Err(error)));
     }
-    if let Err(error) = library(state).check_secrets(&input.config).await {
+    if let Err(error) = state.mcps.check_secrets(&input.config).await {
         return Ok(Install::Done(Err(error)));
     }
     let Ok(by) = sqlx::query_scalar::<_, String>("SELECT name FROM bots WHERE id = ?1")
@@ -516,11 +513,11 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> Result<Instal
         return Ok(Install::Done(Err(Error::Connection)));
     };
     let installed = |manifest| json!({"mcp":manifest,"available_to":"all_bots"});
-    let existing = match library(state).read(&input.id).await {
+    let existing = match state.mcps.read(&input.id).await {
         Ok(existing) if replace && !existing.matches(&input) => existing,
         Ok(_) | Err(Error::NotFound) => {
             return Ok(Install::Done(
-                library(state).install(input, by).await.map(installed),
+                state.mcps.install(input, by).await.map(installed),
             ));
         }
         Err(error) => return Ok(Install::Done(Err(error))),
@@ -557,7 +554,7 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> Result<Instal
     {
         return Ok(Install::Approved(Err(error), note));
     }
-    let result = match library(state).replace(input.clone(), by).await {
+    let result = match state.mcps.replace(input.clone(), by).await {
         Ok(replaced) if replaced.reconnect => revoke().await.map(|()| replaced),
         other => other,
     }
@@ -587,7 +584,7 @@ pub(super) async fn auth_required(
 ) -> Outcome {
     use crate::app::questions::{McpConnection, Spec};
     use crate::db::owner_questions::{self, Gate};
-    let package = match library(state).read(id).await {
+    let package = match state.mcps.read(id).await {
         Ok(package) => package,
         Err(error) => return (failure(&error), None),
     };
@@ -619,7 +616,7 @@ pub(super) async fn auth_required(
     );
     match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
         Ok(Gate::Pending(question)) => {
-            state.scheduler.grants().park(grant.turn_id).await;
+            state.grants.park(grant.turn_id).await;
             (
                 tool_result(
                     json!({"status":status,"mcp_id":id,"connection":connection,"parked":true,
@@ -656,10 +653,7 @@ async fn connection(
     ApiPath((bot_id, id)): ApiPath<(Uuid, PackageId)>,
 ) -> Result<Json<Value>, ApiError> {
     super::turns::active_bot(&state, bot_id).await?;
-    let status = library(&state)
-        .connection_status(&id)
-        .await
-        .map_err(api_error)?;
+    let status = state.mcps.connection_status(&id).await.map_err(api_error)?;
     Ok(Json(json!(status)))
 }
 
@@ -668,7 +662,7 @@ async fn disconnect(
     ApiPath((bot_id, id)): ApiPath<(Uuid, PackageId)>,
 ) -> Result<StatusCode, ApiError> {
     super::turns::active_bot(&state, bot_id).await?;
-    library(&state).disconnect(&id).await.map_err(api_error)?;
+    state.mcps.disconnect(&id).await.map_err(api_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -678,7 +672,8 @@ async fn authorize(
     super::error::ApiJson(body): super::error::ApiJson<AuthorizeArgs>,
 ) -> Result<Json<Value>, ApiError> {
     super::turns::active_bot(&state, bot_id).await?;
-    let started = library(&state)
+    let started = state
+        .mcps
         .authorize(&id, body.redirect_uri)
         .await
         .map_err(api_error)?;
@@ -691,7 +686,8 @@ async fn complete(
     super::error::SecretJson(body): super::error::SecretJson<crate::mcp::oauth::Complete>,
 ) -> Result<Json<Value>, ApiError> {
     super::turns::active_bot(&state, bot_id).await?;
-    library(&state)
+    state
+        .mcps
         .complete_authorization(&id, body)
         .await
         .map_err(api_error)?;
@@ -703,7 +699,8 @@ async fn cancel_authorization(
     ApiPath((bot_id, id, request_id)): ApiPath<(Uuid, PackageId, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
     super::turns::active_bot(&state, bot_id).await?;
-    library(&state)
+    state
+        .mcps
         .cancel_authorization(&id, request_id)
         .await
         .map_err(api_error)?;
@@ -715,7 +712,8 @@ async fn cancel_pending_authorization(
     ApiPath((bot_id, id)): ApiPath<(Uuid, PackageId)>,
 ) -> Result<Json<Value>, ApiError> {
     super::turns::active_bot(&state, bot_id).await?;
-    let status = library(&state)
+    let status = state
+        .mcps
         .cancel_pending_authorization(&id)
         .await
         .map_err(api_error)?;

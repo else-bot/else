@@ -124,6 +124,7 @@ async fn app() -> TestApp {
         2,
         else_api::providers::Registry::new(vec![provider]),
     )
+    .await
 }
 
 async fn send(app: &TestApp, bot: &str, text: &str) -> String {

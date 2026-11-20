@@ -78,7 +78,7 @@ async fn connect(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> 
     let setup = store::request_setup(&s.db, g.turn_id, input.provider, &input.reason).await?;
     let pending = setup.status == store::SetupStatus::Pending;
     if pending {
-        s.scheduler.grants().park(g.turn_id).await;
+        s.grants.park(g.turn_id).await;
     }
     Ok(tool_result(json!({
         "setup": setup,
@@ -156,8 +156,9 @@ async fn set_trigger(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Err
         )
     })?;
     input.validate()?;
-    if let (Some(destination), Some(m)) = (input.destination.as_mut(), s.socials.as_ref()) {
-        *destination = m
+    if let Some(destination) = input.destination.as_mut() {
+        *destination = s
+            .socials
             .resolve(input.connection_id, g.bot_id, g.turn_id, destination)
             .await?;
     }
@@ -187,10 +188,8 @@ async fn delete_trigger(s: &AppState, g: &Grant, args: &Value) -> Result<Value, 
 
 /// Restart the connection's listener only when what it receives changed.
 pub(super) async fn reconnect<T>(s: &AppState, change: &store::TriggerChange<T>) {
-    if change.reconnect
-        && let Some(m) = s.socials.as_ref()
-    {
-        m.changed(change.connection).await;
+    if change.reconnect {
+        s.socials.changed(change.connection).await;
     }
 }
 
@@ -198,7 +197,7 @@ async fn action(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
     let mut input: Action = serde_json::from_value(args.clone())
         .map_err(|_| Error::Invalid("Use connection_id, command, and action_id for a mutation."))?;
     input.command.validate()?;
-    let manager = s.socials.as_ref().ok_or(Error::Crypto)?;
+    let manager = &s.socials;
     let mut args = args.clone();
     if let Some(destination) = input.command.destination_mut() {
         *destination = manager

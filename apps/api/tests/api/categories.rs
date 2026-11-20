@@ -425,8 +425,8 @@ async fn task_grants_cannot_change_categories() {
         .await
         .unwrap();
     let token = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             bot.parse().unwrap(),
             conversation,

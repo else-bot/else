@@ -275,7 +275,7 @@ pub(super) async fn computer_handoff(state: &AppState, grant: &Grant, args: &Val
     let screen = super::guest_tools::current_screen(state, grant).await;
     match computer_handoffs::create(&state.db, grant.turn_id, &reason).await {
         Ok(handoff) => {
-            state.scheduler.grants().park(grant.turn_id).await;
+            state.grants.park(grant.turn_id).await;
             const END: &str = "end this attempt now without more computer actions. You \
                 continue when the owner hands your computer back, declines, or messages you.";
             let mut result =
@@ -409,7 +409,7 @@ pub(super) async fn request_secret(state: &AppState, grant: &Grant, args: &Value
             (tool_result(result), Some(log))
         }
         Ok(request) => {
-            state.scheduler.grants().park(grant.turn_id).await;
+            state.grants.park(grant.turn_id).await;
             let log = format!("pending {} for {}", request.id, request.name);
             let result = json!({
                 "status": "pending",
@@ -476,7 +476,7 @@ pub(super) async fn ask_owner(state: &AppState, grant: &Grant, args: &Value) -> 
             (tool_result(result), Some(log))
         }
         Ok(question) => {
-            state.scheduler.grants().park(grant.turn_id).await;
+            state.grants.park(grant.turn_id).await;
             let log = format!("pending {} {:?}", question.id, question.title);
             let result = json!({
                 "status": "pending",
@@ -544,7 +544,7 @@ pub(super) async fn pending_approval(
     question: &crate::db::owner_questions::QuestionInfo,
     next: &str,
 ) -> Outcome {
-    state.scheduler.grants().park(grant.turn_id).await;
+    state.grants.park(grant.turn_id).await;
     (
         tool_result(
             json!({ "status": "pending", "parked": true, "question_id": question.id,

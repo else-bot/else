@@ -323,8 +323,8 @@ async fn running_grant(app: &TestApp, bot: &str) -> (Uuid, String) {
         .await
         .unwrap();
     let token = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             bot.parse().unwrap(),
             conversation,
@@ -571,7 +571,7 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    let grants = app.scheduler.grants();
+    let grants = &app.state.grants;
     let token = grants
         .issue(
             me.parse().unwrap(),

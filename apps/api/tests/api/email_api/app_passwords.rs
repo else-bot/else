@@ -64,7 +64,7 @@ async fn an_icloud_card_takes_an_app_password_and_reopens_in_the_same_turn_when_
     );
     store::create(
         &app.db.pool,
-        app.state.secret_key.as_ref().unwrap(),
+        &app.state.secret_key,
         &Provider::Icloud.config("other@icloud.com".into()).unwrap(),
         &Credential::Password {
             password: "other-app-password".into(),
@@ -209,7 +209,7 @@ async fn a_revoked_inbox_password_reopens_the_card_until_a_sign_in_succeeds() {
     let (_, token) = h.running(&bot, GATE).await;
     let account = store::create(
         &app.db.pool,
-        app.state.secret_key.as_ref().unwrap(),
+        &app.state.secret_key,
         &Provider::Icloud.config("owner@icloud.com".into()).unwrap(),
         &Credential::Password {
             password: "abcd-efgh-ijkl-mnop".into(),
@@ -271,12 +271,7 @@ async fn a_revoked_inbox_password_reopens_the_card_until_a_sign_in_succeeds() {
     );
 
     inbox.revoked.store(false, Ordering::SeqCst);
-    app.state
-        .connectors
-        .as_ref()
-        .unwrap()
-        .changed(account.id)
-        .await;
+    app.state.connectors.changed(account.id).await;
     health_becomes(app, account.id, Health::Connected).await;
 }
 
@@ -289,7 +284,7 @@ async fn a_scan_that_signed_in_before_revocation_cannot_hide_the_rejection() {
     let (_, token) = h.running(&bot, GATE).await;
     let account = store::create(
         &app.db.pool,
-        app.state.secret_key.as_ref().unwrap(),
+        &app.state.secret_key,
         &Provider::Icloud.config("owner@icloud.com".into()).unwrap(),
         &Credential::Password {
             password: "abcd-efgh-ijkl-mnop".into(),
@@ -306,12 +301,7 @@ async fn a_scan_that_signed_in_before_revocation_cannot_hide_the_rejection() {
     .await
     .unwrap();
     inbox.hold_scan.store(true, Ordering::SeqCst);
-    app.state
-        .connectors
-        .as_ref()
-        .unwrap()
-        .changed(account.id)
-        .await;
+    app.state.connectors.changed(account.id).await;
     tokio::time::timeout(common::SETTLE, inbox.scan_held.notified())
         .await
         .expect("the watch signs in and scans");

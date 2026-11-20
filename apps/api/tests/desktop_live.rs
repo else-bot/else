@@ -211,7 +211,7 @@ async fn open(query: &str) -> Option<Live> {
     let registry = else_api::providers::Registry::new(vec![Arc::new(
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(5)),
     )]);
-    let app = Arc::new(TestApp::with_parts(db, 4, registry, Some(manager.clone())));
+    let app = Arc::new(TestApp::with_parts(db, 4, registry, Some(manager.clone())).await);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let router = app.router.clone();

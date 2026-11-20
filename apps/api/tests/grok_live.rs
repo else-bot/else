@@ -95,7 +95,8 @@ async fn grok_conversations_stream_resume_use_host_and_mcp_tools_and_cancel() {
                 Duration::from_millis(5),
             )),
         ]),
-    );
+    )
+    .await;
     let (calls, mut observed_calls) = tokio::sync::mpsc::channel(64);
     let router = app.router.clone().layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
@@ -314,7 +315,8 @@ async fn a_newer_owner_message_joins_a_running_grok_reply() {
         db,
         2,
         Registry::new(vec![Arc::new(grok(&data, &host, &url).await)]),
-    );
+    )
+    .await;
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let saved = app

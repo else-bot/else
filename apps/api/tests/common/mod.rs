@@ -60,13 +60,49 @@ pub struct TestApp {
     pub router: axum::Router,
     pub state: std::sync::Arc<else_api::http::AppState>,
     pub scheduler: std::sync::Arc<else_api::scheduler::Scheduler>,
-    stop: tokio_util::sync::CancellationToken,
+    pub config: Config,
     pub db: std::sync::Arc<TestDb>,
+    /// Stops the API's loops when the app is dropped.
+    _background: else_api::runtime::Background,
 }
 
-impl Drop for TestApp {
-    fn drop(&mut self) {
-        self.stop.cancel();
+/// What a test substitutes in the production composition.
+pub struct Setup {
+    pub max_active: usize,
+    pub registry: else_api::providers::Registry,
+    pub computers: Option<std::sync::Arc<else_api::computers::ComputerManager>>,
+    pub mail: Option<std::sync::Arc<dyn else_api::connectors::types::MailTransport>>,
+    pub social: Option<std::sync::Arc<dyn else_api::socials::providers::Transport>>,
+    pub skill_sources: else_api::skills::Sources,
+    pub memory: else_api::runtime::Memory,
+    pub backups: bool,
+}
+
+impl Default for Setup {
+    /// The synthetic provider and a profiled fake, four turns at once.
+    fn default() -> Self {
+        use std::sync::Arc;
+        Self::with_registry(else_api::providers::Registry::new(vec![
+            Arc::new(else_api::providers::synthetic::Synthetic::new(
+                std::time::Duration::from_millis(5),
+            )),
+            Arc::new(ProfiledFake),
+        ]))
+    }
+}
+
+impl Setup {
+    pub fn with_registry(registry: else_api::providers::Registry) -> Self {
+        Self {
+            max_active: 4,
+            registry,
+            computers: None,
+            mail: None,
+            social: None,
+            skill_sources: else_api::skills::Sources::default(),
+            memory: else_api::runtime::Memory::Deterministic,
+            backups: false,
+        }
     }
 }
 
@@ -120,141 +156,167 @@ impl TestApp {
     pub async fn installed() -> Self {
         let db = TestDb::migrated().await;
         else_api::db::installation::setup(&db.pool).await.unwrap();
-        Self::with_db(db)
+        Self::with_db(db).await
     }
 
-    pub fn with_db(db: TestDb) -> Self {
-        Self::with_options(std::sync::Arc::new(db), 4)
+    pub async fn with_db(db: TestDb) -> Self {
+        Self::start(std::sync::Arc::new(db), Setup::default()).await
     }
 
+    /// Stop this app and start another over the same database, as after a
+    /// process restart.
     pub async fn restart(self) -> Self {
-        let db = self.db.clone();
-        let scheduler = self.scheduler.clone();
-        drop(self);
-        for _ in 0..200 {
-            if std::sync::Arc::strong_count(&scheduler) == 1 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        else_api::db::turns::recover_after_restart(&db.pool)
-            .await
-            .unwrap();
-        Self::with_options(db, 4)
+        let db = self.stop().await;
+        Self::start(db, Setup::default()).await
     }
 
-    pub fn with_options(db: std::sync::Arc<TestDb>, max_active: usize) -> Self {
-        use std::sync::Arc;
-        let registry = else_api::providers::Registry::new(vec![
-            Arc::new(else_api::providers::synthetic::Synthetic::new(
-                std::time::Duration::from_millis(5),
-            )),
-            Arc::new(ProfiledFake),
-        ]);
-        Self::with_registry(db, max_active, registry)
+    /// Stop the API's loops and wait for them, returning the database.
+    pub async fn stop(self) -> std::sync::Arc<TestDb> {
+        let Self {
+            db, _background, ..
+        } = self;
+        _background.stop().await;
+        db
     }
 
-    pub fn with_registry(
+    /// The configuration of an app over `db`, with its home directory
+    /// inside the database's directory.
+    pub fn config(db: &TestDb) -> Config {
+        let home = db.dir().to_str().unwrap().to_owned();
+        let mut config = Config::load(&MapEnv(vec![("HOME", home)])).unwrap();
+        config.database_url = db.url.clone();
+        config.shutdown_grace = std::time::Duration::from_secs(2);
+        config
+    }
+
+    pub async fn with_options(db: std::sync::Arc<TestDb>, max_active: usize) -> Self {
+        Self::start(
+            db,
+            Setup {
+                max_active,
+                ..Setup::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn with_registry(
         db: std::sync::Arc<TestDb>,
         max_active: usize,
         registry: else_api::providers::Registry,
     ) -> Self {
-        Self::with_parts(db, max_active, registry, None)
+        Self::start(
+            db,
+            Setup {
+                max_active,
+                ..Setup::with_registry(registry)
+            },
+        )
+        .await
     }
 
-    pub fn with_parts(
+    pub async fn with_parts(
         db: std::sync::Arc<TestDb>,
         max_active: usize,
         registry: else_api::providers::Registry,
         computers: Option<std::sync::Arc<else_api::computers::ComputerManager>>,
     ) -> Self {
-        Self::build(db, max_active, registry, computers, None, None)
+        Self::start(
+            db,
+            Setup {
+                max_active,
+                computers,
+                ..Setup::with_registry(registry)
+            },
+        )
+        .await
     }
 
-    pub fn with_skill_sources(
+    pub async fn with_skill_sources(
         db: std::sync::Arc<TestDb>,
         registry: else_api::providers::Registry,
-        sources: else_api::skills::Sources,
+        skill_sources: else_api::skills::Sources,
     ) -> Self {
-        Self::build(db, 4, registry, None, None, Some(sources))
+        Self::start(
+            db,
+            Setup {
+                skill_sources,
+                ..Setup::with_registry(registry)
+            },
+        )
+        .await
     }
 
-    pub fn with_mail(
+    pub async fn with_mail(
         db: std::sync::Arc<TestDb>,
         max_active: usize,
         registry: else_api::providers::Registry,
         mail: std::sync::Arc<dyn else_api::connectors::types::MailTransport>,
     ) -> Self {
-        Self::build(db, max_active, registry, None, Some(mail), None)
+        Self::start(
+            db,
+            Setup {
+                max_active,
+                mail: Some(mail),
+                ..Setup::with_registry(registry)
+            },
+        )
+        .await
     }
 
-    fn build(
-        db: std::sync::Arc<TestDb>,
-        max_active: usize,
-        registry: else_api::providers::Registry,
-        computers: Option<std::sync::Arc<else_api::computers::ComputerManager>>,
-        mail: Option<std::sync::Arc<dyn else_api::connectors::types::MailTransport>>,
-        skill_sources: Option<else_api::skills::Sources>,
-    ) -> Self {
+    /// The production composition, with the test's parts, over `db` and a
+    /// home directory inside it.
+    pub async fn start(db: std::sync::Arc<TestDb>, setup: Setup) -> Self {
+        let config = Self::config(&db);
+        Self::start_in(config, db, setup).await
+    }
+
+    /// [`TestApp::start`] with the test's own configuration.
+    pub async fn start_in(mut config: Config, db: std::sync::Arc<TestDb>, setup: Setup) -> Self {
         use std::sync::Arc;
         let _ = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .with_test_writer()
             .try_init();
-        let config = Config::load(&MapEnv(vec![("HOME", "/tmp")])).unwrap();
-        let scheduler = else_api::scheduler::Scheduler::with_cancel_grace(
-            db.pool.clone(),
-            registry,
-            max_active,
-            std::time::Duration::from_secs(1),
-        );
-        let stop = tokio_util::sync::CancellationToken::new();
-        tokio::spawn(
-            scheduler
-                .clone()
-                .run(stop.clone(), std::time::Duration::from_secs(2)),
-        );
-        let mut state = else_api::http::AppState::new(
-            else_api::credentials::OwnerToken::parse(TOKEN).unwrap(),
-            db.pool.clone(),
-            scheduler.clone(),
-            else_api::events::EventHub::start(db.pool.clone(), stop.clone()),
-        );
-        if let Some(computers) = computers {
-            state = state.with_computers(computers);
-        }
-        if let Some(sources) = skill_sources {
-            state.skill_sources = sources;
-        }
-        let key = Arc::new(else_api::credentials::SecretKey::parse(SECRET_KEY).unwrap());
-        state = state.with_secret_key(key.clone());
-        if let Some(mail) = mail {
-            state = state.with_connectors(Arc::new(
-                else_api::connectors::ConnectorManager::with_transport(
-                    db.pool.clone(),
-                    key,
-                    scheduler.clone(),
-                    mail,
-                ),
-            ));
-        }
-        state.mcps.get_or_init(|| {
-            else_api::mcp::Library::new(db._dir.path().join("mcp"), state.scheduler.gate().clone())
-                .with_oauth_key(state.secret_key.clone())
-                .with_task_secrets(else_api::mcp::TaskSecrets::new(
-                    db.pool.clone(),
-                    state.secret_key.clone(),
-                ))
-        });
-        let state = Arc::new(state);
-        tokio::spawn(else_api::http::mcp_wait::run(state.clone(), stop.clone()));
+        config.max_active_turns = setup.max_active;
+        let parts = else_api::runtime::Parts {
+            owner_token: else_api::credentials::OwnerToken::parse(TOKEN).unwrap(),
+            secret_key: Arc::new(else_api::credentials::SecretKey::parse(SECRET_KEY).unwrap()),
+            pool: db.pool.clone(),
+            registry: setup.registry,
+            memory: setup.memory,
+            computers: else_api::runtime::ComputerSource::Given(match setup.computers {
+                Some(computers) => else_api::runtime::Computers::Ready(computers),
+                None => {
+                    else_api::runtime::Computers::Unavailable("this test runs no computers".into())
+                }
+            }),
+            mail: setup
+                .mail
+                .unwrap_or_else(|| Arc::new(else_api::connectors::pimalaya::Pimalaya)),
+            social: setup
+                .social
+                .unwrap_or_else(|| Arc::new(else_api::socials::providers::Native)),
+            skill_sources: setup.skill_sources,
+            cancel_grace: std::time::Duration::from_secs(1),
+            backups: if setup.backups {
+                else_api::runtime::Backups::Start
+            } else {
+                else_api::runtime::Backups::Off("this test runs no backups".into())
+            },
+        };
+        let (state, background) =
+            else_api::runtime::start(&config, parts, tokio_util::sync::CancellationToken::new())
+                .await
+                .unwrap();
         let router = else_api::http::router(&config, state.clone());
         Self {
             router,
-            db,
+            scheduler: state.scheduler.clone(),
             state,
-            scheduler,
-            stop,
+            config,
+            db,
+            _background: background,
         }
     }
 
@@ -369,14 +431,14 @@ impl TestApp {
     }
 }
 
-struct MapEnv(Vec<(&'static str, &'static str)>);
+struct MapEnv(Vec<(&'static str, String)>);
 
 impl else_api::config::Source for MapEnv {
     fn get(&self, name: &str) -> Option<String> {
         self.0
             .iter()
             .find(|(k, _)| *k == name)
-            .map(|(_, v)| v.to_string())
+            .map(|(_, v)| v.clone())
     }
 }
 

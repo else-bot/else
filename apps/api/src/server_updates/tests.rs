@@ -3,14 +3,8 @@ use std::os::unix::fs::PermissionsExt as _;
 
 struct Fixture {
     directory: tempfile::TempDir,
-    state: crate::http::AppState,
-    stop: tokio_util::sync::CancellationToken,
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        self.stop.cancel();
-    }
+    state: std::sync::Arc<crate::http::AppState>,
+    _background: crate::runtime::Background,
 }
 
 impl Fixture {
@@ -32,30 +26,11 @@ impl Fixture {
         )
         .unwrap();
         std::fs::write(home.join("src/install.sh"), installer).unwrap();
-        let url = crate::config::DatabaseUrl::new(format!(
-            "sqlite://{}",
-            home.join("test.sqlite3").display()
-        ));
-        let pool = crate::db::connect(&url).await.unwrap();
-        crate::db::migrate(&pool).await.unwrap();
-        crate::db::installation::setup(&pool).await.unwrap();
-        let scheduler = crate::scheduler::Scheduler::new(
-            pool.clone(),
-            crate::providers::Registry::new(Vec::new()),
-            1,
-        );
-        let stop = tokio_util::sync::CancellationToken::new();
-        let state = crate::http::AppState::new(
-            crate::credentials::OwnerToken::parse("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-                .unwrap(),
-            pool.clone(),
-            scheduler,
-            crate::events::EventHub::start(pool, stop.clone()),
-        );
+        let (_, state, background) = crate::runtime::start_in(home).await;
         Self {
             directory,
             state,
-            stop,
+            _background: background,
         }
     }
 

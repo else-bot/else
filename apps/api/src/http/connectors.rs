@@ -59,15 +59,6 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/connectors/email/oauth/{request_id}", delete(oauth_cancel))
 }
 
-fn manager(state: &AppState) -> Result<&Arc<ConnectorManager>, ApiError> {
-    state.connectors.as_ref().ok_or_else(|| {
-        ApiError::new(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "connectors_unavailable",
-            "The API host has no credential encryption key.",
-        )
-    })
-}
 fn unavailable(error: store::StoreError) -> ApiError {
     match error {
         store::StoreError::NotFound => ApiError::not_found(),
@@ -161,7 +152,7 @@ async fn view_message(
 ) -> Result<Json<Value>, ApiError> {
     let axum::extract::Query(message) = query
         .map_err(|_| ApiError::bad_request("invalid_query", "Use folder, uid_validity and uid."))?;
-    let manager = manager(&state)?;
+    let manager = &state.connectors;
     let view = manager.view(id, message).await.map_err(|error| {
         use axum::http::StatusCode;
         let (status, message) = match error.code {
@@ -218,7 +209,7 @@ async fn connect(
 ) -> Result<Json<Value>, ApiError> {
     request.config.validate()?;
     request.credential.validate(request.config.provider)?;
-    let manager = manager(&state)?;
+    let manager = &state.connectors;
     manager.verify(&request.config, &request.credential).await?;
     let account = store::create(
         &state.db,
@@ -277,7 +268,7 @@ async fn activate(
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(request): ApiJson<Active>,
 ) -> Result<Json<Value>, ApiError> {
-    let manager = manager(&state)?;
+    let manager = &state.connectors;
     let account = store::set_active(&state.db, id, request.active)
         .await
         .map_err(unavailable)?
@@ -289,7 +280,7 @@ async fn disconnect(
     State(state): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let manager = manager(&state)?;
+    let manager = &state.connectors;
     if !remove_account(&state, manager, id)
         .await
         .map_err(unavailable)?
@@ -316,7 +307,7 @@ async fn configure_folders(
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(config): ApiJson<MailConfig>,
 ) -> Result<Json<Value>, ApiError> {
-    let manager = manager(&state)?;
+    let manager = &state.connectors;
     let account = store::configure_folders(&state.db, id, &config)
         .await
         .map_err(unavailable)?;
@@ -329,7 +320,7 @@ async fn credentials(
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(credential): ApiJson<Credential>,
 ) -> Result<Json<Value>, ApiError> {
-    let manager = manager(&state)?;
+    let manager = &state.connectors;
     let account = store::account(&state.db, id)
         .await
         .map_err(unavailable)?
@@ -416,13 +407,13 @@ async fn oauth_start(
     if accounts.len() >= store::MAX_ACCOUNTS as usize && !may_renew {
         return Err(MailError::new("connector_limit").into());
     }
-    Ok(Json(manager(&state)?.oauth.start(request).await?))
+    Ok(Json(state.connectors.oauth.start(request).await?))
 }
 async fn oauth_complete(
     State(state): State<Arc<AppState>>,
     ApiJson(request): ApiJson<oauth::Complete>,
 ) -> Result<Json<Value>, ApiError> {
-    let manager = manager(&state)?;
+    let manager = &state.connectors;
     let (provider, address, credential) = manager.oauth.complete(request).await?;
     let config = provider.config(address)?;
     config.validate()?;
@@ -462,7 +453,7 @@ async fn oauth_cancel(
     State(state): State<Arc<AppState>>,
     ApiPath(request_id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    manager(&state)?.oauth.cancel(request_id).await;
+    state.connectors.oauth.cancel(request_id).await;
     Ok(Json(json!({"cancelled":true})))
 }
 
@@ -614,9 +605,6 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
             None,
         );
     };
-    if state.connectors.is_none() {
-        return (tool_error("connectors_unavailable"), None);
-    }
     let accounts = match store::accounts(&state.db).await {
         Ok(accounts) => accounts,
         Err(_) => return (tool_error("mail_unavailable"), None),
@@ -670,7 +658,7 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
     );
     match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
         Ok(Gate::Pending(question)) => {
-            state.scheduler.grants().park(grant.turn_id).await;
+            state.grants.park(grant.turn_id).await;
             (
                 tool_result(json!({"status":"pending_owner_auth","parked":true,
                     "question_id":question.id,
@@ -827,9 +815,7 @@ async fn disconnect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outc
             None,
         );
     };
-    let Some(manager) = state.connectors.as_ref() else {
-        return (tool_error("connectors_unavailable"), None);
-    };
+    let manager = &state.connectors;
     let id = request.account_id;
     let not_connected = || {
         (
@@ -1011,10 +997,7 @@ async fn tool_call(
     name: &str,
     args: &Value,
 ) -> Result<Value, MailError> {
-    let manager = state
-        .connectors
-        .as_ref()
-        .ok_or_else(|| MailError::new("connectors_unavailable"))?;
+    let manager = &state.connectors;
     if name == "mail_accounts" {
         if !args.is_null() && args.as_object().is_none_or(|object| !object.is_empty()) {
             return Err(MailError::new("invalid_mail_request"));

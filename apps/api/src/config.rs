@@ -41,7 +41,7 @@ impl std::fmt::Debug for DatabaseUrl {
 #[derive(Debug, Clone)]
 pub struct Config {
     /// SQLite URL, defaulting to `<data_dir>/else.sqlite3`.
-    pub database_url: Option<DatabaseUrl>,
+    pub database_url: DatabaseUrl,
     pub bind: SocketAddr,
     /// Private runtime storage: credentials, the singleton lock, and bot
     /// session directories.
@@ -309,7 +309,7 @@ impl Config {
             synthetic_provider,
             bots_dir,
             max_active_turns,
-            database_url: Some(database_url(source, &data_dir)?),
+            database_url: database_url(source, &data_dir)?,
             bind,
             data_dir,
             owner_token_file,
@@ -355,14 +355,6 @@ fn database_url(
         .unwrap_or_else(|| format!("sqlite://{}", data_dir.join("else.sqlite3").display()));
     crate::db::options(&url).map_err(|_| invalid("DATABASE_URL", "expected a SQLite URL (sqlite:///absolute/path/else.sqlite3); alpha installations use a fresh SQLite database"))?;
     Ok(DatabaseUrl(url))
-}
-
-impl Config {
-    pub fn require_database(&self) -> Result<&DatabaseUrl, ConfigError> {
-        self.database_url
-            .as_ref()
-            .ok_or_else(|| invalid("DATABASE_URL", "no SQLite database configured"))
-    }
 }
 
 fn absolute_path(name: &'static str, value: String) -> Result<PathBuf, ConfigError> {
@@ -552,7 +544,7 @@ pub mod tests {
     fn database_defaults_to_a_private_file_and_rejects_postgres() {
         let config = Config::load(&MapSource::new(&[("HOME", "/h")])).unwrap();
         assert_eq!(
-            config.require_database().unwrap().expose(),
+            config.database_url.expose(),
             "sqlite:///h/.else/else.sqlite3"
         );
         assert!(
@@ -568,7 +560,7 @@ pub mod tests {
         ]))
         .unwrap();
         assert_eq!(
-            config.require_database().unwrap().expose(),
+            config.database_url.expose(),
             "sqlite:///custom/else.sqlite3"
         );
     }
@@ -583,7 +575,7 @@ pub mod tests {
                 unreachable!()
             };
             vec![
-                PathBuf::from(c.require_database().unwrap().expose()),
+                PathBuf::from(c.database_url.expose()),
                 c.bots_dir.clone(),
                 c.owner_token_file.clone(),
                 key.clone(),

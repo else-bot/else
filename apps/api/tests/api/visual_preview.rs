@@ -51,7 +51,7 @@ async fn setup(root: PathBuf, tools: Vec<Tool>) -> (TestApp, PathBuf, String) {
         inner: Synthetic::new(std::time::Duration::from_millis(5)),
         root: root.clone(),
     })]);
-    let app = TestApp::with_registry(Arc::new(db), 4, registry);
+    let app = TestApp::with_registry(Arc::new(db), 4, registry).await;
     let bot = app.main_bot().await;
     let reply = app
         .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
@@ -64,8 +64,8 @@ async fn setup(root: PathBuf, tools: Vec<Tool>) -> (TestApp, PathBuf, String) {
         .await
         .unwrap();
     let token = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(bot.parse().unwrap(), conversation, turn, tools, DEFAULT_TTL)
         .await;
     let project = root.join(&bot);

@@ -9,7 +9,6 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use else_api::config::{Config, ProcessEnv};
 use else_api::runtime_lock::RuntimeLock;
-use else_api::scheduler::Scheduler;
 use else_api::{credentials, db, http};
 use tokio_util::sync::CancellationToken;
 
@@ -197,13 +196,14 @@ fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
 }
 
 fn lock(config: &Config) -> anyhow::Result<RuntimeLock> {
-    let url = config.require_database().context("invalid configuration")?;
-    Ok(else_api::runtime_lock::acquire(&config.data_dir, url)?)
+    Ok(else_api::runtime_lock::acquire(
+        &config.data_dir,
+        &config.database_url,
+    )?)
 }
 
 async fn database(config: &Config) -> anyhow::Result<sqlx::SqlitePool> {
-    let url = config.require_database().context("invalid configuration")?;
-    let pool = db::connect(url).await?;
+    let pool = db::connect(&config.database_url).await?;
     db::migrate(&pool).await?;
     Ok(pool)
 }
@@ -214,8 +214,7 @@ fn backup_parts(
     else_api::backup::DatabaseParams,
     Arc<credentials::SecretKey>,
 )> {
-    let url = config.require_database().context("invalid configuration")?;
-    let params = else_api::backup::DatabaseParams::parse(url.expose())?;
+    let params = else_api::backup::DatabaseParams::parse(config.database_url.expose())?;
     let key = credentials::load_secret_key(&config.secret_key)?;
     Ok((params, Arc::new(key)))
 }
@@ -249,24 +248,10 @@ fn run_backup(database_only: bool) -> anyhow::Result<()> {
             println!("coverage: {}", summary.manifest.coverage.note);
             return Ok(());
         }
-        let computers = match else_api::computers::runtime::Msb::detect(
-            &config.data_dir,
-            config.msb_bin.clone(),
-        ) {
-            Ok(msb) => {
-                let manager = Arc::new(else_api::computers::ComputerManager::new(
-                    pool.clone(),
-                    Arc::new(msb),
-                    config.computers.clone(),
-                ));
-                manager.reconcile_startup().await?;
-                Some(manager)
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "bot computers unavailable; database-only set");
-                None
-            }
-        };
+        let computers = else_api::runtime::open_computers(&config, &pool, None)
+            .await?
+            .manager()
+            .cloned();
         let mut worker = else_api::backup::worker::BackupWorker::new(
             pool.clone(),
             params,
@@ -320,14 +305,10 @@ fn run_upgrade_computer(
         lock(&config).context("the API is running; stop it before changing a computer's image")?;
     runtime()?.block_on(async {
         let pool = database(&config).await?;
-        let msb =
-            else_api::computers::runtime::Msb::detect(&config.data_dir, config.msb_bin.clone())?;
-        let manager = else_api::computers::ComputerManager::new(
-            pool.clone(),
-            Arc::new(msb),
-            config.computers.clone(),
-        );
-        manager.reconcile_startup().await?;
+        let manager = match else_api::runtime::open_computers(&config, &pool, None).await? {
+            else_api::runtime::Computers::Ready(manager) => manager,
+            else_api::runtime::Computers::Unavailable(reason) => anyhow::bail!(reason),
+        };
         manager.settle_offline(bot_id).await?;
         let report = match image {
             Some(image) => manager.upgrade_image(bot_id, image, network).await?,
@@ -372,7 +353,7 @@ fn run_restore_remote(
     let (_, key) = backup_parts(&config)?;
     let downloads = config.data_dir.join("restore-download");
     let saved = runtime()?.block_on(async {
-        let params = else_api::backup::DatabaseParams::parse(config.require_database()?.expose())?;
+        let params = else_api::backup::DatabaseParams::parse(config.database_url.expose())?;
         if !params.options.get_filename().exists() {
             return Ok::<_, anyhow::Error>(None);
         }
@@ -597,147 +578,20 @@ fn run_serve() -> anyhow::Result<()> {
             bind: listener.local_addr()?,
             ..config
         };
-        let swept = else_api::providers::host::Host::new(&config.data_dir, &config.bots_dir)
-            .sweep_orphans()?;
-        if swept > 0 {
-            tracing::warn!(
-                swept,
-                "terminated provider processes left by an earlier API"
-            );
-        }
-        else_api::mcp::cleanup(&config.data_dir.join("mcp"))?;
-        let (registry, summarizer) = else_api::providers::build(&config).await;
-        let (requeued, uncertain) = db::turns::recover_after_restart(&pool).await?;
-        else_api::connectors::store::recover(&pool).await?;
-        else_api::socials::store::recover(&pool).await?;
-        if requeued + uncertain > 0 {
-            tracing::info!(requeued, uncertain, "reconciled unfinished turns");
-        }
-        let model_cache = else_api::providers::models::cache_path(&config.data_dir);
-        else_api::providers::models::restore(&registry, &model_cache);
-        let stop_scheduler = CancellationToken::new();
-        let model_refresh = tokio::spawn(else_api::providers::models::run(
-            registry.clone(),
-            model_cache,
-            stop_scheduler.clone(),
-        ));
-        let scheduler = Scheduler::new(pool.clone(), registry, config.max_active_turns);
-        let scheduler_task = tokio::spawn(
-            scheduler
-                .clone()
-                .run(stop_scheduler.clone(), config.shutdown_grace),
-        );
-        let compactor = match summarizer {
-            Some(summarizer) => else_api::memory_worker::Compactor::with_summaries(
-                pool.clone(),
-                summarizer,
-                scheduler.clone(),
-            ),
-            None => else_api::memory_worker::Compactor::deterministic(pool.clone()),
-        };
-        let compactor = tokio::spawn(
-            compactor
-                .with_gate(scheduler.gate().clone())
-                .run(stop_scheduler.clone()),
-        );
-        let events = else_api::events::EventHub::start(pool.clone(), stop_scheduler.clone());
-        let mut state = http::AppState::new(owner_token, pool.clone(), scheduler, events)
-            .with_secret_key(secret_key.clone())
-            .with_server_updates(&config);
-        let mut computer_task = None;
-        let mut upgrades = None;
-        match else_api::computers::runtime::Msb::detect(&config.data_dir, config.msb_bin.clone()) {
-            Ok(msb) => {
-                let manager = Arc::new(
-                    else_api::computers::ComputerManager::new(
-                        pool.clone(),
-                        Arc::new(msb),
-                        config.computers.clone(),
-                    )
-                    .with_secret_key(secret_key.clone()),
-                );
-                manager.reconcile_startup().await?;
-                computer_task = Some(tokio::spawn(manager.clone().run(stop_scheduler.clone())));
-                upgrades = Some(manager.clone());
-                state = state.with_computers(manager);
-            }
+        let parts =
+            else_api::runtime::Parts::production(&config, owner_token, secret_key, pool).await;
+        let (state, background) =
+            else_api::runtime::start(&config, parts, CancellationToken::new()).await?;
+        let published = match lock.publish(config.bind) {
+            Ok(published) => published,
             Err(err) => {
-                tracing::warn!(error = %err, "bot computers unavailable");
-                state.startup_faults.computers = Some(err.to_string());
-            }
-        }
-        let backup_task = match else_api::backup::service::Backups::start(
-            &config,
-            pool.clone(),
-            secret_key.clone(),
-            else_api::backup::capture::Coordinator {
-                scheduler: Some(state.scheduler.clone()),
-                computers: state.computers.clone(),
-                drain: std::time::Duration::from_secs(300),
-                exclusive: false,
-                projects_dir: Some(config.bots_dir.clone()),
-                mcp_dir: Some(config.data_dir.join("mcp")),
-            },
-            stop_scheduler.clone(),
-        )
-        .await
-        {
-            Ok((backups, task)) => {
-                state.backups = Some(backups);
-                Some(task)
-            }
-            Err(error) => {
-                tracing::warn!(error = %error, "backup service unavailable; API continues without backups");
-                state.startup_faults.backups = Some(error.to_string());
-                None
+                background.stop().await;
+                return Err(err.into());
             }
         };
-        let connector_task = state
-            .connectors
-            .as_ref()
-            .map(|connectors| tokio::spawn(connectors.clone().run(stop_scheduler.clone())));
-        let social_task = state
-            .socials
-            .as_ref()
-            .map(|m| tokio::spawn(m.clone().run(stop_scheduler.clone())));
-        let state = Arc::new(state);
-        let mcp_waits = tokio::spawn(else_api::http::mcp_wait::run(
-            state.clone(),
-            stop_scheduler.clone(),
-        ));
-        let published = lock.publish(config.bind)?;
         let result = serve(&config, listener, state, shutdown).await;
         drop(published);
-        stop_scheduler.cancel();
-        if let Some(computers) = upgrades {
-            computers.stop_upgrades().await;
-        }
-        let _ = tokio::join!(
-            scheduler_task,
-            model_refresh,
-            mcp_waits,
-            async {
-                if let Some(task) = social_task {
-                    let _ = task.await;
-                }
-            },
-            compactor,
-            async {
-                if let Some(task) = connector_task {
-                    let _ = task.await;
-                }
-            },
-            async {
-                if let Some(task) = computer_task {
-                    let _ = task.await;
-                }
-            },
-            async {
-                if let Some(task) = backup_task {
-                    let _ = task.await;
-                }
-            },
-        );
+        background.stop().await;
         drop(lock);
         tracing::info!("API stopped");
         result

@@ -57,12 +57,12 @@ async fn with_memory_tools_host_tools_still_run_and_agents_still_cannot() {
     let port = listener.local_addr().unwrap().port();
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(db, 1, Registry::new(vec![]));
+    let app = TestApp::with_registry(db, 1, Registry::new(vec![])).await;
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let grant = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             Uuid::new_v4(),
             Uuid::new_v4(),
@@ -245,7 +245,7 @@ async fn codex_app(db: Arc<TestDb>, data: &Path) -> TestApp {
             Duration::from_millis(5),
         )),
     ]);
-    TestApp::with_registry(db, 4, registry)
+    TestApp::with_registry(db, 4, registry).await
 }
 
 const FINISHED: &[&str] = &["completed", "failed", "interrupted", "uncertain"];
@@ -621,7 +621,7 @@ async fn codex_retrieves_a_saved_fact_through_memory_tools() {
     ]);
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(db, 2, registry);
+    let app = TestApp::with_registry(db, 2, registry).await;
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
@@ -710,7 +710,7 @@ async fn code_mode_reaches_only_elsebot_tools() {
     )]);
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(db, 2, registry);
+    let app = TestApp::with_registry(db, 2, registry).await;
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let bot = app.create_bot("Probe").await;
@@ -819,7 +819,7 @@ async fn a_synthetic_corpus_is_summarized_faithfully_and_recalled() {
     );
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(db, 2, Registry::new(vec![codex.clone()]));
+    let app = TestApp::with_registry(db, 2, Registry::new(vec![codex.clone()])).await;
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let reply = app
@@ -968,7 +968,7 @@ async fn main_bot_creates_a_github_specialist_on_request() {
     );
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(db, 1, Registry::new(vec![provider]));
+    let app = TestApp::with_registry(db, 1, Registry::new(vec![provider])).await;
     let router = app.router.clone();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let main = app.main_bot().await;
@@ -1050,7 +1050,7 @@ async fn main_bot_delegates_by_name_with_one_provider_slot() {
     );
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(db, 1, Registry::new(vec![codex]));
+    let app = TestApp::with_registry(db, 1, Registry::new(vec![codex])).await;
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let main = app.main_bot().await;
@@ -1176,7 +1176,7 @@ async fn codex_uses_its_guest_computer_through_tools() {
         },
     ));
     computers.reconcile_startup().await.unwrap();
-    let app = TestApp::with_parts(db, 2, Registry::new(vec![codex]), Some(computers.clone()));
+    let app = TestApp::with_parts(db, 2, Registry::new(vec![codex]), Some(computers.clone())).await;
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let bot = app.create_bot("Builder").await;

@@ -172,15 +172,10 @@ async fn owner_retry(
         bot_id,
         request_id: body.request_id,
     };
-    let (routine, queued) = routines::run_now(
-        &state.db,
-        state.scheduler.registry(),
-        by,
-        routine_id,
-        Utc::now(),
-    )
-    .await
-    .map_err(|err| ApiError::from(err).with_request_id(body.request_id))?;
+    let (routine, queued) =
+        routines::run_now(&state.db, &state.registry, by, routine_id, Utc::now())
+            .await
+            .map_err(|err| ApiError::from(err).with_request_id(body.request_id))?;
     if queued {
         state.scheduler.wake();
     }
@@ -344,7 +339,7 @@ pub(super) async fn resolve(
     bot_id: Option<Uuid>,
     request: &ModelRequest<'_>,
 ) -> Result<RoutineModel, String> {
-    let registry = state.scheduler.registry();
+    let registry = &state.registry;
     let providers: Vec<_> = registry
         .all()
         .iter()
@@ -932,7 +927,7 @@ pub async fn run(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     };
     match routines::run_now(
         &state.db,
-        state.scheduler.registry(),
+        &state.registry,
         routines::RunNow::Turn(caller(grant)),
         args.routine_id,
         Utc::now(),

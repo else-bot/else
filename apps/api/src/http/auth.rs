@@ -169,7 +169,7 @@ pub async fn authenticate(
     let authenticated = presented.is_some_and(|token| state.owner_token.matches(token));
     if !authenticated {
         if let Some(token) = presented
-            && state.scheduler.grants().resolve(token).await.is_some()
+            && state.grants.resolve(token).await.is_some()
         {
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
@@ -216,7 +216,7 @@ pub async fn require_task_grant(
         .into_response();
     }
     let grant = match presented {
-        Some(token) => state.scheduler.grants().resolve(token).await,
+        Some(token) => state.grants.resolve(token).await,
         None => None,
     };
     match grant {

@@ -133,10 +133,7 @@ async fn store(
     body: Body,
     mode: Mode,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let key = state
-        .secret_key
-        .as_deref()
-        .ok_or_else(|| error(SecretError::NoKey))?;
+    let key = &*state.secret_key;
     let meta = meta(body.description, body.website)?;
     let created = task_secrets::put(&state.db, key, name, &body.env, &meta, mode)
         .await
@@ -173,7 +170,7 @@ async fn edit(
         set: body.set,
         remove: body.remove,
     };
-    let entry = task_secrets::update(&state.db, state.secret_key.as_deref(), &name, &patch)
+    let entry = task_secrets::update(&state.db, Some(&*state.secret_key), &name, &patch)
         .await
         .map_err(error)?;
     Ok(Json(json!(entry)))
@@ -184,7 +181,7 @@ async fn reveal(
     State(state): State<Arc<AppState>>,
     ApiPath(name): ApiPath<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let env = task_secrets::reveal(&state.db, state.secret_key.as_deref(), &name)
+    let env = task_secrets::reveal(&state.db, Some(&*state.secret_key), &name)
         .await
         .map_err(error)?;
     tracing::info!(secret = %name, "the owner revealed a vault entry");
@@ -242,7 +239,7 @@ async fn fulfill(
     let meta = meta(body.description, body.website)?;
     let done = secret_requests::fulfill(
         &state.db,
-        state.secret_key.as_deref(),
+        Some(&*state.secret_key),
         bot_id,
         request_id,
         &body.env,

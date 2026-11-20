@@ -52,7 +52,7 @@ pub(super) async fn wait_job(
     }
     match waits::create(&state.db, grant.turn_id, caller.attempt, id).await {
         Ok(Created::Waiting(wait_id)) => {
-            state.scheduler.grants().park(grant.turn_id).await;
+            state.grants.park(grant.turn_id).await;
             let next = if caller.owner_conversation {
                 "Tell the owner briefly what the job does and end this attempt now. Do not poll \
                  or call more tools; else.bot continues this request when the job ends."

@@ -424,7 +424,7 @@ async fn bots_channel(state: Arc<AppState>, sub: Sub) {
 }
 
 async fn server_channel(state: Arc<AppState>, sub: Sub) {
-    let mut pause = state.scheduler.gate().watch_pause();
+    let mut pause = state.gate.watch_pause();
     loop {
         let current = pause.borrow_and_update().as_ref().map(|p| p.json());
         let body =

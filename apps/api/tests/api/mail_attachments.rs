@@ -172,7 +172,7 @@ async fn inbox(h: &recorder::Harness, bot: &str, address: &str) -> Uuid {
     };
     let account = store::create(
         &h.app.db.pool,
-        h.app.state.secret_key.as_ref().unwrap(),
+        &h.app.state.secret_key,
         &config,
         &Credential::Password {
             password: "private-app-password".into(),

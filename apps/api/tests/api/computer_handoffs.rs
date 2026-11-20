@@ -17,7 +17,7 @@ async fn harness() -> (TestApp, Arc<Synthetic>) {
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
     let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
-    (TestApp::with_registry(db, 4, registry), synthetic)
+    (TestApp::with_registry(db, 4, registry).await, synthetic)
 }
 
 async fn app() -> TestApp {
@@ -39,8 +39,8 @@ async fn grant(app: &TestApp, turn_id: Uuid) -> String {
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
-    app.scheduler
-        .grants()
+    app.state
+        .grants
         .issue(
             bot,
             conversation,

@@ -36,8 +36,8 @@ async fn harness_in(mail: Option<Arc<FakeMail>>, projects: Option<&std::path::Pa
     let synthetic = Arc::new(synthetic);
     let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
     let app = match mail {
-        Some(mail) => TestApp::with_mail(db, 4, registry, mail),
-        None => TestApp::with_registry(db, 4, registry),
+        Some(mail) => TestApp::with_mail(db, 4, registry, mail).await,
+        None => TestApp::with_registry(db, 4, registry).await,
     };
     Harness { app, synthetic }
 }
@@ -160,7 +160,7 @@ async fn connect(app: &TestApp, bot: &str, address: &str, send: bool) -> Uuid {
     };
     let account = store::create(
         &app.db.pool,
-        app.state.secret_key.as_ref().unwrap(),
+        &app.state.secret_key,
         &config,
         &Credential::Password {
             password: "private-app-password".into(),
@@ -196,8 +196,8 @@ async fn grant(app: &TestApp, turn_id: Uuid) -> String {
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
-    app.scheduler
-        .grants()
+    app.state
+        .grants
         .issue(
             bot,
             conversation,
@@ -1724,8 +1724,8 @@ async fn delegated_task(app: &TestApp, task: &str) -> (String, Uuid, Uuid, Uuid)
         .await;
     let (root, _) = running(app, &main, SLOW, None).await;
     let parent = app
-        .scheduler
-        .grants()
+        .state
+        .grants
         .issue(
             main.parse().unwrap(),
             sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
