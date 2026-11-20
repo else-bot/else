@@ -143,12 +143,18 @@ async fn active(
     };
     let c = match store::set_state(&s.db, id, to).await.map_err(error)? {
         store::StateChange::Changed(c) => {
-            m.changed(id).await;
+            signal(m, id);
             c
         }
         store::StateChange::Unchanged(c) => c,
     };
     Ok(Json(json!({"connection":c})))
+}
+/// Tell the connection's worker about a committed change from a task of its
+/// own, so a dropped request cannot lose the signal that stops in-flight work.
+fn signal(m: &Arc<crate::socials::Manager>, id: Uuid) {
+    let m = m.clone();
+    tokio::spawn(async move { m.changed(id).await });
 }
 async fn remove(
     State(s): State<Arc<AppState>>,
@@ -158,7 +164,7 @@ async fn remove(
     store::set_state(&s.db, id, ConnectionState::Removed)
         .await
         .map_err(error)?;
-    m.changed(id).await;
+    signal(m, id);
     Ok(Json(json!({"disconnected":true})))
 }
 #[derive(Deserialize)]
@@ -188,7 +194,7 @@ async fn credential(
     store::replace(&s.db, &m.key, &c, &Secret::Token(token))
         .await
         .map_err(error)?;
-    m.changed(id).await;
+    signal(m, id);
     Ok(Json(json!({"updated":true})))
 }
 async fn destinations(
