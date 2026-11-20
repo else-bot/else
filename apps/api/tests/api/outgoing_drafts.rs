@@ -1671,7 +1671,10 @@ async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_e
             )
             .await
             .unwrap();
-            assert!(matches!(started, store::ActionStart::Dispatch));
+            assert!(matches!(
+                started,
+                else_api::connector_core::actions::Start::Dispatch
+            ));
         }
         wait(&app, turn, "completed").await;
         let ended = journaled(&app, &main, id).await;
@@ -1682,15 +1685,16 @@ async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_e
     assert_eq!(outcomes[1].2, "uncertain", "dispatched without a receipt");
     let (id, action_id, _) = outcomes[1];
     assert_eq!(
-        store::finish_action(
-            &app.db.pool,
-            account,
-            action_id,
-            store::ActionStatus::Succeeded,
-            &json!({ "action_id": action_id, "status": "succeeded" }),
-        )
-        .await
-        .unwrap()["status"],
+        store::ACTIONS
+            .finish(
+                &app.db.pool,
+                account,
+                action_id,
+                else_api::connector_core::actions::Outcome::Succeeded,
+                json!({}),
+            )
+            .await
+            .unwrap()["status"],
         "succeeded"
     );
     let status: String = sqlx::query_scalar("SELECT status FROM outgoing_drafts WHERE id = ?1")

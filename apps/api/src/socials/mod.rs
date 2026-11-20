@@ -4,6 +4,7 @@ pub mod providers;
 pub mod store;
 pub mod types;
 
+use crate::connector_core::actions::Start;
 use crate::connector_core::workers::{Inbox, Worker, Workers};
 use crate::{actor::Actor, credentials::SecretKey};
 use serde_json::{Value, json};
@@ -472,7 +473,7 @@ impl Manager {
             let id = r
                 .action
                 .ok_or(Error::Invalid("Mutations require a stable action_id."))?;
-            if let Some(result) = store::begin_action(
+            if let Start::Existing(result) = store::begin_action(
                 &self.db,
                 c,
                 store::Action {

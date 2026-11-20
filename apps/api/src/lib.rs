@@ -9,7 +9,7 @@ pub mod app;
 pub mod backup;
 pub mod computers;
 pub mod config;
-mod connector_core;
+pub mod connector_core;
 pub mod connectors;
 pub mod credentials;
 pub mod db;

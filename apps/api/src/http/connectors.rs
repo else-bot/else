@@ -985,14 +985,16 @@ async fn tool_call(
         {
             return Err(MailError::new("mail_forbidden"));
         }
-        return store::action_status(
-            &state.db,
-            request.account_id,
-            grant.bot_id,
-            request.action_id,
-        )
-        .await?
-        .ok_or_else(|| MailError::new("mail_action_not_found"));
+        return store::ACTIONS
+            .receipt(
+                &state.db,
+                request.account_id,
+                grant.bot_id,
+                request.action_id,
+            )
+            .await
+            .map_err(store::StoreError::from)?
+            .ok_or_else(|| MailError::new("mail_action_not_found"));
     }
     let request: ActionRequest = serde_json::from_value(args.clone()).map_err(|_| {
         if saves_mailbox_draft(&args["command"]) {

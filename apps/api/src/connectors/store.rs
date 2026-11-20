@@ -12,14 +12,9 @@
 //! restoring increment it, and scans, credential refreshes and actions that
 //! carry an older generation are refused.
 //!
-//! An action is recorded as `dispatching`, with a fingerprint of who asked
-//! for what, before anything reaches the mail server. A retry with the same
-//! action ID returns the recorded outcome; a different request under that ID
-//! is a conflict. An action left dispatching by a crash becomes `uncertain`
-//! and is never replayed.
+//! Mail actions go through the shared [`ACTIONS`] ledger before anything
+//! reaches the mail server.
 
-use serde_json::Value;
-use sha2::{Digest, Sha256};
 use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -29,6 +24,7 @@ use super::types::{
     Account, Arrival, Credential, Cursor, Envelope, Health, MailCommand, MailConfig, MailError,
     MailTrigger, MessageRef, MoveKind, Permissions, Place, Provider, Scan,
 };
+use crate::connector_core::actions::{BeginError, Column, Columns, Ledger, Start, Status};
 use crate::credentials::SecretKey;
 use crate::db::turns::TurnStatus;
 
@@ -39,8 +35,6 @@ pub const MAX_ACCOUNTS: i64 = 32;
 pub const MAX_GRANTS: i64 = 128;
 /// Events one scan records; the cursor stops at the last one recorded.
 pub const MAX_ARRIVALS: usize = 100;
-/// Bytes of a recorded action result.
-pub const MAX_RESULT: usize = 256 * 1024;
 const MAX_CONFIG: usize = 8192;
 const MAX_FIELD: usize = 255;
 const MAX_SECRET: usize = 8192;
@@ -1160,30 +1154,28 @@ pub async fn record_scan(
     Ok(true)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
-#[strum(serialize_all = "lowercase")]
-pub enum ActionStatus {
-    Dispatching,
-    Succeeded,
-    Failed,
-    /// It may or may not have reached the server; never replayed.
-    Uncertain,
+/// The mail action table's own columns.
+pub struct MailAction {
+    generation: i64,
+    operation: String,
 }
 
-impl ActionStatus {
-    fn as_str(self) -> &'static str {
-        self.into()
+impl Columns for MailAction {
+    const NAMES: &'static [&'static str] = &["generation", "operation"];
+    fn values(&self) -> Vec<Column<'_>> {
+        vec![
+            Column::Int(self.generation),
+            Column::Text(Some(&self.operation)),
+        ]
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum ActionStart {
-    /// Recorded as dispatching: send it, then [`finish_action`].
-    Dispatch,
-    /// This action was already requested: its recorded receipt. Never send
-    /// it again.
-    Existing(Value),
-}
+pub const ACTIONS: Ledger<MailAction> = Ledger::new(
+    "connector_actions",
+    "account_id",
+    "mail",
+    Some(b"mail-action\0"),
+);
 
 /// The bot, turn and account checks every mail command passes, reads
 /// included, in the caller's transaction: the turn is this bot's and still
@@ -1250,26 +1242,8 @@ pub async fn authorize(
     authorize_in(&mut tx, account_id, generation, bot_id, turn_id, command).await
 }
 
-fn fingerprint(account_id: Uuid, bot_id: Uuid, turn_id: Uuid, command: &MailCommand) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(b"mail-action\0");
-    hasher.update(account_id.as_bytes());
-    hasher.update(bot_id.as_bytes());
-    hasher.update(turn_id.as_bytes());
-    hasher.update(serde_json::to_vec(command).expect("a mail command serializes"));
-    hasher.finalize().to_vec()
-}
-
-fn receipt(action_id: Uuid, status: &str, result: Option<Json<Value>>) -> Value {
-    match result {
-        Some(result) => result.0,
-        None => serde_json::json!({ "action_id": action_id, "status": status }),
-    }
-}
-
 /// Authorize a command and record it as dispatching before it is sent, in
-/// one immediate transaction. A repeat of the same request returns its
-/// receipt; a different request under the same action ID is a conflict.
+/// one immediate transaction.
 pub async fn begin_action(
     pool: &SqlitePool,
     account_id: Uuid,
@@ -1278,128 +1252,33 @@ pub async fn begin_action(
     turn_id: Uuid,
     action_id: Uuid,
     command: &MailCommand,
-) -> Result<ActionStart, StoreError> {
-    let print = fingerprint(account_id, bot_id, turn_id, command);
+) -> Result<Start, StoreError> {
     let operation = serde_json::to_value(command)
         .ok()
         .and_then(|v| v["operation"].as_str().map(str::to_owned))
         .unwrap_or_default();
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     authorize_in(&mut tx, account_id, generation, bot_id, turn_id, command).await?;
-    let existing: Option<(Vec<u8>, String, Option<Json<Value>>)> = sqlx::query_as(
-        "SELECT fingerprint, status, result FROM connector_actions WHERE account_id = ?1 AND action_id = ?2",
-    )
-    .bind(account_id)
-    .bind(action_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if let Some((recorded, status, result)) = existing {
-        if recorded != print {
-            return Err(StoreError::Conflict);
-        }
-        return Ok(ActionStart::Existing(receipt(action_id, &status, result)));
-    }
-    sqlx::query(
-        "INSERT INTO connector_actions (account_id, action_id, bot_id, turn_id, generation, operation, fingerprint)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-    )
-    .bind(account_id)
-    .bind(action_id)
-    .bind(bot_id)
-    .bind(turn_id)
-    .bind(generation)
-    .bind(&operation)
-    .bind(&print)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(ActionStart::Dispatch)
-}
-
-/// Settle a dispatching action with the receipt later retries get, and
-/// return the receipt the ledger holds. That keeps an earlier settlement,
-/// such as [`recover`] marking it uncertain.
-pub async fn finish_action(
-    pool: &SqlitePool,
-    account_id: Uuid,
-    action_id: Uuid,
-    status: ActionStatus,
-    settlement: &Value,
-) -> Result<Value, StoreError> {
-    if status == ActionStatus::Dispatching {
-        return Err(StoreError::Invalid(
-            "an action finishes as succeeded, failed or uncertain",
-        ));
-    }
-    let mut text = settlement.to_string();
-    if text.len() > MAX_RESULT {
-        text = serde_json::json!({
-            "action_id": action_id,
-            "status": status.as_str(),
-            "omitted": "the result was too large to record",
-        })
-        .to_string();
-    }
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let settled: Option<(String, Option<Json<Value>>)> =
-        sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "UPDATE connector_actions SET status = ?3, result = ?4, finished_at = {NOW}
-         WHERE account_id = ?1 AND action_id = ?2 AND status = 'dispatching'
-         RETURNING status, result"
-        )))
-        .bind(account_id)
-        .bind(action_id)
-        .bind(status.as_str())
-        .bind(text)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let stored = if let Some(stored) = settled {
-        let turns: Vec<(Uuid, Uuid)> = sqlx::query_as(
-            "SELECT DISTINCT bot_id, turn_id FROM outgoing_drafts
-             WHERE json_extract(delivery, '$.via') = 'mail'
-               AND replace(json_extract(delivery, '$.account_id'), '-', '') = lower(hex(?1))
-               AND replace(json_extract(delivery, '$.action_id'), '-', '') = lower(hex(?2))",
+    let start = ACTIONS
+        .begin(
+            &mut tx,
+            account_id,
+            action_id,
+            bot_id,
+            turn_id,
+            command,
+            &MailAction {
+                generation,
+                operation,
+            },
         )
-        .bind(account_id)
-        .bind(action_id)
-        .fetch_all(&mut *tx)
-        .await?;
-        for (bot_id, turn_id) in turns {
-            crate::db::events::turn_changed(&mut tx, bot_id, turn_id).await?;
-        }
-        stored
-    } else {
-        sqlx::query_as(
-            "SELECT status, result FROM connector_actions WHERE account_id = ?1 AND action_id = ?2",
-        )
-        .bind(account_id)
-        .bind(action_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(StoreError::NotFound)?
-    };
+        .await
+        .map_err(|error| match error {
+            BeginError::Conflict => StoreError::Conflict,
+            BeginError::Db(error) => error.into(),
+        })?;
     tx.commit().await?;
-    let (status, result) = stored;
-    Ok(receipt(action_id, &status, result))
-}
-
-/// The receipt of an action this bot requested on this account.
-pub async fn action_status(
-    pool: &SqlitePool,
-    account_id: Uuid,
-    bot_id: Uuid,
-    action_id: Uuid,
-) -> Result<Option<Value>, StoreError> {
-    let row: Option<(String, Option<Json<Value>>)> = sqlx::query_as(
-        "SELECT status, result FROM connector_actions
-         WHERE account_id = ?1 AND action_id = ?2 AND bot_id = ?3",
-    )
-    .bind(account_id)
-    .bind(action_id)
-    .bind(bot_id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|(status, result)| receipt(action_id, &status, result)))
+    Ok(start)
 }
 
 /// The account whose mail a connector turn was queued for; `None` for any
@@ -1424,48 +1303,25 @@ pub async fn found_in_sent(
     account_id: Uuid,
     action_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let receipt = serde_json::json!({
-        "action_id": action_id,
-        "status": "succeeded",
-        "result": {"sent": true, "found_in_sent": true},
-    });
-    sqlx::query(
-        "UPDATE connector_actions SET status = 'succeeded',
-             result = json_set(?3, '$.earlier', json(coalesce(result, 'null')))
-         WHERE account_id = ?1 AND action_id = ?2 AND status = 'uncertain'",
-    )
-    .bind(account_id)
-    .bind(action_id)
-    .bind(receipt.to_string())
-    .execute(&mut *conn)
-    .await?;
-    let status: Option<String> = sqlx::query_scalar(
-        "SELECT status FROM connector_actions WHERE account_id = ?1 AND action_id = ?2",
-    )
-    .bind(account_id)
-    .bind(action_id)
-    .fetch_optional(&mut *conn)
-    .await?;
+    let status = ACTIONS
+        .confirm(
+            conn,
+            account_id,
+            action_id,
+            serde_json::json!({"result": {"sent": true, "found_in_sent": true}}),
+        )
+        .await?;
     Ok(matches!(
-        status.as_deref(),
-        Some("succeeded" | "dispatching")
+        status,
+        Some(Status::Succeeded | Status::Dispatching)
     ))
-}
-
-async fn uncertain_in(conn: &mut SqliteConnection) -> Result<u64, sqlx::Error> {
-    Ok(sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE connector_actions SET status = 'uncertain', finished_at = {NOW} WHERE status = 'dispatching'"
-    )))
-    .execute(conn)
-    .await?
-    .rows_affected())
 }
 
 /// At startup, before any mail command runs: actions a previous process
 /// left dispatching become uncertain. Returns how many.
 pub async fn recover(pool: &SqlitePool) -> Result<u64, StoreError> {
     let mut conn = pool.acquire().await?;
-    Ok(uncertain_in(&mut conn).await?)
+    Ok(ACTIONS.recover(&mut conn).await?)
 }
 
 /// On a restored database: pause every connected account, fence its
@@ -1488,7 +1344,7 @@ pub async fn restore_passive(conn: &mut SqliteConnection) -> Result<(), sqlx::Er
     )))
     .execute(&mut *tx)
     .await?;
-    uncertain_in(&mut tx).await?;
+    ACTIONS.recover(&mut tx).await?;
     tx.commit().await
 }
 

@@ -1033,7 +1033,8 @@ async fn an_action_recovery_settled_first_reports_the_recorded_receipt() {
         .unwrap();
     assert_eq!(receipt, json!({"action_id": action, "status": "uncertain"}));
     assert_eq!(
-        store::action_status(&h.app.db.pool, account.id, bot, action)
+        store::ACTIONS
+            .receipt(&h.app.db.pool, account.id, bot, action)
             .await
             .unwrap(),
         Some(receipt)
@@ -1698,7 +1699,8 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
         );
         if in_flight {
             assert_eq!(
-                store::action_status(&restored, account.id, bot, action_id)
+                store::ACTIONS
+                    .receipt(&restored, account.id, bot, action_id)
                     .await
                     .unwrap()
                     .unwrap()["status"],

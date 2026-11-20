@@ -14,6 +14,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::connector_core::actions::{Outcome, Start};
 use crate::connector_core::workers::{Inbox, Worker, Workers};
 use crate::{actor::Actor, credentials::SecretKey, scheduler::Scheduler};
 use store::Whereabouts;
@@ -106,11 +107,7 @@ mod tests {
 /// How a mutating mail command that failed settles, logged at warn with
 /// its phase and reason. A send that stopped before the server had the
 /// whole message sent nothing; any other failed change may have happened.
-fn failure_receipt(
-    account_id: Uuid,
-    action_id: Uuid,
-    error: &MailError,
-) -> (store::ActionStatus, Value) {
+fn failure_receipt(account_id: Uuid, action_id: Uuid, error: &MailError) -> (Outcome, Value) {
     let reason = error.reason();
     let phase = error.phase.map(SendPhase::as_str);
     tracing::warn!(
@@ -123,13 +120,13 @@ fn failure_receipt(
     );
     if error.phase.is_some() && !error.may_have_sent() {
         (
-            store::ActionStatus::Failed,
-            json!({"action_id":action_id,"status":"failed","error":error.code,"phase":phase,"reason":reason,"instruction":"Nothing was sent. The owner may approve sending it again."}),
+            Outcome::Failed,
+            json!({"error":error.code,"phase":phase,"reason":reason,"instruction":"Nothing was sent. The owner may approve sending it again."}),
         )
     } else {
         (
-            store::ActionStatus::Uncertain,
-            json!({"action_id":action_id,"status":"uncertain","error":error.code,"phase":phase,"reason":reason,"instruction":"Inspect the mailbox before starting a different action. This action will not be retried."}),
+            Outcome::Uncertain,
+            json!({"error":error.code,"phase":phase,"reason":reason,"instruction":"Inspect the mailbox before starting a different action. This action will not be retried."}),
         )
     }
 }
@@ -679,8 +676,8 @@ impl ConnectorManager {
                 )
                 .await?
                 {
-                    store::ActionStart::Existing(receipt) => return Ok(receipt),
-                    store::ActionStart::Dispatch => Some(action_id),
+                    Start::Existing(receipt) => return Ok(receipt),
+                    Start::Dispatch => Some(action_id),
                 }
             }
         };
@@ -731,14 +728,12 @@ impl ConnectorManager {
         let Some(action_id) = action_id else {
             return result;
         };
-        let (status, receipt) = match result {
-            Ok(value) => (
-                store::ActionStatus::Succeeded,
-                json!({"action_id":action_id,"status":"succeeded","result":value}),
-            ),
+        let (outcome, fields) = match result {
+            Ok(value) => (Outcome::Succeeded, json!({ "result": value })),
             Err(error) => failure_receipt(id, action_id, &error),
         };
-        store::finish_action(&self.db, id, action_id, status, &receipt)
+        store::ACTIONS
+            .finish(&self.db, id, action_id, outcome, fields)
             .await
             .map_err(|_| MailError::new("mail_receipt_unavailable"))
     }
