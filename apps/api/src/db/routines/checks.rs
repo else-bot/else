@@ -22,6 +22,8 @@ pub struct Check {
     pub bot_id: Uuid,
     pub job_id: Uuid,
     pub command: String,
+    /// Vault entry names the check gets in its environment.
+    pub secrets: Vec<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -107,6 +109,7 @@ pub(super) async fn admit_check(
         bot_id,
         job_id,
         command,
+        secrets: Vec::new(),
     }))
 }
 

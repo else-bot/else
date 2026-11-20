@@ -12,6 +12,8 @@ pub struct Guest {
     state: Mutex<std::collections::HashMap<String, RuntimeState>>,
     /// The boot memory each `configure` set, in order.
     configured: Mutex<Vec<u32>>,
+    /// The arguments and input of each job launch, in order.
+    launches: Mutex<Vec<(Vec<String>, Vec<u8>)>>,
 }
 
 impl Guest {
@@ -20,11 +22,17 @@ impl Guest {
             probe: Mutex::new("running\n".into()),
             state: Mutex::default(),
             configured: Mutex::default(),
+            launches: Mutex::default(),
         }
     }
 
     pub fn configured(&self) -> Vec<u32> {
         self.configured.lock().unwrap().clone()
+    }
+
+    /// The arguments and input of each job launch, in order.
+    pub fn launches(&self) -> Vec<(Vec<String>, Vec<u8>)> {
+        self.launches.lock().unwrap().clone()
     }
 
     pub fn report(&self, probe: &str) {
@@ -98,12 +106,16 @@ impl ComputerRuntime for Guest {
         _: &str,
         _: &str,
         args: &[&str],
-        _: &[u8],
+        input: &[u8],
         _: Duration,
     ) -> Result<ExecOutput, RuntimeError> {
         let at = args.iter().position(|a| *a == "-c").map_or(0, |i| i + 1);
         let script = args.get(at).copied().unwrap_or_default();
         let stdout = if script.contains("echo launched") {
+            self.launches.lock().unwrap().push((
+                args.iter().map(|a| (*a).to_owned()).collect(),
+                input.to_vec(),
+            ));
             "launched".to_owned()
         } else if script.contains("alive()") {
             "stopped".to_owned()

@@ -76,12 +76,14 @@ pub async fn create(
         .await?
         .filter(|caller| caller.attempt == attempt)
         .ok_or(CreateError::NotRunning)?;
-    let job: Option<JobStatus> =
-        sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = ?1 AND bot_id = ?2")
-            .bind(job_id)
-            .bind(caller.bot_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let job: Option<JobStatus> = sqlx::query_scalar(
+        "SELECT status FROM guest_jobs WHERE id = ?1 AND bot_id = ?2
+             AND id NOT IN (SELECT job_id FROM watcher_checks)",
+    )
+    .bind(job_id)
+    .bind(caller.bot_id)
+    .fetch_optional(&mut *tx)
+    .await?;
     if job.ok_or(CreateError::NoSuchJob)?.is_ended() {
         return Ok(Created::Ended);
     }

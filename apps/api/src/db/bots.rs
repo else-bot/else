@@ -46,6 +46,8 @@ pub struct BotRecord {
     pub active_turn_id: Option<Uuid>,
     pub active_turn_status: Option<TurnStatus>,
     pub queued_count: i64,
+    /// Its active watchers.
+    pub watching: i64,
     /// Its sidebar category, if any.
     pub category_id: Option<Uuid>,
     /// The owner silenced it: no notifications or unread state while it
@@ -152,6 +154,8 @@ const SELECT_BOT: &str = concat!(
         (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued'
             AND NOT EXISTS (SELECT 1 FROM turn_steers s
                             WHERE s.turn_id = q.id AND s.status <> 'pending')) AS queued_count,
+        (SELECT count(*) FROM watchers wt WHERE wt.bot_id = b.id
+            AND wt.status IN ('waiting', 'checking')) AS watching,
         (SELECT m.created_at FROM items m WHERE m.conversation_id = c.id
             AND m.kind IN ('user', 'assistant') AND NOT m.hidden AND NOT m.silent
             ORDER BY m.seq DESC LIMIT 1) AS last_message_at,

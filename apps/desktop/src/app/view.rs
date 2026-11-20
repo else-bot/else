@@ -1,5 +1,6 @@
 use super::layout::{CategoryDrag, SidebarEdge};
 use super::mentions::{MentionAction, mention_keys};
+use super::settings::{watcher_deadline, watching_label};
 use super::{
     APP_CONTEXT, COMPOSER_CONTEXT, Connection, ElseApp, FindInConversation, FocusComposer,
     FocusSidebar, NewBot, NewCategory, SIDEBAR_CONTEXT, SelectNext, SelectPrev, StopWork,
@@ -22,6 +23,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Textarea};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::menu::ContextMenuExt as _;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -555,6 +557,20 @@ impl ElseApp {
                                         ),
                                 )
                             })
+                            .when(bot.watching > 0, |line| {
+                                let label = watching_label(bot.watching);
+                                line.child(
+                                    div()
+                                        .id("watching")
+                                        .flex_none()
+                                        .role(Role::Image)
+                                        .aria_label(label.clone())
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(label.clone()).build(window, cx)
+                                        })
+                                        .child(Icon::new(IconName::Eye).xsmall().text_color(meta)),
+                                )
+                            })
                             // The wait sits on the title's line, at its end.
                             .children(waited.map(|waited| {
                                 div()
@@ -1010,6 +1026,7 @@ impl ElseApp {
             .children(self.render_waiting_tray(cx))
             .children(self.render_question_bar(&bot.name, cx))
             .children(self.render_handoff_bar(bot, window, cx))
+            .children(self.render_watcher_chip(bot.id, cx))
             .child(div().relative().child(frame).children(self.render_mentions(
                 &self.composer,
                 true,
@@ -1032,6 +1049,47 @@ impl ElseApp {
             .child(self.render_header(bot, cx))
             .child(transcript)
             .child(footer)
+    }
+
+    fn render_watcher_chip(&self, bot: Uuid, cx: &mut Context<Self>) -> Option<Div> {
+        let watchers = self.watchers(bot);
+        let next = watchers.iter().min_by_key(|watcher| watcher.until)?;
+        let local = chrono::Local::now();
+        let ends = watcher_deadline(
+            next.until.with_timezone(&local.timezone()),
+            local.date_naive(),
+        );
+        let (summary, deadline) = if watchers.len() == 1 {
+            (
+                format!("Watching: {}", next.purpose),
+                format!("until {ends}"),
+            )
+        } else {
+            (watching_label(watchers.len()), format!("first ends {ends}"))
+        };
+        let label = format!("{summary} · {deadline}. View watchers in bot details");
+        Some(
+            h_flex().min_w_0().child(
+                Button::new("watcher-chip")
+                    .control(Tier::Ghost, Scale::Compact, false, cx)
+                    .min_w_0()
+                    .max_w_full()
+                    .px_2()
+                    .rounded_full()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .accessibility_label(label)
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .gap_1p5()
+                            .child(Icon::new(IconName::Eye).xsmall().flex_none())
+                            .child(div().min_w_0().truncate().child(summary))
+                            .child(div().flex_none().child(format!("· {deadline}"))),
+                    )
+                    .on_click(cx.listener(|app, _, window, cx| app.show_watchers(window, cx))),
+            ),
+        )
     }
 
     fn render_main(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1179,6 +1237,7 @@ impl Render for ElseApp {
                 .children(self.render_handoff_panel(cx))
                 .into_any_element();
         }
+        self.sync_watcher_clock(cx);
         let settings = self
             .settings_shown()
             .then(|| self.selected_bot().cloned())

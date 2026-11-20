@@ -171,6 +171,7 @@ mod tests {
             last_message_at: None,
             read_state: None,
             sidebar_status: None,
+            watching: 0,
         }
     }
 

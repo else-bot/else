@@ -10,4 +10,5 @@ pub mod rules;
 pub mod server_icon;
 pub mod tools;
 pub mod usage;
+pub mod watchers;
 pub mod webhooks;

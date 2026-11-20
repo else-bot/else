@@ -1268,9 +1268,12 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         jobs: crate::db::handoffs::job_receipts(&mut conn, turn.bot_id).await?,
         run: match crate::db::routines::run_of(&mut conn, turn_id).await? {
             Some(run) => Some(crate::app::providers::SavedRun::Routine(run)),
-            None => crate::db::webhooks::run_of(&mut conn, turn_id)
-                .await?
-                .map(crate::app::providers::SavedRun::Webhook),
+            None => match crate::db::webhooks::run_of(&mut conn, turn_id).await? {
+                Some(run) => Some(crate::app::providers::SavedRun::Webhook(run)),
+                None => crate::db::watchers::run_of(&mut conn, turn_id)
+                    .await?
+                    .map(crate::app::providers::SavedRun::Watcher),
+            },
         },
         rules: crate::db::rules::current(&mut conn, turn.bot_id)
             .await?

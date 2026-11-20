@@ -25,6 +25,7 @@ pub(crate) mod approval;
 mod input_progress;
 mod job_wait;
 mod resize;
+mod watch;
 
 pub use approval::call;
 use approval::{EFFECT_ADVERTISED, MAX_PURPOSE};
@@ -35,6 +36,9 @@ pub const TOOL_NAMES: &[&str] = &[
     "computer_job_start",
     "computer_job",
     "computer_job_cancel",
+    "computer_watch_start",
+    "computer_watches",
+    "computer_watch_stop",
     "computer_write_file",
     "computer_read_file",
     "computer_fetch",
@@ -49,6 +53,12 @@ pub const TOOL_NAMES: &[&str] = &[
 /// bot asks the owner to continue beyond this).
 pub const MAX_INPUT_BATCHES: u32 = 40;
 
+const MAX_JOB_MINUTES: u64 = crate::computers::jobs::MAX_JOB_DURATION.as_secs() / 60;
+const JOB_TOO_LONG: &str = "JOB_TOO_LONG: a background job ends after 6 hours (max_minutes 360), \
+    so it cannot keep a promise longer than that. To wait hours or days for something, call \
+    computer_watch_start: else.bot runs a short check every few minutes until a deadline of up \
+    to 30 days and wakes you once when it ends. For work on a schedule, use a routine. No job \
+    was started.";
 const MAX_ARTIFACT: u64 = 10 * 1024 * 1024;
 const READ_CHUNK: u64 = 12_000;
 pub fn tool_list() -> Vec<Value> {
@@ -83,7 +93,7 @@ pub fn tool_list() -> Vec<Value> {
         "description": "Only with effect external: the id of the draft the owner approved, \
             instead of an approval card. Send exactly its content, once, then call \
             report_draft_send." });
-    vec![
+    let mut tools = vec![
         json!({
             "name": "computer_run",
             "description": "Run a shell command in YOUR OWN computer (a Linux VM with Chromium, never the \
@@ -106,11 +116,13 @@ pub fn tool_list() -> Vec<Value> {
             "name": "computer_job_start",
             "description": "Start a long command in the background in your computer and return its job_id at \
                 once; it keeps running after this turn. Wait for it with computer_job (wait true) \
-                and stop it with computer_job_cancel. At most 4 at once; max_minutes defaults to 60. Pass webhook_id \
-                to fire one of your webhooks when the job exits 0.",
+                and stop it with computer_job_cancel. At most 4 at once; max_minutes defaults to 60 \
+                and a job ends after 6 hours: to wait hours or days for something, use \
+                computer_watch_start. webhook_id fires one of your webhooks when it exits 0.",
             "inputSchema": { "type": "object", "properties": {
                 "command": { "type": "string", "minLength": 1, "maxLength": 8000 },
-                "max_minutes": { "type": "integer", "minimum": 1, "maximum": 360 },
+                "max_minutes": { "type": "integer", "minimum": 1,
+                    "description": "At most 360." },
                 "secrets": secrets,
                 "github": github,
                 "webhook_id": { "type": "string", "format": "uuid",
@@ -144,6 +156,9 @@ pub fn tool_list() -> Vec<Value> {
                 "required": ["job_id"], "additionalProperties": false },
             "annotations": guest,
         }),
+    ];
+    tools.extend(watch::tools(&guest));
+    tools.extend([
         json!({
             "name": "computer_write_file",
             "description": "Write a UTF-8 text file in your computer (up to 64 KB). Relative paths \
@@ -288,7 +303,8 @@ pub fn tool_list() -> Vec<Value> {
             "annotations": { "readOnlyHint": true, "destructiveHint": false,
                              "idempotentHint": true, "openWorldHint": false },
         }),
-    ]
+    ]);
+    tools
 }
 
 fn holder(grant: &Grant) -> String {
@@ -825,6 +841,14 @@ async fn secrets_for(
     args: &Value,
     kind: task_secrets::Use,
 ) -> Result<(Env, Vec<String>), Outcome> {
+    let names = secret_names(args)?;
+    let env = resolve_secrets(state, &names).await?;
+    task_secrets::record_use(&state.db, &names, grant.bot_id, Some(grant.turn_id), kind).await;
+    Ok((env, names))
+}
+
+/// The Vault entry names in `args["secrets"]`, unchecked against the Vault.
+fn secret_names(args: &Value) -> Result<Vec<String>, Outcome> {
     let names: Vec<String> = match &args["secrets"] {
         Value::Null => Vec::new(),
         Value::Array(items) => {
@@ -845,12 +869,13 @@ async fn secrets_for(
     if unique.len() != names.len() {
         return Err((tool_error("secrets names a secret twice."), None));
     }
-    match task_secrets::resolve(&state.db, state.secret_key.as_deref(), &names).await {
-        Ok(env) => {
-            task_secrets::record_use(&state.db, &names, grant.bot_id, Some(grant.turn_id), kind)
-                .await;
-            Ok((env, names))
-        }
+    Ok(names)
+}
+
+/// Decrypt the Vault entries `names`, without recording a use.
+async fn resolve_secrets(state: &AppState, names: &[String]) -> Result<Env, Outcome> {
+    match task_secrets::resolve(&state.db, state.secret_key.as_deref(), names).await {
+        Ok(env) => Ok(env),
         Err(task_secrets::SecretError::Unknown(name)) => Err((
             tool_error(&format!(
                 "SECRET_UNKNOWN: there is no Vault entry named {name}; search computer_secrets. \
@@ -1023,7 +1048,10 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
             let Some(command) = text("command") else {
                 return (tool_error("command is required."), None);
             };
-            let minutes = args["max_minutes"].as_u64().unwrap_or(60).clamp(1, 360);
+            let minutes = args["max_minutes"]
+                .as_u64()
+                .unwrap_or(60)
+                .clamp(1, MAX_JOB_MINUTES);
             let webhook = match &args["webhook_id"] {
                 Value::Null => None,
                 id => match id.as_str().and_then(|s| s.parse::<Uuid>().ok()) {
@@ -1094,6 +1122,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
             }
         }
         resize::NAME => resize::resize(state, grant, &computers, args).await,
+        watch::START | watch::LIST | watch::STOP => watch::call(state, grant, name, args).await,
         "computer_job" if args["wait"] == true => {
             let Some(id) = text("job_id").and_then(|s| s.parse::<Uuid>().ok()) else {
                 return (tool_error("job_id must be a job ID."), None);

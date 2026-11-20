@@ -864,6 +864,36 @@ fn base_request_text(input: &TurnInput) -> String {
             fired = at(&run.requested_at),
             task = input.text,
         ),
+        Some(SavedRun::Watcher(run)) => {
+            use crate::app::watchers::Outcome;
+            let ended = match run.outcome {
+                Outcome::Met => {
+                    "its check reported what you were waiting for. Confirm it yourself, then do \
+                     the task you saved below"
+                }
+                Outcome::Failed => {
+                    "its check failed several times in a row. Do not do the saved task below; \
+                     look at why the check fails"
+                }
+                Outcome::Expired => {
+                    "its deadline passed before its check reported anything. Do not do the saved \
+                     task below"
+                }
+                Outcome::Stopped => {
+                    "the owner stopped it. Do not do the saved task below or start it again \
+                     unless the owner asks"
+                }
+            };
+            format!(
+                "[else.bot watcher] Your watcher \"{purpose}\" (watch_id {id}) ended: {ended}. \
+                 This is not a new message from the owner. Reply to the owner with a concise \
+                 report of what you actually found and did, including failures. Never invent \
+                 results.\n<task>\n{task}\n</task>",
+                purpose = run.purpose,
+                id = run.watcher_id,
+                task = input.text,
+            )
+        }
     }
 }
 

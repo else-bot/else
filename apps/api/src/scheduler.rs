@@ -276,7 +276,38 @@ impl Scheduler {
             {
                 tracing::warn!(error = %err, "settling routine checks failed");
             }
+            if let Err(err) =
+                crate::db::watchers::settle_checks(&self.pool, now, crate::db::watchers::BATCH)
+                    .await
+            {
+                tracing::warn!(error = %err, "settling watcher checks failed");
+            }
             let computers = self.computers.get();
+            match crate::db::watchers::admit_due(
+                &self.pool,
+                computers.map(Arc::as_ref),
+                now,
+                crate::db::watchers::BATCH,
+            )
+            .await
+            {
+                Ok(checks) => {
+                    for check in checks {
+                        self.launch_check(check);
+                    }
+                }
+                Err(err) => tracing::warn!(error = %err, "admitting due watchers failed"),
+            }
+            if let Err(err) = crate::db::watchers::deliver_wakes(
+                &self.pool,
+                &self.registry,
+                now,
+                crate::db::watchers::BATCH,
+            )
+            .await
+            {
+                tracing::warn!(error = %err, "queueing watcher wakes failed");
+            }
             let (admitted, woken, mail, social) = tokio::join!(
                 crate::db::routines::admit_due(
                     &self.pool,
@@ -359,12 +390,11 @@ impl Scheduler {
             return;
         };
         tokio::spawn(async move {
-            let env = crate::db::task_secrets::Env::default();
             if let Err(err) = computers
-                .launch_reserved(check.bot_id, check.job_id, &check.command, &env)
+                .launch_check(check.bot_id, check.job_id, &check.command, &check.secrets)
                 .await
             {
-                tracing::warn!(job = %check.job_id, error = %err, "launching a routine check failed");
+                tracing::warn!(job = %check.job_id, error = %err, "launching a routine or watcher check failed");
             }
         });
     }

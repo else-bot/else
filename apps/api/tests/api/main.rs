@@ -78,5 +78,6 @@ mod turns;
 mod update_gate;
 mod usage;
 mod visual_preview;
+mod watchers;
 mod webhooks;
 mod ws;

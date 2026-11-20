@@ -349,6 +349,13 @@ pub(crate) async fn approve_card(
 /// runs at once, a destructive or external one only with the owner's
 /// approval for exactly this call. The approval is noted in the activity log.
 pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
+    if name == "computer_job_start"
+        && args["max_minutes"]
+            .as_u64()
+            .is_some_and(|minutes| minutes > super::MAX_JOB_MINUTES)
+    {
+        return (tool_error(super::JOB_TOO_LONG), None);
+    }
     let effect = match declared_effect(name, args) {
         Ok(effect) => effect,
         Err(message) => return (tool_error(&message), None),

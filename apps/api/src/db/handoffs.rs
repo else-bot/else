@@ -198,7 +198,8 @@ pub async fn settle_ended(
 }
 
 /// The bot's jobs that may still be running or whose outcome is unknown
-/// (`lost` within a week), newest first, at most 20.
+/// (`lost` within a week), newest first, at most 20. Watcher checks are
+/// their watchers' own.
 pub async fn job_receipts(
     conn: &mut SqliteConnection,
     bot_id: Uuid,
@@ -206,7 +207,8 @@ pub async fn job_receipts(
     let rows: Vec<(Uuid, String, String, String)> = sqlx::query_as(
         "SELECT id, status, substr(command, 1, 300), started_at
          FROM guest_jobs
-         WHERE bot_id = ?1 AND (status IN ('starting', 'running', 'cancelling')
+         WHERE bot_id = ?1 AND id NOT IN (SELECT job_id FROM watcher_checks)
+           AND (status IN ('starting', 'running', 'cancelling')
                OR (status = 'lost' AND started_at > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-7 days')))
          ORDER BY started_at DESC LIMIT 20",
     )
