@@ -1831,6 +1831,58 @@ mod tests {
     }
 
     #[test]
+    fn a_live_edit_inside_a_gap_keeps_both_sides_loadable() {
+        let tail = vec![item(90, 90, "user", "latest")];
+        let mut c = Conversation::from_snapshot(snapshot(5, tail, Some(90))).unwrap();
+        let found = vec![item(20, 20, "user", "a")];
+        assert!(c.merge_window(window(found, 0, 69), None, Some(90)));
+
+        let edit = frame(
+            6,
+            "item.upsert",
+            json!({ "item": item(50, 50, "user", "undone") }),
+        );
+        assert_eq!(c.apply(&edit), Ok(Applied::Changed));
+        assert_eq!(loaded(&c), [20, 50, 90]);
+        assert!(c.gap_below(90).is_some());
+        assert!(c.gap_below(50).is_some());
+
+        let upper = vec![item(51, 51, "user", "b"), item(89, 89, "user", "c")];
+        assert!(c.merge_window(window(upper, 0, 0), Some(50), Some(90)));
+        assert_eq!(c.gap_below(90), None);
+        assert!(c.gap_below(50).is_some());
+        let lower = vec![item(21, 21, "user", "d"), item(49, 49, "user", "e")];
+        assert!(c.merge_window(window(lower, 0, 0), Some(20), Some(50)));
+        assert_eq!(c.gap_below(50), None);
+        assert_eq!(loaded(&c), [20, 21, 49, 50, 51, 89, 90]);
+    }
+
+    #[test]
+    fn a_live_item_next_to_a_loaded_row_leaves_no_empty_gap() {
+        let tail = vec![item(90, 90, "user", "latest")];
+        let mut c = Conversation::from_snapshot(snapshot(5, tail, Some(90))).unwrap();
+        let found = vec![item(20, 20, "user", "a")];
+        assert!(c.merge_window(window(found, 0, 69), None, Some(90)));
+
+        let reply = item(21, 21, "assistant", "");
+        assert_eq!(
+            c.apply(&frame(6, "item.upsert", json!({ "item": reply }))),
+            Ok(Applied::Changed)
+        );
+        assert_eq!(c.apply(&delta(7, 21, 0, "hi")), Ok(Applied::Changed));
+        assert_eq!(c.gap_below(21), None);
+        assert!(c.gap_below(90).is_some());
+
+        let edit = item(89, 89, "user", "top");
+        assert_eq!(
+            c.apply(&frame(8, "item.upsert", json!({ "item": edit }))),
+            Ok(Applied::Changed)
+        );
+        assert_eq!(c.gap_below(90), None);
+        assert!(c.gap_below(89).is_some());
+    }
+
+    #[test]
     fn owner_notices_follow_turn_events_and_reload_from_snapshots() {
         let mut c = Conversation::from_snapshot(snapshot(0, vec![], None)).unwrap();
         let mut turn = json!({
