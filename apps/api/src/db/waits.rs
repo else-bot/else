@@ -109,7 +109,7 @@ async fn settle(
             requeued: false,
         }),
         Stop::Stopped { turn_id } => {
-            let requeued = super::turns::continue_waiting(conn, turn_id).await?;
+            let requeued = super::turns::lifecycle::continue_waiting(conn, turn_id).await?;
             events::turn_changed(conn, bot_id, turn_id).await?;
             Ok(Stopped {
                 kind,

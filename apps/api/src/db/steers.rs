@@ -21,6 +21,7 @@ use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
+use super::turns::lifecycle::{self, Steered};
 use super::turns::{ACTIVE_STATUSES, TurnStatus};
 use crate::app::messages::MessagePart;
 use crate::app::providers::Steer;
@@ -163,7 +164,7 @@ pub async fn place(
     .await?;
     super::computer_handoffs::skip_pending_of(&mut *conn, target.id).await?;
     if target.status == TurnStatus::Waiting {
-        super::turns::continue_waiting(&mut *conn, target.id).await?;
+        super::turns::lifecycle::continue_waiting(&mut *conn, target.id).await?;
     }
     super::events::turn_changed(&mut *conn, target.bot_id, target.id).await?;
     Ok(Placement::Joined {
@@ -452,40 +453,15 @@ pub async fn settle(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
                 .execute(&mut *conn)
                 .await?;
         }
-        let updated = match fate {
+        let steered = match fate {
             Fate::Released => {
                 crate::db::events::turn_changed(&mut *conn, bot_id, turn_id).await?;
                 continue;
             }
-            Fate::Uncertain => sqlx::query(
-                "UPDATE turns SET status = 'uncertain', effect_uncertain = true,
-                     error_code = 'steer_uncertain',
-                     error_message = 'This message was sent into the reply in progress, which \
-did not confirm it. It was not resent; send a follow-up to continue.',
-                     finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
-                     updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-                 WHERE id = ?1 AND status = 'queued'",
-            )
-            .bind(turn_id),
-            Fate::EndsWithReply => sqlx::query(
-                "UPDATE turns SET status = a.status, error_code = a.error_code,
-                     error_message = a.error_message,
-                     effect_uncertain = turns.effect_uncertain OR a.effect_uncertain,
-                     finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
-                     updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-                 FROM turns a
-                 WHERE turns.id = ?1 AND turns.status = 'queued' AND a.id = ?2",
-            )
-            .bind(turn_id)
-            .bind(into),
-        }
-        .execute(&mut *conn)
-        .await?
-        .rows_affected();
-        if updated == 1 {
-            crate::db::events::turn_changed(&mut *conn, bot_id, turn_id).await?;
-            crate::db::memory::log_turn_end(&mut *conn, turn_id).await?;
-        }
+            Fate::Uncertain => Steered::Unconfirmed,
+            Fate::EndsWithReply => Steered::WithReply { into },
+        };
+        lifecycle::end_steered(&mut *conn, bot_id, turn_id, steered).await?;
     }
     Ok(())
 }

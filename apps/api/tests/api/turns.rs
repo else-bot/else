@@ -716,7 +716,7 @@ async fn restart_requeues_undelivered_and_marks_delivered_uncertain() {
     .execute(&pool)
     .await
     .unwrap();
-    let (requeued, uncertain) = else_api::db::turns::recover_after_restart(&pool)
+    let (requeued, uncertain) = else_api::db::turns::lifecycle::recover_after_restart(&pool)
         .await
         .unwrap();
     assert_eq!((requeued, uncertain), (0, 1));

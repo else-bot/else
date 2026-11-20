@@ -7,9 +7,10 @@ use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use super::turns::{ACTIVE_STATUSES, TurnStatus};
+use super::turns::TurnStatus;
+use super::turns::lifecycle::{self, Step};
 use crate::actor::Actor;
-use crate::app::providers::{FailureCode, Fenced, SessionState, TurnInput, TurnOutcome, TurnSink};
+use crate::app::providers::{Fenced, SessionState, TurnInput, TurnOutcome, TurnSink};
 use crate::db::in_ids;
 
 mod steers;
@@ -218,24 +219,22 @@ impl SinkState {
         }))
     }
 
-    async fn transition(&mut self, from: TurnStatus, to: TurnStatus) -> Result<(), Fenced> {
+    async fn transition(&mut self, step: Step) -> Result<(), Fenced> {
         if self.fenced {
             return Err(Fenced);
         }
         let result: Result<bool, sqlx::Error> = async {
             let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-            if self.guard(&mut tx, |status| status == from).await?.is_none() {
+            if self
+                .guard(&mut tx, |status| status == step.source())
+                .await?
+                .is_none()
+                || !lifecycle::advance(&mut tx, self.turn_id, step).await?
+            {
                 return Ok(false);
             }
-            sqlx::query(
-                "UPDATE turns SET status = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
-            )
-            .bind(self.turn_id)
-            .bind(to)
-            .execute(&mut *tx)
-            .await?;
-            match to {
-                TurnStatus::Sending => {
+            match step {
+                Step::Sending => {
                     crate::db::handoffs::transition(
                         &mut tx,
                         self.turn_id,
@@ -246,7 +245,7 @@ impl SinkState {
                     .await?;
                     crate::db::steers::fold(&mut tx, self.turn_id, &self.folded_steers).await?;
                 }
-                TurnStatus::Running => {
+                Step::Running => {
                     crate::db::handoffs::transition(
                         &mut tx,
                         self.turn_id,
@@ -256,7 +255,6 @@ impl SinkState {
                     )
                     .await?
                 }
-                _ => {}
             }
             crate::db::events::turn_changed(&mut tx, self.bot_id, self.turn_id).await?;
             tx.commit().await?;
@@ -391,22 +389,6 @@ impl SinkState {
         } else {
             None
         };
-        let (status, code, message, uncertain) = match outcome {
-            TurnOutcome::Completed => (TurnStatus::Completed, None, None, false),
-            TurnOutcome::Interrupted => (TurnStatus::Interrupted, None, None, false),
-            TurnOutcome::Failed { code, message } => (
-                TurnStatus::Failed,
-                Some(code.as_str()),
-                Some(message.as_str()),
-                false,
-            ),
-            TurnOutcome::Uncertain { message } => (
-                TurnStatus::Uncertain,
-                Some("delivery_uncertain"),
-                Some(message.as_str()),
-                true,
-            ),
-        };
         let chunk = self.pending.clone();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut wrote_item = None;
@@ -427,142 +409,8 @@ impl SinkState {
             self.write_files(&mut tx, item, reply, TurnStatus::is_active)
                 .await?;
         }
-        crate::db::delegations::lock_targets_of_root(&mut tx, self.turn_id).await?;
-        sqlx::query("SELECT 1 FROM turns WHERE id = ?1")
-            .bind(self.turn_id)
-            .execute(&mut *tx)
+        lifecycle::finish_attempt(&mut tx, self.bot_id, self.turn_id, self.attempt, outcome)
             .await?;
-        let (current, error_code, pending, blocking, tasks_unseen, waits_unseen, owner_unseen): (
-            TurnStatus,
-            Option<String>,
-            i64,
-            i64,
-            i64,
-            i64,
-            i64,
-        ) = sqlx::query_as(
-            "SELECT t.status, t.error_code, coalesce(sum(h.pending), 0),
-                 coalesce(sum(h.pending AND h.kind = 'owner'), 0),
-                 coalesce(sum(h.unseen AND h.kind = 'task'), 0),
-                 coalesce(sum(h.unseen AND h.kind = 'wait'), 0),
-                 coalesce(sum(h.unseen AND h.kind = 'owner'), 0)
-             FROM turns t LEFT JOIN turn_holds h ON h.turn_id = t.id
-             WHERE t.id = ?1 GROUP BY t.id",
-        )
-        .bind(self.turn_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        let ready: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "SELECT count(*) FROM delegations d WHERE d.root_turn_id = ?1 AND {}",
-            crate::db::delegations::READY
-        )))
-        .bind(self.turn_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        // The owner stopped only this attempt: the turn parks on its jobs
-        // and tasks, or continues with their outcomes. What the attempt
-        // itself left unseen (a withdrawn question) restarts nothing. With
-        // nothing to park on, the attempt's own outcome stands.
-        let kept = current == TurnStatus::Cancelling
-            && crate::db::stop::Unwind::of(error_code.as_deref())
-                == crate::db::stop::Unwind::KeepWaits
-            && (matches!(status, TurnStatus::Completed | TurnStatus::Interrupted)
-                || pending > 0
-                || waits_unseen + tasks_unseen > 0);
-        let owner_unseen = if kept { 0 } else { owner_unseen };
-        let unseen = tasks_unseen + waits_unseen + owner_unseen;
-        // An attempt the limit cut continues in a new one, unless a cap is
-        // reached. The owner's stop wins: the cut is the interruption it
-        // asked for.
-        let deadline = matches!(
-            outcome,
-            TurnOutcome::Failed {
-                code: FailureCode::TurnDeadline,
-                ..
-            }
-        );
-        let cut = if deadline && current != TurnStatus::Cancelling {
-            super::limit_cuts::cut(&mut tx, self.turn_id, self.bot_id, i64::from(self.attempt))
-                .await?
-        } else {
-            None
-        };
-        let stopped = deadline && current == TurnStatus::Cancelling;
-        let continued = cut == Some(super::limit_cuts::Cut::Continued);
-        let capped = match cut {
-            Some(super::limit_cuts::Cut::Capped { continued }) => {
-                Some(crate::providers::cli::attempt::limit_message(continued))
-            }
-            _ => None,
-        };
-        let (status, code, message) = if kept || continued || stopped {
-            (TurnStatus::Interrupted, None, None)
-        } else {
-            (status, code, capped.as_deref().or(message))
-        };
-        let parks = (kept || current != TurnStatus::Cancelling)
-            && matches!(status, TurnStatus::Completed | TurnStatus::Interrupted);
-        // Pending tasks and waits hold the turn without blocking a ready
-        // batch or any other unseen outcome, as `turns_continuable` decides
-        // for a waiting turn.
-        let own_outcome = ready > 0 || waits_unseen + owner_unseen > 0;
-        // An owner message joined the reply and was not taken yet: the reply
-        // continues with it now, whatever it waits on.
-        let joined = crate::db::steers::waiting_for(&mut tx, self.turn_id).await? > 0;
-        let status = if parks && (joined || (blocking == 0 && own_outcome)) {
-            TurnStatus::Queued
-        } else if parks && pending > 0 {
-            TurnStatus::Waiting
-        } else if parks && (unseen > 0 || continued) {
-            TurnStatus::Queued
-        } else {
-            if pending > 0 {
-                crate::db::delegations::cancel_for_root(&mut tx, self.turn_id).await?;
-            }
-            status
-        };
-        crate::db::owner_notices::supersede_by_card(&mut tx, self.turn_id).await?;
-        let finished = status.is_ended();
-        let keeps_reason = current == TurnStatus::Cancelling && status == TurnStatus::Interrupted;
-        let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "UPDATE turns SET status = ?2,
-                 error_code = CASE WHEN ?7 THEN error_code ELSE ?3 END,
-                 error_message = CASE WHEN ?7 THEN error_message ELSE ?4 END,
-                 effect_uncertain = effect_uncertain OR ?5,
-                 finished_at = CASE WHEN ?6 THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') END, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-             WHERE id = ?1 AND status IN {ACTIVE_STATUSES}"
-        )))
-        .bind(self.turn_id)
-        .bind(status)
-        .bind(code)
-        .bind(message)
-        .bind(uncertain)
-        .bind(finished)
-        .bind(keeps_reason)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        let refused = matches!(
-            outcome,
-            TurnOutcome::Failed {
-                code: FailureCode::ProviderRefused,
-                ..
-            }
-        );
-        crate::db::handoffs::transition(
-            &mut tx,
-            self.turn_id,
-            self.attempt,
-            "sending",
-            if refused { "prepared" } else { "uncertain" },
-        )
-        .await?;
-        if updated == 1 {
-            crate::db::events::turn_changed(&mut tx, self.bot_id, self.turn_id).await?;
-            crate::db::memory::log_turn_end(&mut tx, self.turn_id).await?;
-        }
-        crate::db::stop::settle(&mut tx, self.bot_id).await?;
-        crate::db::steers::settle(&mut tx).await?;
         tx.commit().await?;
         if let Some(item_id) = wrote_item {
             self.assistant_item = Some(item_id);
@@ -610,15 +458,11 @@ impl SinkState {
     }
 
     async fn sending(&mut self) -> Result<(), Fenced> {
-        self.transition(TurnStatus::Preparing, TurnStatus::Sending)
-            .await
+        self.transition(Step::Sending).await
     }
 
     async fn running(&mut self) -> Result<(), Fenced> {
-        match self
-            .transition(TurnStatus::Sending, TurnStatus::Running)
-            .await
-        {
+        match self.transition(Step::Running).await {
             Ok(()) => {
                 if !self.delivered.is_empty()
                     || !self.delivered_secrets.is_empty()

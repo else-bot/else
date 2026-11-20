@@ -275,7 +275,7 @@ pub async fn record(pool: &SqlitePool, id: Uuid, check: &Check) -> Result<bool, 
     .bind(id)
     .execute(&mut *tx)
     .await?;
-    super::turns::continue_waiting(&mut tx, turn_id).await?;
+    super::turns::lifecycle::continue_waiting(&mut tx, turn_id).await?;
     events::turn_changed(&mut tx, bot_id, turn_id).await?;
     tx.commit().await?;
     Ok(true)
@@ -294,7 +294,7 @@ pub async fn expire(pool: &SqlitePool) -> Result<usize, sqlx::Error> {
     .fetch_all(&mut *tx)
     .await?;
     for (turn_id, bot_id) in &expired {
-        super::turns::continue_waiting(&mut tx, *turn_id).await?;
+        super::turns::lifecycle::continue_waiting(&mut tx, *turn_id).await?;
         events::turn_changed(&mut tx, *bot_id, *turn_id).await?;
     }
     tx.commit().await?;

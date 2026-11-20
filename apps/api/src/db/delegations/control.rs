@@ -15,10 +15,10 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::{
-    MAX_TASK_BYTES, announce_task_turn, end_child_turn, lock_targets_of_root, next_item_seq,
-    stop_children,
+    MAX_TASK_BYTES, announce_task_turn, lock_targets_of_root, next_item_seq, stop_children,
 };
 use crate::db::turns::TurnStatus;
+use crate::db::turns::lifecycle;
 
 /// A delegation's lifecycle, as stored in `delegations.status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, strum::IntoStaticStr)]
@@ -292,7 +292,7 @@ pub async fn update(
     if moved != 1 {
         return Err(ControlError::Db);
     }
-    end_child_turn(
+    lifecycle::cancel_task(
         &mut tx,
         row.child_turn_id,
         row.target_bot_id,
@@ -360,8 +360,6 @@ struct OwnedTask {
     target_bot_id: Uuid,
     takeover_turn_id: Option<Uuid>,
     status: Status,
-    child_status: TurnStatus,
-    error_code: Option<String>,
 }
 
 /// The owner stops task `task` that `bot_id` delegated, as its sender's
@@ -374,8 +372,8 @@ pub async fn stop_by_owner(
 ) -> Result<Option<OwnerStop>, sqlx::Error> {
     let found: Option<OwnedTask> = sqlx::query_as(
         "SELECT d.root_turn_id, d.child_turn_id, d.target_bot_id, d.takeover_turn_id,
-                 d.status, t.status AS child_status, t.error_code
-             FROM delegations d JOIN turns t ON t.id = d.child_turn_id
+                 d.status
+             FROM delegations d
              WHERE d.id = ?1 AND d.parent_bot_id = ?2",
     )
     .bind(task)
@@ -388,15 +386,12 @@ pub async fn stop_by_owner(
         target_bot_id: target,
         takeover_turn_id: takeover,
         status,
-        child_status,
-        error_code: code,
     }) = found
     else {
         return Ok(None);
     };
     let ending = takeover.is_none()
-        && child_status == TurnStatus::Cancelling
-        && crate::db::stop::Unwind::of(code.as_deref()) == crate::db::stop::Unwind::EndAll;
+        && lifecycle::unwind(conn, child).await? == Some(lifecycle::Unwind::EndAll);
     match status {
         Status::Cancelled => return Ok(Some(OwnerStop::Repeated)),
         Status::Completed | Status::Failed => return Ok(Some(OwnerStop::Ended)),
