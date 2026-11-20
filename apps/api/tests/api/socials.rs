@@ -1618,3 +1618,82 @@ async fn an_approved_message_sends_exactly_its_approved_picture() {
     );
     stop.cancel();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pending_setup_shows_in_the_sidebar_as_a_request_until_it_is_settled() {
+    let db = Arc::new(TestDb::migrated().await);
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let synthetic = Arc::new(else_api::providers::synthetic::Synthetic::new(
+        Duration::from_millis(5),
+    ));
+    let registry = else_api::providers::Registry::new(vec![synthetic]);
+    let app = common::TestApp::with_registry(db, 4, registry);
+    let bot = app.main_bot().await;
+    let sent = app
+        .send(
+            &bot,
+            Uuid::new_v4(),
+            "[synthetic:slow] post the update to the team chat.",
+            Some("synthetic"),
+        )
+        .await;
+    let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
+    app.wait_turn(&turn, &["running"]).await;
+    tokio::time::timeout(common::SETTLE, async {
+        loop {
+            let snapshot = app
+                .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+                .await;
+            if snapshot.body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["kind"] == "assistant")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the reply started");
+    let setup = store::request_setup(
+        &app.db.pool,
+        turn.parse().unwrap(),
+        Provider::Telegram,
+        "Post updates to the team chat.",
+    )
+    .await
+    .unwrap();
+
+    let listed = app.owner("GET", "/v1/bots", None).await;
+    let shown = listed.body["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == bot)
+        .unwrap()
+        .clone();
+    let status = &shown["sidebar_status"];
+    assert_eq!(status["kind"], "needs_credentials", "{status}");
+    assert_eq!(status["preview"], "Connect Telegram");
+    assert!(
+        status["since"]
+            .as_str()
+            .is_some_and(|at| at.parse::<chrono::DateTime<chrono::Utc>>().is_ok()),
+        "{status}"
+    );
+    assert_eq!(shown["read_state"]["unread_replies"], 1, "{shown}");
+
+    store::settle_setup(&app.db.pool, setup.id, None, None)
+        .await
+        .unwrap();
+    let listed = app.owner("GET", "/v1/bots", None).await;
+    let shown = listed.body["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == bot)
+        .unwrap();
+    assert_ne!(shown["sidebar_status"]["kind"], "needs_credentials");
+}

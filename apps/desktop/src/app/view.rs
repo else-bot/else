@@ -6,7 +6,7 @@ use super::{
     ToggleSettings,
 };
 use crate::ambient::looping;
-use crate::api::Bot;
+use crate::api::{Bot, SidebarStatus};
 use crate::appearance::{Tone, tone};
 use crate::avatar::bot_avatar;
 use crate::connection::{OpenAppSettings, SHELL_CONTEXT};
@@ -474,7 +474,7 @@ impl ElseApp {
             Kind::Queued => Some(IconName::Clock),
             Kind::Answer => Some(IconName::CircleQuestionMark),
             Kind::Approval => Some(IconName::BadgeCheck),
-            Kind::Takeover => Some(IconName::Laptop),
+            Kind::Takeover | Kind::HasComputer => Some(IconName::Laptop),
             Kind::Credentials => Some(IconName::LockKeyhole),
             Kind::Stopping => Some(IconName::Square),
             Kind::Stopped => Some(IconName::Pause),
@@ -1117,6 +1117,9 @@ fn subtitle(bot: &Bot, main: bool) -> String {
     let Some(activity) = &bot.activity else {
         return idle();
     };
+    if activity.phase == "working" && bot.sidebar_status == Some(SidebarStatus::HasComputer) {
+        return "You have the computer".to_owned();
+    }
     // An owner request outranks the bots it waits on, as in the sidebar.
     let working = match activity
         .waiting_on

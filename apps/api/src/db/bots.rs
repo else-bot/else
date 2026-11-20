@@ -106,6 +106,7 @@ macro_rules! handed_back {
             OR EXISTS (SELECT 1 FROM computer_handoffs p WHERE p.turn_id = t.id AND p.status = 'pending')
             OR EXISTS (SELECT 1 FROM skill_installs p WHERE p.turn_id = t.id AND p.status = 'pending')
             OR EXISTS (SELECT 1 FROM secret_requests p WHERE p.turn_id = t.id AND p.status = 'pending')
+            OR EXISTS (SELECT 1 FROM social_setups p WHERE p.turn_id = t.id AND p.status = 'pending')
             OR EXISTS (SELECT 1 FROM outgoing_drafts p WHERE p.turn_id = t.id AND p.status = 'pending'))"
     };
 }
@@ -122,6 +123,11 @@ const SELECT_BOT: &str = concat!(
         question.created_at AS question_at,
         handoff.reason AS handoff_reason, handoff.created_at AS handoff_at,
         r.reason AS credential_reason, r.created_at AS credential_at,
+        setup.provider AS setup_provider, setup.created_at AS setup_at,
+        (SELECT min(k.taken_at) FROM computer_handoffs k JOIN turns t ON t.id = k.turn_id
+            WHERE k.bot_id = b.id AND k.status = 'taken'
+              AND t.status IN ('preparing', 'sending', 'running', 'cancelling', 'waiting'))
+            AS computer_taken_at,
         'Install skill ' || install.name AS skill_install_title,
         install.created_at AS skill_install_at,
         draft.content AS draft_content, draft.created_at AS draft_at,
@@ -184,6 +190,10 @@ const SELECT_BOT: &str = concat!(
         ORDER BY p.created_at, p.id LIMIT 1)
     LEFT JOIN secret_requests r ON r.id = (
         SELECT p.id FROM secret_requests p
+        WHERE p.bot_id = b.id AND p.status = 'pending'
+        ORDER BY p.created_at, p.id LIMIT 1)
+    LEFT JOIN social_setups setup ON setup.id = (
+        SELECT p.id FROM social_setups p
         WHERE p.bot_id = b.id AND p.status = 'pending'
         ORDER BY p.created_at, p.id LIMIT 1)
     LEFT JOIN outgoing_drafts draft ON draft.id = (
