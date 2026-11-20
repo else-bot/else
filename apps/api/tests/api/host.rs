@@ -298,6 +298,7 @@ fn codex_on_path() -> Option<PathBuf> {
     let configured = std::env::var_os("ELSE_CODEX_BIN").map(PathBuf::from);
     else_api::providers::executable::executable(configured.as_deref(), "codex")
         .unwrap_or_else(|reason| panic!("Codex CLI resolution failed: {reason}"))
+        .map(|codex| codex.path().to_owned())
 }
 
 fn codex_supports_startup_config(host: &Host, codex: &Path) -> bool {

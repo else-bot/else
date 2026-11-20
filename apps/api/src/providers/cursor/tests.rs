@@ -571,8 +571,11 @@ fn the_installers_link_is_used_and_kept_unresolved() {
     std::fs::create_dir_all(link.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&version, &link).unwrap();
     let home = Some(dir.path());
-    assert_eq!(lookup(None, home), Ok(Some(link.clone())));
-    assert_eq!(lookup(Some(&link), None), Ok(Some(link)));
+    let found = |configured: Option<&Path>, home| {
+        lookup(configured, home).map(|p| p.map(|p| p.path().to_owned()))
+    };
+    assert_eq!(found(None, home), Ok(Some(link.clone())));
+    assert_eq!(found(Some(&link), None), Ok(Some(link)));
     let missing = dir.path().join("missing");
     let err = lookup(Some(&missing), home).unwrap_err();
     assert!(err.contains("ELSE_CURSOR_BIN"), "{err}");

@@ -11,7 +11,7 @@ impl Claude {
             models: Models::new(&DEFINITION),
             ready: Ok(Ready {
                 host: Host::new(std::path::Path::new("/data"), std::path::Path::new("/bots")),
-                program: PathBuf::new(),
+                program: PathBuf::new().into(),
                 config: claude_home::HostConfig {
                     dir: PathBuf::new(),
                     explicit: false,

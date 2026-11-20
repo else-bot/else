@@ -42,7 +42,9 @@ async fn only_bot_project_skills_reach_new_and_resumed_model_context() {
     };
     let program = crate::providers::executable::executable(Some(Path::new(&program)), "codex")
         .expect("resolve Codex CLI")
-        .expect("configured Codex CLI");
+        .expect("configured Codex CLI")
+        .path()
+        .to_owned();
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("owner-home");
     let projects = dir.path().join("projects");

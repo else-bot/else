@@ -51,7 +51,9 @@ impl Scope {
         Ok(Self {
             host: host.clone(),
             marker: spec.turn_id,
-            process: Supervised::spawn(command)?,
+            process: Supervised::spawn(command).map_err(|e| {
+                std::io::Error::new(e.kind(), format!("{}: {e}", spec.program.display()))
+            })?,
             finished: false,
         })
     }

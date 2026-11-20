@@ -23,7 +23,7 @@ pub mod synthetic;
 
 use std::sync::Arc;
 
-use executable::{executable, executable_as};
+use executable::{Program, executable, executable_as};
 
 use crate::app::providers::{Availability, Provider};
 use crate::config::Config;

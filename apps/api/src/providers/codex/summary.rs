@@ -51,7 +51,7 @@ impl Codex {
         codex_home::prepare(&dirs, &ready.auth, None, false).map_err(|e| e.to_string())?;
         let mut spec = LaunchSpec {
             turn_id: uuid::Uuid::new_v4(),
-            program: ready.program.clone(),
+            program: ready.program.current()?,
             args: Vec::new(),
             env: vec![(
                 "CODEX_HOME".into(),

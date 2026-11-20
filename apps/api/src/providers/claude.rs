@@ -109,7 +109,7 @@ fn build(wiring: &super::Wiring) -> super::Built {
 /// A CLI that runs, logged in with the host configuration.
 struct Ready {
     host: Host,
-    program: PathBuf,
+    program: super::Program,
     config: claude_home::HostConfig,
     account: String,
     version: String,
@@ -156,14 +156,14 @@ impl Claude {
     ) -> Self {
         Self {
             models: Models::new(&DEFINITION),
-            ready: Self::ready(host, Ok(program), config, account),
+            ready: Self::ready(host, Ok(program.map(Into::into)), config, account),
             tool_url: None,
         }
     }
 
     fn ready(
         host: Option<Host>,
-        program: Result<Option<PathBuf>, String>,
+        program: Result<Option<super::Program>, String>,
         config: Option<claude_home::HostConfig>,
         account: String,
     ) -> Result<Ready, String> {
@@ -173,16 +173,18 @@ impl Claude {
             .as_ref()
             .map(claude_home::HostConfig::env)
             .unwrap_or_default();
-        let version = host.probe(&program, &["--version"], &env).map_err(|why| {
-            format!(
-                "Claude Code does not run (`{} --version`: {why}).",
-                program.display()
-            )
-        })?;
+        let version = host
+            .probe(program.path(), &["--version"], &env)
+            .map_err(|why| {
+                format!(
+                    "Claude Code does not run (`{} --version`: {why}).",
+                    program.path().display()
+                )
+            })?;
         let not_logged_in = "Claude Code is not logged in on the host (run `claude` and log in).";
         let config = config.ok_or(not_logged_in)?;
         if !host
-            .probe(&program, &["auth", "status"], &env)
+            .probe(program.path(), &["auth", "status"], &env)
             .is_ok_and(|s| claude_home::logged_in(&s))
         {
             return Err(not_logged_in.into());
@@ -292,6 +294,10 @@ impl Claude {
         tools: Tools,
         grant: Option<&str>,
     ) -> Result<StreamAttempt, String> {
+        let program = ready
+            .program
+            .current()
+            .map_err(|why| format!("Could not start Claude Code: {why}"))?;
         let tool_url = self.tool_url.as_deref().filter(|_| tools != Tools::None);
         claude_home::prepare(&dirs, tool_url, tools.host()).map_err(|e| e.to_string())?;
         let mut args = args;
@@ -315,7 +321,7 @@ impl Claude {
         let spec = LaunchSpec {
             turn_id,
             dirs,
-            program: ready.program.clone(),
+            program,
             args,
             env,
         };
@@ -439,7 +445,7 @@ impl Provider for Claude {
         ready
             .host
             .ask(
-                &ready.program,
+                &ready.program.current()?,
                 &[
                     "-p",
                     "--input-format",
