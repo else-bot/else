@@ -5,6 +5,7 @@
 
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use similar::{Algorithm, ChangeTag};
 
@@ -99,6 +100,9 @@ pub struct RulesUpdate {
     pub change: ChangeKind,
     pub owner_words: String,
     pub diff: Vec<DiffLine>,
+    /// When the owner undid this change by restoring the version before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undone_at: Option<DateTime<Utc>>,
 }
 
 /// A validated request to set one section's text; empty text removes it.

@@ -212,6 +212,7 @@ async fn show(
                 "restored_from": v.restored_from,
                 "diff": v.diff,
                 "created_at": v.created_at,
+                "undone_at": v.undone_at,
             })
         })
         .collect();

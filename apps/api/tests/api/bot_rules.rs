@@ -286,6 +286,143 @@ async fn the_owner_restores_an_earlier_version_or_the_empty_file() {
     assert_eq!(current.body["version"], 5);
 }
 
+async fn rule_rows(app: &TestApp, bot: &str) -> (Vec<Value>, Vec<Value>) {
+    let events: Vec<String> = sqlx::query_scalar(
+        "SELECT data FROM bot_events WHERE bot_id = ?1 AND kind = 'item.upsert' ORDER BY seq",
+    )
+    .bind(bot.parse::<Uuid>().unwrap())
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap();
+    let live = events
+        .iter()
+        .map(|data| serde_json::from_str::<Value>(data).unwrap()["item"].clone())
+        .filter(|item| item["rules_update"].is_object())
+        .collect();
+    let snapshot = app
+        .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+        .await;
+    assert_eq!(snapshot.status, StatusCode::OK, "{}", snapshot.body);
+    let shown = snapshot.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["rules_update"].is_object())
+        .cloned()
+        .collect();
+    (live, shown)
+}
+
+fn undone(row: &Value) -> Option<&Value> {
+    row["rules_update"].get("undone_at")
+}
+
+#[tokio::test]
+async fn undoing_a_rule_change_marks_its_row_undone_live_and_after_reload() {
+    let h = harness(2).await;
+    let main = h.app.main_bot().await;
+    let (turn, token) = h.running(&main, GATE).await;
+    for (section, content) in [
+        ("New Linear issue", OLD_RULE),
+        ("New Linear issue", NEW_RULE),
+        ("Tone", "Short."),
+    ] {
+        let saved = tool(
+            &h.app,
+            &token,
+            "rules_update",
+            update(section, content, "remember this"),
+        )
+        .await;
+        assert!(!saved.error, "{}", saved.body);
+    }
+    h.release(turn).await;
+    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    let path = format!("/v1/bots/{main}/rules/restore");
+    let restore = |version: i64, expected: i64| {
+        h.app.owner(
+            "POST",
+            &path,
+            Some(json!({ "version": version, "expected_version": expected })),
+        )
+    };
+
+    let stale = restore(1, 2).await;
+    assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
+    let skipped = restore(1, 3).await;
+    assert_eq!(skipped.status, StatusCode::OK, "{}", skipped.body);
+    let (live, shown) = rule_rows(&h.app, &main).await;
+    assert_eq!(
+        live.len(),
+        3,
+        "neither a stale undo nor a skip back undoes a row"
+    );
+    assert!(shown.iter().all(|row| undone(row).is_none()), "{shown:?}");
+
+    let (turn, token) = h.running(&main, GATE).await;
+    let saved = tool(
+        &h.app,
+        &token,
+        "rules_update",
+        update(
+            "Weekends",
+            "Never: message me on weekends.",
+            "not on weekends",
+        ),
+    )
+    .await;
+    assert_eq!(saved.result["version"], 5, "{}", saved.body);
+    h.release(turn).await;
+    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    let undo = restore(4, 5).await;
+    assert_eq!(undo.status, StatusCode::OK, "{}", undo.body);
+
+    let file = rules(&h.app, &main).await;
+    let versions: Vec<(i64, bool)> = file["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| (v["version"].as_i64().unwrap(), v["undone_at"].is_string()))
+        .collect();
+    assert_eq!(
+        versions,
+        [
+            (6, false),
+            (5, true),
+            (4, false),
+            (3, false),
+            (2, false),
+            (1, false)
+        ]
+    );
+    let undone_at = file["history"][1]["undone_at"].clone();
+    assert_eq!(undone_at, file["history"][0]["created_at"]);
+
+    let (live, shown) = rule_rows(&h.app, &main).await;
+    let last = live.last().unwrap();
+    assert_eq!(last["rules_update"]["version"], 5);
+    assert_eq!(undone(last), Some(&undone_at));
+    assert_eq!(shown.len(), 4);
+    assert_eq!(&shown[3], last, "the reload shows what the live event did");
+    assert!(shown[..3].iter().all(|row| undone(row).is_none()));
+
+    sqlx::query("UPDATE items SET rules_update = json_remove(rules_update, '$.undone_at')")
+        .execute(&h.app.db.pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/0081_undone_rule_changes.sql"
+    ))
+    .execute(&h.app.db.pool)
+    .await
+    .unwrap();
+    let (_, backfilled) = rule_rows(&h.app, &main).await;
+    assert_eq!(
+        backfilled, shown,
+        "an undo saved before the stamp is backfilled"
+    );
+}
+
 #[tokio::test]
 async fn a_cleared_file_still_tells_the_next_turn_that_no_rules_apply() {
     let h = harness(2).await;

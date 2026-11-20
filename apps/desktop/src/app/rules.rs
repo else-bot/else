@@ -425,7 +425,8 @@ impl ElseApp {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let author = self.bots.iter().find(|b| b.id == bot);
-        let current = self.rules_version_of(bot) == Some(update.version);
+        let current =
+            self.rules_version_of(bot) == Some(update.version) && update.undone_at.is_none();
         let restoring = self.rules.get(&bot).is_some_and(|cache| cache.restoring);
         let section = update.section.clone();
         let shown = update.version;
@@ -460,17 +461,29 @@ impl ElseApp {
                 app.restore_rules(bot, previous, shown, window, cx)
             }))
         });
+        let undone = update.undone_at;
         let line = super::action_card::event_row(&theme)
             .id(SharedString::from(format!("message-{item}")))
             .child(self.event_faces(&format!("rules-{item}"), author.map(|b| b.id)))
-            .child(super::action_card::event_verb(
-                &theme,
-                change_label(update.change),
-            ))
-            .child(super::action_card::event_object(
-                &theme,
-                update.section.clone(),
-            ))
+            .child(
+                super::action_card::event_verb(&theme, change_label(update.change))
+                    .when(undone.is_some(), |verb| verb.line_through()),
+            )
+            .child(
+                super::action_card::event_object(&theme, update.section.clone())
+                    .when(undone.is_some(), |object| {
+                        object.line_through().text_color(theme.muted_foreground)
+                    }),
+            )
+            .when_some(undone, |row, at| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(12.5))
+                        .text_color(super::message_row::meta_color(&theme))
+                        .child(format!("Undone · {}", when(at))),
+                )
+            })
             .child(super::action_card::event_end(
                 &theme,
                 super::action_card::EventEnd::Actions(std::iter::once(view).chain(undo).collect()),
@@ -909,6 +922,7 @@ impl ElseApp {
             .border_color(theme.border)
             .children(file.history.iter().map(|v| {
                 let (title, author, date) = describe(v);
+                let undone = v.undone_at.is_some();
                 let selected = v.version == picked.version;
                 let version = v.version;
                 Button::new(("rules-version", version as usize))
@@ -938,7 +952,13 @@ impl ElseApp {
                                     .gap_1p5()
                                     .text_size(px(13.))
                                     .font_weight(FontWeight::MEDIUM)
-                                    .child(div().min_w_0().truncate().child(title))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .when(undone, |title| title.line_through())
+                                            .child(title),
+                                    )
                                     .child(
                                         div()
                                             .flex_none()
@@ -966,6 +986,14 @@ impl ElseApp {
             .max_h(px(BODY_MAX))
             .overflow_y_scroll()
             .gap_4()
+            .when_some(picked.undone_at, |col, at| {
+                col.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("Undone by you · {}", when(at))),
+                )
+            })
             .when(!picked.owner_words.is_empty(), |col| {
                 col.child(quote(&picked.owner_words, cx))
             })
