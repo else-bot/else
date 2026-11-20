@@ -98,6 +98,17 @@ pub async fn endpoint(
             } else {
                 (params["name"].as_str(), &params["arguments"])
             };
+            // The grant match below falls through to ReadMemory, so refuse an
+            // unknown name before it can pick a grant (#630).
+            if let Some(name) = name
+                && !crate::app::tools::TOOL_NAMES.contains(&name)
+                && !crate::app::tools::DEFERRED_TOOLS.contains(&name)
+            {
+                return Json(
+                    json!({ "jsonrpc": "2.0", "id": id, "result": tool_error("Unknown tool.") }),
+                )
+                .into_response();
+            }
             let needs = match name {
                 Some(
                     "delegate" | "council" | "list_bots" | "delegation_update"
