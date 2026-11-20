@@ -5,7 +5,6 @@
 //! characters to exercise UTF-8 handling. Directives in the message change
 //! behavior for tests, from the request or any owner message that joined it:
 //!
-//! - `[synthetic:slow]` streams one chunk every 200 ms.
 //! - `[synthetic:hang]` acknowledges, then waits until cancelled and takes
 //!   200 ms to drain, like a provider confirming an interrupt. While a test
 //!   holds hangs, the drain waits for the release.
@@ -276,11 +275,7 @@ impl Provider for Synthetic {
             tokio::time::sleep(Duration::from_millis(200)).await;
             return TurnOutcome::Interrupted;
         }
-        let delay = if directives.contains("[synthetic:slow]") {
-            Duration::from_millis(200)
-        } else {
-            self.chunk_delay
-        };
+        let delay = self.chunk_delay;
         for chunk in chunks(&reply_for(&input), 7) {
             tokio::select! {
                 _ = cancel.cancelled() => return TurnOutcome::Interrupted,
