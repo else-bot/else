@@ -61,7 +61,6 @@ pub enum Kind {
     Stopped,
     Failed,
     Uncertain,
-    Unavailable,
     Deleting,
 }
 
@@ -138,7 +137,6 @@ impl Subtitle {
                 "queued" => {
                     return label(Kind::Queued, &format!("{} queued", activity.queued_count));
                 }
-                "unavailable" => return label(Kind::Unavailable, "Provider unavailable"),
                 _ => {}
             }
         }
@@ -253,7 +251,6 @@ mod tests {
             ("working", 2, Kind::Working, "Working · 2 queued"),
             ("queued", 1, Kind::Queued, "1 queued"),
             ("cancelling", 0, Kind::Stopping, "Stopping…"),
-            ("unavailable", 0, Kind::Unavailable, "Provider unavailable"),
         ] {
             let bot = bot(
                 json!({ "activity": { "phase": phase, "active_turn_id": null, "queued_count": queued } }),

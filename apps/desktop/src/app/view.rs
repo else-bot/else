@@ -465,7 +465,7 @@ impl ElseApp {
             match subtitle.kind {
                 Kind::Working => theme.primary,
                 Kind::Answer | Kind::Approval | Kind::Takeover | Kind::Credentials => theme.warning,
-                Kind::Failed | Kind::Uncertain | Kind::Unavailable => theme.danger,
+                Kind::Failed | Kind::Uncertain => theme.danger,
                 _ => meta,
             }
         };
@@ -482,7 +482,6 @@ impl ElseApp {
             Kind::Stopped => Some(IconName::Pause),
             Kind::Failed => Some(IconName::CircleX),
             Kind::Uncertain => Some(IconName::TriangleAlert),
-            Kind::Unavailable => Some(IconName::CircleOff),
             Kind::Deleting => Some(IconName::Trash),
         };
         let subtitle_text = match subtitle.kind {
@@ -1152,7 +1151,6 @@ fn subtitle(bot: &Bot, main: bool) -> String {
         "working" => working,
         "queued" => format!("{} queued", activity.queued_count),
         "cancelling" => "Stopping…".into(),
-        "unavailable" => "Unavailable".into(),
         _ => idle(),
     }
 }
