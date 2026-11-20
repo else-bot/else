@@ -28,7 +28,7 @@ use uuid::Uuid;
 use super::cli::attempt::{self, Channel};
 use super::cli::files::GRANT_ENV;
 use super::cli::session::{self, Identity, Opened, PreparedTurn};
-use super::cli::stream::StreamAttempt;
+use super::cli::stream::{Prompt, StreamAttempt};
 use super::cursor_home::{self, Login};
 use super::definitions::Definition;
 use super::host::{BotDirs, Host, LaunchSpec};
@@ -262,11 +262,31 @@ impl Cursor {
 /// so the result is held until the exit and carries its `exit_code`.
 struct Running<'a> {
     attempt: &'a mut StreamAttempt,
-    result: Option<(Value, tokio::time::Instant)>,
-    exited: bool,
+    phase: Phase,
 }
 
-/// How long the CLI may take to store its chat and exit after its result.
+enum Phase {
+    /// The CLI closed its input before taking the prompt, so its output
+    /// is not about this turn. Only its exit is read, until the deadline.
+    Refused(tokio::time::Instant),
+    Streaming,
+    /// The result, held until the CLI exits or the deadline passes.
+    Settling(Value, tokio::time::Instant),
+    Exited,
+}
+
+impl Running<'_> {
+    /// Mark the CLI exited and take the result it held, if any.
+    fn exit(&mut self) -> Option<Value> {
+        match std::mem::replace(&mut self.phase, Phase::Exited) {
+            Phase::Settling(result, _) => Some(result),
+            _ => None,
+        }
+    }
+}
+
+/// How long the CLI may take to exit after its result, while it stores its
+/// chat, or after it refuses its prompt.
 const SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[async_trait]
@@ -275,36 +295,38 @@ impl Channel for Running<'_> {
 
     async fn next(&mut self) -> Result<Option<Value>, String> {
         use std::os::unix::process::ExitStatusExt;
-        while !self.exited {
-            let next = match &self.result {
-                Some((_, deadline)) => {
+        loop {
+            let next = match &self.phase {
+                Phase::Exited => return Ok(None),
+                Phase::Refused(_) => None,
+                Phase::Streaming => self.attempt.next().await?,
+                Phase::Settling(_, deadline) => {
                     match tokio::time::timeout_at(*deadline, self.attempt.next()).await {
                         Ok(next) => next?,
-                        Err(_) => {
-                            self.exited = true;
-                            return Ok(self.result.take().map(|(result, _)| result));
-                        }
+                        Err(_) => return Ok(self.exit()),
                     }
                 }
-                None => self.attempt.next().await?,
             };
             match next {
-                Some(event) if self.result.is_none() && event["type"] == "result" => {
-                    self.result = Some((event, tokio::time::Instant::now() + SETTLE));
+                Some(event)
+                    if matches!(self.phase, Phase::Streaming) && event["type"] == "result" =>
+                {
+                    self.phase = Phase::Settling(event, tokio::time::Instant::now() + SETTLE);
                 }
                 Some(event) => return Ok(Some(event)),
                 None => {
                     let exited = self.attempt.exited();
-                    let (status, stderr) = match &self.result {
-                        Some((_, deadline)) => tokio::time::timeout_at(*deadline, exited)
-                            .await
-                            .unwrap_or_default(),
-                        None => exited.await,
+                    let (status, stderr) = match &self.phase {
+                        Phase::Settling(_, deadline) | Phase::Refused(deadline) => {
+                            tokio::time::timeout_at(*deadline, exited)
+                                .await
+                                .unwrap_or_default()
+                        }
+                        _ => exited.await,
                     };
-                    self.exited = true;
                     let code = status.and_then(|s| s.code());
-                    return Ok(Some(match self.result.take() {
-                        Some((mut result, _)) => {
+                    return Ok(Some(match self.exit() {
+                        Some(mut result) => {
                             result["exit_code"] = json!(code);
                             result
                         }
@@ -318,7 +340,6 @@ impl Channel for Running<'_> {
                 }
             }
         }
-        Ok(None)
     }
 
     async fn interrupt(&mut self) {
@@ -447,7 +468,7 @@ impl Provider for Cursor {
         if sink.sending().await.is_err() {
             return TurnOutcome::Interrupted;
         }
-        let mut attempt = match StreamAttempt::spawn_with_prompt(
+        let (mut attempt, prompt) = match StreamAttempt::spawn_with_prompt(
             &ready.host,
             &spec,
             &turn.packet,
@@ -466,8 +487,10 @@ impl Provider for Cursor {
         );
         let mut running = Running {
             attempt: &mut attempt,
-            result: None,
-            exited: false,
+            phase: match prompt {
+                Prompt::Written => Phase::Streaming,
+                Prompt::Refused => Phase::Refused(tokio::time::Instant::now() + SETTLE),
+            },
         };
         let ended = attempt::drive(
             &mut running,
