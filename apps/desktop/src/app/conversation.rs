@@ -4,6 +4,8 @@ use super::reply::Author;
 use super::row_text::{RowFormat, RowSource, RowText};
 use super::task_reply::state::{ReplyState, TaskReply, place_cards, task_replies};
 use crate::api::{ClientError, LiveCommand, ReplyPosition, StreamMessage};
+use crate::model::ItemKind;
+use crate::model::Phase;
 use crate::model::{Applied, Conversation, Snapshot};
 use chrono::{DateTime, Local, TimeDelta, TimeZone, Utc};
 use gpui_kit::component::WindowExt as _;
@@ -103,7 +105,7 @@ fn first_unread_row(
     let unread: HashSet<_> = conversation
         .items()
         .filter(|item| {
-            item.kind == "assistant"
+            item.kind == ItemKind::Assistant
                 && !conversation.is_feedback_acknowledgement(item)
                 && !conversation.no_news(item.turn_id)
                 && ReplyPosition {
@@ -290,7 +292,7 @@ pub(super) fn transcript_rows(
     // A received task's row sits where its latest answer landed, like a task card.
     let answered: HashMap<Uuid, Uuid> = c
         .items()
-        .filter(|item| item.kind == "assistant" && delegated.contains(&item.turn_id))
+        .filter(|item| item.kind == ItemKind::Assistant && delegated.contains(&item.turn_id))
         .map(|item| (item.turn_id, item.id))
         .collect();
     // A message joined into a reply anchors both its own queued turn and
@@ -309,14 +311,14 @@ pub(super) fn transcript_rows(
         if c.gap_below(item.seq).is_some() {
             rows.push(RowKey::Gap(item.seq));
         }
-        if item.kind == "assistant" && answered.get(&item.turn_id) == Some(&item.id) {
+        if item.kind == ItemKind::Assistant && answered.get(&item.turn_id) == Some(&item.id) {
             rows.extend(
                 c.task_receipt(item.turn_id)
                     .map(|receipt| RowKey::Item(receipt.id)),
             );
         } else if item.reaction.is_none()
             && !(item.bot_task.is_some() && answered.contains_key(&item.turn_id))
-            && (item.kind != "assistant"
+            && (item.kind != ItemKind::Assistant
                 || tasks
                     .get(&item.turn_id)
                     .is_some_and(|reply| reply.answers.contains(&item.id))
@@ -380,7 +382,7 @@ pub(super) fn opens_turns(c: Option<&Conversation>, rows: &[RowKey]) -> Vec<Opti
                 RowKey::Task(turn) => Some(turn),
                 RowKey::Item(id) => c?
                     .item(id)
-                    .filter(|item| item.kind == "assistant")
+                    .filter(|item| item.kind == ItemKind::Assistant)
                     .map(|item| item.turn_id),
                 _ => None,
             }?;
@@ -495,7 +497,7 @@ pub(super) fn turn_card_rows(c: &Conversation) -> Vec<(Uuid, RowKey, Option<Uuid
 
 fn card_state(c: &Conversation, key: RowKey) -> Option<String> {
     match key {
-        RowKey::Question(id) => c.question(id).map(|q| q.status.clone()),
+        RowKey::Question(id) => c.question(id).map(|q| format!("{:?}", q.status)),
         RowKey::Draft(id) => c.outgoing_draft(id).map(|d| {
             format!(
                 "{}:{}:{:?}:{}:{}",
@@ -503,8 +505,8 @@ fn card_state(c: &Conversation, key: RowKey) -> Option<String> {
             )
         }),
         RowKey::SkillInstall(id) => c.skill_install(id).map(|r| format!("{:?}", r.status)),
-        RowKey::SecretRequest(id) => c.secret_request(id).map(|r| r.status.clone()),
-        RowKey::SocialSetup(id) => c.social_setup(id).map(|s| s.status.clone()),
+        RowKey::SecretRequest(id) => c.secret_request(id).map(|r| format!("{:?}", r.status)),
+        RowKey::SocialSetup(id) => c.social_setup(id).map(|s| format!("{:?}", s.status)),
         RowKey::OwnerNotice(id) => c.owner_notice(id).map(|n| format!("{n:?}")),
         RowKey::ComputerHandoff(id) => c.computer_handoff(id).map(|h| format!("{:?}", h.status)),
         RowKey::Handoff(id) => c
@@ -513,8 +515,8 @@ fn card_state(c: &Conversation, key: RowKey) -> Option<String> {
         RowKey::Item(id) => c
             .item(id)
             .and_then(|i| c.turn(i.turn_id))
-            .map(|t| t.status.clone()),
-        RowKey::Task(id) => c.turn(id).map(|t| t.status.clone()),
+            .map(|t| format!("{:?}", t.status)),
+        RowKey::Task(id) => c.turn(id).map(|t| format!("{:?}", t.status)),
         RowKey::Gap(above) => c.gap_below(above).map(|size| format!("{size:?}")),
         RowKey::Pending(_) | RowKey::QuietRun(_) | RowKey::QuietRuns(_) => None,
     }
@@ -957,7 +959,7 @@ impl ElseApp {
                     }
                     Ok(Applied::Changed) => {
                         let activity = conversation.activity.clone();
-                        if activity.as_ref().is_some_and(|a| a.phase == "idle") {
+                        if activity.as_ref().is_some_and(|a| a.phase == Phase::Idle) {
                             self.stopping.remove(&bot);
                         }
                         if let Some(entry) = self.bots.iter_mut().find(|b| b.id == bot)
@@ -1038,7 +1040,7 @@ impl ElseApp {
                     .rev()
                     .filter(|item| before.is_none_or(|seq| item.seq < seq))
                     .find(|item| {
-                        Author::of(&item.kind) == Some(author) && quotes(&item.text, original)
+                        Author::of(item.kind) == Some(author) && quotes(&item.text, original)
                     })
             })
             .map(|item| item.id);
@@ -1302,10 +1304,7 @@ impl ElseApp {
         requests.extend(conversation.into_iter().flat_map(|c| {
             c.turns_in_order()
                 .into_iter()
-                .filter(|turn| {
-                    c.reaction_in(turn.id).is_some()
-                        && matches!(turn.status.as_str(), "failed" | "interrupted" | "uncertain")
-                })
+                .filter(|turn| c.reaction_in(turn.id).is_some() && turn.status.is_unsuccessful())
                 .map(|turn| {
                     (
                         RowKey::Task(turn.id),
@@ -1345,7 +1344,7 @@ impl ElseApp {
             // A bot exchange's reply reads inline as an excerpt until the
             // owner asks for all of it.
             let exchange_reply = item.bot_reply.is_some()
-                || (item.kind == "assistant" && delegated.contains(&item.turn_id));
+                || (item.kind == ItemKind::Assistant && delegated.contains(&item.turn_id));
             let (text, parts) = if exchange_reply && !view.full_replies.contains(&item.id) {
                 super::bot_activity::excerpt_message(&text, &parts).unwrap_or((text, parts))
             } else {
@@ -1370,7 +1369,7 @@ impl ElseApp {
                     conversation
                         .and_then(|c| c.item(id))
                         .map_or((None, None), |item| {
-                            let author = Author::of(&item.kind).filter(|_| {
+                            let author = Author::of(item.kind).filter(|_| {
                                 item.reaction.is_none()
                                     && !conversation
                                         .is_some_and(|c| c.is_feedback_acknowledgement(item))
@@ -1445,7 +1444,7 @@ impl ElseApp {
                             .into_iter()
                             .flat_map(|task| &task.cards)
                             .filter_map(|card| card_state(c, card.key))
-                            .fold(t.status.clone(), |state, card| state + ":" + &card)
+                            .fold(format!("{:?}", t.status), |state, card| state + ":" + &card)
                     }),
                     _ => card_state(c, key),
                 });
@@ -1593,7 +1592,9 @@ impl ElseApp {
             let key = match key {
                 RowKey::Item(id) => conversation
                     .and_then(|c| c.item(id))
-                    .filter(|item| item.kind == "assistant" && tasks.contains_key(&item.turn_id))
+                    .filter(|item| {
+                        item.kind == ItemKind::Assistant && tasks.contains_key(&item.turn_id)
+                    })
                     .map_or(key, |item| RowKey::Task(item.turn_id)),
                 _ => key,
             };

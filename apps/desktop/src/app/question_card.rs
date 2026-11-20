@@ -24,7 +24,7 @@ use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::model::{
     APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, DENY, Question,
-    QuestionAnswer, QuestionUse,
+    QuestionAnswer, QuestionKind, QuestionStatus, QuestionUse,
 };
 
 mod approval;
@@ -86,15 +86,15 @@ fn outcome(question: &Question, bot_name: &str) -> String {
 }
 
 fn decision(question: &Question, bot_name: &str) -> String {
-    match question.status.as_str() {
-        "answered" => match (question.is_approval(), question.answer.as_ref().and_then(QuestionAnswer::single)) {
+    match question.status {
+        QuestionStatus::Answered => match (question.is_approval(), question.answer.as_ref().and_then(QuestionAnswer::single)) {
             (true, Some(APPROVE)) => "Approved once.".into(),
             (true, Some(APPROVE_FOREVER)) => {
                 format!("Approved, and destructive actions are always allowed for {bot_name}.")
             }
             (true, Some(APPROVE_ROUTINE)) => format!(
                 "Approved. {} are allowed for this routine's saved task on future runs.",
-                if question.kind == "external" {
+                if question.kind == QuestionKind::External {
                     "External computer and host actions"
                 } else {
                     "Destructive actions"
@@ -119,9 +119,11 @@ fn decision(question: &Question, bot_name: &str) -> String {
                     .unwrap_or_default()
             ),
         },
-        "skipped" => "Skipped: you sent a new message instead. Nothing was approved.".into(),
-        "cancelled" => "Withdrawn: the request ended before you answered.".into(),
-        _ => String::new(),
+        QuestionStatus::Skipped => {
+            "Skipped: you sent a new message instead. Nothing was approved.".into()
+        }
+        QuestionStatus::Cancelled => "Withdrawn: the request ended before you answered.".into(),
+        QuestionStatus::Pending | QuestionStatus::Unknown => String::new(),
     }
 }
 
@@ -658,11 +660,14 @@ mod tests {
             "a short card counts when whole"
         );
     }
-    use crate::model::{APPROVE, DENY, Question, QuestionAnswer, QuestionChoice, QuestionUse};
+    use crate::model::{
+        APPROVE, DENY, Question, QuestionAnswer, QuestionChoice, QuestionKind, QuestionStatus,
+        QuestionUse,
+    };
     use uuid::Uuid;
 
-    fn question(kind: &str, status: &str, answer: Option<&str>) -> Question {
-        let choices = if kind == "choice" {
+    fn question(kind: QuestionKind, status: QuestionStatus, answer: Option<&str>) -> Question {
+        let choices = if kind == QuestionKind::Choice {
             vec![
                 QuestionChoice {
                     id: "a".into(),
@@ -687,13 +692,13 @@ mod tests {
         };
         Question {
             id: Uuid::nil(),
-            kind: kind.into(),
+            kind,
             title: "t".into(),
             action: None,
             context: None,
             choices,
             multiple: false,
-            status: status.into(),
+            status,
             answer: answer.map(|id| QuestionAnswer::Single(id.to_owned())),
             settled_at: None,
             used: None,
@@ -703,25 +708,50 @@ mod tests {
     #[test]
     fn settled_cards_say_what_happened_and_grant_nothing_when_skipped() {
         assert_eq!(
-            outcome(&question("choice", "answered", Some("b")), "Mail"),
+            outcome(
+                &question(QuestionKind::Choice, QuestionStatus::Answered, Some("b")),
+                "Mail"
+            ),
             "You chose HTML digest."
         );
         assert_eq!(
-            outcome(&question("external", "answered", Some(DENY)), "Mail"),
+            outcome(
+                &question(QuestionKind::External, QuestionStatus::Answered, Some(DENY)),
+                "Mail"
+            ),
             "Denied."
         );
         assert!(
-            outcome(&question("destructive", "skipped", None), "Mail")
-                .contains("Nothing was approved")
+            outcome(
+                &question(QuestionKind::Destructive, QuestionStatus::Skipped, None),
+                "Mail"
+            )
+            .contains("Nothing was approved")
         );
-        assert!(outcome(&question("choice", "cancelled", None), "Mail").starts_with("Withdrawn"));
-        assert_eq!(outcome(&question("choice", "pending", None), "Mail"), "");
+        assert!(
+            outcome(
+                &question(QuestionKind::Choice, QuestionStatus::Cancelled, None),
+                "Mail"
+            )
+            .starts_with("Withdrawn")
+        );
+        assert_eq!(
+            outcome(
+                &question(QuestionKind::Choice, QuestionStatus::Pending, None),
+                "Mail"
+            ),
+            ""
+        );
         assert_eq!(letter("c"), "C");
     }
 
     #[test]
     fn an_approval_says_whether_its_call_ran() {
-        let mut card = question("external", "answered", Some(APPROVE));
+        let mut card = question(
+            QuestionKind::External,
+            QuestionStatus::Answered,
+            Some(APPROVE),
+        );
         assert_eq!(outcome(&card, "Mail"), "Approved once.");
         let at = "2026-11-13T07:14:47Z".parse().unwrap();
         let stamp = super::super::message_row::stamp(at);
@@ -746,7 +776,11 @@ mod tests {
 
     #[test]
     fn task_approval_names_the_saved_category_and_target() {
-        let mut card = question("destructive", "answered", Some(crate::model::APPROVE_TASK));
+        let mut card = question(
+            QuestionKind::Destructive,
+            QuestionStatus::Answered,
+            Some(crate::model::APPROVE_TASK),
+        );
         for action in [
             serde_json::json!({ "host": "ssh omarchy-m1 tailscale status", "task_scope": {
                 "task": "Manage Tailscale", "target": "SSH host omarchy-m1"
@@ -765,7 +799,11 @@ mod tests {
 
     #[test]
     fn tool_approval_keeps_its_scope_visible_without_context() {
-        let mut card = question("external", "answered", Some(crate::model::APPROVE_TOOL));
+        let mut card = question(
+            QuestionKind::External,
+            QuestionStatus::Answered,
+            Some(crate::model::APPROVE_TOOL),
+        );
         for action in [
             serde_json::json!({"tool": "mcp_request", "args": {
                 "id": "tickets", "method": "tools/call", "tool": "create_ticket", "effect": "external"

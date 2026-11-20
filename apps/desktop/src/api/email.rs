@@ -122,7 +122,7 @@ pub struct EmailAttachment {
 pub struct MailTrigger {
     pub account_id: Uuid,
     pub address: String,
-    pub state: String,
+    pub state: AccountState,
     pub wake: bool,
     #[serde(default)]
     pub instructions: Option<String>,
@@ -154,8 +154,28 @@ pub struct EmailConfig {
 pub struct EmailAccount {
     pub id: Uuid,
     pub config: EmailConfig,
-    pub state: String,
-    pub health: String,
+    pub state: AccountState,
+    pub health: AccountHealth,
+}
+
+crate::model::wire_state! {
+    pub enum AccountState {
+        Active = "active",
+        Paused = "paused",
+        Removed = "removed",
+    }
+    _ => Unknown
+}
+
+crate::model::wire_state! {
+    /// What the server last saw of an account's mail server.
+    pub enum AccountHealth {
+        /// Not checked since the account or its credential changed.
+        Unchecked = "unknown",
+        Connected = "connected",
+    }
+    /// Any failure, sent as its error code.
+    _ => Failing
 }
 
 #[derive(Deserialize)]

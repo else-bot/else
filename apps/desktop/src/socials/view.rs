@@ -23,7 +23,7 @@ impl SocialsView {
         card.child(div().font_semibold().child(format!("{} connected", connection.provider.label())))
             .child(div().text_sm().child(connection.display_name.clone()))
             .children(connection.username.as_ref().map(|username| div().text_sm().child(format!("@{username}"))))
-            .child(div().text_xs().text_color(theme.muted_foreground).child(format!("{} · {}", connection.state, connection.health_label())))
+            .child(div().text_xs().text_color(theme.muted_foreground).child(format!("{} · {}", connection.state.as_str(), connection.health_label())))
             .child(div().text_sm().child("Any bot can use this connection when you ask. Ask the bot in chat to create a trigger to watch messages."))
             .into_any_element()
     }
@@ -225,7 +225,7 @@ impl SocialsView {
     fn render_connection(&self, connection: &Connection, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let id = connection.id;
-        let paused = connection.state != "active";
+        let paused = connection.state != ConnectionState::Active;
         let active_connection = connection.clone();
         let replacement = connection.clone();
         // A grouped-list row: the account, its state, and its actions at
@@ -235,7 +235,11 @@ impl SocialsView {
             .as_ref()
             .map(|username| format!("@{username} · "))
             .unwrap_or_default()
-            + &format!("{} · {}", connection.state, connection.health_label());
+            + &format!(
+                "{} · {}",
+                connection.state.as_str(),
+                connection.health_label()
+            );
         let card = v_flex().w_full().child(
             crate::panel_kit::list_row()
                 .child(crate::panel_kit::row_icon(
@@ -309,7 +313,7 @@ impl SocialsView {
                 "Another webhook, app, or server is receiving this bot's messages. Telegram delivers them to only one receiver. Remove the bot's webhook or stop the other app, then refresh.",
             ));
         }
-        if connection.health == "signed_out" {
+        if connection.health == Health::SignedOut {
             notes_shown = true;
             notes = notes.child(
                 div()

@@ -146,7 +146,7 @@ impl ElseApp {
             .item(item)?;
         Some(MessageReference {
             item: item.id,
-            author: Author::of(&item.kind)?,
+            author: Author::of(item.kind)?,
             text: item.text.clone(),
         })
     }

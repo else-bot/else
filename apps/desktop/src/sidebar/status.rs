@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 
 use crate::api::{Bot, SidebarStatus, WaitingOn};
+use crate::model::Phase;
 
 /// How long a request has waited, in its largest whole unit: `now`, `5m`,
 /// `2h`, `3d`.
@@ -90,11 +91,8 @@ impl Subtitle {
                 label(Kind::Deleting, "Deleting…")
             };
         }
-        let phase = bot
-            .activity
-            .as_ref()
-            .map(|activity| activity.phase.as_str());
-        if stopping || phase == Some("cancelling") {
+        let phase = bot.activity.as_ref().map(|activity| activity.phase);
+        if stopping || phase == Some(Phase::Cancelling) {
             return label(Kind::Stopping, "Stopping…");
         }
         match &bot.sidebar_status {
@@ -119,8 +117,8 @@ impl Subtitle {
             _ => {}
         }
         if let Some(activity) = &bot.activity {
-            match activity.phase.as_str() {
-                "working" => {
+            match activity.phase {
+                Phase::Working => {
                     let (kind, text) = match &activity.waiting_on {
                         Some(waiting) => (Kind::Waiting, waiting_label(waiting)),
                         None => (Kind::Working, "Working".to_owned()),
@@ -134,10 +132,10 @@ impl Subtitle {
                         },
                     );
                 }
-                "queued" => {
+                Phase::Queued => {
                     return label(Kind::Queued, &format!("{} queued", activity.queued_count));
                 }
-                _ => {}
+                Phase::Idle | Phase::Cancelling | Phase::Unknown => {}
             }
         }
         match &bot.sidebar_status {

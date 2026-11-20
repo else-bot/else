@@ -11,6 +11,7 @@ use crate::attachments::MessagePart;
 use crate::controls::{Control as _, Scale, Tier};
 use crate::model::{
     BotCreated, BotReplyStatus, Conversation, ExchangeAsk, Item, OwnerNeed, OwnerNoticeStatus,
+    TurnStatus,
 };
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::button::Button;
@@ -45,9 +46,9 @@ fn outcome(item: &Item, conversation: &Conversation) -> Option<BotReplyStatus> {
         return Some(reply.status);
     }
     item.bot_task.as_ref()?;
-    match conversation.turn(item.turn_id)?.status.as_str() {
-        "failed" => Some(BotReplyStatus::Failed),
-        "interrupted" => Some(BotReplyStatus::Cancelled),
+    match conversation.turn(item.turn_id)?.status {
+        TurnStatus::Failed => Some(BotReplyStatus::Failed),
+        TurnStatus::Interrupted => Some(BotReplyStatus::Cancelled),
         _ => None,
     }
 }
@@ -430,8 +431,8 @@ fn block_status(item: &Item, c: &Conversation) -> ActivityStatus {
     let task_status = received
         .then(|| c.turn(item.turn_id))
         .flatten()
-        .map(|turn| turn.status.as_str());
-    if item.bot_reply.is_some() || task_status == Some("completed") {
+        .map(|turn| turn.status);
+    if item.bot_reply.is_some() || task_status == Some(TurnStatus::Completed) {
         return match declared_need(item) {
             Some(OwnerNeed::Fyi(_)) => ActivityStatus::Fyi,
             Some(OwnerNeed::Nothing) => ActivityStatus::NothingForYou,
@@ -440,9 +441,9 @@ fn block_status(item: &Item, c: &Conversation) -> ActivityStatus {
         };
     }
     match task_status {
-        None | Some("queued") => ActivityStatus::Received,
-        Some("uncertain") => ActivityStatus::Uncertain,
-        Some("waiting") => ActivityStatus::Waiting,
+        None | Some(TurnStatus::Queued) => ActivityStatus::Received,
+        Some(TurnStatus::Uncertain) => ActivityStatus::Uncertain,
+        Some(TurnStatus::Waiting) => ActivityStatus::Waiting,
         _ => ActivityStatus::Working,
     }
 }

@@ -15,6 +15,7 @@ use crate::controls::{
     COMPOSER_ACTION, Control as _, Scale, Tier, composer_actions, composer_turn, send_button,
     stop_button,
 };
+use crate::model::{Phase, TurnStatus};
 use crate::sidebar::status::{Kind, Subtitle};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
@@ -902,13 +903,13 @@ impl ElseApp {
         // A turn that only waits, on the owner or on jobs and tasks, is not
         // running: stop stays reachable from the menu and its shortcut, not
         // as a composer button.
-        let phase = activity.as_ref().map_or("idle", |a| a.phase.as_str());
+        let phase = activity.as_ref().map_or(Phase::Idle, |a| a.phase);
         let parked = bot.waiting().is_some()
             || activity
                 .as_ref()
                 .and_then(|a| a.active_turn_id)
                 .and_then(|id| self.view.as_ref()?.conversation.as_ref()?.turn(id))
-                .is_some_and(|turn| turn.status == "waiting");
+                .is_some_and(|turn| turn.status == TurnStatus::Waiting);
         let turn = composer_turn(phase, self.stopping.contains(&bot.id), parked);
         let actions = composer_actions(turn, can_send);
         let reserved = match (actions.send, actions.stop) {
@@ -1132,7 +1133,7 @@ fn subtitle(bot: &Bot, main: bool) -> String {
     let Some(activity) = &bot.activity else {
         return idle();
     };
-    if activity.phase == "working" && bot.sidebar_status == Some(SidebarStatus::HasComputer) {
+    if activity.phase == Phase::Working && bot.sidebar_status == Some(SidebarStatus::HasComputer) {
         return "You have the computer".to_owned();
     }
     // An owner request outranks the bots it waits on, as in the sidebar.
@@ -1144,14 +1145,14 @@ fn subtitle(bot: &Bot, main: bool) -> String {
         Some(waiting) => crate::sidebar::status::waiting_label(waiting),
         None => "Working".into(),
     };
-    match activity.phase.as_str() {
-        "working" if activity.queued_count > 0 => {
+    match activity.phase {
+        Phase::Working if activity.queued_count > 0 => {
             format!("{working} · {} queued", activity.queued_count)
         }
-        "working" => working,
-        "queued" => format!("{} queued", activity.queued_count),
-        "cancelling" => "Stopping…".into(),
-        _ => idle(),
+        Phase::Working => working,
+        Phase::Queued => format!("{} queued", activity.queued_count),
+        Phase::Cancelling => "Stopping…".into(),
+        Phase::Idle | Phase::Unknown => idle(),
     }
 }
 

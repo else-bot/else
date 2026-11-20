@@ -1,5 +1,5 @@
 use crate::app::RowKey;
-use crate::model::Conversation;
+use crate::model::{Conversation, ItemKind, TurnStatus};
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
@@ -218,16 +218,18 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
         .filter(|turn| conversation.reaction_in(turn.id).is_none() && !delegated.contains(&turn.id))
         .filter(|turn| !turn.taken_by_reply())
         .filter_map(|turn| {
-            let state = match turn.status.as_str() {
-                "queued" => ReplyState::Queued,
-                "preparing" | "sending" | "running" => ReplyState::Working,
-                "waiting" => ReplyState::Waiting,
-                "cancelling" => ReplyState::Stopping,
-                "completed" => ReplyState::Complete,
-                "interrupted" => ReplyState::Stopped,
-                "failed" => ReplyState::Failed,
-                "uncertain" => ReplyState::Uncertain,
-                _ => return None,
+            let state = match turn.status {
+                TurnStatus::Queued => ReplyState::Queued,
+                TurnStatus::Preparing | TurnStatus::Sending | TurnStatus::Running => {
+                    ReplyState::Working
+                }
+                TurnStatus::Waiting => ReplyState::Waiting,
+                TurnStatus::Cancelling => ReplyState::Stopping,
+                TurnStatus::Completed => ReplyState::Complete,
+                TurnStatus::Interrupted => ReplyState::Stopped,
+                TurnStatus::Failed => ReplyState::Failed,
+                TurnStatus::Uncertain => ReplyState::Uncertain,
+                TurnStatus::Unknown => return None,
             };
             if turn.routine.is_some()
                 || !turn.questions.is_empty()
@@ -271,14 +273,14 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
         };
         if conversation.older_before_seq.is_some()
             && seen_turns.insert(item.turn_id)
-            && item.kind != "user"
+            && item.kind != ItemKind::User
         {
             task_turns.insert(item.turn_id);
         }
         if item.bot_task.is_some() || item.bot_reply.is_some() {
             task_turns.insert(item.turn_id);
         }
-        if item.kind == "assistant" {
+        if item.kind == ItemKind::Assistant {
             let has_file = item
                 .parts
                 .iter()
@@ -302,7 +304,10 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
         }
     }
     let mut joined: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-    for item in conversation.items().filter(|item| item.kind == "user") {
+    for item in conversation
+        .items()
+        .filter(|item| item.kind == ItemKind::User)
+    {
         if let Some(into) = conversation
             .turn(item.turn_id)
             .and_then(|turn| turn.steered_into)

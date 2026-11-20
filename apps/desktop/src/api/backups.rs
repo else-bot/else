@@ -73,9 +73,20 @@ pub struct BackupRun {
     pub finished_at: Option<String>,
     pub bytes: Option<u64>,
     pub uploaded_bytes: Option<u64>,
-    pub local_status: String,
-    pub remote_status: Option<String>,
+    pub local_status: LocalBackupStatus,
+    pub remote_status: Option<RemoteBackupStatus>,
     pub error: Option<String>,
+}
+
+crate::model::wire_state! {
+    pub enum RemoteBackupStatus {
+        Completed = "completed",
+        Failed = "failed",
+        /// Removed by retention.
+        Retired = "retired",
+    }
+    /// Still uploading, or a status this desktop does not know yet.
+    _ => Unknown
 }
 
 #[derive(Clone, Deserialize)]

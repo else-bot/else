@@ -9,7 +9,9 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use crate::api::Client;
-use crate::api::socials::{Connection, Pairing, PairingTarget, PairingView, Provider};
+use crate::api::socials::{
+    Connection, ConnectionState, Health, Pairing, PairingTarget, PairingView, Provider,
+};
 
 enum Receipt {
     Loading {
@@ -512,7 +514,7 @@ impl SocialsView {
     }
 
     fn active(&mut self, connection: Connection, window: &mut Window, cx: &mut Context<Self>) {
-        let active = connection.state != "active";
+        let active = connection.state != ConnectionState::Active;
         let revision = self.begin(window, cx);
         let client = self.client.clone();
         self._request = Some(cx.spawn_in(window, async move |this, cx| {

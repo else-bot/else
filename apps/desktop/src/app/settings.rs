@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use crate::api::socials::Provider;
 use crate::api::{Bot, BotProfile, Capabilities, ModelInfo, ProfileChoice};
 use crate::avatar::{Avatar, AvatarPicker, bot_avatar};
-use crate::model::{Conversation, LastRun, Routine, Watcher, WatcherStatus};
+use crate::model::{
+    Conversation, LastRun, PausedReason, Routine, RunStatus, SkipReason, Watcher, WatcherStatus,
+};
 use crate::profile_picker::{ProfilePicker, effort_label, model_label};
 use chrono::{DateTime, Utc};
 use gpui_kit::base::HoverCard;
@@ -2838,9 +2840,9 @@ fn last_run(routine: &Routine) -> Option<(String, bool)> {
     let when = local_time(run.due_at, &routine.timezone);
     let error = run.error.as_ref().and_then(|e| e.message.clone());
     if routine.retrying {
-        let progress = match run.status.as_str() {
-            "queued" => "Retrying: waiting to start",
-            "checking" | "running" => "Retrying: running now",
+        let progress = match run.status {
+            RunStatus::Queued => "Retrying: waiting to start",
+            RunStatus::Checking | RunStatus::Running => "Retrying: running now",
             _ => "Retrying: checking the result",
         };
         return Some((progress.to_owned(), false));
@@ -2848,8 +2850,8 @@ fn last_run(routine: &Routine) -> Option<(String, bool)> {
     if !routine.enabled
         && let Some(reason) = &routine.paused_reason
     {
-        let why = match reason.as_str() {
-            "repeated" => format!("Paused after {} failed runs", routine.failed_runs),
+        let why = match reason {
+            PausedReason::Repeated => format!("Paused after {} failed runs", routine.failed_runs),
             _ => "Paused: retrying won't fix the last failure".to_owned(),
         };
         let detail = error.map_or_else(String::new, |e| format!(" ({e})"));
@@ -2858,38 +2860,33 @@ fn last_run(routine: &Routine) -> Option<(String, bool)> {
     let (text, attention) = last_run_status(run, &when, error);
     Some((
         text,
-        attention && (routine.failed_runs > 0 || run.status == "skipped"),
+        attention && (routine.failed_runs > 0 || run.status == RunStatus::Skipped),
     ))
 }
 
 fn last_run_status(run: &LastRun, when: &str, error: Option<String>) -> (String, bool) {
-    let reason = |code: &str| match code {
-        "overlap" => "the previous run was still going",
-        "queue_full" => "too many messages were waiting",
-        "provider_unavailable" => "no provider was available",
-        "check_cancelled" => "its check was stopped",
-        "check_unavailable" => "its check could not start",
-        _ => "it could not start",
+    let reason = |skip: Option<SkipReason>| match skip {
+        Some(SkipReason::Overlap) => "the previous run was still going",
+        Some(SkipReason::QueueFull) => "too many messages were waiting",
+        Some(SkipReason::ProviderUnavailable) => "no provider was available",
+        Some(SkipReason::CheckCancelled) => "its check was stopped",
+        Some(SkipReason::CheckUnavailable) => "its check could not start",
+        Some(SkipReason::NothingNew | SkipReason::Unknown) | None => "it could not start",
     };
-    match run.status.as_str() {
-        "skipped" if run.skip_reason.as_deref() == Some("nothing_new") => {
+    let status = run.status.as_str();
+    match run.status {
+        RunStatus::Skipped if run.skip_reason == Some(SkipReason::NothingNew) => {
             (format!("Last run {when}: nothing new"), false)
         }
-        "no_news" => (format!("Last run {when}: no news"), false),
-        "failed" | "uncertain" | "interrupted" => {
-            let detail = error.unwrap_or_else(|| run.status.clone());
-            (format!("Last run {when} {}: {detail}", run.status), true)
+        RunStatus::NoNews => (format!("Last run {when}: no news"), false),
+        RunStatus::Failed | RunStatus::Uncertain | RunStatus::Interrupted => {
+            let detail = error.unwrap_or_else(|| status.to_owned());
+            (format!("Last run {when} {status}: {detail}"), true)
         }
-        "skipped" => (
-            format!(
-                "Skipped {when}: {}",
-                reason(run.skip_reason.as_deref().unwrap_or_default())
-            ),
-            true,
-        ),
-        "checking" => (format!("Checking for new work (due {when})"), false),
-        "queued" | "running" => (format!("Running now (due {when})"), false),
-        status => (format!("Last run {when}: {status}"), false),
+        RunStatus::Skipped => (format!("Skipped {when}: {}", reason(run.skip_reason)), true),
+        RunStatus::Checking => (format!("Checking for new work (due {when})"), false),
+        RunStatus::Queued | RunStatus::Running => (format!("Running now (due {when})"), false),
+        RunStatus::Completed | RunStatus::Other(_) => (format!("Last run {when}: {status}"), false),
     }
 }
 
@@ -3299,7 +3296,7 @@ struct TriggerCard {
 fn trigger_cards(conversation: &Conversation) -> Vec<TriggerCard> {
     let mail = conversation.mail_triggers().iter().map(|trigger| {
         let mut pills = vec!["Email".to_owned(), "New mail".to_owned()];
-        if trigger.state == "paused" {
+        if trigger.state == crate::api::AccountState::Paused {
             pills.push("inbox paused".to_owned());
         }
         TriggerCard {

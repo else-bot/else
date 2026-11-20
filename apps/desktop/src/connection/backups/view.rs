@@ -1,4 +1,5 @@
 use super::*;
+use crate::api::{LocalBackupStatus, RemoteBackupStatus};
 use crate::connection::settings::settings_column;
 use crate::controls::{Control as _, Scale, Tier, toggle};
 use chrono::{DateTime, Local, Utc};
@@ -187,7 +188,7 @@ impl Shell {
         let latest = snapshot
             .recent
             .iter()
-            .find(|run| run.remote_status.as_deref() == Some("completed"));
+            .find(|run| run.remote_status == Some(RemoteBackupStatus::Completed));
         // Groups sit 32 px apart; rows inside a group 20 px.
         let page = v_flex()
             .gap_8()
@@ -463,14 +464,14 @@ impl Shell {
             ));
         }
         for run in snapshot.recent.iter().take(5) {
-            let verified = run.remote_status.as_deref() == Some("completed");
-            let state = match run.remote_status.as_deref() {
-                Some("completed") => "Verified",
-                Some("failed") => "Upload failed",
-                Some("retired") => "Removed by retention",
-                Some(_) => "Upload pending",
-                None if run.local_status == "failed" => "Capture failed",
-                None if run.local_status == "running" => "Capturing…",
+            let verified = run.remote_status == Some(RemoteBackupStatus::Completed);
+            let state = match run.remote_status {
+                Some(RemoteBackupStatus::Completed) => "Verified",
+                Some(RemoteBackupStatus::Failed) => "Upload failed",
+                Some(RemoteBackupStatus::Retired) => "Removed by retention",
+                Some(RemoteBackupStatus::Unknown) => "Upload pending",
+                None if run.local_status == LocalBackupStatus::Failed => "Capture failed",
+                None if run.local_status == LocalBackupStatus::Running => "Capturing…",
                 None => "Local copy only",
             };
             history = history.child(
