@@ -22,6 +22,7 @@ pub mod mcp;
 pub mod projects;
 pub mod replicate;
 pub mod restore;
+pub mod runs;
 pub mod s3;
 pub mod service;
 pub mod settings;
@@ -135,15 +136,79 @@ pub struct Completion {
     pub whole_assistant: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactKind {
+    /// The database image, always first.
+    Sqlite,
+    /// One bot's disk archive, see [`ComputerEntry::carries_image`].
+    Vm,
+    /// A host artifact a bot fetched, `file-<artifact id>.age`.
+    File,
+    /// A bot's project directory, see [`projects::Format`].
+    Project,
+    /// The shared MCP library, `mcp.tar.age`.
+    Mcp,
+}
+
+/// What a set holds of one bot's computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VmState {
+    Included,
+    /// The bot never used a computer.
+    None,
+    /// Gone from the runtime.
+    Missing,
+    OmittedDeletedBot,
+    /// Not captured, as in a database-only set.
+    Omitted,
+}
+
+/// What a set holds of one bot's project directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProjectState {
+    Included,
+    /// Some entries could not be read.
+    Partial,
+    /// The bot has no project directory.
+    None,
+    OmittedDeletedBot,
+    /// Not captured, as in sets made before project directories.
+    #[default]
+    Omitted,
+}
+
+impl ProjectState {
+    /// The set holds an archive of the directory.
+    pub fn archived(self) -> bool {
+        matches!(self, Self::Included | Self::Partial)
+    }
+}
+
+/// How much of one kind of state a set covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Covered {
+    Included,
+    Partial,
+    #[default]
+    Omitted,
+}
+
+/// Native provider sessions are never in a set; providers need a fresh
+/// login check after a restore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderState {
+    OmittedReauthRequired,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
-    /// `sqlite`, `vm` (one bot's disk archive, see
-    /// [`ComputerEntry::carries_image`]), `file` (a host artifact a bot
-    /// fetched, `file-<artifact id>.age`), `project` (a bot's project
-    /// directory, see [`projects::Format`]), or
-    /// `mcp` (the shared MCP library, `mcp.tar.age`).
-    pub kind: String,
+    pub kind: ArtifactKind,
     pub object: String,
     /// For a `vm` artifact, its bot.
     pub bot_id: Option<uuid::Uuid>,
@@ -186,25 +251,15 @@ pub struct TableDigest {
 pub struct BotEntry {
     pub id: uuid::Uuid,
     pub name: String,
-    pub status: String,
-    /// `included`, `none` (never used a computer), `missing` (gone from the
-    /// runtime), `omitted-deleted-bot`, or `omitted` (a database-only set).
-    pub vm: String,
+    pub status: crate::db::bots::BotStatus,
+    pub vm: VmState,
     pub computer: Option<ComputerEntry>,
-    /// Native provider sessions are not in this set; conversation context
-    /// is rebuilt from SQLite and providers need a fresh login check.
-    pub provider_state: String,
+    /// Conversation context is rebuilt from SQLite.
+    pub provider_state: ProviderState,
     /// The native sessions the bot had (not included), for the record.
     pub provider_sessions: Vec<SessionEntry>,
-    /// Its project directory: `included`, `partial` (some entries could not
-    /// be read), `none` (no directory), `omitted-deleted-bot`, or `omitted`
-    /// (not captured, as in sets made before project directories).
-    #[serde(default = "omitted")]
-    pub project: String,
-}
-
-fn omitted() -> String {
-    "omitted".into()
+    #[serde(default)]
+    pub project: ProjectState,
 }
 
 /// A bot computer captured as a disk archive.
@@ -265,15 +320,16 @@ pub struct SessionEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Coverage {
-    pub database: String,
-    pub vm: String,
-    /// Bot project directories: `included`, `partial`, or `omitted`.
-    #[serde(default = "omitted")]
-    pub projects: String,
-    /// Shared MCP skills, documentation, and connection config.
-    #[serde(default = "omitted")]
-    pub mcp: String,
-    pub provider_state: String,
+    pub database: Covered,
+    pub vm: Covered,
+    /// Bot project directories.
+    #[serde(default)]
+    pub projects: Covered,
+    /// Shared MCP skills, documentation, and connection config: never
+    /// partial.
+    #[serde(default)]
+    pub mcp: Covered,
+    pub provider_state: ProviderState,
     /// True only when every state the assistant needs is included.
     pub whole_assistant: bool,
     pub note: String,
@@ -299,11 +355,11 @@ pub struct Manifest {
 /// The coverage of a database-only set.
 pub fn database_only_coverage() -> Coverage {
     Coverage {
-        database: "included".into(),
-        vm: "omitted".into(),
-        projects: "omitted".into(),
-        mcp: "omitted".into(),
-        provider_state: "omitted-reauth-required".into(),
+        database: Covered::Included,
+        vm: Covered::Omitted,
+        projects: Covered::Omitted,
+        mcp: Covered::Omitted,
+        provider_state: ProviderState::OmittedReauthRequired,
         whole_assistant: false,
         note: "Database only: bot computers (files, browser profiles, running jobs), the shared \
                MCP library and native provider sessions are not included. Restoring this set does not recover the \

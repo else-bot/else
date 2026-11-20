@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use super::{Artifact, BackupError, Manifest, Sealed};
+use super::{Artifact, ArtifactKind, BackupError, Manifest, Sealed};
 use crate::credentials::SecretKey;
 
 pub const INDEX: &str = "index.json.age";
@@ -58,12 +58,12 @@ pub enum Encoding {
 
 impl Encoding {
     pub fn of(artifact: &Artifact, schema_version: u32) -> Self {
-        let zstd_tar = match artifact.kind.as_str() {
-            "project" => {
+        let zstd_tar = match artifact.kind {
+            ArtifactKind::Project => {
                 super::projects::Format::of(schema_version) == super::projects::Format::TarZstd
             }
-            "vm" => schema_version >= 4,
-            _ => false,
+            ArtifactKind::Vm => schema_version >= 4,
+            ArtifactKind::Sqlite | ArtifactKind::File | ArtifactKind::Mcp => false,
         };
         if zstd_tar { Self::ZstdTar } else { Self::Plain }
     }
@@ -495,8 +495,8 @@ mod tests {
 
     #[test]
     fn computer_archives_share_chunks_when_only_their_compression_differs() {
-        let artifact = |kind: &str| Artifact {
-            kind: kind.into(),
+        let artifact = |kind| Artifact {
+            kind,
             object: "a".into(),
             bot_id: None,
             ciphertext_bytes: 0,
@@ -505,13 +505,22 @@ mod tests {
             plaintext_sha256: String::new(),
         };
         assert_eq!(
-            Encoding::of(&artifact("vm"), 3),
+            Encoding::of(&artifact(ArtifactKind::Vm), 3),
             Encoding::Plain,
             "schema 3 indexes stay readable"
         );
-        assert_eq!(Encoding::of(&artifact("vm"), 4), Encoding::ZstdTar);
-        assert_eq!(Encoding::of(&artifact("project"), 4), Encoding::ZstdTar);
-        assert_eq!(Encoding::of(&artifact("sqlite"), 4), Encoding::Plain);
+        assert_eq!(
+            Encoding::of(&artifact(ArtifactKind::Vm), 4),
+            Encoding::ZstdTar
+        );
+        assert_eq!(
+            Encoding::of(&artifact(ArtifactKind::Project), 4),
+            Encoding::ZstdTar
+        );
+        assert_eq!(
+            Encoding::of(&artifact(ArtifactKind::Sqlite), 4),
+            Encoding::Plain
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let keys = ChunkKeys::derive(&key(1)).unwrap();
@@ -534,7 +543,7 @@ mod tests {
                 ciphertext_sha256: sealed.ciphertext_sha256,
                 plaintext_bytes: sealed.plaintext_bytes,
                 plaintext_sha256: sealed.plaintext_sha256,
-                ..artifact("vm")
+                ..artifact(ArtifactKind::Vm)
             };
             let encoding = Encoding::of(&vm, 4);
             let (chunks, ..) = read_stored(dir.path(), &vm, &identity, encoding, |input| {
@@ -568,11 +577,10 @@ mod tests {
             .unwrap();
             let artifact = Artifact {
                 kind: if encoding == Encoding::Plain {
-                    "sqlite"
+                    ArtifactKind::Sqlite
                 } else {
-                    "project"
-                }
-                .into(),
+                    ArtifactKind::Project
+                },
                 object: object.clone(),
                 bot_id: None,
                 ciphertext_bytes: sealed.ciphertext_bytes,

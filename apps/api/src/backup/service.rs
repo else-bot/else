@@ -12,7 +12,8 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::capture::{BackupConfig, Cadence, Coordinator};
-use super::replicate::Replicator;
+use super::replicate::{RemoteState, Replicator};
+use super::runs::LocalStatus;
 use super::s3::S3;
 use super::settings::{
     self, Destination, DestinationInput, DestinationView, Error, LocalSchedule, LocalUpdate,
@@ -52,8 +53,8 @@ pub struct Recent {
     /// What its remote run wrote to the bucket: only the chunks the bucket
     /// lacked. Absent for sets replicated before incremental uploads.
     pub uploaded_bytes: Option<u64>,
-    pub local_status: String,
-    pub remote_status: Option<String>,
+    pub local_status: LocalStatus,
+    pub remote_status: Option<RemoteState>,
     pub error: Option<String>,
 }
 
@@ -110,12 +111,12 @@ pub enum LocalResult {
 }
 
 impl LocalResult {
-    fn decode(status: &str, whole: bool) -> Self {
+    fn decode(status: LocalStatus, whole: bool) -> Self {
         match status {
-            "running" => Self::Running,
-            "completed" if whole => Self::Completed,
-            "completed" => Self::Partial,
-            _ => Self::Failed,
+            LocalStatus::Running => Self::Running,
+            LocalStatus::Completed if whole => Self::Completed,
+            LocalStatus::Completed => Self::Partial,
+            LocalStatus::Failed => Self::Failed,
         }
     }
 }
@@ -567,10 +568,10 @@ impl Backups {
             .into_iter()
             .map(|row| {
                 let status = LocalResult::decode(
-                    &row.get::<String, _>("local_status"),
+                    row.try_get("local_status")?,
                     row.get::<i64, _>("whole") != 0,
                 );
-                LocalRun {
+                Ok(LocalRun {
                     set_id: row.get("set_id"),
                     started_at: row.get("started_at"),
                     finished_at: row.get("finished_at"),
@@ -586,27 +587,29 @@ impl Backups {
                     error: (status == LocalResult::Failed)
                         .then(|| row.get::<Option<String>, _>("error"))
                         .flatten(),
-                }
+                })
             })
-            .collect();
+            .collect::<Result<_, sqlx::Error>>()?;
         let recent = history?
             .into_iter()
-            .map(|row| Recent {
-                set_id: row.get("set_id"),
-                finished_at: row.get("finished_at"),
-                bytes: row
-                    .get::<Option<i64>, _>("ciphertext_bytes")
-                    .map(|n| n.max(0) as u64),
-                uploaded_bytes: row
-                    .get::<Option<i64>, _>("uploaded_bytes")
-                    .map(|n| n.max(0) as u64),
-                local_status: row.get("local_status"),
-                remote_status: row.get("remote_status"),
-                error: row
-                    .get::<Option<String>, _>("error")
-                    .map(|_| "Remote upload failed. Check the destination and credentials.".into()),
+            .map(|row| {
+                Ok(Recent {
+                    set_id: row.get("set_id"),
+                    finished_at: row.get("finished_at"),
+                    bytes: row
+                        .get::<Option<i64>, _>("ciphertext_bytes")
+                        .map(|n| n.max(0) as u64),
+                    uploaded_bytes: row
+                        .get::<Option<i64>, _>("uploaded_bytes")
+                        .map(|n| n.max(0) as u64),
+                    local_status: row.try_get("local_status")?,
+                    remote_status: row.try_get("remote_status")?,
+                    error: row.get::<Option<String>, _>("error").map(|_| {
+                        "Remote upload failed. Check the destination and credentials.".into()
+                    }),
+                })
             })
-            .collect();
+            .collect::<Result<_, sqlx::Error>>()?;
         let totals = totals?;
         let estimate = latest?.map(|bytes| Estimate { bytes: bytes.max(0) as u64, basis: "Based on the latest complete encrypted backup. The next backup may differ in size.".into() })
             .unwrap_or_else(|| self.initial_estimate.clone());

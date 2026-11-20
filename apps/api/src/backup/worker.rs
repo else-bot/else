@@ -7,7 +7,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::json;
 use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;
 
@@ -177,13 +176,8 @@ impl BackupWorker {
     }
 
     async fn locked_run(&self, cancel: &CancellationToken) -> Result<SetSummary, BackupError> {
-        let run = uuid::Uuid::new_v4();
         let set_id = super::new_set_id();
-        sqlx::query("INSERT INTO backup_runs (id, set_id) VALUES (?1, ?2)")
-            .bind(run)
-            .bind(&set_id)
-            .execute(&self.pool)
-            .await?;
+        let run = super::runs::start(&self.pool, &set_id).await?;
         let result = create_set(
             &self.pool,
             &self.params,
@@ -202,28 +196,13 @@ impl BackupWorker {
                     .iter()
                     .map(|a| a.ciphertext_bytes)
                     .sum();
-                sqlx::query(
-                    "UPDATE backup_runs SET local_status = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
-                         ciphertext_bytes = ?2, coverage = ?3 WHERE id = ?1",
-                )
-                .bind(run)
-                .bind(bytes as i64)
-                .bind(sqlx::types::Json(json!(summary.manifest.coverage)))
-                .execute(&self.pool)
-                .await?;
+                super::runs::complete(&self.pool, run, bytes, &summary.manifest.coverage).await?;
                 tracing::info!(set = %summary.set_id, bytes, "backup set completed");
             }
             Err(err) => {
-                let message: String = err.to_string().chars().take(500).collect();
+                let message = err.to_string();
                 tracing::warn!(set = %set_id, error = %message, "backup failed");
-                sqlx::query(
-                    "UPDATE backup_runs SET local_status = 'failed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), error = ?2
-                     WHERE id = ?1",
-                )
-                .bind(run)
-                .bind(message)
-                .execute(&self.pool)
-                .await?;
+                super::runs::fail(&self.pool, run, &message).await?;
             }
         }
         result
@@ -260,21 +239,7 @@ impl BackupWorker {
         let published = tokio::task::spawn_blocking(move || super::completed_sets(&dir))
             .await
             .map_err(|e| BackupError::Io(e.to_string()))??;
-        sqlx::query(
-            "UPDATE backup_runs SET local_status = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
-                 error = NULL
-             WHERE local_status = 'running' AND set_id IN (SELECT value FROM json_each(?1))",
-        )
-        .bind(sqlx::types::Json(published))
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "UPDATE backup_runs SET local_status = 'failed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
-                 error = 'interrupted before it finished'
-             WHERE local_status = 'running'",
-        )
-        .execute(&self.pool)
-        .await?;
+        super::runs::recover(&self.pool, &published).await?;
         let dir = self.config.dir.clone();
         let (key, lock) = (self.key.clone(), lock.clone());
         tokio::task::spawn_blocking(move || {

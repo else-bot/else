@@ -11,10 +11,12 @@ use std::path::{Path, PathBuf};
 use sqlx::SqlitePool;
 
 use super::{
-    Application, Artifact, BackupError, BotEntry, COMPLETE, Completion, DATABASE, DatabaseParams,
-    MANIFEST, Manifest, ObjectRef, SCHEMA_VERSION, Sqlite, TableDigest,
+    Application, Artifact, ArtifactKind, BackupError, BotEntry, COMPLETE, Completion, Covered,
+    DATABASE, DatabaseParams, MANIFEST, Manifest, ObjectRef, ProjectState, ProviderState,
+    SCHEMA_VERSION, Sqlite, TableDigest, VmState,
 };
 use crate::credentials::SecretKey;
+use crate::db::bots::BotStatus;
 use crate::maintenance::Step;
 
 #[derive(Debug, Clone)]
@@ -252,7 +254,7 @@ async fn seal_file(
 
 async fn capture_computers(
     computers: &crate::computers::ComputerManager,
-    bots: &[(uuid::Uuid, String, String)],
+    bots: &[(uuid::Uuid, String, BotStatus)],
     staging: &Path,
     identity: &age::x25519::Identity,
     limit: u64,
@@ -260,7 +262,7 @@ async fn capture_computers(
 ) -> Result<
     (
         Vec<Artifact>,
-        std::collections::HashMap<uuid::Uuid, (String, Option<super::ComputerEntry>)>,
+        std::collections::HashMap<uuid::Uuid, (VmState, Option<super::ComputerEntry>)>,
     ),
     BackupError,
 > {
@@ -270,13 +272,13 @@ async fn capture_computers(
     let mut carried = std::collections::HashSet::new();
     let total = bots
         .iter()
-        .filter(|(_, _, status)| status == "active")
+        .filter(|(_, _, status)| *status == BotStatus::Active)
         .count();
     let mut done = 0;
     progress(done, total);
     for (bot, name, status) in bots {
-        if status != "active" {
-            entries.insert(*bot, ("omitted-deleted-bot".to_owned(), None));
+        if *status != BotStatus::Active {
+            entries.insert(*bot, (VmState::OmittedDeletedBot, None));
             continue;
         }
         let object = format!("vm-{bot}.msb.age");
@@ -299,10 +301,10 @@ async fn capture_computers(
         };
         match captured {
             DiskCapture::NoComputer => {
-                entries.insert(*bot, ("none".to_owned(), None));
+                entries.insert(*bot, (VmState::None, None));
             }
             DiskCapture::Missing => {
-                entries.insert(*bot, ("missing".to_owned(), None));
+                entries.insert(*bot, (VmState::Missing, None));
             }
             DiskCapture::Exported {
                 runtime_name,
@@ -333,7 +335,7 @@ async fn capture_computers(
                     )));
                 }
                 artifacts.push(Artifact {
-                    kind: "vm".into(),
+                    kind: ArtifactKind::Vm,
                     object: object.clone(),
                     bot_id: Some(*bot),
                     ciphertext_bytes: sealed.ciphertext_bytes,
@@ -344,7 +346,7 @@ async fn capture_computers(
                 entries.insert(
                     *bot,
                     (
-                        "included".to_owned(),
+                        VmState::Included,
                         Some(super::ComputerEntry {
                             object,
                             runtime_name,
@@ -431,7 +433,7 @@ async fn capture_files(
             continue;
         }
         artifacts.push(Artifact {
-            kind: "file".into(),
+            kind: ArtifactKind::File,
             object,
             bot_id: Some(bot),
             ciphertext_bytes: sealed.ciphertext_bytes,
@@ -444,22 +446,28 @@ async fn capture_files(
 }
 
 async fn capture_projects(
-    bots: &[(uuid::Uuid, String, String)],
+    bots: &[(uuid::Uuid, String, BotStatus)],
     projects_dir: &Path,
     staging: &Path,
     identity: &age::x25519::Identity,
     limit: u64,
-) -> Result<(Vec<Artifact>, std::collections::HashMap<uuid::Uuid, String>), BackupError> {
+) -> Result<
+    (
+        Vec<Artifact>,
+        std::collections::HashMap<uuid::Uuid, ProjectState>,
+    ),
+    BackupError,
+> {
     let mut artifacts = Vec::new();
     let mut states = std::collections::HashMap::new();
     for (bot, name, status) in bots {
-        if status != "active" {
-            states.insert(*bot, "omitted-deleted-bot".to_owned());
+        if *status != BotStatus::Active {
+            states.insert(*bot, ProjectState::OmittedDeletedBot);
             continue;
         }
         let dir = projects_dir.join(bot.to_string());
         if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
-            states.insert(*bot, "none".to_owned());
+            states.insert(*bot, ProjectState::None);
             continue;
         }
         let object = super::projects::Format::TarZstd.object(*bot);
@@ -477,7 +485,7 @@ async fn capture_projects(
         }
         let sealed = seal_file(plain, staging.join(&object), identity.clone(), limit).await?;
         artifacts.push(Artifact {
-            kind: "project".into(),
+            kind: ArtifactKind::Project,
             object,
             bot_id: Some(*bot),
             ciphertext_bytes: sealed.ciphertext_bytes,
@@ -488,11 +496,10 @@ async fn capture_projects(
         states.insert(
             *bot,
             if unreadable.is_empty() {
-                "included"
+                ProjectState::Included
             } else {
-                "partial"
-            }
-            .to_owned(),
+                ProjectState::Partial
+            },
         );
     }
     Ok((artifacts, states))
@@ -517,7 +524,7 @@ async fn capture_mcp(
     )
     .await?;
     Ok(Artifact {
-        kind: "mcp".into(),
+        kind: ArtifactKind::Mcp,
         object: super::mcp::OBJECT.into(),
         bot_id: None,
         ciphertext_bytes: sealed.ciphertext_bytes,
@@ -611,7 +618,7 @@ async fn capture_into(
         }
         None => None,
     };
-    let bot_rows: Vec<(uuid::Uuid, String, String)> =
+    let bot_rows: Vec<(uuid::Uuid, String, BotStatus)> =
         sqlx::query_as("SELECT id, name, status FROM bots ORDER BY created_at, id")
             .fetch_all(pool)
             .await?;
@@ -689,7 +696,7 @@ async fn capture_into(
     let server_version: String = sqlx::query_scalar("SELECT sqlite_version()")
         .fetch_one(&mut *tx)
         .await?;
-    let bots: Vec<(uuid::Uuid, String, String)> =
+    let bots: Vec<(uuid::Uuid, String, BotStatus)> =
         sqlx::query_as("SELECT id, name, status FROM bots ORDER BY created_at, id")
             .fetch_all(&mut *tx)
             .await?;
@@ -759,11 +766,7 @@ async fn capture_into(
         if let Some(scheduler) = &coordinator.scheduler {
             scheduler.wake();
         }
-        sqlx::query("UPDATE backup_runs SET paused_ms = ?2 WHERE set_id = ?1")
-            .bind(set_id)
-            .bind(i64::try_from(paused_at.elapsed().as_millis()).unwrap_or(i64::MAX))
-            .execute(pool)
-            .await?;
+        super::runs::paused(pool, set_id, paused_at.elapsed()).await?;
     }
 
     let coordinated = coordinator.computers.is_some()
@@ -774,18 +777,18 @@ async fn capture_into(
         .map(|(id, name, status)| {
             let (vm, computer) = vm_entries.remove(&id).unwrap_or_else(|| {
                 if has_computer.contains(&id) {
-                    ("omitted".to_owned(), None)
+                    (VmState::Omitted, None)
                 } else {
-                    ("none".to_owned(), None)
+                    (VmState::None, None)
                 }
             });
-            if vm == "missing" || (vm == "omitted" && status == "active") {
+            if vm == VmState::Missing || (vm == VmState::Omitted && status == BotStatus::Active) {
                 complete = false;
             }
-            let project = project_states
-                .remove(&id)
-                .unwrap_or_else(|| "omitted".to_owned());
-            if status == "active" && !matches!(project.as_str(), "included" | "none") {
+            let project = project_states.remove(&id).unwrap_or_default();
+            if status == BotStatus::Active
+                && !matches!(project, ProjectState::Included | ProjectState::None)
+            {
                 complete = false;
             }
             if computer.as_ref().is_some_and(|c| {
@@ -808,13 +811,13 @@ async fn capture_into(
                 status,
                 vm,
                 computer,
-                provider_state: "omitted-reauth-required".into(),
+                provider_state: ProviderState::OmittedReauthRequired,
                 project,
             }
         })
         .collect();
     let mut artifacts = vec![Artifact {
-        kind: "sqlite".into(),
+        kind: ArtifactKind::Sqlite,
         object: DATABASE.into(),
         bot_id: None,
         ciphertext_bytes: sealed.ciphertext_bytes,
@@ -824,39 +827,42 @@ async fn capture_into(
     }];
     artifacts.append(&mut vm_artifacts);
     artifacts.append(&mut file_artifacts);
-    let projects_captured =
-        !project_artifacts.is_empty() || entries.iter().any(|b| !b.project.starts_with("omitted"));
-    let projects_partial = entries.iter().any(|b| b.project == "partial");
+    let projects_captured = !project_artifacts.is_empty()
+        || entries.iter().any(|b| {
+            !matches!(
+                b.project,
+                ProjectState::Omitted | ProjectState::OmittedDeletedBot
+            )
+        });
+    let projects_partial = entries.iter().any(|b| b.project == ProjectState::Partial);
     artifacts.append(&mut project_artifacts);
     let mcp = if let Some(artifact) = mcp_artifact {
         artifacts.push(artifact);
-        "included"
+        Covered::Included
     } else {
-        "omitted"
-    }
-    .to_owned();
+        Covered::Omitted
+    };
     if !missing_files.is_empty() {
         complete = false;
     }
     let projects = if !projects_captured {
-        "omitted"
+        Covered::Omitted
     } else if projects_partial {
-        "partial"
+        Covered::Partial
     } else {
-        "included"
-    }
-    .to_owned();
+        Covered::Included
+    };
     let mut coverage = if coordinated {
         super::Coverage {
-            database: "included".into(),
+            database: Covered::Included,
             vm: if complete {
-                "included".into()
+                Covered::Included
             } else {
-                "partial".into()
+                Covered::Partial
             },
             projects,
-            mcp: mcp.clone(),
-            provider_state: "omitted-reauth-required".into(),
+            mcp,
+            provider_state: ProviderState::OmittedReauthRequired,
             whole_assistant: complete,
             note: if complete {
                 "Whole assistant: the database, every active bot's computer (disk archives; \
@@ -876,7 +882,7 @@ async fn capture_into(
                 )
             },
         }
-    } else if projects != "omitted" {
+    } else if projects != Covered::Omitted {
         super::Coverage {
             note: "The database and the bots' project directories only: bot computers \
                    (files, browser profiles, running jobs) and native provider sessions are not \
@@ -889,12 +895,12 @@ async fn capture_into(
         super::database_only_coverage()
     };
     coverage.mcp = mcp;
-    if !coordinated && coverage.mcp == "included" {
+    if !coordinated && coverage.mcp == Covered::Included {
         coverage.note = format!(
             "The database{} and shared MCP skills, documentation and config are included. \
              Bot computers and native provider sessions are not included. Restoring this set \
              does not recover the whole assistant.",
-            if coverage.projects == "omitted" {
+            if coverage.projects == Covered::Omitted {
                 ""
             } else {
                 ", bot project directories"

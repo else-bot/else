@@ -20,7 +20,10 @@ use std::path::{Path, PathBuf};
 use sqlx::Connection;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 
-use super::{BackupError, COMPLETE, Completion, DATABASE, DatabaseParams, MANIFEST, Manifest};
+use super::{
+    ArtifactKind, BackupError, COMPLETE, Completion, Covered, DATABASE, DatabaseParams, MANIFEST,
+    Manifest, VmState,
+};
 use crate::credentials::SecretKey;
 
 #[derive(Debug)]
@@ -170,7 +173,7 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
     let Some((first, rest)) = manifest.artifacts.split_first() else {
         return invalid("none");
     };
-    if first.kind != "sqlite" || first.object != DATABASE || first.bot_id.is_some() {
+    if first.kind != ArtifactKind::Sqlite || first.object != DATABASE || first.bot_id.is_some() {
         return invalid("the database dump must come first");
     }
     let format = super::projects::Format::of(manifest.schema_version);
@@ -180,7 +183,7 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
     let mut projects = std::collections::HashSet::new();
     let mut mcp = false;
     for artifact in rest {
-        if artifact.kind == "mcp" {
+        if artifact.kind == ArtifactKind::Mcp {
             if mcp || artifact.object != super::mcp::OBJECT || artifact.bot_id.is_some() {
                 return invalid("invalid shared MCP archive");
             }
@@ -190,7 +193,7 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
         let Some(bot) = artifact.bot_id else {
             return invalid("an archive without its bot");
         };
-        if artifact.kind == "file" {
+        if artifact.kind == ArtifactKind::File {
             let id = artifact
                 .object
                 .strip_prefix("file-")
@@ -202,11 +205,11 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
             }
             continue;
         }
-        if artifact.kind == "project" {
+        if artifact.kind == ArtifactKind::Project {
             let named = manifest
                 .bots
                 .iter()
-                .any(|b| b.id == bot && matches!(b.project.as_str(), "included" | "partial"));
+                .any(|b| b.id == bot && b.project.archived());
             if artifact.object != format.object(bot) || !named {
                 return invalid(&artifact.object);
             }
@@ -215,7 +218,7 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
             }
             continue;
         }
-        if artifact.kind != "vm" || artifact.object != format!("vm-{bot}.msb.age") {
+        if artifact.kind != ArtifactKind::Vm || artifact.object != format!("vm-{bot}.msb.age") {
             return invalid(&artifact.object);
         }
         if !seen.insert(bot) {
@@ -224,7 +227,7 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
         let computer = manifest
             .bots
             .iter()
-            .find(|b| b.id == bot && b.vm == "included")
+            .find(|b| b.id == bot && b.vm == VmState::Included)
             .and_then(|b| b.computer.as_ref())
             .filter(|c| c.object == artifact.object);
         let Some(computer) = computer else {
@@ -239,17 +242,21 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
             return invalid("a computer archive without its image follows no archive that has it");
         }
     }
-    let included = manifest.bots.iter().filter(|b| b.vm == "included").count();
+    let included = manifest
+        .bots
+        .iter()
+        .filter(|b| b.vm == VmState::Included)
+        .count();
     let with_project = manifest
         .bots
         .iter()
-        .filter(|b| matches!(b.project.as_str(), "included" | "partial"))
+        .filter(|b| b.project.archived())
         .count();
     if included != seen.len() || with_project != projects.len() {
         return invalid("a bot entry names a missing archive");
     }
-    if !matches!(manifest.coverage.mcp.as_str(), "included" | "omitted")
-        || (manifest.coverage.mcp == "included") != mcp
+    if manifest.coverage.mcp == Covered::Partial
+        || (manifest.coverage.mcp == Covered::Included) != mcp
     {
         return invalid("shared MCP coverage does not match its archive");
     }
@@ -344,7 +351,10 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
                 .into(),
         ));
     }
-    let has_computers = manifest.artifacts.iter().any(|a| a.kind == "vm");
+    let has_computers = manifest
+        .artifacts
+        .iter()
+        .any(|a| a.kind == ArtifactKind::Vm);
     if has_computers
         && request
             .computers
@@ -566,7 +576,11 @@ async fn restore_runtime(
     attempted: &mut Vec<String>,
 ) -> Result<(), BackupError> {
     if let Some(target) = &request.computers {
-        if let Some(artifact) = manifest.artifacts.iter().find(|a| a.kind == "mcp") {
+        if let Some(artifact) = manifest
+            .artifacts
+            .iter()
+            .find(|a| a.kind == ArtifactKind::Mcp)
+        {
             let plain = staging.join("mcp.tar");
             let set_dir = request.set_dir.to_owned();
             let artifact = artifact.clone();
@@ -585,7 +599,7 @@ async fn restore_runtime(
         let format = super::projects::Format::of(manifest.schema_version);
         for artifact in manifest.artifacts[1..]
             .iter()
-            .filter(|a| a.kind == "project")
+            .filter(|a| a.kind == ArtifactKind::Project)
         {
             let bot = artifact.bot_id.expect("validated");
             ensure_private(&projects)?;
@@ -605,10 +619,10 @@ async fn restore_runtime(
         }
         for artifact in manifest.artifacts[1..]
             .iter()
-            .filter(|a| !matches!(a.kind.as_str(), "project" | "mcp"))
+            .filter(|a| !matches!(a.kind, ArtifactKind::Project | ArtifactKind::Mcp))
         {
             let bot = artifact.bot_id.expect("validated");
-            if artifact.kind == "file" {
+            if artifact.kind == ArtifactKind::File {
                 let id = artifact
                     .object
                     .strip_prefix("file-")
@@ -727,14 +741,7 @@ async fn reconcile(
     }
     crate::db::memory_tree::restore_passive(&mut tx).await?;
     crate::db::turn_sink::restore_passive(&mut tx).await?;
-    sqlx::query(
-        "UPDATE backup_runs SET local_status = 'completed', finished_at = coalesce(finished_at, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
-             error = NULL
-         WHERE set_id = ?1",
-    )
-    .bind(&manifest.set_id)
-    .execute(&mut *tx)
-    .await?;
+    super::runs::restored(&mut tx, &manifest.set_id).await?;
     tx.commit().await?;
     conn.close().await?;
     Ok(())

@@ -9,7 +9,7 @@ use common::TestApp;
 use else_api::backup::capture::BackupConfig;
 use else_api::backup::restore::{RestoreRequest, restore};
 use else_api::backup::worker::BackupWorker;
-use else_api::backup::{self, BackupError, DatabaseParams};
+use else_api::backup::{self, BackupError, Covered, DatabaseParams, VmState};
 use else_api::credentials::SecretKey;
 use serde_json::json;
 use sqlx::Connection;
@@ -157,12 +157,12 @@ async fn a_backup_restores_into_a_new_database_with_matching_rows() {
         !manifest.coverage.whole_assistant,
         "a database-only set says so"
     );
-    assert_eq!(manifest.coverage.vm, "omitted");
+    assert_eq!(manifest.coverage.vm, Covered::Omitted);
     assert!(
         manifest
             .bots
             .iter()
-            .all(|b| b.vm == "none" && b.computer.is_none())
+            .all(|b| b.vm == VmState::None && b.computer.is_none())
     );
     assert_eq!(manifest.bots.len(), 2, "main bot and Planner");
     assert!(manifest.application.migration_version >= 1);
