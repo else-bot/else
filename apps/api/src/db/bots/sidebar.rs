@@ -5,6 +5,7 @@ use sqlx::types::Json;
 use crate::app::outgoing::Content;
 
 use crate::db::turns::TurnStatus;
+use crate::socials::types::Provider;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SidebarRow {
@@ -15,6 +16,11 @@ pub struct SidebarRow {
     handoff_at: Option<DateTime<Utc>>,
     credential_reason: Option<String>,
     credential_at: Option<DateTime<Utc>>,
+    setup_provider: Option<Provider>,
+    setup_at: Option<DateTime<Utc>>,
+    /// A turn still open waits for the owner to hand back the computer.
+    /// A taken handoff outlives its turn, so ended turns do not count.
+    computer_taken_at: Option<DateTime<Utc>>,
     skill_install_title: Option<String>,
     skill_install_at: Option<DateTime<Utc>>,
     draft_content: Option<Json<Content>>,
@@ -54,6 +60,9 @@ pub enum SidebarStatus {
         since: DateTime<Utc>,
         /// The ask shown, so a desktop announces each ask once.
         notice_id: uuid::Uuid,
+    },
+    HasComputer {
+        since: DateTime<Utc>,
     },
     Failed,
     Stopped,
@@ -95,6 +104,12 @@ impl SidebarRow {
                 since,
             });
         }
+        if let (Some(provider), Some(since)) = (self.setup_provider, self.setup_at) {
+            return Some(SidebarStatus::NeedsCredentials {
+                preview: format!("Connect {}", provider.label()),
+                since,
+            });
+        }
         if let (Some(notice_id), Some(summary), Some(since)) =
             (self.notice_id, &self.notice_summary, self.notice_at)
         {
@@ -103,6 +118,9 @@ impl SidebarRow {
                 since,
                 notice_id,
             });
+        }
+        if let Some(since) = self.computer_taken_at {
+            return Some(SidebarStatus::HasComputer { since });
         }
         if busy || self.latest_turn_read {
             return None;

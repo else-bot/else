@@ -55,6 +55,7 @@ pub enum Kind {
     Answer,
     Approval,
     Takeover,
+    HasComputer,
     Credentials,
     Stopping,
     Stopped,
@@ -112,6 +113,9 @@ impl Subtitle {
             }
             Some(SidebarStatus::NeedsCredentials { preview, .. }) => {
                 return label(Kind::Credentials, &format!("Needs credentials · {preview}"));
+            }
+            Some(SidebarStatus::HasComputer) => {
+                return label(Kind::HasComputer, "You have the computer");
             }
             _ => {}
         }
@@ -284,6 +288,21 @@ mod tests {
         assert_eq!(subtitle.kind, Kind::Answer);
         assert_eq!(subtitle.text, "Needs you · Choose a bot");
         assert_eq!(bot.waiting().unwrap().since, Some(since.parse().unwrap()));
+    }
+
+    #[test]
+    fn a_taken_computer_replaces_working_without_asking_the_owner() {
+        let bot = bot(json!({
+            "activity": {"phase": "working", "active_turn_id": null, "queued_count": 0},
+            "sidebar_status": {"kind": "has_computer", "since": "2026-11-13T12:00:00Z"}
+        }));
+        let subtitle = Subtitle::new(&bot, true, false);
+        assert_eq!(
+            (subtitle.kind, subtitle.text.as_str()),
+            (Kind::HasComputer, "You have the computer")
+        );
+        assert!(bot.waiting().is_none());
+        assert_eq!(Subtitle::new(&bot, true, true).kind, Kind::Stopping);
     }
 
     #[test]

@@ -345,6 +345,8 @@ pub enum SidebarStatus {
         #[serde(default)]
         since: Option<DateTime<Utc>>,
     },
+    /// The owner took over the bot's computer and has not handed it back.
+    HasComputer,
     Failed,
     Stopped,
     Uncertain,
@@ -366,7 +368,9 @@ impl SidebarStatus {
             | Self::NeedsTakeover { since, .. }
             | Self::NeedsCredentials { since, .. }
             | Self::NeedsYou { since, .. } => Some(Waiting { since: *since }),
-            Self::Failed | Self::Stopped | Self::Uncertain | Self::Unknown => None,
+            Self::HasComputer | Self::Failed | Self::Stopped | Self::Uncertain | Self::Unknown => {
+                None
+            }
         }
     }
 }

@@ -35,7 +35,8 @@ impl Ask {
             SidebarStatus::NeedsTakeover { .. } => Self::Takeover,
             SidebarStatus::NeedsCredentials { .. } => Self::Credentials,
             SidebarStatus::NeedsYou { .. } => Self::Owner,
-            SidebarStatus::Failed
+            SidebarStatus::HasComputer
+            | SidebarStatus::Failed
             | SidebarStatus::Stopped
             | SidebarStatus::Uncertain
             | SidebarStatus::Unknown => return None,

@@ -769,7 +769,7 @@ pub async fn request_setup(
     if crate::db::turns::attempt_parked(&mut tx, turn, caller.attempt).await? {
         return Err(Error::Busy);
     }
-    let setup:Setup=sqlx::query_as(sqlx::AssertSqlSafe(format!("INSERT INTO social_setups(id,bot_id,turn_id,attempt,provider,reason) VALUES(?1,?2,?3,?4,?5,?6) RETURNING {SETUP_COLUMNS}"))).bind(Uuid::new_v4()).bind(caller.bot_id).bind(turn).bind(caller.attempt).bind(provider).bind(reason).fetch_one(&mut *tx).await?;
+    let setup:Setup=sqlx::query_as(sqlx::AssertSqlSafe(format!("INSERT INTO social_setups(id,bot_id,turn_id,attempt,provider,reason,created_at) VALUES(?1,?2,?3,?4,?5,?6,strftime('%Y-%m-%dT%H:%M:%f+00:00','now')) RETURNING {SETUP_COLUMNS}"))).bind(Uuid::new_v4()).bind(caller.bot_id).bind(turn).bind(caller.attempt).bind(provider).bind(reason).fetch_one(&mut *tx).await?;
     crate::db::events::turn_changed(&mut tx, caller.bot_id, turn).await?;
     tx.commit().await?;
     Ok(setup)
