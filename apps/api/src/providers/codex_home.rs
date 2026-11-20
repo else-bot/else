@@ -29,7 +29,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::cli::files::{GRANT_ENV, link_login, replace_private};
-use super::host::{BotDirs, Host, LaunchSpec};
+use super::host::{BotDirs, Host, LaunchSpec, Run};
 
 /// Feature flags forced off for every bot session. Native sub-agents
 /// (`multi_agent*`) are disabled by policy, not only by prompt. `shell_tool`
@@ -231,7 +231,7 @@ pub async fn no_native_tools(
         ..launch.clone()
     };
     let exported = host
-        .bounded_output(&export, EXPORT_TIMEOUT, EXPORT_LIMIT)
+        .run(&export_run(&export))
         .await
         .map_err(|e| format!("`codex debug models` failed: {e}"))?;
     let catalog = no_native_catalog(&exported, model)?;
@@ -245,8 +245,9 @@ pub async fn no_native_tools(
     verify.args = arguments.clone();
     verify.args.extend(["debug".into(), "models".into()]);
     let loaded = host
-        .bounded_output(&verify, EXPORT_TIMEOUT, EXPORT_LIMIT)
-        .await?;
+        .run(&export_run(&verify))
+        .await
+        .map_err(|e| e.to_string())?;
     let loaded: Value = serde_json::from_slice(&loaded)
         .map_err(|_| "Codex did not return the loaded model catalog")?;
     let expected: Value = serde_json::from_slice(&catalog).expect("generated catalog is JSON");
@@ -254,6 +255,14 @@ pub async fn no_native_tools(
         return Err("Codex did not load the catalog without native tools".into());
     }
     Ok(arguments)
+}
+
+fn export_run(launch: &LaunchSpec) -> Run {
+    Run {
+        limit: EXPORT_LIMIT,
+        timeout: EXPORT_TIMEOUT,
+        ..Run::launch(launch)
+    }
 }
 
 /// Prepare the bot's Codex home: rewrite the config and point `auth.json`

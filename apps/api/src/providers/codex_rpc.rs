@@ -132,7 +132,7 @@ impl AppServer {
         Ok(Self {
             cwd: spec.dirs.project.to_string_lossy().into_owned(),
             scope,
-            stderr: Stderr::collect(stderr, &spec),
+            stderr: Stderr::collect(stderr, &spec.env),
             commands,
             slots: Arc::new(Semaphore::new(MAX_REQUESTS)),
             next_id: AtomicI64::new(1),

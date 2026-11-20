@@ -13,9 +13,10 @@ fn live() -> bool {
     std::env::var("ELSE_LIVE_CODEX").as_deref() == Ok("1")
 }
 
-fn codex_and_auth() -> (PathBuf, PathBuf) {
+async fn codex_and_auth() -> (PathBuf, PathBuf) {
     let configured = std::env::var_os("ELSE_CODEX_BIN").map(PathBuf::from);
     let codex = else_api::providers::executable::executable(configured.as_deref(), "codex")
+        .await
         .expect("resolve Codex CLI")
         .expect("Codex CLI on PATH or ELSE_CODEX_BIN")
         .path()
@@ -83,7 +84,7 @@ async fn probe_native_tools(tools: Option<(String, String)>) {
     std::fs::create_dir(&data).unwrap();
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     let host = Host::new(&data, &dir.path().join("bots"));
-    let (codex, auth) = codex_and_auth();
+    let (codex, auth) = codex_and_auth().await;
     let dirs = host.bot_dirs(Uuid::new_v4(), "codex").unwrap();
     codex_home::prepare(
         &dirs,
@@ -235,11 +236,11 @@ fn codex_host(data: &Path) -> Host {
     Host::new(data, &data.with_file_name("projects"))
 }
 
-fn codex_app(db: Arc<TestDb>, data: &Path) -> TestApp {
+async fn codex_app(db: Arc<TestDb>, data: &Path) -> TestApp {
     let sandbox = codex_host(data);
-    let (codex, auth) = codex_and_auth();
+    let (codex, auth) = codex_and_auth().await;
     let registry = Registry::new(vec![
-        Arc::new(Codex::detect(Some(sandbox), Some(codex), Some(auth))),
+        Arc::new(Codex::detect(Some(sandbox), Some(codex), Some(auth)).await),
         Arc::new(else_api::providers::synthetic::Synthetic::new(
             Duration::from_millis(5),
         )),
@@ -367,7 +368,7 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = codex_app(db.clone(), &data);
+    let app = codex_app(db.clone(), &data).await;
     let caps = app.owner("GET", "/v1/capabilities", None).await;
     assert_eq!(caps.body["default_provider_id"], "codex", "{:?}", caps.body);
 
@@ -433,7 +434,7 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
 
     let app = app.restart().await;
     drop(app);
-    let app = codex_app(db.clone(), &data);
+    let app = codex_app(db.clone(), &data).await;
     let (_, _, text) = ask(
         &app,
         &a,
@@ -554,7 +555,7 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
         "delegating effort refused"
     );
     drop(app);
-    let app = codex_app(db.clone(), &data);
+    let app = codex_app(db.clone(), &data).await;
     let (turn, status, _) = ask(
         &app,
         &a,
@@ -590,7 +591,7 @@ async fn a_newer_owner_message_joins_a_running_codex_reply() {
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = codex_app(db, &data);
+    let app = codex_app(db, &data).await;
     common::steer::joins_mid_tool_and_mid_text(&app, "codex", true).await;
 }
 
@@ -607,10 +608,11 @@ async fn codex_retrieves_a_saved_fact_through_memory_tools() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let sandbox = codex_host(&data);
-    let (codex, auth) = codex_and_auth();
+    let (codex, auth) = codex_and_auth().await;
     let registry = Registry::new(vec![
         Arc::new(
             Codex::detect(Some(sandbox), Some(codex), Some(auth))
+                .await
                 .with_tools(format!("http://127.0.0.1:{port}/tools/v1/mcp")),
         ),
         Arc::new(else_api::providers::synthetic::Synthetic::new(
@@ -700,9 +702,10 @@ async fn code_mode_reaches_only_elsebot_tools() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let sandbox = codex_host(&data);
-    let (codex, auth) = codex_and_auth();
+    let (codex, auth) = codex_and_auth().await;
     let registry = Registry::new(vec![Arc::new(
         Codex::detect(Some(sandbox), Some(codex), Some(auth))
+            .await
             .with_tools(format!("http://127.0.0.1:{port}/tools/v1/mcp")),
     )]);
     let db = Arc::new(TestDb::migrated().await);
@@ -755,8 +758,8 @@ async fn summary_attempts_cannot_run_tools() {
     std::fs::create_dir(&data).unwrap();
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     let sandbox = codex_host(&data);
-    let (codex, auth) = codex_and_auth();
-    let codex = Codex::detect(Some(sandbox.clone()), Some(codex), Some(auth));
+    let (codex, auth) = codex_and_auth().await;
+    let codex = Codex::detect(Some(sandbox.clone()), Some(codex), Some(auth)).await;
     let bot = Uuid::new_v4();
     let profile = else_api::app::providers::Profile {
         model: "gpt-6.1-sol".into(),
@@ -808,9 +811,10 @@ async fn a_synthetic_corpus_is_summarized_faithfully_and_recalled() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let sandbox = codex_host(&data);
-    let (codex, auth) = codex_and_auth();
+    let (codex, auth) = codex_and_auth().await;
     let codex = Arc::new(
         Codex::detect(Some(sandbox), Some(codex), Some(auth))
+            .await
             .with_tools(format!("http://127.0.0.1:{port}/tools/v1/mcp")),
     );
     let db = Arc::new(TestDb::migrated().await);
@@ -956,9 +960,10 @@ async fn main_bot_creates_a_github_specialist_on_request() {
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let (codex, auth) = codex_and_auth();
+    let (codex, auth) = codex_and_auth().await;
     let provider = Arc::new(
         Codex::detect(Some(codex_host(&data)), Some(codex), Some(auth))
+            .await
             .with_tools(format!("http://127.0.0.1:{port}/tools/v1/mcp")),
     );
     let db = Arc::new(TestDb::migrated().await);
@@ -1037,9 +1042,10 @@ async fn main_bot_delegates_by_name_with_one_provider_slot() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let sandbox = codex_host(&data);
-    let (codex, auth) = codex_and_auth();
+    let (codex, auth) = codex_and_auth().await;
     let codex = Arc::new(
         Codex::detect(Some(sandbox), Some(codex), Some(auth))
+            .await
             .with_tools(format!("http://127.0.0.1:{port}/tools/v1/mcp")),
     );
     let db = Arc::new(TestDb::migrated().await);
@@ -1151,9 +1157,10 @@ async fn codex_uses_its_guest_computer_through_tools() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let sandbox = codex_host(&data);
-    let (codex, auth) = codex_and_auth();
+    let (codex, auth) = codex_and_auth().await;
     let codex = Arc::new(
         Codex::detect(Some(sandbox), Some(codex), Some(auth))
+            .await
             .with_tools(format!("http://127.0.0.1:{port}/tools/v1/mcp")),
     );
     let db = Arc::new(TestDb::migrated().await);

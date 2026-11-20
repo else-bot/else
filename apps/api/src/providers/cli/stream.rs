@@ -102,7 +102,7 @@ impl StreamAttempt {
             scope,
             stdin,
             events: JsonLines::new(stdout, label),
-            stderr: Stderr::collect(stderr, spec),
+            stderr: Stderr::collect(stderr, &spec.env),
             interrupt,
             label,
             project: spec.dirs.project.clone(),

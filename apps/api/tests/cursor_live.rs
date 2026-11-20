@@ -12,7 +12,7 @@ use else_api::providers::{Registry, host::Host};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-fn installed() -> PathBuf {
+async fn installed() -> PathBuf {
     if let Some(configured) = std::env::var_os("ELSE_CURSOR_BIN") {
         return configured.into();
     }
@@ -22,6 +22,7 @@ fn installed() -> PathBuf {
         return link;
     }
     else_api::providers::executable::executable(None, "cursor-agent")
+        .await
         .expect("resolve Cursor CLI")
         .expect("Cursor CLI in ~/.local/bin, on PATH, or in ELSE_CURSOR_BIN")
         .path()
@@ -63,7 +64,8 @@ async fn session(app: &TestApp, bot: &str) -> String {
 /// A signed-in Cursor whose catalog holds the account's models, and the
 /// model the checks use: `ELSE_LIVE_CURSOR_MODEL`, else the first listed.
 async fn cursor(host: &Host, tool_url: &str) -> (Cursor, String) {
-    let provider = Cursor::detect(Some(host.clone()), Some(installed()), Login::host())
+    let provider = Cursor::detect(Some(host.clone()), Some(installed().await), Login::host())
+        .await
         .with_tools(tool_url.into());
     let listed = provider.list_models().await.expect("Cursor lists models");
     let model = std::env::var("ELSE_LIVE_CURSOR_MODEL")

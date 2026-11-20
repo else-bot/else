@@ -52,7 +52,7 @@ async fn a_bot_reads_the_reason_a_provider_is_unavailable() {
         Arc::new(else_api::providers::synthetic::Synthetic::new(
             std::time::Duration::from_millis(5),
         )),
-        Arc::new(Grok::detect(None, None, None)),
+        Arc::new(Grok::detect(None, None, None).await),
     ]);
     let app = TestApp::with_registry(Arc::new(db), 4, registry);
 

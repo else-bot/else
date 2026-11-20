@@ -9,6 +9,8 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use super::host::{RUN_TIMEOUT, Supervised};
+
 /// A provider CLI to launch. One found by [`executable`] remembers how: a
 /// version manager's upgrade can remove the version a shim resolved to,
 /// and a reinstall can move the CLI to another `PATH` directory, while the
@@ -35,11 +37,11 @@ impl Program {
 
     /// The executable to launch now, or why there is none, naming the file
     /// tried and the setting that overrides it.
-    pub fn current(&self) -> Result<PathBuf, String> {
-        self.current_in(std::env::var_os("PATH").as_deref())
+    pub async fn current(&self) -> Result<PathBuf, String> {
+        self.current_in(std::env::var_os("PATH").as_deref()).await
     }
 
-    fn current_in(&self, path: Option<&OsStr>) -> Result<PathBuf, String> {
+    async fn current_in(&self, path: Option<&OsStr>) -> Result<PathBuf, String> {
         let Some(found) = &self.found else {
             return Ok(self.path.clone());
         };
@@ -52,7 +54,7 @@ impl Program {
             find(None, &found.name, &found.setting, path)?
         };
         if let Some(given) = given.filter(|given| is_executable(given)) {
-            return locate(&given, &found.name, &found.setting, path);
+            return locate(&given, &found.name, &found.setting, path).await;
         }
         Err(format!(
             "`{}` was not found at {}. Install it or set {}.",
@@ -77,16 +79,17 @@ impl From<PathBuf> for Program {
 /// `Ok(None)` means it is not on `PATH`. An error says why the found or
 /// configured file cannot be used; a configured path never falls back to
 /// `PATH`.
-pub fn executable(configured: Option<&Path>, name: &str) -> Result<Option<Program>, String> {
+pub async fn executable(configured: Option<&Path>, name: &str) -> Result<Option<Program>, String> {
     executable_as(
         configured,
         name,
         &format!("ELSE_{}_BIN", name.to_uppercase()),
     )
+    .await
 }
 
 /// [`executable`] for a CLI configured by a `setting` not named after it.
-pub fn executable_as(
+pub async fn executable_as(
     configured: Option<&Path>,
     name: &str,
     setting: &str,
@@ -97,9 +100,10 @@ pub fn executable_as(
         setting,
         std::env::var_os("PATH").as_deref(),
     )
+    .await
 }
 
-fn program(
+async fn program(
     configured: Option<&Path>,
     name: &str,
     setting: &str,
@@ -109,7 +113,7 @@ fn program(
         return Ok(None);
     };
     Ok(Some(Program {
-        path: locate(&given, name, setting, path)?,
+        path: locate(&given, name, setting, path).await?,
         found: Some(Lookup {
             given,
             configured: configured.is_some(),
@@ -147,13 +151,13 @@ fn find(
 }
 
 /// The executable `found` runs: itself, or the version its shim selects.
-fn locate(
+async fn locate(
     found: &Path,
     name: &str,
     setting: &str,
     path: Option<&OsStr>,
 ) -> Result<PathBuf, String> {
-    native(found, name, path).map_err(|why| {
+    native(found, name, path).await.map_err(|why| {
         format!(
             "`{name}` at {} {why}; set {setting} to the {name} executable itself",
             found.display()
@@ -212,7 +216,7 @@ fn classify(path: &Path) -> Result<Found, String> {
     Ok(Found::Native)
 }
 
-fn native(found: &Path, name: &str, path: Option<&OsStr>) -> Result<PathBuf, String> {
+async fn native(found: &Path, name: &str, path: Option<&OsStr>) -> Result<PathBuf, String> {
     let (manager, binary) = match classify(found)? {
         Found::Native => return Ok(found.to_path_buf()),
         Found::Link(manager, binary) => (manager, binary),
@@ -228,10 +232,8 @@ fn native(found: &Path, name: &str, path: Option<&OsStr>) -> Result<PathBuf, Str
         }
     };
     let which = format!("`{} which {name}`", manager.name());
-    let out = std::process::Command::new(&binary)
-        .args(["which", name])
-        .stdin(std::process::Stdio::null())
-        .output()
+    let out = run_which(&binary, name)
+        .await
         .map_err(|e| format!("is a shim and {which} did not run ({e})"))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -263,6 +265,43 @@ fn native(found: &Path, name: &str, path: Option<&OsStr>) -> Result<PathBuf, Str
     }
 }
 
+/// `binary which name` with this process's environment and directory, which
+/// a shim picks its version from, so not through [`super::host::Host::run`].
+/// Bounded in bytes and time; its process group is killed if it overruns.
+async fn run_which(binary: &Path, name: &str) -> std::io::Result<std::process::Output> {
+    use tokio::io::AsyncReadExt;
+    const LIMIT: u64 = 64 * 1024;
+    let mut command = tokio::process::Command::new(binary);
+    command
+        .args(["which", name])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        .kill_on_drop(true);
+    let mut process = Supervised::spawn(command)?;
+    let (stdout, stderr) = (process.child.stdout.take(), process.child.stderr.take());
+    let run = async {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        if let (Some(stdout), Some(stderr)) = (stdout, stderr) {
+            let (mut stdout, mut stderr) = (stdout.take(LIMIT), stderr.take(LIMIT));
+            tokio::try_join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))?;
+        }
+        let status = process.child.wait().await?;
+        Ok(std::process::Output {
+            status,
+            stdout: out,
+            stderr: err,
+        })
+    };
+    let result = tokio::time::timeout(RUN_TIMEOUT, run).await;
+    result.unwrap_or_else(|_| {
+        Err(std::io::Error::other(format!(
+            "it did not finish within {RUN_TIMEOUT:?}"
+        )))
+    })
+}
+
 fn search(path: Option<&OsStr>, name: &str) -> Option<PathBuf> {
     std::env::split_paths(path?)
         .map(|dir| dir.join(name))
@@ -280,13 +319,15 @@ mod tests {
 
     const NAMES: [&str; 3] = ["codex", "claude", "grok"];
 
-    fn resolve(
+    async fn resolve(
         configured: Option<&Path>,
         name: &str,
         path: Option<&OsStr>,
     ) -> Result<Option<PathBuf>, String> {
         let setting = format!("ELSE_{}_BIN", name.to_uppercase());
-        program(configured, name, &setting, path).map(|p| p.map(|p| p.path))
+        program(configured, name, &setting, path)
+            .await
+            .map(|p| p.map(|p| p.path))
     }
 
     struct Tree(tempfile::TempDir);
@@ -336,8 +377,8 @@ mod tests {
         format!("echo \"{}/installs/$2/1.0/bin/$2\"", tree.at("").display())
     }
 
-    #[test]
-    fn a_mise_link_shim_on_path_resolves_to_each_providers_install() {
+    #[tokio::test]
+    async fn a_mise_link_shim_on_path_resolves_to_each_providers_install() {
         let tree = Tree::new();
         let mise = tree.manager("usr/bin/mise", &installs_answer(&tree));
         for name in NAMES {
@@ -345,12 +386,16 @@ mod tests {
             tree.file(&format!("not-exec/{name}"), "data", 0o644);
             tree.link(&format!("wrappers/{name}"), &mise);
             let path = tree.path(&["missing", "not-exec", "wrappers"]);
-            assert_eq!(resolve(None, name, Some(&path)), Ok(Some(native)), "{name}");
+            assert_eq!(
+                resolve(None, name, Some(&path)).await,
+                Ok(Some(native)),
+                "{name}"
+            );
         }
     }
 
-    #[test]
-    fn script_shims_resolve_through_the_manager_on_path() {
+    #[tokio::test]
+    async fn script_shims_resolve_through_the_manager_on_path() {
         for manager in ["asdf", "mise"] {
             let tree = Tree::new();
             tree.manager(&format!("bin/{manager}"), &installs_answer(&tree));
@@ -365,7 +410,7 @@ mod tests {
                 );
                 let path = tree.path(&["shims", "bin"]);
                 assert_eq!(
-                    resolve(None, name, Some(&path)),
+                    resolve(None, name, Some(&path)).await,
                     Ok(Some(native)),
                     "{manager} {name}"
                 );
@@ -373,8 +418,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn quoted_manager_paths_are_resolved_and_never_returned_as_native() {
+    #[tokio::test]
+    async fn quoted_manager_paths_are_resolved_and_never_returned_as_native() {
         for manager in ["mise", "asdf"] {
             let tree = Tree::new();
             let native = tree.native("codex");
@@ -390,11 +435,11 @@ mod tests {
                 );
                 tree.manager(&format!("bin/{manager}"), &installs_answer(&tree));
                 assert_eq!(
-                    resolve(None, "codex", Some(&path)),
+                    resolve(None, "codex", Some(&path)).await,
                     Ok(Some(native.clone()))
                 );
                 assert_eq!(
-                    resolve(Some(&shim), "codex", Some(&path)),
+                    resolve(Some(&shim), "codex", Some(&path)).await,
                     Ok(Some(native.clone()))
                 );
                 tree.manager(
@@ -402,20 +447,25 @@ mod tests {
                     &format!("echo '{}'", shim.display()),
                 );
                 let link = tree.link(&format!("links/{quote}/codex"), &binary);
-                let err = resolve(Some(&link), "codex", Some(&path)).unwrap_err();
+                let err = resolve(Some(&link), "codex", Some(&path))
+                    .await
+                    .unwrap_err();
                 assert!(err.contains("another shim"), "{err}");
             }
         }
     }
 
-    #[test]
-    fn a_link_to_a_native_binary_is_kept_across_an_upgrade() {
+    #[tokio::test]
+    async fn a_link_to_a_native_binary_is_kept_across_an_upgrade() {
         let tree = Tree::new();
         let old = tree.file("Caskroom/codex/0.142.0/bin/codex", "old", 0o755);
         let link = tree.link("homebrew/bin/codex", &old);
         let path = tree.path(&["homebrew/bin"]);
-        assert_eq!(resolve(None, "codex", Some(&path)), Ok(Some(link.clone())));
-        let program = executable(Some(&link), "codex").unwrap().unwrap();
+        assert_eq!(
+            resolve(None, "codex", Some(&path)).await,
+            Ok(Some(link.clone()))
+        );
+        let program = executable(Some(&link), "codex").await.unwrap().unwrap();
         assert_eq!(program.path(), link);
 
         let new = tree.file(
@@ -426,28 +476,29 @@ mod tests {
         std::fs::remove_dir_all(tree.at("Caskroom/codex/0.142.0")).unwrap();
         std::fs::remove_file(&link).unwrap();
         symlink(&new, &link).unwrap();
-        let ran = std::process::Command::new(program.current().unwrap())
+        let ran = std::process::Command::new(program.current().await.unwrap())
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&ran.stdout), "0.171.0\n");
     }
 
-    #[test]
-    fn a_cli_reinstalled_elsewhere_on_path_is_found_again() {
+    #[tokio::test]
+    async fn a_cli_reinstalled_elsewhere_on_path_is_found_again() {
         let tree = Tree::new();
         let old = tree.file("npm/bin/codex", "old", 0o755);
         let path = tree.path(&["npm/bin", "homebrew/bin"]);
         let program = program(None, "codex", "ELSE_CODEX_BIN", Some(&path))
+            .await
             .unwrap()
             .unwrap();
-        assert_eq!(program.current_in(Some(&path)), Ok(old.clone()));
+        assert_eq!(program.current_in(Some(&path)).await, Ok(old.clone()));
 
         std::fs::remove_file(&old).unwrap();
         let new = tree.file("homebrew/bin/codex", "new", 0o755);
-        assert_eq!(program.current_in(Some(&path)), Ok(new.clone()));
+        assert_eq!(program.current_in(Some(&path)).await, Ok(new.clone()));
         std::fs::remove_file(&new).unwrap();
         assert_eq!(
-            program.current_in(Some(&path)),
+            program.current_in(Some(&path)).await,
             Err(format!(
                 "`codex` was not found at {}. Install it or set ELSE_CODEX_BIN.",
                 old.display()
@@ -455,33 +506,34 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_shim_is_resolved_again_once_its_version_is_removed() {
+    #[tokio::test]
+    async fn a_shim_is_resolved_again_once_its_version_is_removed() {
         let tree = Tree::new();
         let answer =
             |version: &str| format!("echo {}/installs/{version}/codex", tree.at("").display());
         let mise = tree.manager("bin/mise", &answer("1.0"));
         let old = tree.file("installs/1.0/codex", "old", 0o755);
         let shim = tree.link("shims/codex", &mise);
-        let program = executable(Some(&shim), "codex").unwrap().unwrap();
-        assert_eq!(program.current(), Ok(old));
+        let program = executable(Some(&shim), "codex").await.unwrap().unwrap();
+        assert_eq!(program.current().await, Ok(old));
 
         let new = tree.file("installs/2.0/codex", "new", 0o755);
         std::fs::remove_dir_all(tree.at("installs/1.0")).unwrap();
         tree.manager("bin/mise", &answer("2.0"));
-        assert_eq!(program.current(), Ok(new));
+        assert_eq!(program.current().await, Ok(new));
     }
 
-    #[test]
-    fn a_removed_cli_names_the_file_and_the_setting() {
+    #[tokio::test]
+    async fn a_removed_cli_names_the_file_and_the_setting() {
         let tree = Tree::new();
         let found = tree.file("bin/cursor-agent", "native", 0o755);
         let program = executable_as(Some(&found), "cursor-agent", "ELSE_CURSOR_BIN")
+            .await
             .unwrap()
             .unwrap();
         std::fs::remove_file(&found).unwrap();
         assert_eq!(
-            program.current(),
+            program.current().await,
             Err(format!(
                 "`cursor-agent` was not found at {}. Install it or set ELSE_CURSOR_BIN.",
                 found.display()
@@ -489,16 +541,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn nothing_on_path_is_not_an_error() {
+    #[tokio::test]
+    async fn nothing_on_path_is_not_an_error() {
         let tree = Tree::new();
         tree.file("bin/codex", "data", 0o644);
-        assert_eq!(resolve(None, "codex", Some(&tree.path(&["bin"]))), Ok(None));
-        assert_eq!(resolve(None, "codex", None), Ok(None));
+        assert_eq!(
+            resolve(None, "codex", Some(&tree.path(&["bin"]))).await,
+            Ok(None)
+        );
+        assert_eq!(resolve(None, "codex", None).await, Ok(None));
     }
 
-    #[test]
-    fn a_configured_path_wins_over_path_and_never_falls_back() {
+    #[tokio::test]
+    async fn a_configured_path_wins_over_path_and_never_falls_back() {
         let tree = Tree::new();
         let configured = tree.file("custom/codex", "native", 0o755);
         tree.native("codex");
@@ -508,28 +563,30 @@ mod tests {
         );
         let path = tree.path(&["wrappers"]);
         assert_eq!(
-            resolve(Some(&configured), "codex", Some(&path)),
+            resolve(Some(&configured), "codex", Some(&path)).await,
             Ok(Some(configured))
         );
 
         let missing = tree.at("nope/codex");
-        let err = resolve(Some(&missing), "codex", Some(&path)).unwrap_err();
+        let err = resolve(Some(&missing), "codex", Some(&path))
+            .await
+            .unwrap_err();
         assert!(err.contains("ELSE_CODEX_BIN"), "{err}");
     }
 
-    #[test]
-    fn a_configured_mise_shim_is_resolved() {
+    #[tokio::test]
+    async fn a_configured_mise_shim_is_resolved() {
         let tree = Tree::new();
         let native = tree.native("grok");
         let shim = tree.link(
             "shims/grok",
             &tree.manager("bin/mise", &installs_answer(&tree)),
         );
-        assert_eq!(resolve(Some(&shim), "grok", None), Ok(Some(native)));
+        assert_eq!(resolve(Some(&shim), "grok", None).await, Ok(Some(native)));
     }
 
-    #[test]
-    fn an_unresolved_shim_is_an_error_naming_the_setting() {
+    #[tokio::test]
+    async fn an_unresolved_shim_is_an_error_naming_the_setting() {
         let tree = Tree::new();
         let script = tree.file("bin/codex.sh", "#!/bin/sh\nexit 0\n", 0o755);
         let answers = [
@@ -555,8 +612,8 @@ mod tests {
             let shim = tree.link(&format!("{case}/wrappers/codex"), &mise);
             let path = tree.path(&[&format!("{case}/wrappers")]);
             for got in [
-                resolve(None, "codex", Some(&path)),
-                resolve(Some(&shim), "codex", None),
+                resolve(None, "codex", Some(&path)).await,
+                resolve(Some(&shim), "codex", None).await,
             ] {
                 let err = got.expect_err(case);
                 assert!(err.contains("ELSE_CODEX_BIN"), "{case}: {err}");
@@ -569,9 +626,9 @@ mod tests {
             0o755,
         );
         let path = tree.path(&["lonely/shims"]);
-        let err = resolve(None, "claude", Some(&path)).unwrap_err();
+        let err = resolve(None, "claude", Some(&path)).await.unwrap_err();
         assert!(err.contains("ELSE_CLAUDE_BIN"), "{err}");
-        let err = resolve(Some(&asdf_shim), "claude", None).unwrap_err();
+        let err = resolve(Some(&asdf_shim), "claude", None).await.unwrap_err();
         assert!(err.contains("ELSE_CLAUDE_BIN"), "{err}");
     }
 }

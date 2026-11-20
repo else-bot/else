@@ -284,9 +284,9 @@ fn reported_settings_are_checked_field_by_field() {
     assert!(other_tier.mismatch(&profile).is_some());
 }
 
-#[test]
-fn catalog_offers_current_and_legacy_models_as_exact_profiles() {
-    let codex = Codex::detect(None, None, None);
+#[tokio::test]
+async fn catalog_offers_current_and_legacy_models_as_exact_profiles() {
+    let codex = Codex::detect(None, None, None).await;
     let catalog = codex.catalog();
     let featured: Vec<&str> = catalog
         .models
@@ -318,9 +318,9 @@ fn catalog_offers_current_and_legacy_models_as_exact_profiles() {
     }
 }
 
-#[test]
-fn profile_validation_refuses_delegating_effort() {
-    let codex = Codex::detect(None, None, None);
+#[tokio::test]
+async fn profile_validation_refuses_delegating_effort() {
+    let codex = Codex::detect(None, None, None).await;
     assert!(codex.ready.is_err());
     let ok = Profile {
         model: "gpt-6.1-sol".into(),
@@ -347,8 +347,8 @@ fn profile_validation_refuses_delegating_effort() {
     assert!(matches!(codex.availability(), Availability::Unavailable(_)));
 }
 
-#[test]
-fn fingerprint_changes_with_profile_and_name() {
+#[tokio::test]
+async fn fingerprint_changes_with_profile_and_name() {
     let a = input(vec![]);
     let profile = Profile {
         model: "gpt-6.1-sol".into(),
@@ -375,17 +375,18 @@ fn fingerprint_changes_with_profile_and_name() {
         codex.fingerprint_of(&profile, &a.clone(), "chatgpt:a")
     );
     let dir = tempfile::tempdir().unwrap();
-    let version = |v: &str| {
-        detect_with(dir.path(), &format!("echo '{v}'"), true).fingerprint_of(
-            &profile,
-            &a,
-            "chatgpt:a",
-        )
+    let version = async |v: &str| {
+        detect_with(dir.path(), &format!("echo '{v}'"), true)
+            .await
+            .fingerprint_of(&profile, &a, "chatgpt:a")
     };
-    assert_ne!(version("codex-cli 9.0.0"), version("codex-cli 9.0.1"));
+    assert_ne!(
+        version("codex-cli 9.0.0").await,
+        version("codex-cli 9.0.1").await
+    );
 }
 
-fn detect_with(dir: &std::path::Path, script: &str, logged_in: bool) -> Codex {
+async fn detect_with(dir: &std::path::Path, script: &str, logged_in: bool) -> Codex {
     use std::os::unix::fs::PermissionsExt;
     let program = dir.join("codex");
     std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
@@ -396,14 +397,14 @@ fn detect_with(dir: &std::path::Path, script: &str, logged_in: bool) -> Codex {
     } else {
         let _ = std::fs::remove_file(&auth);
     }
-    Codex::detect(Some(Host::new(dir, dir)), Some(program), Some(auth))
+    Codex::detect(Some(Host::new(dir, dir)), Some(program), Some(auth)).await
 }
 
-fn fake_codex(dir: &std::path::Path) -> (Codex, std::path::PathBuf) {
-    fake_codex_with(dir, &json!([]), None)
+async fn fake_codex(dir: &std::path::Path) -> (Codex, std::path::PathBuf) {
+    fake_codex_with(dir, &json!([]), None).await
 }
 
-fn fake_codex_with(
+async fn fake_codex_with(
     dir: &std::path::Path,
     servers: &Value,
     item_kind: Option<&str>,
@@ -500,7 +501,8 @@ for line in sys.stdin:
         dir,
         &format!("[ \"$1\" = --version ] && echo 'codex-cli 9.0.0' && exit\n{script}"),
         true,
-    );
+    )
+    .await;
     let availability = codex.availability();
     assert!(
         matches!(availability, Availability::Available),
@@ -543,7 +545,7 @@ async fn a_connector_event_launches_without_host_tools_but_keeps_elsebot_tools()
         (Origin::Other, true),
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let (codex, _) = fake_codex_with(dir.path(), &elsebot_server(), None);
+        let (codex, _) = fake_codex_with(dir.path(), &elsebot_server(), None).await;
         let codex = codex.with_tools(TOOL_URL.into());
         let sink = super::super::recording::Recorded::default();
         let outcome = codex.run(turn_from(origin), &sink, Stop::default()).await;
@@ -637,7 +639,7 @@ async fn a_connector_event_fails_before_its_turn_without_the_no_native_catalog()
         ("ignore-catalog", true),
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let (codex, received) = fake_codex_with(dir.path(), &elsebot_server(), None);
+        let (codex, received) = fake_codex_with(dir.path(), &elsebot_server(), None).await;
         let codex = codex.with_tools(TOOL_URL.into());
         std::fs::write(dir.path().join(marker), "").unwrap();
         if one {
@@ -663,7 +665,7 @@ async fn a_connector_event_fails_before_its_turn_without_the_no_native_catalog()
 #[tokio::test]
 async fn summaries_and_checkpoints_run_on_the_no_native_catalog() {
     let dir = tempfile::tempdir().unwrap();
-    let (codex, _) = fake_codex(dir.path());
+    let (codex, _) = fake_codex(dir.path()).await;
     let profile = turn_from(crate::app::providers::Origin::Other)
         .profile
         .unwrap();
@@ -679,7 +681,7 @@ async fn summaries_and_checkpoints_run_on_the_no_native_catalog() {
     assert_no_native_catalog(dir.path(), &launches(dir.path()), &profile.model);
 
     let dir = tempfile::tempdir().unwrap();
-    let (codex, _) = fake_codex(dir.path());
+    let (codex, _) = fake_codex(dir.path()).await;
     std::fs::write(dir.path().join("ignore-catalog"), "").unwrap();
     let result = codex
         .summarize_once(
@@ -702,7 +704,7 @@ async fn summaries_and_checkpoints_run_on_the_no_native_catalog() {
 async fn a_failed_account_read_is_asked_once_more_before_the_turn_fails() {
     for (failures, delivered) in [(1, true), (2, false)] {
         let dir = tempfile::tempdir().unwrap();
-        let (codex, received) = fake_codex_with(dir.path(), &elsebot_server(), None);
+        let (codex, received) = fake_codex_with(dir.path(), &elsebot_server(), None).await;
         let codex = codex.with_tools(TOOL_URL.into());
         std::fs::write(dir.path().join("account-failures"), failures.to_string()).unwrap();
         let sink = super::super::recording::Recorded::default();
@@ -735,7 +737,7 @@ async fn a_failed_account_read_is_asked_once_more_before_the_turn_fails() {
 async fn an_empty_tool_inventory_is_listed_once_more_before_the_turn_fails() {
     for (failures, delivered) in [(1, true), (2, false)] {
         let dir = tempfile::tempdir().unwrap();
-        let (codex, received) = fake_codex_with(dir.path(), &elsebot_server(), None);
+        let (codex, received) = fake_codex_with(dir.path(), &elsebot_server(), None).await;
         let codex = codex.with_tools(TOOL_URL.into());
         std::fs::write(dir.path().join("mcp-failures"), failures.to_string()).unwrap();
         let sink = super::super::recording::Recorded::default();
@@ -771,7 +773,7 @@ async fn an_empty_tool_inventory_is_listed_once_more_before_the_turn_fails() {
 async fn an_unexpected_tool_inventory_is_a_policy_violation() {
     let dir = tempfile::tempdir().unwrap();
     let servers = json!([{ "name": crate::app::tools::SERVER_NAME, "tools": { "shell": {} } }]);
-    let (codex, received) = fake_codex_with(dir.path(), &servers, None);
+    let (codex, received) = fake_codex_with(dir.path(), &servers, None).await;
     let codex = codex.with_tools(TOOL_URL.into());
     let sink = super::super::recording::Recorded::default();
     let outcome = codex
@@ -804,7 +806,7 @@ async fn a_codex_that_exits_reports_the_end_of_its_stderr_without_the_grant() {
                  exit 101"
             ),
             true,
-        )
+        ).await
         .with_tools(TOOL_URL.into());
         let sink = super::super::recording::Recorded::default();
         let outcome = codex
@@ -830,7 +832,7 @@ async fn a_connector_event_fails_on_any_command_or_file_change() {
     use crate::app::providers::Origin;
     for kind in ["commandExecution", "fileChange", "webSearch"] {
         let dir = tempfile::tempdir().unwrap();
-        let (codex, _) = fake_codex_with(dir.path(), &elsebot_server(), Some(kind));
+        let (codex, _) = fake_codex_with(dir.path(), &elsebot_server(), Some(kind)).await;
         let codex = codex.with_tools(TOOL_URL.into());
         let sink = super::super::recording::Recorded::default();
         let outcome = codex
@@ -843,7 +845,7 @@ async fn a_connector_event_fails_on_any_command_or_file_change() {
     }
     for kind in ["commandExecution", "fileChange"] {
         let dir = tempfile::tempdir().unwrap();
-        let (codex, _) = fake_codex_with(dir.path(), &elsebot_server(), Some(kind));
+        let (codex, _) = fake_codex_with(dir.path(), &elsebot_server(), Some(kind)).await;
         let codex = codex.with_tools(TOOL_URL.into());
         let sink = super::super::recording::Recorded::default();
         let outcome = codex
@@ -875,7 +877,7 @@ fn a_connector_event_never_resumes_a_thread_with_host_tools() {
 #[tokio::test]
 async fn a_warm_thread_receives_only_changed_memory_and_default_skills() {
     let dir = tempfile::tempdir().unwrap();
-    let (codex, received) = fake_codex(dir.path());
+    let (codex, received) = fake_codex(dir.path()).await;
     let turn = |session| TurnInput {
         turn_no: 3,
         bot_name: "GitHub".into(),
@@ -949,7 +951,7 @@ async fn a_warm_thread_receives_only_changed_memory_and_default_skills() {
 #[tokio::test]
 async fn a_thread_whose_history_outgrew_the_line_limit_still_resumes() {
     let dir = tempfile::tempdir().unwrap();
-    let (codex, _) = fake_codex(dir.path());
+    let (codex, _) = fake_codex(dir.path()).await;
     std::fs::write(dir.path().join("long-history"), "").unwrap();
     let mut turn = turn_from(crate::app::providers::Origin::RoutineRun);
     let fingerprint = codex.fingerprint_of(
@@ -976,7 +978,7 @@ async fn files_reach_codex_in_order_with_images_as_local_images() {
     use crate::app::messages::{Attachment, MessagePart};
     use crate::app::providers::InputFile;
     let dir = tempfile::tempdir().unwrap();
-    let (codex, _) = fake_codex(dir.path());
+    let (codex, _) = fake_codex(dir.path()).await;
     let file = |name: &str, media_type: &str, data: &[u8]| InputFile {
         attachment: Attachment {
             id: Uuid::new_v4(),
@@ -1064,10 +1066,10 @@ async fn files_reach_codex_in_order_with_images_as_local_images() {
     assert_eq!(sent.as_array().unwrap().len(), 3);
 }
 
-#[test]
-fn any_running_logged_in_version_is_available() {
+#[tokio::test]
+async fn any_running_logged_in_version_is_available() {
     let dir = tempfile::tempdir().unwrap();
-    let codex = detect_with(dir.path(), "echo 'codex-cli 9.0.0'", true);
+    let codex = detect_with(dir.path(), "echo 'codex-cli 9.0.0'", true).await;
     let availability = codex.availability();
     assert!(
         matches!(availability, Availability::Available),
@@ -1081,7 +1083,9 @@ fn any_running_logged_in_version_is_available() {
     ] {
         assert!(
             matches!(
-                detect_with(dir.path(), script, logged_in).availability(),
+                detect_with(dir.path(), script, logged_in)
+                    .await
+                    .availability(),
                 Availability::Unavailable(_)
             ),
             "{script} {logged_in}"
@@ -1127,7 +1131,8 @@ for line in sys.stdin:
         print(json.dumps({"id": m["id"], "result": {}}), flush=True)
 '"#,
         true,
-    );
+    )
+    .await;
     let input = turn_from(crate::app::providers::Origin::OwnerRequest);
     let turn_id = input.turn_id;
     let stop = Stop::default();
@@ -1282,8 +1287,8 @@ fn context_compaction_is_reported_once_per_signal() {
     assert!(events.on(&other).unwrap().is_empty());
 }
 
-#[test]
-fn debug_models_lists_shown_models_in_priority_order() {
+#[tokio::test]
+async fn debug_models_lists_shown_models_in_priority_order() {
     let exported = json!({ "models": [
         { "slug": "gpt-6.1-sol", "visibility": "list", "priority": 3,
           "supported_reasoning_levels": [{ "effort": "low" }, { "effort": "ultra" }],
@@ -1301,7 +1306,7 @@ fn debug_models_lists_shown_models_in_priority_order() {
         listed[1].tiers.as_deref(),
         Some(&["default".to_owned(), "priority".to_owned()][..])
     );
-    let codex = Codex::detect(None, None, None);
+    let codex = Codex::detect(None, None, None).await;
     codex.models.listed(listed, chrono::Utc::now()).unwrap();
     let sol = codex.catalog().model("gpt-6.1-sol").cloned().unwrap();
     assert_eq!(sol.efforts, ["low"], "ultra is not offered");

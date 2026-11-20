@@ -10,9 +10,10 @@ use else_api::providers::{Registry, grok::Grok, grok_home, host::Host};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-fn installed() -> PathBuf {
+async fn installed() -> PathBuf {
     let configured = std::env::var_os("ELSE_GROK_BIN").map(PathBuf::from);
     else_api::providers::executable::executable(configured.as_deref(), "grok")
+        .await
         .expect("resolve Grok CLI")
         .expect("Grok CLI on PATH or ELSE_GROK_BIN")
         .path()
@@ -57,12 +58,13 @@ async fn session(app: &TestApp, bot: &str) -> String {
         .bind(bot.parse::<Uuid>().unwrap()).fetch_one(&app.db.pool).await.unwrap()
 }
 
-fn grok(data: &Path, host: &Host, tool_url: &str) -> Grok {
+async fn grok(data: &Path, host: &Host, tool_url: &str) -> Grok {
     let provider = Grok::detect(
         Some(host.clone()),
-        Some(installed()),
+        Some(installed().await),
         grok_home::host_home(),
     )
+    .await
     .with_tools(tool_url.into());
     assert_eq!(
         provider.project_dir(Uuid::nil()).unwrap(),
@@ -88,7 +90,7 @@ async fn grok_conversations_stream_resume_use_host_and_mcp_tools_and_cancel() {
         db,
         2,
         Registry::new(vec![
-            Arc::new(grok(&data, &host, &url)),
+            Arc::new(grok(&data, &host, &url).await),
             Arc::new(else_api::providers::synthetic::Synthetic::new(
                 Duration::from_millis(5),
             )),
@@ -311,7 +313,7 @@ async fn a_newer_owner_message_joins_a_running_grok_reply() {
     let app = TestApp::with_registry(
         db,
         2,
-        Registry::new(vec![Arc::new(grok(&data, &host, &url))]),
+        Registry::new(vec![Arc::new(grok(&data, &host, &url).await)]),
     );
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });

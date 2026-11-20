@@ -107,7 +107,10 @@ async fn known_choice_waits_when_its_profile_or_provider_is_unavailable() {
     let bot = bot(&db).await;
     default_provider(&db, "codex").await;
     let missing_profile = Registry::new(vec![synthetic(), Arc::new(ProfiledFake)]);
-    let unavailable = Registry::new(vec![synthetic(), Arc::new(Codex::detect(None, None, None))]);
+    let unavailable = Registry::new(vec![
+        synthetic(),
+        Arc::new(Codex::detect(None, None, None).await),
+    ]);
     for registry in [missing_profile, unavailable] {
         assert!(
             bot_profiles::for_admission(&mut db.pool.acquire().await.unwrap(), &registry, bot,)

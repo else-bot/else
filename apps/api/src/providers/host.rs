@@ -22,13 +22,14 @@
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder};
-use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use rustix::process::{Pid, Signal};
+
+use super::cli::process::{Finish, Scope, Stderr, last_lines};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -85,6 +86,193 @@ pub struct LaunchSpec {
     pub env: Vec<(String, String)>,
 }
 
+/// How long a run outside a turn may take unless it says otherwise.
+pub const RUN_TIMEOUT: Duration = Duration::from_secs(30);
+const RUN_LIMIT: usize = 1024 * 1024;
+
+/// One CLI run to completion, supervised like a provider run: its own
+/// process group with the installation marker, killed on drop, and bounded
+/// in bytes and time.
+#[derive(Debug, Clone)]
+pub struct Run {
+    pub program: PathBuf,
+    pub args: Vec<OsString>,
+    /// Extra environment, on top of the passed session variables.
+    pub env: Vec<(String, String)>,
+    pub dir: PathBuf,
+    /// Every process the run starts carries it, so the run's leftovers are
+    /// swept by it. One run per marker at a time.
+    pub marker: Uuid,
+    /// Written to stdin; empty means no stdin.
+    pub input: Vec<u8>,
+    pub limit: usize,
+    pub timeout: Duration,
+}
+
+impl Run {
+    /// `program args` outside any bot, in the temporary directory.
+    pub fn new(program: &Path, args: &[&str]) -> Self {
+        Self {
+            program: program.to_owned(),
+            args: args.iter().map(OsString::from).collect(),
+            env: Vec::new(),
+            dir: std::env::temp_dir(),
+            marker: Uuid::new_v4(),
+            input: Vec::new(),
+            limit: RUN_LIMIT,
+            timeout: RUN_TIMEOUT,
+        }
+    }
+
+    /// A launch run like a provider turn: in the bot's project, under the
+    /// launch's marker.
+    pub fn launch(spec: &LaunchSpec) -> Self {
+        Self {
+            program: spec.program.clone(),
+            args: spec.args.clone(),
+            env: spec.env.clone(),
+            dir: spec.dirs.project.clone(),
+            marker: spec.turn_id,
+            input: Vec::new(),
+            limit: RUN_LIMIT,
+            timeout: RUN_TIMEOUT,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    #[error("could not start ({0})")]
+    Start(String),
+    #[error("could not write its input ({0})")]
+    Write(std::io::Error),
+    #[error("could not read its output ({0})")]
+    Read(std::io::Error),
+    #[error("its output exceeded {0} bytes")]
+    TooLarge(usize),
+    #[error("did not finish within {0:?}")]
+    TimedOut(Duration),
+    #[error("{status}{}", reason(.stderr))]
+    Failed {
+        status: std::process::ExitStatus,
+        stderr: Option<String>,
+    },
+    #[error("it exited without answering{}", reason(.stderr))]
+    NoAnswer { stderr: Option<String> },
+    #[error("printed nothing")]
+    Empty,
+    #[error("{0}")]
+    Cleanup(String),
+}
+
+impl RunError {
+    fn stderr_slot(&mut self) -> Option<&mut Option<String>> {
+        match self {
+            Self::Failed { stderr, .. } | Self::NoAnswer { stderr } => Some(stderr),
+            _ => None,
+        }
+    }
+}
+
+fn reason(stderr: &Option<String>) -> String {
+    stderr
+        .as_deref()
+        .map_or_else(String::new, |line| format!(": {line}"))
+}
+
+struct Started {
+    scope: Scope,
+    stdin: Option<tokio::process::ChildStdin>,
+    stdout: Option<tokio::process::ChildStdout>,
+    stderr: Option<Stderr>,
+}
+
+impl Started {
+    async fn write_input(&mut self, run: &Run) -> Result<(), RunError> {
+        use tokio::io::AsyncWriteExt;
+        if let Some(stdin) = self.stdin.as_mut() {
+            stdin.write_all(&run.input).await.map_err(RunError::Write)?;
+        }
+        Ok(())
+    }
+
+    async fn output(&mut self, run: &Run) -> Result<Vec<u8>, RunError> {
+        use tokio::io::AsyncReadExt;
+        self.write_input(run).await?;
+        self.stdin = None;
+        let mut out = Vec::new();
+        if let Some(stdout) = self.stdout.take() {
+            stdout
+                .take(run.limit as u64 + 1)
+                .read_to_end(&mut out)
+                .await
+                .map_err(RunError::Read)?;
+        }
+        if out.len() > run.limit {
+            return Err(RunError::TooLarge(run.limit));
+        }
+        let status = self.scope.child().wait().await.map_err(RunError::Read)?;
+        if !status.success() {
+            return Err(RunError::Failed {
+                status,
+                stderr: None,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn answer<T>(
+        &mut self,
+        run: &Run,
+        answer: impl Fn(&str) -> Option<T>,
+    ) -> Result<T, RunError> {
+        use tokio::io::AsyncReadExt;
+        self.write_input(run).await?;
+        let Some(stdout) = self.stdout.as_mut() else {
+            return Err(RunError::NoAnswer { stderr: None });
+        };
+        let mut pending: Vec<u8> = Vec::new();
+        let mut read = 0;
+        let mut chunk = vec![0; 64 * 1024];
+        loop {
+            let n = stdout.read(&mut chunk).await.map_err(RunError::Read)?;
+            if n == 0 {
+                return Err(RunError::NoAnswer { stderr: None });
+            }
+            read += n;
+            if read > run.limit {
+                return Err(RunError::TooLarge(run.limit));
+            }
+            pending.extend_from_slice(&chunk[..n]);
+            while let Some(end) = pending.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = pending.drain(..=end).collect();
+                if let Some(found) = answer(String::from_utf8_lossy(&line).trim_end()) {
+                    return Ok(found);
+                }
+            }
+        }
+    }
+
+    /// Stop the process tree and sweep its marker. The run's own error wins
+    /// over a cleanup error. A failure's reason is read after the sweep,
+    /// when nothing is left holding stderr open.
+    async fn finish<T>(self, result: Result<T, RunError>) -> Result<T, RunError> {
+        drop(self.stdin);
+        let cleanup = self.scope.finish(Finish::Kill).await;
+        let mut error = match result {
+            Ok(value) => return cleanup.map_err(RunError::Cleanup).map(|()| value),
+            Err(error) => error,
+        };
+        if let (Some(slot), Some(stderr)) = (error.stderr_slot(), &self.stderr) {
+            let tail = stderr.tail().await;
+            *slot = last_lines(&tail, 1)
+                .first()
+                .map(|line| line.chars().take(200).collect());
+        }
+        Err(error)
+    }
+}
+
 #[derive(Clone)]
 pub struct Host {
     data_dir: PathBuf,
@@ -102,205 +290,89 @@ impl Host {
         }
     }
 
-    /// Run `program args` with the passed environment plus `env` and return
-    /// its trimmed stdout, or why it did not run: it could not start, it
-    /// failed (with the last line of its stderr), or it printed nothing.
-    pub fn probe(
+    /// Run `run` to completion and return its stdout. Everything it started
+    /// is stopped and swept before this returns, or in the background if the
+    /// call is dropped.
+    pub async fn run(&self, run: &Run) -> Result<Vec<u8>, RunError> {
+        let mut started = self.start(run).await?;
+        let read = tokio::time::timeout(run.timeout, started.output(run));
+        let result = read.await.unwrap_or(Err(RunError::TimedOut(run.timeout)));
+        started.finish(result).await
+    }
+
+    /// Start `run`, write its input, and return the first stdout line
+    /// `answer` accepts. Errors past `run.limit` bytes, at EOF, or after
+    /// `run.timeout`; the process tree is stopped either way.
+    pub async fn ask<T>(
+        &self,
+        run: &Run,
+        answer: impl Fn(&str) -> Option<T>,
+    ) -> Result<T, RunError> {
+        let mut started = self.start(run).await?;
+        let read = tokio::time::timeout(run.timeout, started.answer(run, answer));
+        let result = read.await.unwrap_or(Err(RunError::TimedOut(run.timeout)));
+        started.finish(result).await
+    }
+
+    /// Run a short check such as `--version` and return its trimmed stdout,
+    /// or why it did not run: it could not start, it failed (with the last
+    /// line of its stderr), it timed out, or it printed nothing.
+    pub async fn probe(
         &self,
         program: &Path,
         args: &[&str],
         env: &[(String, String)],
-    ) -> Result<String, String> {
-        let mut command = std::process::Command::new(program);
-        command
-            .args(args)
-            .env_clear()
-            .envs(passed_env())
-            .envs(env.iter().map(|(k, v)| (k, v)))
-            .stdin(Stdio::null());
-        // A file, not a pipe: a background child that keeps stderr open must
-        // not hold the probe until it exits. Only a failure's reason needs it.
-        let mut stderr = probe_stderr();
-        command.stderr(
-            stderr
-                .as_ref()
-                .and_then(|f| f.try_clone().ok())
-                .map_or_else(Stdio::null, Stdio::from),
-        );
-        let mut retries = 5;
-        let output = loop {
-            match command.output() {
-                // A concurrent fork can briefly inherit a freshly written executable's writer.
-                Err(err) if err.raw_os_error() == Some(libc::ETXTBSY) && retries > 0 => {
-                    retries -= 1;
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                result => break result.map_err(|e| format!("could not start ({e})"))?,
-            }
+    ) -> Result<String, RunError> {
+        let run = Run {
+            env: env.to_vec(),
+            ..Run::new(program, args)
         };
-        if !output.status.success() {
-            let mut text = String::new();
-            if let Some(file) = stderr.as_mut() {
-                let _ = file
-                    .seek(SeekFrom::Start(0))
-                    .and_then(|_| file.read_to_string(&mut text));
-            }
-            return Err(match text.lines().map(str::trim).rfind(|l| !l.is_empty()) {
-                Some(line) => {
-                    let line: String = line.chars().take(200).collect();
-                    format!("{}: {line}", output.status)
-                }
-                None => output.status.to_string(),
-            });
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let stdout = self.run(&run).await?;
+        let stdout = String::from_utf8_lossy(&stdout).trim().to_owned();
         if stdout.is_empty() {
-            return Err("printed nothing".into());
+            return Err(RunError::Empty);
         }
         Ok(stdout)
     }
 
-    /// Run a launch to completion like a provider run and return its stdout:
-    /// an error if it fails, writes more than `limit` bytes, or outlives
-    /// `timeout`. Everything it started is stopped and swept before it
-    /// returns (or in the background if the call is dropped).
-    pub async fn bounded_output(
-        &self,
-        spec: &LaunchSpec,
-        timeout: Duration,
-        limit: usize,
-    ) -> Result<Vec<u8>, String> {
-        use tokio::io::AsyncReadExt;
-        let mut scope = super::cli::process::Scope::spawn(self, spec, Stdio::null(), Stdio::null())
-            .map_err(|e| e.to_string())?;
-        let stdout = scope.child().stdout.take();
-        let run = async {
-            let mut out = Vec::new();
-            if let Some(stdout) = stdout {
-                stdout
-                    .take(limit as u64 + 1)
-                    .read_to_end(&mut out)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            }
-            if out.len() > limit {
-                return Err(format!("output exceeded {limit} bytes"));
-            }
-            let status = scope.child().wait().await.map_err(|e| e.to_string())?;
-            if status.success() {
-                Ok(out)
+    async fn start(&self, run: &Run) -> Result<Started, RunError> {
+        let stdin = || {
+            if run.input.is_empty() {
+                Stdio::null()
             } else {
-                Err(format!("exited with {status}"))
+                Stdio::piped()
             }
         };
-        let result = tokio::time::timeout(timeout, run)
-            .await
-            .unwrap_or_else(|_| Err(format!("did not finish within {}s", timeout.as_secs())));
-        let cleanup = scope.finish(super::cli::process::Finish::Kill).await;
-        let out = result?;
-        cleanup.map(|()| out)
-    }
-
-    /// `program` started outside any bot, in its own process group with
-    /// the installation marker, so dropping it or a restarted API's sweep
-    /// stops everything it started.
-    fn spawn_probe(
-        &self,
-        program: &Path,
-        args: &[&str],
-        env: &[(String, String)],
-        stdin: Stdio,
-    ) -> Result<Supervised, String> {
-        let mut command = tokio::process::Command::new(program);
-        command
-            .args(args)
-            .current_dir(std::env::temp_dir())
-            .env_clear()
-            .envs(passed_env())
-            .envs(env.iter().map(|(k, v)| (k, v)))
-            .env(MARKER_VAR, self.marker(Uuid::nil()))
-            .stdin(stdin)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .kill_on_drop(true);
-        Supervised::spawn(command).map_err(|e| format!("could not start ({e})"))
-    }
-
-    /// Run `program` outside any bot to completion and return its stdout:
-    /// an error if it fails or writes more than `limit` bytes. Dropping the
-    /// call kills it.
-    pub async fn output(
-        &self,
-        program: &Path,
-        args: &[&str],
-        env: &[(String, String)],
-        limit: usize,
-    ) -> Result<String, String> {
-        use tokio::io::AsyncReadExt;
-        let mut process = self.spawn_probe(program, args, env, Stdio::null())?;
-        let stdout = process.child.stdout.take().ok_or("no stdout")?;
-        let mut out = Vec::new();
-        stdout
-            .take(limit as u64 + 1)
-            .read_to_end(&mut out)
-            .await
-            .map_err(|e| format!("could not read its output ({e})"))?;
-        if out.len() > limit {
-            process.kill().await;
-            return Err(format!("its output exceeded {limit} bytes"));
-        }
-        let status = process.child.wait().await.map_err(|e| e.to_string())?;
-        if !status.success() {
-            return Err(format!("exited with {status}"));
-        }
-        String::from_utf8(out).map_err(|_| "its output is not UTF-8".into())
-    }
-
-    /// Start `program` outside any bot, write `input` to it, and return the
-    /// first stdout line `answer` accepts. The process group is killed when
-    /// this returns or is dropped. Errors past `limit` bytes or at EOF.
-    pub async fn ask<T>(
-        &self,
-        program: &Path,
-        args: &[&str],
-        env: &[(String, String)],
-        input: &str,
-        limit: usize,
-        answer: impl Fn(&str) -> Option<T>,
-    ) -> Result<T, String> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut process = self.spawn_probe(program, args, env, Stdio::piped())?;
-        let mut stdin = process.child.stdin.take().ok_or("no stdin")?;
-        let mut stdout = process.child.stdout.take().ok_or("no stdout")?;
-        stdin
-            .write_all(input.as_bytes())
-            .await
-            .map_err(|e| format!("could not write its input ({e})"))?;
-        let mut pending: Vec<u8> = Vec::new();
-        let mut read = 0;
-        let mut chunk = vec![0; 64 * 1024];
-        let found = 'read: loop {
-            let n = match stdout.read(&mut chunk).await {
-                Ok(0) => break Err("it exited without answering".to_owned()),
-                Ok(n) => n,
-                Err(e) => break Err(format!("could not read its output ({e})")),
-            };
-            read += n;
-            if read > limit {
-                break Err(format!("its output exceeded {limit} bytes"));
-            }
-            pending.extend_from_slice(&chunk[..n]);
-            while let Some(end) = pending.iter().position(|b| *b == b'\n') {
-                let line: Vec<u8> = pending.drain(..=end).collect();
-                if let Some(found) = answer(String::from_utf8_lossy(&line).trim_end()) {
-                    break 'read Ok(found);
+        let mut retries = 5;
+        let mut scope = loop {
+            let mut command =
+                self.command_in(&run.program, &run.args, &run.env, &run.dir, run.marker);
+            command
+                .stdin(stdin())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            match Scope::supervise(self, run.marker, command) {
+                // A concurrent fork can briefly inherit a freshly written executable's writer.
+                Err(err) if err.raw_os_error() == Some(libc::ETXTBSY) && retries > 0 => {
+                    retries -= 1;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
+                result => break result.map_err(|e| RunError::Start(e.to_string()))?,
             }
         };
-        drop(stdin);
-        process.kill().await;
-        found
+        let stdin = scope.child().stdin.take();
+        let stdout = scope.child().stdout.take();
+        let stderr = scope
+            .child()
+            .stderr
+            .take()
+            .map(|stderr| Stderr::collect(stderr, &run.env));
+        Ok(Started {
+            scope,
+            stdin,
+            stdout,
+            stderr,
+        })
     }
 
     pub fn marker_prefix(&self) -> &str {
@@ -349,14 +421,31 @@ impl Host {
     /// directory, the passed environment plus the launch's own, its own
     /// process group, and the marker for discovery.
     pub fn command(&self, spec: &LaunchSpec) -> tokio::process::Command {
-        let mut command = tokio::process::Command::new(&spec.program);
+        self.command_in(
+            &spec.program,
+            &spec.args,
+            &spec.env,
+            &spec.dirs.project,
+            spec.turn_id,
+        )
+    }
+
+    fn command_in(
+        &self,
+        program: &Path,
+        args: &[OsString],
+        env: &[(String, String)],
+        dir: &Path,
+        marker: Uuid,
+    ) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new(program);
         command
-            .args(&spec.args)
-            .current_dir(&spec.dirs.project)
+            .args(args)
+            .current_dir(dir)
             .env_clear()
             .envs(passed_env())
-            .envs(spec.env.iter().map(|(k, v)| (k, v)))
-            .env(MARKER_VAR, self.marker(spec.turn_id))
+            .envs(env.iter().map(|(k, v)| (k, v)))
+            .env(MARKER_VAR, self.marker(marker))
             .process_group(0)
             .kill_on_drop(true);
         command
@@ -416,39 +505,6 @@ pub fn project_dir(root: &Path, bot_id: Uuid) -> std::io::Result<PathBuf> {
         return Err(std::io::Error::other("not a directory"));
     }
     Ok(dir)
-}
-
-/// An anonymous file for a probe's stderr: created private, then unlinked.
-/// `None` if the temporary directory cannot hold one.
-fn probe_stderr() -> Option<fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    for _ in 0..8 {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos());
-        let path = std::env::temp_dir().join(format!(
-            "else-probe-{}-{}-{nanos}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        match fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
-            Ok(file) => {
-                let _ = fs::remove_file(&path);
-                return Some(file);
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return None,
-        }
-    }
-    None
 }
 
 fn passed_env() -> impl Iterator<Item = (OsString, OsString)> {
@@ -753,64 +809,121 @@ mod tests {
         Host::new(&dir.join("data"), &dir.join("bots"))
     }
 
-    #[tokio::test]
-    async fn probes_stop_reading_at_their_limit_even_without_a_newline() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = host(dir.path());
-        let sh = Path::new("/bin/sh");
-        let flood = ["-c", "head -c 4000000 /dev/zero; sleep 60"];
-        let asked = host.ask(sh, &flood, &[], "", 1024, |_| Some(())).await;
-        assert!(asked.unwrap_err().contains("exceeded 1024 bytes"));
-        let output = host.output(sh, &flood, &[], 1024).await;
-        assert!(output.unwrap_err().contains("exceeded 1024 bytes"));
-        let answered = host
-            .ask(
-                sh,
-                &["-c", "read line; echo skip; echo \"got $line\""],
-                &[],
-                "hi\n",
-                1024,
-                |l| l.strip_prefix("got ").map(str::to_owned),
-            )
-            .await;
-        assert_eq!(answered.as_deref(), Ok("hi"));
-        assert_eq!(
-            host.output(sh, &["-c", "echo listed"], &[], 1024)
-                .await
-                .as_deref(),
-            Ok("listed\n")
-        );
-        assert!(host.output(sh, &["-c", "exit 3"], &[], 1024).await.is_err());
+    fn sh(script: &str) -> Run {
+        Run {
+            limit: 1024,
+            ..Run::new(Path::new("/bin/sh"), &["-c", script])
+        }
     }
 
     #[tokio::test]
-    async fn a_dropped_probe_kills_its_process_group() {
+    async fn runs_stop_reading_at_their_limit_even_without_a_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(dir.path());
+        let flood = sh("head -c 4000000 /dev/zero; sleep 60");
+        let asked = host.ask(&flood, |_| Some(())).await;
+        assert_eq!(
+            asked.unwrap_err().to_string(),
+            "its output exceeded 1024 bytes"
+        );
+        let output = host.run(&flood).await;
+        assert_eq!(
+            output.unwrap_err().to_string(),
+            "its output exceeded 1024 bytes"
+        );
+        let question = Run {
+            input: b"hi\n".to_vec(),
+            ..sh("read line; echo skip; echo \"got $line\"")
+        };
+        let answered = host
+            .ask(&question, |l| l.strip_prefix("got ").map(str::to_owned))
+            .await;
+        assert_eq!(answered.unwrap(), "hi");
+        assert_eq!(host.run(&sh("echo listed")).await.unwrap(), b"listed\n");
+        assert_eq!(
+            host.run(&sh("echo why >&2; exit 3"))
+                .await
+                .unwrap_err()
+                .to_string(),
+            "exit status: 3: why"
+        );
+        let silent = host
+            .ask(&sh("echo not logged in >&2"), |_| None::<()>)
+            .await;
+        assert_eq!(
+            silent.unwrap_err().to_string(),
+            "it exited without answering: not logged in"
+        );
+    }
+
+    fn gone(pid: i32) -> bool {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map_or(true, |stat| stat.split_whitespace().nth(2) == Some("Z"))
+    }
+
+    async fn wait_gone(pid: i32) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !gone(pid) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        gone(pid)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_hanging_run_times_out_and_everything_it_started_is_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(dir.path());
+        let pids = dir.path().join("pids");
+        let script = format!(
+            "setsid sleep 60 </dev/null >/dev/null 2>&1 & echo $! > {0}.new; \
+             sleep 60 & echo $! >> {0}.new; echo $$ >> {0}.new; mv {0}.new {0}; wait",
+            pids.display()
+        );
+        let run = Run {
+            timeout: Duration::from_secs(3),
+            ..sh(&script)
+        };
+        let timed_out = host.run(&run).await.unwrap_err();
+        assert_eq!(timed_out.to_string(), "did not finish within 3s");
+        let pids: Vec<i32> = fs::read_to_string(&pids)
+            .unwrap()
+            .lines()
+            .map(|l| l.parse().unwrap())
+            .collect();
+        assert_eq!(
+            pids.len(),
+            3,
+            "the shell, its child, and one that left the group"
+        );
+        for pid in pids {
+            assert!(
+                wait_gone(pid).await,
+                "{pid} was killed when the run timed out"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_dropped_run_kills_its_process_group() {
         let dir = tempfile::tempdir().unwrap();
         let host = host(dir.path());
         let pids = dir.path().join("pids");
         let script = format!("sleep 60 & echo $! > {}; wait", pids.display());
         let args = ["-c", script.as_str()];
-        let hung = host.output(Path::new("/bin/sh"), &args, &[], 1024);
-        let waited = tokio::time::timeout(Duration::from_millis(500), async {
-            tokio::join!(hung, async {
-                while !pids.exists() {
+        let run = Run::new(Path::new("/bin/sh"), &args);
+        tokio::select! {
+            _ = host.run(&run) => panic!("the run hangs until dropped"),
+            () = async {
+                while !fs::read_to_string(&pids).is_ok_and(|p| p.ends_with('\n')) {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            })
-        })
-        .await;
-        assert!(waited.is_err(), "the probe hangs until dropped");
-        let child: i32 = fs::read_to_string(&pids).unwrap().trim().parse().unwrap();
-        let gone = || {
-            fs::read_to_string(format!("/proc/{child}/stat"))
-                .map_or(true, |stat| stat.split_whitespace().nth(2) == Some("Z"))
-        };
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while !gone() && std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            } => {}
         }
+        let child: i32 = fs::read_to_string(&pids).unwrap().trim().parse().unwrap();
         assert!(
-            gone(),
+            wait_gone(child).await,
             "the background child {child} was killed with its group"
         );
     }

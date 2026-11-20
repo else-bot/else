@@ -41,6 +41,7 @@ async fn only_bot_project_skills_reach_new_and_resumed_model_context() {
         return;
     };
     let program = crate::providers::executable::executable(Some(Path::new(&program)), "codex")
+        .await
         .expect("resolve Codex CLI")
         .expect("configured Codex CLI")
         .path()

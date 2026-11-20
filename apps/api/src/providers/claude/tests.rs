@@ -398,9 +398,9 @@ fn a_no_tool_checkpoint_requires_an_empty_inventory() {
     assert!(t.on(&init(claude_home::tool_names(), connected())).is_err());
 }
 
-#[test]
-fn profiles_need_explicit_supported_values() {
-    let claude = Claude::detect(None, None, None, String::new());
+#[tokio::test]
+async fn profiles_need_explicit_supported_values() {
+    let claude = Claude::detect(None, None, None, String::new()).await;
     let ok = Profile {
         model: "claude-opus-5-5".into(),
         reasoning_effort: "high".into(),
@@ -433,9 +433,10 @@ fn profiles_need_explicit_supported_values() {
     ));
 }
 
-#[test]
-fn arguments_offer_only_host_and_elsebot_tools_and_resume_explicitly() {
+#[tokio::test]
+async fn arguments_offer_only_host_and_elsebot_tools_and_resume_explicitly() {
     let claude = Claude::detect(None, None, None, String::new())
+        .await
         .with_tools("http://127.0.0.1:1/tools/v1/mcp".into());
     let profile = Profile {
         model: "claude-sonnet-5-5".into(),
@@ -472,7 +473,7 @@ fn arguments_offer_only_host_and_elsebot_tools_and_resume_explicitly() {
     );
 }
 
-fn detect_with(dir: &std::path::Path, version: &str, status: &str) -> Availability {
+async fn detect_with(dir: &std::path::Path, version: &str, status: &str) -> Availability {
     use std::os::unix::fs::PermissionsExt;
     let program = dir.join("claude");
     std::fs::write(
@@ -491,15 +492,16 @@ fn detect_with(dir: &std::path::Path, version: &str, status: &str) -> Availabili
         Some(config),
         String::new(),
     )
+    .await
     .availability()
 }
 
-#[test]
-fn any_running_logged_in_version_is_available() {
+#[tokio::test]
+async fn any_running_logged_in_version_is_available() {
     let dir = tempfile::tempdir().unwrap();
     let version = "echo '2.1.999 (Claude Code)'";
     let logged_in = r#"echo '{"loggedIn":true}'"#;
-    let availability = detect_with(dir.path(), version, logged_in);
+    let availability = detect_with(dir.path(), version, logged_in).await;
     assert!(
         matches!(availability, Availability::Available),
         "{availability:?}"
@@ -513,7 +515,7 @@ fn any_running_logged_in_version_is_available() {
     ] {
         assert!(
             matches!(
-                detect_with(dir.path(), version, status),
+                detect_with(dir.path(), version, status).await,
                 Availability::Unavailable(_)
             ),
             "{version} {status}"
@@ -670,7 +672,7 @@ fn an_api_error_fails_the_turn_with_the_clis_message() {
     );
 }
 
-fn fake_claude(dir: &std::path::Path) -> (Claude, std::path::PathBuf) {
+async fn fake_claude(dir: &std::path::Path) -> (Claude, std::path::PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let received = dir.join("received.jsonl");
     let program = dir.join("claude");
@@ -707,7 +709,8 @@ out({{"type": "result", "subtype": "success", "is_error": False, "result": "ok",
         Some(program),
         Some(config),
         String::new(),
-    );
+    )
+    .await;
     assert!(matches!(claude.availability(), Availability::Available));
     (claude, received)
 }
@@ -766,7 +769,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
 #[tokio::test]
 async fn a_warm_session_receives_only_changed_memory_and_default_skills() {
     let dir = tempfile::tempdir().unwrap();
-    let (claude, received) = fake_claude(dir.path());
+    let (claude, received) = fake_claude(dir.path()).await;
     let base = specialist_turn(None);
     let profile = base.profile.clone().unwrap();
     let fingerprint = claude.fingerprint(claude.ready.as_ref().unwrap(), &profile, &base);
@@ -842,7 +845,7 @@ async fn files_reach_claude_in_order_with_images_inline() {
     use crate::app::messages::{Attachment, MessagePart};
     use crate::app::providers::InputFile;
     let dir = tempfile::tempdir().unwrap();
-    let (claude, received) = fake_claude(dir.path());
+    let (claude, received) = fake_claude(dir.path()).await;
     let file = |name: &str, media_type: &str, data: Vec<u8>| InputFile {
         attachment: Attachment {
             id: Uuid::new_v4(),
@@ -917,7 +920,7 @@ async fn files_reach_claude_in_order_with_images_inline() {
     );
 }
 
-fn fake_inventory_claude(dir: &std::path::Path, builtins: Option<&[&str]>) -> Claude {
+async fn fake_inventory_claude(dir: &std::path::Path, builtins: Option<&[&str]>) -> Claude {
     use std::os::unix::fs::PermissionsExt;
     let program = dir.join("claude");
     let launched = dir.join("launched.json");
@@ -960,6 +963,7 @@ out({{"type": "result", "subtype": "success", "is_error": False, "result": "ok",
         Some(config),
         String::new(),
     )
+    .await
     .with_tools("http://127.0.0.1:1/tools/v1/mcp".into())
 }
 
@@ -980,7 +984,7 @@ async fn a_connector_event_launches_with_only_elsebot_tools() {
         (Origin::Other, true),
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let claude = fake_inventory_claude(dir.path(), None);
+        let claude = fake_inventory_claude(dir.path(), None).await;
         let sink = super::super::recording::Recorded::default();
         let outcome = claude.run(turn_from(origin), &sink, Stop::default()).await;
         assert_eq!(outcome, TurnOutcome::Completed, "{origin:?}");
@@ -1035,7 +1039,7 @@ async fn a_connector_event_offered_host_tools_anyway_fails() {
     use crate::app::providers::Origin;
     for tool in ["Bash", "Read"] {
         let dir = tempfile::tempdir().unwrap();
-        let claude = fake_inventory_claude(dir.path(), Some(&[tool]));
+        let claude = fake_inventory_claude(dir.path(), Some(&[tool])).await;
         let sink = super::super::recording::Recorded::default();
         let outcome = claude
             .run(turn_from(Origin::ConnectorEvent), &sink, Stop::default())

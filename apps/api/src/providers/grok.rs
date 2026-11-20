@@ -23,7 +23,7 @@ use super::cli::files::GRANT_ENV;
 use super::cli::session::{self, Identity, Opened, PreparedTurn};
 use super::cli::stream::{Interrupt, StreamAttempt};
 use super::definitions::Definition;
-use super::host::{BotDirs, Host, LaunchSpec};
+use super::host::{BotDirs, Host, LaunchSpec, Run};
 use super::models::{Listed, Models};
 use super::{attachments, grok_home, prompt};
 use crate::app::providers::{
@@ -49,19 +49,21 @@ pub static DEFINITION: Definition = Definition {
     build,
 };
 
-fn build(wiring: &super::Wiring) -> super::Built {
-    let home = grok_home::host_home();
-    let program = lookup(wiring.config.grok_bin.as_deref(), home.as_deref());
-    let grok = Grok {
-        models: Models::new(&DEFINITION),
-        ready: Grok::ready(Some(wiring.host.clone()), program, home),
-        tool_url: None,
-    }
-    .with_tools(wiring.tool_url.clone());
-    super::Built {
-        provider: std::sync::Arc::new(grok),
-        summarizer: None,
-    }
+fn build<'w>(wiring: &'w super::Wiring<'_>) -> futures_util::future::BoxFuture<'w, super::Built> {
+    Box::pin(async move {
+        let home = grok_home::host_home();
+        let program = lookup(wiring.config.grok_bin.as_deref(), home.as_deref()).await;
+        let grok = Grok {
+            models: Models::new(&DEFINITION),
+            ready: Grok::ready(Some(wiring.host.clone()), program, home).await,
+            tool_url: None,
+        }
+        .with_tools(wiring.tool_url.clone());
+        super::Built {
+            provider: std::sync::Arc::new(grok),
+            summarizer: None,
+        }
+    })
 }
 
 /// The models `grok models` prints under "Available models:", one per
@@ -96,11 +98,11 @@ fn installed(home: &Path) -> Option<PathBuf> {
 /// `ELSE_GROK_BIN` or `PATH`, under the same rule as [`choose`]: the
 /// installer writes `ELSE_GROK_BIN` from its own `PATH`, so it can name the
 /// npm package's script too. A setting that does not resolve stays an error.
-fn lookup(
+async fn lookup(
     configured: Option<&Path>,
     home: Option<&Path>,
 ) -> Result<Option<super::Program>, String> {
-    let found = super::executable(configured, "grok");
+    let found = super::executable(configured, "grok").await;
     match configured {
         Some(_) if found.is_err() => found,
         _ => choose(found, home.and_then(installed)),
@@ -143,15 +145,19 @@ pub struct Grok {
 }
 
 impl Grok {
-    pub fn detect(host: Option<Host>, program: Option<PathBuf>, login: Option<PathBuf>) -> Self {
+    pub async fn detect(
+        host: Option<Host>,
+        program: Option<PathBuf>,
+        login: Option<PathBuf>,
+    ) -> Self {
         Self {
             models: Models::new(&DEFINITION),
-            ready: Self::ready(host, Ok(program.map(Into::into)), login),
+            ready: Self::ready(host, Ok(program.map(Into::into)), login).await,
             tool_url: None,
         }
     }
 
-    fn ready(
+    async fn ready(
         host: Option<Host>,
         program: Result<Option<super::Program>, String>,
         login: Option<PathBuf>,
@@ -160,6 +166,7 @@ impl Grok {
         let program = program?.ok_or("Grok CLI (`grok`) was not found on PATH.")?;
         let version = host
             .probe(program.path(), &["--version"], &[])
+            .await
             .map_err(|why| {
                 format!(
                     "Grok CLI does not run (`{} --version`: {why}).",
@@ -200,7 +207,7 @@ impl Grok {
         )
     }
 
-    fn launch(
+    async fn launch(
         &self,
         ready: &Ready,
         input: &TurnInput,
@@ -211,6 +218,7 @@ impl Grok {
         let program = ready
             .program
             .current()
+            .await
             .map_err(|why| format!("Could not start Grok CLI: {why}"))?;
         let host_tools = input.delegation.host_tools();
         let system = format!(
@@ -307,11 +315,16 @@ impl Provider for Grok {
     }
     async fn list_models(&self) -> Result<Vec<Listed>, String> {
         let ready = self.ready.as_ref().map_err(Clone::clone)?;
+        let run = Run {
+            timeout: super::models::ASK_TIMEOUT,
+            ..Run::new(&ready.program.current().await?, &["models"])
+        };
         let printed = ready
             .host
-            .output(&ready.program.current()?, &["models"], &[], 1024 * 1024)
+            .run(&run)
             .await
             .map_err(|why| format!("`grok models` failed: {why}"))?;
+        let printed = String::from_utf8(printed).map_err(|_| "`grok models` printed non-UTF-8")?;
         listed_models(&printed)
     }
 
@@ -365,7 +378,7 @@ impl Provider for Grok {
         ) {
             return failed("provider_unavailable", e.to_string());
         }
-        let spec = match self.launch(ready, &input, profile, dirs, &turn) {
+        let spec = match self.launch(ready, &input, profile, dirs, &turn).await {
             Ok(spec) => spec,
             Err(why) => return failed("provider_unavailable", why),
         };
