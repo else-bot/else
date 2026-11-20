@@ -28,8 +28,8 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::types::{
-    Account, Arrival, Credential, Cursor, Envelope, Health, MailCommand, MailConfig, MailTrigger,
-    MessageRef, MoveKind, Permissions, Place, Provider, Scan,
+    Account, Arrival, Credential, Cursor, Envelope, Health, MailCommand, MailConfig, MailError,
+    MailTrigger, MessageRef, MoveKind, Permissions, Place, Provider, Scan,
 };
 use crate::credentials::SecretKey;
 use crate::db::turns::TurnStatus;
@@ -55,8 +55,10 @@ pub enum StoreError {
     Forbidden,
     #[error("the request is no longer running")]
     NotRunning,
-    #[error("the mail account is paused or was changed; reload it and retry")]
+    #[error("the mail account is paused")]
     Inactive,
+    #[error("the mail account was changed; reload it and retry")]
+    Changed,
     #[error("this action ID was already used for a different request")]
     Conflict,
     #[error("another mail account already uses this address")]
@@ -69,6 +71,29 @@ pub enum StoreError {
     Crypto,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
+}
+
+impl From<StoreError> for MailError {
+    fn from(error: StoreError) -> Self {
+        match error {
+            StoreError::NotFound => MailError::new("mail_account_not_found"),
+            StoreError::Forbidden => MailError::new("mail_forbidden"),
+            StoreError::NotRunning => MailError::new("mail_not_running"),
+            StoreError::Inactive => MailError::new("mail_account_paused"),
+            StoreError::Changed => MailError::new("mail_account_changed"),
+            StoreError::Conflict => MailError::new("mail_action_conflict"),
+            StoreError::AddressTaken => MailError::new("mail_account_exists"),
+            StoreError::Limit(limit) => MailError::new("connector_limit").detail(limit),
+            StoreError::Invalid(why) => MailError::new("invalid_mail_request").detail(why),
+            StoreError::Crypto => MailError::new("mail_credential_unavailable"),
+            StoreError::Db(error) => {
+                // sqlx text can quote stored values, so it is logged, never
+                // shown to the owner or the bot.
+                tracing::warn!(%error, "mail store failed");
+                MailError::new("mail_unavailable")
+            }
+        }
+    }
 }
 
 fn provider_name(provider: Provider) -> &'static str {
@@ -336,7 +361,7 @@ pub async fn configure_folders(
     let changed = sqlx::query("UPDATE connector_accounts SET config=?3,generation=generation+1,health='unknown',health_version=health_version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=?1 AND generation=?2 AND state <> 'removed'")
         .bind(id).bind(current.generation).bind(Json(config)).execute(pool).await?.rows_affected();
     if changed != 1 {
-        return Err(StoreError::Inactive);
+        return Err(StoreError::Changed);
     }
     account(pool, id).await?.ok_or(StoreError::NotFound)
 }
@@ -1217,6 +1242,14 @@ pub async fn authorize_in(
     if !status.serves_tools() || bot_status != "active" {
         return Err(StoreError::NotRunning);
     }
+    // The grant comes first, so a bot without access learns nothing about
+    // the account's state; a removed account has no grant.
+    if !grant_in(conn, account_id, bot_id)
+        .await?
+        .is_some_and(|p| command.allowed(&p))
+    {
+        return Err(StoreError::Forbidden);
+    }
     let account: Option<(String, i64)> = sqlx::query_as(
         "SELECT state, generation FROM connector_accounts WHERE id = ?1 AND state <> 'removed'",
     )
@@ -1224,17 +1257,17 @@ pub async fn authorize_in(
     .fetch_optional(&mut *conn)
     .await?;
     let (state, current) = account.ok_or(StoreError::NotFound)?;
-    if state != "active" || current != generation {
+    if state != "active" {
         return Err(StoreError::Inactive);
     }
-    match grant_in(conn, account_id, bot_id).await? {
-        Some(p) if command.allowed(&p) => Ok(()),
-        _ => Err(StoreError::Forbidden),
+    if current != generation {
+        return Err(StoreError::Changed);
     }
+    Ok(())
 }
 
-/// [`authorize_in`] in its own transaction, for commands that change
-/// nothing and so are not recorded.
+/// [`authorize_in`] in a deferred read transaction, for commands that
+/// change nothing and so are not recorded: one snapshot, no write lock.
 pub async fn authorize(
     pool: &SqlitePool,
     account_id: Uuid,
@@ -1243,7 +1276,7 @@ pub async fn authorize(
     turn_id: Uuid,
     command: &MailCommand,
 ) -> Result<(), StoreError> {
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = pool.begin().await?;
     authorize_in(&mut tx, account_id, generation, bot_id, turn_id, command).await
 }
 
@@ -1313,22 +1346,22 @@ pub async fn begin_action(
     Ok(ActionStart::Dispatch)
 }
 
-/// Settle a dispatching action with the receipt later retries get. Returns
-/// false when it was not dispatching (already settled, or made uncertain by
-/// [`recover`]).
+/// Settle a dispatching action with the receipt later retries get, and
+/// return the receipt the ledger holds. That keeps an earlier settlement,
+/// such as [`recover`] marking it uncertain.
 pub async fn finish_action(
     pool: &SqlitePool,
     account_id: Uuid,
     action_id: Uuid,
     status: ActionStatus,
-    receipt: &Value,
-) -> Result<bool, StoreError> {
+    settlement: &Value,
+) -> Result<Value, StoreError> {
     if status == ActionStatus::Dispatching {
         return Err(StoreError::Invalid(
             "an action finishes as succeeded, failed or uncertain",
         ));
     }
-    let mut text = receipt.to_string();
+    let mut text = settlement.to_string();
     if text.len() > MAX_RESULT {
         text = serde_json::json!({
             "action_id": action_id,
@@ -1338,17 +1371,19 @@ pub async fn finish_action(
         .to_string();
     }
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let done = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE connector_actions SET status = ?3, result = ?4, finished_at = {NOW}
-         WHERE account_id = ?1 AND action_id = ?2 AND status = 'dispatching'"
-    )))
-    .bind(account_id)
-    .bind(action_id)
-    .bind(status.as_str())
-    .bind(text)
-    .execute(&mut *tx)
-    .await?;
-    if done.rows_affected() == 1 {
+    let settled: Option<(String, Option<Json<Value>>)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "UPDATE connector_actions SET status = ?3, result = ?4, finished_at = {NOW}
+         WHERE account_id = ?1 AND action_id = ?2 AND status = 'dispatching'
+         RETURNING status, result"
+        )))
+        .bind(account_id)
+        .bind(action_id)
+        .bind(status.as_str())
+        .bind(text)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let stored = if let Some(stored) = settled {
         let turns: Vec<(Uuid, Uuid)> = sqlx::query_as(
             "SELECT DISTINCT bot_id, turn_id FROM outgoing_drafts
              WHERE json_extract(delivery, '$.via') = 'mail'
@@ -1362,9 +1397,20 @@ pub async fn finish_action(
         for (bot_id, turn_id) in turns {
             crate::db::events::turn_changed(&mut tx, bot_id, turn_id).await?;
         }
-    }
+        stored
+    } else {
+        sqlx::query_as(
+            "SELECT status, result FROM connector_actions WHERE account_id = ?1 AND action_id = ?2",
+        )
+        .bind(account_id)
+        .bind(action_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StoreError::NotFound)?
+    };
     tx.commit().await?;
-    Ok(done.rows_affected() == 1)
+    let (status, result) = stored;
+    Ok(receipt(action_id, &status, result))
 }
 
 /// The receipt of an action this bot requested on this account.

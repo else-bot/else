@@ -1014,15 +1014,18 @@ async fn an_action_is_dispatched_once_and_never_replayed_after_a_crash() {
     ));
     let receipt =
         json!({ "action_id": action, "status": "succeeded", "result": { "moved": true } });
-    assert!(
+    assert_eq!(
         store::finish_action(&db.pool, account, action, ActionStatus::Succeeded, &receipt)
             .await
-            .unwrap()
+            .unwrap(),
+        receipt
     );
-    assert!(
-        !store::finish_action(&db.pool, account, action, ActionStatus::Failed, &json!({}))
+    assert_eq!(
+        store::finish_action(&db.pool, account, action, ActionStatus::Failed, &json!({}))
             .await
-            .unwrap()
+            .unwrap(),
+        receipt,
+        "a settled action keeps its first receipt"
     );
     assert_eq!(
         begin(action, archive.clone()).await.unwrap(),
@@ -1045,16 +1048,18 @@ async fn an_action_is_dispatched_once_and_never_replayed_after_a_crash() {
         begin(crashed, archive.clone()).await.unwrap(),
         ActionStart::Existing(json!({ "action_id": crashed, "status": "uncertain" }))
     );
-    assert!(
-        !store::finish_action(
+    assert_eq!(
+        store::finish_action(
             &db.pool,
             account,
             crashed,
             ActionStatus::Succeeded,
-            &json!({})
+            &json!({ "action_id": crashed, "status": "succeeded" })
         )
         .await
-        .unwrap()
+        .unwrap(),
+        json!({ "action_id": crashed, "status": "uncertain" }),
+        "settling after recovery reports what recovery recorded"
     );
 
     let draft = Draft {
@@ -1082,7 +1087,7 @@ async fn an_action_is_dispatched_once_and_never_replayed_after_a_crash() {
             &archive
         )
         .await,
-        Err(StoreError::Inactive)
+        Err(StoreError::Changed)
     ));
     set_turn(&db, running, "completed").await;
     assert!(matches!(

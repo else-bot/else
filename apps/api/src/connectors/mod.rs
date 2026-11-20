@@ -328,14 +328,10 @@ impl ConnectorManager {
             .enter()
             .ok_or_else(|| MailError::new("maintenance_in_progress"))?;
         let account = store::account(&self.db, id)
-            .await
-            .map_err(|_| MailError::new("mail_unavailable"))?
+            .await?
             .ok_or_else(|| MailError::new("mail_account_unavailable"))?;
         credential.validate(account.config.provider)?;
-        if !store::replace_credential(&self.db, &self.key, id, &credential)
-            .await
-            .map_err(|_| MailError::new("mail_unavailable"))?
-        {
+        if !store::replace_credential(&self.db, &self.key, id, &credential).await? {
             return Err(MailError::new("mail_account_changed"));
         }
         Ok(())
@@ -380,8 +376,7 @@ impl ConnectorManager {
             .call(move |messages| messages.epoch(account_id))
             .await;
         let account = store::account(&self.db, account_id)
-            .await
-            .map_err(|_| MailError::new("mail_unavailable"))?
+            .await?
             .ok_or_else(|| MailError::new("mail_forbidden"))?;
         if account.state != "active" {
             return Err(MailError::new("mail_account_paused"));
@@ -391,9 +386,7 @@ impl ConnectorManager {
             .gate()
             .enter()
             .ok_or_else(|| MailError::new("maintenance_in_progress"))?;
-        let whereabouts = store::whereabouts(&self.db, account_id, &message)
-            .await
-            .map_err(|_| MailError::new("mail_unavailable"))?;
+        let whereabouts = store::whereabouts(&self.db, account_id, &message).await?;
         let at = match whereabouts.as_ref().map(|w| &w.place) {
             Some(Place::Deleted) => return Err(MailError::new("message_deleted")),
             Some(Place::Moved { message, .. }) => message.clone(),
@@ -445,9 +438,7 @@ impl ConnectorManager {
             },
             None => Place::Deleted,
         };
-        let recorded = store::found(&self.db, event_id, &place, &now)
-            .await
-            .map_err(|_| MailError::new("mail_unavailable"))?;
+        let recorded = store::found(&self.db, event_id, &place, &now).await?;
         // A bot moved it while the search ran: its record wins.
         let now = if recorded {
             now
@@ -575,8 +566,7 @@ impl ConnectorManager {
             reply,
         };
         let account = store::account(&self.db, account_id)
-            .await
-            .map_err(|_| MailError::new("mail_unavailable"))?
+            .await?
             .ok_or_else(|| MailError::new("mail_forbidden"))?;
         self.authorization(&account, &command).await?;
         let worker = self.worker(account_id).await?;
@@ -623,7 +613,7 @@ impl ConnectorManager {
 
     async fn authorization(&self, account: &Account, command: &Command) -> Result<(), MailError> {
         match command.caller {
-            Caller::Bot { bot_id, turn_id } => store::authorize(
+            Caller::Bot { bot_id, turn_id } => Ok(store::authorize(
                 &self.db,
                 account.id,
                 account.generation,
@@ -631,8 +621,7 @@ impl ConnectorManager {
                 turn_id,
                 &command.command,
             )
-            .await
-            .map_err(|_| MailError::new("mail_forbidden")),
+            .await?),
         }
     }
 
@@ -648,9 +637,7 @@ impl ConnectorManager {
             .gate()
             .enter()
             .ok_or_else(|| MailError::new("maintenance_in_progress"))?;
-        let mut credential = store::credential(&self.db, &self.key, account.id)
-            .await
-            .map_err(|_| MailError::new("mail_credential_unavailable"))?;
+        let mut credential = store::credential(&self.db, &self.key, account.id).await?;
         if oauth::refresh(account.config.provider, &mut credential).await?
             && !store::save_credential(
                 &self.db,
@@ -659,8 +646,7 @@ impl ConnectorManager {
                 account.generation,
                 &credential,
             )
-            .await
-            .map_err(|_| MailError::new("mail_unavailable"))?
+            .await?
         {
             return Err(MailError::new("mail_account_changed"));
         }
@@ -711,9 +697,10 @@ impl ConnectorManager {
             .enter()
             .ok_or_else(|| MailError::new("maintenance_in_progress"))?;
         let account = store::account(&self.db, id)
-            .await
-            .map_err(|_| MailError::new("mail_unavailable"))?
-            .ok_or_else(|| MailError::new("mail_forbidden"))?;
+            .await?
+            .ok_or(store::StoreError::NotFound)?;
+        // Before signing in, so a command that lost its access while queued
+        // refreshes no credential and records no health.
         self.authorization(&account, command).await?;
         let started = tokio::time::Instant::now();
         let auth = self.auth(&account).await.inspect_err(|error| {
@@ -721,9 +708,11 @@ impl ConnectorManager {
                 *rejected = Some((account.generation, REAUTHENTICATION_REQUIRED));
             }
         })?;
-        self.authorization(&account, command).await?;
         let action_id = match (command.command.mutates(), command.caller) {
-            (false, _) => None,
+            (false, _) => {
+                self.authorization(&account, command).await?;
+                None
+            }
             (true, Caller::Bot { bot_id, turn_id }) => {
                 let action_id = command.action_id.expect("validated action ID");
                 match store::begin_action(
@@ -735,8 +724,7 @@ impl ConnectorManager {
                     action_id,
                     &command.command,
                 )
-                .await
-                .map_err(|_| MailError::new("mail_action_conflict"))?
+                .await?
                 {
                     store::ActionStart::Existing(receipt) => return Ok(receipt),
                     store::ActionStart::Dispatch => Some(action_id),
@@ -799,14 +787,12 @@ impl ConnectorManager {
         };
         store::finish_action(&self.db, id, action_id, status, &receipt)
             .await
-            .map_err(|_| MailError::new("mail_receipt_unavailable"))?;
-        Ok(receipt)
+            .map_err(|_| MailError::new("mail_receipt_unavailable"))
     }
 
     async fn prepare_watch(&self, id: Uuid) -> Result<(Account, Auth), MailError> {
         let account = store::account(&self.db, id)
-            .await
-            .map_err(|_| MailError::new("mail_unavailable"))?
+            .await?
             .ok_or_else(|| MailError::new("mail_account_unavailable"))?;
         if account.state != "active" {
             return Err(MailError::new("mail_account_paused"));
@@ -826,9 +812,7 @@ impl ConnectorManager {
             .await
             .map_err(|_| MailError::new("mail_account_unavailable"))?;
         let cursor = loop {
-            let old = store::cursor(&self.db, id)
-                .await
-                .map_err(|_| MailError::new("mail_unavailable"))?;
+            let old = store::cursor(&self.db, id).await?;
             // Only the server waits stop early. A database write that began
             // finishes, so a stopped watch leaves no late health behind.
             let scan = tokio::select! {
@@ -843,8 +827,7 @@ impl ConnectorManager {
                     .enter()
                     .ok_or_else(|| MailError::new("maintenance_in_progress"))?;
                 if !store::record_scan(&self.db, id, account.generation, old.as_ref(), &scan)
-                    .await
-                    .map_err(|_| MailError::new("mail_unavailable"))?
+                    .await?
                 {
                     return Err(MailError::new("mail_account_changed"));
                 }
