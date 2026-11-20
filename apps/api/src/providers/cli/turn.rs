@@ -284,9 +284,6 @@ impl<A: Adapter> Cli<A> {
         if let Err(reason) = self.models.validate(profile) {
             return TurnOutcome::failed(FailureCode::InvalidProfile, reason);
         }
-        if stop.is_requested() {
-            return TurnOutcome::Interrupted;
-        }
         let mut dirs = match ready.host.bot_dirs(input.bot_id, A::DEFINITION.id) {
             Ok(dirs) => dirs,
             Err(err) => return unavailable(err.to_string()),
@@ -308,6 +305,11 @@ impl<A: Adapter> Cli<A> {
         };
         let mut turn = PreparedTurn::new(&input, fingerprint, opened);
         self.adapter.prepare_packet(&mut turn, &input, &dirs);
+        // The last moment a stop leaves nothing recorded, not even a
+        // fresh session that retires the previous one.
+        if stop.is_requested() {
+            return TurnOutcome::Interrupted;
+        }
         if turn.record(sink).await.is_err() {
             return TurnOutcome::Interrupted;
         }

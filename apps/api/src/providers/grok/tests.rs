@@ -644,3 +644,31 @@ pub(crate) fn pinned_fingerprints() -> Vec<(String, &'static str, String)> {
         },
     )
 }
+
+#[tokio::test]
+async fn a_stopped_turn_records_no_session() {
+    let root = tempfile::tempdir().unwrap();
+    let login = root.path().join("login");
+    std::fs::create_dir(&login).unwrap();
+    std::fs::write(login.join("auth.json"), r#"{"a": {"user_id": "u"}}"#).unwrap();
+    let grok = Grok::new(
+        GrokCli,
+        Ok(Ready {
+            host: Host::new(&root.path().join("data"), &root.path().join("bots")),
+            program: root.path().join("missing-grok").into(),
+            version: "grok 1.0".into(),
+            login,
+        }),
+    );
+    let mut input = crate::providers::cli::session::tests::input();
+    input.profile = Some(Profile {
+        model: "grok-4.7".into(),
+        reasoning_effort: "high".into(),
+        service_tier: "default".into(),
+    });
+    let sink = crate::providers::recording::Recorded::default();
+    let stop = Stop::new(Default::default());
+    stop.request();
+    assert_eq!(grok.run(input, &sink, stop).await, TurnOutcome::Interrupted);
+    assert!(sink.sessions.lock().unwrap().is_empty());
+}

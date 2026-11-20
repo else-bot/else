@@ -68,8 +68,9 @@ fn reports(tools: &[(&str, &str)], kind: &str) -> bool {
 pub enum Message {
     /// One `stream-json` event.
     Event(Value),
-    /// The result, held until the CLI exited: its exit code, or `None`
-    /// when it did not exit in time.
+    /// The result, held until the CLI exited, and its exit code: `None`
+    /// when no numeric exit code was observed (a signal, or no exit before
+    /// the settle deadline).
     Result {
         event: Value,
         exit_code: Option<i32>,
