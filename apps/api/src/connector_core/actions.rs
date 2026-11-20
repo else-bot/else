@@ -160,7 +160,10 @@ impl<C: Columns> Ledger<C> {
 
     /// Record an action as dispatching, in the caller's immediate
     /// transaction after it authorized `request`.
-    #[allow(clippy::too_many_arguments)] // One column each; a struct would only rename them.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one per ledger key column; a struct would only rename them"
+    )]
     pub async fn begin(
         &self,
         conn: &mut SqliteConnection,
