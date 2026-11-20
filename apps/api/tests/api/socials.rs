@@ -753,14 +753,11 @@ async fn changing_generation_cancels_inflight_sdk_wait_and_records_uncertainty()
 async fn stopping_work_cancels_an_inflight_send_and_records_uncertainty() {
     let fake = Arc::new(Fake::default());
     let db = Arc::new(TestDb::migrated().await);
-    let app = common::TestApp::start(
-        db.clone(),
-        common::Setup {
-            social: Some(fake.clone()),
-            ..common::Setup::default()
-        },
-    )
-    .await;
+    let app = common::TestApp::builder()
+        .db(db.clone())
+        .social(fake.clone())
+        .start()
+        .await;
     let c = account(&db, "stop").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
@@ -923,14 +920,11 @@ async fn owner_credentials_task_authority_and_approved_native_send_stay_separate
     use else_api::grants::Tool;
     let fake = Arc::new(Fake::default());
     let db = Arc::new(TestDb::migrated().await);
-    let app = common::TestApp::start(
-        db.clone(),
-        common::Setup {
-            social: Some(fake.clone()),
-            ..common::Setup::default()
-        },
-    )
-    .await;
+    let app = common::TestApp::builder()
+        .db(db.clone())
+        .social(fake.clone())
+        .start()
+        .await;
     let router = app.router.clone();
     let bot = bot(&db).await;
     let turn = running_turn(&app, bot).await;
@@ -1033,14 +1027,11 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
     use else_api::grants::Tool;
     let fake = Arc::new(Fake::default());
     let db = Arc::new(TestDb::migrated().await);
-    let app = common::TestApp::start(
-        db.clone(),
-        common::Setup {
-            social: Some(fake.clone()),
-            ..common::Setup::default()
-        },
-    )
-    .await;
+    let app = common::TestApp::builder()
+        .db(db.clone())
+        .social(fake.clone())
+        .start()
+        .await;
     let router = app.router.clone();
     let bot = bot(&db).await;
     let turn = running_turn(&app, bot).await;
@@ -1402,14 +1393,11 @@ async fn upgrading_turns_wake_access_into_triggers_and_drops_bindings() {
 async fn completing_another_bots_setup_keeps_an_approved_send_running() {
     let fake = Arc::new(Fake::default());
     let db = Arc::new(TestDb::migrated().await);
-    let app = common::TestApp::start(
-        db.clone(),
-        common::Setup {
-            social: Some(fake.clone()),
-            ..common::Setup::default()
-        },
-    )
-    .await;
+    let app = common::TestApp::builder()
+        .db(db.clone())
+        .social(fake.clone())
+        .start()
+        .await;
     let router = app.router.clone();
     let c = account(&db, "shared").await;
     destinations(&db, c.id).await;
@@ -1555,19 +1543,17 @@ fn connection_state_transitions() {
 
 #[tokio::test]
 async fn an_approved_message_sends_exactly_its_approved_picture() {
-    use else_api::{grants::Tool, providers::Registry, providers::synthetic::Synthetic};
+    use else_api::{grants::Tool, providers::synthetic::Synthetic};
     let fake = Arc::new(Fake::default());
     let root = tempfile::tempdir().unwrap();
     let synthetic = Synthetic::new(Duration::from_millis(5)).with_projects(root.path().into());
     let db = Arc::new(TestDb::migrated().await);
-    let app = common::TestApp::start(
-        db.clone(),
-        common::Setup {
-            social: Some(fake.clone()),
-            ..common::Setup::with_registry(Registry::new(vec![Arc::new(synthetic)]))
-        },
-    )
-    .await;
+    let app = common::TestApp::builder()
+        .db(db.clone())
+        .social(fake.clone())
+        .providers(vec![Arc::new(synthetic)])
+        .start()
+        .await;
     let router = app.router.clone();
     let bot = bot(&db).await;
     let turn = running_turn(&app, bot).await;
@@ -1657,8 +1643,12 @@ async fn a_pending_setup_shows_in_the_sidebar_as_a_request_until_it_is_settled()
     let synthetic = Arc::new(else_api::providers::synthetic::Synthetic::new(
         Duration::from_millis(5),
     ));
-    let registry = else_api::providers::Registry::new(vec![synthetic]);
-    let app = common::TestApp::with_registry(db, 4, registry).await;
+    let registry: common::Providers = vec![synthetic];
+    let app = common::TestApp::builder()
+        .db(db)
+        .providers(registry)
+        .start()
+        .await;
     let bot = app.main_bot().await;
     let sent = app
         .send(

@@ -44,8 +44,13 @@ async fn setup() -> Setup {
     );
     manager.reconcile_startup().await.unwrap();
     let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
-    let registry = else_api::providers::Registry::new(vec![synthetic]);
-    let app = TestApp::with_parts(db, 4, registry, Some(manager.clone())).await;
+    let registry: common::Providers = vec![synthetic];
+    let app = TestApp::builder()
+        .db(db)
+        .providers(registry)
+        .computers(manager.clone())
+        .start()
+        .await;
     let bot = app.create_bot("Scout").await;
     let token = owner_turn(&app, &bot).await;
     Setup {

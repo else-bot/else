@@ -515,11 +515,15 @@ async fn a_cut_result_is_saved_whole_in_the_bots_project() {
     let root = tempfile::tempdir().unwrap();
     let db = common::TestDb::migrated().await;
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let registry = else_api::providers::Registry::new(vec![std::sync::Arc::new(WithProject {
+    let registry: common::Providers = vec![std::sync::Arc::new(WithProject {
         inner: else_api::providers::synthetic::Synthetic::new(std::time::Duration::from_millis(5)),
         root: root.path().to_owned(),
-    })]);
-    let app = TestApp::with_registry(std::sync::Arc::new(db), 4, registry).await;
+    })];
+    let app = TestApp::builder()
+        .db(std::sync::Arc::new(db))
+        .providers(registry)
+        .start()
+        .await;
     let bot = app.create_bot("Scout").await;
     std::fs::create_dir_all(root.path().join(&bot)).unwrap();
     let (_, token) = grant(&app, &bot, vec![Tool::Mcp, Tool::ManageMcp]).await;

@@ -40,10 +40,17 @@ async fn harness_in(mail: Option<Arc<FakeMail>>, projects: Option<&std::path::Pa
         synthetic = synthetic.with_projects(root.to_owned());
     }
     let synthetic = Arc::new(synthetic);
-    let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
+    let registry: common::Providers = vec![synthetic.clone()];
     let app = match mail {
-        Some(mail) => TestApp::with_mail(db, 4, registry, mail).await,
-        None => TestApp::with_registry(db, 4, registry).await,
+        Some(mail) => {
+            TestApp::builder()
+                .db(db)
+                .providers(registry)
+                .mail(mail)
+                .start()
+                .await
+        }
+        None => TestApp::builder().db(db).providers(registry).start().await,
     };
     Harness { app, synthetic }
 }

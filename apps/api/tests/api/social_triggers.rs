@@ -16,7 +16,11 @@ async fn app() -> TestApp {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
-    TestApp::with_registry(db, 4, else_api::providers::Registry::new(vec![synthetic])).await
+    TestApp::builder()
+        .db(db)
+        .providers(vec![synthetic])
+        .start()
+        .await
 }
 
 async fn connection(app: &TestApp) -> Uuid {

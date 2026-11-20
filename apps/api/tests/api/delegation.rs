@@ -15,7 +15,11 @@ const SLOW: &str = "[synthetic:slow] please plan the week: groceries, school for
 async fn app_with(max_active: usize) -> TestApp {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    TestApp::with_options(db, max_active).await
+    TestApp::builder()
+        .db(db)
+        .max_active(max_active)
+        .start()
+        .await
 }
 
 async fn leaf(app: &TestApp, name: &str) -> String {
@@ -2459,7 +2463,7 @@ async fn delegation_of(
 #[tokio::test(flavor = "multi_thread")]
 async fn any_bot_hands_work_to_a_peer_or_the_main_bot_and_gets_the_reply() {
     use common::recorder::{GATE, harness, tool};
-    let h = harness(2).await;
+    let h = harness(common::TestApp::builder().max_active(2)).await;
     let main = h.app.main_bot().await;
     let (work, family) = tokio::join!(h.app.create_bot("Work"), h.app.create_bot("Family"));
 
@@ -2496,7 +2500,7 @@ async fn any_bot_hands_work_to_a_peer_or_the_main_bot_and_gets_the_reply() {
 #[tokio::test(flavor = "multi_thread")]
 async fn two_bots_waiting_on_each_other_both_finish_with_one_provider_slot() {
     use common::recorder::{GATE, harness, tool};
-    let h = harness(1).await;
+    let h = harness(common::TestApp::builder().max_active(1)).await;
     let (a, b) = tokio::join!(h.app.create_bot("Alpha"), h.app.create_bot("Beta"));
     let root_a = h.send(&a, GATE).await;
     let root_b = h.send(&b, GATE).await;
@@ -2537,7 +2541,7 @@ async fn two_bots_waiting_on_each_other_both_finish_with_one_provider_slot() {
 #[tokio::test(flavor = "multi_thread")]
 async fn stopping_a_peer_leaves_its_task_until_the_owner_stops_the_task() {
     use common::recorder::{GATE, harness, tool};
-    let h = harness(1).await;
+    let h = harness(common::TestApp::builder().max_active(1)).await;
     let main = h.app.main_bot().await;
     let peer = h.app.create_bot("Work").await;
     let (root, token) = h.running(&peer, GATE).await;
@@ -3425,7 +3429,7 @@ async fn the_delegating_turn_hears_a_tasks_progress_while_its_message_streams() 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_task_hands_work_on_once_and_the_last_hop_routes_follow_ups_back() {
     use common::recorder::{GATE, GATE_EVERY_ATTEMPT, harness, tool};
-    let h = harness(3).await;
+    let h = harness(common::TestApp::builder().max_active(3)).await;
     let main = h.app.main_bot().await;
     let (manager, dev, reviewer) = tokio::join!(
         h.app.create_bot("Manager"),
@@ -3890,8 +3894,16 @@ async fn app_with_synthetic() -> (TestApp, Arc<else_api::providers::synthetic::S
     let synthetic = Arc::new(else_api::providers::synthetic::Synthetic::new(
         Duration::from_millis(5),
     ));
-    let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
-    (TestApp::with_registry(db, 3, registry).await, synthetic)
+    let registry: common::Providers = vec![synthetic.clone()];
+    (
+        TestApp::builder()
+            .db(db)
+            .max_active(3)
+            .providers(registry)
+            .start()
+            .await,
+        synthetic,
+    )
 }
 
 async fn update(app: &TestApp, token: &str, task: Uuid, message: &str) -> Value {

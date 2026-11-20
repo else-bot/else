@@ -14,7 +14,7 @@ const SLOW: &str = "[synthetic:slow] set up my morning digest routine, please.";
 const YEARLY: &str = "0 9 1 1 *";
 
 async fn harness() -> Harness {
-    recorder::harness(4).await
+    recorder::harness(common::TestApp::builder()).await
 }
 
 impl Harness {
@@ -1911,7 +1911,7 @@ async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
 
 #[tokio::test]
 async fn an_owner_message_starts_while_routines_fill_the_other_slots() {
-    let h = recorder::harness(2).await;
+    let h = recorder::harness(common::TestApp::builder().max_active(2)).await;
     let main = h.app.main_bot().await;
     let due = at(&json!("2030-01-01T00:00:00Z"));
     for name in ["Scout", "Auto"] {

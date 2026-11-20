@@ -86,17 +86,11 @@ async fn add(app: &TestApp, bot: Uuid, key: &str, body: &str) {
 
 /// An app whose memory each test compacts with its own summarizer.
 async fn app(max_active: usize) -> TestApp {
-    let db = common::TestDb::migrated().await;
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    TestApp::start(
-        Arc::new(db),
-        common::Setup {
-            max_active,
-            memory: else_api::runtime::Memory::Manual,
-            ..common::Setup::default()
-        },
-    )
-    .await
+    TestApp::builder()
+        .max_active(max_active)
+        .memory(else_api::runtime::Memory::Manual)
+        .start()
+        .await
 }
 
 fn compactor(app: &TestApp, summarizer: Arc<Scripted>) -> Compactor {

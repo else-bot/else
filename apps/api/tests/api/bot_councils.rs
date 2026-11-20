@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn peer_creation_acknowledges_the_main_bot_once_with_its_purpose() {
-    let h = harness(3).await;
+    let h = harness(common::TestApp::builder().max_active(3)).await;
     let main = h.app.main_bot().await;
     let peer = h.app.create_bot("Work").await;
     let category = h
@@ -126,7 +126,7 @@ async fn peer_creation_acknowledges_the_main_bot_once_with_its_purpose() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_category_council_collects_every_report_with_one_provider_slot() {
-    let h = harness(1).await;
+    let h = harness(common::TestApp::builder().max_active(1)).await;
     let main = h.app.main_bot().await;
     let category = h
         .app
@@ -249,7 +249,7 @@ async fn a_category_council_collects_every_report_with_one_provider_slot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn councils_are_atomic_bounded_and_cannot_create_nested_work() {
-    let h = harness(1).await;
+    let h = harness(common::TestApp::builder().max_active(1)).await;
     let main = h.app.main_bot().await;
     let peer = h.app.create_bot("Review").await;
     let (root, token) = h.running(&main, GATE).await;
@@ -338,7 +338,7 @@ async fn councils_are_atomic_bounded_and_cannot_create_nested_work() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cancelled_member_is_included_with_the_other_council_reports() {
-    let h = harness(3).await;
+    let h = harness(common::TestApp::builder().max_active(3)).await;
     let main = h.app.main_bot().await;
     let mut targets = Vec::new();
     for name in ["Build", "Review", "Release"] {

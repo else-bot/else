@@ -282,8 +282,8 @@ async fn rapid_corrections_all_join_the_running_reply() {
     let synthetic = Arc::new(else_api::providers::synthetic::Synthetic::new(
         Duration::from_millis(5),
     ));
-    let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
-    let app = TestApp::with_registry(db, 4, registry).await;
+    let registry: common::Providers = vec![synthetic.clone()];
+    let app = TestApp::builder().db(db).providers(registry).start().await;
     let bot = app.main_bot().await;
     let other = app.create_bot("Other").await;
     let elsewhere = app
@@ -405,7 +405,7 @@ async fn a_retry_of_an_older_message_does_not_preempt_the_newer_one() {
 async fn different_bots_run_concurrently_within_the_global_limit() {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_options(db, 2).await;
+    let app = TestApp::builder().db(db).max_active(2).start().await;
     let bots = [
         app.main_bot().await,
         app.create_bot("B").await,
@@ -720,7 +720,7 @@ async fn restart_requeues_undelivered_and_marks_delivered_uncertain() {
         .await
         .unwrap();
     assert_eq!((requeued, uncertain), (0, 1));
-    let app = TestApp::with_options(db, 4).await;
+    let app = TestApp::builder().db(db).start().await;
     let status = app.wait_turn(&hang_id, &["uncertain"]).await;
     assert_eq!(status, "uncertain");
     app.wait_turn(&waiting_id, &["completed"]).await;
@@ -802,7 +802,7 @@ async fn retry_succeeds_after_provider_removed_and_patch_needs_adapter() {
         .await;
     let db = app.db.clone();
     drop(app);
-    let app = TestApp::with_registry(db, 4, else_api::providers::Registry::new(vec![])).await;
+    let app = TestApp::builder().db(db).providers(vec![]).start().await;
     let retry = app
         .send(&bot, request, "before removal", Some("synthetic"))
         .await;

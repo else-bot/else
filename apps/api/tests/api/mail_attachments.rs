@@ -220,7 +220,7 @@ async fn card(h: &recorder::Harness, bot: &str, question: &str) -> Value {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_bot_opens_attachments_the_owner_approved_and_searches_them_by_page() {
     let mail = Arc::new(Inbox::default());
-    let h = recorder::harness_with(4, Some(mail.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(mail.clone())).await;
     let bot = h.app.create_bot("Mail helper").await;
     let account = inbox(&h, &bot, "owner@example.com").await;
     let (turn, token) = h.running(&bot, GATE_EVERY_ATTEMPT).await;
@@ -360,7 +360,7 @@ async fn a_bot_opens_attachments_the_owner_approved_and_searches_them_by_page() 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_declined_card_keeps_the_files_closed_and_a_bot_without_read_gets_no_card() {
     let mail = Arc::new(Inbox::default());
-    let h = recorder::harness_with(4, Some(mail.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(mail.clone())).await;
     let bot = h.app.create_bot("Mail helper").await;
     let account = inbox(&h, &bot, "owner@example.com").await;
     let (turn, token) = h.running(&bot, GATE_EVERY_ATTEMPT).await;
@@ -423,7 +423,7 @@ async fn a_declined_card_keeps_the_files_closed_and_a_bot_without_read_gets_no_c
 async fn pdfs_are_read_in_a_worker_that_a_hostile_file_cannot_take_down() {
     else_api::connectors::documents::pdf::use_worker(env!("CARGO_BIN_EXE_else-api").into());
     let mail = Arc::new(Inbox::default());
-    let h = recorder::harness_with(4, Some(mail.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(mail.clone())).await;
     let bot = h.app.create_bot("Mail helper").await;
     let account = inbox(&h, &bot, "owner@example.com").await;
     let (turn, token) = h.running(&bot, GATE_EVERY_ATTEMPT).await;

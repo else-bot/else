@@ -120,12 +120,12 @@ async fn app() -> TestApp {
     let provider = Arc::new(Steering {
         inner: Synthetic::new(Duration::from_millis(5)),
     });
-    TestApp::with_registry(
-        Arc::new(db),
-        2,
-        else_api::providers::Registry::new(vec![provider]),
-    )
-    .await
+    TestApp::builder()
+        .db(Arc::new(db))
+        .max_active(2)
+        .providers(vec![provider])
+        .start()
+        .await
 }
 
 async fn send(app: &TestApp, bot: &str, text: &str) -> String {

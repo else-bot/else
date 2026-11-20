@@ -12,7 +12,7 @@ use uuid::Uuid;
 const TASK: &str = "Read the watcher job's output and tell the owner the BTC price.";
 
 async fn harness() -> Harness {
-    recorder::harness(4).await
+    recorder::harness(common::TestApp::builder()).await
 }
 
 fn watcher(extra: Value) -> Value {

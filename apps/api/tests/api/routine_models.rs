@@ -74,7 +74,7 @@ impl Provider for Catalogued {
 }
 
 async fn harness() -> Harness {
-    recorder::harness_with_providers(4, None, vec![Arc::new(Catalogued)]).await
+    recorder::harness(common::TestApp::builder().providers(vec![Arc::new(Catalogued)])).await
 }
 
 fn digest(name: &str, extra: Value) -> Value {

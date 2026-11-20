@@ -15,17 +15,12 @@ use uuid::Uuid;
 
 /// These tests drive compaction with `memory_worker::drain`, so the API
 /// runs no compactor of its own.
-fn manual() -> common::Setup {
-    common::Setup {
-        memory: else_api::runtime::Memory::Manual,
-        ..common::Setup::default()
-    }
+fn manual() -> common::Builder {
+    TestApp::builder().memory(else_api::runtime::Memory::Manual)
 }
 
 async fn app() -> TestApp {
-    let db = common::TestDb::migrated().await;
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    TestApp::start(std::sync::Arc::new(db), manual()).await
+    manual().start().await
 }
 
 async fn small_recipe(app: &TestApp) {
@@ -375,7 +370,7 @@ async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
     .await
     .unwrap();
 
-    let app = TestApp::start(app.stop().await, manual()).await;
+    let app = manual().db(app.stop().await).start().await;
     let after = app
         .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
         .await
@@ -615,7 +610,7 @@ async fn the_compaction_view_is_saved_and_damaged_views_are_reported() {
         .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
         .await
         .body;
-    let app = TestApp::start(app.stop().await, manual()).await;
+    let app = manual().db(app.stop().await).start().await;
     let after = app
         .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
         .await

@@ -60,16 +60,16 @@ impl Provider for ImageProvider {
 async fn app(root: &Path, replies: Vec<String>, outcome: TurnOutcome) -> TestApp {
     let db = TestDb::migrated().await;
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    TestApp::with_registry(
-        Arc::new(db),
-        1,
-        else_api::providers::Registry::new(vec![Arc::new(ImageProvider {
+    TestApp::builder()
+        .db(Arc::new(db))
+        .max_active(1)
+        .providers(vec![Arc::new(ImageProvider {
             root: root.to_owned(),
             replies,
             outcome,
-        })]),
-    )
-    .await
+        })])
+        .start()
+        .await
 }
 
 fn png() -> Vec<u8> {

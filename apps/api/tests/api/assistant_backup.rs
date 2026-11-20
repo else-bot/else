@@ -247,10 +247,15 @@ async fn setup_image(projects: bool, image: &str) -> Setup {
         },
     ));
     manager.reconcile_startup().await.unwrap();
-    let registry = else_api::providers::Registry::new(vec![Arc::new(
+    let registry: common::Providers = vec![Arc::new(
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
-    )]);
-    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone())).await;
+    )];
+    let app = TestApp::builder()
+        .db(Arc::new(db))
+        .providers(registry)
+        .computers(manager.clone())
+        .start()
+        .await;
     Setup {
         app,
         fake,

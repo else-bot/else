@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use common::{TestApp, TestDb};
 use else_api::grants::{DEFAULT_TTL, Tool};
-use else_api::providers::{Registry, grok::Grok, host::Host, synthetic::Synthetic};
+use else_api::providers::{grok::Grok, host::Host, synthetic::Synthetic};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -103,15 +103,15 @@ async fn fixture() -> Fixture {
         .with_tools("http://127.0.0.1:9/tools/v1/mcp".into());
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(
-        db,
-        2,
-        Registry::new(vec![
+    let app = TestApp::builder()
+        .db(db)
+        .max_active(2)
+        .providers(vec![
             Arc::new(grok),
             Arc::new(Synthetic::new(Duration::from_millis(5))),
-        ]),
-    )
-    .await;
+        ])
+        .start()
+        .await;
     let saved = app
         .owner(
             "PATCH",

@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::http::StatusCode;
 use else_api::app::providers::{
@@ -12,7 +11,7 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
-use super::{TestApp, TestDb};
+use super::{Builder, SETTLE, TestApp};
 
 pub const GATE: &str = "[gate]";
 pub const GATE_EVERY_ATTEMPT: &str = "[gate:every-attempt]";
@@ -185,26 +184,9 @@ pub struct Harness {
     pub recorder: Arc<Recorder>,
 }
 
-pub async fn harness(max_active: usize) -> Harness {
-    harness_with(max_active, None).await
-}
-
-pub async fn harness_with(
-    max_active: usize,
-    mail: Option<Arc<dyn else_api::connectors::types::MailTransport>>,
-) -> Harness {
-    harness_with_providers(max_active, mail, Vec::new()).await
-}
-
-/// A recorder harness whose registry also has `extra` providers after the
-/// default recorder.
-pub async fn harness_with_providers(
-    max_active: usize,
-    mail: Option<Arc<dyn else_api::connectors::types::MailTransport>>,
-    extra: Vec<Arc<dyn Provider>>,
-) -> Harness {
-    let db = Arc::new(TestDb::migrated().await);
-    else_api::db::installation::setup(&db.pool).await.unwrap();
+/// A running app whose first provider is a recorder, the default for turns.
+pub async fn harness(mut builder: Builder) -> Harness {
+    let db = builder.database().await;
     sqlx::query("UPDATE installation SET default_provider_id = 'synthetic'")
         .execute(&db.pool)
         .await
@@ -217,16 +199,12 @@ pub async fn harness_with_providers(
         }
     });
     let recorder = Arc::new(Recorder {
-        inner: Synthetic::new(Duration::from_millis(5)),
+        inner: builder.synthetic(),
         mailbox,
     });
     let mut providers: Vec<Arc<dyn Provider>> = vec![recorder.clone()];
-    providers.extend(extra);
-    let registry = else_api::providers::Registry::new(providers);
-    let app = match mail {
-        Some(mail) => TestApp::with_mail(db, max_active, registry, mail).await,
-        None => TestApp::with_registry(db, max_active, registry).await,
-    };
+    providers.extend(builder.extra_providers());
+    let app = builder.start_with(providers).await;
     Harness { app, recorder }
 }
 
@@ -234,7 +212,7 @@ impl Harness {
     async fn grant(&self, turn: Uuid, old: Option<&str>) -> String {
         let mut updates = self.recorder.ask(|r| Message::Grant(turn, r)).await;
         let token = tokio::time::timeout(
-            Duration::from_secs(20),
+            SETTLE,
             updates.wait_for(|token| token.as_deref().is_some_and(|token| Some(token) != old)),
         )
         .await
@@ -245,9 +223,7 @@ impl Harness {
 
     pub async fn continued(&self, turn: Uuid, old: &str) -> String {
         let token = self.grant(turn, Some(old)).await;
-        self.app
-            .wait_turn_for(&turn.to_string(), &["running"], Duration::from_secs(20))
-            .await;
+        self.app.wait_turn(&turn.to_string(), &["running"]).await;
         token
     }
 
@@ -271,10 +247,30 @@ impl Harness {
     }
 
     pub async fn started(&self, turn: Uuid) -> (Uuid, String) {
-        self.app
-            .wait_turn_for(&turn.to_string(), &["running"], Duration::from_secs(20))
-            .await;
+        self.app.wait_turn(&turn.to_string(), &["running"]).await;
         (turn, self.grant(turn, None).await)
+    }
+
+    /// A grant for `turn` with exactly `tools`, for a test that checks a
+    /// tool set other than the one the scheduler issued.
+    pub async fn grant_with(&self, turn: Uuid, tools: Vec<else_api::grants::Tool>) -> String {
+        let (bot, conversation): (Uuid, Uuid) =
+            sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
+                .bind(turn)
+                .fetch_one(&self.app.db.pool)
+                .await
+                .unwrap();
+        self.app
+            .state
+            .grants
+            .issue(
+                bot,
+                conversation,
+                turn,
+                tools,
+                else_api::grants::DEFAULT_TTL,
+            )
+            .await
     }
 
     pub async fn inputs(&self, turn: Uuid) -> Vec<TurnInput> {

@@ -167,7 +167,7 @@ const APPROVE_FOREVER: [&str; 3] = ["approve", "deny", "approve_forever"];
 
 #[tokio::test(flavor = "multi_thread")]
 async fn chat_can_preapprove_a_routine_before_its_first_run() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let authorization = "You can already mark this routine as always approved.";
@@ -257,7 +257,7 @@ async fn chat_can_preapprove_a_routine_before_its_first_run() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn chat_bot_approval_is_idempotent_and_a_retry_cannot_restore_it_after_revocation() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let authorization = "Always approve destructive actions for this bot.";
@@ -289,7 +289,7 @@ async fn chat_bot_approval_is_idempotent_and_a_retry_cannot_restore_it_after_rev
 
 #[tokio::test(flavor = "multi_thread")]
 async fn chat_approval_requires_the_current_owner_message_and_current_owned_routine() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let authorization = "Always allow this routine's destructive actions.";
@@ -360,7 +360,7 @@ async fn chat_approval_requires_the_current_owner_message_and_current_owned_rout
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_chat_authorization_cannot_be_reused_after_the_routine_task_changes() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let authorization = "Always approve this routine's destructive actions.";
@@ -431,7 +431,7 @@ async fn a_chat_authorization_cannot_be_reused_after_the_routine_task_changes() 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_routine_grant_covers_future_runs_of_that_routine_only() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let (setup, token) = h
@@ -555,7 +555,7 @@ async fn a_routine_grant_covers_future_runs_of_that_routine_only() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_destructive_routine_grant_does_not_cover_an_external_action() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let (setup, token) = h.running(&main, &format!("{GATE} set up")).await;
@@ -588,7 +588,7 @@ async fn a_destructive_routine_grant_does_not_cover_an_external_action() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_prompt_edit_ends_the_grant_and_a_stale_card_grants_nothing() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let first = format!("{GATE_EVERY_ATTEMPT} Delete merged branches on origin.");

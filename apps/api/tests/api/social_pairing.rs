@@ -630,14 +630,11 @@ async fn a_secret_must_match_how_its_provider_connects() {
 async fn the_card_pairs_a_setup_and_a_connection_through_one_pairing_route_each() {
     let db = Arc::new(TestDb::migrated().await);
     let phone = Phone::new("33612345678");
-    let app = common::TestApp::start(
-        db.clone(),
-        common::Setup {
-            social: Some(phone.clone()),
-            ..common::Setup::default()
-        },
-    )
-    .await;
+    let app = common::TestApp::builder()
+        .db(db.clone())
+        .social(phone.clone())
+        .start()
+        .await;
     let router = app.router.clone();
     let turn = running_turn(&app, bot(&db).await).await;
     let setup = store::request_setup(&db.pool, turn, Provider::WhatsApp, "Watch the Family group")

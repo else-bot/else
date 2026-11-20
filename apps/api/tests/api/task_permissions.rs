@@ -41,7 +41,7 @@ fn requested_host_action() -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn explicit_owner_request_runs_its_host_action_without_another_card() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let bot = app.main_bot().await;
     let (turn, token) = h
@@ -71,7 +71,7 @@ async fn explicit_owner_request_runs_its_host_action_without_another_card() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn invented_or_malformed_host_authorization_does_not_approve_an_action() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let bot = app.main_bot().await;
     let (turn, token) = h.running(&bot, GATE).await;
@@ -94,7 +94,7 @@ async fn owner_quote_cannot_override_a_pending_or_denied_host_action() {
     use else_api::app::questions::{Spec, permission_authorization};
     use else_api::db::owner_questions::{self, Gate};
 
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let bot = app.main_bot().await;
     let (turn, token) = h
@@ -131,7 +131,7 @@ async fn owner_quote_cannot_approve_a_different_action_after_the_attempt_parks()
     use else_api::app::questions::{Spec, permission_authorization};
     use else_api::db::owner_questions::{self, RequestError};
 
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let bot = app.main_bot().await;
     let (turn, token) = h
@@ -263,7 +263,7 @@ async fn always_allow(h: &Harness, bot: &str, args: Value) -> Uuid {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn always_allow_covers_one_task_on_one_target_until_revoked() {
-    let h = recorder::harness(8).await;
+    let h = recorder::harness(common::TestApp::builder().max_active(8)).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let question = always_allow(&h, &main, tailscale("up --ssh")).await;
@@ -342,7 +342,7 @@ async fn always_allow_covers_one_task_on_one_target_until_revoked() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn approving_once_or_denying_remembers_nothing_and_plain_host_cards_offer_no_blanket_grant() {
-    let h = recorder::harness(8).await;
+    let h = recorder::harness(common::TestApp::builder().max_active(8)).await;
     let app = &h.app;
     let main = app.main_bot().await;
     for choice in ["approve", "deny"] {
@@ -396,7 +396,7 @@ async fn approving_once_or_denying_remembers_nothing_and_plain_host_cards_offer_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_exact_denial_outlasts_a_task_grant_given_later_in_the_request() {
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
@@ -426,7 +426,7 @@ async fn an_exact_denial_outlasts_a_task_grant_given_later_in_the_request() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn chat_can_record_a_task_grant_from_the_owner_words_only() {
-    let h = recorder::harness(8).await;
+    let h = recorder::harness(common::TestApp::builder().max_active(8)).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let authorization = "Always allow managing Tailscale over SSH on omarchy-m1.";
@@ -489,7 +489,7 @@ async fn chat_can_record_a_task_grant_from_the_owner_words_only() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn work_delegated_for_an_owner_request_records_a_task_grant_only_from_the_owner() {
-    let h = recorder::harness(8).await;
+    let h = recorder::harness(common::TestApp::builder().max_active(8)).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let worker = app.create_bot("Worker").await;
@@ -663,7 +663,7 @@ async fn choices_of(app: &TestApp, question: Uuid) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduled_routine_runs_use_task_grants_but_webhook_wakes_do_not() {
-    let h = recorder::harness(8).await;
+    let h = recorder::harness(common::TestApp::builder().max_active(8)).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let authorization = "You are always approved to like posts.";
@@ -948,7 +948,7 @@ async fn upgrading_keeps_existing_task_grants_on_the_calls_they_were_saved_for()
 #[tokio::test(flavor = "multi_thread")]
 async fn an_upgraded_task_confirmation_cannot_be_saved_again_from_its_owner_message() {
     use else_api::app::questions::{Covers, Kind, PermissionTarget};
-    let h = recorder::harness(4).await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let app = &h.app;
     let main = app.main_bot().await;
     let authorization = "Always allow managing Tailscale over SSH on omarchy-m1.";

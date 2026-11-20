@@ -226,8 +226,8 @@ async fn owner_consent_resumes_a_parked_read_and_one_sign_in_serves_every_bot() 
     let synthetic = std::sync::Arc::new(else_api::providers::synthetic::Synthetic::new(
         Duration::from_millis(5),
     ));
-    let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
-    let app = TestApp::with_registry(db, 4, registry).await;
+    let registry: common::Providers = vec![synthetic.clone()];
+    let app = TestApp::builder().db(db).providers(registry).start().await;
     let bot = app.create_bot("OAuth owner").await;
     let other = app.create_bot("Other bot").await;
     let (turn, token) = grant(&app, &bot, true).await;

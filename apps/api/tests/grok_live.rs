@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use common::{TestApp, TestDb};
 use else_api::app::providers::Provider;
-use else_api::providers::{Registry, grok::Grok, grok_home, host::Host};
+use else_api::providers::{grok::Grok, grok_home, host::Host};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -86,17 +86,17 @@ async fn grok_conversations_stream_resume_use_host_and_mcp_tools_and_cancel() {
     let url = format!("http://{}/tools/v1/mcp", listener.local_addr().unwrap());
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(
-        db,
-        2,
-        Registry::new(vec![
+    let app = TestApp::builder()
+        .db(db)
+        .max_active(2)
+        .providers(vec![
             Arc::new(grok(&data, &host, &url).await),
             Arc::new(else_api::providers::synthetic::Synthetic::new(
                 Duration::from_millis(5),
             )),
-        ]),
-    )
-    .await;
+        ])
+        .start()
+        .await;
     let (calls, mut observed_calls) = tokio::sync::mpsc::channel(64);
     let router = app.router.clone().layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
@@ -311,12 +311,12 @@ async fn a_newer_owner_message_joins_a_running_grok_reply() {
     let url = format!("http://{}/tools/v1/mcp", listener.local_addr().unwrap());
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let app = TestApp::with_registry(
-        db,
-        2,
-        Registry::new(vec![Arc::new(grok(&data, &host, &url).await)]),
-    )
-    .await;
+    let app = TestApp::builder()
+        .db(db)
+        .max_active(2)
+        .providers(vec![Arc::new(grok(&data, &host, &url).await)])
+        .start()
+        .await;
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let saved = app

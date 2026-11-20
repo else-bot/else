@@ -208,10 +208,17 @@ async fn open(query: &str) -> Option<Live> {
         },
     ));
     manager.reconcile_startup().await.unwrap();
-    let registry = else_api::providers::Registry::new(vec![Arc::new(
+    let registry: common::Providers = vec![Arc::new(
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(5)),
-    )]);
-    let app = Arc::new(TestApp::with_parts(db, 4, registry, Some(manager.clone())).await);
+    )];
+    let app = Arc::new(
+        TestApp::builder()
+            .db(db)
+            .providers(registry)
+            .computers(manager.clone())
+            .start()
+            .await,
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let router = app.router.clone();

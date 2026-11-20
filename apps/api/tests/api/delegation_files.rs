@@ -103,12 +103,12 @@ async fn setup() -> Setup {
         .execute(&db.pool)
         .await
         .unwrap();
-    let app = TestApp::with_registry(
-        Arc::new(db),
-        2,
-        else_api::providers::Registry::new(vec![provider.clone()]),
-    )
-    .await;
+    let app = TestApp::builder()
+        .db(Arc::new(db))
+        .max_active(2)
+        .providers(vec![provider.clone()])
+        .start()
+        .await;
     let main = app.main_bot().await;
     let twitter = app.create_bot("Twitter").await;
     let card = png();

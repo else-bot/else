@@ -95,12 +95,12 @@ async fn app() -> (TestApp, Arc<Mutex<Vec<Seen>>>, Arc<Synthetic>) {
         inner: inner.clone(),
         seen: seen.clone(),
     });
-    let app = TestApp::with_registry(
-        Arc::new(db),
-        2,
-        else_api::providers::Registry::new(vec![provider]),
-    )
-    .await;
+    let app = TestApp::builder()
+        .db(Arc::new(db))
+        .max_active(2)
+        .providers(vec![provider])
+        .start()
+        .await;
     (app, seen, inner)
 }
 

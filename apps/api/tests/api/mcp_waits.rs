@@ -41,8 +41,11 @@ async fn harness() -> (TestApp, Arc<Synthetic>) {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
-    let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
-    (TestApp::with_registry(db, 4, registry).await, synthetic)
+    let registry: common::Providers = vec![synthetic.clone()];
+    (
+        TestApp::builder().db(db).providers(registry).start().await,
+        synthetic,
+    )
 }
 
 async fn running(app: &TestApp, bot: &str) -> (Uuid, String) {

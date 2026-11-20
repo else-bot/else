@@ -47,11 +47,15 @@ impl Provider for WithProject {
 async fn setup(root: PathBuf, tools: Vec<Tool>) -> (TestApp, PathBuf, String) {
     let db = TestDb::migrated().await;
     else_api::db::installation::setup(&db.pool).await.unwrap();
-    let registry = else_api::providers::Registry::new(vec![Arc::new(WithProject {
+    let registry: common::Providers = vec![Arc::new(WithProject {
         inner: Synthetic::new(std::time::Duration::from_millis(5)),
         root: root.clone(),
-    })]);
-    let app = TestApp::with_registry(Arc::new(db), 4, registry).await;
+    })];
+    let app = TestApp::builder()
+        .db(Arc::new(db))
+        .providers(registry)
+        .start()
+        .await;
     let bot = app.main_bot().await;
     let reply = app
         .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))

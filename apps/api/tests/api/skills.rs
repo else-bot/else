@@ -111,9 +111,14 @@ async fn harness() -> Harness {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
-    let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
+    let registry: common::Providers = vec![synthetic.clone()];
     Harness {
-        app: TestApp::with_skill_sources(db, registry, fake_github().await).await,
+        app: TestApp::builder()
+            .db(db)
+            .providers(registry)
+            .skill_sources(fake_github().await)
+            .start()
+            .await,
         synthetic,
     }
 }

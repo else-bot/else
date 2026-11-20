@@ -244,9 +244,11 @@ async fn the_next_owner_message_carries_the_greeting_without_a_handoff() {
     let synthetic = Arc::new(else_api::providers::synthetic::Synthetic::new(
         Duration::from_millis(1),
     ));
-    let registry =
-        else_api::providers::Registry::new(vec![Arc::new(common::ProfiledFake), synthetic.clone()]);
-    let app = TestApp::with_registry(Arc::new(db), 4, registry).await;
+    let app = TestApp::builder()
+        .db(Arc::new(db))
+        .providers(vec![Arc::new(common::ProfiledFake), synthetic.clone()])
+        .start()
+        .await;
     let main = app.main_bot().await;
     assert_eq!(onboard(&app, "Jarvis").await.status, StatusCode::OK);
 

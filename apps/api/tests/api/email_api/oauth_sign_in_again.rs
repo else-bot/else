@@ -6,7 +6,7 @@ use super::*;
 #[tokio::test(flavor = "multi_thread")]
 async fn a_gmail_inbox_google_signed_out_reopens_the_sign_in_card() {
     let inbox = Arc::new(QuietInbox::default());
-    let h = recorder::harness_with(4, Some(inbox.clone())).await;
+    let h = recorder::harness(common::TestApp::builder().mail(inbox.clone())).await;
     let app = &h.app;
     let bot = app.main_bot().await;
     let (turn, token) = h
@@ -125,7 +125,8 @@ async fn a_gmail_inbox_google_signed_out_reopens_the_sign_in_card() {
 
 #[tokio::test]
 async fn signing_in_again_takes_no_account_slot() {
-    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+    let h =
+        recorder::harness(common::TestApp::builder().mail(Arc::new(QuietInbox::default()))).await;
     let app = &h.app;
     let key = &app.state.secret_key;
     let (config, credential) = gmail("owner@gmail.com");

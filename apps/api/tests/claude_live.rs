@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{TestApp, TestDb};
-use else_api::providers::Registry;
 use else_api::providers::claude::Claude;
 use else_api::providers::claude_home;
 use else_api::providers::codex::Codex;
@@ -138,12 +137,12 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     save_claude_profile(&db).await;
-    let app = TestApp::with_registry(
-        db,
-        2,
-        Registry::new(vec![Arc::new(claude(&data, &url).await)]),
-    )
-    .await;
+    let app = TestApp::builder()
+        .db(db)
+        .max_active(2)
+        .providers(vec![Arc::new(claude(&data, &url).await)])
+        .start()
+        .await;
     serve(&app, listener).await;
     let caps = app.owner("GET", "/v1/capabilities", None).await;
     eprintln!("capabilities: {}", caps.body["providers"]);
@@ -310,12 +309,12 @@ async fn a_newer_owner_message_joins_a_running_claude_reply() {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     save_claude_profile(&db).await;
-    let app = TestApp::with_registry(
-        db,
-        2,
-        Registry::new(vec![Arc::new(claude(&data, &url).await)]),
-    )
-    .await;
+    let app = TestApp::builder()
+        .db(db)
+        .max_active(2)
+        .providers(vec![Arc::new(claude(&data, &url).await)])
+        .start()
+        .await;
     serve(&app, listener).await;
 
     common::steer::joins_mid_tool_and_mid_text(&app, "claude", true).await;
@@ -419,13 +418,13 @@ async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
         },
     ));
     computers.reconcile_startup().await.unwrap();
-    let app = TestApp::with_parts(
-        db,
-        2,
-        Registry::new(vec![Arc::new(codex), Arc::new(claude(&data, &url).await)]),
-        Some(computers.clone()),
-    )
-    .await;
+    let app = TestApp::builder()
+        .db(db)
+        .max_active(2)
+        .providers(vec![Arc::new(codex), Arc::new(claude(&data, &url).await)])
+        .computers(computers.clone())
+        .start()
+        .await;
     serve(&app, listener).await;
     let bot = app.create_bot("Builder").await;
     let bot_id: Uuid = bot.parse().unwrap();
