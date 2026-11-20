@@ -1,8 +1,11 @@
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use super::AppState;
-use super::mcp::{Outcome, tool_error, tool_result};
+use crate::app::questions::{Spec, Standing};
+use crate::db::owner_questions::{self, Gate, RequestError};
 use crate::grants::Grant;
+use crate::http::tool_result::{Done, Refusal, ToolResult};
 
 pub(super) fn secret_schema() -> Value {
     json!({
@@ -152,7 +155,11 @@ pub(super) fn confirm_permission_schema() -> Value {
     })
 }
 
-pub(super) async fn confirm_permission(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+pub(super) async fn confirm_permission(
+    state: &AppState,
+    grant: &Grant,
+    args: &Value,
+) -> ToolResult {
     use crate::app::questions::{Covers, PermissionTarget};
     use crate::db::owner_questions::standing::{self, ConfirmError};
 
@@ -169,26 +176,19 @@ pub(super) async fn confirm_permission(state: &AppState, grant: &Grant, args: &V
             "error": "INVALID_COVERS: task scope covers host (ask_permission actions) or computer (computer tool calls). Nothing was saved.",
             "next": "A task grant never covers MCP tools/call. For MCP work, save an mcp_tool grant for that one tool; if it would drop a limit the owner gave, save nothing and tell them.",
         });
-        return (
-            tool_error(&result.to_string()),
-            Some("rejected INVALID_COVERS".into()),
-        );
+        return Err(Refusal::text(result.to_string()).logged("rejected INVALID_COVERS"));
     }
     let args = match serde_json::from_value::<Args>(args.clone()) {
         Ok(args) => args,
         Err(_) => {
-            return (
-                tool_error(
-                    "INVALID_REQUEST: pass target and authorization; task scope requires task, target, kind and covers; routine scope requires routine_id and prompt_revision",
-                ),
-                None,
-            );
+            return Err(Refusal::text(
+                "INVALID_REQUEST: pass target and authorization; task scope requires task, target, kind and covers; routine scope requires routine_id and prompt_revision",
+            ));
         }
     };
     let target = args.target.clone();
     match standing::confirm(&state.db, grant.turn_id, args.target, &args.authorization).await {
-        Ok(confirmed) => (
-            tool_result(json!({
+        Ok(confirmed) => Ok(Done::json(json!({
                 "status": if confirmed.active { "approved" } else { "revoked" },
                 "target": target,
                 "question_id": confirmed.question.id,
@@ -222,10 +222,8 @@ pub(super) async fn confirm_permission(state: &AppState, grant: &Grant, args: &V
                     "Standing permission is recorded for this scope. Declare each effect honestly. \
                      Routine reversible work needs no card. Sensitive actions outside this scope still need approval."
                 },
-            })),
-            Some(format!("standing permission {}", confirmed.question.id)),
-        ),
-        Err(ConfirmError::Request(err)) => question_refused(err),
+            })).logged(format!("standing permission {}", confirmed.question.id))),
+        Err(ConfirmError::Request(err)) => Err(err.into()),
         Err(err) => {
             let code = match err {
                 ConfirmError::NotAuthorized => "NOT_AUTHORIZED",
@@ -235,10 +233,7 @@ pub(super) async fn confirm_permission(state: &AppState, grant: &Grant, args: &V
                 ConfirmError::CardAnswered => "CARD_ANSWERED",
                 ConfirmError::Request(_) => unreachable!(),
             };
-            (
-                tool_error(&format!("{code}: {err}")),
-                Some(format!("rejected {code}")),
-            )
+            Err(Refusal::coded(code, err))
         }
     }
 }
@@ -266,11 +261,11 @@ pub(super) fn handoff_schema() -> Value {
     })
 }
 
-pub(super) async fn computer_handoff(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+pub(super) async fn computer_handoff(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::db::computer_handoffs::{self, CreateError};
     let reason = match computer_handoffs::parse_reason(args["reason"].as_str()) {
         Ok(reason) => reason,
-        Err(message) => return (tool_error(&format!("INVALID_REQUEST: {message}")), None),
+        Err(message) => return Err(Refusal::text(format!("INVALID_REQUEST: {message}"))),
     };
     let screen = super::guest_tools::current_screen(state, grant).await;
     match computer_handoffs::create(&state.db, grant.turn_id, &reason).await {
@@ -298,7 +293,7 @@ pub(super) async fn computer_handoff(state: &AppState, grant: &Grant, args: &Val
                 }
                 None => result["next"] = json!(format!("Say what you need, then {END}")),
             }
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
         Err(err) => {
             let code = match err {
@@ -309,10 +304,7 @@ pub(super) async fn computer_handoff(state: &AppState, grant: &Grant, args: &Val
                 CreateError::OwnerAsked => "HANDOFF_PENDING",
                 CreateError::Db => "UNAVAILABLE",
             };
-            (
-                tool_error(&format!("{code}: {err}")),
-                Some(format!("rejected {code}")),
-            )
+            Err(Refusal::coded(code, err))
         }
     }
 }
@@ -344,31 +336,27 @@ pub(super) fn notice_schema() -> Value {
     })
 }
 
-pub(super) async fn notify_owner(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+pub(super) async fn notify_owner(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::db::owner_notices::{self, CreateError, Declaration, Declared};
     let declaration = match Declaration::parse(args) {
         Ok(declaration) => declaration,
-        Err(message) => return (tool_error(&format!("INVALID_REQUEST: {message}")), None),
+        Err(message) => return Err(Refusal::text(format!("INVALID_REQUEST: {message}"))),
     };
     match owner_notices::declare(&state.db, grant.turn_id, &declaration).await {
-        Ok(Declared::Ask(notice)) => (
-            tool_result(json!({
-                "status": "pending",
-                "notice_id": notice.id,
-                "next": "The owner sees this card in your chat with them and on the exchange. \
-                         Finish the task: your final message still goes back to the bot that \
-                         delegated it.",
-            })),
-            Some(format!("pending {}", notice.id)),
-        ),
-        Ok(Declared::Quiet(need)) => (
-            tool_result(json!({
-                "status": "recorded",
-                "kind": need,
-                "next": "Now write your final message with the full result.",
-            })),
-            Some(format!("declared {}", need.as_str())),
-        ),
+        Ok(Declared::Ask(notice)) => Ok(Done::json(json!({
+            "status": "pending",
+            "notice_id": notice.id,
+            "next": "The owner sees this card in your chat with them and on the exchange. \
+                     Finish the task: your final message still goes back to the bot that \
+                     delegated it.",
+        }))
+        .logged(format!("pending {}", notice.id))),
+        Ok(Declared::Quiet(need)) => Ok(Done::json(json!({
+            "status": "recorded",
+            "kind": need,
+            "next": "Now write your final message with the full result.",
+        }))
+        .logged(format!("declared {}", need.as_str()))),
         Err(err) => {
             let code = match err {
                 CreateError::NotDelegated => "NOT_DELEGATED",
@@ -377,19 +365,16 @@ pub(super) async fn notify_owner(state: &AppState, grant: &Grant, args: &Value) 
                 CreateError::AskPending => "ASK_PENDING",
                 CreateError::Db => "UNAVAILABLE",
             };
-            (
-                tool_error(&format!("{code}: {err}")),
-                Some(format!("rejected {code}")),
-            )
+            Err(Refusal::coded(code, err))
         }
     }
 }
 
-pub(super) async fn request_secret(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+pub(super) async fn request_secret(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::db::secret_requests::{self, RequestError, Spec, Status};
     let spec = match Spec::parse(args) {
         Ok(spec) => spec,
-        Err(message) => return (tool_error(&format!("INVALID_REQUEST: {message}")), None),
+        Err(message) => return Err(Refusal::text(format!("INVALID_REQUEST: {message}"))),
     };
     match secret_requests::create(&state.db, grant.turn_id, &spec).await {
         Ok(request) if request.status != Status::Pending => {
@@ -406,7 +391,7 @@ pub(super) async fn request_secret(state: &AppState, grant: &Grant, args: &Value
                     "The owner declined this request; continue without it and do not ask again unless they do."
                 },
             });
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
         Ok(request) => {
             state.grants.park(grant.turn_id).await;
@@ -420,7 +405,7 @@ pub(super) async fn request_secret(state: &AppState, grant: &Grant, args: &Value
                 "next": "Tell the owner briefly what you need and end this attempt now. Do not \
                          wait, poll, or call more tools; the answer arrives in a continuation.",
             });
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
         Err(err) => {
             let code = match err {
@@ -432,33 +417,31 @@ pub(super) async fn request_secret(state: &AppState, grant: &Grant, args: &Value
                 RequestError::Db => "UNAVAILABLE",
             };
             let log = format!("rejected {code}");
-            (tool_error(&format!("{code}: {err}")), Some(log))
+            Err(Refusal::text(format!("{code}: {err}")).logged(log))
         }
     }
 }
 
-pub(super) fn question_refused(err: crate::db::owner_questions::RequestError) -> Outcome {
-    use crate::db::owner_questions::RequestError;
-    let code = match err {
-        RequestError::NotAllowed => "NOT_ALLOWED",
-        RequestError::AttemptParked => "ATTEMPT_PARKED",
-        RequestError::BudgetExhausted => "BUDGET_EXHAUSTED",
-        RequestError::Conflict => "CONFLICT",
-        RequestError::NotRunning => "NOT_RUNNING",
-        RequestError::Db => "UNAVAILABLE",
-    };
-    (
-        tool_error(&format!("{code}: {err}")),
-        Some(format!("rejected {code}")),
-    )
+impl From<RequestError> for Refusal {
+    fn from(err: RequestError) -> Self {
+        let code = match err {
+            RequestError::NotAllowed => "NOT_ALLOWED",
+            RequestError::AttemptParked => "ATTEMPT_PARKED",
+            RequestError::BudgetExhausted => "BUDGET_EXHAUSTED",
+            RequestError::Conflict => "CONFLICT",
+            RequestError::NotRunning => "NOT_RUNNING",
+            RequestError::Db => "UNAVAILABLE",
+        };
+        Refusal::coded(code, err)
+    }
 }
 
-pub(super) async fn ask_owner(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+pub(super) async fn ask_owner(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     use crate::app::questions::{Spec, Status};
     use crate::db::owner_questions;
     let spec = match Spec::choice(args) {
         Ok(spec) => spec,
-        Err(message) => return (tool_error(&format!("INVALID_QUESTION: {message}")), None),
+        Err(message) => return Err(Refusal::text(format!("INVALID_QUESTION: {message}"))),
     };
     match owner_questions::create(&state.db, grant.turn_id, &spec).await {
         Ok(question) if question.status != Status::Pending => {
@@ -473,7 +456,7 @@ pub(super) async fn ask_owner(state: &AppState, grant: &Grant, args: &Value) -> 
                     _ => "The owner did not answer this; a newer message of theirs governs. Do not treat it as a choice.",
                 },
             });
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
         Ok(question) => {
             state.grants.park(grant.turn_id).await;
@@ -488,24 +471,28 @@ pub(super) async fn ask_owner(state: &AppState, grant: &Grant, args: &Value) -> 
                          Do not wait, poll, or call more tools; their choice arrives in a \
                          continuation.",
             });
-            (tool_result(result), Some(log))
+            Ok(Done::json(result).logged(log))
         }
-        Err(err) => question_refused(err),
+        Err(err) => Err(err.into()),
     }
 }
 
-pub(super) async fn ask_permission(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    use crate::app::questions::{Spec, Standing, permission_authorization};
-    use crate::db::owner_questions::{self, Gate};
+pub(super) async fn ask_permission(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
+    use crate::app::questions::permission_authorization;
     let (spec, authorization) =
         match Spec::permission(args).and_then(|spec| Ok((spec, permission_authorization(args)?))) {
             Ok(parsed) => parsed,
-            Err(message) => return (tool_error(&format!("INVALID_REQUEST: {message}")), None),
+            Err(message) => return Err(Refusal::text(format!("INVALID_REQUEST: {message}"))),
         };
-    match owner_questions::gate_host(&state.db, grant.turn_id, &spec, authorization).await {
-        Ok(Gate::Run { standing }) => (
-            tool_result(
-                json!({ "status": "approved", "standing": standing.is_some(),
+    let card = Card::approval(
+        "Tell the owner briefly what this will do and why, then end this attempt now. Do not \
+         act, wait, poll, or call more tools. The decision arrives in a continuation: approved \
+         means exactly this action, once; otherwise do not do it.",
+    )
+    .quoting(authorization);
+    let declined = Declined::Status("The owner denied this action. Do not do it or an equivalent.");
+    let standing = ask(state, grant, &spec, card, declined).await?;
+    Ok(Done::json(json!({ "status": "approved", "standing": standing.is_some(),
                 "scope": standing, "next": match standing {
                     Some(Standing::Routine) => "Standing permission for destructive actions in \
                         this routine's runs applies. Do exactly this host action now, then \
@@ -514,42 +501,149 @@ pub(super) async fn ask_permission(state: &AppState, grant: &Grant, args: &Value
                         Do exactly this host action now, then report what you did. Keep future \
                         actions within the saved scope and declare their effect honestly.",
                     _ => "Do exactly this host action now, once, then report what you did.",
-                } }),
-            ),
-            Some(format!("approved host action: {:?}", spec.context)),
-        ),
-        Ok(Gate::Pending(question)) => {
-            pending_approval(
-                state,
-                grant,
-                &question,
-                "Tell the owner briefly what this will do and why, then end this attempt now. \
-             Do not act, wait, poll, or call more tools. The decision arrives in a continuation: \
-             approved means exactly this action, once; otherwise do not do it.",
-            )
-            .await
+                } })).logged(format!("approved host action: {:?}", spec.context)))
+}
+
+/// What a gated tool tells the bot while the owner decides, and how it
+/// refuses when the request cannot ask.
+pub(crate) struct Card<'a> {
+    waiting: Waiting<'a>,
+    refused: Refused,
+    authorization: Option<&'a str>,
+}
+
+enum Waiting<'a> {
+    /// The approval result, with this guidance as its `next`.
+    Approval(String),
+    /// A tool's own result for the question ID, logged as `log` and the ID.
+    Result {
+        value: Box<dyn FnOnce(Uuid) -> Value + Send + 'a>,
+        log: &'a str,
+    },
+}
+
+enum Refused {
+    /// Each request error as its own code.
+    Coded,
+    /// `NOT_ALLOWED` as this refusal, other errors as their own code.
+    NotAllowed(Refusal),
+    /// Every request error as this refusal.
+    Always(Refusal),
+}
+
+/// What the bot reads after the owner declines, in the dialect its tool
+/// already speaks.
+pub(crate) enum Declined<'a> {
+    /// `{"status":"denied","question_id","next"}`, logged.
+    Status(&'a str),
+    /// `{"status":"error","code":"owner_declined","safe_message"}`.
+    SafeMessage(&'a str),
+    /// An error text, logged.
+    Text(String),
+    /// This refusal as it is.
+    Refusal(Refusal),
+}
+
+/// The owner's answer to a card [`consult`] did not refuse.
+pub(crate) enum Answer {
+    Approved(Option<Standing>),
+    /// The owner declined the card with this question ID.
+    Declined(Uuid),
+}
+
+impl<'a> Card<'a> {
+    /// The approval result with guidance for while the card waits.
+    pub(crate) fn approval(next: impl Into<String>) -> Self {
+        Self::new(Waiting::Approval(next.into()))
+    }
+
+    /// The tool's own waiting result for the question ID, logged as `log`
+    /// and the ID.
+    pub(crate) fn waiting(value: impl FnOnce(Uuid) -> Value + Send + 'a, log: &'a str) -> Self {
+        Self::new(Waiting::Result {
+            value: Box::new(value),
+            log,
+        })
+    }
+
+    fn new(waiting: Waiting<'a>) -> Self {
+        Self {
+            waiting,
+            refused: Refused::Coded,
+            authorization: None,
         }
-        Ok(Gate::Denied(question)) => (
-            tool_result(json!({ "status": "denied", "question_id": question.id,
-                "next": "The owner denied this action. Do not do it or an equivalent." })),
-            Some(format!("denied {} by the owner", question.id)),
-        ),
-        Err(err) => question_refused(err),
+    }
+
+    pub(crate) fn not_allowed(mut self, refusal: Refusal) -> Self {
+        self.refused = Refused::NotAllowed(refusal);
+        self
+    }
+
+    pub(crate) fn refused(mut self, refusal: Refusal) -> Self {
+        self.refused = Refused::Always(refusal);
+        self
+    }
+
+    /// Runs a host action the owner's message of this turn asks for in
+    /// these words; see [`owner_questions::gate`].
+    pub(crate) fn quoting(mut self, authorization: Option<&'a str>) -> Self {
+        self.authorization = authorization;
+        self
     }
 }
 
-pub(super) async fn pending_approval(
+/// Asks the owner about `spec` unless an approval or standing grant already
+/// covers it, refusing as `declined` says when the owner declines.
+pub(crate) async fn ask(
     state: &AppState,
     grant: &Grant,
-    question: &crate::db::owner_questions::QuestionInfo,
-    next: &str,
-) -> Outcome {
-    state.grants.park(grant.turn_id).await;
-    (
-        tool_result(
-            json!({ "status": "pending", "parked": true, "question_id": question.id,
-        "kind": question.kind, "next": next }),
+    spec: &Spec,
+    card: Card<'_>,
+    declined: Declined<'_>,
+) -> Result<Option<Standing>, Refusal> {
+    let question = match consult(state, grant, spec, card).await? {
+        Answer::Approved(standing) => return Ok(standing),
+        Answer::Declined(question) => question,
+    };
+    let log = format!("denied {question} by the owner");
+    Err(match declined {
+        Declined::Status(next) => {
+            Refusal::json(json!({ "status": "denied", "question_id": question, "next": next }))
+                .logged(log)
+        }
+        Declined::SafeMessage(message) => Refusal::json(
+            json!({"status": "error", "code": "owner_declined", "safe_message": message}),
         ),
-        Some(format!("awaiting approval {}", question.id)),
-    )
+        Declined::Text(message) => Refusal::text(message).logged(log),
+        Declined::Refusal(refusal) => refusal,
+    })
+}
+
+/// Asks the owner about `spec` unless an approval or standing grant already
+/// covers it, for a tool that handles a decline itself. A card still waiting
+/// parks the turn and refuses with the card's waiting result.
+pub(crate) async fn consult(
+    state: &AppState,
+    grant: &Grant,
+    spec: &Spec,
+    card: Card<'_>,
+) -> Result<Answer, Refusal> {
+    let gate = owner_questions::gate(&state.db, grant.turn_id, spec, card.authorization).await;
+    let question = match (gate, card.refused) {
+        (Ok(Gate::Run { standing }), _) => return Ok(Answer::Approved(standing)),
+        (Ok(Gate::Denied(question)), _) => return Ok(Answer::Declined(question.id)),
+        (Ok(Gate::Pending(question)), _) => question,
+        (Err(_), Refused::Always(refusal))
+        | (Err(RequestError::NotAllowed), Refused::NotAllowed(refusal)) => return Err(refusal),
+        (Err(err), _) => return Err(err.into()),
+    };
+    state.grants.park(grant.turn_id).await;
+    Err(match card.waiting {
+        Waiting::Approval(next) => Refusal::json(json!({ "status": "pending", "parked": true,
+            "question_id": question.id, "kind": question.kind, "next": next }))
+        .logged(format!("awaiting approval {}", question.id)),
+        Waiting::Result { value, log } => {
+            Refusal::json(value(question.id)).logged(format!("{log} {}", question.id))
+        }
+    })
 }

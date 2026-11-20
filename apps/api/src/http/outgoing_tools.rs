@@ -7,11 +7,11 @@
 //! tool call naming the approved draft, or its host tools after
 //! `start_draft_send`.
 
+use crate::http::tool_result::{Done, Refusal, ToolResult};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::AppState;
-use super::mcp::{Outcome, tool_error, tool_result};
 use crate::app::outgoing::{
     self, ApprovalSource, Content, Delivery, Email, MAX_DETAIL, Message, Platform, Status,
 };
@@ -233,53 +233,46 @@ fn draft_json(draft: &OutgoingDraft) -> Value {
     value
 }
 
-pub(super) fn refused(err: DraftError) -> Outcome {
-    let code = err.code();
-    if let DraftError::Db(err) = &err {
-        tracing::warn!(error = %err, "outgoing draft tool failed");
+impl From<DraftError> for Refusal {
+    fn from(err: DraftError) -> Self {
+        let code = err.code();
+        if let DraftError::Db(err) = &err {
+            tracing::warn!(error = %err, "outgoing draft tool failed");
+        }
+        Refusal::coded(code, err)
     }
-    (
-        tool_error(&format!("{code}: {err}")),
-        Some(format!("rejected {code}")),
-    )
 }
 
-fn id_arg(args: &Value, key: &str) -> Result<Uuid, Outcome> {
+fn id_arg(args: &Value, key: &str) -> Result<Uuid, Refusal> {
     args[key]
         .as_str()
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| (tool_error(&format!("{key} must be a draft id.")), None))
+        .ok_or_else(|| Refusal::text(format!("{key} must be a draft id.")))
 }
 
-fn only(args: &Value, allowed: &[&str]) -> Result<(), Outcome> {
+fn only(args: &Value, allowed: &[&str]) -> Result<(), Refusal> {
     match args.as_object() {
         Some(object) if object.keys().all(|k| allowed.contains(&k.as_str())) => Ok(()),
-        _ => Err((
-            tool_error(&format!("use only {}.", allowed.join(", "))),
-            None,
-        )),
+        _ => Err(Refusal::text(format!("use only {}.", allowed.join(", ")))),
     }
 }
 
-pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
-    let result = match name {
-        "draft_email" => match sender(state, grant, args).await {
-            Ok(account) => {
-                let email = Email::parse(args, account.as_deref()).map(Content::Email);
-                draft(state, grant, args, email).await
-            }
-            Err(outcome) => Err(outcome),
-        },
-        "draft_message" => match social_destination(state, grant, Message::parse(args)).await {
-            Ok(content) => draft(state, grant, args, content).await,
-            Err(outcome) => Err(outcome),
-        },
+pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
+    match name {
+        "draft_email" => {
+            let account = sender(state, grant, args).await?;
+            let email = Email::parse(args, account.as_deref()).map(Content::Email);
+            draft(state, grant, args, email).await
+        }
+        "draft_message" => {
+            let content = social_destination(state, grant, Message::parse(args)).await?;
+            draft(state, grant, args, content).await
+        }
         "confirm_draft_approval" => confirm(state, grant, args).await,
         "start_draft_send" => start(state, grant, args).await,
         "send_draft" => send(state, grant, args).await,
         _ => report(state, grant, args).await,
-    };
-    result.unwrap_or_else(|outcome| outcome)
+    }
 }
 
 /// A native social draft names its chat by ID, so the owner approves the
@@ -288,7 +281,7 @@ async fn social_destination(
     state: &AppState,
     grant: &Grant,
     message: Result<Message, &'static str>,
-) -> Result<Result<Content, &'static str>, Outcome> {
+) -> Result<Result<Content, &'static str>, Refusal> {
     let Ok(mut message) = message else {
         return Ok(message.map(Content::Message));
     };
@@ -300,7 +293,7 @@ async fn social_destination(
         *destination = socials
             .resolve(account, grant.bot_id, grant.turn_id, destination)
             .await
-            .map_err(|e| (tool_error(&e.to_string()), None))?;
+            .map_err(|e| Refusal::text(e.to_string()))?;
     }
     Ok(Ok(Content::Message(message)))
 }
@@ -310,16 +303,15 @@ async fn draft(
     grant: &Grant,
     args: &Value,
     content: Result<Content, &'static str>,
-) -> Result<Outcome, Outcome> {
-    let content =
-        content.map_err(|message| (tool_error(&format!("INVALID_DRAFT: {message}")), None))?;
-    let sources = files::sources(args).map_err(|message| (tool_error(&message), None))?;
+) -> ToolResult {
+    let content = content.map_err(|message| Refusal::text(format!("INVALID_DRAFT: {message}")))?;
+    let sources = files::sources(args).map_err(Refusal::text)?;
     let content = if sources.is_empty() {
         content
     } else {
         let rejected = |message: String| {
             let code = message.split(':').next().unwrap_or_default().to_owned();
-            (tool_error(&message), Some(format!("rejected {code}")))
+            Refusal::text(message).logged(format!("rejected {code}"))
         };
         let files = files::snapshot(state, grant, sources)
             .await
@@ -332,38 +324,32 @@ async fn draft(
         Value::Null => None,
         _ => Some(id_arg(args, "replaces")?),
     };
-    let row = outgoing_drafts::propose(&state.db, grant.turn_id, &content, replaces)
-        .await
-        .map_err(refused)?;
+    let row = outgoing_drafts::propose(&state.db, grant.turn_id, &content, replaces).await?;
     if row.status == Status::Approved
         && row.approval_source == Some(ApprovalSource::Standing)
         && row.send_turn_id == Some(grant.turn_id)
     {
-        return Ok((
-            tool_result(json!({
-                "status": "approved",
-                "draft": draft_json(&row),
-                "next": format!(
-                    "The owner approves {} like this always, so it is approved as drafted. {}",
-                    row.content.noun(),
-                    send_next(&row)
-                ),
-            })),
-            Some(format!(
-                "{} {} approved always to {}",
+        return Ok(Done::json(json!({
+            "status": "approved",
+            "draft": draft_json(&row),
+            "next": format!(
+                "The owner approves {} like this always, so it is approved as drafted. {}",
                 row.content.noun(),
-                row.id,
-                row.content.audience()
-            )),
-        ));
+                send_next(&row)
+            ),
+        }))
+        .logged(format!(
+            "{} {} approved always to {}",
+            row.content.noun(),
+            row.id,
+            row.content.audience()
+        )));
     }
     if row.status != Status::Pending {
         let log = format!("already {} {}", row.status.as_str(), row.id);
-        return Ok((
-            tool_result(json!({ "draft": draft_json(&row),
-                "next": "You already drafted this in this request; follow its status." })),
-            Some(log),
-        ));
+        return Ok(Done::json(json!({ "draft": draft_json(&row),
+                "next": "You already drafted this in this request; follow its status." }))
+        .logged(log));
     }
     state.grants.park(grant.turn_id).await;
     let log = format!(
@@ -373,20 +359,18 @@ async fn draft(
         row.revision,
         row.content.audience()
     );
-    Ok((
-        tool_result(json!({
-            "status": "pending",
-            "parked": true,
-            "draft": draft_json(&row),
-            "next": "Tell the owner briefly that the draft is ready for review and end this \
-                     attempt now. Do not send it, wait, poll, or call more tools; their decision \
-                     arrives in a continuation.",
-        })),
-        Some(log),
-    ))
+    Ok(Done::json(json!({
+        "status": "pending",
+        "parked": true,
+        "draft": draft_json(&row),
+        "next": "Tell the owner briefly that the draft is ready for review and end this \
+                 attempt now. Do not send it, wait, poll, or call more tools; their decision \
+                 arrives in a continuation.",
+    }))
+    .logged(log))
 }
 
-async fn sender(state: &AppState, grant: &Grant, args: &Value) -> Result<Option<String>, Outcome> {
+async fn sender(state: &AppState, grant: &Grant, args: &Value) -> Result<Option<String>, Refusal> {
     let Some(id) = args.get("account_id").filter(|v| !v.is_null()) else {
         return Ok(None);
     };
@@ -394,14 +378,12 @@ async fn sender(state: &AppState, grant: &Grant, args: &Value) -> Result<Option<
         return Ok(None);
     };
     let forbidden = || {
-        (
-            tool_error(
-                "MAIL_FORBIDDEN: this task cannot send from that account. Use an account \
-                        mail_accounts lists with send permission, or omit account_id and send \
-                        with your own tools.",
-            ),
-            Some("rejected MAIL_FORBIDDEN".to_owned()),
+        Refusal::text(
+            "MAIL_FORBIDDEN: this task cannot send from that account. Use an account \
+             mail_accounts lists with send permission, or omit account_id and send with your \
+             own tools.",
         )
+        .logged("rejected MAIL_FORBIDDEN")
     };
     if !grant.allows(Tool::Mail) {
         return Err(forbidden());
@@ -410,12 +392,7 @@ async fn sender(state: &AppState, grant: &Grant, args: &Value) -> Result<Option<
         store::account(&state.db, id),
         store::permissions(&state.db, id, grant.bot_id)
     );
-    let unavailable = |_| {
-        (
-            tool_error("UNAVAILABLE: mail accounts could not be read."),
-            None,
-        )
-    };
+    let unavailable = |_| Refusal::text("UNAVAILABLE: mail accounts could not be read.");
     match (
         account.map_err(unavailable)?,
         permissions.map_err(unavailable)?,
@@ -445,17 +422,15 @@ fn send_next(row: &OutgoingDraft) -> String {
     }
 }
 
-async fn confirm(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
+async fn confirm(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     only(args, &["draft_id", "always"])?;
     let id = id_arg(args, "draft_id")?;
     let always = match &args["always"] {
         Value::Null => None,
         Value::String(words) => Some(words.as_str()),
-        _ => return Err((tool_error("always is the owner's exact words."), None)),
+        _ => return Err(Refusal::text("always is the owner's exact words.")),
     };
-    let row = outgoing_drafts::confirm(&state.db, grant.turn_id, id, always)
-        .await
-        .map_err(refused)?;
+    let row = outgoing_drafts::confirm(&state.db, grant.turn_id, id, always).await?;
     let mut result = json!({ "status": "approved", "draft": draft_json(&row) });
     let next = send_next(&row);
     let log = format!(
@@ -479,31 +454,26 @@ async fn confirm(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcom
         _ => (next, log),
     };
     result["next"] = json!(next);
-    Ok((tool_result(result), Some(log)))
+    Ok(Done::json(result).logged(log))
 }
 
-async fn start(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
+async fn start(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     only(args, &["draft_id"])?;
     let id = id_arg(args, "draft_id")?;
-    let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &Delivery::Host)
-        .await
-        .map_err(refused)?;
+    let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &Delivery::Host).await?;
     stage_claimed(state, &row).await?;
-    Ok((
-        tool_result(json!({
+    Ok(Done::json(json!({
             "status": "sending",
             "draft": draft_json(&row),
             "next": format!("Send exactly this {}{} now with your host tools, once, then call \
                      report_draft_send with the result. Do not send it any other way or again.",
                      row.content.noun(),
                      if row.content.files().is_empty() { "" } else { " with the files at attachment_paths" }),
-        })),
-        Some(format!(
+        })).logged(format!(
             "claimed {} {} for a host send",
             row.content.noun(),
             row.id
-        )),
-    ))
+        )))
 }
 
 enum ConnectedPayload<'a> {
@@ -552,16 +522,11 @@ fn connected_payload(draft: &OutgoingDraft) -> Result<ConnectedPayload<'_>, Draf
     }
 }
 
-async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
+async fn send(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     only(args, &["draft_id"])?;
     let id = id_arg(args, "draft_id")?;
-    let draft = outgoing_drafts::load_for(&state.db, grant.bot_id, id)
-        .await
-        .map_err(refused)?;
-    let account_id = draft
-        .content
-        .account()
-        .ok_or_else(|| refused(DraftError::NotConnected))?;
+    let draft = outgoing_drafts::load_for(&state.db, grant.bot_id, id).await?;
+    let account_id = draft.content.account().ok_or(DraftError::NotConnected)?;
     let delivery = match &draft.content.0 {
         Content::Email(_) if grant.allows(Tool::Mail) => Delivery::Mail {
             account_id,
@@ -572,9 +537,8 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
             action_id: Uuid::new_v4(),
         },
         _ => {
-            return Err((
-                tool_error("Native sending is unavailable for this task and account."),
-                None,
+            return Err(Refusal::text(
+                "Native sending is unavailable for this task and account.",
             ));
         }
     };
@@ -590,12 +554,10 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
     let row = if settled {
         draft
     } else {
-        let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &delivery)
-            .await
-            .map_err(refused)?;
+        let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &delivery).await?;
         let fresh = row.delivery.as_deref() == Some(&delivery);
         let approved = claimed_files(state, &row, fresh).await?;
-        match connected_payload(&row).map_err(refused)? {
+        match connected_payload(&row)? {
             ConnectedPayload::Mail {
                 account_id,
                 action_id,
@@ -603,8 +565,7 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
             } => {
                 let manager = &state.connectors;
                 match outgoing_drafts::next_mail_send(&state.db, id, &email.message_id(row.id))
-                    .await
-                    .map_err(refused)?
+                    .await?
                 {
                     MailSend::Dispatch { message_id } => {
                         let result = manager
@@ -620,9 +581,7 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
                             )
                             .await;
                         let refusal = result.as_ref().err().map(|err: &MailError| err.code);
-                        outgoing_drafts::after_mail_send(&state.db, id, refusal)
-                            .await
-                            .map_err(refused)?
+                        outgoing_drafts::after_mail_send(&state.db, id, refusal).await?
                     }
                     MailSend::Sent(row) => *row,
                     MailSend::CheckSent {
@@ -654,8 +613,7 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
                         outgoing_drafts::record_sent_check(
                             &state.db, id, action_id, &earlier, check,
                         )
-                        .await
-                        .map_err(refused)?
+                        .await?
                     }
                 }
             }
@@ -700,8 +658,7 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
                     id,
                     result.err().map(|e| e.to_string()).as_deref(),
                 )
-                .await
-                .map_err(refused)?
+                .await?
             }
         }
     };
@@ -729,17 +686,14 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
     if matches!(row.delivery.as_deref(), Some(Delivery::Mail { .. })) {
         let attempts = outgoing_drafts::mail_attempts(&state.db, row.id)
             .await
-            .map_err(|err| refused(err.into()))?;
+            .map_err(DraftError::from)?;
         result["sends"] = json!(attempts);
     }
-    Ok((
-        tool_result(result),
-        Some(format!(
-            "{medium} {} {} through its connected account",
-            row.id,
-            row.status.as_str()
-        )),
-    ))
+    Ok(Done::json(result).logged(format!(
+        "{medium} {} {} through its connected account",
+        row.id,
+        row.status.as_str()
+    )))
 }
 
 fn mail_file(file: &files::Approved) -> crate::connectors::types::OutgoingAttachment {
@@ -767,70 +721,54 @@ async fn claimed_files(
     state: &AppState,
     row: &OutgoingDraft,
     fresh: bool,
-) -> Result<Vec<files::Approved>, Outcome> {
+) -> Result<Vec<files::Approved>, Refusal> {
     let changed = match files::approved(state, row.bot_id, row.content.files()).await {
         Ok(approved) => return Ok(approved),
         Err(changed) => changed.to_string(),
     };
     if !fresh {
-        return Err((
-            tool_error(&format!(
-                "FILE_CHANGED: {changed}. An earlier call already started this send and its \
+        return Err(Refusal::text(format!(
+            "FILE_CHANGED: {changed}. An earlier call already started this send and its \
                  result is not known; never send it again without the owner's new approval."
-            )),
-            Some("rejected FILE_CHANGED".into()),
-        ));
+        ))
+        .logged("rejected FILE_CHANGED"));
     }
-    outgoing_drafts::fail_unsent(&state.db, row.id, &changed)
-        .await
-        .map_err(refused)?;
-    Err((
-        tool_error(&format!(
-            "FILE_CHANGED: {changed}. Tell the owner; draft it again for a new approval."
-        )),
-        Some("rejected FILE_CHANGED".into()),
+    outgoing_drafts::fail_unsent(&state.db, row.id, &changed).await?;
+    Err(Refusal::text(format!(
+        "FILE_CHANGED: {changed}. Tell the owner; draft it again for a new approval."
     ))
+    .logged("rejected FILE_CHANGED"))
 }
 
 /// Stage the files of an unconnected draft this call just claimed for the
 /// bot's own send; nothing was sent if that fails.
-async fn stage_claimed(state: &AppState, row: &OutgoingDraft) -> Result<(), Outcome> {
+async fn stage_claimed(state: &AppState, row: &OutgoingDraft) -> Result<(), Refusal> {
     let approved = claimed_files(state, row, true).await?;
     if let Err(message) = files::stage(state, row.bot_id, &approved).await {
-        outgoing_drafts::fail_unsent(&state.db, row.id, &message)
-            .await
-            .map_err(refused)?;
-        return Err((
-            tool_error(&message),
-            Some("rejected FILE_UNAVAILABLE".into()),
-        ));
+        outgoing_drafts::fail_unsent(&state.db, row.id, &message).await?;
+        return Err(Refusal::text(message).logged("rejected FILE_UNAVAILABLE"));
     }
     Ok(())
 }
 
-async fn report(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
+async fn report(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     only(args, &["draft_id", "status", "detail"])?;
     let id = id_arg(args, "draft_id")?;
     let outcome = args["status"]
         .as_str()
         .and_then(outgoing::Outcome::parse)
-        .ok_or_else(|| (tool_error("status is sent, failed, or uncertain."), None))?;
+        .ok_or_else(|| Refusal::text("status is sent, failed, or uncertain."))?;
     let detail = outgoing::detail(args.get("detail"))
-        .map_err(|message| (tool_error(&format!("INVALID_REPORT: {message}")), None))?;
+        .map_err(|message| Refusal::text(format!("INVALID_REPORT: {message}")))?;
     let (row, changed) =
-        outgoing_drafts::report(&state.db, grant.turn_id, id, outcome, detail.as_deref())
-            .await
-            .map_err(refused)?;
+        outgoing_drafts::report(&state.db, grant.turn_id, id, outcome, detail.as_deref()).await?;
     let noun = row.content.noun();
     let log = if changed {
         format!("{noun} {} {}", row.id, row.status.as_str())
     } else {
         format!("{noun} {} already {}", row.id, row.status.as_str())
     };
-    Ok((
-        tool_result(json!({ "status": row.status, "draft_id": row.id, "medium": noun })),
-        Some(log),
-    ))
+    Ok(Done::json(json!({ "status": row.status, "draft_id": row.id, "medium": noun })).logged(log))
 }
 
 pub(super) async fn claim_for_tool(
@@ -838,7 +776,7 @@ pub(super) async fn claim_for_tool(
     grant: &Grant,
     name: &str,
     args: &Value,
-) -> Result<String, Outcome> {
+) -> Result<String, Refusal> {
     let id = id_arg(args, "approved_draft")?;
     let delivery = Delivery::Tool {
         tool: name.to_owned(),
@@ -847,13 +785,12 @@ pub(super) async fn claim_for_tool(
     let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &delivery)
         .await
         .map_err(|err| {
-            let code = err.code();
-            (
-                tool_error(&format!(
-                    "{code}: {err}. Nothing was done. approved_draft names a draft approved for \
-                     this request and not yet sent."
-                )),
-                Some(format!("rejected {code}")),
+            Refusal::coded(
+                err.code(),
+                format!(
+                    "{err}. Nothing was done. approved_draft names a draft approved for this \
+                     request and not yet sent."
+                ),
             )
         })?;
     stage_claimed(state, &row).await?;

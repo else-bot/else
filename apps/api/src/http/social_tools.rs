@@ -1,7 +1,6 @@
-use super::{
-    AppState,
-    mcp::{Outcome, tool_error, tool_result},
-};
+use super::AppState;
+use super::owner_tools::{Card, Declined, ask};
+use crate::http::tool_result::{Done, Refusal, ToolResult};
 use crate::{
     app::questions::{Kind, Spec},
     grants::Grant,
@@ -33,8 +32,10 @@ pub fn schemas() -> Vec<Value> {
         json!({"name":"social_action_status","description":"Read the durable result of a social mutation. An uncertain or dispatching action must never be blindly repeated with a new ID.","inputSchema":{"type":"object","properties":{"connection_id":{"type":"string","format":"uuid"},"action_id":{"type":"string","format":"uuid"}},"required":["connection_id","action_id"],"additionalProperties":false},"annotations":{"readOnlyHint":true}}),
     ]
 }
-fn refused(e: Error) -> Outcome {
-    (tool_error(&e.to_string()), None)
+impl From<Error> for Refusal {
+    fn from(error: Error) -> Self {
+        Refusal::text(error.to_string())
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,7 +57,7 @@ struct Status {
     connection_id: Uuid,
     action_id: Uuid,
 }
-pub async fn call(s: &AppState, g: &Grant, name: &str, args: &Value) -> Outcome {
+pub async fn call(s: &AppState, g: &Grant, name: &str, args: &Value) -> ToolResult {
     let result = match name {
         "social_connect" => connect(s, g, args).await,
         "social_connections" => connections(s, g, args).await,
@@ -65,14 +66,12 @@ pub async fn call(s: &AppState, g: &Grant, name: &str, args: &Value) -> Outcome 
         "social_trigger_set" => set_trigger(s, g, args).await,
         "social_trigger_list" => list_triggers(s, g, args).await,
         "social_trigger_delete" => delete_trigger(s, g, args).await,
-        _ => Err(Error::Unsupported),
+        _ => Err(Error::Unsupported.into()),
     };
-    result
-        .map(|value| (value, Some(format!("native social tool {name}"))))
-        .unwrap_or_else(refused)
+    result.map(|done| done.logged(format!("native social tool {name}")))
 }
 
-async fn connect(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
+async fn connect(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
     let input: Connect = serde_json::from_value(args.clone())
         .map_err(|_| Error::Invalid("Use provider and reason only. Never pass a token."))?;
     let setup = store::request_setup(&s.db, g.turn_id, input.provider, &input.reason).await?;
@@ -80,7 +79,7 @@ async fn connect(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> 
     if pending {
         s.grants.park(g.turn_id).await;
     }
-    Ok(tool_result(json!({
+    Ok(Done::json(json!({
         "setup": setup,
         "parked": pending,
         "next": if pending && input.provider.setup() == SetupKind::Pairing {
@@ -93,19 +92,21 @@ async fn connect(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> 
     })))
 }
 
-async fn connections(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
+async fn connections(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
     if !args.as_object().is_some_and(|a| a.is_empty()) {
-        return Err(Error::Invalid("social_connections takes no arguments."));
+        return Err(Error::Invalid("social_connections takes no arguments.").into());
     }
-    let triggers = store::triggers(&mut *s.db.acquire().await?, g.bot_id).await?;
+    let triggers = store::triggers(&mut *s.db.acquire().await.map_err(Error::from)?, g.bot_id)
+        .await
+        .map_err(Error::from)?;
     let mut list = Vec::new();
     for c in store::connections(&s.db).await? {
         let access = {
-            let mut conn = s.db.acquire().await?;
+            let mut conn = s.db.acquire().await.map_err(Error::from)?;
             match store::authorize(&mut conn, &c, g.bot_id, g.turn_id, None, false, false).await {
                 Ok(access) => access,
                 Err(Error::Forbidden) => continue,
-                Err(error) => return Err(error),
+                Err(error) => return Err(error.into()),
             }
         };
         let destinations = store::destinations(&s.db, c.id)
@@ -140,7 +141,7 @@ async fn connections(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Err
             "sending": "draft_message with account_id then exact approved send_draft"
         }));
     }
-    Ok(tool_result(json!({"connections": list})))
+    Ok(Done::json(json!({"connections": list})))
 }
 
 #[derive(Deserialize)]
@@ -149,7 +150,7 @@ struct DeleteTrigger {
     trigger_id: Uuid,
 }
 
-async fn set_trigger(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
+async fn set_trigger(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
     let mut input: TriggerInput = serde_json::from_value(args.clone()).map_err(|_| {
         Error::Invalid(
             "Use connection_id, wake (mentions or all), instructions, and optional destination.",
@@ -164,26 +165,28 @@ async fn set_trigger(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Err
     }
     let change = store::set_trigger(&s.db, g.turn_id, &input).await?;
     reconnect(s, &change).await;
-    Ok(tool_result(json!({
+    Ok(Done::json(json!({
         "trigger": change.value,
         "next": "Tell the owner what will wake you and what you will do. They can pause or delete it in your sidebar."
     })))
 }
 
-async fn list_triggers(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
+async fn list_triggers(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
     if !args.as_object().is_some_and(|a| a.is_empty()) {
-        return Err(Error::Invalid("social_trigger_list takes no arguments."));
+        return Err(Error::Invalid("social_trigger_list takes no arguments.").into());
     }
-    let triggers = store::triggers(&mut *s.db.acquire().await?, g.bot_id).await?;
-    Ok(tool_result(json!({ "triggers": triggers })))
+    let triggers = store::triggers(&mut *s.db.acquire().await.map_err(Error::from)?, g.bot_id)
+        .await
+        .map_err(Error::from)?;
+    Ok(Done::json(json!({ "triggers": triggers })))
 }
 
-async fn delete_trigger(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
+async fn delete_trigger(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
     let input: DeleteTrigger =
         serde_json::from_value(args.clone()).map_err(|_| Error::Invalid("Use trigger_id only."))?;
     let change = store::delete_trigger(&s.db, g.bot_id, input.trigger_id).await?;
     reconnect(s, &change).await;
-    Ok(tool_result(json!({ "deleted": input.trigger_id })))
+    Ok(Done::json(json!({ "deleted": input.trigger_id })))
 }
 
 /// Restart the connection's listener only when what it receives changed.
@@ -193,7 +196,7 @@ pub(super) async fn reconnect<T>(s: &AppState, change: &store::TriggerChange<T>)
     }
 }
 
-async fn action(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
+async fn action(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
     let mut input: Action = serde_json::from_value(args.clone())
         .map_err(|_| Error::Invalid("Use connection_id, command, and action_id for a mutation."))?;
     input.command.validate()?;
@@ -208,14 +211,14 @@ async fn action(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
     let args = &args;
     if input.command.mutates() {
         if input.action_id.is_none() {
-            return Err(Error::Invalid("Mutations require a stable action_id."));
+            return Err(Error::Invalid("Mutations require a stable action_id.").into());
         }
         let connection = store::connection(&s.db, input.connection_id).await?;
         if !connection.provider.supports(input.command.operation()) {
-            return Err(Error::Unsupported);
+            return Err(Error::Unsupported.into());
         }
         store::authorize(
-            &mut *s.db.acquire().await?,
+            &mut *s.db.acquire().await.map_err(Error::from)?,
             &connection,
             g.bot_id,
             g.turn_id,
@@ -237,20 +240,20 @@ async fn action(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
             format!("{} social action", connection.provider.label()),
             serde_json::to_string(&input.command).map_err(|_| Error::Conflict)?,
         );
-        match crate::db::owner_questions::gate(&s.db, g.turn_id, &spec)
-            .await
-            .map_err(|_| Error::Forbidden)?
-        {
-            crate::db::owner_questions::Gate::Pending(question) => {
-                return Ok(super::owner_tools::pending_approval(s, g, &question,
-                    "The owner sees an approval card for this exact social action. End this attempt. If approved, call social_action with exactly the same arguments once."
-                ).await.0);
-            }
-            crate::db::owner_questions::Gate::Denied(_) => return Err(Error::Forbidden),
-            crate::db::owner_questions::Gate::Run { .. } => {}
-        }
+        let card = Card::approval(
+            "The owner sees an approval card for this exact social action. End this attempt. If approved, call social_action with exactly the same arguments once.",
+        )
+        .refused(Error::Forbidden.into());
+        ask(
+            s,
+            g,
+            &spec,
+            card,
+            Declined::Refusal(Error::Forbidden.into()),
+        )
+        .await?;
     }
-    Ok(tool_result(
+    Ok(Done::json(
         manager
             .execute(
                 input.connection_id,
@@ -263,16 +266,16 @@ async fn action(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
     ))
 }
 
-async fn status(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
+async fn status(s: &AppState, g: &Grant, args: &Value) -> ToolResult {
     let input: Status = serde_json::from_value(args.clone())
         .map_err(|_| Error::Invalid("Use connection_id and action_id."))?;
     let connection = store::connection(&s.db, input.connection_id).await?;
     let row: Option<(Option<String>, String, Option<sqlx::types::Json<Value>>)> = sqlx::query_as(
         "SELECT destination,status,result FROM social_actions WHERE connection_id=?1 AND action_id=?2 AND bot_id=?3",
-    ).bind(input.connection_id).bind(input.action_id).bind(g.bot_id).fetch_optional(&s.db).await?;
+    ).bind(input.connection_id).bind(input.action_id).bind(g.bot_id).fetch_optional(&s.db).await.map_err(Error::from)?;
     let (destination, status, result) = row.ok_or(Error::NotFound)?;
     store::authorize(
-        &mut *s.db.acquire().await?,
+        &mut *s.db.acquire().await.map_err(Error::from)?,
         &connection,
         g.bot_id,
         g.turn_id,
@@ -281,7 +284,7 @@ async fn status(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
         false,
     )
     .await?;
-    Ok(tool_result(
+    Ok(Done::json(
         json!({"action_id": input.action_id, "status": status, "result": result.map(|x| x.0)}),
     ))
 }

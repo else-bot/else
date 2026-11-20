@@ -1,9 +1,9 @@
 //! `visual_preview`: a bot sees its HTML visual as the owner's chat will.
 
+use crate::http::tool_result::{Done, Refusal, ToolResult};
 use serde_json::{Value, json};
 
 use super::AppState;
-use super::mcp::{Outcome, tool_error, tool_image};
 use crate::grants::Grant;
 
 pub const NAME: &str = "visual_preview";
@@ -34,9 +34,9 @@ pub(super) fn schema() -> Value {
     })
 }
 
-pub(super) async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+pub(super) async fn call(state: &AppState, grant: &Grant, args: &Value) -> ToolResult {
     let Some(path) = args["path"].as_str().map(str::to_owned) else {
-        return (super::mcp::tool_result(json!({ "rules": rules() })), None);
+        return Ok(Done::json(json!({ "rules": rules() })));
     };
     let width = args["width"]
         .as_u64()
@@ -48,7 +48,7 @@ pub(super) async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outco
         .iter()
         .find_map(|provider| provider.project_dir(grant.bot_id))
     else {
-        return (tool_error("Your project directory is unavailable."), None);
+        return Err(Refusal::text("Your project directory is unavailable."));
     };
     let rendered = tokio::task::spawn_blocking(move || {
         let html = crate::providers::output_files::read_visual(&project, &path)?;
@@ -61,8 +61,8 @@ pub(super) async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outco
     .await;
     let (png, rendered) = match rendered {
         Ok(Ok(done)) => done,
-        Ok(Err(message)) => return (tool_error(&message), None),
-        Err(_) => return (tool_error("Rendering failed."), None),
+        Ok(Err(message)) => return Err(Refusal::text(message)),
+        Err(_) => return Err(Refusal::text("Rendering failed.")),
     };
     let next = if !rendered.blocked.is_empty() {
         "Remote images and fonts never load. Inline images as data: URIs or draw them in SVG."
@@ -82,7 +82,7 @@ pub(super) async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outco
         "blocked": rendered.blocked,
         "next": next,
     });
-    (tool_image(meta, &png), None)
+    Ok(Done::image(meta, png))
 }
 
 fn rules() -> String {

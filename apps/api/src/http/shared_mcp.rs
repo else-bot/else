@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use super::owner_tools::{Card, Declined, ask};
+use crate::app::questions::Effect;
+use crate::http::tool_result::{Done, Refusal, ToolResult};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
@@ -9,7 +12,6 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::error::{ApiError, ApiPath};
-use super::mcp::{Outcome, tool_result};
 use super::{AppState, Routes};
 use crate::grants::Grant;
 use crate::mcp::{Error, Installation, PackageId};
@@ -150,14 +152,6 @@ async fn list_or_request(
     Ok((named_response(found, &names), false))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Effect {
-    Local,
-    Destructive,
-    External,
-}
-
 use crate::mcp::METHODS;
 
 pub(crate) const PURPOSE_MAX: usize = 300;
@@ -175,12 +169,13 @@ pub(crate) fn oversized_purpose(purpose: &str) -> Option<String> {
 
 /// Runs a shared MCP tool. Every failure reaches the bot in the same JSON
 /// envelope as a result, whichever layer refused it.
-pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
-    let (value, log) = run(state, grant, name, args).await;
-    (json_error(value), log)
+pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
+    run(state, grant, name, args)
+        .await
+        .map_err(Refusal::enveloped)
 }
 
-async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
+async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> ToolResult {
     let mut approval = None;
     let mut upstream_error = false;
     let result = match name {
@@ -195,10 +190,9 @@ async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outco
                     input
                 }
                 _ => {
-                    return (
-                        invalid("Use an MCP id and an optional purpose of at most 300 bytes."),
-                        None,
-                    );
+                    return Err(invalid(
+                        "Use an MCP id and an optional purpose of at most 300 bytes.",
+                    ));
                 }
             };
             if name == "mcp_connection_status" {
@@ -215,7 +209,7 @@ async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outco
                 {
                     Ok(_) => Ok(json!({"status":"connected","mcp_id":input.id})),
                     Err(Error::AuthRequired(connection)) => {
-                        return auth_required(
+                        return Err(auth_required(
                             state,
                             grant,
                             &input.id,
@@ -223,7 +217,7 @@ async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outco
                             *connection,
                             "pending_owner_auth",
                         )
-                        .await;
+                        .await);
                     }
                     Err(error) => Err(error),
                 }
@@ -238,17 +232,16 @@ async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outco
             Ok(ListArgs { id: None }) => state.mcps.list().await.map(|mcps| json!({"mcps":mcps})),
             Err(_) => Err(Error::Invalid("Use an optional MCP id only.")),
         },
-        "mcp_install" => match install(state, grant, args).await {
-            Ok(Install::Done(result)) => result,
-            Ok(Install::Approved(result, note)) => {
+        "mcp_install" => match install(state, grant, args).await? {
+            Install::Done(result) => result,
+            Install::Approved(result, note) => {
                 approval = Some(note);
                 result
             }
-            Err(outcome) => return outcome,
         },
         "mcp_request" => {
             if let Some(error) = args["purpose"].as_str().and_then(oversized_purpose) {
-                return (invalid(&error), None);
+                return Err(invalid(&error));
             }
             let request = match serde_json::from_value::<RequestArgs>(args.clone()) {
                 Ok(request)
@@ -266,36 +259,23 @@ async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outco
                     request
                 }
                 _ => {
-                    return (
-                        invalid(
-                            "Use a supported MCP method with object params, and valid effect, purpose and context.",
-                        ),
-                        None,
-                    );
+                    return Err(invalid(
+                        "Use a supported MCP method with object params, and valid effect, purpose and context.",
+                    ));
                 }
             };
             if request.method == "tools/call" {
-                use crate::app::questions::Kind;
                 let kind = match request.effect {
-                    Some(Effect::Local) => None,
-                    Some(Effect::Destructive) => Some(Kind::Destructive),
-                    Some(Effect::External) => Some(Kind::External),
+                    Some(effect) => effect.approval(),
                     _ => {
-                        return (
-                            invalid(
-                                "Declare effect local, destructive or external for tools/call. Nothing was done.",
-                            ),
-                            None,
-                        );
+                        return Err(invalid(
+                            "Declare effect local, destructive or external for tools/call. Nothing was done.",
+                        ));
                     }
                 };
                 if let Some(kind) = kind {
-                    match super::guest_tools::approval::approve(state, grant, name, args, kind)
-                        .await
-                    {
-                        Ok(note) => approval = note,
-                        Err(outcome) => return outcome,
-                    }
+                    approval = super::guest_tools::approval::approve(state, grant, name, args, kind)
+                        .await?
                 }
             }
             let result = list_or_request(state, &request.id, request.method, request.params).await;
@@ -329,7 +309,7 @@ async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outco
                 }
                 Ok((result, false)) => Ok(json!({"mcp_id": request.id, "result": result})),
                 Err(Error::AuthRequired(connection)) => {
-                    return auth_required(
+                    return Err(auth_required(
                         state,
                         grant,
                         &request.id,
@@ -337,73 +317,33 @@ async fn run(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outco
                         *connection,
                         "auth_required",
                     )
-                    .await;
+                    .await);
                 }
                 Err(error) => Err(error),
             }
         }
-        _ => return (invalid("Unknown MCP library tool."), None),
+        _ => return Err(invalid("Unknown MCP library tool.")),
     };
     let note = approval.map(|note| format!("; {note}")).unwrap_or_default();
     match result {
         // The upstream tool's own error flag stays visible outside its result.
         Ok(result) if upstream_error => {
-            let mut value = tool_result(result);
-            value["isError"] = json!(true);
-            (
-                value,
-                Some(format!("shared MCP request returned an error{note}")),
-            )
+            Err(Refusal::flagged(result)
+                .logged(format!("shared MCP request returned an error{note}")))
         }
-        Ok(result) => (
-            tool_result(result),
-            Some(format!("shared MCP request completed{note}")),
-        ),
-        Err(error) => (
-            failure(&error),
-            Some(format!("shared MCP request failed{note}")),
-        ),
+        Ok(result) => Ok(Done::json(result).logged(format!("shared MCP request completed{note}"))),
+        Err(error) => Err(failure(&error).logged(format!("shared MCP request failed{note}"))),
     }
 }
 
 /// A failed call in the same JSON shape as a result, so a bot that parses
 /// every result as JSON can read the failure too.
-fn failure(error: &Error) -> Value {
-    envelope(error.code(), &error.to_string())
+fn failure(error: &Error) -> Refusal {
+    Refusal::envelope(error.code(), &error.to_string())
 }
 
-fn invalid(message: &str) -> Value {
-    envelope("invalid_request", message)
-}
-
-/// Turns a plain-text failure, such as an approval refusal written as
-/// `DENIED: ...`, into the JSON error envelope. Results and failures that
-/// are already JSON objects pass through unchanged.
-pub(crate) fn json_error(value: Value) -> Value {
-    if value["isError"] != true {
-        return value;
-    }
-    let Some(text) = value["content"][0]["text"].as_str() else {
-        return value;
-    };
-    if serde_json::from_str::<Value>(text).is_ok_and(|parsed| parsed.is_object()) {
-        return value;
-    }
-    let (code, message) = match text.split_once(": ") {
-        Some((code, message))
-            if !code.is_empty() && code.bytes().all(|b| b.is_ascii_uppercase() || b == b'_') =>
-        {
-            (code.to_ascii_lowercase(), message)
-        }
-        _ => ("error".to_owned(), text),
-    };
-    envelope(&code, message)
-}
-
-fn envelope(code: &str, message: &str) -> Value {
-    let mut value = tool_result(json!({"error": {"code": code, "message": message}}));
-    value["isError"] = json!(true);
-    value
+fn invalid(message: &str) -> Refusal {
+    Refusal::envelope("invalid_request", message)
 }
 
 /// Bytes of a whole result saved for a bot to query; larger ones keep only
@@ -486,13 +426,13 @@ enum Install {
 
 /// Publish a package. Replacing a different one under the same id needs
 /// `replace` and the owner's destructive approval of the exact call.
-async fn install(state: &AppState, grant: &Grant, args: &Value) -> Result<Install, Outcome> {
+async fn install(state: &AppState, grant: &Grant, args: &Value) -> Result<Install, Refusal> {
     let mut fields = args.clone();
     let replace = match fields.as_object_mut().and_then(|o| o.remove("replace")) {
         None | Some(Value::Null) | Some(Value::Bool(false)) => false,
         Some(Value::Bool(true)) => true,
         Some(_) => {
-            return Err((invalid("replace is true or false. Nothing was done."), None));
+            return Err(invalid("replace is true or false. Nothing was done."));
         }
     };
     let Ok(input) = serde_json::from_value::<Installation>(fields) else {
@@ -582,12 +522,11 @@ pub(super) async fn auth_required(
     purpose: Option<&str>,
     connection: crate::mcp::oauth::ConnectionStatus,
     status: &str,
-) -> Outcome {
+) -> Refusal {
     use crate::app::questions::{McpConnection, Spec};
-    use crate::db::owner_questions::{self, Gate};
     let package = match state.mcps.read(id).await {
         Ok(package) => package,
-        Err(error) => return (failure(&error), None),
+        Err(error) => return failure(&error),
     };
     let describe = |scopes: &str| {
         format!(
@@ -615,31 +554,21 @@ pub(super) async fn auth_required(
         format!("Connect {}", package.manifest.name),
         context,
     );
-    match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
-        Ok(Gate::Pending(question)) => {
-            state.grants.park(grant.turn_id).await;
-            (
-                tool_result(
-                    json!({"status":status,"mcp_id":id,"connection":connection,"parked":true,
-                "question_id":question.id,"action":{"type":"mcp_connect","mcp_id":id},
-                "next":"The owner sees a native connection card. Explain briefly and end this attempt. After sign-in, retry the original read. Do not automatically repeat tools/call; check its outcome first."}),
-                ),
-                Some(format!("awaiting MCP authorization {}", question.id)),
-            )
-        }
-        Ok(Gate::Denied(_)) => (
-            tool_result(
-                json!({"status":"error","code":"owner_declined","safe_message":"The owner declined this connection. Continue without it."}),
-            ),
-            None,
+    let card = Card::waiting(
+        |question| {
+            json!({"status":status,"mcp_id":id,"connection":connection,"parked":true,
+                "question_id":question,"action":{"type":"mcp_connect","mcp_id":id},
+                "next":"The owner sees a native connection card. Explain briefly and end this attempt. After sign-in, retry the original read. Do not automatically repeat tools/call; check its outcome first."})
+        },
+        "awaiting MCP authorization",
+    );
+    let declined =
+        Declined::SafeMessage("The owner declined this connection. Continue without it.");
+    match ask(state, grant, &spec, card, declined).await {
+        Ok(_) => Refusal::json(
+            json!({"status":"error","code":"reauth_required","safe_message":"The connection still requires sign-in. Start a new owner request to authorize again."}),
         ),
-        Ok(Gate::Run { .. }) => (
-            tool_result(
-                json!({"status":"error","code":"reauth_required","safe_message":"The connection still requires sign-in. Start a new owner request to authorize again."}),
-            ),
-            None,
-        ),
-        Err(error) => super::owner_tools::question_refused(error),
+        Err(refusal) => refusal,
     }
 }
 
@@ -719,44 +648,4 @@ async fn cancel_pending_authorization(
         .await
         .map_err(api_error)?;
     Ok(Json(json!(status)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::http::mcp::tool_error;
-
-    fn error_of(value: &Value) -> Value {
-        serde_json::from_str(value["content"][0]["text"].as_str().unwrap()).unwrap()
-    }
-
-    #[test]
-    fn a_plain_text_refusal_becomes_the_json_error_envelope() {
-        let denied = json_error(tool_error(
-            "DENIED: the owner declined this external action.",
-        ));
-        assert_eq!(denied["isError"], true);
-        assert_eq!(
-            error_of(&denied)["error"],
-            json!({"code": "denied", "message": "the owner declined this external action."})
-        );
-        let bare = json_error(tool_error("The shared MCP library is unavailable."));
-        assert_eq!(error_of(&bare)["error"]["code"], "error");
-
-        let already = invalid("Use an MCP id only.");
-        assert_eq!(
-            json_error(already.clone()),
-            already,
-            "an envelope passes through"
-        );
-        let upstream = json!({"content": [{"type": "text", "text": "{\"mcp_id\":\"x\"}"}],
-                              "isError": true});
-        assert_eq!(
-            json_error(upstream.clone()),
-            upstream,
-            "upstream JSON is kept"
-        );
-        let ok = tool_result(json!({"status": "ok"}));
-        assert_eq!(json_error(ok.clone()), ok);
-    }
 }

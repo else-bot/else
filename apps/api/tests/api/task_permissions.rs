@@ -110,7 +110,7 @@ async fn owner_quote_cannot_override_a_pending_or_denied_host_action() {
     let spec = Spec::permission(&args).unwrap();
     let quote = permission_authorization(&args).unwrap();
     assert!(matches!(
-        owner_questions::gate_host(&app.db.pool, turn, &spec, quote)
+        owner_questions::gate(&app.db.pool, turn, &spec, quote)
             .await
             .unwrap(),
         Gate::Pending(_)
@@ -146,7 +146,7 @@ async fn owner_quote_cannot_approve_a_different_action_after_the_attempt_parks()
     .await;
     assert_eq!(called.result["status"], "pending", "{}", called.body);
     let args = requested_host_action();
-    let result = owner_questions::gate_host(
+    let result = owner_questions::gate(
         &app.db.pool,
         turn,
         &Spec::permission(&args).unwrap(),
