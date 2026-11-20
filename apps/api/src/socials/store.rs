@@ -716,7 +716,7 @@ pub async fn setups(
     ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Vec<Setup>>, sqlx::Error> {
     let rows: Vec<Setup> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {SETUP_COLUMNS} FROM social_setups WHERE {}",
+        "SELECT {SETUP_COLUMNS} FROM social_setups WHERE {} ORDER BY rowid",
         in_ids("turn_id", "?1")
     )))
     .bind(Json(ids))

@@ -269,8 +269,10 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            plan.iter()
-                .any(|(.., step)| step.starts_with("SEARCH secret_requests USING")),
+            plan.iter().any(
+                |(.., step)| step.starts_with("SEARCH secret_requests USING")
+                    && step.ends_with("(turn_id=?)")
+            ),
             "{plan:?}"
         );
     }
