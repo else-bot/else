@@ -66,10 +66,10 @@ struct Request {
     turn: Uuid,
     action: Option<Uuid>,
     operation: Operation,
-    reply: oneshot::Sender<Result<Value, Error>>,
 }
+type Reply = oneshot::Sender<Result<Value, Error>>;
 enum WorkerRequest {
-    Action(Request),
+    Action(Request, Reply),
     Discover {
         generation: i64,
         reply: oneshot::Sender<Result<Vec<Destination>, Error>>,
@@ -83,8 +83,8 @@ enum WorkerRequest {
 impl WorkerRequest {
     fn reject(self) {
         match self {
-            Self::Action(request) => {
-                let _ = request.reply.send(Err(Error::Inactive));
+            Self::Action(_, reply) => {
+                let _ = reply.send(Err(Error::Inactive));
             }
             Self::Discover { reply, .. } => {
                 let _ = reply.send(Err(Error::Inactive));
@@ -278,15 +278,17 @@ impl Manager {
             CancellationToken::new()
         };
         worker
-            .try_send(WorkerRequest::Action(Request {
-                cancel,
-                generation: c.generation,
-                bot,
-                turn,
-                action,
-                operation,
-                reply: tx,
-            }))
+            .try_send(WorkerRequest::Action(
+                Request {
+                    cancel,
+                    generation: c.generation,
+                    bot,
+                    turn,
+                    action,
+                    operation,
+                },
+                tx,
+            ))
             .map_err(|_| Error::Busy)?;
         tokio::time::timeout(Duration::from_secs(60), rx)
             .await
@@ -358,7 +360,7 @@ impl Manager {
                     },
                     request = requests.recv() => {
                         let Some(message) = request else { break false };
-                        let request = match message {
+                        let (request, mut reply) = match message {
                             WorkerRequest::Discover { generation, reply } => {
                                 if generation != c.generation {
                                     let _ = reply.send(Err(Error::Inactive));
@@ -390,10 +392,10 @@ impl Manager {
                                 if reload { break true; }
                                 continue;
                             }
-                            WorkerRequest::Action(request) => request,
+                            WorkerRequest::Action(request, reply) => (request, reply),
                         };
                         if request.generation != c.generation || c.state != ConnectionState::Active {
-                            let _ = request.reply.send(Err(Error::Inactive));
+                            let _ = reply.send(Err(Error::Inactive));
                             continue;
                         }
                         let (result, reload) = tokio::select! {
@@ -401,6 +403,9 @@ impl Manager {
                             _ = stop.cancelled() => (Err(Error::Inactive), true),
                             _ = changed.changed() => (Err(Error::Inactive), true),
                             _ = request.cancel.cancelled() => (Err(Error::Inactive), false),
+                            // The caller timed out or went away: its turn may
+                            // already have moved on.
+                            _ = reply.closed() => (Err(Error::Inactive), false),
                             result = self.dispatch(&c, &session, &request) => (result, false),
                         };
                         if result.is_err()
@@ -409,7 +414,7 @@ impl Manager {
                         {
                             let _ = store::uncertain(&self.db, c.id, Some(action)).await;
                         }
-                        let _ = request.reply.send(result);
+                        let _ = reply.send(result);
                         if reload {
                             break true;
                         }

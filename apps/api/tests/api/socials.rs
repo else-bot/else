@@ -813,6 +813,58 @@ async fn stopping_work_cancels_an_inflight_send_and_records_uncertainty() {
 }
 
 #[tokio::test]
+async fn a_send_whose_caller_gave_up_stops_and_records_uncertainty() {
+    let db = TestDb::migrated().await;
+    let c = account(&db, "gave-up").await;
+    destinations(&db, c.id).await;
+    let bot = bot(&db).await;
+    let turn = turn(&db, bot, "user").await;
+    let fake = Arc::new(Fake::default());
+    fake.blocked.store(true, Ordering::SeqCst);
+    let manager = Arc::new(Manager::with_transport(
+        db.pool.clone(),
+        Arc::new(key()),
+        fake.clone(),
+    ));
+    let id = Uuid::new_v4();
+    let running = manager.clone();
+    let task = tokio::spawn(async move {
+        running
+            .send(
+                c.id,
+                bot,
+                turn,
+                id,
+                SendMessage {
+                    destination: "100".into(),
+                    body: "body".into(),
+                    reply_to: None,
+                    files: Vec::new(),
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(common::SETTLE, fake.started.notified())
+        .await
+        .unwrap();
+    task.abort();
+    tokio::time::timeout(common::SETTLE, async {
+        while store::ACTIONS
+            .receipt(&db.pool, c.id, bot, id)
+            .await
+            .unwrap()
+            != Some(json!({"action_id": id, "status": "uncertain"}))
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the abandoned send is recorded uncertain");
+    fake.release.notify_one();
+    assert_eq!(fake.sends.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn restored_connections_are_passive_and_credentials_are_removed_on_disconnect() {
     let db = TestDb::migrated().await;
     let c = account(&db, "restore").await;
