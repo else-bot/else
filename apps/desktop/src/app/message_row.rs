@@ -417,6 +417,9 @@ impl ElseApp {
                             .child(bot.name.clone()),
                     );
                 }
+                if !row.folded.is_empty() {
+                    column = column.children(self.render_fold(id, &row.folded, cx));
+                }
                 let card = if conversation
                     .latest_reply()
                     .is_some_and(|reply| reply.id == id)
