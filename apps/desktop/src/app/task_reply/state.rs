@@ -57,8 +57,9 @@ pub(in crate::app) struct TaskReply {
     /// Updates from before each joined owner message, oldest first, by the
     /// answer just above that message, where they fold.
     pub folds: HashMap<Uuid, Vec<Uuid>>,
-    /// The newest joined owner message: the task reads after it, and what
-    /// the turn showed before it stays above it.
+    /// The newest joined owner message the task reads after, and what the
+    /// turn showed before it stays above it. A finished turn that wrote
+    /// nothing after its last messages reads after the one before them.
     pub since: Option<Uuid>,
     pub kept: Vec<Uuid>,
     /// Files of `kept` replies that a later reply delivers again; the kept
@@ -406,7 +407,11 @@ pub(in crate::app) fn place_cards(
                 || before_since
                 || task.answers.contains(&after)
             {
-                return Some((key, anchor));
+                // A card after a folded update reads after the reply it folds under.
+                let folded_under = (task.folds.iter())
+                    .find(|(_, folded)| folded.contains(&after))
+                    .map(|(&reply, _)| reply);
+                return Some((key, folded_under.or(anchor)));
             }
             let attempt = match key {
                 RowKey::Handoff(id) => conversation
@@ -460,9 +465,30 @@ fn split_answers(
                     .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }))
             })
     };
+    let replies: Vec<_> = reply.history.iter().copied().chain(reply.latest).collect();
+    let files = |id| {
+        conversation
+            .item(id)
+            .into_iter()
+            .flat_map(|item| &item.parts)
+            .filter_map(|part| match part {
+                crate::attachments::MessagePart::File { file } => Some(file),
+                crate::attachments::MessagePart::Text { .. } => None,
+            })
+    };
+    // A reacted reply before a message stays in view, and so does one with a
+    // file no later reply delivers again.
+    let stays = |id: Uuid| {
+        reactions.contains_key(&id)
+            || files(id).any(|file| {
+                !(replies.iter().copied())
+                    .filter(|&later| seq(later) > seq(id))
+                    .any(|later| files(later).any(|again| same_file(file, again)))
+            })
+    };
     let mut boundaries: Vec<_> = joined.to_vec();
     let mut segments = vec![Vec::new(); boundaries.len() + 1];
-    for id in reply.history.iter().copied().chain(reply.latest) {
+    for &id in &replies {
         let index = boundaries.partition_point(|&message| seq(message) < seq(id));
         segments[index].push(id);
     }
@@ -474,11 +500,10 @@ fn split_answers(
     let Some((current, earlier)) = segments.split_last() else {
         return;
     };
-    // A reacted reply or one with a file before a message stays in view.
     let mut answers: Vec<Uuid> = earlier
         .iter()
         .filter_map(|segment| segment.last().copied())
-        .chain(earlier.iter().flatten().copied().filter(|&id| kept(id)))
+        .chain(earlier.iter().flatten().copied().filter(|&id| stays(id)))
         .collect();
     for segment in segments.iter().skip(1) {
         let Some(&first) = segment.first() else {
@@ -494,7 +519,7 @@ fn split_answers(
     answers.retain(|&id| current.last() != Some(&id));
     answers.sort_by_key(|&id| seq(id));
     answers.dedup();
-    if answers.is_empty() {
+    if answers.is_empty() && boundaries.is_empty() {
         return;
     }
     reply.folds = earlier
@@ -514,6 +539,15 @@ fn split_answers(
         .filter(|id| !answers.contains(id) && reply.latest != Some(*id))
         .collect();
     reply.answers = answers;
+}
+
+/// Whether `b` delivers file `a` again: a bot that re-uploads a file after a
+/// park sometimes renames an image, so an image of the same type and byte
+/// size counts as the same file.
+fn same_file(a: &crate::attachments::Attachment, b: &crate::attachments::Attachment) -> bool {
+    a.media_type == b.media_type
+        && a.size == b.size
+        && (a.name == b.name || a.media_type.starts_with("image/"))
 }
 
 /// Moves the earlier replies the owner still needs from `history` to `kept`:
@@ -556,11 +590,6 @@ fn keep_earlier_replies(
         .filter(|pair| attempt(pair[0]).is_some_and(|ended| attempt(pair[1]) > Some(ended)))
         .map(|pair| pair[0])
         .collect();
-    let same = |a: &crate::attachments::Attachment, b: &crate::attachments::Attachment| {
-        a.media_type == b.media_type
-            && a.size == b.size
-            && (a.name == b.name || a.media_type.starts_with("image/"))
-    };
     let has_text = |id| {
         conversation
             .item(id)
@@ -573,7 +602,7 @@ fn keep_earlier_replies(
         let files = files(id);
         let (again, new): (Vec<&&crate::attachments::Attachment>, Vec<_>) = files
             .iter()
-            .partition(|file| delivered_later.iter().any(|later| same(file, later)));
+            .partition(|file| delivered_later.iter().any(|later| same_file(file, later)));
         let answer = reply.answers.contains(&id);
         let keep = !answer
             && (!new.is_empty()

@@ -1491,14 +1491,24 @@ fn a_joined_turns_new_updates_count_from_the_message_live_and_reloaded() {
 }
 
 #[test]
-fn a_card_from_before_a_joined_message_stays_above_it() {
+fn a_card_after_a_folded_update_reads_after_the_reply_it_folds_under() {
     let (items, turns) = parked_then_joined("waiting", 2, &[]);
     let c = conversation(items, turns);
     let mut tasks = task_replies(&c);
     let card = RowKey::Question(id(300));
     let left = place_cards(&c, &mut tasks, vec![(id(20), card, Some(id(3)))]);
-    assert_eq!(left, [(card, Some(id(3)))]);
+    assert_eq!(left, [(card, Some(id(5)))]);
     assert!(tasks[&id(20)].cards.is_empty());
+    assert_eq!(
+        crate::app::conversation::transcript_rows(&c, &tasks, left),
+        [
+            RowKey::Item(id(1)),
+            RowKey::Item(id(5)),
+            card,
+            RowKey::Item(id(6)),
+            RowKey::Task(id(20))
+        ],
+    );
 }
 
 #[test]
@@ -1510,4 +1520,72 @@ fn a_file_from_before_a_joined_message_stays_in_view_above_it() {
     let task = &task_replies(&c)[&id(20)];
     assert_eq!(task.answers, [id(3), id(5)]);
     assert_eq!(task.folds[&id(5)], [id(2), id(4)]);
+}
+
+fn pdf(file: u128) -> Value {
+    json!([{"type": "file", "file": {"id": id(file), "name": "report.pdf",
+        "media_type": "application/pdf", "size": 10}}])
+}
+
+#[test]
+fn a_file_sent_again_later_folds_with_the_update_that_first_sent_it() {
+    let (mut items, turns) = parked_then_joined("running", 3, &[(7, 3)]);
+    items[2]["parts"] = pdf(400);
+    items[6]["parts"] = pdf(401);
+    let task = &task_replies(&conversation(items, turns))[&id(20)];
+    assert_eq!(task.answers, [id(5)]);
+    assert_eq!(task.folds[&id(5)], [id(2), id(3), id(4)]);
+}
+
+#[test]
+fn a_message_waits_below_a_queued_status_until_the_reply_takes_it() {
+    let (items, mut turns) = parked_then_joined("waiting", 2, &[]);
+    turns[1]["steer_status"] = json!("pending");
+    let mut c = conversation(items, turns.clone());
+    let tasks = task_replies(&c);
+    assert_eq!(tasks[&id(21)].state, ReplyState::Queued);
+    assert_eq!(
+        rows(&c),
+        [
+            RowKey::Item(id(1)),
+            RowKey::Item(id(5)),
+            RowKey::Item(id(6)),
+            RowKey::Task(id(21)),
+            RowKey::Task(id(20))
+        ],
+    );
+    turns[1]["steer_status"] = json!("delivered");
+    c.apply(&Frame {
+        id: Some("test:1".into()),
+        event: "turn.updated".into(),
+        data: json!({"turn": turns[1]}).to_string(),
+    })
+    .unwrap();
+    assert_eq!(
+        rows(&c),
+        [1, 5, 6]
+            .map(|n| RowKey::Item(id(n)))
+            .into_iter()
+            .chain([RowKey::Task(id(20))])
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn a_reply_that_parked_without_writing_works_below_the_message_that_joins_it() {
+    let (items, turns) = parked_then_joined("waiting", 1, &[]);
+    let items: Vec<_> = items
+        .into_iter()
+        .filter(|item| item["kind"] == "user")
+        .collect();
+    let c = conversation(items, turns);
+    assert_eq!(task_replies(&c)[&id(20)].anchor, Some(id(6)));
+    assert_eq!(
+        rows(&c),
+        [
+            RowKey::Item(id(1)),
+            RowKey::Item(id(6)),
+            RowKey::Task(id(20))
+        ],
+    );
 }

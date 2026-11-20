@@ -293,10 +293,18 @@ pub(super) fn transcript_rows(
         .filter(|item| item.kind == "assistant" && delegated.contains(&item.turn_id))
         .map(|item| (item.turn_id, item.id))
         .collect();
-    let anchored: HashMap<Uuid, Uuid> = tasks
-        .values()
-        .filter_map(|task| Some((task.anchor?, task.turn)))
-        .collect();
+    // A message joined into a reply anchors both its own queued turn and
+    // the reply working on it; the message's own status reads first.
+    let mut anchored: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for task in tasks.values() {
+        if let Some(anchor) = task.anchor {
+            anchored.entry(anchor).or_default().push(task.turn);
+        }
+    }
+    for (anchor, turns) in &mut anchored {
+        let own = c.item(*anchor).map(|item| item.turn_id);
+        turns.sort_by_key(|&turn| (Some(turn) != own, c.turn(turn).map(|t| t.turn_no)));
+    }
     for item in c.items() {
         if c.gap_below(item.seq).is_some() {
             rows.push(RowKey::Gap(item.seq));
@@ -316,7 +324,13 @@ pub(super) fn transcript_rows(
         {
             rows.push(RowKey::Item(item.id));
         }
-        rows.extend(anchored.get(&item.id).map(|&turn| RowKey::Task(turn)));
+        rows.extend(
+            anchored
+                .get(&item.id)
+                .into_iter()
+                .flatten()
+                .map(|&turn| RowKey::Task(turn)),
+        );
         requests.retain(|(key, anchor)| {
             let here = *anchor == Some(item.id);
             if here {
