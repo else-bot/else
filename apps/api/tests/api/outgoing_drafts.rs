@@ -11,6 +11,12 @@ use else_api::providers::synthetic::Synthetic;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+/// A caller that may send through connected mail only.
+const MAIL: else_api::app::outgoing::Channels = else_api::app::outgoing::Channels {
+    mail: true,
+    social: false,
+};
+
 const SLOW: &str = "[synthetic:slow] email Ada about lunch on Friday, and keep it short.";
 
 struct Harness {
@@ -1623,8 +1629,7 @@ async fn uncertain_revoked_and_revised_connected_emails_never_send_twice() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_ends() {
-    use else_api::app::outgoing::Delivery;
-    use else_api::db::outgoing_drafts;
+    use else_api::db::outgoing_drafts::{self, Claim, Claimed, Payload};
     let mail = Arc::new(FakeMail::default());
     let Harness { app, .. } = harness_with(Some(mail.clone())).await;
     let main = app.main_bot().await;
@@ -1644,23 +1649,17 @@ async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_e
         wait(&app, turn, "waiting").await;
         owner_action(&app, &main, id, "approve", json!({ "version": 1 })).await;
         wait(&app, turn, "running").await;
-        let action_id = Uuid::new_v4();
-        let claimed = outgoing_drafts::claim(
-            &app.db.pool,
-            turn,
-            id,
-            &Delivery::Mail {
-                account_id: account,
-                action_id,
-            },
-        )
-        .await
-        .unwrap();
+        let Claim::Fresh(Claimed {
+            action_id,
+            payload: Payload::Mail(email),
+            ..
+        }) = outgoing_drafts::claim_connected(&app.db.pool, turn, id, MAIL)
+            .await
+            .unwrap()
+        else {
+            panic!("an approved connected email is claimed for its mail send");
+        };
         if dispatched {
-            let email = match &claimed.content.0 {
-                else_api::app::outgoing::Content::Email(email) => email.clone(),
-                _ => unreachable!(),
-            };
             let started = store::begin_action(
                 &app.db.pool,
                 account,
@@ -3197,7 +3196,6 @@ async fn an_uncertain_send_without_a_message_id_is_never_sent_again() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_retry_failing_before_its_send_keeps_the_earlier_send_uncertain() {
-    use else_api::app::outgoing::Delivery;
     use else_api::db::outgoing_drafts;
     let mail = Arc::new(FakeMail::default());
     mail.fail_at(Some(SendPhase::Reply));
@@ -3210,11 +3208,7 @@ async fn a_retry_failing_before_its_send_keeps_the_earlier_send_uncertain() {
     wait(&app, first, "completed").await;
 
     let (second, _) = approve_again(&app, &main, id).await;
-    let delivery = Delivery::Mail {
-        account_id: account,
-        action_id: Uuid::new_v4(),
-    };
-    outgoing_drafts::claim(&app.db.pool, second, id, &delivery)
+    outgoing_drafts::claim_connected(&app.db.pool, second, id, MAIL)
         .await
         .unwrap();
     let failed = outgoing_drafts::fail_unsent(
