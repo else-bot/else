@@ -10,10 +10,11 @@ pub mod types;
 
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::connector_core::workers::{Inbox, Worker, Workers};
 use crate::{actor::Actor, credentials::SecretKey, scheduler::Scheduler};
 use store::Whereabouts;
 use types::*;
@@ -155,20 +156,13 @@ enum Request {
         reply: oneshot::Sender<Result<(), MailError>>,
     },
 }
-#[derive(Clone)]
-struct Worker {
-    commands: mpsc::Sender<Request>,
-    changed: Arc<Notify>,
-    stop: CancellationToken,
-    done: tokio::sync::watch::Receiver<bool>,
-}
 
 pub struct ConnectorManager {
     pub db: sqlx::SqlitePool,
     pub key: Arc<SecretKey>,
     scheduler: Arc<Scheduler>,
     transport: Arc<dyn MailTransport>,
-    workers: Actor<HashMap<Uuid, Worker>>,
+    workers: Workers<Request>,
     messages: Actor<cache::Messages>,
     readers: readers::Readers,
     /// One sign-in refresh at a time per account, so the owner's reader
@@ -192,7 +186,7 @@ impl ConnectorManager {
             key,
             scheduler,
             transport,
-            workers: Actor::default(),
+            workers: Workers::default(),
             messages: Actor::default(),
             readers: readers::Readers::default(),
             refreshes: Actor::default(),
@@ -200,38 +194,20 @@ impl ConnectorManager {
         }
     }
 
-    async fn worker(self: &Arc<Self>, id: Uuid) -> Result<Worker, MailError> {
+    async fn worker(self: &Arc<Self>, id: Uuid) -> Result<Worker<Request>, MailError> {
         self.worker_or_start(id).await.map(|(worker, _)| worker)
     }
 
     /// The account's worker, and whether this call started it.
-    async fn worker_or_start(self: &Arc<Self>, id: Uuid) -> Result<(Worker, bool), MailError> {
+    async fn worker_or_start(
+        self: &Arc<Self>,
+        id: Uuid,
+    ) -> Result<(Worker<Request>, bool), MailError> {
         let manager = self.clone();
         self.workers
-            .call(move |workers| {
-                if let Some(worker) = workers.get(&id) {
-                    return Ok((worker.clone(), false));
-                }
-                if workers.len() >= 32 {
-                    return Err(MailError::new("connector_limit"));
-                }
-                let (commands, receiver) = mpsc::channel(16);
-                let (done, completed) = tokio::sync::watch::channel(false);
-                let worker = Worker {
-                    commands,
-                    changed: Arc::new(Notify::new()),
-                    stop: CancellationToken::new(),
-                    done: completed,
-                };
-                workers.insert(id, worker.clone());
-                let running = worker.clone();
-                tokio::spawn(async move {
-                    manager.account_loop(id, running, receiver).await;
-                    let _ = done.send(true);
-                });
-                Ok((worker, true))
-            })
+            .get_or_spawn(id, move |inbox| manager.account_loop(id, inbox))
             .await
+            .map_err(|_| MailError::new("connector_limit"))
     }
 
     /// Drops what the owner's reader kept for the account, so a paused,
@@ -251,19 +227,12 @@ impl ConnectorManager {
         // A worker this call starts reads the changed account itself; a
         // notification would restart its first watch for nothing.
         if let Ok((worker, false)) = self.worker_or_start(id).await {
-            worker.changed.notify_one();
+            worker.changed();
         }
     }
 
     pub async fn forget(&self, id: Uuid) {
-        if let Some(mut worker) = self.workers.call(move |workers| workers.remove(&id)).await {
-            worker.stop.cancel();
-            while !*worker.done.borrow_and_update() {
-                if worker.done.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
+        self.workers.stop(id).await;
         self.drop_reads(id, true).await;
     }
 
@@ -275,7 +244,6 @@ impl ConnectorManager {
         let worker = self.worker(id).await?;
         let (reply, result) = oneshot::channel();
         worker
-            .commands
             .try_send(Request::Credential { credential, reply })
             .map_err(|_| MailError::new("mail_account_busy"))?;
         tokio::time::timeout(Duration::from_secs(120), result)
@@ -571,7 +539,6 @@ impl ConnectorManager {
         self.authorization(&account, &command).await?;
         let worker = self.worker(account_id).await?;
         worker
-            .commands
             .try_send(Request::Mail(command))
             .map_err(|_| MailError::new("mail_account_busy"))?;
         match tokio::time::timeout(Duration::from_secs(120), result).await {
@@ -594,21 +561,7 @@ impl ConnectorManager {
             }
             tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(30)) => {} }
         }
-        let workers: Vec<_> = self
-            .workers
-            .call(|workers| workers.drain().map(|(_, worker)| worker).collect())
-            .await;
-        for worker in &workers {
-            worker.stop.cancel();
-        }
-        futures_util::future::join_all(workers.into_iter().map(|mut worker| async move {
-            while !*worker.done.borrow_and_update() {
-                if worker.done.changed().await.is_err() {
-                    break;
-                }
-            }
-        }))
-        .await;
+        self.workers.shutdown().await;
     }
 
     async fn authorization(&self, account: &Account, command: &Command) -> Result<(), MailError> {
@@ -858,32 +811,33 @@ impl ConnectorManager {
         }
     }
 
-    async fn account_loop(
-        self: Arc<Self>,
-        id: Uuid,
-        worker: Worker,
-        mut commands: mpsc::Receiver<Request>,
-    ) {
+    async fn account_loop(self: Arc<Self>, id: Uuid, inbox: Inbox<Request>) {
+        let Inbox {
+            requests: mut commands,
+            mut changed,
+            stop,
+        } = inbox;
         let mut failures = 0u32;
         let mut retry_at = tokio::time::Instant::now();
         let mut watching: Option<Watching> = None;
         loop {
-            if worker.stop.is_cancelled() {
+            if stop.is_cancelled() {
                 break;
             }
             if watching.is_none() && tokio::time::Instant::now() >= retry_at {
                 match self.prepare_watch(id).await {
                     Ok((account, auth)) => {
                         let manager = self.clone();
-                        let stop = worker.stop.child_token();
-                        let watch_stop = stop.clone();
+                        let watch_stop = stop.child_token();
+                        let task_stop = watch_stop.clone();
                         let generation = account.generation;
-                        let task = tokio::spawn(async move {
-                            manager.watch(&account, &auth, watch_stop).await
-                        });
+                        let task =
+                            tokio::spawn(
+                                async move { manager.watch(&account, &auth, task_stop).await },
+                            );
                         watching = Some(Watching {
                             task,
-                            stop,
+                            stop: watch_stop,
                             generation,
                         });
                     }
@@ -900,7 +854,7 @@ impl ConnectorManager {
             }
             tokio::select! {
                 biased;
-                _ = worker.stop.cancelled() => break,
+                _ = stop.cancelled() => break,
                 command = commands.recv() => {
                     let Some(command) = command else { break; };
                     match command {
@@ -918,7 +872,8 @@ impl ConnectorManager {
                         }
                     }
                 }
-                _ = worker.changed.notified() => {
+                result = changed.changed() => {
+                    if result.is_err() { break; }
                     stop_watch(&mut watching).await;
                     failures = 0;
                     retry_at = tokio::time::Instant::now();
