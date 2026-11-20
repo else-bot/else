@@ -1,5 +1,6 @@
 use super::{
-    ComputerError, ComputerManager, GUEST_CHECKPOINT, IdleAction, Ordering, Reason, RuntimeState,
+    ComputerError, ComputerManager, Desired, GUEST_CHECKPOINT, IdleAction, Observed, Ordering,
+    Reason, Transition,
 };
 use crate::db::turns::ACTIVE_STATUSES;
 use std::mem::DropGuard;
@@ -17,19 +18,8 @@ impl ComputerManager {
             .bind(bot_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query(
-            "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib, desired_state, network)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'stopped', ?6)
-             ON CONFLICT (bot_id) DO UPDATE SET desired_state = 'stopped', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')",
-        )
-        .bind(bot_id)
-        .bind(Self::runtime_name(bot_id))
-        .bind(&self.config.image)
-        .bind(self.config.cpus as i32)
-        .bind(self.config.memory_mib as i32)
-            .bind(&self.config.network)
-        .execute(&mut *tx)
-        .await?;
+        self.ensure_row(&mut tx, bot_id).await?;
+        Self::desire(&mut tx, bot_id, Desired::Stopped).await?;
         sqlx::query(
             "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'owner_stop'
              WHERE bot_id = ?1 AND released_at IS NULL",
@@ -45,11 +35,22 @@ impl ComputerManager {
 
     /// Clear an owner stop. The computer starts again only on next use.
     pub async fn owner_resume(&self, bot_id: Uuid) -> Result<(), ComputerError> {
+        let mut conn = self.pool.acquire().await?;
+        Self::desire(&mut conn, bot_id, Desired::Auto).await?;
+        Ok(())
+    }
+
+    async fn desire(
+        conn: &mut sqlx::SqliteConnection,
+        bot_id: Uuid,
+        desired: Desired,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "UPDATE bot_computers SET desired_state = 'auto', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE bot_id = ?1",
+            "UPDATE bot_computers SET desired_state = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE bot_id = ?1",
         )
         .bind(bot_id)
-        .execute(&self.pool)
+        .bind(desired)
+        .execute(&mut *conn)
         .await?;
         Ok(())
     }
@@ -72,7 +73,7 @@ impl ComputerManager {
             Reason::MustStop | Reason::Resize => {
                 if reason == Reason::MustStop
                     && active == Some(true)
-                    && row.desired_state != "stopped"
+                    && row.desired_state != Desired::Stopped
                 {
                     return Ok(false);
                 }
@@ -99,7 +100,7 @@ impl ComputerManager {
                 IdleAction::Stop
             }
             Reason::ForJobs => {
-                if row.observed_state != "paused" {
+                if row.observed_state != Observed::Paused {
                     return Ok(false);
                 }
                 IdleAction::Stop
@@ -115,34 +116,29 @@ impl ComputerManager {
                 .bind(self.config.idle_after.as_secs_f64())
                 .fetch_one(&mut *tx)
                 .await?;
-                if !idle || active != Some(true) || row.desired_state != "auto" {
+                if !idle || active != Some(true) || row.desired_state != Desired::Auto {
                     return Ok(false);
                 }
                 action
             }
         };
-        let applies = match action {
-            IdleAction::Stop => {
-                matches!(row.observed_state.as_str(), "running" | "paused" | "error")
-            }
-            IdleAction::Pause => row.observed_state == "running",
-        };
-        if !applies {
+        if Transition::Halt(action)
+            .apply(&mut tx, bot_id)
+            .await?
+            .is_none()
+        {
             tx.commit().await?;
             return Ok(false);
         }
-        let (transient, done) = match action {
-            IdleAction::Stop => ("stopping", "stopped"),
-            IdleAction::Pause => ("pausing", "paused"),
-        };
-        self.set_state(&mut tx, bot_id, transient, Some(row.generation + 1), None)
-            .await?;
         tx.commit().await?;
         if crate::faults::hit("computer.after_stop_decision") {
             return Err(ComputerError::Interrupted);
         }
         tracing::info!(bot = %bot_id, ?reason, "computer transition");
-        if self.config.desktop && action == IdleAction::Stop && row.observed_state == "running" {
+        if self.config.desktop
+            && action == IdleAction::Stop
+            && row.observed_state == Observed::Running
+        {
             let checkpointed = self
                 .runtime
                 .exec(
@@ -166,11 +162,16 @@ impl ComputerManager {
         match result {
             Ok(()) => {
                 let mut conn = self.pool.acquire().await?;
-                self.set_state(&mut conn, bot_id, done, None, None).await?;
+                Self::transition(&mut conn, bot_id, Transition::Halted(action)).await?;
                 Ok(true)
             }
             Err(err) => {
-                self.observe_after_failure(bot_id, &err.to_string()).await?;
+                let from = match action {
+                    IdleAction::Stop => Observed::Stopping,
+                    IdleAction::Pause => Observed::Pausing,
+                };
+                self.observe_after_failure(bot_id, from, &err.to_string())
+                    .await?;
                 Ok(false)
             }
         }
@@ -250,9 +251,9 @@ impl ComputerManager {
             };
             self.stop_held(bot, Reason::MustStop).await?;
         }
-        let idle_states: Vec<&str> = match self.config.idle_action {
-            IdleAction::Stop => vec!["running", "paused"],
-            IdleAction::Pause => vec!["running"],
+        let idle_states = match self.config.idle_action {
+            IdleAction::Stop => vec![Observed::Running, Observed::Paused],
+            IdleAction::Pause => vec![Observed::Running],
         };
         let idle: Vec<Uuid> = sqlx::query_scalar(
             "SELECT c.bot_id FROM bot_computers c
@@ -315,6 +316,11 @@ impl ComputerManager {
     /// an interrupted transition takes the runtime's actual state. Until
     /// this succeeds no computer is used, and maintenance retries it.
     pub async fn reconcile_startup(&self) -> Result<(), ComputerError> {
+        let rows: Vec<(Uuid, String, Observed, i64)> = sqlx::query_as(
+            "SELECT bot_id, runtime_name, observed_state, generation FROM bot_computers",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         let listed = match self.runtime.list().await {
             Ok(listed) => listed,
             Err(err) => {
@@ -322,32 +328,22 @@ impl ComputerManager {
                 return Ok(());
             }
         };
-        let rows: Vec<(Uuid, String, String)> =
-            sqlx::query_as("SELECT bot_id, runtime_name, observed_state FROM bot_computers")
-                .fetch_all(&self.pool)
-                .await?;
-        for (bot, name, observed) in rows {
+        for (bot, name, was, generation) in rows {
             let actual = listed.iter().find(|(n, _)| *n == name).map(|(_, s)| *s);
-            let state = match actual {
-                Some(RuntimeState::Running) => "running",
-                Some(RuntimeState::Paused) => "paused",
-                Some(RuntimeState::Stopped) => "stopped",
-                Some(RuntimeState::Failed) => "error",
-                None if observed == "absent" || observed == "creating" => "absent",
-                None => "missing",
-            };
-            if state != observed {
-                tracing::info!(bot = %bot, from = %observed, to = state, "computer state reconciled");
+            let now = was.from_runtime(actual);
+            let mut conn = self.pool.acquire().await?;
+            let reconciled = Transition::Reconciled {
+                was,
+                generation,
+                now,
             }
-            sqlx::query(
-                "UPDATE bot_computers SET observed_state = ?2, generation = generation + 1,
-                     updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-                 WHERE bot_id = ?1",
-            )
-            .bind(bot)
-            .bind(state)
-            .execute(&self.pool)
+            .apply(&mut conn, bot)
             .await?;
+            if reconciled.is_none() {
+                tracing::info!(bot = %bot, "computer changed during startup inspection; left as is");
+            } else if now != was {
+                tracing::info!(bot = %bot, from = %was, to = %now, "computer state reconciled");
+            }
         }
         self.clear_stranded_upgrades().await?;
         sqlx::query(

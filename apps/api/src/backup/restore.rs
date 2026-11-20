@@ -22,7 +22,6 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 
 use super::{BackupError, COMPLETE, Completion, DATABASE, DatabaseParams, MANIFEST, Manifest};
 use crate::credentials::SecretKey;
-use crate::db::in_ids;
 
 #[derive(Debug)]
 pub struct RestoreRequest<'a> {
@@ -720,21 +719,13 @@ async fn reconcile(
     let target = request.server.with_database(request.target_database);
     let mut conn = SqliteConnection::connect_with(&options(&target)).await?;
     let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
-    sqlx::query(
-        sqlx::AssertSqlSafe(format!("UPDATE bot_computers SET observed_state = 'stopped', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE {}", in_ids("bot_id", "?1"))),
-    )
-    .bind(sqlx::types::Json(restored))
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        sqlx::AssertSqlSafe(format!("UPDATE bot_computers SET observed_state = 'missing',
-             last_error = 'not included in the restored backup', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE observed_state <> 'absent' AND NOT ({})", in_ids("bot_id", "?1"))),
-    )
-    .bind(sqlx::types::Json(restored))
-    .execute(&mut *tx)
-    .await?;
+    let tracked = crate::computers::state::restored(&mut tx, restored).await?;
+    if tracked != restored.len() as u64 {
+        return Err(BackupError::Invalid(format!(
+            "{} restored computer disks have no computer in the database",
+            restored.len() as u64 - tracked
+        )));
+    }
     sqlx::query(
         "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'restored'
          WHERE released_at IS NULL",

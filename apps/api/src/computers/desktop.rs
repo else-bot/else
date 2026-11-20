@@ -1,6 +1,6 @@
 use super::{
-    Acquire, ComputerError, ComputerManager, DESKTOP_GUEST_PORT, Desktop, GUEST_DESKTOP,
-    GUEST_INIT, RuntimeError, bounded,
+    Acquire, ComputerError, ComputerManager, DESKTOP_GUEST_PORT, Desired, Desktop, GUEST_DESKTOP,
+    GUEST_INIT, Observed, RuntimeError, bounded,
 };
 use std::time::Duration;
 use uuid::Uuid;
@@ -23,7 +23,10 @@ impl ComputerManager {
             .bind(port as i32)
             .execute(&self.pool)
             .await
-            .map_err(|e| unavailable(e.to_string()))?;
+            .map_err(|e| match e.as_database_error() {
+                Some(db) if db.is_unique_violation() => RuntimeError::PortInUse(db.to_string()),
+                _ => unavailable(e.to_string()),
+            })?;
         let password = self
             .write_vnc_password(bot_id)
             .map_err(|e| unavailable(e.to_string()))?;
@@ -537,10 +540,10 @@ impl ComputerManager {
         let Some(row) = Self::row(&mut tx, bot_id).await? else {
             return Ok(Err(ViewerRefusal::NotRunning));
         };
-        if row.desired_state == "stopped" {
+        if row.desired_state == Desired::Stopped {
             return Ok(Err(ViewerRefusal::OwnerStopped));
         }
-        if row.observed_state != "running" {
+        if row.observed_state != Observed::Running {
             return Ok(Err(ViewerRefusal::NotRunning));
         }
         let lease = self.lease(&mut tx, bot_id, holder, row.generation).await?;
@@ -555,7 +558,7 @@ impl ComputerManager {
         lease_id: Uuid,
         renew: bool,
     ) -> Result<ViewerLease, ComputerError> {
-        let row: Option<(bool, Option<String>, bool, String, bool)> = sqlx::query_as(
+        let row: Option<(bool, Option<String>, bool, Desired, bool)> = sqlx::query_as(
             "SELECT l.released_at IS NULL, l.end_reason, b.status = 'active', c.desired_state,
                     c.observed_state = 'running' AND c.generation = l.generation
              FROM computer_leases l JOIN bots b ON b.id = l.bot_id
@@ -569,7 +572,7 @@ impl ComputerManager {
         };
         let state = if !active {
             ViewerLease::BotInactive
-        } else if desired == "stopped" || reason.as_deref() == Some("owner_stop") {
+        } else if desired == Desired::Stopped || reason.as_deref() == Some("owner_stop") {
             ViewerLease::OwnerStopped
         } else if !running {
             ViewerLease::NotRunning

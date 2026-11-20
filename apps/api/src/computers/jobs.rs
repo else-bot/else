@@ -22,7 +22,7 @@ use sqlx::Row as _;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::{Acquire, ComputerError, ComputerManager, ExecOutput};
+use super::{Acquire, ComputerError, ComputerManager, ExecOutput, Observed};
 use crate::db::computer_job_waits as job_waits;
 use crate::db::task_secrets::{Env, redact};
 
@@ -513,7 +513,7 @@ impl ComputerManager {
         script: &str,
         args: &[&str],
     ) -> Result<Inspect, ComputerError> {
-        let row: Option<(String, String)> = sqlx::query_as(
+        let row: Option<(String, Observed)> = sqlx::query_as(
             "SELECT runtime_name, observed_state FROM bot_computers WHERE bot_id = ?1",
         )
         .bind(bot_id)
@@ -522,11 +522,16 @@ impl ComputerManager {
         let Some((name, state)) = row else {
             return Ok(Inspect::Gone);
         };
-        match state.as_str() {
-            "running" => {}
-            "absent" | "stopped" | "missing" => return Ok(Inspect::Gone),
-            "paused" => return Ok(Inspect::Paused),
-            _ => return Ok(Inspect::Unknown),
+        match state {
+            Observed::Running => {}
+            Observed::Absent | Observed::Stopped | Observed::Missing => return Ok(Inspect::Gone),
+            Observed::Paused => return Ok(Inspect::Paused),
+            Observed::Creating
+            | Observed::Starting
+            | Observed::Pausing
+            | Observed::Resuming
+            | Observed::Stopping
+            | Observed::Error => return Ok(Inspect::Unknown),
         }
         let (program, mut all) = self.as_guest_user(script);
         all.extend(args.iter().map(|a| (*a).to_owned()));
@@ -774,7 +779,8 @@ impl ComputerManager {
             }
             Err(err) => {
                 let note = format!("resuming the computer failed: {err}");
-                self.observe_after_failure(bot_id, &note).await?;
+                self.observe_after_failure(bot_id, Observed::Paused, &note)
+                    .await?;
                 Ok(Some(note))
             }
         }

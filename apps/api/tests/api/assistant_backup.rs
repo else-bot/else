@@ -359,7 +359,11 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
     assert_eq!((ea.vm.as_str(), eb.vm.as_str()), ("included", "included"));
     let (ca, cb) = (ea.computer.unwrap(), eb.computer.unwrap());
     assert!(ca.was_running && !cb.was_running);
-    assert_eq!(cb.desired_state, "stopped", "the owner's stop is recorded");
+    assert_eq!(
+        cb.desired_state,
+        else_api::computers::Desired::Stopped,
+        "the owner's stop is recorded"
+    );
     assert!(ca.desktop_port.is_some() && ca.desktop_password.is_some());
     assert!(
         !ea.provider_sessions.is_empty(),
