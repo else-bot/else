@@ -212,29 +212,6 @@ impl Upgrades {
     }
 }
 
-/// The owner-facing reason to put a computer off, when the error is one
-/// that passes by itself. Any other error fails the computer's upgrade, so
-/// one that would never pass (a disk the runtime no longer has, a failing
-/// browser checkpoint) is shown instead of retried forever.
-fn deferred_reason(error: &ComputerError) -> Option<&'static str> {
-    let ComputerError::Busy(reason) = error else {
-        return None;
-    };
-    match reason.as_str() {
-        "in use" => Some("The bot is using its computer."),
-        super::upgrade::ACTIVE_JOB => Some("The bot is running a job on its computer."),
-        "the computer changed during the upgrade" => {
-            Some("The computer changed during the upgrade.")
-        }
-        "state creating" | "state starting" | "state pausing" | "state resuming"
-        | "state stopping" => Some("The computer is starting or stopping."),
-        budget if budget.starts_with("the computer budget") => {
-            Some("Other computers use the whole budget.")
-        }
-        _ => None,
-    }
-}
-
 impl ComputerManager {
     pub async fn upgrade_status(&self, bot_id: Uuid) -> Option<UpgradeStatus> {
         self.upgrades
@@ -329,19 +306,20 @@ impl ComputerManager {
                     () = self.upgrade_stop.cancelled() => Err(ComputerError::Refused("the API stopped during the upgrade".into())),
                 };
                 match upgraded {
-                    Ok(_) => Ended::Upgraded,
-                    Err(ComputerError::Refused(reason))
-                        if reason.starts_with("the computer already uses") =>
-                    {
-                        Ended::Upgraded
-                    }
-                    Err(err) => match deferred_reason(&err) {
-                        Some(reason) => deferred(reason),
-                        None => {
-                            tracing::warn!(bot = %bot_id, error = %err, "queued computer upgrade failed");
-                            Ended::Failed(err.to_string())
+                    Ok(_) | Err(ComputerError::AlreadyUses(_)) => Ended::Upgraded,
+                    Err(err) => {
+                        let defers = match &err {
+                            ComputerError::Busy(busy) => busy.defers(),
+                            _ => None,
+                        };
+                        match defers {
+                            Some(reason) => deferred(reason),
+                            None => {
+                                tracing::warn!(bot = %bot_id, error = %err, "queued computer upgrade failed");
+                                Ended::Failed(err.to_string())
+                            }
                         }
-                    },
+                    }
                 }
             }
         };
@@ -468,15 +446,14 @@ mod tests {
 
     #[test]
     fn only_contention_puts_a_computer_off() {
-        let busy = |reason: &str| deferred_reason(&ComputerError::Busy(reason.into()));
-        assert!(busy("in use").is_some());
-        assert!(busy(super::super::upgrade::ACTIVE_JOB).is_some());
-        assert!(busy("state stopping").is_some());
-        assert!(busy("the computer budget is in use; stop another computer first").is_some());
-        assert_eq!(busy("the runtime does not report it stopped"), None);
-        assert_eq!(busy("state missing"), None);
-        assert_eq!(busy("state error"), None);
-        assert_eq!(busy("its browser checkpoint failed: boom"), None);
-        assert_eq!(deferred_reason(&ComputerError::Refused("no".into())), None);
+        use super::super::{Busy, Observed};
+        assert!(Busy::InUse.defers().is_some());
+        assert!(Busy::ActiveJob.defers().is_some());
+        assert!(Busy::State(Observed::Stopping).defers().is_some());
+        assert!(Busy::BudgetFull.defers().is_some());
+        assert_eq!(Busy::NotStopped.defers(), None);
+        assert_eq!(Busy::State(Observed::Missing).defers(), None);
+        assert_eq!(Busy::State(Observed::Error).defers(), None);
+        assert_eq!(Busy::CheckpointFailed("boom".into()).defers(), None);
     }
 }

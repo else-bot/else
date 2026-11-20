@@ -47,8 +47,11 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use super::runtime::valid_image;
+use super::state::{self, UpgradeEnd};
 use super::upgrade_queue::Ended;
-use super::{ComputerError, ComputerManager, DESKTOP_GUEST_PORT, RuntimeState, Spec};
+use super::{
+    Busy, ComputerError, ComputerManager, DESKTOP_GUEST_PORT, Observed, RuntimeState, Spec,
+};
 
 const COPY_TIMEOUT: Duration = Duration::from_secs(1800);
 
@@ -146,9 +149,6 @@ fi
 sync
 cat /etc/elsebot/image.json 2>/dev/null || echo '{}'"#;
 
-/// Why an upgrade waits for the computer, rather than failing.
-pub(super) const ACTIVE_JOB: &str = "a guest job is active; wait for it or cancel it first";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpgradeReport {
     pub id: Uuid,
@@ -217,12 +217,10 @@ fn sha256_file(path: &Path) -> std::io::Result<(u64, String)> {
 impl ComputerManager {
     pub(super) fn can_start_upgrade(&self) -> Result<(), ComputerError> {
         if !self.inspected.load(super::Ordering::SeqCst) {
-            return Err(ComputerError::Busy(
-                "the computer runtime has not been inspected yet".into(),
-            ));
+            return Err(ComputerError::Busy(Busy::NotInspected));
         }
         if self.upgrade_stop.is_cancelled() {
-            return Err(ComputerError::Busy("the API is stopping".into()));
+            return Err(ComputerError::Busy(Busy::Stopping));
         }
         Ok(())
     }
@@ -269,7 +267,7 @@ impl ComputerManager {
             };
             let ended = match upgraded {
                 Ok(_) => Ended::Upgraded,
-                Err(ComputerError::Busy(reason)) if reason == "in use" => Ended::Failed(
+                Err(ComputerError::Busy(Busy::InUse)) => Ended::Failed(
                     "The bot is using its computer. Try again once it is idle.".to_owned(),
                 ),
                 Err(err) => {
@@ -374,16 +372,21 @@ impl ComputerManager {
         .await?;
         for (id, name) in started {
             self.discard_replacement(&name).await?;
-            sqlx::query(
-                "UPDATE computer_upgrades SET state = 'failed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
-                     error = coalesce(error, 'interrupted')
-                 WHERE id = ?1",
-            )
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+            self.end_upgrade(id, UpgradeEnd::Fail("interrupted"))
+                .await?;
         }
         Ok(())
+    }
+
+    /// Record how upgrade `id` ended. The caller holds the bot's operation
+    /// lock, so an upgrade no longer in the source state changed under it.
+    async fn end_upgrade(&self, id: Uuid, end: UpgradeEnd<'_>) -> Result<(), ComputerError> {
+        let mut conn = self.pool.acquire().await?;
+        if end.apply(&mut conn, id).await? {
+            Ok(())
+        } else {
+            Err(ComputerError::Busy(Busy::Changed("upgrade")))
+        }
     }
 
     async fn discard_replacement(&self, name: &str) -> Result<(), ComputerError> {
@@ -404,9 +407,7 @@ impl ComputerManager {
         if admitted {
             Ok(())
         } else {
-            Err(ComputerError::Busy(
-                "the computer budget is in use; stop another computer first".into(),
-            ))
+            Err(ComputerError::Busy(Busy::BudgetFull))
         }
     }
 
@@ -428,7 +429,9 @@ impl ComputerManager {
         bot_id: Uuid,
         mut row: super::Row,
     ) -> Result<super::Row, ComputerError> {
-        if !self.config.desktop || !matches!(row.observed_state.as_str(), "running" | "paused") {
+        if !self.config.desktop
+            || !matches!(row.observed_state, Observed::Running | Observed::Paused)
+        {
             return Ok(row);
         }
         let holders: Vec<String> = sqlx::query_scalar(
@@ -443,12 +446,12 @@ impl ComputerManager {
                 Some(("turn" | "job", id)) if id.parse::<Uuid>().is_ok()
             ) && !self.holder_is_live(&holder).await?;
             if !finished {
-                return Err(ComputerError::Busy("in use".into()));
+                return Err(ComputerError::Busy(Busy::InUse));
             }
         }
-        if row.observed_state == "paused" {
+        if row.observed_state == Observed::Paused {
             self.resume_held(bot_id, &row.runtime_name).await?;
-            row.observed_state = "running".into();
+            row.observed_state = Observed::Running;
         }
         let out = self
             .runtime
@@ -518,7 +521,7 @@ impl ComputerManager {
             ));
         };
         if row.image == image {
-            return Err(refused(format!("the computer already uses {image}")));
+            return Err(ComputerError::AlreadyUses(image.to_owned()));
         }
         let Some(network) = network.map(str::to_owned).or_else(|| row.network.clone()) else {
             return Err(refused(
@@ -527,7 +530,7 @@ impl ComputerManager {
             ));
         };
         if self.active_jobs(bot_id).await? > 0 {
-            return Err(ComputerError::Busy(ACTIVE_JOB.into()));
+            return Err(ComputerError::Busy(Busy::ActiveJob));
         }
         let row = self.close_browser(bot_id, row).await?;
         self.stop_for_disk(bot_id, &row).await?;
@@ -564,73 +567,47 @@ impl ComputerManager {
             Ok(done) => done,
             Err(err) => {
                 let _ = self.stop_confirmed(&row.runtime_name).await;
-                let discarded = self.discard_replacement(&to_runtime_name).await;
-                sqlx::query(
-                    "UPDATE computer_upgrades SET state = ?2, finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), error = ?3
-                     WHERE id = ?1",
-                )
-                .bind(id)
-                .bind(if discarded.is_ok() {
-                    "failed"
-                } else {
-                    "started"
-                })
-                .bind(super::bounded(&err.to_string(), 2000))
-                .execute(&self.pool)
-                .await?;
+                let error = err.to_string();
+                let end = match self.discard_replacement(&to_runtime_name).await {
+                    Ok(()) => UpgradeEnd::Fail(&error),
+                    Err(_) => UpgradeEnd::Strand(&error),
+                };
+                self.end_upgrade(id, end).await?;
                 return Err(err);
             }
         };
 
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let current = Self::row(&mut tx, bot_id).await?.expect("exists");
         let held: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM computer_leases WHERE bot_id = ?1 AND released_at IS NULL)",
         )
         .bind(bot_id)
         .fetch_one(&mut *tx)
         .await?;
-        if current.runtime_name != row.runtime_name || current.observed_state != "stopped" || held {
-            drop(tx);
-            let _ = self.discard_replacement(&to_runtime_name).await;
-            sqlx::query(
-                "UPDATE computer_upgrades SET state = 'failed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
-                     error = 'the computer changed during the upgrade'
-                 WHERE id = ?1",
+        let completed = UpgradeEnd::Complete {
+            bytes: copied.bytes,
+            sha256: &copied.sha256,
+            unrestored: &copied.unrestored,
+        };
+        if held
+            || !state::switch(
+                &mut tx,
+                bot_id,
+                &row.runtime_name,
+                &to_runtime_name,
+                image,
+                Some(network.as_str()),
             )
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-            return Err(ComputerError::Busy(
-                "the computer changed during the upgrade".into(),
-            ));
+            .await?
+            || !completed.apply(&mut tx, id).await?
+        {
+            drop(tx);
+            let changed = Busy::Changed("upgrade");
+            let _ = self.discard_replacement(&to_runtime_name).await;
+            self.end_upgrade(id, UpgradeEnd::Fail(&changed.to_string()))
+                .await?;
+            return Err(ComputerError::Busy(changed));
         }
-        sqlx::query(
-            "UPDATE bot_computers SET runtime_name = ?2, image = ?3, network = ?4,
-                 observed_state = 'stopped', generation = generation + 1,
-                 services_generation = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-             WHERE bot_id = ?1",
-        )
-        .bind(bot_id)
-        .bind(&to_runtime_name)
-        .bind(image)
-        .bind(&network)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "UPDATE computer_upgrades SET state = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
-                 data_bytes = ?2, data_sha256 = ?3, unrestored_packages = ?4
-             WHERE id = ?1",
-        )
-        .bind(id)
-        .bind(copied.bytes as i64)
-        .bind(&copied.sha256)
-        .bind(
-            (!copied.unrestored.is_empty())
-                .then(|| serde_json::to_string(&copied.unrestored).expect("strings serialize")),
-        )
-        .execute(&mut *tx)
-        .await?;
         tx.commit().await?;
         tracing::info!(bot = %bot_id, from = %row.image, to = %image, "computer upgraded");
         self.rescan_disks().await;
@@ -805,7 +782,7 @@ impl ComputerManager {
             ));
         };
         if self.active_jobs(bot_id).await? > 0 {
-            return Err(ComputerError::Busy(ACTIVE_JOB.into()));
+            return Err(ComputerError::Busy(Busy::ActiveJob));
         }
         if self.runtime.state(&from_name).await? != Some(RuntimeState::Stopped) {
             return Err(refused(format!(
@@ -814,30 +791,19 @@ impl ComputerManager {
         }
         self.stop_for_disk(bot_id, &row).await?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let current = Self::row(&mut tx, bot_id).await?.expect("exists");
-        if current.runtime_name != row.runtime_name || current.observed_state != "stopped" {
-            return Err(ComputerError::Busy(
-                "the computer changed during the rollback".into(),
-            ));
+        if !state::switch(
+            &mut tx,
+            bot_id,
+            &row.runtime_name,
+            &from_name,
+            &from_image,
+            from_network.as_deref(),
+        )
+        .await?
+            || !UpgradeEnd::RollBack.apply(&mut tx, id).await?
+        {
+            return Err(ComputerError::Busy(Busy::Changed("rollback")));
         }
-        sqlx::query(
-            "UPDATE bot_computers SET runtime_name = ?2, image = ?3, network = ?4,
-                 observed_state = 'stopped', generation = generation + 1,
-                 services_generation = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-             WHERE bot_id = ?1",
-        )
-        .bind(bot_id)
-        .bind(&from_name)
-        .bind(&from_image)
-        .bind(&from_network)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "UPDATE computer_upgrades SET state = 'rolled_back', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
-        )
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
         tx.commit().await?;
         self.rescan_disks().await;
         Ok(UpgradeReport {

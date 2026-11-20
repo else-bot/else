@@ -33,6 +33,9 @@ pub enum RuntimeError {
     Unavailable(String),
     #[error("{operation} failed: {message}")]
     Failed { operation: String, message: String },
+    /// A create could not bind the desktop's host port; another port may work.
+    #[error("create failed: {0}")]
+    PortInUse(String),
 }
 
 /// A running computer's live use, as the runtime last sampled it.
@@ -727,7 +730,17 @@ impl ComputerRuntime for Msb {
         args.push("--".into());
         args.push(spec.image.clone());
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        self.control("create", &args).await
+        match self.control("create", &args).await {
+            Err(RuntimeError::Failed { message, .. })
+                if !spec.ports.is_empty() && {
+                    let lower = message.to_lowercase();
+                    lower.contains("address") || lower.contains("in use")
+                } =>
+            {
+                Err(RuntimeError::PortInUse(message))
+            }
+            other => other,
+        }
     }
 
     async fn start(&self, name: &str) -> Result<(), RuntimeError> {

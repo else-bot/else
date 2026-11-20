@@ -26,6 +26,7 @@ pub mod memory;
 pub mod runtime;
 pub mod screens;
 mod snapshot;
+pub mod state;
 pub mod upgrade;
 pub mod upgrade_queue;
 pub mod viewer;
@@ -45,6 +46,8 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 pub use runtime::{ComputerRuntime, ExecOutput, Mount, RuntimeError, RuntimeState, Spec};
+pub use state::{Desired, Observed, UpgradeState};
+use state::{Transition, Wake};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdleAction {
@@ -176,10 +179,67 @@ pub enum ComputerError {
     Interrupted,
     /// The computer holds live work or is mid-transition (a backup defers).
     #[error("the computer is busy: {0}")]
-    Busy(String),
+    Busy(Busy),
     /// An explicit owner operation that does not apply (image upgrades).
     #[error("{0}")]
     Refused(String),
+    /// An upgrade to the image the computer already runs.
+    #[error("the computer already uses {0}")]
+    AlreadyUses(String),
+}
+
+/// Why an operation waits for the computer instead of acting on it now.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Busy {
+    #[error("in use")]
+    InUse,
+    #[error("a guest job is active; wait for it or cancel it first")]
+    ActiveJob,
+    /// The computer is not in a state the operation can start from.
+    #[error("state {0}")]
+    State(Observed),
+    #[error("the computer budget is in use; stop another computer first")]
+    BudgetFull,
+    /// The computer changed under the operation (named here).
+    #[error("the computer changed during the {0}")]
+    Changed(&'static str),
+    #[error("the runtime does not report it stopped")]
+    NotStopped,
+    #[error("its browser checkpoint failed: {0}")]
+    CheckpointFailed(String),
+    #[error("the computer runtime has not been inspected yet")]
+    NotInspected,
+    #[error("the API is stopping")]
+    Stopping,
+    #[error("the computer is being upgraded; try again in a few minutes")]
+    Upgrading,
+    #[error("the host's computer budget has no room for {} now", memory::gib(*.0))]
+    NoRoomFor(u32),
+    #[error("the computer is changing state; try again shortly")]
+    ChangingState,
+    #[error("the computer did not stop; its size is unchanged until its next start")]
+    DidNotStop,
+    #[error("the computer is set to {} but did not start again: {why}", memory::gib(*memory_mib))]
+    NotRestarted { memory_mib: u32, why: String },
+}
+
+impl Busy {
+    /// The owner-facing reason to put an upgrade off, when this passes by
+    /// itself. Anything else fails the upgrade, so a state that would never
+    /// pass (a lost disk, a failing browser checkpoint) is shown instead of
+    /// retried forever.
+    pub fn defers(&self) -> Option<&'static str> {
+        match self {
+            Self::InUse => Some("The bot is using its computer."),
+            Self::ActiveJob => Some("The bot is running a job on its computer."),
+            Self::Changed(_) => Some("The computer changed during the upgrade."),
+            Self::State(state) if state.is_transient() => {
+                Some("The computer is starting or stopping.")
+            }
+            Self::BudgetFull => Some("Other computers use the whole budget."),
+            _ => None,
+        }
+    }
 }
 
 /// What a backup found for one bot's computer.
@@ -191,7 +251,7 @@ pub enum DiskCapture {
         image: String,
         cpus: u32,
         memory_mib: u32,
-        desired_state: String,
+        desired_state: Desired,
         desktop_port: Option<u16>,
         /// Whether the computer was running before the backup stopped it.
         was_running: bool,
@@ -234,8 +294,8 @@ struct Row {
     grown: bool,
     /// The boot memory the owner approved; `None` boots at the configured size.
     chosen_memory_mib: Option<i32>,
-    desired_state: String,
-    observed_state: String,
+    desired_state: Desired,
+    observed_state: Observed,
     generation: i64,
     network: Option<String>,
 }
@@ -269,13 +329,6 @@ const ROW: &str = "runtime_name, image, cpus, memory_mib, max_cpus, max_memory_m
 const RESERVED_CPUS: &str =
     "CASE WHEN grown THEN max(cpus, coalesce(max_cpus, cpus)) ELSE cpus END";
 const RESERVED_MEMORY: &str = "CASE WHEN grown THEN max(memory_mib, coalesce(max_memory_mib, memory_mib)) ELSE memory_mib END";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Wake {
-    Create,
-    Start,
-    Resume,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reason {
@@ -564,7 +617,7 @@ impl ComputerManager {
             let mut conn = self.pool.acquire().await?;
             Self::row(&mut conn, bot_id)
                 .await?
-                .filter(|row| row.observed_state == "stopped")
+                .filter(|row| row.observed_state == Observed::Stopped)
         };
         if let Some(row) = stopped {
             self.configure_boot(bot_id, &row).await?;
@@ -579,28 +632,12 @@ impl ComputerManager {
             if active != Some(true) {
                 return Ok(Acquire::BotInactive);
             }
-            let growth = self.config.growth();
-            sqlx::query(
-                "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib, network,
-                                            max_cpus, max_memory_mib)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT DO NOTHING",
-            )
-            .bind(bot_id)
-            .bind(Self::runtime_name(bot_id))
-            .bind(&self.config.image)
-            .bind(self.config.cpus as i32)
-            .bind(self.config.memory_mib as i32)
-            .bind(&self.config.network)
-            .bind(growth.map(|(cpus, _)| cpus as i32))
-            .bind(growth.map(|(_, memory)| memory as i32))
-            .execute(&mut *tx)
-            .await?;
-            let row = Self::row(&mut tx, bot_id).await?.expect("inserted");
-            if row.desired_state == "stopped" {
+            let row = self.ensure_row(&mut tx, bot_id).await?;
+            if row.desired_state == Desired::Stopped {
                 return Ok(Acquire::OwnerStopped);
             }
-            let wake = match row.observed_state.as_str() {
-                "running" => {
+            let wake = match row.observed_state {
+                Observed::Running => {
                     let lease = self.lease(&mut tx, bot_id, holder, row.generation).await?;
                     tx.commit().await?;
                     self.ensure_services(bot_id, &row.runtime_name).await?;
@@ -610,17 +647,22 @@ impl ComputerManager {
                         generation: row.generation,
                     });
                 }
-                "missing" => {
+                Observed::Missing => {
                     return Ok(Acquire::Unavailable {
                         reason: "this bot's computer is missing from the runtime; it was not \
                                  recreated"
                             .into(),
                     });
                 }
-                "absent" => Wake::Create,
-                "stopped" => Wake::Start,
-                "paused" => Wake::Resume,
-                _ => {
+                Observed::Absent => Wake::Create,
+                Observed::Stopped => Wake::Start,
+                Observed::Paused => Wake::Resume,
+                Observed::Creating
+                | Observed::Starting
+                | Observed::Pausing
+                | Observed::Resuming
+                | Observed::Stopping
+                | Observed::Error => {
                     drop(tx);
                     self.observe(bot_id).await?;
                     continue;
@@ -647,14 +689,7 @@ impl ComputerManager {
                 reason: "the computer budget is in use; waiting for capacity".into(),
             });
         }
-        let next = row.generation + 1;
-        let transient = match wake {
-            Wake::Create => "creating",
-            Wake::Start => "starting",
-            Wake::Resume => "resuming",
-        };
-        self.set_state(&mut tx, bot_id, transient, Some(next), None)
-            .await?;
+        let next = Self::transition(&mut tx, bot_id, Transition::Wake(wake)).await?;
         tx.commit().await?;
         if crate::faults::hit("computer.after_start_decision") {
             return Err(ComputerError::Interrupted);
@@ -692,8 +727,7 @@ impl ComputerManager {
                         }
                         Err(err) => Err(err),
                     };
-                    let collided = matches!(&outcome, Err(err)
-                        if { let e = err.to_string().to_lowercase(); e.contains("address") || e.contains("in use") || e.contains("desktop_port") });
+                    let collided = matches!(outcome, Err(RuntimeError::PortInUse(_)));
                     let exists = matches!(self.runtime.state(&row.runtime_name).await, Ok(Some(_)));
                     if !(self.config.desktop && collided && !exists) {
                         break;
@@ -705,7 +739,8 @@ impl ComputerManager {
             Wake::Resume => self.runtime.resume(&row.runtime_name).await,
         };
         if let Err(err) = result {
-            self.observe_after_failure(bot_id, &err.to_string()).await?;
+            self.observe_after_failure(bot_id, wake.transient(), &err.to_string())
+                .await?;
             return Ok(Acquire::Unavailable {
                 reason: err.to_string(),
             });
@@ -717,13 +752,12 @@ impl ComputerManager {
                 .fetch_optional(&mut *tx)
                 .await?;
         let row = Self::row(&mut tx, bot_id).await?.expect("exists");
-        self.set_state(&mut tx, bot_id, "running", None, None)
-            .await?;
+        Self::transition(&mut tx, bot_id, Transition::Woke(wake)).await?;
         sqlx::query("UPDATE bot_computers SET browser_checkpoint = NULL WHERE bot_id = ?1")
             .bind(bot_id)
             .execute(&mut *tx)
             .await?;
-        if active != Some(true) || row.desired_state == "stopped" {
+        if active != Some(true) || row.desired_state == Desired::Stopped {
             tx.commit().await?;
             self.stop_held(bot_id, Reason::MustStop).await?;
             return Ok(if active != Some(true) {
@@ -767,26 +801,44 @@ impl ComputerManager {
         }])
     }
 
-    async fn set_state(
+    /// Create the bot's computer row on first use, at the configured size
+    /// and able to grow to the desktop size, and return its row. The
+    /// computer itself is created on its first wake.
+    async fn ensure_row(
         &self,
         conn: &mut SqliteConnection,
         bot_id: Uuid,
-        state: &str,
-        generation: Option<i64>,
-        error: Option<&str>,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<Row, sqlx::Error> {
+        let growth = self.config.growth();
         sqlx::query(
-            "UPDATE bot_computers SET observed_state = ?2, generation = coalesce(?3, generation),
-                 last_error = coalesce(?4, last_error), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-             WHERE bot_id = ?1",
+            "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib, network,
+                                        max_cpus, max_memory_mib)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT DO NOTHING",
         )
         .bind(bot_id)
-        .bind(state)
-        .bind(generation)
-        .bind(error.map(|e| bounded(e, 2000)))
+        .bind(Self::runtime_name(bot_id))
+        .bind(&self.config.image)
+        .bind(self.config.cpus as i32)
+        .bind(self.config.memory_mib as i32)
+        .bind(&self.config.network)
+        .bind(growth.map(|(cpus, _)| cpus as i32))
+        .bind(growth.map(|(_, memory)| memory as i32))
         .execute(&mut *conn)
         .await?;
-        Ok(())
+        Ok(Self::row(conn, bot_id).await?.expect("inserted"))
+    }
+
+    /// Apply a transition the caller is entitled to: it holds the bot's
+    /// operation lock, so a computer not in a source state changed under it.
+    async fn transition(
+        conn: &mut SqliteConnection,
+        bot_id: Uuid,
+        transition: Transition<'_>,
+    ) -> Result<i64, ComputerError> {
+        transition
+            .apply(conn, bot_id)
+            .await?
+            .ok_or(ComputerError::Busy(Busy::Changed("operation")))
     }
 
     /// Resume a paused computer in place. The caller holds the bot's
@@ -794,13 +846,14 @@ impl ComputerManager {
     async fn resume_held(&self, bot_id: Uuid, name: &str) -> Result<(), ComputerError> {
         self.runtime.resume(name).await?;
         let mut conn = self.pool.acquire().await?;
-        self.set_state(&mut conn, bot_id, "running", None, None)
-            .await?;
+        Self::transition(&mut conn, bot_id, Transition::Resumed).await?;
         Ok(())
     }
 
+    /// Record what the runtime reports for the bot's computer. The caller
+    /// holds the bot's operation lock.
     async fn observe(&self, bot_id: Uuid) -> Result<(), ComputerError> {
-        let row: Option<(String, String)> = sqlx::query_as(
+        let row: Option<(String, Observed)> = sqlx::query_as(
             "SELECT runtime_name, observed_state FROM bot_computers WHERE bot_id = ?1",
         )
         .bind(bot_id)
@@ -809,31 +862,25 @@ impl ComputerManager {
         let Some((name, was)) = row else {
             return Ok(());
         };
-        let state = match self.runtime.state(&name).await {
-            Ok(Some(RuntimeState::Running)) => "running",
-            Ok(Some(RuntimeState::Paused)) => "paused",
-            Ok(Some(RuntimeState::Stopped)) => "stopped",
-            Ok(Some(RuntimeState::Failed)) | Err(_) => "error",
-            Ok(None) if matches!(was.as_str(), "absent" | "creating") => "absent",
-            Ok(None) => "missing",
+        let now = match self.runtime.state(&name).await {
+            Ok(actual) => was.from_runtime(actual),
+            Err(_) => Observed::Error,
         };
         let mut conn = self.pool.acquire().await?;
-        self.set_state(&mut conn, bot_id, state, None, None).await?;
+        Self::transition(&mut conn, bot_id, Transition::Observed { was, now }).await?;
         Ok(())
     }
 
-    async fn observe_after_failure(&self, bot_id: Uuid, error: &str) -> Result<(), ComputerError> {
+    /// Record that a runtime call from `from` failed, then what the runtime
+    /// reports now.
+    async fn observe_after_failure(
+        &self,
+        bot_id: Uuid,
+        from: Observed,
+        error: &str,
+    ) -> Result<(), ComputerError> {
         let mut conn = self.pool.acquire().await?;
-        sqlx::query(
-            "UPDATE bot_computers SET last_error = ?2,
-                 observed_state = CASE WHEN observed_state = 'creating' THEN 'creating' ELSE 'error' END,
-                 updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-             WHERE bot_id = ?1",
-        )
-        .bind(bot_id)
-        .bind(bounded(error, 2000))
-        .execute(&mut *conn)
-        .await?;
+        Self::transition(&mut conn, bot_id, Transition::Failed { from, error }).await?;
         drop(conn);
         self.observe(bot_id).await
     }

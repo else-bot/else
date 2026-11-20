@@ -218,7 +218,7 @@ pub struct ComputerEntry {
     pub cpus: u32,
     pub memory_mib: u32,
     /// The owner's intent (`auto` or `stopped`), restored as recorded.
-    pub desired_state: String,
+    pub desired_state: crate::computers::Desired,
     /// Network profile; restore applies its policy explicitly.
     pub network: String,
     pub desktop_port: Option<u16>,

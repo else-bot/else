@@ -1340,6 +1340,47 @@ async fn desktop_computers_boot_small_and_grow_only_for_the_screen() {
 
 /// A desktop whose startup fails is not admitted: the use is told it
 /// failed, the failure is recorded, and the next use starts it again.
+/// A stop only starts from running, paused, or error: an owner stop of a
+/// computer already stopped, or missing from the runtime, asks the runtime
+/// for nothing and leaves its state as recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_stop_leaves_a_stopped_or_missing_computer_alone() {
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let manager = manager(&app, &fake, config(2)).await;
+    let bot: Uuid = app.create_bot("Stop").await.parse().unwrap();
+    let (lease, _) = ready(&manager, bot, "test:a").await;
+    manager.release(lease).await.unwrap();
+    let stops = || {
+        fake.calls()
+            .iter()
+            .filter(|c| c.starts_with("stop"))
+            .count()
+    };
+
+    manager.owner_stop(bot).await.unwrap();
+    assert_eq!(
+        (stops(), observed(&app, bot).await.as_str()),
+        (1, "stopped")
+    );
+    manager.owner_stop(bot).await.unwrap();
+    assert_eq!(
+        (stops(), observed(&app, bot).await.as_str()),
+        (1, "stopped")
+    );
+
+    sqlx::query("UPDATE bot_computers SET observed_state = 'missing' WHERE bot_id = ?1")
+        .bind(bot)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    manager.owner_stop(bot).await.unwrap();
+    assert_eq!(
+        (stops(), observed(&app, bot).await.as_str()),
+        (1, "missing")
+    );
+}
+
 /// A computer can grow to the desktop size however its row was first
 /// recorded: by a reserved background job or an owner stop as much as by
 /// a first use.

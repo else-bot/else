@@ -12,8 +12,8 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::computers::ComputerError;
 use crate::computers::upgrade_queue::UpgradeStatus;
+use crate::computers::{ComputerError, Desired, Observed, UpgradeState};
 use crate::db::computer_handoffs as handoffs;
 
 use super::error::{ApiError, ApiPath};
@@ -140,8 +140,8 @@ async fn show(
         image: String,
         cpus: i32,
         memory_mib: i32,
-        desired_state: String,
-        observed_state: String,
+        desired_state: Desired,
+        observed_state: Observed,
         last_used_at: Option<chrono::DateTime<chrono::Utc>>,
         last_error: Option<String>,
         leases: i64,
@@ -243,8 +243,8 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiErro
         image: String,
         cpus: i32,
         memory_mib: i32,
-        desired_state: String,
-        observed_state: String,
+        desired_state: Desired,
+        observed_state: Observed,
         last_used_at: Option<chrono::DateTime<chrono::Utc>>,
     }
     let rows = sqlx::query_as::<_, Row>(
@@ -282,7 +282,7 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiErro
         };
         let live = usage
             .get(&row.runtime_name)
-            .filter(|_| row.observed_state == "running");
+            .filter(|_| row.observed_state == Observed::Running);
         let cpus = live
             .and_then(|usage| usage.cpus)
             .unwrap_or(row.cpus.max(1) as u32);
@@ -348,7 +348,7 @@ async fn recorded_upgrades(
     #[derive(sqlx::FromRow)]
     struct Recorded {
         bot_id: Uuid,
-        state: String,
+        state: UpgradeState,
         error: Option<String>,
         unrestored_packages: Option<String>,
         current: bool,
@@ -377,12 +377,12 @@ async fn recorded_upgrades(
                 unrestored_packages: packages,
                 current,
             } = recorded;
-            let shown = match (state.as_str(), packages) {
-                ("failed", _) => json!({
+            let shown = match (state, packages) {
+                (UpgradeState::Failed, _) => json!({
                     "state": "failed",
                     "error": error.unwrap_or_else(|| "interrupted".into()),
                 }),
-                ("completed", Some(packages)) if current => json!({
+                (UpgradeState::Completed, Some(packages)) if current => json!({
                     "state": "completed",
                     "unrestored_packages": serde_json::from_str::<Vec<String>>(&packages).unwrap_or_default(),
                 }),
@@ -451,9 +451,11 @@ async fn set_memory(
             "memory_refused",
             reason,
         )),
-        Err(ComputerError::Busy(reason)) => {
-            Err(ApiError::new(StatusCode::CONFLICT, "computer_busy", reason))
-        }
+        Err(ComputerError::Busy(reason)) => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "computer_busy",
+            reason.to_string(),
+        )),
         Err(err) => Err(computer_error(err)),
     }
 }

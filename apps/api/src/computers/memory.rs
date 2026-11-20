@@ -4,7 +4,7 @@
 //! computer (its jobs end, its disk stays), sets its boot size, and starts
 //! it again.
 
-use super::{Acquire, ComputerError, ComputerManager, Reason};
+use super::{Acquire, Busy, ComputerError, ComputerManager, Desired, Observed, Reason};
 use uuid::Uuid;
 
 /// The memory sizes a bot may ask for, in MiB.
@@ -81,9 +81,7 @@ impl ComputerManager {
             )));
         }
         if self.upgrading(bot_id).await {
-            return Err(ComputerError::Busy(
-                "the computer is being upgraded; try again in a few minutes".into(),
-            ));
+            return Err(ComputerError::Busy(Busy::Upgrading));
         }
         let op = self.op(bot_id).await;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -95,23 +93,7 @@ impl ComputerManager {
         if active != Some(true) {
             return Err(ComputerError::Refused("this bot is not active".into()));
         }
-        let growth = self.config.growth();
-        sqlx::query(
-            "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib, network,
-                                        max_cpus, max_memory_mib)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT DO NOTHING",
-        )
-        .bind(bot_id)
-        .bind(Self::runtime_name(bot_id))
-        .bind(&self.config.image)
-        .bind(self.config.cpus as i32)
-        .bind(self.config.memory_mib as i32)
-        .bind(&self.config.network)
-        .bind(growth.map(|(cpus, _)| cpus as i32))
-        .bind(growth.map(|(_, memory)| memory as i32))
-        .execute(&mut *tx)
-        .await?;
-        let row = Self::row(&mut tx, bot_id).await?.expect("inserted");
+        let row = self.ensure_row(&mut tx, bot_id).await?;
         if row.chosen_memory_mib.map(|m| m as u32) == memory_mib && row.memory_mib as u32 == target
         {
             return Ok(Resized {
@@ -125,23 +107,24 @@ impl ComputerManager {
                 .admits(&mut tx, bot_id, row.cpus as u32, max_memory)
                 .await?
         {
-            return Err(ComputerError::Busy(format!(
-                "the host's computer budget has no room for {} now",
-                gib(target)
-            )));
+            return Err(ComputerError::Busy(Busy::NoRoomFor(target)));
         }
-        let restarts = match row.observed_state.as_str() {
-            "running" | "paused" | "error" => row.desired_state == "auto",
-            "stopped" | "absent" => false,
-            "missing" => {
+        let restarts = match row.observed_state {
+            Observed::Running | Observed::Paused | Observed::Error => {
+                row.desired_state == Desired::Auto
+            }
+            Observed::Stopped | Observed::Absent => false,
+            Observed::Missing => {
                 return Err(ComputerError::Refused(
                     "this bot's computer is missing from the runtime".into(),
                 ));
             }
-            _ => {
-                return Err(ComputerError::Busy(
-                    "the computer is changing state; try again shortly".into(),
-                ));
+            Observed::Creating
+            | Observed::Starting
+            | Observed::Pausing
+            | Observed::Resuming
+            | Observed::Stopping => {
+                return Err(ComputerError::Busy(Busy::ChangingState));
             }
         };
         // A computer never created yet is created at the new size.
@@ -158,18 +141,18 @@ impl ComputerManager {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        if row.observed_state == "absent" {
+        if row.observed_state == Observed::Absent {
             return Ok(Resized {
                 memory_mib: target,
                 restarted: false,
             });
         }
-        if matches!(row.observed_state.as_str(), "running" | "paused" | "error")
-            && !self.stop_held(bot_id, Reason::Resize).await?
+        if matches!(
+            row.observed_state,
+            Observed::Running | Observed::Paused | Observed::Error
+        ) && !self.stop_held(bot_id, Reason::Resize).await?
         {
-            return Err(ComputerError::Busy(
-                "the computer did not stop; its size is unchanged until its next start".into(),
-            ));
+            return Err(ComputerError::Busy(Busy::DidNotStop));
         }
         let row = {
             let mut conn = self.pool.acquire().await?;
@@ -209,10 +192,10 @@ impl ComputerManager {
                     Acquire::BotInactive => "the bot is not active".into(),
                     Acquire::Ready { .. } => unreachable!("matched above"),
                 };
-                Err(ComputerError::Busy(format!(
-                    "the computer is set to {} but did not start again: {why}",
-                    gib(target)
-                )))
+                Err(ComputerError::Busy(Busy::NotRestarted {
+                    memory_mib: target,
+                    why,
+                }))
             }
         }
     }

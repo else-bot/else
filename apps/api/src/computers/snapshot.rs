@@ -1,6 +1,6 @@
 use super::{
-    ComputerError, ComputerManager, DiskCapture, GUEST_CHECKPOINT, GUEST_PROJECT, ROOT_PROJECT,
-    Reason, Row, RuntimeState,
+    Busy, ComputerError, ComputerManager, DiskCapture, GUEST_CHECKPOINT, GUEST_PROJECT, Observed,
+    ROOT_PROJECT, Reason, Row, RuntimeState,
 };
 use std::time::Duration;
 use uuid::Uuid;
@@ -30,10 +30,10 @@ impl ComputerManager {
         let Some(row) = row else {
             return Ok(DiskCapture::NoComputer);
         };
-        let was_running = matches!(row.observed_state.as_str(), "running" | "paused");
-        match row.observed_state.as_str() {
-            "absent" => return Ok(DiskCapture::NoComputer),
-            "missing" => return Ok(DiskCapture::Missing),
+        let was_running = matches!(row.observed_state, Observed::Running | Observed::Paused);
+        match row.observed_state {
+            Observed::Absent => return Ok(DiskCapture::NoComputer),
+            Observed::Missing => return Ok(DiskCapture::Missing),
             _ => self.stop_for_disk(bot_id, &row).await?,
         }
         let carries_image = !(super::pinned_image(&row.image) && carried.contains(&row.image));
@@ -67,12 +67,9 @@ impl ComputerManager {
     }
 
     pub(super) async fn stop_for_disk(&self, bot_id: Uuid, row: &Row) -> Result<(), ComputerError> {
-        match row.observed_state.as_str() {
-            "absent" | "missing" => {
-                return Err(ComputerError::Busy(format!("state {}", row.observed_state)));
-            }
-            "stopped" => {}
-            "running" | "paused" => {
+        match row.observed_state {
+            Observed::Stopped => {}
+            Observed::Running | Observed::Paused => {
                 let leases: Vec<(Uuid, String)> = sqlx::query_as(
                     "SELECT id, holder FROM computer_leases
                      WHERE bot_id = ?1 AND released_at IS NULL",
@@ -99,10 +96,10 @@ impl ComputerManager {
                     .await?;
                 }
                 if held {
-                    return Err(ComputerError::Busy("in use".into()));
+                    return Err(ComputerError::Busy(Busy::InUse));
                 }
                 if self.config.desktop {
-                    if row.observed_state == "paused" {
+                    if row.observed_state == Observed::Paused {
                         self.resume_held(bot_id, &row.runtime_name).await?;
                     }
                     let out = self
@@ -115,22 +112,19 @@ impl ComputerManager {
                         )
                         .await?;
                     if out.status != Some(0) {
-                        return Err(ComputerError::Busy(format!(
-                            "its browser checkpoint failed: {}",
-                            out.stderr.trim().chars().take(200).collect::<String>()
+                        return Err(ComputerError::Busy(Busy::CheckpointFailed(
+                            out.stderr.trim().chars().take(200).collect(),
                         )));
                     }
                 }
                 if !self.stop_held(bot_id, Reason::Backup).await? {
-                    return Err(ComputerError::Busy("in use".into()));
+                    return Err(ComputerError::Busy(Busy::InUse));
                 }
             }
-            other => return Err(ComputerError::Busy(format!("state {other}"))),
+            other => return Err(ComputerError::Busy(Busy::State(other))),
         }
         if self.runtime.state(&row.runtime_name).await? != Some(RuntimeState::Stopped) {
-            return Err(ComputerError::Busy(
-                "the runtime does not report it stopped".into(),
-            ));
+            return Err(ComputerError::Busy(Busy::NotStopped));
         }
         Ok(())
     }
