@@ -4,24 +4,13 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use chrono::{DateTime, SubsecRound, Utc};
-use common::recorder::{self, GATE, GATE_EVERY_ATTEMPT, Harness, tool};
+use common::recorder::{GATE, GATE_EVERY_ATTEMPT, Harness, harness, tool};
 use common::{TestApp, TestDb};
-use else_api::grants::{DEFAULT_TTL, Tool};
+use else_api::grants::Tool;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-const SLOW: &str = "[synthetic:slow] set up my morning digest routine, please.";
 const YEARLY: &str = "0 9 1 1 *";
-
-async fn harness() -> Harness {
-    recorder::harness(common::TestApp::builder()).await
-}
-
-impl Harness {
-    async fn owner_turn(&self, bot: &str) -> (Uuid, String) {
-        self.running(bot, SLOW).await
-    }
-}
 
 fn digest(prompt: &str) -> Value {
     json!({ "name": "Morning digest", "prompt": prompt, "cron": YEARLY })
@@ -89,7 +78,7 @@ async fn events(app: &TestApp, bot: &str) -> Vec<(String, Value)> {
 
 #[tokio::test]
 async fn bot_edits_leave_one_ordered_notice_in_live_and_paged_history() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let bot = h.app.main_bot().await;
     let (turn, token) = h.running(&bot, GATE).await;
     let routine = create(&h.app, &token, digest("Summarize my unread mail.")).await;
@@ -183,14 +172,14 @@ async fn bot_edits_leave_one_ordered_notice_in_live_and_paged_history() {
 
 #[tokio::test]
 async fn new_routines_default_to_working_hours_in_the_desktop_time_zone() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let sent = h
         .app
         .owner(
             "POST",
             &format!("/v1/bots/{main}/turns"),
-            Some(json!({ "request_id": Uuid::new_v4(), "text": SLOW,
+            Some(json!({ "request_id": Uuid::new_v4(), "text": GATE,
                          "timezone": "America/New_York" })),
         )
         .await;
@@ -339,9 +328,9 @@ async fn new_routines_default_to_working_hours_in_the_desktop_time_zone() {
 
 #[tokio::test]
 async fn a_bot_manages_its_own_routines_over_mcp() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
-    let (_, token) = h.owner_turn(&main).await;
+    let (_, token) = h.running(&main, GATE).await;
 
     let routine = create(&h.app, &token, digest("Summarize my unread mail.")).await;
     let id = routine["id"].as_str().unwrap().to_owned();
@@ -483,7 +472,7 @@ async fn a_bot_manages_its_own_routines_over_mcp() {
     assert!(taken.result.as_str().unwrap().starts_with("NAME_TAKEN"));
 
     let other = h.app.create_bot("Work").await;
-    let (_, other_token) = h.owner_turn(&other).await;
+    let (_, other_token) = h.running(&other, GATE).await;
     let theirs = tool(&h.app, &other_token, "routine_list", json!({})).await;
     assert_eq!(theirs.result["routines"], json!([]));
     for (name, args) in [
@@ -531,9 +520,9 @@ async fn a_bot_manages_its_own_routines_over_mcp() {
 
 #[tokio::test]
 async fn routines_per_bot_are_capped() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
-    let (_, token) = h.owner_turn(&main).await;
+    let (_, token) = h.running(&main, GATE).await;
     for n in 0..else_api::app::routines::MAX_PER_BOT {
         create(
             &h.app,
@@ -570,22 +559,9 @@ async fn owner_conversation(app: &TestApp, bot: &str) -> Uuid {
         .unwrap()
 }
 
-async fn forged(app: &TestApp, turn: Uuid, tools: Vec<Tool>) -> String {
-    let (bot, conversation): (Uuid, Uuid) =
-        sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
-            .bind(turn)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
-    app.state
-        .grants
-        .issue(bot, conversation, turn, tools, DEFAULT_TTL)
-        .await
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let args = json!({ "name": "Morning digest", "prompt": "Summarize the owner's unread mail.",
                        "cron": "30 7 * * 1-5", "timezone": "Europe/Paris",
@@ -699,7 +675,7 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
         "never back up the chain, even with a forged grant"
     );
     h.release(child).await;
-    let (_, continuation_token) = h.started(root).await;
+    let continuation_token = h.continued(root, &token).await;
 
     let attempts = h.inputs(root).await;
     assert_eq!(attempts.len(), 2);
@@ -780,7 +756,7 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn routine_runs_and_their_delegated_tasks_cannot_manage_routines() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let leaf = h.app.create_bot("School").await;
     let (setup, token) = h.running(&main, GATE).await;
@@ -813,7 +789,7 @@ async fn routine_runs_and_their_delegated_tasks_cannot_manage_routines() {
     assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
     let called = tool(
         &h.app,
-        &forged(&h.app, run, vec![Tool::Routines]).await,
+        &h.grant_with(run, vec![Tool::Routines]).await,
         "routine_delete",
         json!({ "routine_id": routine["id"] }),
     )
@@ -856,7 +832,7 @@ async fn routine_runs_and_their_delegated_tasks_cannot_manage_routines() {
     assert!(!rules.contains("save it as a routine with routine_create"));
     let called = tool(
         &h.app,
-        &forged(&h.app, child, vec![Tool::Routines]).await,
+        &h.grant_with(child, vec![Tool::Routines]).await,
         "routine_create",
         digest("x"),
     )
@@ -869,7 +845,7 @@ async fn routine_runs_and_their_delegated_tasks_cannot_manage_routines() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owner_answer_in_a_routine_run_lets_the_delegated_bot_change_its_routine() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let manager = h.app.main_bot().await;
     let scout = h.app.create_bot("Scout").await;
     let (setup, token) = h.running(&scout, GATE_EVERY_ATTEMPT).await;
@@ -1008,7 +984,7 @@ async fn an_owner_answer_in_a_routine_run_lets_the_delegated_bot_change_its_rout
 
 #[tokio::test]
 async fn a_bot_runs_a_paused_routine_on_demand_without_moving_its_schedule() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let (setup, token) = h.running(&main, GATE).await;
     const TASK: &str = "[gate] update the tickets after the deployment.";
@@ -1119,12 +1095,13 @@ async fn a_bot_runs_a_paused_routine_on_demand_without_moving_its_schedule() {
 
 #[tokio::test]
 async fn a_run_is_hidden_and_its_report_is_visible() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
-    let (setup, token) = h.owner_turn(&main).await;
+    let (setup, token) = h.running(&main, GATE).await;
     const TASK: &str = "Collect the overnight build results and list failures.";
     let routine = create(&h.app, &token, digest(TASK)).await;
     let id = routine["id"].as_str().unwrap().to_owned();
+    h.release(setup).await;
     h.app.wait_turn(&setup.to_string(), &["completed"]).await;
     let selected: Option<String> =
         sqlx::query_scalar("SELECT selected_provider_id FROM bots WHERE id = ?1")
@@ -1216,7 +1193,7 @@ async fn a_run_is_hidden_and_its_report_is_visible() {
     assert_eq!(last.1["routines"][0]["id"], id.as_str());
     assert_eq!(last.1["routines"][0]["last_run"]["status"], "completed");
 
-    let (_, owner_token) = h.owner_turn(&main).await;
+    let (_, owner_token) = h.running(&main, GATE).await;
     let history = h
         .app
         .call(
@@ -1283,10 +1260,11 @@ async fn owner_memory(app: &TestApp, bot: &str) -> i64 {
 
 #[tokio::test]
 async fn rebuilt_history_labels_a_run_as_a_routine() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
-    let (setup, token) = h.owner_turn(&main).await;
+    let (setup, token) = h.running(&main, GATE).await;
     let routine = create(&h.app, &token, digest("Water the plants reminder.")).await;
+    h.release(setup).await;
     h.app.wait_turn(&setup.to_string(), &["completed"]).await;
     fire(&h.app, at(&routine["next_run_at"])).await;
     let run = runs(&h.app, routine["id"].as_str().unwrap()).await[0]
@@ -1346,13 +1324,14 @@ async fn sidebar(app: &TestApp, bot: &str) -> Value {
 }
 
 async fn failing_routine(h: &Harness, bot: &str, prompt: &str) -> (String, DateTime<Utc>) {
-    let (setup, token) = h.owner_turn(bot).await;
+    let (setup, token) = h.running(bot, GATE).await;
     let routine = create(
         &h.app,
         &token,
         json!({ "name": "Tickets", "prompt": prompt, "cron": "0 * * * *", "active_hours": "always" }),
     )
     .await;
+    h.release(setup).await;
     h.app.wait_turn(&setup.to_string(), &["completed"]).await;
     (
         routine["id"].as_str().unwrap().to_owned(),
@@ -1371,7 +1350,7 @@ async fn set_failed_runs(app: &TestApp, routine: &str, failed_runs: i64) {
 
 #[tokio::test]
 async fn a_transient_failure_is_retried_once_then_reported_until_dismissed() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let (id, due) = failing_routine(&h, &main, "[synthetic:fail] update the tickets").await;
     fire(&h.app, due).await;
@@ -1487,7 +1466,7 @@ async fn a_transient_failure_is_retried_once_then_reported_until_dismissed() {
 
 #[tokio::test]
 async fn a_failure_covered_by_a_stop_is_reported_but_never_retried() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let (id, due) = failing_routine(&h, &main, "[synthetic:fail] update the tickets").await;
     sqlx::query(
@@ -1514,7 +1493,7 @@ async fn a_failure_covered_by_a_stop_is_reported_but_never_retried() {
 
 #[tokio::test]
 async fn a_routine_that_keeps_failing_is_paused_until_turned_back_on() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let (id, due) = failing_routine(&h, &main, "[synthetic:fail] update the tickets").await;
     let limit = else_api::app::routine_failures::MAX_FAILED_RUNS;
@@ -1546,7 +1525,7 @@ async fn a_routine_that_keeps_failing_is_paused_until_turned_back_on() {
 
 #[tokio::test]
 async fn a_failure_retrying_cannot_fix_pauses_at_once_and_says_why() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let (id, due) = failing_routine(&h, &main, "[synthetic:policy] check the servers").await;
     fire(&h.app, due).await;
@@ -1609,7 +1588,7 @@ async fn paused_routine(h: &Harness, bot: &str) -> String {
 
 #[tokio::test]
 async fn the_owner_retries_a_paused_routine_and_a_success_switches_it_back_on() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let id = paused_routine(&h, &main).await;
     set_prompt(&h.app, &id, "Check the servers.").await;
@@ -1646,7 +1625,7 @@ async fn the_owner_retries_a_paused_routine_and_a_success_switches_it_back_on() 
 
 #[tokio::test]
 async fn the_owner_retries_an_enabled_routine_whose_last_run_failed() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let (id, due) = failing_routine(&h, &main, "[synthetic:fail] update the tickets").await;
     fire(&h.app, due).await;
@@ -1678,7 +1657,7 @@ async fn the_owner_retries_an_enabled_routine_whose_last_run_failed() {
 
 #[tokio::test]
 async fn a_failed_retry_of_an_enabled_routine_counts_and_keeps_its_schedule() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let (id, due) = failing_routine(&h, &main, "[synthetic:fail] update the tickets").await;
     fire(&h.app, due).await;
@@ -1699,7 +1678,7 @@ async fn a_failed_retry_of_an_enabled_routine_counts_and_keeps_its_schedule() {
 
 #[tokio::test]
 async fn a_scheduled_run_skipped_during_an_owner_retry_keeps_it_retrying() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let (id, due) = failing_routine(&h, &main, "[synthetic:fail] update the tickets").await;
     fire(&h.app, due).await;
@@ -1718,7 +1697,7 @@ async fn a_scheduled_run_skipped_during_an_owner_retry_keeps_it_retrying() {
 
 #[tokio::test]
 async fn a_second_retry_waits_for_the_first_and_a_stopped_retry_stays_paused() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let id = paused_routine(&h, &main).await;
     set_prompt(&h.app, &id, "[synthetic:hang] check the servers").await;
@@ -1758,7 +1737,7 @@ async fn a_second_retry_waits_for_the_first_and_a_stopped_retry_stays_paused() {
 
 #[tokio::test]
 async fn a_retry_without_a_provider_says_so_and_queues_nothing() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let id = paused_routine(&h, &main).await;
     sqlx::query("UPDATE routines SET model = ?2 WHERE id = ?1")
@@ -1780,7 +1759,7 @@ async fn a_retry_without_a_provider_says_so_and_queues_nothing() {
 
 #[tokio::test]
 async fn a_failed_owner_retry_keeps_the_routine_paused_with_the_new_reason() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let id = paused_routine(&h, &main).await;
     set_prompt(&h.app, &id, "[synthetic:fail] check the servers").await;
@@ -1823,7 +1802,7 @@ async fn a_failed_owner_retry_keeps_the_routine_paused_with_the_new_reason() {
 
 #[tokio::test]
 async fn a_successful_run_forgets_earlier_failures() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let (id, due) = failing_routine(&h, &main, "Collect the build results.").await;
     set_failed_runs(&h.app, &id, 2).await;
@@ -1836,17 +1815,18 @@ async fn a_successful_run_forgets_earlier_failures() {
 
 #[tokio::test]
 async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
-    let (setup, token) = h.owner_turn(&main).await;
+    let (setup, token) = h.running(&main, GATE).await;
     let routine = create(
         &h.app,
         &token,
-        json!({ "name": "Slow", "prompt": "[synthetic:slow] a long routine report for overlap checks.",
+        json!({ "name": "Slow", "prompt": format!("{GATE} a long routine report for overlap checks."),
                 "cron": "0 * * * *", "active_hours": "always" }),
     )
     .await;
     let id = routine["id"].as_str().unwrap().to_owned();
+    h.release(setup).await;
     h.app.wait_turn(&setup.to_string(), &["completed"]).await;
     let due = at(&json!("2030-01-01T00:00:00Z"));
     sqlx::query("UPDATE routines SET next_due_at = '2030-01-01T00:00:00.000+00:00' WHERE id = ?1")
@@ -1865,9 +1845,10 @@ async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
     let listed = owner_routines(&h.app, &main).await;
     assert_eq!(listed[0]["last_run"]["status"], "skipped");
     assert_eq!(listed[0]["last_run"]["skip_reason"], "overlap");
+    h.release(first).await;
     h.app.wait_turn(&first.to_string(), &["completed"]).await;
 
-    let (_, _) = h.owner_turn(&main).await;
+    h.running(&main, GATE).await;
     for _ in 0..else_api::app::messages::MAX_QUEUED_TURNS {
         let sent = h.app.send(&main, Uuid::new_v4(), "queued", None).await;
         assert_eq!(sent.status, StatusCode::ACCEPTED);
@@ -1911,12 +1892,12 @@ async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
 
 #[tokio::test]
 async fn an_owner_message_starts_while_routines_fill_the_other_slots() {
-    let h = recorder::harness(common::TestApp::builder().max_active(2)).await;
+    let h = harness(TestApp::builder().max_active(2)).await;
     let main = h.app.main_bot().await;
     let due = at(&json!("2030-01-01T00:00:00Z"));
     for name in ["Scout", "Auto"] {
         let bot = h.app.create_bot(name).await;
-        let (setup, token) = h.owner_turn(&bot).await;
+        let (setup, token) = h.running(&bot, GATE).await;
         let routine = create(
             &h.app,
             &token,
@@ -1924,6 +1905,7 @@ async fn an_owner_message_starts_while_routines_fill_the_other_slots() {
                     "cron": "0 * * * *", "active_hours": "always" }),
         )
         .await;
+        h.release(setup).await;
         h.app.wait_turn(&setup.to_string(), &["completed"]).await;
         sqlx::query(
             "UPDATE routines SET next_due_at = '2030-01-01T00:00:00.000+00:00' WHERE id = ?1",
@@ -1961,17 +1943,18 @@ async fn an_owner_message_starts_while_routines_fill_the_other_slots() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pausing_stops_future_runs_and_resuming_counts_from_now() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
-    let (setup, token) = h.owner_turn(&main).await;
+    let (setup, token) = h.running(&main, GATE).await;
     let routine = create(
         &h.app,
         &token,
-        digest("[synthetic:slow] a long routine report for pause checks."),
+        digest(&format!("{GATE} a long routine report for pause checks.")),
     )
     .await;
     let id = routine["id"].as_str().unwrap().to_owned();
     let original_next = routine["next_run_at"].clone();
+    h.release(setup).await;
     h.app.wait_turn(&setup.to_string(), &["completed"]).await;
 
     fire(&h.app, at(&original_next)).await;
@@ -1981,6 +1964,7 @@ async fn pausing_stops_future_runs_and_resuming_counts_from_now() {
     assert_eq!(paused.status, StatusCode::OK, "{}", paused.body);
     assert_eq!(paused.body["routine"]["enabled"], false);
     assert_eq!(paused.body["routine"]["next_run_at"], Value::Null);
+    h.release(run).await;
     h.app.wait_turn(&run.to_string(), &["completed"]).await;
     let far = Utc::now() + chrono::Duration::days(3650);
     assert_eq!(fire(&h.app, far).await, 0, "paused routines never run");
@@ -1999,7 +1983,7 @@ async fn pausing_stops_future_runs_and_resuming_counts_from_now() {
     assert_eq!(again.body["routine"]["next_run_at"], next);
     assert_eq!(events(&h.app, &main).await.len(), before + 1);
 
-    let (_, token) = h.owner_turn(&main).await;
+    let (_, token) = h.running(&main, GATE).await;
     tool(
         &h.app,
         &token,
@@ -2035,7 +2019,7 @@ async fn owner_delete(app: &TestApp, bot: &str, routine: &str) -> common::Reply 
 
 #[tokio::test]
 async fn the_owner_deletes_a_routine_and_its_admitted_run_finishes() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
     let other = h.app.create_bot("Work").await;
     let (setup, token) = h.running(&main, GATE).await;
@@ -2108,13 +2092,14 @@ async fn the_owner_deletes_a_routine_and_its_admitted_run_finishes() {
 
 #[tokio::test]
 async fn stop_deletion_and_maintenance_hold_runs() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
-    let (setup, token) = h.owner_turn(&main).await;
-    let mut args = digest("[synthetic:slow] a long routine report for stop checks.");
+    let (setup, token) = h.running(&main, GATE).await;
+    let mut args = digest(&format!("{GATE} a long routine report for stop checks."));
     args["active_hours"] = json!("always");
     let routine = create(&h.app, &token, args).await;
     let id = routine["id"].as_str().unwrap().to_owned();
+    h.release(setup).await;
     h.app.wait_turn(&setup.to_string(), &["completed"]).await;
 
     fire(&h.app, at(&routine["next_run_at"])).await;
@@ -2170,11 +2155,13 @@ async fn stop_deletion_and_maintenance_hold_runs() {
         .iter()
         .find_map(|r| r.0.filter(|t| *t != run))
         .unwrap();
+    h.release(second).await;
     h.app.wait_turn(&second.to_string(), &["completed"]).await;
 
     let other = h.app.create_bot("Work").await;
-    let (other_setup, other_token) = h.owner_turn(&other).await;
+    let (other_setup, other_token) = h.running(&other, GATE).await;
     let theirs = create(&h.app, &other_token, digest("Weekly report.")).await;
+    h.release(other_setup).await;
     h.app
         .wait_turn(&other_setup.to_string(), &["completed"])
         .await;
@@ -2198,16 +2185,17 @@ async fn stop_deletion_and_maintenance_hold_runs() {
 
 #[tokio::test]
 async fn a_restart_never_repeats_an_admitted_run() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
-    let (setup, token) = h.owner_turn(&main).await;
+    let (setup, token) = h.running(&main, GATE).await;
     let routine = create(
         &h.app,
         &token,
-        digest("[synthetic:slow] a long routine report for restart checks."),
+        digest(&format!("{GATE} a long routine report for restart checks.")),
     )
     .await;
     let id = routine["id"].as_str().unwrap().to_owned();
+    h.release(setup).await;
     h.app.wait_turn(&setup.to_string(), &["completed"]).await;
     let due = at(&routine["next_run_at"]);
     fire(&h.app, due).await;
@@ -2517,9 +2505,9 @@ async fn the_failures_migration_keeps_a_failed_last_run_visible_and_never_review
 
 #[tokio::test]
 async fn a_reminder_runs_once_then_leaves_the_list() {
-    let h = harness().await;
+    let h = harness(TestApp::builder()).await;
     let main = h.app.main_bot().await;
-    let (setup, token) = h.owner_turn(&main).await;
+    let (setup, token) = h.running(&main, GATE).await;
     let args = json!({ "name": "Scout check", "prompt": "Check how many DMs Scout sent.",
                        "in_minutes": 360 });
     let before = Utc::now();
@@ -2586,6 +2574,7 @@ async fn a_reminder_runs_once_then_leaves_the_list() {
     )
     .await;
     assert!(moved.error, "a reminder's time is fixed: {}", moved.body);
+    h.release(setup).await;
     h.app.wait_turn(&setup.to_string(), &["completed"]).await;
 
     assert_eq!(

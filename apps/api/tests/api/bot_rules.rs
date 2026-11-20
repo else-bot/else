@@ -3,7 +3,7 @@ use crate::common;
 use axum::http::StatusCode;
 use common::TestApp;
 use common::recorder::{GATE, GATE_EVERY_ATTEMPT, harness, tool};
-use else_api::grants::{DEFAULT_TTL, Tool};
+use else_api::grants::Tool;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -481,19 +481,7 @@ async fn delegated_tasks_and_routine_runs_cannot_edit_rules() {
     let denied = tool(&h.app, &child_token, "rules_update", args.clone()).await;
     assert_eq!(denied.status, StatusCode::FORBIDDEN);
 
-    let conversation = h.inputs(child).await[0].conversation_id;
-    let forged = h
-        .app
-        .state
-        .grants
-        .issue(
-            worker.parse().unwrap(),
-            conversation,
-            child,
-            vec![Tool::Rules],
-            DEFAULT_TTL,
-        )
-        .await;
+    let forged = h.grant_with(child, vec![Tool::Rules]).await;
     let refused = tool(&h.app, &forged, "rules_update", args).await;
     assert_eq!(refused.code(), "NOT_ALLOWED");
     assert_eq!(rules(&h.app, &worker).await["version"], 0);

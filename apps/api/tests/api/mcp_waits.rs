@@ -1,17 +1,13 @@
 use crate::common;
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use common::recorder::{GATE, GATE_EVERY_ATTEMPT, harness, tool};
 use common::{TestApp, TestDb};
-use else_api::grants::{DEFAULT_TTL, Tool};
-use else_api::providers::synthetic::Synthetic;
 use serde_json::{Value, json};
 use uuid::Uuid;
-
-const SLOW: &str = "[synthetic:slow] Start WEB-284 in T3 and review its PR when it is ready.";
 
 const SERVER: &str = r#"
 import json, os, sys
@@ -36,54 +32,6 @@ for line in sys.stdin:
     else: r = {}
     print(json.dumps({'jsonrpc':'2.0','id':m['id'],'result':r}), flush=True)
 "#;
-
-async fn harness() -> (TestApp, Arc<Synthetic>) {
-    let db = Arc::new(TestDb::migrated().await);
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
-    let registry: common::Providers = vec![synthetic.clone()];
-    (
-        TestApp::builder().db(db).providers(registry).start().await,
-        synthetic,
-    )
-}
-
-async fn running(app: &TestApp, bot: &str) -> (Uuid, String) {
-    let sent = app.send(bot, Uuid::new_v4(), SLOW, Some("synthetic")).await;
-    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
-    let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
-    app.wait_turn(&turn, &["running"]).await;
-    let turn: Uuid = turn.parse().unwrap();
-    let (bot, conversation): (Uuid, Uuid) =
-        sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
-            .bind(turn)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
-    let token = app
-        .state
-        .grants
-        .issue(
-            bot,
-            conversation,
-            turn,
-            vec![Tool::Mcp, Tool::ManageMcp],
-            DEFAULT_TTL,
-        )
-        .await;
-    (turn, token)
-}
-
-async fn tool(app: &TestApp, token: &str, name: &str, arguments: Value) -> Value {
-    let reply = app.call("POST", "/tools/v1/mcp", Some(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}})), Some(token)).await;
-    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    reply.body["result"].clone()
-}
-
-fn text(result: &Value) -> Value {
-    assert_ne!(result["isError"], true, "{result}");
-    serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
-}
 
 fn install(state: &Path) -> Value {
     json!({"id":"t3-code","name":"T3 Code","description":"Delegate coding tasks","skill":"Check tasks with task_status.","documentation":"task_status {taskId}","config":{"type":"stdio","command":"python3","args":["-u","-c",SERVER],"env":{"JOB_STATE":state.to_str().unwrap()}}})
@@ -132,39 +80,38 @@ async fn shown_waits(app: &TestApp, bot: &str, turn: Uuid) -> Value {
         .clone()
 }
 
-async fn settle(app: &TestApp, turn: Uuid, status: &str) {
-    app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(30))
-        .await;
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_request_waiting_on_a_running_mcp_job_continues_by_itself_when_it_finishes() {
-    let (app, synthetic) = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
     std::fs::write(&state, "working").unwrap();
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    text(&tool(&app, &token, "mcp_install", install(&state)).await);
+    let (turn, token) = h.running(&main, GATE).await;
+    let installed = tool(app, &token, "mcp_install", install(&state)).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
 
-    let parked = tool(&app, &token, "mcp_wait", wait_args()).await;
-    assert!(else_api::app::tools::parks("mcp_wait", &parked), "{parked}");
-    assert_eq!(text(&parked)["status"], "waiting");
-    settle(&app, turn, "waiting").await;
-    assert_eq!(attempts(&app, turn).await, 1);
-
-    check_now(&app).await;
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    assert_eq!(
-        wait_row(&app, turn).await.0,
-        "pending",
-        "the job still runs"
+    let parked = tool(app, &token, "mcp_wait", wait_args()).await;
+    assert!(
+        else_api::app::tools::parks("mcp_wait", &parked.body["result"]),
+        "{}",
+        parked.body
     );
+    assert_eq!(parked.result["status"], "waiting");
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    assert_eq!(attempts(app, turn).await, 1);
+
+    check_now(app).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(wait_row(app, turn).await.0, "pending", "the job still runs");
     assert_eq!(
         app.wait_turn(&turn.to_string(), &["waiting"]).await,
         "waiting"
     );
-    let shown = shown_waits(&app, &main, turn).await;
+    let shown = shown_waits(app, &main, turn).await;
     assert_eq!(shown.as_array().map(Vec::len), Some(1), "{shown}");
     assert_eq!(shown[0]["mcp_id"], "t3-code", "{shown}");
     let waiting = app.waiting_on(&main).await;
@@ -175,67 +122,77 @@ async fn a_request_waiting_on_a_running_mcp_job_continues_by_itself_when_it_fini
     );
 
     std::fs::write(&state, "result_available").unwrap();
-    check_now(&app).await;
-    settle(&app, turn, "completed").await;
-    assert_eq!(shown_waits(&app, &main, turn).await, json!([]));
-    assert_eq!(attempts(&app, turn).await, 2, "the same request continued");
+    check_now(app).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    assert_eq!(shown_waits(app, &main, turn).await, json!([]));
+    assert_eq!(attempts(app, turn).await, 2, "the same request continued");
     assert_eq!(app.waiting_on(&main).await, Value::Null, "the job ended");
-    let (status, delivered, checks) = wait_row(&app, turn).await;
+    let (status, delivered, checks) = wait_row(app, turn).await;
     assert_eq!((status.as_str(), delivered), ("finished", Some(2)));
     assert!(checks >= 3, "{checks}");
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("[else.bot MCP waits]"), "{packet}");
     assert!(packet.contains("Opened PR #775"), "{packet}");
     assert!(packet.contains("status=\"finished\""), "{packet}");
 
-    let (_, token) = running(&app, &main).await;
-    let done = text(&tool(&app, &token, "mcp_wait", wait_args()).await);
+    let (_, token) = h.running(&main, GATE).await;
+    let done = tool(app, &token, "mcp_wait", wait_args()).await.result;
     assert_eq!(done["status"], "finished", "{done}");
     assert_eq!(done["result"]["content"][0]["type"], "text");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_status_that_cannot_be_read_never_counts_as_the_job_finishing() {
-    let (app, synthetic) = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
     std::fs::write(&state, "working").unwrap();
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    text(&tool(&app, &token, "mcp_install", install(&state)).await);
+    let (turn, token) = h.running(&main, GATE).await;
+    let installed = tool(app, &token, "mcp_install", install(&state)).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
 
     let mut misspelled = wait_args();
     misspelled["status_pointer"] = json!("/work_state");
-    let refused = tool(&app, &token, "mcp_wait", misspelled).await;
-    assert_eq!(refused["isError"], true, "{refused}");
+    let refused = tool(app, &token, "mcp_wait", misspelled).await;
+    assert_eq!(refused.status, StatusCode::OK, "{}", refused.body);
+    assert!(refused.error, "{}", refused.body);
     assert_eq!(
-        error_code(&refused),
-        "unreadable_status",
-        "a refusal is the JSON error envelope: {refused}"
+        refused.result["error"]["code"], "unreadable_status",
+        "a refusal is the JSON error envelope: {}",
+        refused.body
     );
-    assert!(refused.to_string().contains("/work_state"), "{refused}");
+    assert!(
+        refused.result.to_string().contains("/work_state"),
+        "{}",
+        refused.body
+    );
 
-    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
-    settle(&app, turn, "waiting").await;
+    let parked = tool(app, &token, "mcp_wait", wait_args()).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
     std::fs::write(&state, "unreadable").unwrap();
-    check_now(&app).await;
+    check_now(app).await;
     tokio::time::sleep(Duration::from_secs(5)).await;
-    let (status, _, checks) = wait_row(&app, turn).await;
+    let (status, _, checks) = wait_row(app, turn).await;
     assert_eq!(
         (status.as_str(), checks),
         ("pending", 2),
         "one unreadable status keeps waiting"
     );
-    assert_eq!(attempts(&app, turn).await, 1);
+    assert_eq!(attempts(app, turn).await, 1);
 
     for _ in 0..2 {
-        check_now(&app).await;
+        check_now(app).await;
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
-    settle(&app, turn, "completed").await;
-    let (status, delivered, checks) = wait_row(&app, turn).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    let (status, delivered, checks) = wait_row(app, turn).await;
     assert_eq!((status.as_str(), delivered, checks), ("failed", Some(2), 4));
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("status=\"failed\""), "{packet}");
     assert!(packet.contains("UNREADABLE_STATUS"), "{packet}");
     assert!(packet.contains("upstream schema changed"), "{packet}");
@@ -243,15 +200,20 @@ async fn a_status_that_cannot_be_read_never_counts_as_the_job_finishing() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_wait_survives_a_restart_during_and_after_the_owners_stop() {
-    let (app, _) = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
     std::fs::write(&state, "working").unwrap();
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    text(&tool(&app, &token, "mcp_install", install(&state)).await);
-    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
-    settle(&app, turn, "waiting").await;
+    let (turn, token) = h.running(&main, GATE).await;
+    let installed = tool(app, &token, "mcp_install", install(&state)).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
+    let parked = tool(app, &token, "mcp_wait", wait_args()).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
     // A restart lands while the owner's Stop unwinds a reply that carries
     // this wait: recovery parks the turn on it instead of cancelling it.
     sqlx::query("UPDATE turns SET status = 'cancelling', error_code = 'stopped' WHERE id = ?1")
@@ -259,14 +221,16 @@ async fn a_wait_survives_a_restart_during_and_after_the_owners_stop() {
         .execute(&app.db.pool)
         .await
         .unwrap();
-    assert_eq!(wait_row(&app, turn).await.0, "pending");
+    assert_eq!(wait_row(app, turn).await.0, "pending");
 
-    let app = app.restart().await;
+    let db = h.app.stop().await;
+    let h = harness(TestApp::builder().db(db)).await;
+    let app = &h.app;
     assert_eq!(
         app.wait_turn(&turn.to_string(), &["waiting"]).await,
         "waiting"
     );
-    assert_eq!(wait_row(&app, turn).await.0, "pending");
+    assert_eq!(wait_row(app, turn).await.0, "pending");
     let stopped = app
         .owner(
             "POST",
@@ -281,27 +245,32 @@ async fn a_wait_survives_a_restart_during_and_after_the_owners_stop() {
         "waiting",
         "Stop ends generation only; the turn keeps waiting"
     );
-    assert_eq!(wait_row(&app, turn).await.0, "pending");
+    assert_eq!(wait_row(app, turn).await.0, "pending");
     std::fs::write(&state, "result_available").unwrap();
-    check_now(&app).await;
-    settle(&app, turn, "completed").await;
-    assert_eq!(wait_row(&app, turn).await.0, "finished");
+    check_now(app).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    assert_eq!(wait_row(app, turn).await.0, "finished");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_stops_one_wait_and_the_bot_learns_it_was_cancelled() {
-    let (app, synthetic) = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
     std::fs::write(&state, "working").unwrap();
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    text(&tool(&app, &token, "mcp_install", install(&state)).await);
-    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
-    settle(&app, turn, "waiting").await;
+    let (turn, token) = h.running(&main, GATE).await;
+    let installed = tool(app, &token, "mcp_install", install(&state)).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
+    let parked = tool(app, &token, "mcp_wait", wait_args()).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
     std::fs::write(&state, "result_available").unwrap();
-    check_now(&app).await;
-    settle(&app, turn, "completed").await;
+    check_now(app).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
     let finished: Uuid = sqlx::query_scalar("SELECT id FROM mcp_waits WHERE turn_id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
@@ -309,22 +278,21 @@ async fn the_owner_stops_one_wait_and_the_bot_learns_it_was_cancelled() {
         .unwrap();
 
     std::fs::write(&state, "working").unwrap();
-    let (turn, token) = running(&app, &main).await;
-    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
-    settle(&app, turn, "waiting").await;
-    let shown = shown_waits(&app, &main, turn).await;
+    let (turn, token) = h.running(&main, GATE).await;
+    let parked = tool(app, &token, "mcp_wait", wait_args()).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
+    let shown = shown_waits(app, &main, turn).await;
     assert_eq!(
         shown[0]["purpose"], "Review the WEB-284 PR once T3 finishes.",
         "{shown}"
     );
     assert_eq!(shown[0]["last_status"], "working", "{shown}");
     let wait = shown[0]["id"].as_str().unwrap().to_owned();
-    let cancel = |bot: String, id: String| {
-        let app = &app;
-        async move {
-            app.owner("POST", &format!("/v1/bots/{bot}/waits/{id}/cancel"), None)
-                .await
-        }
+    let cancel = |bot: String, id: String| async move {
+        app.owner("POST", &format!("/v1/bots/{bot}/waits/{id}/cancel"), None)
+            .await
     };
     let first = cancel(main.clone(), wait.clone()).await;
     assert_eq!(first.status, StatusCode::OK, "{}", first.body);
@@ -332,10 +300,10 @@ async fn the_owner_stops_one_wait_and_the_bot_learns_it_was_cancelled() {
         (&first.body["kind"], &first.body["created"]),
         (&json!("mcp"), &json!(true))
     );
-    settle(&app, turn, "completed").await;
-    let (status, delivered, _) = wait_row(&app, turn).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    let (status, delivered, _) = wait_row(app, turn).await;
     assert_eq!((status.as_str(), delivered), ("stopped", Some(2)));
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("status=\"stopped\""), "{packet}");
     assert!(packet.contains("cancelled by owner"), "{packet}");
 
@@ -352,17 +320,24 @@ async fn the_owner_stops_one_wait_and_the_bot_learns_it_was_cancelled() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stopping_a_continued_reply_keeps_its_waits() {
-    let (app, synthetic) = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
     std::fs::write(&state, "working").unwrap();
     let main = app.main_bot().await;
-    let (first, token) = running(&app, &main).await;
-    text(&tool(&app, &token, "mcp_install", install(&state)).await);
-    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
-    settle(&app, first, "waiting").await;
+    let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let installed = tool(app, &token, "mcp_install", install(&state)).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
+    let parked = tool(app, &token, "mcp_wait", wait_args()).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["waiting"]).await;
 
-    let (next, _) = follow(&app, &main, first, 2).await;
+    let next = follow(app, &main, first).await;
+    let token = h.continued(first, &token).await;
+    assert_eq!(attempts(app, first).await, 2);
     let stopped = app
         .owner(
             "POST",
@@ -371,22 +346,22 @@ async fn stopping_a_continued_reply_keeps_its_waits() {
         )
         .await;
     assert!(stopped.status.is_success(), "{}", stopped.body);
-    settle(&app, first, "waiting").await;
-    assert_eq!(turn_status(&app, next).await, "interrupted");
-    assert_eq!(carried(&app, first).await, vec![(1, "pending".into())]);
+    app.wait_turn(&first.to_string(), &["waiting"]).await;
+    assert_eq!(turn_status(app, next).await, "interrupted");
+    assert_eq!(carried(app, first).await, vec![(1, "pending".into())]);
 
     std::fs::write(&state, "result_available").unwrap();
-    check_now(&app).await;
-    settle(&app, first, "completed").await;
-    assert_eq!(attempts(&app, first).await, 3);
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    check_now(app).await;
+    h.continued(first, &token).await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["completed"]).await;
+    assert_eq!(attempts(app, first).await, 3);
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("Opened PR #775"), "{packet}");
 }
 
-/// Send a follow-up while `into` waits: it joins that reply, which
-/// continues with it as attempt `attempt`. Returns the message's own turn
-/// and an MCP grant for the running continuation.
-async fn follow(app: &TestApp, bot: &str, into: Uuid, attempt: i32) -> (Uuid, String) {
+/// Send a follow-up that joins the waiting turn. Returns the message's own turn.
+async fn follow(app: &TestApp, bot: &str, into: Uuid) -> Uuid {
     let sent = app
         .send(
             bot,
@@ -397,16 +372,7 @@ async fn follow(app: &TestApp, bot: &str, into: Uuid, attempt: i32) -> (Uuid, St
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
     assert_eq!(sent.body["turn"]["steered_into"], into.to_string());
-    let turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    rests_after(
-        app,
-        into,
-        attempt,
-        "running",
-        "the follow-up continues the reply",
-    )
-    .await;
-    (turn, grant(app, into, vec![Tool::Mcp]).await)
+    sent.body["turn"]["id"].as_str().unwrap().parse().unwrap()
 }
 
 async fn turn_status(app: &TestApp, turn: Uuid) -> String {
@@ -434,45 +400,60 @@ async fn carried(app: &TestApp, turn: Uuid) -> Vec<(i32, String)> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn follow_ups_join_the_reply_and_each_of_its_waits_reports_once() {
-    let (app, synthetic) = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
     std::fs::write(&state, "working").unwrap();
     let main = app.main_bot().await;
-    let (first, token) = running(&app, &main).await;
-    text(&tool(&app, &token, "mcp_install", install(&state)).await);
-    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
-    settle(&app, first, "waiting").await;
+    let (first, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let installed = tool(app, &token, "mcp_install", install(&state)).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
+    let parked = tool(app, &token, "mcp_wait", wait_args()).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["waiting"]).await;
 
-    let (second, token) = follow(&app, &main, first, 2).await;
+    let second = follow(app, &main, first).await;
+    let token = h.continued(first, &token).await;
+    assert_eq!(attempts(app, first).await, 2);
     let deploy = wait_on("WEB-286", "Check the WEB-286 deploy.");
-    text(&tool(&app, &token, "mcp_wait", deploy).await);
-    rests_after(&app, first, 2, "waiting", "the reply parks on both waits").await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let parked = tool(app, &token, "mcp_wait", deploy).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(first).await;
+    rests_after(app, first, 2, "waiting", "the reply parks on both waits").await;
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("Any news on WEB-284?"), "{packet}");
 
-    let (latest, token) = follow(&app, &main, first, 3).await;
+    let latest = follow(app, &main, first).await;
+    let token = h.continued(first, &token).await;
+    assert_eq!(attempts(app, first).await, 3);
     let merge = wait_on("WEB-285", "Merge WEB-285 once T3 finishes.");
-    text(&tool(&app, &token, "mcp_wait", merge).await);
-    rests_after(&app, first, 3, "waiting", "the reply parks on three waits").await;
-    let shown = shown_waits(&app, &main, first).await;
+    let parked = tool(app, &token, "mcp_wait", merge).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(first).await;
+    rests_after(app, first, 3, "waiting", "the reply parks on three waits").await;
+    let shown = shown_waits(app, &main, first).await;
     assert_eq!(shown.as_array().map(Vec::len), Some(3), "{shown}");
 
     std::fs::write(dir.path().join("job.WEB-285"), "result_available").unwrap();
-    check_now(&app).await;
+    check_now(app).await;
+    let token = h.continued(first, &token).await;
+    h.release(first).await;
     rests_after(
-        &app,
+        app,
         first,
         4,
         "waiting",
         "one result continues the reply while its other waits still run",
     )
     .await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("Merge WEB-285"), "{packet}");
     assert!(packet.contains("Opened PR #775"), "{packet}");
     assert_eq!(
-        carried(&app, first).await,
+        carried(app, first).await,
         vec![
             (1, "pending".into()),
             (2, "pending".into()),
@@ -480,16 +461,20 @@ async fn follow_ups_join_the_reply_and_each_of_its_waits_reports_once() {
         ]
     );
 
-    std::fs::write(&state, "result_available").unwrap();
-    for _ in 0..2 {
-        check_now(&app).await;
-        tokio::time::sleep(Duration::from_secs(3)).await;
-    }
-    settle(&app, first, "completed").await;
+    std::fs::write(dir.path().join("job.WEB-284"), "result_available").unwrap();
+    check_now(app).await;
+    let token = h.continued(first, &token).await;
+    h.release(first).await;
+    rests_after(app, first, 5, "waiting", "one wait is still pending").await;
+    std::fs::write(dir.path().join("job.WEB-286"), "result_available").unwrap();
+    check_now(app).await;
+    h.continued(first, &token).await;
+    h.release(first).await;
+    app.wait_turn(&first.to_string(), &["completed"]).await;
     for message in [second, latest] {
-        settle(&app, message, "completed").await;
+        app.wait_turn(&message.to_string(), &["completed"]).await;
         assert_eq!(
-            attempts(&app, message).await,
+            attempts(app, message).await,
             0,
             "a joined message never runs"
         );
@@ -507,7 +492,7 @@ async fn follow_ups_join_the_reply_and_each_of_its_waits_reports_once() {
             .all(|(status, at)| status == "finished" && at.is_some()),
         "{delivered:?}"
     );
-    let packets = synthetic.packets().await;
+    let packets = h.packets().await;
     for purpose in [
         "Review the WEB-284 PR",
         "Check the WEB-286 deploy",
@@ -526,37 +511,51 @@ async fn follow_ups_join_the_reply_and_each_of_its_waits_reports_once() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_status_tool_not_declared_repeatable_is_refused_and_a_deadline_ends_a_wait() {
-    let (app, _) = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
     std::fs::write(&state, "working").unwrap();
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    text(&tool(&app, &token, "mcp_install", install(&state)).await);
+    let (turn, token) = h.running(&main, GATE).await;
+    let installed = tool(app, &token, "mcp_install", install(&state)).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
     let mut poke = wait_args();
     poke["tool"] = json!("task_poke");
-    let refused = tool(&app, &token, "mcp_wait", poke).await;
-    assert_eq!(refused["isError"], true, "{refused}");
-    assert_eq!(error_code(&refused), "not_repeatable", "{refused}");
-    assert!(!else_api::app::tools::parks("mcp_wait", &refused));
+    let refused = tool(app, &token, "mcp_wait", poke).await;
+    assert_eq!(refused.status, StatusCode::OK, "{}", refused.body);
+    assert!(refused.error, "{}", refused.body);
+    assert_eq!(
+        refused.result["error"]["code"], "not_repeatable",
+        "{}",
+        refused.body
+    );
+    assert!(!else_api::app::tools::parks(
+        "mcp_wait",
+        &refused.body["result"]
+    ));
     let held: i64 = sqlx::query_scalar("SELECT count(*) FROM turn_holds WHERE turn_id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
     assert_eq!(held, 0, "a refused tool neither waits nor asks the owner");
-    settle(&app, turn, "completed").await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
 
-    let (next, token) = running(&app, &main).await;
-    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
-    settle(&app, next, "waiting").await;
+    let (next, token) = h.running(&main, GATE).await;
+    let parked = tool(app, &token, "mcp_wait", wait_args()).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(next).await;
+    app.wait_turn(&next.to_string(), &["waiting"]).await;
     sqlx::query("UPDATE mcp_waits SET deadline_at = '2000-01-01T00:00:00.000+00:00', next_check_at = '2999-01-01T00:00:00.000+00:00' WHERE turn_id = ?1")
         .bind(next)
         .execute(&app.db.pool)
         .await
         .unwrap();
-    settle(&app, next, "completed").await;
-    let (status, delivered, checks) = wait_row(&app, next).await;
+    app.wait_turn(&next.to_string(), &["completed"]).await;
+    let (status, delivered, checks) = wait_row(app, next).await;
     assert_eq!(
         (status.as_str(), delivered, checks),
         ("expired", Some(2), 1),
@@ -566,15 +565,20 @@ async fn a_status_tool_not_declared_repeatable_is_refused_and_a_deadline_ends_a_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_busy_package_with_many_due_waits_does_not_hide_another_package() {
-    let (app, _) = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
     std::fs::write(&state, "working").unwrap();
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    text(&tool(&app, &token, "mcp_install", install(&state)).await);
-    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
-    settle(&app, turn, "waiting").await;
+    let (turn, token) = h.running(&main, GATE).await;
+    let installed = tool(app, &token, "mcp_install", install(&state)).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
+    let parked = tool(app, &token, "mcp_wait", wait_args()).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
     sqlx::query(
         "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 70)
          INSERT INTO mcp_waits (id, bot_id, turn_id, attempt, mcp_id, tool, arguments,
@@ -612,16 +616,19 @@ fn calls(state: &Path) -> usize {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_external_first_call_waits_for_the_owner_and_a_tool_that_stops_qualifying_is_not_repeated()
  {
-    let (app, _) = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
     std::fs::write(&state, "working").unwrap();
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    text(&tool(&app, &token, "mcp_install", install(&state)).await);
+    let (turn, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let installed = tool(app, &token, "mcp_install", install(&state)).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
     let mut external = wait_args();
     external["effect"] = json!("external");
-    let asked = text(&tool(&app, &token, "mcp_wait", external).await);
+    let asked = tool(app, &token, "mcp_wait", external).await.result;
     assert_eq!(asked["parked"], true, "{asked}");
     assert_eq!(calls(&state), 0, "nothing runs before the owner approves");
     let waits: i64 = sqlx::query_scalar("SELECT count(*) FROM mcp_waits")
@@ -629,16 +636,23 @@ async fn an_external_first_call_waits_for_the_owner_and_a_tool_that_stops_qualif
         .await
         .unwrap();
     assert_eq!(waits, 0);
-    settle(&app, turn, "waiting").await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
 
-    let (_, token) = follow(&app, &main, turn, 2).await;
-    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
-    rests_after(&app, turn, 2, "waiting", "the reply parks on its wait").await;
+    follow(app, &main, turn).await;
+    let token = h.continued(turn, &token).await;
+    assert_eq!(attempts(app, turn).await, 2);
+    let parked = tool(app, &token, "mcp_wait", wait_args()).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(turn).await;
+    rests_after(app, turn, 2, "waiting", "the reply parks on its wait").await;
     assert_eq!(calls(&state), 1);
     std::fs::write(state.with_extension("unsafe"), "").unwrap();
-    check_now(&app).await;
-    settle(&app, turn, "completed").await;
-    assert_eq!(wait_row(&app, turn).await.0, "failed");
+    check_now(app).await;
+    h.continued(turn, &token).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    assert_eq!(wait_row(app, turn).await.0, "failed");
     assert_eq!(
         calls(&state),
         1,
@@ -646,22 +660,10 @@ async fn an_external_first_call_waits_for_the_owner_and_a_tool_that_stops_qualif
     );
 }
 
-async fn grant(app: &TestApp, turn: Uuid, tools: Vec<Tool>) -> String {
-    let (bot, conversation): (Uuid, Uuid) =
-        sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
-            .bind(turn)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
-    app.state
-        .grants
-        .issue(bot, conversation, turn, tools, DEFAULT_TTL)
-        .await
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delegated_task_waits_on_a_job_and_its_delegator_resumes_only_when_it_finishes() {
-    let (app, synthetic) = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
     std::fs::write(&state, "working").unwrap();
@@ -672,19 +674,19 @@ async fn a_delegated_task_waits_on_a_job_and_its_delegator_resumes_only_when_it_
         .execute(&app.db.pool)
         .await
         .unwrap();
-    let (root, token) = running(&app, &main).await;
-    text(&tool(&app, &token, "mcp_install", install(&state)).await);
-    let delegator = grant(&app, root, vec![Tool::Delegate]).await;
-    let task = "[synthetic:slow] Run WEB-284 in T3, review its PR, and report back.";
-    let accepted = text(
-        &tool(
-            &app,
-            &delegator,
-            "delegate",
-            json!({ "target_bot_id": dev, "task": task }),
-        )
-        .await,
-    );
+    let (root, token) = h.running(&main, GATE).await;
+    let installed = tool(app, &token, "mcp_install", install(&state)).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
+    let task = format!("{GATE} Run WEB-284 in T3, review its PR, and report back.");
+    let accepted = tool(
+        app,
+        &token,
+        "delegate",
+        json!({ "target_bot_id": dev, "task": task }),
+    )
+    .await
+    .result;
     assert_eq!(accepted["status"], "pending", "{accepted}");
     let (delegation, child): (Uuid, Uuid) =
         sqlx::query_as("SELECT id, child_turn_id FROM delegations WHERE root_turn_id = ?1")
@@ -692,16 +694,17 @@ async fn a_delegated_task_waits_on_a_job_and_its_delegator_resumes_only_when_it_
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
-    app.wait_turn(&child.to_string(), &["running"]).await;
-    let worker = grant(&app, child, vec![Tool::Mcp]).await;
-    let parked = text(&tool(&app, &worker, "mcp_wait", wait_args()).await);
+    let (_, worker) = h.started(child).await;
+    let parked = tool(app, &worker, "mcp_wait", wait_args()).await.result;
     assert_eq!(parked["parked"], true, "{parked}");
     assert!(
         parked["next"].as_str().unwrap().contains("without a reply"),
         "{parked}"
     );
-    settle(&app, child, "waiting").await;
-    settle(&app, root, "waiting").await;
+    h.release(child).await;
+    app.wait_turn(&child.to_string(), &["waiting"]).await;
+    h.release(root).await;
+    app.wait_turn(&root.to_string(), &["waiting"]).await;
     let pending: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
         .bind(delegation)
         .fetch_one(&app.db.pool)
@@ -721,7 +724,7 @@ async fn a_delegated_task_waits_on_a_job_and_its_delegator_resumes_only_when_it_
     app.wait_turn_for(
         owner.body["turn"]["id"].as_str().unwrap(),
         &["completed"],
-        Duration::from_secs(30),
+        common::SETTLE,
     )
     .await;
     assert_eq!(
@@ -729,15 +732,15 @@ async fn a_delegated_task_waits_on_a_job_and_its_delegator_resumes_only_when_it_
         "waiting",
         "the owner's work ran while the task kept waiting"
     );
-    assert_eq!(attempts(&app, root).await, 1);
+    assert_eq!(attempts(app, root).await, 1);
 
     std::fs::write(&state, "result_available").unwrap();
-    check_now(&app).await;
-    settle(&app, child, "completed").await;
-    assert_eq!(attempts(&app, child).await, 2, "the same task continued");
-    assert_eq!(wait_row(&app, child).await.0, "finished");
-    settle(&app, root, "completed").await;
-    assert_eq!(attempts(&app, root).await, 2, "the delegator resumed once");
+    check_now(app).await;
+    app.wait_turn(&child.to_string(), &["completed"]).await;
+    assert_eq!(attempts(app, child).await, 2, "the same task continued");
+    assert_eq!(wait_row(app, child).await.0, "finished");
+    app.wait_turn(&root.to_string(), &["completed"]).await;
+    assert_eq!(attempts(app, root).await, 2, "the delegator resumed once");
     let (status, delivered): (String, Option<i32>) =
         sqlx::query_as("SELECT status, delivered_attempt FROM delegations WHERE id = ?1")
             .bind(delegation)
@@ -745,7 +748,7 @@ async fn a_delegated_task_waits_on_a_job_and_its_delegator_resumes_only_when_it_
             .await
             .unwrap();
     assert_eq!((status.as_str(), delivered), ("completed", Some(2)));
-    let packets = synthetic.packets().await;
+    let packets = h.packets().await;
     assert!(
         packets
             .iter()
@@ -762,19 +765,10 @@ async fn a_delegated_task_waits_on_a_job_and_its_delegator_resumes_only_when_it_
     );
 }
 
-/// The code of a refused call's JSON error envelope.
-fn error_code(result: &Value) -> String {
-    let text = result["content"][0]["text"].as_str().unwrap_or_default();
-    let envelope: Value = serde_json::from_str(text).unwrap_or_default();
-    envelope["error"]["code"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned()
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_settled_wait_continues_a_reply_whose_task_still_runs() {
-    let (app, synthetic) = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
     std::fs::write(&state, "working").unwrap();
@@ -785,23 +779,30 @@ async fn a_settled_wait_continues_a_reply_whose_task_still_runs() {
         .execute(&app.db.pool)
         .await
         .unwrap();
-    let (root, token) = running(&app, &main).await;
-    text(&tool(&app, &token, "mcp_install", install(&state)).await);
-    let delegator = grant(&app, root, vec![Tool::Delegate]).await;
+    let (root, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let installed = tool(app, &token, "mcp_install", install(&state)).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
     let task = json!({ "target_bot_id": dev, "task": "[synthetic:hang] Audit the billing code." });
-    text(&tool(&app, &delegator, "delegate", task).await);
-    settle(&app, root, "waiting").await;
+    let accepted = tool(app, &token, "delegate", task).await;
+    assert_eq!(accepted.result["status"], "pending", "{}", accepted.body);
+    h.release(root).await;
+    app.wait_turn(&root.to_string(), &["waiting"]).await;
 
-    let (_, token) = follow(&app, &main, root, 2).await;
+    follow(app, &main, root).await;
+    let token = h.continued(root, &token).await;
+    assert_eq!(attempts(app, root).await, 2);
     let task_root: Uuid =
         sqlx::query_scalar("SELECT root_turn_id FROM delegations WHERE status = 'running'")
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
     assert_eq!(task_root, root, "the task stays with its reply");
-    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
+    let parked = tool(app, &token, "mcp_wait", wait_args()).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(root).await;
     rests_after(
-        &app,
+        app,
         root,
         2,
         "waiting",
@@ -810,17 +811,19 @@ async fn a_settled_wait_continues_a_reply_whose_task_still_runs() {
     .await;
 
     std::fs::write(&state, "result_available").unwrap();
-    check_now(&app).await;
+    check_now(app).await;
+    h.continued(root, &token).await;
+    h.release(root).await;
     rests_after(
-        &app,
+        app,
         root,
         3,
         "waiting",
         "the settled wait continues the reply while its task still runs",
     )
     .await;
-    assert_eq!(wait_row(&app, root).await.1, Some(3));
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert_eq!(wait_row(app, root).await.1, Some(3));
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(packet.contains("Opened PR #775"), "{packet}");
 }
 
@@ -843,35 +846,50 @@ async fn rests_after(app: &TestApp, turn: Uuid, attempt: i32, status: &str, why:
 
 #[tokio::test(flavor = "multi_thread")]
 async fn each_wait_that_settles_continues_the_reply_while_the_others_run() {
-    let (app, synthetic) = harness().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("job");
     std::fs::write(&state, "working").unwrap();
     let main = app.main_bot().await;
-    let (latest, token) = running(&app, &main).await;
-    text(&tool(&app, &token, "mcp_install", install(&state)).await);
-    text(&tool(&app, &token, "mcp_wait", wait_args()).await);
-    settle(&app, latest, "waiting").await;
-    let (_, token) = follow(&app, &main, latest, 2).await;
+    let (latest, token) = h.running(&main, GATE_EVERY_ATTEMPT).await;
+    let installed = tool(app, &token, "mcp_install", install(&state)).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
+    let parked = tool(app, &token, "mcp_wait", wait_args()).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(latest).await;
+    app.wait_turn(&latest.to_string(), &["waiting"]).await;
+    follow(app, &main, latest).await;
+    let token = h.continued(latest, &token).await;
+    assert_eq!(attempts(app, latest).await, 2);
     let deploy = wait_on("WEB-286", "Check the WEB-286 deploy.");
-    text(&tool(&app, &token, "mcp_wait", deploy).await);
-    rests_after(&app, latest, 2, "waiting", "the reply parks on two waits").await;
-    let (_, token) = follow(&app, &main, latest, 3).await;
+    let parked = tool(app, &token, "mcp_wait", deploy).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(latest).await;
+    rests_after(app, latest, 2, "waiting", "the reply parks on two waits").await;
+    follow(app, &main, latest).await;
+    let token = h.continued(latest, &token).await;
+    assert_eq!(attempts(app, latest).await, 3);
     let merge = wait_on("WEB-285", "Merge WEB-285 once T3 finishes.");
-    text(&tool(&app, &token, "mcp_wait", merge).await);
-    rests_after(&app, latest, 3, "waiting", "the reply parks on three waits").await;
+    let parked = tool(app, &token, "mcp_wait", merge).await;
+    assert_eq!(parked.result["status"], "waiting", "{}", parked.body);
+    h.release(latest).await;
+    rests_after(app, latest, 3, "waiting", "the reply parks on three waits").await;
 
     std::fs::write(dir.path().join("job.WEB-286"), "result_available").unwrap();
-    check_now(&app).await;
+    check_now(app).await;
+    let token = h.continued(latest, &token).await;
+    h.release(latest).await;
     rests_after(
-        &app,
+        app,
         latest,
         4,
         "waiting",
         "a wait that settles continues the reply while the others run",
     )
     .await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("Purpose: Check the WEB-286 deploy"),
         "{packet}"
@@ -883,24 +901,28 @@ async fn each_wait_that_settles_continues_the_reply_while_the_others_run() {
     );
 
     std::fs::write(dir.path().join("job.WEB-284"), "result_available").unwrap();
-    check_now(&app).await;
+    check_now(app).await;
+    let token = h.continued(latest, &token).await;
+    h.release(latest).await;
     rests_after(
-        &app,
+        app,
         latest,
         5,
         "waiting",
         "a continuation that parked nothing still wakes on the next wait",
     )
     .await;
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("Purpose: Review the WEB-284 PR"),
         "{packet}"
     );
 
     std::fs::write(dir.path().join("job.WEB-285"), "result_available").unwrap();
-    check_now(&app).await;
-    rests_after(&app, latest, 6, "completed", "the last wait ends the reply").await;
+    check_now(app).await;
+    h.continued(latest, &token).await;
+    h.release(latest).await;
+    rests_after(app, latest, 6, "completed", "the last wait ends the reply").await;
     assert_eq!(
         sqlx::query_as::<_, (i32, String, Option<i32>)>(
             "SELECT attempt, status, delivered_attempt FROM mcp_waits
@@ -916,7 +938,7 @@ async fn each_wait_that_settles_continues_the_reply_while_the_others_run() {
             (3, "finished".into(), Some(6)),
         ]
     );
-    let packets = synthetic.packets().await;
+    let packets = h.packets().await;
     for purpose in [
         "Review the WEB-284 PR",
         "Check the WEB-286 deploy",

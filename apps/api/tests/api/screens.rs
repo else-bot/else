@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use axum::http::StatusCode;
 use base64::Engine;
 use common::TestApp;
+use common::recorder::{Called, GATE, Harness, harness, tool};
 use else_api::computers::{
     ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, RuntimeError, RuntimeState, Spec,
 };
-use else_api::grants::{DEFAULT_TTL, Tool};
 use serde_json::{Value, json};
 use sha2::Digest;
 use uuid::Uuid;
@@ -158,10 +158,10 @@ impl ComputerRuntime for Guest {
 }
 
 struct Setup {
-    app: Arc<TestApp>,
+    h: Harness,
     guest: Arc<Guest>,
     manager: Arc<ComputerManager>,
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
 }
 
 async fn setup(desktop: bool) -> Setup {
@@ -194,99 +194,37 @@ async fn setup(desktop: bool) -> Setup {
         },
     ));
     manager.reconcile_startup().await.unwrap();
-    let registry: common::Providers = vec![Arc::new(
-        else_api::providers::synthetic::Synthetic::new(Duration::from_millis(5))
-            .with_projects(dir.path().join("projects")),
-    )];
-    let app = Arc::new(
+    let h = harness(
         TestApp::builder()
             .db(db)
-            .providers(registry)
-            .computers(manager.clone())
-            .start()
-            .await,
-    );
+            .projects(dir.path().join("projects"))
+            .computers(manager.clone()),
+    )
+    .await;
     Setup {
-        app,
+        h,
         guest,
         manager,
-        _dir: dir,
+        dir,
     }
-}
-
-async fn grant(app: &TestApp, bot: &str) -> String {
-    let reply = app
-        .send(bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
-        .await;
-    let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    app.wait_turn(&turn.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-        .bind(turn)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    app.state
-        .grants
-        .issue(
-            bot.parse().unwrap(),
-            conversation,
-            turn,
-            vec![Tool::Computer],
-            DEFAULT_TTL,
-        )
-        .await
-}
-
-async fn tool(app: &TestApp, token: &str, name: &str, arguments: Value) -> Value {
-    let reply = app
-        .call(
-            "POST",
-            "/tools/v1/mcp",
-            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                         "params": { "name": name, "arguments": arguments } })),
-            Some(token),
-        )
-        .await;
-    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
-    reply.body["result"].clone()
-}
-
-async fn shot(app: &TestApp, token: &str, arguments: Value) -> Value {
-    let reply = app
-        .call(
-            "POST",
-            "/tools/v1/mcp",
-            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                         "params": { "name": "computer_screenshot", "arguments": arguments } })),
-            Some(token),
-        )
-        .await;
-    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
-    reply.body["result"].clone()
-}
-
-fn error(result: &Value) -> String {
-    assert_eq!(result["isError"], true, "{result}");
-    result["content"][0]["text"].as_str().unwrap().to_owned()
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     let Setup {
-        app,
-        guest,
-        manager,
-        ..
+        h, guest, manager, ..
     } = setup(true).await;
+    let app = &h.app;
     let bot = app.create_bot("Seer").await;
     let other = app.create_bot("Other").await;
 
-    let token = grant(&app, &bot).await;
-    let result = shot(&app, &token, json!({ "save": true })).await;
-    assert_ne!(result["isError"], true, "{result}");
-    let content = result["content"].as_array().unwrap();
+    let (_, token) = h.running(&bot, GATE).await;
+    let result = tool(app, &token, "computer_screenshot", json!({ "save": true })).await;
+    assert_eq!(result.status, StatusCode::OK, "{}", result.body);
+    assert!(!result.error, "{}", result.body);
+    let content = result.body["result"]["content"].as_array().unwrap();
     assert_eq!(content.len(), 2);
-    let meta: Value = serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
+    let meta = result.result;
     assert_eq!(
         (meta["screen_width"].clone(), meta["screen_height"].clone()),
         (json!(1280), json!(800))
@@ -311,9 +249,15 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     );
     assert!(logged.iter().all(|l| !l.contains(&PNG[..40])), "{logged:?}");
 
-    let again = shot(&app, &token, json!({ "artifact_id": artifact })).await;
-    assert_eq!(again["content"][1]["data"], PNG);
-    let saved: Value = serde_json::from_str(again["content"][0]["text"].as_str().unwrap()).unwrap();
+    let again = tool(
+        app,
+        &token,
+        "computer_screenshot",
+        json!({ "artifact_id": artifact }),
+    )
+    .await;
+    assert_eq!(again.body["result"]["content"][1]["data"], PNG);
+    let saved = again.result;
     for key in [
         "screen_width",
         "screen_height",
@@ -340,44 +284,46 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     assert!(late.is_err(), "a stopped turn captures nothing");
     assert_eq!(guest.files.lock().unwrap().len(), before);
     manager.release(lease).await.unwrap();
-    let other_token = grant(&app, &other).await;
-    let foreign = error(&shot(&app, &other_token, json!({ "artifact_id": artifact })).await);
-    assert!(foreign.starts_with("No such screenshot"), "{foreign}");
+    let (other_turn, other_token) = h.running(&other, GATE).await;
+    let foreign = tool(
+        app,
+        &other_token,
+        "computer_screenshot",
+        json!({ "artifact_id": artifact }),
+    )
+    .await;
+    assert!(foreign.error, "{}", foreign.body);
+    assert!(
+        foreign
+            .result
+            .as_str()
+            .unwrap()
+            .starts_with("No such screenshot"),
+        "{}",
+        foreign.body
+    );
 
-    *guest.mode.lock().unwrap() = Mode::NoDisplay;
-    assert!(error(&shot(&app, &token, json!({})).await).starts_with("DISPLAY_UNAVAILABLE"));
-    *guest.mode.lock().unwrap() = Mode::TooLarge;
-    assert!(error(&shot(&app, &token, json!({})).await).starts_with("IMAGE_TOO_LARGE"));
-    *guest.mode.lock().unwrap() = Mode::Mismatch;
-    assert!(error(&shot(&app, &token, json!({})).await).starts_with("SCREENSHOT_INVALID"));
+    for (mode, code) in [
+        (Mode::NoDisplay, "DISPLAY_UNAVAILABLE"),
+        (Mode::TooLarge, "IMAGE_TOO_LARGE"),
+        (Mode::Mismatch, "SCREENSHOT_INVALID"),
+    ] {
+        *guest.mode.lock().unwrap() = mode;
+        let refused = tool(app, &token, "computer_screenshot", json!({})).await;
+        assert!(refused.error, "{}", refused.body);
+        assert_eq!(refused.code(), code, "{}", refused.body);
+    }
     *guest.mode.lock().unwrap() = Mode::Ok;
 
     manager.owner_stop(bot.parse().unwrap()).await.unwrap();
     let before = guest.files.lock().unwrap().len();
-    assert!(error(&shot(&app, &token, json!({})).await).starts_with("COMPUTER_STOPPED"));
+    let stopped = tool(app, &token, "computer_screenshot", json!({})).await;
+    assert!(stopped.error, "{}", stopped.body);
+    assert_eq!(stopped.code(), "COMPUTER_STOPPED", "{}", stopped.body);
     assert_eq!(guest.files.lock().unwrap().len(), before);
 
-    app.state
-        .grants
-        .revoke_turn(
-            sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM turns WHERE bot_id = ?1 AND status = 'running' LIMIT 1",
-            )
-            .bind(other.parse::<Uuid>().unwrap())
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap(),
-        )
-        .await;
-    let revoked = app
-        .call(
-            "POST",
-            "/tools/v1/mcp",
-            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                         "params": { "name": "computer_screenshot", "arguments": {} } })),
-            Some(&other_token),
-        )
-        .await;
+    app.state.grants.revoke_turn(other_turn).await;
+    let revoked = tool(app, &other_token, "computer_screenshot", json!({})).await;
     assert_eq!(
         revoked.status,
         StatusCode::UNAUTHORIZED,
@@ -388,37 +334,47 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn computers_without_a_desktop_say_so() {
-    let Setup { app, .. } = setup(false).await;
+    let Setup { h, .. } = setup(false).await;
+    let app = &h.app;
     let bot = app.create_bot("Headless").await;
-    let token = grant(&app, &bot).await;
-    let refused = error(&shot(&app, &token, json!({})).await);
-    assert!(refused.contains("no desktop"), "{refused}");
+    let (_, token) = h.running(&bot, GATE).await;
+    let refused = tool(app, &token, "computer_screenshot", json!({})).await;
+    assert!(refused.error, "{}", refused.body);
+    assert!(
+        refused.result.as_str().unwrap().contains("no desktop"),
+        "{}",
+        refused.body
+    );
 }
 
-fn handed_off(result: &Value) -> Value {
-    assert_ne!(result["isError"], true, "{result}");
+fn handed_off(reply: Called) -> Value {
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(!reply.error, "{}", reply.body);
+    let result = &reply.body["result"];
     let content = result["content"].as_array().unwrap();
     assert_eq!(content.len(), 1, "the bot already saw its screen: {result}");
-    serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap()
+    reply.result
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_handoff_shares_the_screen_it_asks_the_owner_to_look_at() {
-    let Setup { app, _dir, .. } = setup(true).await;
+    let Setup { h, dir, .. } = setup(true).await;
+    let app = &h.app;
     let bot = app.create_bot("Scout").await;
-    let token = grant(&app, &bot).await;
-    let looked = shot(&app, &token, json!({})).await;
-    assert_ne!(looked["isError"], true, "{looked}");
+    let (_, token) = h.running(&bot, GATE).await;
+    let looked = tool(app, &token, "computer_screenshot", json!({})).await;
+    assert_eq!(looked.status, StatusCode::OK, "{}", looked.body);
+    assert!(!looked.error, "{}", looked.body);
 
     let reason = json!({ "reason": "X Chat is blank at x.com/messages." });
-    let asked = handed_off(&tool(&app, &token, "computer_handoff", reason).await);
+    let asked = handed_off(tool(app, &token, "computer_handoff", reason).await);
     assert_eq!(asked["parked"], true, "{asked}");
     let shared = asked["shared"].as_str().expect("the screen is shared");
     assert!(
         shared.starts_with("screens/") && shared.ends_with(".png"),
         "{shared}"
     );
-    let file = _dir.path().join("projects").join(&bot).join(shared);
+    let file = dir.path().join("projects").join(&bot).join(shared);
     assert_eq!(std::fs::read(&file).unwrap(), png(), "{}", file.display());
     let next = asked["next"].as_str().unwrap();
     assert!(next.contains(&format!("]({shared})")), "{next}");
@@ -426,12 +382,13 @@ async fn a_handoff_shares_the_screen_it_asks_the_owner_to_look_at() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_handoff_never_wakes_a_computer_to_share_its_screen() {
-    let Setup { app, guest, .. } = setup(true).await;
+    let Setup { h, guest, .. } = setup(true).await;
+    let app = &h.app;
     let bot = app.create_bot("Sleeper").await;
-    let token = grant(&app, &bot).await;
+    let (_, token) = h.running(&bot, GATE).await;
 
     let reason = json!({ "reason": "Log in to X at x.com/login." });
-    let asked = handed_off(&tool(&app, &token, "computer_handoff", reason).await);
+    let asked = handed_off(tool(app, &token, "computer_handoff", reason).await);
     assert_eq!(asked["parked"], true, "{asked}");
     assert!(asked.get("shared").is_none(), "{asked}");
     assert!(
@@ -442,12 +399,13 @@ async fn a_handoff_never_wakes_a_computer_to_share_its_screen() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_handoff_without_a_desktop_still_asks_the_owner() {
-    let Setup { app, .. } = setup(false).await;
+    let Setup { h, .. } = setup(false).await;
+    let app = &h.app;
     let bot = app.create_bot("Headless").await;
-    let token = grant(&app, &bot).await;
+    let (_, token) = h.running(&bot, GATE).await;
 
     let reason = json!({ "reason": "Log in to X at x.com/login." });
-    let asked = handed_off(&tool(&app, &token, "computer_handoff", reason).await);
+    let asked = handed_off(tool(app, &token, "computer_handoff", reason).await);
     assert_eq!(asked["parked"], true, "{asked}");
     assert!(asked.get("shared").is_none(), "{asked}");
     assert!(
@@ -458,9 +416,10 @@ async fn a_handoff_without_a_desktop_still_asks_the_owner() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn duplicate_input_progress_never_reports_success() {
-    let Setup { app, guest, .. } = setup(true).await;
+    let Setup { h, guest, .. } = setup(true).await;
+    let app = &h.app;
     let bot = app.create_bot("Hands").await;
-    let token = grant(&app, &bot).await;
+    let (_, token) = h.running(&bot, GATE).await;
     *guest.input_reply.lock().unwrap() = (
         0,
         vec![
@@ -471,14 +430,15 @@ async fn duplicate_input_progress_never_reports_success() {
         ],
     );
     let reply = tool(
-        &app,
+        app,
         &token,
         "computer_input",
         json!({ "frame": [1280, 800], "effect": "local",
             "actions": [{ "click": [100, 200] }, { "key": "Enter" }] }),
     )
     .await;
-    let text = error(&reply);
+    assert!(reply.error, "{}", reply.body);
+    let text = reply.result.as_str().unwrap();
     assert!(text.starts_with("UNCERTAIN: 1 of 2"), "{text}");
     assert!(text.contains("INPUT_PROTOCOL"), "{text}");
     assert!(
@@ -491,18 +451,17 @@ async fn duplicate_input_progress_never_reports_success() {
 #[tokio::test(flavor = "multi_thread")]
 async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     let Setup {
-        app,
-        guest,
-        manager,
-        ..
+        h, guest, manager, ..
     } = setup(true).await;
+    let app = &h.app;
     let bot = app.create_bot("Hands").await;
-    let token = grant(&app, &bot).await;
+    let (_, token) = h.running(&bot, GATE).await;
     let batch = json!({ "frame": [1280, 800], "effect": "local",
         "actions": [{ "click": [100, 200] }, { "type": "hunter2-password" }] });
-    let done = tool(&app, &token, "computer_input", batch.clone()).await;
-    assert_ne!(done["isError"], true, "{done}");
-    let result: Value = serde_json::from_str(done["content"][0]["text"].as_str().unwrap()).unwrap();
+    let done = tool(app, &token, "computer_input", batch.clone()).await;
+    assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+    assert!(!done.error, "{}", done.body);
+    let result = done.result;
     assert_eq!(
         (result["done"].clone(), result["of"].clone()),
         (json!(2), json!(2))
@@ -533,8 +492,9 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     );
 
     *guest.input_reply.lock().unwrap() = (2, vec![r#"{"error": "SCREEN_CHANGED: the screen is now 1024x768, not 1280x800; take a new screenshot"}"#.into()]);
-    let refused = tool(&app, &token, "computer_input", batch.clone()).await;
-    let text = refused["content"][0]["text"].as_str().unwrap();
+    let refused = tool(app, &token, "computer_input", batch.clone()).await;
+    assert!(refused.error, "{}", refused.body);
+    let text = refused.result.as_str().unwrap();
     assert!(
         text.starts_with("SCREEN_CHANGED") && text.ends_with("Nothing was done."),
         "{text}"
@@ -548,8 +508,9 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
                 .into(),
         ],
     );
-    let cut = tool(&app, &token, "computer_input", batch.clone()).await;
-    let text = cut["content"][0]["text"].as_str().unwrap();
+    let cut = tool(app, &token, "computer_input", batch.clone()).await;
+    assert!(cut.error, "{}", cut.body);
+    let text = cut.result.as_str().unwrap();
     assert!(text.starts_with("UNCERTAIN: 1 of 2"), "{text}");
     *guest.input_reply.lock().unwrap() = (
         5,
@@ -559,8 +520,9 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
             r#"{"error": "INVALID_TEXT: no spare keycode to type a character"}"#.into(),
         ],
     );
-    let late = tool(&app, &token, "computer_input", batch.clone()).await;
-    let text = late["content"][0]["text"].as_str().unwrap();
+    let late = tool(app, &token, "computer_input", batch.clone()).await;
+    assert!(late.error, "{}", late.body);
+    let text = late.result.as_str().unwrap();
     assert!(text.starts_with("UNCERTAIN: 1 of 2"), "{text}");
     let sent = guest.inputs.lock().unwrap().len();
     assert_eq!(sent, 4, "nothing was replayed");
@@ -576,13 +538,9 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     );
     let desktop = manager.desktop(bot.parse().unwrap()).await.unwrap();
     assert!(desktop.is_ok());
-    let busy = tool(&app, &token, "computer_input", batch.clone()).await;
-    assert!(
-        busy["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("OWNER_USING_DESKTOP")
-    );
+    let busy = tool(app, &token, "computer_input", batch.clone()).await;
+    assert!(busy.error, "{}", busy.body);
+    assert_eq!(busy.code(), "OWNER_USING_DESKTOP");
     assert_eq!(
         guest.inputs.lock().unwrap().len(),
         sent,
@@ -592,9 +550,10 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
 
     let mut limited = None;
     for _ in 0..60 {
-        let r = tool(&app, &token, "computer_input", batch.clone()).await;
-        if r["isError"] == true {
-            limited = Some(r["content"][0]["text"].as_str().unwrap().to_owned());
+        let r = tool(app, &token, "computer_input", batch.clone()).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        if r.error {
+            limited = Some(r.result.as_str().unwrap().to_owned());
             break;
         }
     }

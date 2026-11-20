@@ -1,19 +1,14 @@
 use crate::common;
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::routing::get;
-use common::{TestApp, TestDb};
-use else_api::grants::{DEFAULT_TTL, Tool};
-use else_api::providers::synthetic::Synthetic;
+use common::TestApp;
+use common::recorder::{GATE, harness, tool};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 const CANARY: &str = "CANARY-5k1ll";
-const SLOW: &str = "[synthetic:slow] install the rea-growth skill for me.";
 const COMMIT: &str = "a41c9e2f00000000000000000000000000000001";
 const URL: &str = "https://github.com/acme/treg/tree/main/skills/rea-growth";
 const SKILL_MD: &str = "---\nname: rea-growth\ndescription: Reverse engineer how a company grows\n  on each channel.\n---\n# REA growth\nRun scripts/teardown.py with TREG_TOKEN.\n";
@@ -102,91 +97,6 @@ async fn fake_github() -> else_api::skills::Sources {
     }
 }
 
-struct Harness {
-    app: TestApp,
-    synthetic: Arc<Synthetic>,
-}
-
-async fn harness() -> Harness {
-    let db = Arc::new(TestDb::migrated().await);
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
-    let registry: common::Providers = vec![synthetic.clone()];
-    Harness {
-        app: TestApp::builder()
-            .db(db)
-            .providers(registry)
-            .skill_sources(fake_github().await)
-            .start()
-            .await,
-        synthetic,
-    }
-}
-
-fn tools() -> Vec<Tool> {
-    vec![
-        Tool::ReadHistory,
-        Tool::ReadMemory,
-        Tool::Mcp,
-        Tool::ManageMcp,
-    ]
-}
-
-async fn running(app: &TestApp, bot: &str) -> (Uuid, String) {
-    let sent = app.send(bot, Uuid::new_v4(), SLOW, Some("synthetic")).await;
-    let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
-    app.wait_turn(&turn, &["running"]).await;
-    let turn_id: Uuid = turn.parse().unwrap();
-    (turn_id, grant(app, turn_id).await)
-}
-
-async fn grant(app: &TestApp, turn_id: Uuid) -> String {
-    let (owner, conversation): (Uuid, Uuid) =
-        sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
-            .bind(turn_id)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
-    app.state
-        .grants
-        .issue(owner, conversation, turn_id, tools(), DEFAULT_TTL)
-        .await
-}
-
-async fn tool(app: &TestApp, token: &str, name: &str, args: Value) -> Value {
-    let reply = app
-        .call(
-            "POST",
-            "/tools/v1/mcp",
-            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                         "params": { "name": name, "arguments": args } })),
-            Some(token),
-        )
-        .await;
-    let result = &reply.body["result"];
-    let text = result["content"][0]["text"].as_str().unwrap_or_default();
-    let mut value = serde_json::from_str(text).unwrap_or_else(|_| json!(text));
-    if result["isError"] == true {
-        value = json!({ "error": text });
-    }
-    value
-}
-
-async fn install(app: &TestApp, token: &str) -> Value {
-    tool(
-        app,
-        token,
-        "skill_install",
-        json!({ "url": URL, "reason": "Run the Lovable teardown.", "env": ["TREG_TOKEN"] }),
-    )
-    .await
-}
-
-async fn wait(app: &TestApp, turn: Uuid, status: &str) {
-    app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(30))
-        .await;
-}
-
 async fn shown_card(app: &TestApp, bot: &str, turn: Uuid) -> Value {
     let snapshot = app
         .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
@@ -202,18 +112,27 @@ async fn shown_card(app: &TestApp, bot: &str, turn: Uuid) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_approved_card_installs_the_reviewed_files_stores_the_key_and_continues() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder().skill_sources(fake_github().await)).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
+    let (turn, token) = h.running(&main, GATE).await;
 
-    let pending = install(&app, &token).await;
+    let pending = tool(
+        app,
+        &token,
+        "skill_install",
+        json!({ "url": URL, "reason": "Run the Lovable teardown.", "env": ["TREG_TOKEN"] }),
+    )
+    .await
+    .result;
     assert_eq!(pending["status"], "pending", "{pending}");
     assert_eq!(pending["parked"], true);
     assert_eq!(pending["commit"], COMMIT);
     let card_id = pending["request_id"].as_str().unwrap().to_owned();
-    wait(&app, turn, "waiting").await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
 
-    let card = shown_card(&app, &main, turn).await;
+    let card = shown_card(app, &main, turn).await;
     assert_eq!(card["status"], "pending");
     assert_eq!(card["skill_id"], "rea-growth");
     assert_eq!(
@@ -266,7 +185,6 @@ async fn an_approved_card_installs_the_reviewed_files_stores_the_key_and_continu
     assert_eq!(review.body["contents"]["scripts/teardown.py"], SCRIPT);
 
     let approve = |body: Value| {
-        let app = &app;
         let path = format!("/v1/bots/{main}/skill-installs/{card_id}/approve");
         async move { app.owner("POST", &path, Some(body)).await }
     };
@@ -287,9 +205,9 @@ async fn an_approved_card_installs_the_reviewed_files_stores_the_key_and_continu
     assert_eq!(done.body["install"]["key_stored"], true);
     assert_eq!(done.body["requeued"], true);
     assert!(!done.body.to_string().contains(CANARY));
-    wait(&app, turn, "completed").await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
 
-    let packet = synthetic.packets().await.last().unwrap().clone();
+    let packet = h.packets().await.last().unwrap().clone();
     assert!(
         packet.contains("<skill id=\"rea-growth\" status=\"installed\" scope=\"this bot only\" key=\"stored as skill-rea-growth\"/>"),
         "{packet}"
@@ -299,7 +217,7 @@ async fn an_approved_card_installs_the_reviewed_files_stores_the_key_and_continu
         packet.contains("- rea-growth: Reverse engineer how a company grows on each channel. [keys: task secret skill-rea-growth (TREG_TOKEN), set]"),
         "{packet}"
     );
-    for packet in synthetic.packets().await {
+    for packet in h.packets().await {
         assert!(!packet.contains(CANARY), "a provider packet held the key");
     }
     let replay = approve(json!({ "scope": "all" })).await;
@@ -336,36 +254,38 @@ async fn an_approved_card_installs_the_reviewed_files_stores_the_key_and_continu
         .await;
     assert_eq!(shown.body["contents"]["scripts/teardown.py"], SCRIPT);
 
-    let (_, token) = running(&app, &main).await;
-    let read = tool(&app, &token, "skill_read", json!({ "id": "rea-growth" })).await;
+    let (_, token) = h.running(&main, GATE).await;
+    let read = tool(app, &token, "skill_read", json!({ "id": "rea-growth" }))
+        .await
+        .result;
     assert_eq!(read["content"], SKILL_MD, "{read}");
     assert_eq!(
         read["keys"],
         json!({ "secret": "skill-rea-growth", "env": ["TREG_TOKEN"], "stored": true })
     );
     let script = tool(
-        &app,
+        app,
         &token,
         "skill_read",
         json!({ "id": "rea-growth", "path": "scripts/teardown.py" }),
     )
-    .await;
+    .await
+    .result;
     assert_eq!(script["content"], SCRIPT);
     let helper = app.create_bot("Helper").await;
-    let (_, other) = running(&app, &helper).await;
-    let hidden = tool(&app, &other, "skill_read", json!({ "id": "rea-growth" })).await;
-    assert!(
-        hidden["error"].as_str().unwrap().starts_with("NOT_FOUND"),
-        "{hidden}"
-    );
-    let again = install(&app, &token).await;
-    assert!(
-        again["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("ALREADY_INSTALLED"),
-        "{again}"
-    );
+    let (_, other) = h.running(&helper, GATE).await;
+    let hidden = tool(app, &other, "skill_read", json!({ "id": "rea-growth" })).await;
+    assert!(hidden.error, "{}", hidden.body);
+    assert_eq!(hidden.code(), "NOT_FOUND", "{}", hidden.body);
+    let again = tool(
+        app,
+        &token,
+        "skill_install",
+        json!({ "url": URL, "reason": "Run the Lovable teardown.", "env": ["TREG_TOKEN"] }),
+    )
+    .await;
+    assert!(again.error, "{}", again.body);
+    assert_eq!(again.code(), "ALREADY_INSTALLED", "{}", again.body);
 
     let removed = app
         .owner("DELETE", "/v1/settings/skills/rea-growth", None)
@@ -377,20 +297,30 @@ async fn an_approved_card_installs_the_reviewed_files_stores_the_key_and_continu
         json!([]),
         "the skill's key goes with it"
     );
-    let gone = tool(&app, &token, "skill_read", json!({ "id": "rea-growth" })).await;
-    assert!(gone["error"].as_str().unwrap().starts_with("NOT_FOUND"));
+    let gone = tool(app, &token, "skill_read", json!({ "id": "rea-growth" })).await;
+    assert!(gone.error, "{}", gone.body);
+    assert_eq!(gone.code(), "NOT_FOUND", "{}", gone.body);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_declined_card_installs_nothing_and_a_shared_skill_reaches_every_bot() {
-    let Harness { app, synthetic } = harness().await;
+    let h = harness(TestApp::builder().skill_sources(fake_github().await)).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
-    let card_id = install(&app, &token).await["request_id"]
+    let (turn, token) = h.running(&main, GATE).await;
+    let card_id = tool(
+        app,
+        &token,
+        "skill_install",
+        json!({ "url": URL, "reason": "Run the Lovable teardown.", "env": ["TREG_TOKEN"] }),
+    )
+    .await
+    .result["request_id"]
         .as_str()
         .unwrap()
         .to_owned();
-    wait(&app, turn, "waiting").await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
     let declined = app
         .owner(
             "POST",
@@ -400,10 +330,9 @@ async fn a_declined_card_installs_nothing_and_a_shared_skill_reaches_every_bot()
         .await;
     assert_eq!(declined.status, StatusCode::OK, "{}", declined.body);
     assert_eq!(declined.body["install"]["status"], "declined");
-    wait(&app, turn, "completed").await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
     assert!(
-        synthetic
-            .packets()
+        h.packets()
             .await
             .last()
             .unwrap()
@@ -420,12 +349,20 @@ async fn a_declined_card_installs_nothing_and_a_shared_skill_reaches_every_bot()
     let skills = app.owner("GET", "/v1/settings/skills", None).await;
     assert_eq!(skills.body["skills"], json!([]));
 
-    let (turn, token) = running(&app, &main).await;
-    let card_id = install(&app, &token).await["request_id"]
+    let (turn, token) = h.running(&main, GATE).await;
+    let card_id = tool(
+        app,
+        &token,
+        "skill_install",
+        json!({ "url": URL, "reason": "Run the Lovable teardown.", "env": ["TREG_TOKEN"] }),
+    )
+    .await
+    .result["request_id"]
         .as_str()
         .unwrap()
         .to_owned();
-    wait(&app, turn, "waiting").await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
     let done = app
         .owner(
             "POST",
@@ -434,28 +371,30 @@ async fn a_declined_card_installs_nothing_and_a_shared_skill_reaches_every_bot()
         )
         .await;
     assert_eq!(done.body["install"]["key_stored"], false, "{}", done.body);
-    wait(&app, turn, "completed").await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
     let skill = &app.owner("GET", "/v1/settings/skills", None).await.body["skills"][0];
     assert_eq!(skill["scope"], "all");
     assert_eq!(skill["bot_id"], Value::Null);
     assert_eq!(skill["key_stored"], false);
     let helper = app.create_bot("Helper").await;
-    let (_, other) = running(&app, &helper).await;
+    let (_, other) = h.running(&helper, GATE).await;
     let read = tool(
-        &app,
+        app,
         &other,
         "skill_read",
         json!({ "id": "rea-growth", "path": "references/channels.md" }),
     )
-    .await;
+    .await
+    .result;
     assert_eq!(read["content"], "# Channels\n", "{read}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn links_that_do_not_hold_a_skill_are_refused_before_any_card() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder().skill_sources(fake_github().await)).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
+    let (turn, token) = h.running(&main, GATE).await;
     for (url, code) in [
         ("https://gitlab.com/acme/treg", "INVALID_SKILL"),
         (
@@ -476,31 +415,25 @@ async fn links_that_do_not_hold_a_skill_are_refused_before_any_card() {
         ),
     ] {
         let refused = tool(
-            &app,
+            app,
             &token,
             "skill_install",
             json!({ "url": url, "reason": "r" }),
         )
         .await;
-        assert!(
-            refused["error"].as_str().unwrap().starts_with(code),
-            "{url}: {refused}"
-        );
+        assert!(refused.error, "{url}: {}", refused.body);
+        assert_eq!(refused.code(), code, "{url}: {}", refused.body);
     }
     let values = tool(
-        &app,
+        app,
         &token,
         "skill_install",
         json!({ "url": URL, "reason": "r", "env": [CANARY] }),
     )
     .await;
-    assert!(
-        values["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("INVALID_REQUEST")
-    );
-    assert!(!values.to_string().contains(CANARY));
+    assert!(values.error, "{}", values.body);
+    assert_eq!(values.code(), "INVALID_REQUEST", "{}", values.body);
+    assert!(!values.body.to_string().contains(CANARY));
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM skill_installs")
         .fetch_one(&app.db.pool)
         .await
@@ -519,18 +452,21 @@ async fn links_that_do_not_hold_a_skill_are_refused_before_any_card() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_long_file_reads_in_full_across_pages() {
-    let Harness { app, .. } = harness().await;
+    let h = harness(TestApp::builder().skill_sources(fake_github().await)).await;
+    let app = &h.app;
     let main = app.main_bot().await;
-    let (turn, token) = running(&app, &main).await;
+    let (turn, token) = h.running(&main, GATE).await;
     let pending = tool(
-        &app,
+        app,
         &token,
         "skill_install",
         json!({ "url": "https://github.com/acme/treg/tree/main/skills/big", "reason": "r" }),
     )
-    .await;
+    .await
+    .result;
     let card_id = pending["request_id"].as_str().unwrap().to_owned();
-    wait(&app, turn, "waiting").await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
     let done = app
         .owner(
             "POST",
@@ -539,19 +475,20 @@ async fn a_long_file_reads_in_full_across_pages() {
         )
         .await;
     assert_eq!(done.status, StatusCode::OK, "{}", done.body);
-    wait(&app, turn, "completed").await;
-    let (_, token) = running(&app, &main).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
+    let (_, token) = h.running(&main, GATE).await;
     let mut text = String::new();
     let mut offset = Some(0);
     let mut pages = 0;
     while let Some(at) = offset {
         let page = tool(
-            &app,
+            app,
             &token,
             "skill_read",
             json!({ "id": "big", "path": "big.md", "offset": at }),
         )
-        .await;
+        .await
+        .result;
         assert_eq!(page["bytes"], BIG.len(), "{page}");
         text.push_str(page["content"].as_str().unwrap());
         offset = page["next_offset"].as_u64();

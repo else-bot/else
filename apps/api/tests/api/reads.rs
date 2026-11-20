@@ -3,6 +3,7 @@ use crate::common;
 use std::borrow::Cow;
 
 use axum::http::StatusCode;
+use common::recorder::{self, GATE, GATE_AFTER_OPENING};
 use common::{TestApp, TestDb};
 use serde_json::{Value, json};
 use sqlx::migrate::Migrator;
@@ -107,7 +108,8 @@ async fn a_reply_is_unread_until_read_and_the_read_survives_a_restart() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sidebar_failure_clears_when_the_next_turn_starts_and_returns_to_the_reply() {
-    let app = TestApp::installed().await;
+    let h = recorder::harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("Writer").await;
     let sent = app
         .send(&bot, Uuid::new_v4(), "[synthetic:fail]", Some("synthetic"))
@@ -126,19 +128,11 @@ async fn sidebar_failure_clears_when_the_next_turn_starts_and_returns_to_the_rep
             .starts_with("Partial output")
     );
 
-    let sent = app
-        .send(
-            &bot,
-            Uuid::new_v4(),
-            "[synthetic:slow] try again",
-            Some("synthetic"),
-        )
-        .await;
-    let turn = sent.body["turn"]["id"].as_str().unwrap();
-    app.wait_turn(turn, &["running"]).await;
+    let (turn, _) = h.running(&bot, &format!("{GATE} try again")).await;
     let shown = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
     assert_eq!(shown.body["bot"]["sidebar_status"], Value::Null);
-    app.wait_turn(turn, &["completed"]).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
     let shown = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
     assert_eq!(shown.body["bot"]["sidebar_status"], Value::Null);
     assert!(
@@ -222,32 +216,28 @@ async fn misspelled_read_commands_preserve_the_unread_mark() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn text_appended_after_a_partial_read_is_unread_again() {
-    let app = TestApp::installed().await;
+    let h = recorder::harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("Streamer").await;
-    let sent = app
-        .send(
-            &bot,
-            Uuid::new_v4(),
-            "[synthetic:slow] ✓✓✓✓ long",
-            Some("synthetic"),
-        )
+    let (turn, _) = h
+        .running(&bot, &format!("{GATE_AFTER_OPENING} ✓✓✓✓ long"))
         .await;
-    let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
-    let started = streaming_reply(&app, &bot, &turn).await;
+    let started = streaming_reply(app, &bot, &turn.to_string()).await;
     let partial = json!({
         "item_seq": started["seq"],
         "text_bytes": started["text"].as_str().unwrap().len(),
     });
     let read = mark(
-        &app,
+        app,
         &bot,
         json!({ "action": "through", "position": partial }),
     )
     .await;
     assert_eq!(read.status, StatusCode::OK, "{:?}", read.body);
-    app.wait_turn(&turn, &["completed"]).await;
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["completed"]).await;
 
-    let state = read_state(&app, &bot).await;
+    let state = read_state(app, &bot).await;
     assert_eq!(state["latest"]["position"]["item_seq"], partial["item_seq"]);
     assert!(
         state["latest"]["position"]["text_bytes"].as_i64() > partial["text_bytes"].as_i64(),

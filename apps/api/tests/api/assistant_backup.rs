@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
+use common::recorder::{self, GATE};
 use common::{TestApp, TestDb};
 use else_api::backup::capture::{BackupConfig, Coordinator};
 use else_api::backup::restore::{ComputerTarget, RestoreRequest, restore};
@@ -630,20 +631,13 @@ async fn the_gate_refuses_changes_and_desktop_wakes_while_closed() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_sent_during_a_backup_queues_behind_the_running_turn() {
-    let s = setup().await;
-    let bot = s.app.main_bot().await;
-    let first = s
-        .app
-        .send(
-            &bot,
-            Uuid::new_v4(),
-            "[synthetic:slow] a long piece of work",
-            Some("synthetic"),
-        )
+    let h = recorder::harness(TestApp::builder()).await;
+    let app = &h.app;
+    let bot = app.main_bot().await;
+    let (first, _) = h
+        .running(&bot, &format!("{GATE} a long piece of work"))
         .await;
-    let first = first.body["turn"]["id"].as_str().unwrap().to_owned();
-    s.app.wait_turn(&first, &["running"]).await;
-    let gate = s.app.state.gate.clone();
+    let gate = app.state.gate.clone();
     let closed = gate
         .close(
             Duration::from_secs(1),
@@ -652,8 +646,7 @@ async fn a_message_sent_during_a_backup_queues_behind_the_running_turn() {
         .await
         .unwrap()
         .unwrap();
-    let second = s
-        .app
+    let second = app
         .send(&bot, Uuid::new_v4(), "a follow-up", Some("synthetic"))
         .await;
     assert_eq!(
@@ -663,27 +656,27 @@ async fn a_message_sent_during_a_backup_queues_behind_the_running_turn() {
         second.body
     );
     let second = second.body["turn"]["id"].as_str().unwrap().to_owned();
+    h.release(first).await;
     assert_eq!(
-        s.app
-            .wait_turn_for(
-                &first,
-                &["completed", "cancelling", "interrupted"],
-                Duration::from_secs(30)
-            )
-            .await,
+        app.wait_turn_for(
+            &first.to_string(),
+            &["completed", "cancelling", "interrupted"],
+            Duration::from_secs(30)
+        )
+        .await,
         "completed",
         "the running turn finishes instead of being cancelled"
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
     let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
         .bind(second.parse::<Uuid>().unwrap())
-        .fetch_one(&s.app.db.pool)
+        .fetch_one(&app.db.pool)
         .await
         .unwrap();
     assert_eq!(status, "queued", "nothing starts while the gate is closed");
     drop(closed);
-    s.app.scheduler.wake();
-    assert_eq!(s.app.wait_turn(&second, &["completed"]).await, "completed");
+    app.scheduler.wake();
+    assert_eq!(app.wait_turn(&second, &["completed"]).await, "completed");
 }
 
 #[tokio::test(flavor = "multi_thread")]

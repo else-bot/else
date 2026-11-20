@@ -2,6 +2,7 @@ use crate::common;
 
 use axum::http::StatusCode;
 use common::TestApp;
+use common::recorder::{GATE, harness};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -307,28 +308,18 @@ async fn assignments_move_and_deleting_a_category_keeps_its_bots() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn categories_change_during_a_turn_and_survive_a_restart_without_interrupting_it() {
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("Busy").await;
-    let sent = app
-        .send(
-            &bot,
-            Uuid::new_v4(),
-            "[synthetic:slow] a long answer please",
-            Some("synthetic"),
-        )
+    let (turn, _) = h
+        .running(&bot, &format!("{GATE} a long answer please"))
         .await;
-    let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
-    app.wait_turn(&turn, &["running"]).await;
-    let team = create(&app, Uuid::new_v4(), "Team").await.body["category"]["id"].clone();
-    assert_eq!(
-        assign(&app, &bot, team.clone()).await.status,
-        StatusCode::OK
-    );
-    let status = app
-        .wait_turn_for(&turn, &["completed"], std::time::Duration::from_secs(60))
-        .await;
+    let team = create(app, Uuid::new_v4(), "Team").await.body["category"]["id"].clone();
+    assert_eq!(assign(app, &bot, team.clone()).await.status, StatusCode::OK);
+    h.release(turn).await;
+    let status = app.wait_turn(&turn.to_string(), &["completed"]).await;
     assert_eq!(status, "completed", "the turn was not interrupted");
-    let app = app.restart().await;
+    let app = h.app.restart().await;
     let after = listing(&app).await;
     assert_eq!(category_of(&after, &bot), team);
     assert_eq!(after["categories"][0]["name"], "Team");
@@ -412,32 +403,10 @@ async fn the_owner_orders_categories_for_every_client_and_restart() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn task_grants_cannot_change_categories() {
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("Bot").await;
-    let sent = app
-        .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
-        .await;
-    let turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    app.wait_turn(&turn.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-        .bind(turn)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    let token = app
-        .state
-        .grants
-        .issue(
-            bot.parse().unwrap(),
-            conversation,
-            turn,
-            vec![
-                else_api::grants::Tool::Computer,
-                else_api::grants::Tool::Delegate,
-            ],
-            else_api::grants::DEFAULT_TTL,
-        )
-        .await;
+    let (_, token) = h.running(&bot, GATE).await;
     for (method, path, body) in [
         (
             "POST",

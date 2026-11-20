@@ -1,54 +1,10 @@
 use crate::common;
 
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
-use common::{TestApp, TestDb};
-use else_api::app::providers::{
-    Availability, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
-};
-use else_api::grants::{DEFAULT_TTL, Tool};
-use else_api::providers::synthetic::Synthetic;
-use serde_json::{Value, json};
+use common::TestApp;
+use common::recorder::{GATE, GATE_EVERY_ATTEMPT, Harness, harness, tool};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-
-/// The synthetic provider with a project directory per bot under `root`,
-/// recording every input it runs.
-struct WithProject {
-    inner: Synthetic,
-    root: PathBuf,
-    inputs: Mutex<Vec<TurnInput>>,
-}
-
-#[async_trait::async_trait]
-impl Provider for WithProject {
-    fn id(&self) -> &'static str {
-        self.inner.id()
-    }
-    fn label(&self) -> &'static str {
-        self.inner.label()
-    }
-    fn availability(&self) -> Availability {
-        self.inner.availability()
-    }
-    fn uses_profile(&self) -> bool {
-        self.inner.uses_profile()
-    }
-    fn validate_profile(&self, profile: &Profile) -> Result<(), String> {
-        self.inner.validate_profile(profile)
-    }
-    fn project_dir(&self, bot: Uuid) -> Option<PathBuf> {
-        Some(self.root.join(bot.to_string()))
-    }
-    async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
-        self.inputs.lock().unwrap().push(input.clone());
-        self.inner.run(input, sink, stop).await
-    }
-}
-
-const SLOW: &str = "[synthetic:slow] Ask Twitter to post the approved whale card.";
 
 fn png() -> Vec<u8> {
     let mut out = std::io::Cursor::new(Vec::new());
@@ -58,29 +14,9 @@ fn png() -> Vec<u8> {
     out.into_inner()
 }
 
-async fn delegate(app: &TestApp, token: &str, arguments: Value) -> (bool, Value) {
-    let reply = app
-        .call(
-            "POST",
-            "/tools/v1/mcp",
-            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                         "params": { "name": "delegate", "arguments": arguments } })),
-            Some(token),
-        )
-        .await;
-    let text = reply.body["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default();
-    (
-        reply.body["result"]["isError"] == true,
-        serde_json::from_str(text).unwrap_or_else(|_| json!(text)),
-    )
-}
-
 struct Setup {
     _root: tempfile::TempDir,
-    provider: Arc<WithProject>,
-    app: TestApp,
+    h: Harness,
     main: String,
     twitter: String,
     card: Vec<u8>,
@@ -90,25 +26,10 @@ struct Setup {
 
 /// The main bot with a card in its project, mid-request with a delegate
 /// grant, and a Twitter bot with a receipt in its own.
-async fn setup() -> Setup {
+async fn setup(parent_prompt: &str) -> Setup {
     let root = tempfile::tempdir().unwrap();
-    let provider = Arc::new(WithProject {
-        inner: Synthetic::new(Duration::from_millis(5)),
-        root: root.path().to_owned(),
-        inputs: Mutex::new(Vec::new()),
-    });
-    let db = TestDb::migrated().await;
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    sqlx::query("UPDATE installation SET default_provider_id = 'synthetic'")
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    let app = TestApp::builder()
-        .db(Arc::new(db))
-        .max_active(2)
-        .providers(vec![provider.clone()])
-        .start()
-        .await;
+    let h = harness(TestApp::builder().max_active(2).projects(root.path())).await;
+    let app = &h.app;
     let main = app.main_bot().await;
     let twitter = app.create_bot("Twitter").await;
     let card = png();
@@ -122,30 +43,11 @@ async fn setup() -> Setup {
     )
     .unwrap();
 
-    let sent = app.send(&main, Uuid::new_v4(), SLOW, None).await;
-    let parent: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    app.wait_turn(&parent.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-        .bind(parent)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    let token = app
-        .state
-        .grants
-        .issue(
-            main.parse().unwrap(),
-            conversation,
-            parent,
-            vec![Tool::Delegate],
-            DEFAULT_TTL,
-        )
-        .await;
+    let (parent, token) = h.running(&main, parent_prompt).await;
 
     Setup {
         _root: root,
-        provider,
-        app,
+        h,
         main,
         twitter,
         card,
@@ -158,39 +60,43 @@ async fn setup() -> Setup {
 async fn a_delegated_file_reaches_the_other_bot_and_its_reply_files_come_back() {
     let Setup {
         _root,
-        provider,
-        app,
+        h,
         main,
         twitter,
         card,
         parent,
         token,
-    } = setup().await;
+    } = setup(GATE).await;
+    let app = &h.app;
     let task = "Post the attached card, then reply with [receipt](out/receipt.txt).";
     for (path, reason) in [
         ("../../escape.png", "No regular file"),
         ("cards/missing.png", "No regular file"),
     ] {
-        let (error, message) = delegate(
-            &app,
+        let message = tool(
+            app,
             &token,
+            "delegate",
             json!({ "target_bot_id": twitter, "task": task, "files": [path] }),
         )
         .await;
-        let message = message.as_str().unwrap_or_default().to_owned();
+        let error = message.error;
+        let message = message.result.as_str().unwrap_or_default();
         assert!(
             error && message.starts_with("FILE_UNAVAILABLE"),
             "{message}"
         );
         assert!(message.contains(reason), "{message}");
     }
-    let (error, pending) = delegate(
-        &app,
+    let pending = tool(
+        app,
         &token,
+        "delegate",
         json!({ "target_bot_id": twitter, "task": task, "files": ["cards/whale.png"] }),
     )
     .await;
-    assert!(!error, "{pending}");
+    assert!(!pending.error, "{}", pending.body);
+    let pending = pending.result;
     assert_eq!(pending["status"], "pending", "{pending}");
     let digest = hex::encode(Sha256::digest(&card));
     assert_eq!(
@@ -199,13 +105,12 @@ async fn a_delegated_file_reaches_the_other_bot_and_its_reply_files_come_back() 
                  "size": card.len(), "sha256": digest }]),
     );
 
-    app.wait_turn_for(&parent.to_string(), &["completed"], Duration::from_secs(40))
-        .await;
-    let inputs = provider.inputs.lock().unwrap().clone();
-    let child = inputs
-        .iter()
-        .find(|input| input.bot_id.to_string() == twitter)
-        .expect("the task ran");
+    let task_id = pending["task_id"].as_str().unwrap().parse().unwrap();
+    let child = child_of(app, task_id).await;
+    h.release(parent).await;
+    app.wait_turn(&parent.to_string(), &["completed"]).await;
+    let child_inputs = h.inputs(child).await;
+    let child = child_inputs.first().expect("the task ran");
     assert_eq!(child.files.len(), 1, "only the named file is sent");
     assert_eq!(child.files[0].attachment.name, "whale.png");
     assert_eq!(*child.files[0].data, *card, "exact bytes");
@@ -229,10 +134,8 @@ async fn a_delegated_file_reaches_the_other_bot_and_its_reply_files_come_back() 
         "the copy belongs to the recipient alone"
     );
 
-    let continuation = inputs
-        .iter()
-        .rfind(|input| input.turn_id == parent)
-        .unwrap();
+    let inputs = h.inputs(parent).await;
+    let continuation = inputs.last().unwrap();
     assert_eq!(continuation.attempt, 2);
     let returned = &continuation.delegation.outcomes[0].files;
     assert_eq!(returned.len(), 1, "{:?}", continuation.delegation.outcomes);
@@ -267,129 +170,61 @@ async fn an_owner_message_joining_an_updated_task_still_reaches_it_with_its_file
     owner_message_reaches_the_task_with_its_files(true).await;
 }
 
-/// A task that streams for long enough to ask the owner mid-reply.
-fn slow(task: &str) -> String {
-    format!(
-        "[synthetic:slow] {task} {}",
-        "Check the caption and the alt text. ".repeat(20)
-    )
-}
-
-/// Waits until `turn` runs its attempt `attempt`.
-async fn runs_attempt(app: &TestApp, turn: Uuid, attempt: i32) {
-    let deadline = std::time::Instant::now() + common::SETTLE;
-    loop {
-        let now: (i32, String) = sqlx::query_as("SELECT attempt, status FROM turns WHERE id = ?1")
-            .bind(turn)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
-        if now.0 >= attempt && now.1 == "running" {
-            return;
-        }
-        assert!(std::time::Instant::now() < deadline, "{turn}: {now:?}");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
 async fn owner_message_reaches_the_task_with_its_files(updated: bool) {
     let Setup {
         _root,
-        provider,
-        app,
+        h,
         main,
         twitter,
         card,
         parent,
         token,
-    } = setup().await;
-    let (error, pending) = delegate(
-        &app,
+    } = setup(GATE_EVERY_ATTEMPT).await;
+    let app = &h.app;
+    let pending = tool(
+        app,
         &token,
-        json!({ "target_bot_id": twitter, "task": slow("Post the card."),
+        "delegate",
+        json!({ "target_bot_id": twitter, "task": format!("{GATE_EVERY_ATTEMPT} Post the card."),
                 "files": ["cards/whale.png"] }),
     )
     .await;
-    assert!(!error, "{pending}");
+    assert!(!pending.error, "{}", pending.body);
+    let pending = pending.result;
     let task: Uuid = pending["task_id"].as_str().unwrap().parse().unwrap();
-    let child_of = || async {
-        sqlx::query_scalar::<_, Uuid>("SELECT child_turn_id FROM delegations")
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap()
-    };
-    let child = child_of().await;
-    app.wait_turn_for(&child.to_string(), &["running"], Duration::from_secs(20))
-        .await;
-    if updated {
-        let follow = app
-            .send(&main, Uuid::new_v4(), "[synthetic:hang] Any news?", None)
-            .await;
+    let child = child_of(app, task).await;
+    h.release(parent).await;
+    let initial = h.started(child).await;
+    let (asking, ask_token) = if updated {
+        app.wait_turn(&parent.to_string(), &["waiting"]).await;
+        let follow = app.send(&main, Uuid::new_v4(), "Any news?", None).await;
         assert_eq!(follow.body["turn"]["steered_into"], parent.to_string());
-        runs_attempt(&app, parent, 2).await;
-        let conversation: Uuid =
-            sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-                .bind(parent)
-                .fetch_one(&app.db.pool)
-                .await
-                .unwrap();
-        let token = app
-            .state
-            .grants
-            .issue(
-                main.parse().unwrap(),
-                conversation,
-                parent,
-                vec![Tool::Delegate],
-                DEFAULT_TTL,
-            )
-            .await;
-        let reply = app
-            .call(
-                "POST",
-                "/tools/v1/mcp",
-                Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                             "params": { "name": "delegation_update", "arguments": {
-                                 "task_id": task,
-                                 "message": slow("Use the blue caption.") } } })),
-                Some(&token),
-            )
-            .await;
-        assert_ne!(reply.body["result"]["isError"], true, "{}", reply.body);
+        let token = h.continued(parent, &token).await;
+        let reply = tool(
+            app,
+            &token,
+            "delegation_update",
+            json!({ "task_id": task, "message": format!("{GATE_EVERY_ATTEMPT} Use the blue caption.") }),
+        )
+        .await;
+        assert!(!reply.error, "{}", reply.body);
         app.wait_turn(&child.to_string(), &["interrupted"]).await;
-        let replacement = child_of().await;
-        app.wait_turn(&replacement.to_string(), &["running"]).await;
-    }
-    let asking = child_of().await;
-    let task_conversation: Uuid =
-        sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-            .bind(asking)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
-    let ask_token = app
-        .state
-        .grants
-        .issue(
-            twitter.parse().unwrap(),
-            task_conversation,
-            asking,
-            vec![Tool::AskOwner],
-            DEFAULT_TTL,
-        )
-        .await;
-    let asked = app
-        .call(
-            "POST",
-            "/tools/v1/mcp",
-            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                         "params": { "name": "ask_owner", "arguments": {
-                             "question": "Which caption should the card use?",
-                             "choices": ["The blue one", "The red one"] } } })),
-            Some(&ask_token),
-        )
-        .await;
-    assert_ne!(asked.body["result"]["isError"], true, "{}", asked.body);
+        let replacement = child_of(app, task).await;
+        h.started(replacement).await
+    } else {
+        initial
+    };
+    let asked = tool(
+        app,
+        &ask_token,
+        "ask_owner",
+        json!({ "question": "Which caption should the card use?",
+                "choices": ["The blue one", "The red one"] }),
+    )
+    .await;
+    assert!(!asked.error, "{}", asked.body);
+    h.release(asking).await;
+    app.wait_turn(&asking.to_string(), &["waiting"]).await;
 
     let text = "Post it with this caption instead.";
     let sent = app.send(&twitter, Uuid::new_v4(), text, None).await;
@@ -399,20 +234,18 @@ async fn owner_message_reaches_the_task_with_its_files(updated: bool) {
         "the message joins the task that asked: {}",
         sent.body
     );
-    runs_attempt(&app, asking, 2).await;
-    let inputs = provider.inputs.lock().unwrap().clone();
-    let task = inputs
-        .iter()
-        .rfind(|input| input.turn_id == asking)
-        .unwrap();
+    h.continued(asking, &ask_token).await;
+    let inputs = h.inputs(asking).await;
+    let task = inputs.last().unwrap();
     assert!(
         task.steered.iter().any(|s| s.message.text == text),
         "the task continues with the owner's message"
     );
     // An update's continuation resumes the task's session, which was given
     // the file with the task; the task's own continuation is given it again.
+    let original = h.inputs(child).await;
     let given = if updated {
-        inputs.iter().find(|input| input.turn_id == child).unwrap()
+        original.first().unwrap()
     } else {
         task
     };
@@ -432,4 +265,13 @@ async fn owner_message_reaches_the_task_with_its_files(updated: bool) {
     );
     let packet = else_api::providers::prompt::packet(task, 0);
     assert!(packet.contains(text), "{packet}");
+    h.release(asking).await;
+}
+
+async fn child_of(app: &TestApp, task: Uuid) -> Uuid {
+    sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
+        .bind(task)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
 }

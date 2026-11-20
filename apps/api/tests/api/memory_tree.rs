@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use common::TestApp;
+use common::recorder::{GATE, harness, tool};
 use else_api::app::memory_tree::NodeId;
 use else_api::db::memory::{self, Kind, NewEntry};
 use else_api::db::memory_tree::{self, Completion, Wait};
-use else_api::grants::{DEFAULT_TTL, Tool};
 use else_api::memory_worker;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -17,10 +17,6 @@ use uuid::Uuid;
 /// runs no compactor of its own.
 fn manual() -> common::Builder {
     TestApp::builder().memory(else_api::runtime::Memory::Manual)
-}
-
-async fn app() -> TestApp {
-    manual().start().await
 }
 
 async fn small_recipe(app: &TestApp) {
@@ -92,7 +88,7 @@ async fn assert_exact_coverage(app: &TestApp, bot: Uuid) -> memory_tree::SavedVi
 
 #[tokio::test(flavor = "multi_thread")]
 async fn exact_tree_publishes_in_order_compacts_and_keeps_every_range() {
-    let app = app().await;
+    let app = manual().start().await;
     small_recipe(&app).await;
     let bot: Uuid = app.create_bot("Tree").await.parse().unwrap();
     let mut merged_once = false;
@@ -140,15 +136,16 @@ async fn exact_tree_publishes_in_order_compacts_and_keeps_every_range() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
-    let app = app().await;
-    small_recipe(&app).await;
+    let h = harness(manual()).await;
+    let app = &h.app;
+    small_recipe(app).await;
     let bot = app.create_bot("Long").await;
     let bot_id: Uuid = bot.parse().unwrap();
-    add(&app, bot_id, "a", "short one").await;
-    add(&app, bot_id, "b", &"long ".repeat(40)).await;
-    add(&app, bot_id, "c", "after the long one").await;
+    add(app, bot_id, "a", "short one").await;
+    add(app, bot_id, "b", &"long ".repeat(40)).await;
+    add(app, bot_id, "c", "after the long one").await;
     memory_worker::drain(&app.db.pool).await.unwrap();
-    let saved = assert_exact_coverage(&app, bot_id).await;
+    let saved = assert_exact_coverage(app, bot_id).await;
     assert_eq!(
         saved.published_seq, 0,
         "publication stops at the first missing leaf"
@@ -159,43 +156,13 @@ async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
         .unwrap();
     assert!(later.is_some());
 
-    let reply = app
-        .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
-        .await;
-    let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    app.wait_turn(&turn.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-        .bind(turn)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    let token = app
-        .state
-        .grants
-        .issue(
-            bot_id,
-            conversation,
-            turn,
-            vec![Tool::ReadMemory],
-            DEFAULT_TTL,
-        )
-        .await;
+    let (_, token) = h.running(&bot, GATE).await;
     let call = |name: &'static str, args: Value| {
-        let token = token.clone();
-        let app = &app;
+        let token = &token;
         async move {
-            let reply = app
-                .call(
-                    "POST",
-                    "/tools/v1/mcp",
-                    Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                                 "params": { "name": name, "arguments": args } })),
-                    Some(&token),
-                )
-                .await;
-            let result = &reply.body["result"];
-            assert_ne!(result["isError"], true, "{name}: {result}");
-            serde_json::from_str::<Value>(result["content"][0]["text"].as_str().unwrap()).unwrap()
+            let called = tool(app, token, name, args).await;
+            assert!(!called.error, "{name}: {}", called.body);
+            called.result
         }
     };
     let view = call("memory_view", json!({})).await;
@@ -217,7 +184,7 @@ async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_retried_job_is_not_reported_blocked_while_leased() {
-    let app = app().await;
+    let app = manual().start().await;
     small_recipe(&app).await;
     let bot: Uuid = app.create_bot("Retry").await.parse().unwrap();
     add(&app, bot, "long", &"long ".repeat(40)).await;
@@ -261,7 +228,7 @@ async fn a_retried_job_is_not_reported_blocked_while_leased() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn replaced_leases_and_concurrent_workers_never_publish_twice() {
-    let app = app().await;
+    let app = manual().start().await;
     small_recipe(&app).await;
     let bot: Uuid = app.create_bot("Race").await.parse().unwrap();
     add(&app, bot, "first", "first").await;
@@ -350,7 +317,7 @@ async fn replaced_leases_and_concurrent_workers_never_publish_twice() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
-    let app = app().await;
+    let app = manual().start().await;
     small_recipe(&app).await;
     let bot = app.create_bot("Saved").await;
     let bot_id: Uuid = bot.parse().unwrap();
@@ -442,7 +409,8 @@ async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cut_text_is_marked_with_where_the_rest_is() {
-    let app = app().await;
+    let h = harness(manual()).await;
+    let app = &h.app;
     let reply = app
         .owner(
             "PATCH",
@@ -454,40 +422,10 @@ async fn cut_text_is_marked_with_where_the_rest_is() {
     let bot = app.create_bot("Wide").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let long = "w".repeat(10_009);
-    add(&app, bot_id, "long", &long).await;
+    add(app, bot_id, "long", &long).await;
     memory_worker::drain(&app.db.pool).await.unwrap();
-    let reply = app
-        .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
-        .await;
-    let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    app.wait_turn(&turn.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-        .bind(turn)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    let token = app
-        .state
-        .grants
-        .issue(
-            bot_id,
-            conversation,
-            turn,
-            vec![Tool::ReadMemory],
-            DEFAULT_TTL,
-        )
-        .await;
-    let reply = app
-        .call(
-            "POST",
-            "/tools/v1/mcp",
-            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                         "params": { "name": "memory_view", "arguments": {} } })),
-            Some(&token),
-        )
-        .await;
-    let view: Value =
-        serde_json::from_str(reply.body["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let (_, token) = h.running(&bot, GATE).await;
+    let view = tool(app, &token, "memory_view", json!({})).await.result;
     let node = &view["nodes"][0];
     assert_eq!(node["truncated"], true);
     assert_eq!(node["text_bytes"], 10_016, "\"Owner: \" + 10,009 bytes");
@@ -497,7 +435,7 @@ async fn cut_text_is_marked_with_where_the_rest_is() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_backlog_longer_than_one_batch_keeps_publishing() {
-    let app = app().await;
+    let app = manual().start().await;
     let bot: Uuid = app.create_bot("Backlog").await.parse().unwrap();
     add(&app, bot, "first", "first").await;
     sqlx::query("UPDATE memory_store SET next_seq = 10050 WHERE bot_id = ?1")
@@ -539,7 +477,7 @@ async fn a_backlog_longer_than_one_batch_keeps_publishing() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rebuild_switches_only_after_reaching_the_append_watermark() {
-    let app = app().await;
+    let app = manual().start().await;
     small_recipe(&app).await;
     let bot = app.create_bot("Catch").await;
     let bot_id: Uuid = bot.parse().unwrap();
@@ -581,7 +519,7 @@ async fn a_rebuild_switches_only_after_reaching_the_append_watermark() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_compaction_view_is_saved_and_damaged_views_are_reported() {
-    let app = app().await;
+    let app = manual().start().await;
     let reply = app
         .owner(
             "PATCH",

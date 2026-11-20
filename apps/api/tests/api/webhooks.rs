@@ -5,15 +5,11 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use common::TestApp;
-use common::recorder::{self, GATE, GATE_EVERY_ATTEMPT, Harness, tool};
+use common::recorder::{self, GATE, GATE_EVERY_ATTEMPT, tool};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 const TASK: &str = "Read the watcher job's output and tell the owner the BTC price.";
-
-async fn harness() -> Harness {
-    recorder::harness(common::TestApp::builder()).await
-}
 
 fn watcher(extra: Value) -> Value {
     let mut args = json!({ "name": "BTC above 100k", "prompt": TASK });
@@ -63,7 +59,7 @@ async fn admit(app: &TestApp, now: DateTime<Utc>) -> usize {
 
 #[tokio::test]
 async fn a_trigger_wakes_the_bot_with_its_prompt_and_later_events_wait_and_coalesce() {
-    let h = harness().await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let bot = h.app.main_bot().await;
     let (setup, token) = h.running(&bot, GATE).await;
     let created = tool(&h.app, &token, "webhook_create", watcher(json!({}))).await;
@@ -144,7 +140,7 @@ async fn a_trigger_wakes_the_bot_with_its_prompt_and_later_events_wait_and_coale
 
 #[tokio::test]
 async fn a_wake_cannot_manage_webhooks() {
-    let h = harness().await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let bot = h.app.main_bot().await;
     let (setup, token) = h.running(&bot, GATE).await;
     let created = tool(
@@ -187,7 +183,7 @@ async fn a_wake_cannot_manage_webhooks() {
 
 #[tokio::test]
 async fn a_faster_pace_waits_for_the_owner_to_approve_its_cost() {
-    let h = harness().await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let bot = h.app.main_bot().await;
     let (turn, token) = h.running(&bot, GATE_EVERY_ATTEMPT).await;
     let fast = watcher(json!({ "min_interval_minutes": 1, "daily_limit": 100 }));
@@ -259,7 +255,7 @@ async fn a_faster_pace_waits_for_the_owner_to_approve_its_cost() {
 
 #[tokio::test]
 async fn a_linked_job_fires_its_webhook_only_when_it_exits_zero() {
-    let h = harness().await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let bot = h.app.main_bot().await;
     let (setup, token) = h.running(&bot, GATE).await;
     let created = tool(&h.app, &token, "webhook_create", watcher(json!({}))).await;
@@ -323,7 +319,7 @@ async fn a_linked_job_fires_its_webhook_only_when_it_exits_zero() {
 
 #[tokio::test]
 async fn deleting_a_webhook_revokes_its_token_and_drops_a_waiting_wake() {
-    let h = harness().await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let bot = h.app.main_bot().await;
     let (setup, token) = h.running(&bot, GATE).await;
     let created = tool(&h.app, &token, "webhook_create", watcher(json!({}))).await;
@@ -418,7 +414,7 @@ async fn deleting_a_webhook_revokes_its_token_and_drops_a_waiting_wake() {
 async fn an_update_never_restores_a_faster_pace_the_owner_did_not_approve_for_it() {
     use else_api::db::routines::By;
     use else_api::db::webhooks::{self, Patch, WebhookError};
-    let h = harness().await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let bot = h.app.main_bot().await;
     let (setup, token) = h.running(&bot, GATE).await;
     let created = tool(&h.app, &token, "webhook_create", watcher(json!({}))).await;
@@ -480,7 +476,7 @@ async fn an_update_never_restores_a_faster_pace_the_owner_did_not_approve_for_it
 
 #[tokio::test]
 async fn the_owner_sees_pauses_and_deletes_webhooks_in_the_sidebar() {
-    let h = harness().await;
+    let h = recorder::harness(common::TestApp::builder()).await;
     let bot = h.app.main_bot().await;
     let (setup, token) = h.running(&bot, GATE).await;
     let created = tool(&h.app, &token, "webhook_create", watcher(json!({}))).await;

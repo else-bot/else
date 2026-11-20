@@ -5,7 +5,7 @@ use common::TestApp;
 use common::recorder::{GATE, harness, tool};
 use else_api::app::bots::BotName;
 use else_api::db::bots::{self, BotError, Refusal};
-use else_api::grants::{DEFAULT_TTL, Tool};
+use else_api::grants::Tool;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -218,19 +218,7 @@ async fn routine_runs_cannot_rename_even_with_a_forged_capability() {
     let args = json!({ "target_bot_id": main, "name": "Unasked" });
     let denied = tool(&h.app, &token, "rename_bot", args.clone()).await;
     assert_eq!(denied.status, StatusCode::FORBIDDEN);
-    let conversation = h.inputs(routine).await[0].conversation_id;
-    let forged = h
-        .app
-        .state
-        .grants
-        .issue(
-            main.parse().unwrap(),
-            conversation,
-            routine,
-            vec![Tool::EditBot],
-            DEFAULT_TTL,
-        )
-        .await;
+    let forged = h.grant_with(routine, vec![Tool::EditBot]).await;
     let denied = tool(&h.app, &forged, "rename_bot", args).await;
     assert_eq!(denied.code(), "NOT_ALLOWED");
     let model = json!({ "target_bot_id": main, "model": "anything" });

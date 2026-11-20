@@ -1,51 +1,10 @@
 use crate::common;
 
-use std::sync::Arc;
-
 use axum::http::StatusCode;
-use common::{TestApp, TestDb};
-use else_api::grants::{DEFAULT_TTL, Tool};
+use common::TestApp;
+use common::recorder::{GATE, Harness, harness, tool};
 use serde_json::{Value, json};
 use uuid::Uuid;
-
-const SLOW: &str = "[synthetic:slow] fix the checkout errors; ask the right bot to triage them.";
-
-async fn app() -> TestApp {
-    let db = Arc::new(TestDb::migrated().await);
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    TestApp::builder().db(db).max_active(2).start().await
-}
-
-async fn grant(app: &TestApp, turn: Uuid, tools: Vec<Tool>) -> String {
-    let (bot, conversation): (Uuid, Uuid) =
-        sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
-            .bind(turn)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
-    app.state
-        .grants
-        .issue(bot, conversation, turn, tools, DEFAULT_TTL)
-        .await
-}
-
-async fn tool(app: &TestApp, token: &str, name: &str, arguments: Value) -> (bool, Value) {
-    let reply = app
-        .call(
-            "POST",
-            "/tools/v1/mcp",
-            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                         "params": { "name": name, "arguments": arguments } })),
-            Some(token),
-        )
-        .await;
-    let result = &reply.body["result"];
-    let text = result["content"][0]["text"].as_str().unwrap_or_default();
-    (
-        result["isError"] == true,
-        serde_json::from_str(text).unwrap_or_else(|_| json!(text)),
-    )
-}
 
 /// A running task the main bot delegated to Tech Manager, with its grant.
 struct Delegated {
@@ -55,40 +14,27 @@ struct Delegated {
     child_token: String,
 }
 
-async fn delegated(app: &TestApp) -> Delegated {
-    delegated_with(
-        app,
-        "[synthetic:hang] triage checkout 500s",
-        vec![Tool::ReadHistory],
-    )
-    .await
-}
-
-async fn delegated_with(app: &TestApp, task: &str, tools: Vec<Tool>) -> Delegated {
+async fn delegated(h: &Harness, task: &str) -> Delegated {
+    let app = &h.app;
     let target = app.create_bot("Tech Manager").await;
     let main = app.main_bot().await;
-    let sent = app
-        .send(&main, Uuid::new_v4(), SLOW, Some("synthetic"))
-        .await;
-    let root: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    app.wait_turn(&root.to_string(), &["running"]).await;
-    let root_token = grant(app, root, vec![Tool::Delegate, Tool::ReadHistory]).await;
-    let (failed, result) = tool(
+    let (root, root_token) = h.running(&main, GATE).await;
+    let delegated = tool(
         app,
         &root_token,
         "delegate",
-        json!({ "target_bot_id": target, "task": task, "title": "Triage checkout errors" }),
+        json!({ "target_bot_id": target, "task": format!("{GATE} {task}"), "title": "Triage checkout errors" }),
     )
     .await;
-    assert!(!failed, "{result}");
+    assert!(!delegated.error, "{}", delegated.result);
+    h.release(root).await;
     let child: Uuid =
         sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
             .bind(root)
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
-    app.wait_turn(&child.to_string(), &["running"]).await;
-    let child_token = grant(app, child, tools).await;
+    let (_, child_token) = h.started(child).await;
     Delegated {
         main,
         target,
@@ -97,15 +43,9 @@ async fn delegated_with(app: &TestApp, task: &str, tools: Vec<Tool>) -> Delegate
     }
 }
 
-async fn notify(app: &TestApp, token: &str, summary: &str) -> (bool, Value) {
-    tool(
-        app,
-        token,
-        "notify_owner",
-        json!({ "kind": "blocked", "summary": summary,
-                "tried": "Delegated to Dev; refused, no eligible session." }),
-    )
-    .await
+fn blocked_notice(summary: &str) -> Value {
+    json!({ "kind": "blocked", "summary": summary,
+            "tried": "Delegated to Dev; refused, no eligible session." })
 }
 
 async fn notices(app: &TestApp, bot: &str, turn: Uuid) -> Vec<Value> {
@@ -145,25 +85,37 @@ async fn dismiss(app: &TestApp, bot: &str, id: &Value) -> common::Reply {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delegated_task_shows_the_owner_what_it_needs_until_it_is_handled() {
-    let app = app().await;
-    let task = delegated(&app).await;
+    let h = harness(TestApp::builder().max_active(2)).await;
+    let app = &h.app;
+    let task = delegated(&h, "triage checkout 500s").await;
 
-    let (failed, first) = notify(&app, &task.child_token, "Dev can't start the fix.").await;
-    assert!(!failed, "{first}");
-    assert_eq!(first["status"], "pending");
-    let (failed, again) = notify(
-        &app,
+    let first = tool(
+        app,
         &task.child_token,
-        "Dev has no eligible session, so the fix can't start. Start one or reassign it.",
+        "notify_owner",
+        blocked_notice("Dev can't start the fix."),
     )
     .await;
-    assert!(!failed, "{again}");
+    assert!(!first.error, "{}", first.body);
+    let first = first.result;
+    assert_eq!(first["status"], "pending");
+    let again = tool(
+        app,
+        &task.child_token,
+        "notify_owner",
+        blocked_notice(
+            "Dev has no eligible session, so the fix can't start. Start one or reassign it.",
+        ),
+    )
+    .await;
+    assert!(!again.error, "{}", again.body);
+    let again = again.result;
     assert_eq!(
         again["notice_id"], first["notice_id"],
         "a retry rewrites the notice"
     );
 
-    let shown = notices(&app, &task.target, task.child).await;
+    let shown = notices(app, &task.target, task.child).await;
     assert_eq!(shown.len(), 1, "{shown:?}");
     assert_eq!(shown[0]["kind"], "blocked");
     assert_eq!(shown[0]["status"], "pending");
@@ -177,13 +129,13 @@ async fn a_delegated_task_shows_the_owner_what_it_needs_until_it_is_handled() {
         shown[0]["tried"],
         "Delegated to Dev; refused, no eligible session."
     );
-    let status = sidebar_status(&app, &task.target).await;
+    let status = sidebar_status(app, &task.target).await;
     assert_eq!(status["kind"], "needs_you", "{status}");
 
-    let handled = dismiss(&app, &task.target, &first["notice_id"]).await;
+    let handled = dismiss(app, &task.target, &first["notice_id"]).await;
     assert_eq!(handled.status, StatusCode::OK, "{}", handled.body);
     assert_eq!(handled.body["notice"]["status"], "dismissed");
-    let repeated = dismiss(&app, &task.target, &first["notice_id"]).await;
+    let repeated = dismiss(app, &task.target, &first["notice_id"]).await;
     assert_eq!(
         repeated.status,
         StatusCode::OK,
@@ -191,52 +143,57 @@ async fn a_delegated_task_shows_the_owner_what_it_needs_until_it_is_handled() {
     );
     assert_eq!(repeated.body["notice"]["status"], "dismissed");
     assert_eq!(
-        notices(&app, &task.target, task.child).await[0]["status"],
+        notices(app, &task.target, task.child).await[0]["status"],
         "dismissed"
     );
-    assert!(sidebar_status(&app, &task.target).await.is_null());
+    assert!(sidebar_status(app, &task.target).await.is_null());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owner_message_answers_the_notice_and_it_can_no_longer_be_dismissed() {
-    let app = app().await;
-    let task = delegated(&app).await;
-    let (failed, flagged) = tool(
-        &app,
+    let h = harness(TestApp::builder().max_active(2)).await;
+    let app = &h.app;
+    let task = delegated(&h, "triage checkout 500s").await;
+    let flagged = tool(
+        app,
         &task.child_token,
         "notify_owner",
         json!({ "kind": "decision", "summary": "Roll back the deploy or hotfix it?" }),
     )
     .await;
-    assert!(!failed, "{flagged}");
+    assert!(!flagged.error, "{}", flagged.body);
+    let flagged = flagged.result;
 
     let sent = app
         .send(&task.target, Uuid::new_v4(), "hotfix it", Some("synthetic"))
         .await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
-    let shown = notices(&app, &task.target, task.child).await;
+    let shown = notices(app, &task.target, task.child).await;
     assert_eq!(shown[0]["status"], "replied", "{shown:?}");
     assert_eq!(shown[0]["tried"], Value::Null);
 
-    let late = dismiss(&app, &task.target, &flagged["notice_id"]).await;
+    let late = dismiss(app, &task.target, &flagged["notice_id"]).await;
     assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
     assert_eq!(late.body["error"]["code"], "owner_notice_settled");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn only_a_running_delegated_task_can_notify_the_owner() {
-    let app = app().await;
-    let task = delegated(&app).await;
+    let h = harness(TestApp::builder().max_active(2)).await;
+    let app = &h.app;
+    let task = delegated(&h, "triage checkout 500s").await;
 
     let solo = app.create_bot("Solo").await;
-    let sent = app
-        .send(&solo, Uuid::new_v4(), SLOW, Some("synthetic"))
-        .await;
-    let own: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-    app.wait_turn(&own.to_string(), &["running"]).await;
-    let own_token = grant(&app, own, vec![Tool::ReadHistory]).await;
-    let (failed, refused) = notify(&app, &own_token, "I need you.").await;
-    assert!(failed, "{refused}");
+    let (_, own_token) = h.running(&solo, GATE).await;
+    let refused = tool(
+        app,
+        &own_token,
+        "notify_owner",
+        blocked_notice("I need you."),
+    )
+    .await;
+    assert!(refused.error, "{}", refused.body);
+    let refused = refused.result;
     assert!(
         refused.as_str().unwrap().starts_with("NOT_DELEGATED"),
         "{refused}"
@@ -247,8 +204,9 @@ async fn only_a_running_delegated_task_can_notify_the_owner() {
         json!({ "kind": "fyi" }),
         json!({ "kind": "decision" }),
     ] {
-        let (failed, refused) = tool(&app, &task.child_token, "notify_owner", invalid).await;
-        assert!(failed);
+        let refused = tool(app, &task.child_token, "notify_owner", invalid).await;
+        assert!(refused.error);
+        let refused = refused.result;
         assert!(
             refused.as_str().unwrap().starts_with("INVALID_REQUEST"),
             "{refused}"
@@ -264,61 +222,78 @@ async fn only_a_running_delegated_task_can_notify_the_owner() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn repeating_a_handled_notice_keeps_it_handled() {
-    let app = app().await;
-    let task = delegated(&app).await;
+    let h = harness(TestApp::builder().max_active(2)).await;
+    let app = &h.app;
+    let task = delegated(&h, "triage checkout 500s").await;
     let summary = "Dev can't start the fix. Start a Dev session.";
-    let (_, flagged) = notify(&app, &task.child_token, summary).await;
-    let handled = dismiss(&app, &task.target, &flagged["notice_id"]).await;
+    let flagged = tool(
+        app,
+        &task.child_token,
+        "notify_owner",
+        blocked_notice(summary),
+    )
+    .await
+    .result;
+    let handled = dismiss(app, &task.target, &flagged["notice_id"]).await;
     assert_eq!(handled.status, StatusCode::OK, "{}", handled.body);
 
-    let (failed, again) = notify(&app, &task.child_token, summary).await;
-    assert!(!failed, "{again}");
+    let again = tool(
+        app,
+        &task.child_token,
+        "notify_owner",
+        blocked_notice(summary),
+    )
+    .await;
+    assert!(!again.error, "{}", again.body);
+    let again = again.result;
     assert_eq!(
         again["notice_id"], flagged["notice_id"],
         "the retry returns the handled notice"
     );
-    let shown = notices(&app, &task.target, task.child).await;
+    let shown = notices(app, &task.target, task.child).await;
     assert_eq!(shown.len(), 1, "{shown:?}");
     assert_eq!(shown[0]["status"], "dismissed");
-    assert!(sidebar_status(&app, &task.target).await.is_null());
+    assert!(sidebar_status(app, &task.target).await.is_null());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_card_raised_after_the_notice_replaces_it() {
-    let app = app().await;
-    let task = delegated_with(
-        &app,
-        "[synthetic:slow] triage the checkout 500s: read the logs, find the failing requests, \
+    let h = harness(TestApp::builder().max_active(2)).await;
+    let app = &h.app;
+    let task = delegated(
+        &h,
+        "triage the checkout 500s: read the logs, find the failing requests, \
          compare the webhook secrets, and report what blocks the fix.",
-        vec![Tool::ReadHistory, Tool::AskOwner],
     )
     .await;
-    let (failed, flagged) = tool(
-        &app,
+    let flagged = tool(
+        app,
         &task.child_token,
         "notify_owner",
         json!({ "kind": "decision", "summary": "Roll back the deploy or hotfix it?" }),
     )
     .await;
-    assert!(!failed, "{flagged}");
-    let (failed, asked) = tool(
-        &app,
+    assert!(!flagged.error, "{}", flagged.body);
+    let flagged = flagged.result;
+    let asked = tool(
+        app,
         &task.child_token,
         "ask_owner",
         json!({ "question": "Roll back the deploy or hotfix it?" }),
     )
     .await;
-    assert!(!failed, "{asked}");
+    assert!(!asked.error, "{}", asked.body);
+    h.release(task.child).await;
     app.wait_turn(&task.child.to_string(), &["waiting"]).await;
 
-    let shown = notices(&app, &task.target, task.child).await;
+    let shown = notices(app, &task.target, task.child).await;
     assert_eq!(shown[0]["status"], "superseded", "{shown:?}");
-    let status = sidebar_status(&app, &task.target).await;
+    let status = sidebar_status(app, &task.target).await;
     assert_ne!(
         status["kind"], "needs_you",
         "the card's own status shows: {status}"
     );
-    let late = dismiss(&app, &task.target, &flagged["notice_id"]).await;
+    let late = dismiss(app, &task.target, &flagged["notice_id"]).await;
     assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
 }
 
@@ -336,55 +311,63 @@ async fn item_where(app: &TestApp, bot: &str, field: &str) -> Value {
         .clone()
 }
 
-async fn declare(app: &TestApp, token: &str, arguments: Value) -> (bool, Value) {
-    tool(app, token, "notify_owner", arguments).await
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_task_declares_what_it_needs_and_both_chats_show_it() {
-    let app = app().await;
-    let task = delegated_with(
-        &app,
-        "[synthetic:slow] sort the overnight WhatsApp DMs: read each thread, decline the offers \
+    let h = harness(TestApp::builder().max_active(2)).await;
+    let app = &h.app;
+    let task = delegated(
+        &h,
+        "sort the overnight WhatsApp DMs: read each thread, decline the offers \
          we never take, draft replies for the rest, and report which ones need the owner.",
-        vec![Tool::ReadHistory],
     )
     .await;
 
-    let (failed, fyi) = declare(
-        &app,
+    let fyi = tool(
+        app,
         &task.child_token,
+        "notify_owner",
         json!({ "kind": "fyi", "summary": "Declined MIRAY myself." }),
     )
     .await;
-    assert!(!failed, "{fyi}");
+    assert!(!fyi.error, "{}", fyi.body);
+    let fyi = fyi.result;
     assert_eq!(fyi["status"], "recorded");
-    let received = item_where(&app, &task.target, "bot_task").await;
+    let received = item_where(app, &task.target, "bot_task").await;
     assert_eq!(received["title"], "Triage checkout errors");
     assert_eq!(received["owner_need"], "fyi", "{received}");
     assert_eq!(received["owner_line"], "Declined MIRAY myself.");
 
-    let (failed, asked) = declare(
-        &app,
+    let asked = tool(
+        app,
         &task.child_token,
+        "notify_owner",
         json!({ "kind": "decision", "summary": "Approve the Romow DM before I send it." }),
     )
     .await;
-    assert!(!failed, "{asked}");
+    assert!(!asked.error, "{}", asked.body);
+    let asked = asked.result;
     assert_eq!(asked["status"], "pending");
 
-    let (failed, quiet) = declare(&app, &task.child_token, json!({ "kind": "nothing" })).await;
-    assert!(failed, "a quiet declaration cannot hide a pending ask");
+    let quiet = tool(
+        app,
+        &task.child_token,
+        "notify_owner",
+        json!({ "kind": "nothing" }),
+    )
+    .await;
+    assert!(quiet.error, "a quiet declaration cannot hide a pending ask");
+    let quiet = quiet.result;
     assert!(
         quiet.as_str().unwrap().starts_with("ASK_PENDING"),
         "{quiet}"
     );
-    let received = item_where(&app, &task.target, "bot_task").await;
+    let received = item_where(app, &task.target, "bot_task").await;
     assert_eq!(received["owner_need"], "decision", "{received}");
     assert_eq!(received["owner_line"], Value::Null);
 
+    h.release(task.child).await;
     app.wait_turn(&task.child.to_string(), &["completed"]).await;
-    let reply = item_where(&app, &task.main, "bot_reply").await;
+    let reply = item_where(app, &task.main, "bot_reply").await;
     assert_eq!(reply["title"], "Triage checkout errors");
     assert_eq!(reply["owner_need"], "decision", "{reply}");
     let asks = reply["asks"].as_array().unwrap();
@@ -395,9 +378,9 @@ async fn a_task_declares_what_it_needs_and_both_chats_show_it() {
     assert_eq!(asks[0]["status"], "pending");
     assert_eq!(asks[0]["summary"], "Approve the Romow DM before I send it.");
 
-    let handled = dismiss(&app, &task.target, &asked["notice_id"]).await;
+    let handled = dismiss(app, &task.target, &asked["notice_id"]).await;
     assert_eq!(handled.status, StatusCode::OK, "{}", handled.body);
-    let reply = item_where(&app, &task.main, "bot_reply").await;
+    let reply = item_where(app, &task.main, "bot_reply").await;
     assert_eq!(
         reply["asks"][0]["status"], "dismissed",
         "the delegating chat follows the ask: {reply}"
@@ -406,19 +389,27 @@ async fn a_task_declares_what_it_needs_and_both_chats_show_it() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_task_that_declares_nothing_keeps_its_reply_quiet() {
-    let app = app().await;
-    let task = delegated_with(
-        &app,
-        "[synthetic:slow] count this week's reach on every channel, compare it with last \
+    let h = harness(TestApp::builder().max_active(2)).await;
+    let app = &h.app;
+    let task = delegated(
+        &h,
+        "count this week's reach on every channel, compare it with last \
          week, and report the totals without changing anything.",
-        vec![Tool::ReadHistory],
     )
     .await;
-    let (failed, quiet) = declare(&app, &task.child_token, json!({ "kind": "nothing" })).await;
-    assert!(!failed, "{quiet}");
+    let quiet = tool(
+        app,
+        &task.child_token,
+        "notify_owner",
+        json!({ "kind": "nothing" }),
+    )
+    .await;
+    assert!(!quiet.error, "{}", quiet.body);
+    let quiet = quiet.result;
     assert_eq!(quiet["kind"], "nothing");
+    h.release(task.child).await;
     app.wait_turn(&task.child.to_string(), &["completed"]).await;
-    let reply = item_where(&app, &task.main, "bot_reply").await;
+    let reply = item_where(app, &task.main, "bot_reply").await;
     assert_eq!(reply["owner_need"], "nothing", "{reply}");
     assert!(reply.get("asks").is_none(), "{reply}");
 }
@@ -485,55 +476,57 @@ async fn reply(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reply_settles_only_the_ask_it_answers() {
-    let app = app().await;
-    let task = delegated(&app).await;
-    let (failed, flagged) = tool(
-        &app,
+    let h = harness(TestApp::builder().max_active(2)).await;
+    let app = &h.app;
+    let task = delegated(&h, "triage checkout 500s").await;
+    let flagged = tool(
+        app,
         &task.child_token,
         "notify_owner",
         json!({ "kind": "decision", "summary": "Roll back the deploy or hotfix it?" }),
     )
     .await;
-    assert!(!failed, "{flagged}");
+    assert!(!flagged.error, "{}", flagged.body);
+    let flagged = flagged.result;
     let first: Uuid = flagged["notice_id"].as_str().unwrap().parse().unwrap();
-    let other = second_ask(&app, &task).await;
+    let other = second_ask(app, &task).await;
 
     // With two asks pending, a message without a target cannot tell which
     // it answers, so both stay.
-    let plain = reply(&app, &task.target, Uuid::new_v4(), "one moment", None).await;
+    let plain = reply(app, &task.target, Uuid::new_v4(), "one moment", None).await;
     assert_eq!(plain.status, StatusCode::ACCEPTED, "{}", plain.body);
-    assert_eq!(status_of(&app, first).await, "pending");
-    assert_eq!(status_of(&app, other).await, "pending");
+    assert_eq!(status_of(app, first).await, "pending");
+    assert_eq!(status_of(app, other).await, "pending");
 
     // Another bot's ask is refused, and the message is not stored.
-    let foreign = reply(&app, &task.main, Uuid::new_v4(), "hotfix it", Some(first)).await;
+    let foreign = reply(app, &task.main, Uuid::new_v4(), "hotfix it", Some(first)).await;
     assert_eq!(foreign.status, StatusCode::BAD_REQUEST, "{}", foreign.body);
     assert_eq!(foreign.body["error"]["code"], "invalid_notice");
-    assert_eq!(status_of(&app, first).await, "pending");
+    assert_eq!(status_of(app, first).await, "pending");
 
     let request = Uuid::new_v4();
-    let targeted = reply(&app, &task.target, request, "hotfix it", Some(first)).await;
+    let targeted = reply(app, &task.target, request, "hotfix it", Some(first)).await;
     assert_eq!(targeted.status, StatusCode::ACCEPTED, "{}", targeted.body);
-    assert_eq!(status_of(&app, first).await, "replied");
-    assert_eq!(status_of(&app, other).await, "pending");
+    assert_eq!(status_of(app, first).await, "replied");
+    assert_eq!(status_of(app, other).await, "pending");
 
     // A retry returns the stored message; the same ID with another target
     // is a different request.
-    let retry = reply(&app, &task.target, request, "hotfix it", Some(first)).await;
+    let retry = reply(app, &task.target, request, "hotfix it", Some(first)).await;
     assert_eq!(retry.status, StatusCode::OK, "{}", retry.body);
     assert_eq!(retry.body["turn"]["id"], targeted.body["turn"]["id"]);
-    let conflict = reply(&app, &task.target, request, "hotfix it", Some(other)).await;
+    let conflict = reply(app, &task.target, request, "hotfix it", Some(other)).await;
     assert_eq!(conflict.status, StatusCode::CONFLICT, "{}", conflict.body);
-    assert_eq!(status_of(&app, other).await, "pending");
+    assert_eq!(status_of(app, other).await, "pending");
 
     // Answering a settled ask still delivers the message and changes nothing.
-    let late = reply(&app, &task.target, Uuid::new_v4(), "also this", Some(first)).await;
+    let late = reply(app, &task.target, Uuid::new_v4(), "also this", Some(first)).await;
     assert_eq!(late.status, StatusCode::ACCEPTED, "{}", late.body);
-    assert_eq!(status_of(&app, first).await, "replied");
-    assert_eq!(status_of(&app, other).await, "pending");
+    assert_eq!(status_of(app, first).await, "replied");
+    assert_eq!(status_of(app, other).await, "pending");
 
     // With one ask left, a plain message answers it, as before.
-    let last = reply(&app, &task.target, Uuid::new_v4(), "yes renew", None).await;
+    let last = reply(app, &task.target, Uuid::new_v4(), "yes renew", None).await;
     assert_eq!(last.status, StatusCode::ACCEPTED, "{}", last.body);
-    assert_eq!(status_of(&app, other).await, "replied");
+    assert_eq!(status_of(app, other).await, "replied");
 }

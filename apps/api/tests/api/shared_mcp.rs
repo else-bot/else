@@ -2,7 +2,8 @@ use crate::common;
 
 use axum::http::StatusCode;
 use common::TestApp;
-use else_api::grants::{DEFAULT_TTL, Tool};
+use common::recorder::{GATE, GATE_EVERY_ATTEMPT, harness, tool};
+use else_api::grants::Tool;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -30,95 +31,69 @@ pub(crate) fn installation() -> Value {
     json!({"id":"t3-code","name":"T3 Code","description":"Work with code and threads","skill":"Use T3 Code for code tasks.","documentation":"Discover tools/list before calling tools/call.","config":{"type":"stdio","command":"python3","args":["-u","-c",SERVER],"env":{"MCP_TEST_SECRET":"keep-this-out-of-discovery-and-memory"}}})
 }
 
-async fn grant(app: &TestApp, bot: &str, tools: Vec<Tool>) -> (Uuid, String) {
-    let sent = app
-        .send(bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
-        .await;
-    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
-    let turn = sent.body["turn"]["id"].as_str().unwrap();
-    app.wait_turn(turn, &["running"]).await;
-    let turn: Uuid = turn.parse().unwrap();
-    let conversation = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-        .bind(turn)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    (
-        turn,
-        app.state
-            .grants
-            .issue(bot.parse().unwrap(), conversation, turn, tools, DEFAULT_TTL)
-            .await,
-    )
-}
-
-async fn tool(app: &TestApp, token: &str, name: &str, arguments: Value) -> common::Reply {
-    app.call("POST", "/tools/v1/mcp", Some(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}})), Some(token)).await
-}
-
-fn result(reply: &common::Reply) -> Value {
-    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    assert_ne!(reply.body["result"]["isError"], true, "{}", reply.body);
-    serde_json::from_str(reply.body["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn one_bot_installs_another_discovers_and_uses_it_then_owner_removes_it() {
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let maple = app.create_bot("Maple").await;
     let scout = app.create_bot("Scout").await;
-    let (_, installer) = grant(&app, &maple, vec![Tool::Mcp, Tool::ManageMcp]).await;
-    let (_, consumer) = grant(&app, &scout, vec![Tool::Mcp]).await;
-    let first = result(&tool(&app, &installer, "mcp_install", installation()).await);
+    let (_, installer) = h.running(&maple, GATE).await;
+    let (turn, _) = h.running(&scout, GATE).await;
+    let consumer = h.grant_with(turn, vec![Tool::Mcp]).await;
+    let first = tool(app, &installer, "mcp_install", installation())
+        .await
+        .result;
     assert_eq!(first["mcp"]["installed_by"], "Maple");
     assert_eq!(first["available_to"], "all_bots");
-    let repeat = result(&tool(&app, &installer, "mcp_install", installation()).await);
+    let repeat = tool(app, &installer, "mcp_install", installation())
+        .await
+        .result;
     assert_eq!(first["mcp"]["installed_at"], repeat["mcp"]["installed_at"]);
-    let discovery = result(&tool(&app, &consumer, "mcp_list", json!({})).await);
+    let discovery = tool(app, &consumer, "mcp_list", json!({})).await.result;
     assert_eq!(discovery["mcps"].as_array().unwrap().len(), 1);
     assert!(!discovery.to_string().contains("keep-this-out"));
-    let package = result(&tool(&app, &consumer, "mcp_list", json!({"id":"t3-code"})).await);
+    let package = tool(app, &consumer, "mcp_list", json!({"id":"t3-code"}))
+        .await
+        .result;
     assert_eq!(package["skill"], "Use T3 Code for code tasks.");
     assert!(!package.to_string().contains("keep-this-out"));
     assert!(package.get("config").is_none());
-    let listed = result(
-        &tool(
-            &app,
-            &consumer,
-            "mcp_request",
-            json!({"id":"t3-code","method":"tools/list","params":{}}),
-        )
-        .await,
-    );
+    let listed = tool(
+        app,
+        &consumer,
+        "mcp_request",
+        json!({"id":"t3-code","method":"tools/list","params":{}}),
+    )
+    .await
+    .result;
     assert_eq!(listed["result"]["tools"][0]["name"], "echo");
     assert_eq!(listed["result"]["tools"][0]["description"], "Echo input");
     assert!(listed["result"]["tools"][0].get("inputSchema").is_none());
-    let schemas = result(
-        &tool(
-            &app,
-            &consumer,
-            "mcp_request",
-            json!({"id":"t3-code","method":"tools/list","params":{"names":["echo","nope"]}}),
-        )
-        .await,
-    );
+    let schemas = tool(
+        app,
+        &consumer,
+        "mcp_request",
+        json!({"id":"t3-code","method":"tools/list","params":{"names":["echo","nope"]}}),
+    )
+    .await
+    .result;
     assert_eq!(
         schemas["result"]["tools"][0]["inputSchema"]["type"],
         "object"
     );
     assert_eq!(schemas["result"]["missing"], json!(["nope"]));
     for (token, counter) in [(&installer, 1), (&consumer, 2)] {
-        let called=result(&tool(&app,token,"mcp_request",json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{"hello":"world"}},"effect":"local"})).await);
+        let called=tool(app,token,"mcp_request",json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{"hello":"world"}},"effect":"local"})).await.result;
         let body: Value =
             serde_json::from_str(called["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(body["calls"], counter);
         assert_eq!(body["arguments"]["hello"], "world");
         if counter == 1 {
-            let malformed = tool(&app, token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"arguments":{}},"effect":"local"})).await;
-            assert_eq!(malformed.body["result"]["isError"], true);
+            let malformed = tool(app, token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"arguments":{}},"effect":"local"})).await;
+            assert!(malformed.error);
             let plan = "a".repeat(301);
-            let long = tool(&app, token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{}},"effect":"local","purpose":plan})).await;
-            assert_eq!(long.body["result"]["isError"], true);
+            let long = tool(app, token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{}},"effect":"local","purpose":plan})).await;
+            assert!(long.error);
             assert!(
                 long.body["result"]["content"][0]["text"]
                     .as_str()
@@ -129,7 +104,7 @@ async fn one_bot_installs_another_discovers_and_uses_it_then_owner_removes_it() 
             );
         }
     }
-    let forged = tool(&app, &consumer, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"forge","arguments":{}},"effect":"local"})).await;
+    let forged = tool(app, &consumer, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"forge","arguments":{}},"effect":"local"})).await;
     assert!(!else_api::app::tools::parks(
         "mcp_request",
         &forged.body["result"]
@@ -158,69 +133,58 @@ async fn one_bot_installs_another_discovers_and_uses_it_then_owner_removes_it() 
         json!([])
     );
     let removed = tool(
-        &app,
+        app,
         &consumer,
         "mcp_request",
         json!({"id":"t3-code","method":"tools/list","params":{}}),
     )
     .await;
-    assert_eq!(removed.body["result"]["isError"], true);
+    assert!(removed.error);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn installation_and_execution_require_their_grants_and_external_calls_park_for_approval() {
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("Scoped").await;
-    let (_, read_only) = grant(&app, &bot, vec![Tool::ReadMemory]).await;
+    let (turn, token) = h.running(&bot, GATE).await;
+    let read_only = h.grant_with(turn, vec![Tool::ReadMemory]).await;
     for name in ["mcp_list", "mcp_install", "mcp_request"] {
-        let denied = tool(&app, &read_only, name, json!({})).await;
+        let denied = tool(app, &read_only, name, json!({})).await;
         assert_eq!(denied.status, StatusCode::FORBIDDEN, "{name}");
     }
-    let (turn, token) =
-        grant_for_running(&app, &bot, vec![Tool::Mcp, Tool::ManageMcp, Tool::AskOwner]).await;
-    result(&tool(&app, &token, "mcp_install", installation()).await);
+    let installed = tool(app, &token, "mcp_install", installation()).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
     let missing_effect = tool(
-        &app,
+        app,
         &token,
         "mcp_request",
         json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{}}}),
     )
     .await;
-    assert_eq!(missing_effect.body["result"]["isError"], true);
-    let pending=result(&tool(&app,&token,"mcp_request",json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{"message":"Hello"}},"effect":"external","purpose":"Send a greeting"})).await);
+    assert!(missing_effect.error);
+    let pending=tool(app,&token,"mcp_request",json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{"message":"Hello"}},"effect":"external","purpose":"Send a greeting"})).await.result;
     assert_eq!(pending["parked"], true);
     assert!(app.state.grants.is_parked(turn).await);
-    let blocked = tool(&app, &token, "mcp_list", json!({})).await;
+    let blocked = tool(app, &token, "mcp_list", json!({})).await;
     assert_eq!(blocked.status, StatusCode::CONFLICT);
-}
-
-async fn grant_for_running(app: &TestApp, bot: &str, tools: Vec<Tool>) -> (Uuid, String) {
-    let (turn, conversation): (Uuid, Uuid) =
-        sqlx::query_as("SELECT id,conversation_id FROM turns WHERE bot_id=?1 AND status='running'")
-            .bind(bot.parse::<Uuid>().unwrap())
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
-    (
-        turn,
-        app.state
-            .grants
-            .issue(bot.parse().unwrap(), conversation, turn, tools, DEFAULT_TTL)
-            .await,
-    )
+    h.release(turn).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn replacing_a_different_package_waits_for_the_owner_and_resets_a_changed_connection() {
-    let app = TestApp::installed().await;
-    let tools = vec![Tool::Mcp, Tool::ManageMcp, Tool::AskOwner];
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let maple = app.create_bot("Maple").await;
-    let (turn, token) = grant(&app, &maple, tools.clone()).await;
-    result(&tool(&app, &token, "mcp_install", installation()).await);
+    let (turn, token) = h.running(&maple, GATE_EVERY_ATTEMPT).await;
+    let installed = tool(app, &token, "mcp_install", installation()).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
     let mut moved = installation();
     moved["config"]["env"]["MCP_TEST_SECRET"] = json!("new-secret-stays-out-of-cards");
-    let conflict = tool(&app, &token, "mcp_install", moved.clone()).await;
-    assert_eq!(conflict.body["result"]["isError"], true);
+    let conflict = tool(app, &token, "mcp_install", moved.clone()).await;
+    assert!(conflict.error);
     assert!(
         conflict.body.to_string().contains("replace true"),
         "{}",
@@ -230,14 +194,14 @@ async fn replacing_a_different_package_waits_for_the_owner_and_resets_a_changed_
     moved["replace"] = json!(true);
     let mut leaky = moved.clone();
     leaky["config"] = json!({"type":"http","url":"https://alice:card-secret@example.com/mcp"});
-    let refused = tool(&app, &token, "mcp_install", leaky).await;
-    assert_eq!(refused.body["result"]["isError"], true, "{}", refused.body);
+    let refused = tool(app, &token, "mcp_install", leaky).await;
+    assert!(refused.error, "{}", refused.body);
     let asked: i64 = sqlx::query_scalar("SELECT count(*) FROM owner_questions")
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
     assert_eq!(asked, 0, "invalid input is refused before any card");
-    let pending = result(&tool(&app, &token, "mcp_install", moved.clone()).await);
+    let pending = tool(app, &token, "mcp_install", moved.clone()).await.result;
     assert_eq!(pending["parked"], true, "{pending}");
     assert!(app.state.grants.is_parked(turn).await);
     let (question, kind, title, context, choices): (Uuid, String, String, String, String) =
@@ -280,13 +244,17 @@ async fn replacing_a_different_package_waits_for_the_owner_and_resets_a_changed_
             .await
             .unwrap();
     }
-    let (_, scout_token) = grant(&app, &scout, tools.clone()).await;
-    let standing = result(&tool(&app, &scout_token, "mcp_install", moved.clone()).await);
+    let (_, scout_token) = h.running(&scout, GATE).await;
+    let standing = tool(app, &scout_token, "mcp_install", moved.clone())
+        .await
+        .result;
     assert_eq!(
         standing["parked"], true,
         "standing grants never replace: {standing}"
     );
 
+    h.release(turn).await;
+    app.wait_turn(&turn.to_string(), &["waiting"]).await;
     let answered = app
         .owner(
             "POST",
@@ -295,9 +263,8 @@ async fn replacing_a_different_package_waits_for_the_owner_and_resets_a_changed_
         )
         .await;
     assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
-    app.wait_turn(&turn.to_string(), &["running"]).await;
-    let (_, token) = grant_for_running(&app, &maple, tools).await;
-    let replaced = result(&tool(&app, &token, "mcp_install", moved).await);
+    let token = h.continued(turn, &token).await;
+    let replaced = tool(app, &token, "mcp_install", moved).await.result;
     assert_eq!(replaced["replaced"], true, "{replaced}");
     assert_eq!(replaced["reconnect_required"], true);
     assert_eq!(replaced["mcp"]["installed_by"], "Maple");
@@ -306,15 +273,14 @@ async fn replacing_a_different_package_waits_for_the_owner_and_resets_a_changed_
         .await
         .unwrap();
     assert_eq!(scopes, ["destructive"]);
-    let called = result(
-        &tool(
-            &app,
-            &token,
-            "mcp_request",
-            json!({"id":"t3-code","method":"tools/list","params":{}}),
-        )
-        .await,
-    );
+    let called = tool(
+        app,
+        &token,
+        "mcp_request",
+        json!({"id":"t3-code","method":"tools/list","params":{}}),
+    )
+    .await
+    .result;
     assert_eq!(called["result"]["tools"][0]["name"], "echo");
 }
 
@@ -382,9 +348,10 @@ async fn header_credentials_come_from_task_secrets_and_connect_without_oauth() {
         .await
         .unwrap()
     });
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let maple = app.create_bot("Maple").await;
-    let (_, token) = grant(&app, &maple, vec![Tool::Mcp, Tool::ManageMcp]).await;
+    let (_, token) = h.running(&maple, GATE).await;
     let install = |secrets: Value| {
         json!({"id":"bento","name":"Bento","description":"Email marketing","skill":"Use Bento for subscribers.","documentation":"Discover tools first.","config":{"type":"http","url":url,"secrets":secrets,"headers":{
             "X-Bento-Publishable-Key":"${BENTO_PUBLISHABLE_KEY}",
@@ -393,10 +360,10 @@ async fn header_credentials_come_from_task_secrets_and_connect_without_oauth() {
         }}})
     };
 
-    let unnamed = tool(&app, &token, "mcp_install", install(json!([]))).await;
-    assert_eq!(unnamed.body["result"]["isError"], true, "{}", unnamed.body);
-    let missing = tool(&app, &token, "mcp_install", install(json!(["bento"]))).await;
-    assert_eq!(missing.body["result"]["isError"], true, "{}", missing.body);
+    let unnamed = tool(app, &token, "mcp_install", install(json!([]))).await;
+    assert!(unnamed.error, "{}", unnamed.body);
+    let missing = tool(app, &token, "mcp_install", install(json!(["bento"]))).await;
+    assert!(missing.error, "{}", missing.body);
     assert!(
         missing.body.to_string().contains("bento"),
         "{}",
@@ -415,7 +382,9 @@ async fn header_credentials_come_from_task_secrets_and_connect_without_oauth() {
         )
         .await;
     assert_eq!(stored.status, StatusCode::CREATED, "{}", stored.body);
-    result(&tool(&app, &token, "mcp_install", install(json!(["bento"]))).await);
+    let installed = tool(app, &token, "mcp_install", install(json!(["bento"]))).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
     let config =
         std::fs::read_to_string(app.config.data_dir.join("mcp/bento/config.json")).unwrap();
     assert!(config.contains("${BENTO_SECRET_KEY}"), "{config}");
@@ -424,22 +393,25 @@ async fn header_credentials_come_from_task_secrets_and_connect_without_oauth() {
         "values stay out of the config: {config}"
     );
 
-    let connected = result(&tool(&app, &token, "mcp_connect", json!({"id":"bento"})).await);
+    let connected = tool(app, &token, "mcp_connect", json!({"id":"bento"}))
+        .await
+        .result;
     assert_eq!(connected["status"], "connected");
-    let status = result(&tool(&app, &token, "mcp_connection_status", json!({"id":"bento"})).await);
+    let status = tool(app, &token, "mcp_connection_status", json!({"id":"bento"}))
+        .await
+        .result;
     assert_eq!(status["status"], "connected");
     assert_eq!(status["provider"], Value::Null);
-    let listed = result(
-        &tool(
-            &app,
-            &token,
-            "mcp_request",
-            json!({"id":"bento","method":"tools/list","params":{}}),
-        )
-        .await,
-    );
+    let listed = tool(
+        app,
+        &token,
+        "mcp_request",
+        json!({"id":"bento","method":"tools/list","params":{}}),
+    )
+    .await
+    .result;
     assert_eq!(listed["result"]["tools"][0]["name"], "bento_list_tags");
-    let called = result(&tool(&app, &token, "mcp_request", json!({"id":"bento","method":"tools/call","params":{"name":"bento_list_tags","arguments":{}},"effect":"local"})).await);
+    let called = tool(app, &token, "mcp_request", json!({"id":"bento","method":"tools/call","params":{"name":"bento_list_tags","arguments":{}},"effect":"local"})).await.result;
     assert_eq!(
         called["result"]["content"][0]["text"],
         "tags for site [secret BENTO_SITE_UUID]"
@@ -466,7 +438,7 @@ async fn header_credentials_come_from_task_secrets_and_connect_without_oauth() {
         )
         .await;
     assert_eq!(rotated.status, StatusCode::OK, "{}", rotated.body);
-    let called = result(&tool(&app, &token, "mcp_request", json!({"id":"bento","method":"tools/call","params":{"name":"bento_list_tags","arguments":{}},"effect":"local"})).await);
+    let called = tool(app, &token, "mcp_request", json!({"id":"bento","method":"tools/call","params":{"name":"bento_list_tags","arguments":{}},"effect":"local"})).await.result;
     assert_eq!(
         called["result"]["structuredContent"]["key"], "[secret BENTO_SECRET_KEY]",
         "the next call sends the rotated key and redacts it"
@@ -474,62 +446,18 @@ async fn header_credentials_come_from_task_secrets_and_connect_without_oauth() {
     server.abort();
 }
 
-/// The synthetic provider, with a project directory under `root`.
-struct WithProject {
-    inner: else_api::providers::synthetic::Synthetic,
-    root: std::path::PathBuf,
-}
-
-#[async_trait::async_trait]
-impl else_api::app::providers::Provider for WithProject {
-    fn id(&self) -> &'static str {
-        self.inner.id()
-    }
-    fn label(&self) -> &'static str {
-        self.inner.label()
-    }
-    fn availability(&self) -> else_api::app::providers::Availability {
-        self.inner.availability()
-    }
-    fn uses_profile(&self) -> bool {
-        self.inner.uses_profile()
-    }
-    fn validate_profile(&self, profile: &else_api::app::providers::Profile) -> Result<(), String> {
-        self.inner.validate_profile(profile)
-    }
-    fn project_dir(&self, bot: Uuid) -> Option<std::path::PathBuf> {
-        Some(self.root.join(bot.to_string()))
-    }
-    async fn run(
-        &self,
-        input: else_api::app::providers::TurnInput,
-        sink: &dyn else_api::app::providers::TurnSink,
-        stop: else_api::app::providers::Stop,
-    ) -> else_api::app::providers::TurnOutcome {
-        self.inner.run(input, sink, stop).await
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cut_result_is_saved_whole_in_the_bots_project() {
     let root = tempfile::tempdir().unwrap();
-    let db = common::TestDb::migrated().await;
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    let registry: common::Providers = vec![std::sync::Arc::new(WithProject {
-        inner: else_api::providers::synthetic::Synthetic::new(std::time::Duration::from_millis(5)),
-        root: root.path().to_owned(),
-    })];
-    let app = TestApp::builder()
-        .db(std::sync::Arc::new(db))
-        .providers(registry)
-        .start()
-        .await;
+    let h = harness(TestApp::builder().projects(root.path())).await;
+    let app = &h.app;
     let bot = app.create_bot("Scout").await;
-    std::fs::create_dir_all(root.path().join(&bot)).unwrap();
-    let (_, token) = grant(&app, &bot, vec![Tool::Mcp, Tool::ManageMcp]).await;
-    result(&tool(&app, &token, "mcp_install", installation()).await);
+    let (_, token) = h.running(&bot, GATE).await;
+    let installed = tool(app, &token, "mcp_install", installation()).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
     let long = "row ".repeat(8_000);
-    let called = result(&tool(&app, &token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{"text":long}},"effect":"local"})).await);
+    let called = tool(app, &token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{"text":long}},"effect":"local"})).await.result;
     assert!(called.to_string().len() < 12_000, "the preview stays small");
     let path = called["whole_result"].as_str().expect("whole result saved");
     assert!(path.starts_with("mcp-results/t3-code-"), "{path}");
@@ -543,7 +471,7 @@ async fn a_cut_result_is_saved_whole_in_the_bots_project() {
         "the saved copy is the whole upstream text"
     );
 
-    let rows = result(&tool(&app, &token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"rows","arguments":{}},"effect":"local"})).await);
+    let rows = tool(app, &token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"rows","arguments":{}},"effect":"local"})).await.result;
     let path = rows["whole_result"].as_str().unwrap();
     let saved: Value =
         serde_json::from_str(&std::fs::read_to_string(root.path().join(&bot).join(path)).unwrap())
@@ -560,12 +488,15 @@ async fn a_cut_result_is_saved_whole_in_the_bots_project() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn without_a_project_a_result_keeps_the_larger_budget() {
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("Scout").await;
-    let (_, token) = grant(&app, &bot, vec![Tool::Mcp, Tool::ManageMcp]).await;
-    result(&tool(&app, &token, "mcp_install", installation()).await);
+    let (_, token) = h.running(&bot, GATE).await;
+    let installed = tool(app, &token, "mcp_install", installation()).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
     let long = "row ".repeat(3_500);
-    let called = result(&tool(&app, &token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{"text":long}},"effect":"local"})).await);
+    let called = tool(app, &token, "mcp_request", json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{"text":long}},"effect":"local"})).await.result;
     assert!(called.get("whole_result").is_none());
     let echoed: Value =
         serde_json::from_str(called["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -577,28 +508,26 @@ async fn without_a_project_a_result_keeps_the_larger_budget() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn else_side_mcp_request_failures_use_the_json_error_envelope() {
-    let app = TestApp::installed().await;
+    let h = harness(TestApp::builder()).await;
+    let app = &h.app;
     let bot = app.create_bot("Parser").await;
-    let (_, token) = grant(&app, &bot, vec![Tool::Mcp, Tool::ManageMcp]).await;
+    let (_, token) = h.running(&bot, GATE).await;
     let mut broken = installation();
     broken["id"] = json!("broken");
     broken["config"]["args"] = json!(["-c", "import sys; sys.exit(1)"]);
-    result(&tool(&app, &token, "mcp_install", broken).await);
-    let envelope = |reply: &common::Reply| -> Value {
-        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-        assert_eq!(reply.body["result"]["isError"], true, "{}", reply.body);
-        let text = reply.body["result"]["content"][0]["text"].as_str().unwrap();
-        serde_json::from_str(text).unwrap_or_else(|_| panic!("not JSON: {text}"))
-    };
-    let failed = envelope(
-        &tool(
-            &app,
-            &token,
-            "mcp_request",
-            json!({"id":"broken","method":"tools/list","params":{}}),
-        )
-        .await,
-    );
+    let installed = tool(app, &token, "mcp_install", broken).await;
+    assert_eq!(installed.status, StatusCode::OK, "{}", installed.body);
+    assert!(!installed.error, "{}", installed.body);
+    let failed = tool(
+        app,
+        &token,
+        "mcp_request",
+        json!({"id":"broken","method":"tools/list","params":{}}),
+    )
+    .await;
+    assert_eq!(failed.status, StatusCode::OK, "{}", failed.body);
+    assert!(failed.error, "{}", failed.body);
+    let failed = failed.result;
     assert_eq!(failed["error"]["code"], "connection_failed", "{failed}");
     assert!(
         failed["error"]["message"]
@@ -607,24 +536,26 @@ async fn else_side_mcp_request_failures_use_the_json_error_envelope() {
             .contains("connection failed"),
         "{failed}"
     );
-    let missing = envelope(
-        &tool(
-            &app,
-            &token,
-            "mcp_request",
-            json!({"id":"nowhere","method":"tools/list","params":{}}),
-        )
-        .await,
-    );
+    let missing = tool(
+        app,
+        &token,
+        "mcp_request",
+        json!({"id":"nowhere","method":"tools/list","params":{}}),
+    )
+    .await;
+    assert_eq!(missing.status, StatusCode::OK, "{}", missing.body);
+    assert!(missing.error, "{}", missing.body);
+    let missing = missing.result;
     assert_eq!(missing["error"]["code"], "not_found", "{missing}");
-    let invalid = envelope(
-        &tool(
-            &app,
-            &token,
-            "mcp_request",
-            json!({"id":"broken","method":"tools/call","params":{"name":"echo","arguments":{}}}),
-        )
-        .await,
-    );
+    let invalid = tool(
+        app,
+        &token,
+        "mcp_request",
+        json!({"id":"broken","method":"tools/call","params":{"name":"echo","arguments":{}}}),
+    )
+    .await;
+    assert_eq!(invalid.status, StatusCode::OK, "{}", invalid.body);
+    assert!(invalid.error, "{}", invalid.body);
+    let invalid = invalid.result;
     assert_eq!(invalid["error"]["code"], "invalid_request", "{invalid}");
 }
