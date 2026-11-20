@@ -14,6 +14,8 @@ pub(super) struct ResultInfo {
     pub(super) message: String,
     /// Model turns the CLI ran; 0 means it ended before running any.
     pub(super) num_turns: Option<i64>,
+    /// The CLI ended on an API error, not on the interruption it was sent.
+    pub(super) api_error: bool,
 }
 
 /// A tool call the model made. The CLI answers a name outside its verified
@@ -316,6 +318,7 @@ fn result_info(event: &Value) -> ResultInfo {
         success,
         message,
         num_turns: event["num_turns"].as_i64(),
+        api_error: event["terminal_reason"] == "api_error",
     }
 }
 
@@ -460,7 +463,7 @@ impl Protocol for Tracker {
         }
         if info.success {
             TurnOutcome::Completed
-        } else if stopping.is_some() {
+        } else if stopping.is_some() && !info.api_error {
             TurnOutcome::Interrupted
         } else {
             failed("provider_failed", info.message)

@@ -79,6 +79,7 @@ fn a_turn_is_accepted_by_its_echo_and_streams_text() {
             success: true,
             message: "Hi\n\nagain".into(),
             num_turns: None,
+            api_error: false,
         })])
     );
 }
@@ -525,6 +526,7 @@ fn info(success: bool, num_turns: Option<i64>) -> ResultInfo {
         success,
         message: "m".into(),
         num_turns,
+        api_error: false,
     }
 }
 
@@ -651,12 +653,15 @@ fn an_api_error_fails_the_turn_with_the_clis_message() {
     let Some(Event::Finished(result)) = events.last() else {
         panic!("the result finishes the turn");
     };
+    let failed = TurnOutcome::Failed {
+        code: "provider_failed".into(),
+        message: failure.into(),
+    };
+    assert_eq!(t.outcome(result.clone(), None, true), failed);
     assert_eq!(
-        t.outcome(result.clone(), None, true),
-        TurnOutcome::Failed {
-            code: "provider_failed".into(),
-            message: failure.into(),
-        }
+        t.outcome(result.clone(), Some(StopCause::Deadline), true),
+        failed,
+        "an API error as the deadline fires is not the interruption"
     );
     let model_output = json!({"type":"assistant","message":{"model":"<synthetic>","content":[]}});
     assert_eq!(

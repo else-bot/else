@@ -712,6 +712,14 @@ impl SinkState {
                     self.fenced = false;
                     let accepted = async {
                         let mut conn = self.pool.acquire().await?;
+                        if self.delivers_cut {
+                            crate::db::limit_cuts::mark_delivered(
+                                &mut conn,
+                                self.turn_id,
+                                self.attempt,
+                            )
+                            .await?;
+                        }
                         crate::db::handoffs::transition(
                             &mut conn,
                             self.turn_id,
