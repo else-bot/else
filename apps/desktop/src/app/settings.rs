@@ -425,19 +425,7 @@ impl ElseApp {
         cx.notify();
     }
 
-    pub(super) fn show_watchers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.details_tab = super::computer::DetailsTab::Details;
-        self.computer = None;
-        self._computer_layout = None;
-        self.details_scroll.scroll_to_item(WATCHING_SECTION);
-        if !self.settings_open {
-            self.toggle_settings(window, cx);
-        } else {
-            cx.notify();
-        }
-    }
-
-    pub(super) fn watchers(&self, bot: Uuid) -> &[Watcher] {
+    fn watchers(&self, bot: Uuid) -> &[Watcher] {
         self.view
             .as_ref()
             .filter(|view| view.bot_id == bot)
@@ -1316,15 +1304,12 @@ impl ElseApp {
             .min_h_0()
             .pt_2()
             .pb_6()
-            .overflow_y_scroll()
-            .track_scroll(&self.details_scroll);
+            .overflow_y_scroll();
         if let Some(computer) = &self.computer {
             body = body.child(v_flex().flex_1().p_4().child(computer.clone()));
         }
         if self.details_tab == super::computer::DetailsTab::Details {
             if let Some(entry) = self.settings.get(&bot.id) {
-                // Keep Watching at WATCHING_SECTION: the composer chip
-                // scrolls the panel to that child.
                 body = body
                     .child(self.render_bot_usage(cx))
                     .child(self.render_model(bot.id, &entry.model, cx))
@@ -2968,19 +2953,13 @@ fn list_rows(rows: Vec<AnyElement>) -> Div {
     v_flex().w_full().gap(ROW_GAP).children(rows)
 }
 
-/// The Watching section's index among the Details tab's sections.
-const WATCHING_SECTION: usize = 5;
-
 pub(super) fn watching_label(count: usize) -> String {
     let noun = if count == 1 { "thing" } else { "things" };
     format!("Watching {count} {noun}")
 }
 
 /// A watcher's deadline: its time when it falls on `today`, else its date.
-pub(super) fn watcher_deadline<Tz: chrono::TimeZone>(
-    until: DateTime<Tz>,
-    today: chrono::NaiveDate,
-) -> String
+fn watcher_deadline<Tz: chrono::TimeZone>(until: DateTime<Tz>, today: chrono::NaiveDate) -> String
 where
     Tz::Offset: std::fmt::Display,
 {
