@@ -2014,24 +2014,21 @@ impl ElseApp {
                     app.dismiss_routine_failures(bot, id, window, cx)
                 }))
         });
-        let retry =
-            (retrying || (!routine.enabled && routine.paused_reason.is_some())).then(|| {
-                Button::new(ElementId::Name(format!("routine-retry-{id}").into()))
-                    .control(
-                        Tier::Primary,
-                        Scale::Compact,
-                        busy || !connected || retrying,
-                        cx,
-                    )
-                    .label("Retry")
-                    .loading(retrying)
-                    .accessibility_label(format!("Retry {} now", routine.name))
-                    .on_click(
-                        cx.listener(move |app, _, window, cx| {
-                            app.retry_routine(bot, id, window, cx)
-                        }),
-                    )
-            });
+        let retry = (retrying || retryable(routine)).then(|| {
+            Button::new(ElementId::Name(format!("routine-retry-{id}").into()))
+                .control(
+                    Tier::Primary,
+                    Scale::Compact,
+                    busy || !connected || retrying,
+                    cx,
+                )
+                .label("Retry")
+                .loading(retrying)
+                .accessibility_label(format!("Retry {} now", routine.name))
+                .on_click(
+                    cx.listener(move |app, _, window, cx| app.retry_routine(bot, id, window, cx)),
+                )
+        });
         // Separate tokens, so a narrow panel wraps between them. Only a
         // token wider than the row, like a long cron description, wraps
         // inside itself.
@@ -2434,7 +2431,7 @@ fn retry_failure(err: &crate::api::ClientError) -> String {
             Check Settings or choose another model for the routine."
             .to_owned(),
         Some("already_running") => "A run of this routine is already in progress.".to_owned(),
-        Some("not_paused") => "This routine is no longer paused.".to_owned(),
+        Some("nothing_to_retry") => "This routine's last run no longer needs a retry.".to_owned(),
         Some("queue_full") => {
             "Couldn't retry. The bot's queue is full; try again once its requests finish."
                 .to_owned()
@@ -2598,6 +2595,12 @@ fn describe_hours(hours: &crate::model::ActiveHours) -> String {
             .join(", ")
     };
     format!("{days} {} to {}", hours.start, hours.end)
+}
+
+/// Whether the owner may run the routine again now: its last run failed,
+/// or else.bot paused it. The API accepts a Retry under the same rule.
+fn retryable(routine: &Routine) -> bool {
+    routine.failed_runs > 0 || (!routine.enabled && routine.paused_reason.is_some())
 }
 
 /// What a routine shows under its schedule.
@@ -3124,8 +3127,8 @@ fn still_pending(save: &TriggerSave, current: Option<bool>) -> bool {
 mod tests {
     use super::{
         Banner, Metadata, MetadataChange, MetadataSync, ModelState, RoutineSave, TriggerSave,
-        banner, describe_cron, describe_hours, last_run, pace, parse_name, still_pending,
-        trigger_cards,
+        banner, describe_cron, describe_hours, last_run, pace, parse_name, retryable,
+        still_pending, trigger_cards,
     };
     use crate::api::socials::Trigger;
     use crate::api::{BotProfile, ProfileChoice};
@@ -3444,6 +3447,29 @@ mod tests {
             banner(&retrying, Some(&failed)),
             Some(Banner::Problem("Couldn't save. offline".to_owned())),
             "the owner learns why the switch snapped back"
+        );
+    }
+
+    #[test]
+    fn a_routine_whose_last_run_failed_offers_retry_while_enabled_or_paused() {
+        let routine = |enabled: bool, failed_runs: i64, paused: Option<&str>| {
+            serde_json::from_value::<crate::model::Routine>(serde_json::json!({
+                "id": uuid::Uuid::nil(), "name": "Tickets", "prompt": "p",
+                "cron": "0 9 * * 1-5", "timezone": "Europe/Paris", "enabled": enabled,
+                "next_run_at": null, "updated_at": "2026-11-20T09:00:00Z",
+                "failed_runs": failed_runs, "paused_reason": paused,
+            }))
+            .unwrap()
+        };
+        assert!(
+            retryable(&routine(true, 1, None)),
+            "an enabled routine's failed run"
+        );
+        assert!(retryable(&routine(false, 3, Some("repeated"))));
+        assert!(!retryable(&routine(true, 0, None)), "nothing failed");
+        assert!(
+            !retryable(&routine(false, 0, None)),
+            "the owner switched it off"
         );
     }
 

@@ -48,7 +48,7 @@ impl From<RoutineError> for ApiError {
             RoutineError::BotDeleted => super::turns::bot_deleted(),
             RoutineError::Invalid(err) => ApiError::bad_request("invalid_input", err.to_string()),
             RoutineError::Db(err) => err.into(),
-            RoutineError::NotPaused => conflict("not_paused", err),
+            RoutineError::NothingToRetry => conflict("nothing_to_retry", err),
             RoutineError::AlreadyRunning => conflict("already_running", err),
             RoutineError::ProviderUnavailable => conflict("provider_unavailable", err),
             RoutineError::QueueFull => conflict("queue_full", err),
@@ -73,7 +73,7 @@ fn code(err: &RoutineError) -> &'static str {
         RoutineError::AlreadyRunning => "ALREADY_RUNNING",
         RoutineError::QueueFull => "QUEUE_FULL",
         RoutineError::ProviderUnavailable => "PROVIDER_UNAVAILABLE",
-        RoutineError::NotPaused => "NOT_PAUSED",
+        RoutineError::NothingToRetry => "NOTHING_TO_RETRY",
         RoutineError::Invalid(_) => "INVALID_ROUTINE",
         RoutineError::Db(_) => "UNAVAILABLE",
     }
@@ -160,8 +160,9 @@ struct RetryRequest {
     request_id: Uuid,
 }
 
-/// Run a paused routine now; a success switches it back on. Repeating a
-/// request returns its run.
+/// Run a routine whose last run failed, or that else.bot paused, now; a
+/// success switches a paused routine back on. Repeating a request returns
+/// its run.
 async fn owner_retry(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, routine_id)): ApiPath<(Uuid, Uuid)>,
