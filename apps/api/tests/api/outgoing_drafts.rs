@@ -1682,7 +1682,7 @@ async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_e
     assert_eq!(outcomes[0].2, "failed", "never recorded, so never sent");
     assert_eq!(outcomes[1].2, "uncertain", "dispatched without a receipt");
     let (id, action_id, _) = outcomes[1];
-    assert!(
+    assert_eq!(
         store::finish_action(
             &app.db.pool,
             account,
@@ -1691,7 +1691,8 @@ async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_e
             &json!({ "action_id": action_id, "status": "succeeded" }),
         )
         .await
-        .unwrap()
+        .unwrap()["status"],
+        "succeeded"
     );
     let status: String = sqlx::query_scalar("SELECT status FROM outgoing_drafts WHERE id = ?1")
         .bind(id)

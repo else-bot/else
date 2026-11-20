@@ -1053,8 +1053,7 @@ async fn tool_call(
             grant.bot_id,
             request.action_id,
         )
-        .await
-        .map_err(|_| MailError::new("mail_forbidden"))?
+        .await?
         .ok_or_else(|| MailError::new("mail_action_not_found"));
     }
     let request: ActionRequest = serde_json::from_value(args.clone()).map_err(|_| {

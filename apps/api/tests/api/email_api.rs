@@ -714,6 +714,9 @@ async fn introduction_is_private_idempotent_and_reaches_the_model_and_history() 
 struct Transport {
     sends: AtomicUsize,
     uncertain: bool,
+    /// Marks dispatching actions uncertain while a command is in flight, as
+    /// startup recovery or a restore does.
+    recovers: Option<sqlx::SqlitePool>,
 }
 
 /// A password QuietInbox's server rejects, as Apple rejects a revoked
@@ -902,6 +905,9 @@ impl MailTransport for Transport {
     }
     async fn execute(&self, _: &MailConfig, _: &Auth, _: &MailCommand) -> Result<Value, MailError> {
         self.sends.fetch_add(1, Ordering::SeqCst);
+        if let Some(pool) = &self.recovers {
+            store::recover(pool).await.unwrap();
+        }
         if self.uncertain {
             Err(MailError::new("connection_lost"))
         } else {
@@ -949,6 +955,7 @@ async fn duplicate_and_uncertain_send_retries_never_repeat_transport_effects() {
         let transport = Arc::new(Transport {
             sends: AtomicUsize::new(0),
             uncertain,
+            recovers: None,
         });
         let manager = Arc::new(ConnectorManager::with_transport(
             h.app.db.pool.clone(),
@@ -1006,6 +1013,115 @@ async fn duplicate_and_uncertain_send_retries_never_repeat_transport_effects() {
         );
         manager.forget(account.id).await;
     }
+}
+
+#[tokio::test]
+async fn an_action_recovery_settled_first_reports_the_recorded_receipt() {
+    let h = recorder::harness(4).await;
+    let bot: Uuid = h.app.main_bot().await.parse().unwrap();
+    let (turn, _) = h.running(&bot.to_string(), GATE).await;
+    let account = account(&h.app).await;
+    store::set_permissions(&h.app.db.pool, account.id, bot, &permissions())
+        .await
+        .unwrap();
+    let manager = Arc::new(ConnectorManager::with_transport(
+        h.app.db.pool.clone(),
+        h.app.state.secret_key.clone().unwrap(),
+        h.app.scheduler.clone(),
+        Arc::new(Transport {
+            sends: AtomicUsize::new(0),
+            uncertain: false,
+            recovers: Some(h.app.db.pool.clone()),
+        }),
+    ));
+    let action = Uuid::new_v4();
+    let receipt = manager
+        .execute(
+            account.id,
+            bot,
+            turn,
+            Some(action),
+            MailCommand::CreateFolder {
+                folder: "Receipts".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt, json!({"action_id": action, "status": "uncertain"}));
+    assert_eq!(
+        store::action_status(&h.app.db.pool, account.id, bot, action)
+            .await
+            .unwrap(),
+        Some(receipt)
+    );
+    manager.forget(account.id).await;
+}
+
+#[tokio::test]
+async fn store_refusals_reach_the_bot_under_their_own_codes() {
+    let h = recorder::harness(4).await;
+    let bot: Uuid = h.app.main_bot().await.parse().unwrap();
+    let (turn, _) = h.running(&bot.to_string(), GATE).await;
+    let account = account(&h.app).await;
+    let pool = &h.app.db.pool;
+    store::set_permissions(pool, account.id, bot, &permissions())
+        .await
+        .unwrap();
+    let manager = Arc::new(ConnectorManager::with_transport(
+        pool.clone(),
+        h.app.state.secret_key.clone().unwrap(),
+        h.app.scheduler.clone(),
+        Arc::new(Transport {
+            sends: AtomicUsize::new(0),
+            uncertain: false,
+            recovers: None,
+        }),
+    ));
+    let folder = |name: &str| MailCommand::CreateFolder {
+        folder: name.into(),
+    };
+    let code = |turn: Uuid, action: Option<Uuid>, command: MailCommand| {
+        let manager = manager.clone();
+        async move {
+            manager
+                .execute(account.id, bot, turn, action, command)
+                .await
+                .unwrap_err()
+                .code
+        }
+    };
+    let action = Uuid::new_v4();
+    manager
+        .execute(account.id, bot, turn, Some(action), folder("One"))
+        .await
+        .unwrap();
+    assert_eq!(
+        code(turn, Some(action), folder("Two")).await,
+        "mail_action_conflict"
+    );
+    store::set_active(pool, account.id, false).await.unwrap();
+    assert_eq!(
+        code(turn, None, MailCommand::Folders).await,
+        "mail_account_paused"
+    );
+    store::set_active(pool, account.id, true).await.unwrap();
+    store::set_permissions(pool, account.id, bot, &Permissions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        code(turn, None, MailCommand::Folders).await,
+        "mail_forbidden"
+    );
+    store::set_permissions(pool, account.id, bot, &permissions())
+        .await
+        .unwrap();
+    h.release(turn).await;
+    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    assert_eq!(
+        code(turn, None, MailCommand::Folders).await,
+        "mail_not_running"
+    );
+    manager.forget(account.id).await;
 }
 
 /// A mail-triggered turn for one arrival in `folder` of `account`, whose
@@ -1082,6 +1198,7 @@ async fn mail_event_origin_removes_computer_authority() {
     let transport = Arc::new(Transport {
         sends: AtomicUsize::new(0),
         uncertain: false,
+        recovers: None,
     });
     let h = recorder::harness_with(4, Some(transport.clone())).await;
     let bot: Uuid = h.app.main_bot().await.parse().unwrap();
@@ -1333,6 +1450,7 @@ async fn a_mail_event_drafts_a_reply_the_owner_approves_in_a_card() {
     let transport = Arc::new(Transport {
         sends: AtomicUsize::new(0),
         uncertain: false,
+        recovers: None,
     });
     let h = recorder::harness_with(4, Some(transport.clone())).await;
     let bot = h.app.main_bot().await;
