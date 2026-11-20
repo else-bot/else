@@ -1,6 +1,6 @@
 use super::layout::{CategoryDrag, SidebarEdge};
 use super::mentions::{MentionAction, mention_keys};
-use super::settings::{watcher_until, watching_label};
+use super::settings::{watcher_deadline, watching_label};
 use super::{
     APP_CONTEXT, COMPOSER_CONTEXT, Connection, ElseApp, FindInConversation, FocusComposer,
     FocusSidebar, NewBot, NewCategory, SIDEBAR_CONTEXT, SelectNext, SelectPrev, StopWork,
@@ -1054,11 +1054,18 @@ impl ElseApp {
     fn render_watcher_chip(&self, bot: Uuid, cx: &mut Context<Self>) -> Option<Div> {
         let watchers = self.watchers(bot);
         let next = watchers.iter().min_by_key(|watcher| watcher.until)?;
-        let until = watcher_until(next.until.with_timezone(&chrono::Local));
+        let local = chrono::Local::now();
+        let ends = watcher_deadline(
+            next.until.with_timezone(&local.timezone()),
+            local.date_naive(),
+        );
         let (summary, deadline) = if watchers.len() == 1 {
-            (format!("Watching: {}", next.purpose), until)
+            (
+                format!("Watching: {}", next.purpose),
+                format!("until {ends}"),
+            )
         } else {
-            (watching_label(watchers.len()), format!("next {until}"))
+            (watching_label(watchers.len()), format!("first ends {ends}"))
         };
         let label = format!("{summary} · {deadline}. View watchers in bot details");
         Some(

@@ -544,7 +544,7 @@ struct ErrorBody {
 #[derive(Debug, Clone, Deserialize)]
 struct ErrorDetail {
     code: String,
-    message: Option<String>,
+    message: String,
     #[serde(default)]
     retryable: bool,
 }
@@ -576,7 +576,7 @@ impl ClientError {
             Ok(body) => Self::Api {
                 status: status.as_u16(),
                 code: body.error.code,
-                message: body.error.message.unwrap_or_else(fallback),
+                message: body.error.message,
                 retryable: body.error.retryable,
             },
             Err(_) => Self::Protocol(fallback()),
@@ -1466,7 +1466,7 @@ pub(crate) mod tests {
         assert_eq!(body, "");
 
         let (origin, _) = serve_once(
-            "HTTP/1.1 409 Conflict\r\nContent-Length: 31\r\n\r\n{\"error\":{\"code\":\"not_active\"}}",
+            "HTTP/1.1 409 Conflict\r\nContent-Length: 71\r\n\r\n{\"error\":{\"code\":\"not_active\",\"message\":\"This watcher already ended.\"}}",
         ).await;
         let error = client(origin).stop_watcher(bot, watcher).await.unwrap_err();
         assert_eq!(error.code(), Some("not_active"));

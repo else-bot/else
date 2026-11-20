@@ -369,10 +369,25 @@ impl TriggerSave {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum WatcherStop {
     Stopping,
     Failed(String),
     Unconfirmed(String),
+}
+
+/// What a finished stop request leaves on the row. `None` keeps it
+/// stopping until `bot.updated` drops the watcher: it stopped, or it had
+/// already ended.
+fn stop_result(result: Result<(), crate::api::ClientError>) -> Option<WatcherStop> {
+    match result {
+        Ok(()) => None,
+        Err(err) if err.code() == Some("not_active") => None,
+        Err(err) if err.outcome_unknown() => Some(WatcherStop::Unconfirmed(format!(
+            "Couldn't confirm the stop. {err}"
+        ))),
+        Err(err) => Some(WatcherStop::Failed(format!("Couldn't stop. {err}"))),
+    }
 }
 
 pub(super) struct BotSettings {
@@ -854,14 +869,8 @@ impl ElseApp {
         cx.notify();
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let result = client.stop_watcher(bot, watcher).await;
-            let state = match result {
-                Ok(()) => return,
-                Err(err) if err.code() == Some("not_active") => return,
-                Err(err) if err.outcome_unknown() => {
-                    WatcherStop::Unconfirmed(format!("Couldn't confirm the stop. {err}"))
-                }
-                Err(err) => WatcherStop::Failed(format!("Couldn't stop. {err}")),
+            let Some(state) = stop_result(client.stop_watcher(bot, watcher).await) else {
+                return;
             };
             let _ = this.update(cx, |app, cx| {
                 if let Some(entry) = app.settings.get_mut(&bot)
@@ -2053,7 +2062,14 @@ impl ElseApp {
                             }
                         }))
                 });
-                let until = watcher_until(watcher.until.with_timezone(&chrono::Local));
+                let local = chrono::Local::now();
+                let until = format!(
+                    "until {}",
+                    watcher_deadline(
+                        watcher.until.with_timezone(&local.timezone()),
+                        local.date_naive()
+                    )
+                );
                 let timing = watcher_next(watcher, now);
                 let mut labels = vec![meta(until, cx).into_any_element()];
                 labels.extend(timing.map(|text| meta(text, cx).into_any_element()));
@@ -2955,8 +2971,19 @@ pub(super) fn watching_label(count: usize) -> String {
     format!("Watching {count} {noun}")
 }
 
-pub(super) fn watcher_until(until: DateTime<impl chrono::TimeZone>) -> String {
-    format!("until {}", until.date_naive().format("%b %-d"))
+/// A watcher's deadline: its time when it falls on `today`, else its date.
+pub(super) fn watcher_deadline<Tz: chrono::TimeZone>(
+    until: DateTime<Tz>,
+    today: chrono::NaiveDate,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    if until.date_naive() == today {
+        until.format("%H:%M").to_string()
+    } else {
+        until.format("%b %-d").to_string()
+    }
 }
 
 fn watcher_duration(minutes: i64) -> String {
@@ -2970,7 +2997,10 @@ fn watcher_duration(minutes: i64) -> String {
 
 fn watcher_last_check(watcher: &Watcher, now: DateTime<Utc>) -> String {
     let Some(at) = watcher.last_checked_at else {
-        return "not checked yet".to_owned();
+        return match &watcher.last_status {
+            Some(status) => format!("not checked yet: {status}"),
+            None => "not checked yet".to_owned(),
+        };
     };
     let minutes = (now - at).num_minutes();
     let when = if minutes <= 0 {
@@ -3369,9 +3399,11 @@ fn still_pending(save: &TriggerSave, current: Option<bool>) -> bool {
 mod tests {
     use super::{
         Banner, Metadata, MetadataChange, MetadataSync, ModelState, RoutineSave, TriggerSave,
-        banner, describe_cron, describe_hours, last_run, pace, parse_name, retryable,
-        still_pending, trigger_cards, watcher_last_check, watcher_next, watcher_until,
+        WatcherStop, banner, describe_cron, describe_hours, last_run, pace, parse_name, retryable,
+        still_pending, stop_result, trigger_cards, watcher_deadline, watcher_last_check,
+        watcher_next,
     };
+    use crate::api::ClientError;
     use crate::api::socials::Trigger;
     use crate::api::{BotProfile, ProfileChoice};
     use crate::avatar::{Avatar, AvatarColor, AvatarShape};
@@ -3389,7 +3421,10 @@ mod tests {
             "next_check_at": "2026-11-20T08:13:00Z", "last_output": null,
         }))
         .unwrap();
-        assert_eq!(watcher_until(watcher.until), "until Dec 4");
+        let today = "2026-11-20".parse().unwrap();
+        assert_eq!(watcher_deadline(watcher.until, today), "Dec 4");
+        let tonight: chrono::DateTime<chrono::Utc> = "2026-11-20T18:30:00Z".parse().unwrap();
+        assert_eq!(watcher_deadline(tonight, today), "18:30");
         assert_eq!(
             watcher_last_check(&watcher, now),
             "checked 2 min ago: unavailable"
@@ -3414,6 +3449,50 @@ mod tests {
         })).unwrap();
         assert_eq!(watcher_last_check(&watcher, now), "not checked yet");
         assert_eq!(watcher_next(&watcher, now).as_deref(), Some("checking now"));
+    }
+
+    #[test]
+    fn a_watcher_that_never_ran_says_why() {
+        let now = "2026-11-20T08:00:00Z".parse().unwrap();
+        let watcher: Watcher = serde_json::from_value(json!({
+            "id": "c7947c9e-2f91-4fb5-8fcc-ec4b20ca9307", "purpose": "Domain availability",
+            "until": "2026-12-04T10:00:00Z", "status": "waiting",
+            "last_status": "check did not run: the computer was not available",
+            "last_checked_at": null, "next_check_at": "2026-11-20T08:01:00Z", "last_output": null,
+        }))
+        .unwrap();
+        assert_eq!(
+            watcher_last_check(&watcher, now),
+            "not checked yet: check did not run: the computer was not available"
+        );
+    }
+
+    #[test]
+    fn a_stop_settles_on_its_result() {
+        let api = |status: u16, code: &str| {
+            Err(ClientError::Api {
+                status,
+                code: code.into(),
+                message: "Nope.".into(),
+                retryable: false,
+            })
+        };
+        assert_eq!(stop_result(Ok(())), None);
+        assert_eq!(
+            stop_result(api(409, "not_active")),
+            None,
+            "it already ended"
+        );
+        assert_eq!(
+            stop_result(api(404, "not_found")),
+            Some(WatcherStop::Failed("Couldn't stop. Nope.".into()))
+        );
+        assert_eq!(
+            stop_result(api(503, "unavailable")),
+            Some(WatcherStop::Unconfirmed(
+                "Couldn't confirm the stop. Nope.".into()
+            ))
+        );
     }
 
     fn profile(model: &str) -> Option<BotProfile> {
