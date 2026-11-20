@@ -99,43 +99,84 @@ impl AppState {
     }
 }
 
+/// A module's `/v1` routes, split by whether they wait out a maintenance
+/// pause.
+#[derive(Default)]
+pub struct Routes {
+    /// Served while paused: reads, Stop, stopping a computer, sending a
+    /// message (its handler queues it for after the pause), and the update
+    /// endpoints (which close and reopen the gate themselves).
+    pub open: Router<Arc<AppState>>,
+    /// Refused with `503 maintenance` while paused, and admitted through
+    /// the gate otherwise, so a backup waits for them to finish.
+    pub gated: Router<Arc<AppState>>,
+}
+
+impl Routes {
+    pub fn open(open: Router<Arc<AppState>>) -> Self {
+        Self {
+            open,
+            gated: Router::new(),
+        }
+    }
+
+    pub fn gated(gated: Router<Arc<AppState>>) -> Self {
+        Self {
+            open: Router::new(),
+            gated,
+        }
+    }
+
+    fn merge(self, other: Self) -> Self {
+        Self {
+            open: self.open.merge(other.open),
+            gated: self.gated.merge(other.gated),
+        }
+    }
+}
+
 pub fn router(config: &Config, state: Arc<AppState>) -> Router {
+    let routes = [
+        Routes::open(Router::new().route("/capabilities", get(capabilities))),
+        bots::routes(),
+        categories::routes(),
+        turns::routes(),
+        attachments::routes(),
+        conversation::routes(),
+        ws::routes(),
+        memory::routes(),
+        computers::routes(),
+        connectors::routes(),
+        socials::routes(),
+        settings::routes(),
+        backups::routes(),
+        shared_mcp::routes(),
+        skills::routes(),
+        usage::routes(),
+        task_secrets::routes(),
+        questions::routes(),
+        outgoing_drafts::routes(),
+        routines::routes(),
+        webhooks::routes(),
+        watchers::routes(),
+        rules::routes(),
+        maintenance::routes(),
+        onboarding::routes(),
+        waits::routes(),
+    ]
+    .into_iter()
+    .fold(Routes::default(), Routes::merge);
     // Every route under /v1 requires the owner token.
     // `layer` (not `route_layer`) also covers the fallback, so unknown /v1
     // paths are authenticated before they report 404.
-    let v1 = Router::new()
-        .route("/capabilities", get(capabilities))
-        .merge(bots::routes())
-        .merge(categories::routes())
-        .merge(turns::routes())
-        .merge(attachments::routes())
-        .merge(conversation::routes())
-        .merge(ws::routes())
-        .merge(memory::routes())
-        .merge(computers::routes())
-        .merge(connectors::routes())
-        .merge(socials::routes())
-        .merge(settings::routes())
-        .merge(backups::routes())
-        .merge(shared_mcp::routes())
-        .merge(skills::routes())
-        .merge(usage::routes())
-        .merge(task_secrets::routes())
-        .merge(questions::routes())
-        .merge(outgoing_drafts::routes())
-        .merge(routines::routes())
-        .merge(webhooks::routes())
-        .merge(watchers::routes())
-        .merge(rules::routes())
-        .merge(maintenance::routes())
-        .merge(onboarding::routes())
-        .merge(waits::routes())
-        .fallback(|| async { ApiError::not_found() })
-        .method_not_allowed_fallback(|| async { method_not_allowed() })
-        .layer(middleware::from_fn_with_state(
+    let v1 = routes
+        .open
+        .merge(routes.gated.route_layer(middleware::from_fn_with_state(
             state.clone(),
             maintenance_gate,
-        ))
+        )))
+        .fallback(|| async { ApiError::not_found() })
+        .method_not_allowed_fallback(|| async { method_not_allowed() })
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_owner,
@@ -192,9 +233,6 @@ async fn maintenance_gate(
     request: Request,
     next: Next,
 ) -> Response {
-    if crate::maintenance::allowed(request.method(), request.uri().path()) {
-        return next.run(request).await;
-    }
     let Some(_admission) = state.gate.enter() else {
         return maintenance_response();
     };

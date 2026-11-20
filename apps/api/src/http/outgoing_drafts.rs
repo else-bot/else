@@ -12,26 +12,28 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
+use super::{AppState, Routes};
 use crate::app::outgoing::Edits;
 use crate::db::outgoing_drafts::{self, DraftError, Settled};
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/bots/{bot_id}/outgoing-drafts/{draft_id}", put(edit))
-        .route(
-            "/bots/{bot_id}/outgoing-drafts/{draft_id}/approve",
-            post(approve),
-        )
-        .route(
-            "/bots/{bot_id}/outgoing-drafts/{draft_id}/discard",
-            post(discard),
-        )
-        .route(
-            "/bots/{bot_id}/outgoing-drafts/{draft_id}/always",
-            delete(stop_always),
-        )
+pub fn routes() -> Routes {
+    Routes::gated(
+        Router::new()
+            .route("/bots/{bot_id}/outgoing-drafts/{draft_id}", put(edit))
+            .route(
+                "/bots/{bot_id}/outgoing-drafts/{draft_id}/approve",
+                post(approve),
+            )
+            .route(
+                "/bots/{bot_id}/outgoing-drafts/{draft_id}/discard",
+                post(discard),
+            )
+            .route(
+                "/bots/{bot_id}/outgoing-drafts/{draft_id}/always",
+                delete(stop_always),
+            ),
+    )
 }
 
 #[derive(Deserialize)]

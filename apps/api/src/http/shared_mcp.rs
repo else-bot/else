@@ -8,30 +8,31 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiPath};
 use super::mcp::{Outcome, tool_result};
+use super::{AppState, Routes};
 use crate::grants::Grant;
 use crate::mcp::{Error, Installation, PackageId};
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/settings/mcp", get(list))
-        .route("/settings/mcp/{id}", delete(remove))
-        .route(
-            "/bots/{bot_id}/mcp/{id}/connection",
-            get(connection).delete(disconnect),
-        )
-        .route(
-            "/bots/{bot_id}/mcp/{id}/oauth",
-            delete(cancel_pending_authorization),
-        )
-        .route("/bots/{bot_id}/mcp/{id}/oauth/start", post(authorize))
-        .route("/bots/{bot_id}/mcp/{id}/oauth/complete", post(complete))
-        .route(
-            "/bots/{bot_id}/mcp/{id}/oauth/{request_id}",
-            delete(cancel_authorization),
-        )
+pub fn routes() -> Routes {
+    Routes {
+        open: Router::new()
+            .route("/settings/mcp", get(list))
+            .route("/bots/{bot_id}/mcp/{id}/connection", get(connection)),
+        gated: Router::new()
+            .route("/settings/mcp/{id}", delete(remove))
+            .route("/bots/{bot_id}/mcp/{id}/connection", delete(disconnect))
+            .route(
+                "/bots/{bot_id}/mcp/{id}/oauth",
+                delete(cancel_pending_authorization),
+            )
+            .route("/bots/{bot_id}/mcp/{id}/oauth/start", post(authorize))
+            .route("/bots/{bot_id}/mcp/{id}/oauth/complete", post(complete))
+            .route(
+                "/bots/{bot_id}/mcp/{id}/oauth/{request_id}",
+                delete(cancel_authorization),
+            ),
+    }
 }
 
 fn api_error(error: Error) -> ApiError {

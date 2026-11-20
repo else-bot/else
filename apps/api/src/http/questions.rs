@@ -12,35 +12,37 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
 use super::turns::active_bot;
+use super::{AppState, Routes};
 use crate::app::questions::Answer;
 use crate::db::owner_questions::{self, SettleError};
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/bots/{bot_id}/questions/{question_id}/answer",
-            post(answer),
-        )
-        .route(
-            "/bots/{bot_id}/owner-notices/{notice_id}/dismiss",
-            post(dismiss_notice),
-        )
-        .route("/bots/{bot_id}/permissions", get(permissions))
-        .route(
-            "/bots/{bot_id}/permissions/{scope}",
-            axum::routing::delete(revoke),
-        )
-        .route(
-            "/bots/{bot_id}/permissions/routines/{routine_id}",
-            axum::routing::delete(revoke_routine),
-        )
-        .route(
-            "/bots/{bot_id}/permissions/routines/{routine_id}/{kind}",
-            axum::routing::delete(revoke_routine_kind),
-        )
+pub fn routes() -> Routes {
+    Routes {
+        open: Router::new().route("/bots/{bot_id}/permissions", get(permissions)),
+        gated: Router::new()
+            .route(
+                "/bots/{bot_id}/questions/{question_id}/answer",
+                post(answer),
+            )
+            .route(
+                "/bots/{bot_id}/owner-notices/{notice_id}/dismiss",
+                post(dismiss_notice),
+            )
+            .route(
+                "/bots/{bot_id}/permissions/{scope}",
+                axum::routing::delete(revoke),
+            )
+            .route(
+                "/bots/{bot_id}/permissions/routines/{routine_id}",
+                axum::routing::delete(revoke_routine),
+            )
+            .route(
+                "/bots/{bot_id}/permissions/routines/{routine_id}/{kind}",
+                axum::routing::delete(revoke_routine_kind),
+            ),
+    }
 }
 
 async fn dismiss_notice(

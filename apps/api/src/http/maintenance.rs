@@ -14,7 +14,7 @@
 //!   touching the gate, so the desktop can say whether an update would be
 //!   refused. Only the installer's `POST` decides.
 //!
-//! All three bypass the gate themselves (see `maintenance::allowed`).
+//! All three are open routes: they close and reopen the gate themselves.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,21 +26,23 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use serde_json::{Value, json};
 
-use super::AppState;
 use super::error::ApiError;
+use super::{AppState, Routes};
 
 const ADMITTED_GRACE: Duration = Duration::from_secs(10);
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/maintenance/update",
-            get(report).post(prepare).delete(reopen),
-        )
-        .route(
-            "/maintenance/update/installation",
-            get(installation).post(install),
-        )
+pub fn routes() -> Routes {
+    Routes::open(
+        Router::new()
+            .route(
+                "/maintenance/update",
+                get(report).post(prepare).delete(reopen),
+            )
+            .route(
+                "/maintenance/update/installation",
+                get(installation).post(install),
+            ),
+    )
 }
 
 async fn installation(

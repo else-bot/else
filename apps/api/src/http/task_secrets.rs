@@ -15,30 +15,32 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiPath, SecretJson};
+use super::{AppState, Routes};
 use crate::db::secret_requests::{self, SettleError, Settled};
 use crate::db::task_secrets::{self, Meta, Mode, Patch, SecretError, Website};
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/task-secrets", get(list))
-        .route(
-            "/task-secrets/{name}",
-            axum::routing::put(replace)
-                .post(create)
-                .patch(edit)
-                .delete(remove),
-        )
-        .route("/task-secrets/{name}/reveal", post(reveal))
-        .route(
-            "/bots/{bot_id}/secret-requests/{request_id}/fulfill",
-            post(fulfill),
-        )
-        .route(
-            "/bots/{bot_id}/secret-requests/{request_id}/cancel",
-            post(cancel),
-        )
+pub fn routes() -> Routes {
+    Routes {
+        open: Router::new().route("/task-secrets", get(list)),
+        gated: Router::new()
+            .route(
+                "/task-secrets/{name}",
+                axum::routing::put(replace)
+                    .post(create)
+                    .patch(edit)
+                    .delete(remove),
+            )
+            .route("/task-secrets/{name}/reveal", post(reveal))
+            .route(
+                "/bots/{bot_id}/secret-requests/{request_id}/fulfill",
+                post(fulfill),
+            )
+            .route(
+                "/bots/{bot_id}/secret-requests/{request_id}/cancel",
+                post(cancel),
+            ),
+    }
 }
 
 #[derive(Deserialize)]

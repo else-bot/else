@@ -8,9 +8,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiPath};
 use super::turns::bot_deleted;
+use super::{AppState, Routes};
 use crate::db::bots::BotStatus;
 use crate::db::conversation::{self, WindowQuery};
 use crate::views::{activity_json, item_json, routine_json, turn_json};
@@ -19,11 +19,13 @@ const DEFAULT_LIMIT: i64 = 50;
 const MAX_LIMIT: i64 = 200;
 const MAX_QUERY_CHARS: usize = 200;
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/bots/{bot_id}/conversation", get(snapshot))
-        .route("/bots/{bot_id}/conversation/search", get(search))
-        .route("/bots/{bot_id}/conversation/window", get(window))
+pub fn routes() -> Routes {
+    Routes::open(
+        Router::new()
+            .route("/bots/{bot_id}/conversation", get(snapshot))
+            .route("/bots/{bot_id}/conversation/search", get(search))
+            .route("/bots/{bot_id}/conversation/window", get(window)),
+    )
 }
 
 /// `<server_instance_id>:<bot_id>:<seq>`. Binding the cursor to this API

@@ -86,6 +86,28 @@ async fn an_update_is_refused_while_bots_work_and_holds_new_work_once_idle() {
         app.owner("GET", "/v1/bots", None).await.status,
         StatusCode::OK
     );
+    let upgrades = app
+        .owner("POST", "/v1/computers/upgrade-all/cancel", None)
+        .await;
+    assert_eq!(
+        upgrades.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "only Stop bypasses the pause: {}",
+        upgrades.body
+    );
+    assert_eq!(upgrades.body["error"]["code"], "maintenance");
+    let stop = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{bot}/cancel"),
+            Some(serde_json::json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert!(
+        stop.status.is_success(),
+        "Stop works while paused: {}",
+        stop.body
+    );
 
     let reopened = app.owner("DELETE", "/v1/maintenance/update", None).await;
     assert_eq!(reopened.body["reopened"], true);

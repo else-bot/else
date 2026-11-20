@@ -1,5 +1,5 @@
 use super::{
-    AppState,
+    AppState, Routes,
     error::{ApiError, ApiJson, ApiPath, SecretJson},
 };
 use crate::socials::{pairing::Purpose, store, types::*};
@@ -7,52 +7,62 @@ use axum::{
     Json, Router,
     extract::{Query, State},
     http::StatusCode,
-    routing::{get, post, put},
+    routing::{get, patch, post, put},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/connectors/socials/providers",
-            get(|| async { Json(definitions()) }),
-        )
-        .route("/connectors/socials/connections", get(list).post(connect))
-        .route(
-            "/connectors/socials/connections/{id}",
-            get(detail).patch(active).delete(remove),
-        )
-        .route(
-            "/connectors/socials/connections/{id}/credentials",
-            put(credential),
-        )
-        .route(
-            "/connectors/socials/connections/{id}/destinations",
-            get(destinations),
-        )
-        .route(
-            "/bots/{bot}/social-triggers/{id}",
-            axum::routing::patch(toggle_trigger).delete(delete_trigger),
-        )
-        .route("/connectors/socials/setups/{id}/complete", post(complete))
-        .route(
-            "/connectors/socials/setups/{id}/pairing",
-            get(|s, id, after| pairing(s, id, after, Purpose::Setup))
-                .post(|s, id| start_pairing(s, id, Purpose::Setup)),
-        )
-        .route(
-            "/connectors/socials/connections/{id}/pairing",
-            get(|s, id, after| pairing(s, id, after, Purpose::Repair))
-                .post(|s, id| start_pairing(s, id, Purpose::Repair))
-                .delete(stop_repair_pairing),
-        )
-        .route(
-            "/connectors/socials/setups/{id}",
-            axum::routing::delete(cancel),
-        )
+pub fn routes() -> Routes {
+    Routes {
+        open: Router::new()
+            .route(
+                "/connectors/socials/providers",
+                get(|| async { Json(definitions()) }),
+            )
+            .route("/connectors/socials/connections", get(list))
+            .route("/connectors/socials/connections/{id}", get(detail))
+            .route(
+                "/connectors/socials/connections/{id}/destinations",
+                get(destinations),
+            )
+            .route(
+                "/connectors/socials/setups/{id}/pairing",
+                get(|s, id, after| pairing(s, id, after, Purpose::Setup)),
+            )
+            .route(
+                "/connectors/socials/connections/{id}/pairing",
+                get(|s, id, after| pairing(s, id, after, Purpose::Repair)),
+            ),
+        gated: Router::new()
+            .route("/connectors/socials/connections", post(connect))
+            .route(
+                "/connectors/socials/connections/{id}",
+                patch(active).delete(remove),
+            )
+            .route(
+                "/connectors/socials/connections/{id}/credentials",
+                put(credential),
+            )
+            .route(
+                "/bots/{bot}/social-triggers/{id}",
+                patch(toggle_trigger).delete(delete_trigger),
+            )
+            .route("/connectors/socials/setups/{id}/complete", post(complete))
+            .route(
+                "/connectors/socials/setups/{id}/pairing",
+                post(|s, id| start_pairing(s, id, Purpose::Setup)),
+            )
+            .route(
+                "/connectors/socials/connections/{id}/pairing",
+                post(|s, id| start_pairing(s, id, Purpose::Repair)).delete(stop_repair_pairing),
+            )
+            .route(
+                "/connectors/socials/setups/{id}",
+                axum::routing::delete(cancel),
+            ),
+    }
 }
 pub(super) fn error(e: Error) -> ApiError {
     match e {

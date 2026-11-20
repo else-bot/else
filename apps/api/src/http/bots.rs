@@ -3,25 +3,31 @@ use std::sync::Arc;
 use axum::extract::{Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
+use super::{AppState, Routes};
 use crate::app::bots::{Avatar, BotName};
 use crate::db::bots::{self, BotError, BotStatus, Created};
 use crate::db::reads::{self, ReadCommand, ReadError};
 use crate::views::*;
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/bots", get(list).post(create))
-        .route("/bots/{bot_id}", get(show).patch(update).delete(delete))
-        .route("/bots/{bot_id}/profile", get(show_profile).put(set_profile))
-        .route("/bots/{bot_id}/read", post(mark_read))
+pub fn routes() -> Routes {
+    Routes {
+        open: Router::new()
+            .route("/bots", get(list))
+            .route("/bots/{bot_id}", get(show))
+            .route("/bots/{bot_id}/profile", get(show_profile)),
+        gated: Router::new()
+            .route("/bots", post(create))
+            .route("/bots/{bot_id}", patch(update).delete(delete))
+            .route("/bots/{bot_id}/profile", put(set_profile))
+            .route("/bots/{bot_id}/read", post(mark_read)),
+    }
 }
 
 impl From<ReadError> for ApiError {

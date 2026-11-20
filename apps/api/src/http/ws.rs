@@ -47,8 +47,8 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::AppState;
 use super::conversation::{bot_is_active, encode_cursor, parse_cursor};
+use super::{AppState, Routes};
 use crate::db::{bots, events};
 use crate::views::bot_json;
 
@@ -63,8 +63,8 @@ const WRITE_LIMIT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSE_LIMIT: Duration = Duration::from_secs(5);
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new().route("/ws", get(upgrade))
+pub fn routes() -> Routes {
+    Routes::open(Router::new().route("/ws", get(upgrade)))
 }
 
 async fn upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {

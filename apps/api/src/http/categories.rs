@@ -6,23 +6,26 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, put};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
 use super::turns::bot_deleted;
+use super::{AppState, Routes};
 use crate::db::categories::{self, CategoryError, Created};
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/categories", get(list).post(create))
-        .route("/categories/order", put(reorder))
-        .route("/categories/{category_id}", patch(rename).delete(remove))
-        .route("/bots/{bot_id}/category", patch(assign))
+pub fn routes() -> Routes {
+    Routes {
+        open: Router::new().route("/categories", get(list)),
+        gated: Router::new()
+            .route("/categories", post(create))
+            .route("/categories/order", put(reorder))
+            .route("/categories/{category_id}", patch(rename).delete(remove))
+            .route("/bots/{bot_id}/category", patch(assign)),
+    }
 }
 
 impl From<CategoryError> for ApiError {
