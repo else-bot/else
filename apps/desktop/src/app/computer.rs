@@ -10,8 +10,8 @@ use uuid::Uuid;
 use xkeysym::Keysym;
 
 use crate::api::{
-    Client, ClientError, ComputerState, ComputerUpgrade, DesktopCommand, DesktopCommands,
-    DesktopEvent, DesktopMode, MAX_CLIPBOARD_BYTES,
+    Client, ClientError, ComputerState, ComputerUpgrade, DesiredState, DesktopCommand,
+    DesktopCommands, DesktopEvent, DesktopMode, MAX_CLIPBOARD_BYTES, RuntimeState,
 };
 
 #[cfg(target_os = "macos")]
@@ -178,8 +178,8 @@ impl ComputerView {
                         Ok(state) => {
                             let upgrading = state.upgrade == Some(ComputerUpgrade::Running);
                             let available = state.desktop_available;
-                            let running =
-                                state.state == "running" && state.desired_state != "stopped";
+                            let running = state.state == RuntimeState::Running
+                                && state.desired_state != DesiredState::Stopped;
                             let _ = this.update(cx, |view, cx| {
                                 view.computer = Some(state);
                                 if upgrading {

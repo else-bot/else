@@ -18,7 +18,7 @@ use super::super::message_row::CardPlacement;
 use super::{
     Connection, ElseApp, Extent, QuestionForm, RowKey, SubmitState, callout, letter, receipt,
 };
-use crate::model::{Question, QuestionAnswer};
+use crate::model::{Question, QuestionAnswer, QuestionStatus};
 
 /// The field on a pending single-choice card for an answer its options don't
 /// cover, and the reply field of an open question. Its text is sent as an
@@ -494,9 +494,9 @@ fn settled(question: &Question, form: Option<&QuestionForm>, reply: Option<&str>
             },
         };
     }
-    match question.status.as_str() {
-        "answered" => resumed(chose(question, question.answer.as_ref())),
-        "skipped" => match reply.map(str::trim).filter(|r| !r.is_empty()) {
+    match question.status {
+        QuestionStatus::Answered => resumed(chose(question, question.answer.as_ref())),
+        QuestionStatus::Skipped => match reply.map(str::trim).filter(|r| !r.is_empty()) {
             Some(reply) => {
                 let end = clip::char_end(reply, QUOTE_CHARS);
                 let quote = if clip::hides_enough(&reply[end..], QUOTE_CHARS) {
@@ -557,13 +557,17 @@ fn divider(label: String, color: Hsla) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{QuestionForm, Settled, SubmitState, settled};
-    use crate::model::{Question, QuestionAnswer, QuestionChoice};
+    use crate::model::{Question, QuestionAnswer, QuestionChoice, QuestionKind, QuestionStatus};
     use uuid::Uuid;
 
-    fn question(status: &str, multiple: bool, answer: Option<QuestionAnswer>) -> Question {
+    fn question(
+        status: QuestionStatus,
+        multiple: bool,
+        answer: Option<QuestionAnswer>,
+    ) -> Question {
         Question {
             id: Uuid::nil(),
-            kind: "choice".into(),
+            kind: QuestionKind::Choice,
             title: "Which format?".into(),
             action: None,
             context: None,
@@ -576,7 +580,7 @@ mod tests {
                 })
                 .collect(),
             multiple,
-            status: status.into(),
+            status,
             answer,
             settled_at: None,
             used: None,
@@ -585,7 +589,11 @@ mod tests {
 
     #[test]
     fn a_settled_card_says_whether_the_bot_resumed_and_with_what() {
-        let single = question("answered", false, Some(QuestionAnswer::Single("b".into())));
+        let single = question(
+            QuestionStatus::Answered,
+            false,
+            Some(QuestionAnswer::Single("b".into())),
+        );
         assert_eq!(
             settled(&single, None, None),
             Settled {
@@ -595,7 +603,7 @@ mod tests {
             }
         );
         let many = question(
-            "answered",
+            QuestionStatus::Answered,
             true,
             Some(QuestionAnswer::Multiple(vec!["a".into(), "c".into()])),
         );
@@ -603,7 +611,7 @@ mod tests {
             settled(&many, None, None).outcome,
             "You chose Plain text, Both."
         );
-        let skipped = question("skipped", false, None);
+        let skipped = question(QuestionStatus::Skipped, false, None);
         let own = settled(&skipped, None, Some("Markdown, for Notion "));
         assert!(own.resumed);
         assert_eq!(own.outcome, "You answered in chat: “Markdown, for Notion”");
@@ -623,14 +631,19 @@ mod tests {
         );
         assert!(!settled(&skipped, None, None).resumed);
         assert_eq!(
-            settled(&question("cancelled", false, None), None, None).marker,
+            settled(
+                &question(QuestionStatus::Cancelled, false, None),
+                None,
+                None
+            )
+            .marker,
             "Withdrawn"
         );
     }
 
     #[test]
     fn a_sent_answer_reads_as_sent_before_the_server_settles_it() {
-        let pending = question("pending", false, None);
+        let pending = question(QuestionStatus::Pending, false, None);
         let mut form = QuestionForm {
             answer: QuestionAnswer::Single("a".into()),
             state: SubmitState::Sending,

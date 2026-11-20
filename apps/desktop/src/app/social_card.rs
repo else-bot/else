@@ -3,10 +3,11 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use super::{Connection, ElseApp, RowKey};
+use crate::api::socials::SetupStatus;
 
 pub(super) struct SocialCard {
     view: Entity<crate::socials::SocialsView>,
-    status: String,
+    status: SetupStatus,
     _layout: Subscription,
 }
 
@@ -32,7 +33,7 @@ impl ElseApp {
             .iter()
             .flat_map(|c| c.turns_in_order())
             .flat_map(|t| &t.social_setups)
-            .filter(|s| s.is_pending() || s.status == "connected")
+            .filter(|s| s.is_pending() || s.status == SetupStatus::Connected)
             .cloned()
             .collect();
         view.social_forms.retain(|id, card| {
@@ -45,9 +46,10 @@ impl ElseApp {
         for setup in setups {
             if let Some(card) = view.social_forms.get_mut(&setup.id) {
                 if card.status != setup.status {
-                    card.status = setup.status.clone();
-                    if let Some(connection) =
-                        setup.connection_id.filter(|_| setup.status == "connected")
+                    card.status = setup.status;
+                    if let Some(connection) = setup
+                        .connection_id
+                        .filter(|_| setup.status == SetupStatus::Connected)
                     {
                         card.view.update(cx, |form, cx| {
                             form.show_receipt(connection, setup.provider, window, cx)
@@ -58,8 +60,9 @@ impl ElseApp {
                 let id = setup.id;
                 let client = self.client.clone();
                 let form = cx.new(|cx| {
-                    if let Some(connection) =
-                        setup.connection_id.filter(|_| setup.status == "connected")
+                    if let Some(connection) = setup
+                        .connection_id
+                        .filter(|_| setup.status == SetupStatus::Connected)
                     {
                         crate::socials::SocialsView::new_receipt(
                             client,
@@ -84,7 +87,7 @@ impl ElseApp {
                     id,
                     SocialCard {
                         view: form,
-                        status: setup.status.clone(),
+                        status: setup.status,
                         _layout: layout,
                     },
                 );
@@ -107,13 +110,17 @@ impl ElseApp {
         if let Some(card) = view.social_forms.get(&id) {
             return row.child(card.view.clone()).into_any_element();
         }
-        let text = match setup.status.as_str() {
-            "connected" => format!(
+        let text = match setup.status {
+            SetupStatus::Connected => format!(
                 "{} connected. Manage connections in Settings → Socials.",
                 setup.provider.label()
             ),
-            "cancelled" => format!("{} connection request cancelled.", setup.provider.label()),
-            _ => "Reconnect to the API to set up this connection.".into(),
+            SetupStatus::Cancelled => {
+                format!("{} connection request cancelled.", setup.provider.label())
+            }
+            SetupStatus::Pending | SetupStatus::Unknown => {
+                "Reconnect to the API to set up this connection.".into()
+            }
         };
         row.child(
             div()

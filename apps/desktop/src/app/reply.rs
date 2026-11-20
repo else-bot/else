@@ -1,4 +1,5 @@
 use super::attachments::DraftFile;
+use crate::model::ItemKind;
 use crate::model::ReactionKind;
 use gpui_kit::component::input::InputContent;
 use std::collections::HashMap;
@@ -12,11 +13,11 @@ pub(super) enum Author {
 }
 
 impl Author {
-    pub(super) fn of(kind: &str) -> Option<Self> {
+    pub(super) fn of(kind: ItemKind) -> Option<Self> {
         match kind {
-            "user" => Some(Author::Owner),
-            "assistant" => Some(Author::Bot),
-            _ => None,
+            ItemKind::User => Some(Author::Owner),
+            ItemKind::Assistant => Some(Author::Bot),
+            ItemKind::Status | ItemKind::Routine | ItemKind::Unknown => None,
         }
     }
 }

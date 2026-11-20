@@ -3,6 +3,7 @@
 //! history.
 
 use crate::controls::{Control as _, Scale, Tier, segment, segment_track};
+use crate::model::RuleAuthor;
 use std::collections::HashMap;
 
 use super::ElseApp;
@@ -901,7 +902,7 @@ impl ElseApp {
                     v.section
                 ),
             };
-            let by = if v.author == "owner" {
+            let by = if v.author == RuleAuthor::Owner {
                 "You"
             } else {
                 bot_name.as_str()

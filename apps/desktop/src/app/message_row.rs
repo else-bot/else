@@ -5,7 +5,7 @@ use super::row_text::RowText;
 use super::{ElseApp, RowKey};
 use crate::avatar::bot_avatar;
 use crate::controls::{Control as _, Scale, Tier};
-use crate::model::ReactionKind;
+use crate::model::{ItemKind, ReactionKind, TurnStatus};
 use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
@@ -238,7 +238,7 @@ impl ElseApp {
             return None;
         }
         let theme = cx.theme();
-        let active = matches!(turn.status.as_str(), "preparing" | "sending" | "running");
+        let active = turn.status.is_working();
         Some(
             h_flex()
                 .gap_1p5()
@@ -392,7 +392,7 @@ impl ElseApp {
                     return Some(self.render_rules_update(id, view.bot_id, update, footer, cx));
                 }
                 let text = view.texts.get(&key)?;
-                let user = item.kind == "user";
+                let user = item.kind == ItemKind::User;
                 let turn = conversation.turn(item.turn_id);
                 if item.reaction.is_some() {
                     return None;
@@ -445,7 +445,7 @@ impl ElseApp {
                 } else {
                     card
                 };
-                let card = match Author::of(&item.kind) {
+                let card = match Author::of(item.kind) {
                     Some(author) => {
                         let (owner, bot) = (cx.entity().downgrade(), view.bot_id);
                         card.context_menu(move |menu, window, cx| {
@@ -459,7 +459,7 @@ impl ElseApp {
                     Some(kind) => with_reaction(card, kind, cx),
                     None => card,
                 };
-                let card = match Author::of(&item.kind) {
+                let card = match Author::of(item.kind) {
                     Some(Author::Bot) => div()
                         .relative()
                         .group("message-bubble")
@@ -935,7 +935,7 @@ pub(super) fn model_remedy(
     bot: uuid::Uuid,
     cx: &Context<ElseApp>,
 ) -> Option<Button> {
-    (turn.status == "failed"
+    (turn.status == TurnStatus::Failed
         && turn
             .error
             .as_ref()
@@ -953,7 +953,7 @@ fn switch_model(id: String, bot: uuid::Uuid, cx: &Context<ElseApp>) -> Button {
 pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
     use crate::model::QuestionUse;
     let (label, error) = status_label(turn);
-    if !matches!(turn.status.as_str(), "failed" | "uncertain" | "interrupted") {
+    if !turn.status.is_unsuccessful() {
         return (label, error);
     }
     let used = |pick: fn(&QuestionUse) -> bool| {
@@ -997,16 +997,20 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
             c.minutes, c.count, c.max
         )
     });
-    match turn.status.as_str() {
-        "queued" if turn.taken_by_reply() => (String::new(), false),
-        "queued" | "preparing" | "sending" | "running" if continued.is_some() => {
+    match turn.status {
+        TurnStatus::Queued if turn.taken_by_reply() => (String::new(), false),
+        TurnStatus::Queued | TurnStatus::Preparing | TurnStatus::Sending | TurnStatus::Running
+            if continued.is_some() =>
+        {
             (continued.unwrap_or_default(), false)
         }
-        "queued" => ("Queued".into(), false),
-        "preparing" | "sending" | "running" => ("Working".into(), false),
-        "waiting" if turn.waits_on_job() => (waiting_label(turn), false),
-        "cancelling" => ("Stopping…".into(), false),
-        "waiting"
+        TurnStatus::Queued => ("Queued".into(), false),
+        TurnStatus::Preparing | TurnStatus::Sending | TurnStatus::Running => {
+            ("Working".into(), false)
+        }
+        TurnStatus::Waiting if turn.waits_on_job() => (waiting_label(turn), false),
+        TurnStatus::Cancelling => ("Stopping…".into(), false),
+        TurnStatus::Waiting
             if turn
                 .skill_installs
                 .iter()
@@ -1014,11 +1018,11 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
         {
             ("Waiting for your skill approval…".into(), false)
         }
-        "waiting" if turn.secret_requests.iter().any(|r| r.is_pending()) => (
+        TurnStatus::Waiting if turn.secret_requests.iter().any(|r| r.is_pending()) => (
             "Waiting for you to answer the secret request…".into(),
             false,
         ),
-        "waiting"
+        TurnStatus::Waiting
             if turn
                 .outgoing_drafts
                 .iter()
@@ -1026,7 +1030,7 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
         {
             ("Waiting for your approval…".into(), false)
         }
-        "waiting"
+        TurnStatus::Waiting
             if turn
                 .questions
                 .iter()
@@ -1034,14 +1038,14 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
         {
             ("Waiting for your approval…".into(), false)
         }
-        "waiting" if turn.questions.iter().any(|q| q.is_pending()) => {
+        TurnStatus::Waiting if turn.questions.iter().any(|q| q.is_pending()) => {
             ("Waiting for your answer…".into(), false)
         }
-        "waiting" if turn.social_setups.iter().any(|setup| setup.is_pending()) => {
+        TurnStatus::Waiting if turn.social_setups.iter().any(|setup| setup.is_pending()) => {
             ("Waiting for you to connect an account…".into(), false)
         }
-        "waiting" => (format!("{}…", waiting_label(turn)), false),
-        "interrupted" => (
+        TurnStatus::Waiting => (format!("{}…", waiting_label(turn)), false),
+        TurnStatus::Interrupted => (
             if turn.error.as_ref().is_some_and(|e| e.code == "cancelled") {
                 "Stopped before it ran".into()
             } else {
@@ -1049,9 +1053,9 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
             },
             false,
         ),
-        "failed" => (format!("Failed. {detail}"), true),
-        "uncertain" => (format!("Outcome unknown. {detail}"), true),
-        _ => (String::new(), false),
+        TurnStatus::Failed => (format!("Failed. {detail}"), true),
+        TurnStatus::Uncertain => (format!("Outcome unknown. {detail}"), true),
+        TurnStatus::Completed | TurnStatus::Unknown => (String::new(), false),
     }
 }
 

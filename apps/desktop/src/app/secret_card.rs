@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
-use crate::model::SecretRequest;
+use crate::model::{SecretRequest, SecretRequestStatus};
 
 pub(super) struct SecretForm {
     fields: Entity<CredentialFields>,
@@ -244,16 +244,18 @@ impl ElseApp {
         let row = v_flex().w_full();
         let form = view.secret_forms.get(&id);
         let (Some(form), true) = (form, request.is_pending()) else {
-            let text = match request.status.as_str() {
-                "stored" => format!(
+            let text = match request.status {
+                SecretRequestStatus::Stored => format!(
                     "Saved {} in the Vault. Every bot on this server can use it.",
                     request.name
                 ),
-                "cancelled" => format!(
+                SecretRequestStatus::Cancelled => format!(
                     "The request for {} was declined or withdrawn.",
                     request.name
                 ),
-                _ => format!("Sent {} to {bot_name}…", request.name),
+                SecretRequestStatus::Pending | SecretRequestStatus::Unknown => {
+                    format!("Sent {} to {bot_name}…", request.name)
+                }
             };
             return row.child(note(text)).into_any_element();
         };

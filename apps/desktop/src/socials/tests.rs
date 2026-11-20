@@ -14,6 +14,7 @@ fn a_bot_whose_messages_go_elsewhere_says_so_instead_of_its_raw_health() {
     assert!(conflicted.receiver_conflict());
     assert_eq!(conflicted.health_label(), "messages go elsewhere");
     assert_eq!(connection("connected").health_label(), "connected");
+    assert_eq!(connection("throttled").health_label(), "throttled");
 }
 
 #[test]

@@ -28,8 +28,8 @@ pub const MAX_CLIPBOARD_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ComputerState {
-    pub state: String,
-    pub desired_state: String,
+    pub state: RuntimeState,
+    pub desired_state: DesiredState,
     #[serde(default)]
     pub desktop_available: bool,
     #[serde(default)]
@@ -42,6 +42,33 @@ pub struct ComputerState {
     pub memory_mib: Option<u32>,
     #[serde(default)]
     pub default_memory_mib: Option<u32>,
+}
+
+crate::model::wire_state! {
+    /// What the runtime last observed of a bot's computer.
+    pub enum RuntimeState {
+        Absent = "absent",
+        Creating = "creating",
+        Starting = "starting",
+        Running = "running",
+        Pausing = "pausing",
+        Paused = "paused",
+        Resuming = "resuming",
+        Stopping = "stopping",
+        Stopped = "stopped",
+        Missing = "missing",
+        Error = "error",
+    }
+    _ => Unknown
+}
+
+crate::model::wire_state! {
+    /// Whether the owner let the computer start on demand or stopped it.
+    pub enum DesiredState {
+        Auto = "auto",
+        Stopped = "stopped",
+    }
+    _ => Unknown
 }
 
 impl ComputerState {

@@ -7,6 +7,8 @@ use super::*;
 use crate::app::clip;
 use crate::controls::{Scale, Tier};
 use crate::model::QuestionChoice;
+use crate::model::QuestionKind;
+use crate::model::QuestionStatus;
 use gpui_kit::component::radio::Radio;
 
 /// How long an approval choice lasts, as the scope list shows it.
@@ -50,10 +52,10 @@ fn scope(choice: &QuestionChoice, question: &Question, bot: &str) -> (String, St
             ),
             format!(
                 "For {} actions with this tool in {bot}'s chats, routine runs and tasks.",
-                question.kind
+                question.kind.as_str()
             ),
         ),
-        APPROVE_ROUTINE if question.kind == "external" => (
+        APPROVE_ROUTINE if question.kind == QuestionKind::External => (
             "Always for this routine".into(),
             "Allows external computer and host actions for its saved task. Changing the task clears this.".into(),
         ),
@@ -130,7 +132,7 @@ impl ElseApp {
                 .child(text)
         };
         if !question.is_pending() {
-            let approved = question.status == "answered"
+            let approved = question.status == QuestionStatus::Answered
                 && question
                     .answer
                     .as_ref()
@@ -176,7 +178,7 @@ impl ElseApp {
         }
         let locked =
             submit.is_some_and(QuestionForm::locks) || self.connection != Connection::Connected;
-        let destructive = question.kind == "destructive";
+        let destructive = question.kind == QuestionKind::Destructive;
         let attachments = question.mail_attachments();
         let icon = if destructive {
             IconName::TriangleAlert

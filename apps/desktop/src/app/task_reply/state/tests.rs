@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::ItemKind;
 use crate::model::{Frame, Snapshot};
 use serde_json::{Value, json};
 
@@ -297,7 +298,7 @@ fn interleaved_tasks_and_handoffs_keep_their_own_replies() {
     assert_eq!(replies[&id(10)].latest, Some(id(5)));
     assert_eq!(replies[&id(11)].latest, Some(id(3)));
     assert_eq!(replies[&id(11)].state, ReplyState::Waiting);
-    assert_eq!(c.item(id(4)).unwrap().kind, "status");
+    assert_eq!(c.item(id(4)).unwrap().kind, ItemKind::Status);
 }
 
 #[test]

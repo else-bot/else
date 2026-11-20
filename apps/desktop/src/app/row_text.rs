@@ -4,6 +4,7 @@ use super::link_target::LinkTarget;
 use super::reply::{Author, Passage, QuotedReply};
 use super::{ElseApp, RowKey};
 use crate::attachments::{Attachment, MessagePart, byte_size, file_id, input_content};
+use crate::model::ItemKind;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::FocusableExt;
 use gpui_kit::base::text::{
@@ -53,9 +54,9 @@ impl RowFormat {
     }
 
     pub(super) fn for_item(item: &crate::model::Item) -> Self {
-        if item.kind == "assistant" || item.bot_reply.is_some() {
+        if item.kind == ItemKind::Assistant || item.bot_reply.is_some() {
             Self::Markdown
-        } else if item.kind == "user" && item.bot_task.is_none() {
+        } else if item.kind == ItemKind::User && item.bot_task.is_none() {
             Self::for_owner(&item.text, &item.parts)
         } else {
             Self::Plain

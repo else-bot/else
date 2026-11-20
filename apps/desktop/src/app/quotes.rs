@@ -106,7 +106,7 @@ impl ElseApp {
             }
         }
         let (item, (text, highlight)) = found?;
-        let author = Author::of(&view.conversation.as_ref()?.item(item)?.kind)?;
+        let author = Author::of(view.conversation.as_ref()?.item(item)?.kind)?;
         Some(QuotePrompt {
             bot,
             source: MessageReference {

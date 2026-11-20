@@ -13,7 +13,7 @@ use gpui_kit::component::{
 use gpui_kit::*;
 use uuid::Uuid;
 
-use crate::api::{Client, EmailAccount, EmailPreset};
+use crate::api::{AccountHealth, AccountState, Client, EmailAccount, EmailPreset};
 use form::Form;
 
 struct Introduction {
@@ -413,13 +413,13 @@ impl Render for EmailSettings {
                 .accounts
                 .iter()
                 .map(|account| {
-                    let status = if account.state == "paused" {
+                    let status = if account.state == AccountState::Paused {
                         "Paused"
                     } else {
-                        match account.health.as_str() {
-                            "connected" => "Connected",
-                            "unknown" => "Checking connection…",
-                            _ => "Check credentials and server settings",
+                        match account.health {
+                            AccountHealth::Connected => "Connected",
+                            AccountHealth::Unchecked => "Checking connection…",
+                            AccountHealth::Failing => "Check credentials and server settings",
                         }
                     };
                     let id = account.id;

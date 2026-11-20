@@ -9,6 +9,7 @@
 
 use std::rc::Rc;
 
+use crate::model::Phase;
 use gpui_kit::base::{Switch as BaseSwitch, SwitchThumb, spring};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
@@ -427,10 +428,10 @@ pub enum Turn {
 /// The composer's turn from the bot's activity `phase`. A turn parked on
 /// jobs, tasks or the owner runs no attempt: the owner sends to steer it,
 /// and each wait has its own stop.
-pub fn composer_turn(phase: &str, stopping: bool, parked: bool) -> Turn {
-    if stopping || phase == "cancelling" {
+pub fn composer_turn(phase: Phase, stopping: bool, parked: bool) -> Turn {
+    if stopping || phase == Phase::Cancelling {
         Turn::Stopping
-    } else if matches!(phase, "working" | "queued") && !parked {
+    } else if matches!(phase, Phase::Working | Phase::Queued) && !parked {
         Turn::Running
     } else {
         Turn::Idle
@@ -526,19 +527,22 @@ mod tests {
 
     #[test]
     fn a_turn_parked_on_waits_offers_send_not_stop() {
-        assert_eq!(composer_turn("working", false, true), Turn::Idle);
+        assert_eq!(composer_turn(Phase::Working, false, true), Turn::Idle);
         assert_eq!(
-            composer_actions(composer_turn("working", false, true), true),
+            composer_actions(composer_turn(Phase::Working, false, true), true),
             ComposerActions {
                 send: Some(true),
                 stop: None
             }
         );
-        assert_eq!(composer_turn("working", false, false), Turn::Running);
-        assert_eq!(composer_turn("queued", false, false), Turn::Running);
-        assert_eq!(composer_turn("idle", false, false), Turn::Idle);
-        assert_eq!(composer_turn("working", true, true), Turn::Stopping);
-        assert_eq!(composer_turn("cancelling", false, false), Turn::Stopping);
+        assert_eq!(composer_turn(Phase::Working, false, false), Turn::Running);
+        assert_eq!(composer_turn(Phase::Queued, false, false), Turn::Running);
+        assert_eq!(composer_turn(Phase::Idle, false, false), Turn::Idle);
+        assert_eq!(composer_turn(Phase::Working, true, true), Turn::Stopping);
+        assert_eq!(
+            composer_turn(Phase::Cancelling, false, false),
+            Turn::Stopping
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! merged into the next request instead of queued: positions only move
 //! forward, and of two explicit marks the later one wins.
 
+use crate::model::Phase;
 use std::collections::HashMap;
 
 use uuid::Uuid;
@@ -438,7 +439,7 @@ impl Inbox {
 /// continuing after its delegated tasks is queued, so it is not idle. A
 /// takeover request leaves its turn running, so its reply waits for idle.
 fn handed_back(bot: &Bot) -> bool {
-    bot.activity.as_ref().is_none_or(|a| a.phase == "idle")
+    bot.activity.as_ref().is_none_or(|a| a.phase == Phase::Idle)
         || matches!(
             bot.sidebar_status,
             Some(
@@ -547,11 +548,11 @@ mod tests {
         assert!(!inbox.observe(&[waiting]), "a repeated list is no news");
     }
 
-    fn busy(mut bot: Bot, phase: &str) -> Bot {
+    fn busy(mut bot: Bot, phase: Phase) -> Bot {
         bot.activity = Some(crate::api::Activity {
-            phase: phase.into(),
-            active_turn_id: (phase == "working").then(|| turn(1)),
-            queued_count: u32::from(phase == "queued"),
+            phase,
+            active_turn_id: (phase == Phase::Working).then(|| turn(1)),
+            queued_count: u32::from(phase == Phase::Queued),
             waiting_on: None,
         });
         bot
@@ -571,15 +572,15 @@ mod tests {
     #[test]
     fn progress_updates_wait_for_the_bot_to_finish() {
         let mut inbox = Inbox::default();
-        inbox.observe(&[busy(bot(1, None, at(0, 0)), "working")]);
+        inbox.observe(&[busy(bot(1, None, at(0, 0)), Phase::Working)]);
         for (position, phase) in [
-            (at(2, 7), "working"),
-            (at(3, 12), "working"),
-            (at(3, 12), "queued"),
+            (at(2, 7), Phase::Working),
+            (at(3, 12), Phase::Working),
+            (at(3, 12), Phase::Queued),
         ] {
             let update = busy(bot(1, Some((1, position)), at(0, 0)), phase);
-            assert!(!inbox.observe(std::slice::from_ref(&update)), "{phase}");
-            assert!(inbox.alerts(&[update], nobody).is_empty(), "{phase}");
+            assert!(!inbox.observe(std::slice::from_ref(&update)), "{phase:?}");
+            assert!(inbox.alerts(&[update], nobody).is_empty(), "{phase:?}");
         }
         let done = finished(
             bot(1, Some((1, at(3, 12))), at(0, 0)),
@@ -603,15 +604,15 @@ mod tests {
     #[test]
     fn a_question_is_announced_and_so_is_the_answer_it_led_to() {
         let mut inbox = Inbox::default();
-        inbox.observe(&[busy(bot(1, None, at(0, 0)), "working")]);
-        let mut asking = busy(bot(1, Some((1, at(2, 7))), at(0, 0)), "working");
+        inbox.observe(&[busy(bot(1, None, at(0, 0)), Phase::Working)]);
+        let mut asking = busy(bot(1, Some((1, at(2, 7))), at(0, 0)), Phase::Working);
         asking.sidebar_status = Some(crate::api::SidebarStatus::WaitingForAnswer {
             preview: "Which one?".into(),
             since: None,
         });
         assert!(inbox.observe(std::slice::from_ref(&asking)));
         assert_eq!(inbox.alerts(&[asking], nobody).len(), 1);
-        let resumed = busy(bot(1, Some((1, at(4, 9))), at(0, 0)), "working");
+        let resumed = busy(bot(1, Some((1, at(4, 9))), at(0, 0)), Phase::Working);
         assert!(!inbox.observe(std::slice::from_ref(&resumed)));
         let done = bot(1, Some((1, at(4, 9))), at(0, 0));
         assert!(
@@ -624,8 +625,8 @@ mod tests {
     #[test]
     fn a_pending_owner_notice_is_announced_once_and_keeps_progress_replies_quiet() {
         let mut inbox = Inbox::default();
-        inbox.observe(&[busy(bot(1, None, at(0, 0)), "working")]);
-        let mut working = busy(bot(1, Some((1, at(2, 7))), at(0, 0)), "working");
+        inbox.observe(&[busy(bot(1, None, at(0, 0)), Phase::Working)]);
+        let mut working = busy(bot(1, Some((1, at(2, 7))), at(0, 0)), Phase::Working);
         working.sidebar_status = Some(SidebarStatus::NeedsYou {
             preview: "Choose another bot".into(),
             since: None,
@@ -642,7 +643,7 @@ mod tests {
             }],
             "the ask, not the progress reply"
         );
-        let mut later = busy(bot(1, Some((1, at(3, 7))), at(0, 0)), "working");
+        let mut later = busy(bot(1, Some((1, at(3, 7))), at(0, 0)), Phase::Working);
         later.sidebar_status = working.sidebar_status.clone();
         inbox.observe(std::slice::from_ref(&later));
         assert!(
@@ -775,7 +776,7 @@ mod tests {
     #[test]
     fn a_turn_running_at_startup_is_announced_when_it_finishes() {
         let mut inbox = Inbox::default();
-        assert!(!inbox.observe(&[busy(bot(1, Some((1, at(2, 7))), at(0, 0)), "working")]));
+        assert!(!inbox.observe(&[busy(bot(1, Some((1, at(2, 7))), at(0, 0)), Phase::Working)]));
         let done = bot(1, Some((1, at(2, 7))), at(0, 0));
         assert!(inbox.observe(std::slice::from_ref(&done)));
         assert_eq!(inbox.alerts(&[done], nobody).len(), 1);
@@ -847,14 +848,14 @@ mod tests {
     #[test]
     fn a_muted_bot_waiting_on_the_owner_is_announced_until_the_request_closes() {
         let mut inbox = Inbox::default();
-        inbox.observe(&[busy(bot(1, None, at(0, 0)), "working")]);
+        inbox.observe(&[busy(bot(1, None, at(0, 0)), Phase::Working)]);
         let takeover = || {
             Some(SidebarStatus::NeedsTakeover {
                 preview: "Inspect the open X conversation.".into(),
                 since: None,
             })
         };
-        let mut streaming = busy(bot(1, Some((1, at(2, 4))), at(0, 0)), "working");
+        let mut streaming = busy(bot(1, Some((1, at(2, 4))), at(0, 0)), Phase::Working);
         streaming.muted = true;
         streaming.sidebar_status = takeover();
         assert!(

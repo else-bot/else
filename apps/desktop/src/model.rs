@@ -17,7 +17,13 @@ use crate::api::socials::Trigger;
 use crate::api::{Activity, Bot};
 
 mod outgoing;
+mod status;
 pub use outgoing::{DraftAttachment, DraftEdit, DraftFile, DraftStatus, OutgoingDraft};
+pub(crate) use status::wire_state;
+pub use status::{
+    ItemKind, PausedReason, Phase, QuestionKind, QuestionStatus, RuleAuthor, RunStatus,
+    SecretRequestStatus, SkipReason, TurnStatus,
+};
 
 /// One event of a `bot:<id>` channel: its cursor, kind, and JSON data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +39,7 @@ pub struct Item {
     pub seq: i64,
     pub turn_id: Uuid,
     pub request_id: Option<Uuid>,
-    pub kind: String,
+    pub kind: ItemKind,
     pub text: String,
     #[serde(default)]
     pub parts: Vec<crate::attachments::MessagePart>,
@@ -117,8 +123,7 @@ pub struct RulesVersion {
     pub section: String,
     pub change: RuleChange,
     pub owner_words: String,
-    /// `bot` or `owner`.
-    pub author: String,
+    pub author: RuleAuthor,
     pub restored_from: Option<i64>,
     pub diff: Vec<DiffLine>,
     pub created_at: DateTime<Utc>,
@@ -280,13 +285,12 @@ pub struct SecretRequest {
     pub name: String,
     pub reason: String,
     pub env: Vec<String>,
-    /// `pending`, `stored`, or `cancelled`.
-    pub status: String,
+    pub status: SecretRequestStatus,
 }
 
 impl SecretRequest {
     pub fn is_pending(&self) -> bool {
-        self.status == "pending"
+        self.status == SecretRequestStatus::Pending
     }
 }
 
@@ -364,8 +368,7 @@ impl QuestionAnswer {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Question {
     pub id: Uuid,
-    /// `choice`, `destructive`, or `external`.
-    pub kind: String,
+    pub kind: QuestionKind,
     pub title: String,
     #[serde(default)]
     pub action: Option<QuestionAction>,
@@ -374,8 +377,7 @@ pub struct Question {
     pub choices: Vec<QuestionChoice>,
     #[serde(default)]
     pub multiple: bool,
-    /// `pending`, `answered`, `skipped`, or `cancelled`.
-    pub status: String,
+    pub status: QuestionStatus,
     /// The selected option id or ids once answered.
     #[serde(default)]
     pub answer: Option<QuestionAnswer>,
@@ -524,12 +526,12 @@ impl Question {
     }
 
     pub fn is_pending(&self) -> bool {
-        self.status == "pending"
+        self.status == QuestionStatus::Pending
     }
 
     /// An approval card, as opposed to a plain choice.
     pub fn is_approval(&self) -> bool {
-        self.kind != "choice"
+        self.kind != QuestionKind::Choice
     }
 
     pub fn chosen(&self) -> Option<&QuestionChoice> {
@@ -590,7 +592,7 @@ pub struct Turn {
     #[serde(default)]
     pub limit_continued: Option<LimitContinued>,
     pub provider_id: String,
-    pub status: String,
+    pub status: TurnStatus,
     pub error: Option<TurnError>,
     pub effect_uncertain: bool,
     #[serde(default)]
@@ -809,7 +811,7 @@ impl Turn {
 
     /// Parked only on tasks it handed to other bots.
     pub fn waits_on_bots(&self) -> bool {
-        self.status == "waiting"
+        self.status == TurnStatus::Waiting
             && !self.waits_on_job()
             && !self.waits_on_owner()
             && !self.open_delegations().is_empty()
@@ -893,10 +895,8 @@ impl RoutineRun {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct LastRun {
     pub due_at: DateTime<Utc>,
-    /// `checking`, `queued`, `running`, `skipped`, `no_news`, or the turn's
-    /// terminal status.
-    pub status: String,
-    pub skip_reason: Option<String>,
+    pub status: RunStatus,
+    pub skip_reason: Option<SkipReason>,
     pub error: Option<TurnError>,
 }
 
@@ -935,9 +935,9 @@ pub struct Routine {
     /// Consecutive failed runs the owner has not dismissed.
     #[serde(default)]
     pub failed_runs: i64,
-    /// Why else.bot switched the routine off: `needs_action` or `repeated`.
+    /// Why else.bot switched the routine off.
     #[serde(default)]
-    pub paused_reason: Option<String>,
+    pub paused_reason: Option<PausedReason>,
     /// The last run is the owner's retry of the paused routine, not yet
     /// settled.
     #[serde(default)]
@@ -1375,7 +1375,7 @@ impl Conversation {
         self.items
             .values()
             .rev()
-            .find(|item| item.kind == "assistant" && !self.no_news(item.turn_id))
+            .find(|item| item.kind == ItemKind::Assistant && !self.no_news(item.turn_id))
     }
 
     pub fn item(&self, id: Uuid) -> Option<&Item> {
@@ -1398,11 +1398,7 @@ impl Conversation {
             .values()
             .max_by_key(|turn| turn.turn_no)
             .filter(|turn| {
-                (self.reaction_in(turn.id).is_some()
-                    && matches!(
-                        turn.status.as_str(),
-                        "queued" | "preparing" | "sending" | "running" | "cancelling" | "waiting"
-                    ))
+                (self.reaction_in(turn.id).is_some() && turn.status.is_live())
                     || !self.items().any(|item| item.turn_id == turn.id)
             })
     }
@@ -1513,12 +1509,7 @@ impl Conversation {
         let mut waits: Vec<Wait<'_>> = self
             .turns
             .values()
-            .filter(|turn| {
-                matches!(
-                    turn.status.as_str(),
-                    "queued" | "waiting" | "preparing" | "sending" | "running" | "cancelling"
-                )
-            })
+            .filter(|turn| turn.status.is_live())
             .flat_map(|turn| {
                 let tasks = turn.delegations.iter().filter(|d| {
                     (!d.status.settled() || !d.seen)
@@ -1588,7 +1579,7 @@ impl Conversation {
     pub fn skipping_reply(&self, question: &Question) -> Option<&Item> {
         let settled = question
             .settled_at
-            .filter(|_| question.status == "skipped")?;
+            .filter(|_| question.status == QuestionStatus::Skipped)?;
         let turn = self
             .turns
             .values()
@@ -1602,7 +1593,7 @@ impl Conversation {
         self.items
             .range(after + 1..)
             .map(|(_, item)| item)
-            .filter(|item| item.kind == "user")
+            .filter(|item| item.kind == ItemKind::User)
             .filter_map(|item| Some((item, (item.created_at? - settled).abs())))
             .filter(|(_, gap)| *gap <= chrono::TimeDelta::seconds(2))
             .min_by_key(|(_, gap)| *gap)
@@ -1705,7 +1696,7 @@ impl Conversation {
         }
         let replies: Vec<_> = self
             .items()
-            .filter(|item| item.turn_id == task.turn_id && item.kind == "assistant")
+            .filter(|item| item.turn_id == task.turn_id && item.kind == ItemKind::Assistant)
             .collect();
         let last = replies.len().saturating_sub(1);
         replies
@@ -1729,7 +1720,7 @@ impl Conversation {
     }
 
     pub fn is_feedback_acknowledgement(&self, item: &Item) -> bool {
-        item.kind == "assistant"
+        item.kind == ItemKind::Assistant
             && self.reaction_in(item.turn_id).is_some()
             && item
                 .text
@@ -2036,15 +2027,53 @@ mod tests {
     }
 
     #[test]
+    fn states_a_newer_server_adds_still_load() {
+        let mut page = snapshot(1, vec![item(1, 1, "summary", "Digest")], None);
+        page.turns = vec![
+            serde_json::from_value(json!({
+                "id": Uuid::from_u128(901), "request_id": Uuid::from_u128(501), "turn_no": 1,
+                "provider_id": "codex", "status": "rewinding", "error": null,
+                "effect_uncertain": false,
+                "computer_job_waits": [{ "id": Uuid::from_u128(902), "job_id": Uuid::from_u128(903) }]
+            }))
+            .unwrap(),
+        ];
+        let c = Conversation::from_snapshot(page).unwrap();
+        assert_eq!(c.item(Uuid::from_u128(1)).unwrap().kind, ItemKind::Unknown);
+        assert!(c.latest_reply().is_none(), "an unknown item is not a reply");
+        assert_eq!(
+            c.turn(Uuid::from_u128(901)).unwrap().status,
+            TurnStatus::Unknown
+        );
+        assert!(c.waiting_on().is_empty(), "an unknown turn is not live");
+    }
+
+    #[test]
+    fn a_state_that_is_not_a_string_is_malformed() {
+        let mut c = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
+        let turn = json!({"id": Uuid::from_u128(901), "request_id": Uuid::from_u128(501), "turn_no": 1,
+            "provider_id": "codex", "status": {"running": null}, "error": null, "effect_uncertain": false});
+        assert!(matches!(
+            c.apply(&frame(2, "turn.updated", json!({"turn": turn}))),
+            Err(Reset::Malformed)
+        ));
+        assert!(c.turn(Uuid::from_u128(901)).is_none());
+    }
+
+    #[test]
     fn hidden_turn_status_is_available_until_its_first_visible_item() {
         let mut c = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
         assert!(c.latest_unshown_turn().is_none());
-        for (seq, status) in [(2, "running"), (3, "failed"), (4, "interrupted")] {
+        for (seq, status, expected) in [
+            (2, "running", TurnStatus::Running),
+            (3, "failed", TurnStatus::Failed),
+            (4, "interrupted", TurnStatus::Interrupted),
+        ] {
             let turn = json!({"id": Uuid::from_u128(901), "request_id": Uuid::from_u128(501), "turn_no": 1,
                 "provider_id": "codex", "status": status, "error": null, "effect_uncertain": false});
             c.apply(&frame(seq, "turn.updated", json!({"turn":turn})))
                 .unwrap();
-            assert_eq!(c.latest_unshown_turn().unwrap().status, status);
+            assert_eq!(c.latest_unshown_turn().unwrap().status, expected);
         }
         c.apply(&frame(
             5,
@@ -2109,7 +2138,12 @@ mod tests {
         let feedback = reaction(2, 2, 1, "thumbs_up");
         let turn_id = feedback["turn_id"].clone();
         let mut page = snapshot(1, vec![feedback], None);
-        for status in ["queued", "running", "waiting", "cancelling"] {
+        for (status, expected) in [
+            ("queued", TurnStatus::Queued),
+            ("running", TurnStatus::Running),
+            ("waiting", TurnStatus::Waiting),
+            ("cancelling", TurnStatus::Cancelling),
+        ] {
             page.turns = vec![
                 serde_json::from_value(json!({
                     "id": turn_id, "request_id": Uuid::new_v4(), "turn_no": 2,
@@ -2119,7 +2153,7 @@ mod tests {
                 .unwrap(),
             ];
             let c = Conversation::from_snapshot(page.clone()).unwrap();
-            assert_eq!(c.latest_unshown_turn().unwrap().status, status);
+            assert_eq!(c.latest_unshown_turn().unwrap().status, expected);
         }
     }
 
@@ -2382,7 +2416,7 @@ mod tests {
         ))
         .unwrap();
         let last = c.routines()[0].last_run.as_ref().unwrap();
-        assert_eq!(last.status, "failed");
+        assert_eq!(last.status, RunStatus::Failed);
         assert_eq!(last.error.as_ref().unwrap().code, "provider_refused");
 
         c.apply(&bot_updated(3, None)).unwrap();
@@ -2692,7 +2726,10 @@ mod tests {
         assert_eq!(c.secret_requests().len(), 1);
         c.apply(&frame(3, "turn.updated", turn("queued", "stored")))
             .unwrap();
-        assert_eq!(c.secret_request(request).unwrap().status, "stored");
+        assert_eq!(
+            c.secret_request(request).unwrap().status,
+            SecretRequestStatus::Stored
+        );
         let plain = json!({ "turn": {
             "id": Uuid::from_u128(10), "request_id": Uuid::from_u128(11), "turn_no": 2,
             "provider_id": "synthetic", "status": "queued", "error": null,
@@ -2832,7 +2869,10 @@ mod tests {
             turn("interrupted", "skipped", None),
         ))
         .unwrap();
-        assert_eq!(c.question(question).unwrap().status, "skipped");
+        assert_eq!(
+            c.question(question).unwrap().status,
+            QuestionStatus::Skipped
+        );
         assert_eq!(c.question(question).unwrap().chosen(), None);
     }
 

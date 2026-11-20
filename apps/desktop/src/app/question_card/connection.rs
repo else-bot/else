@@ -1,6 +1,7 @@
 use super::*;
 use crate::api::EmailProvider;
 use crate::controls::{Scale, Tier, text_field};
+use crate::model::QuestionStatus;
 use flow::{Consent, Flow, Resolution};
 use gpui_kit::component::input::{Input, InputState};
 
@@ -355,7 +356,7 @@ impl ElseApp {
         };
         let account = Account::of(question, &theme);
         if !question.is_pending() {
-            let connected = question.status == "answered"
+            let connected = question.status == QuestionStatus::Answered
                 && question.answer.as_ref().and_then(QuestionAnswer::single) == Some(APPROVE);
             let (title, outcome) = if connected {
                 match &account.address {
@@ -368,7 +369,7 @@ impl ElseApp {
                         "Connected. Every bot can use it when you ask.".to_owned(),
                     ),
                 }
-            } else if question.status == "skipped" {
+            } else if question.status == QuestionStatus::Skipped {
                 (
                     question.title.clone(),
                     "Skipped: you sent a new message instead.".to_owned(),

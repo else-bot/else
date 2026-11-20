@@ -42,6 +42,7 @@ mod visuals;
 mod waiting_tray;
 mod warm;
 
+use crate::model::Phase;
 use categories::CategoryFormHolder;
 use conversation::{ConversationView, RowKey};
 use create_bot::CreateFormHolder;
@@ -668,7 +669,7 @@ impl ElseApp {
         self.stopping.retain(|id| {
             self.bots
                 .iter()
-                .any(|b| b.id == *id && b.activity.as_ref().is_some_and(|a| a.phase != "idle"))
+                .any(|b| b.id == *id && b.activity.as_ref().is_some_and(|a| a.phase != Phase::Idle))
         });
         self.observe_replies(window, cx);
         self.reconcile_selection(window, cx);
