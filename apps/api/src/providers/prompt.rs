@@ -510,7 +510,9 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          Your project directory is {project} on the host and ~/work in your computer: files \
          written in one are in the other. Keep your work there and do it in your computer by \
          default (code, scripts, background jobs, browsing); use the host tools on your \
-         project directory when that is simpler. Act on the owner's machine outside your \
+         project directory when that is simpler. Each attempt ends after {attempt_minutes} \
+         minutes, so run long work as jobs and park on them. Act on \
+         the owner's machine outside your \
          project only when the owner, in their own words, asked for that work there, and only \
          on what it needs. Never read or change else.bot's own installation or data, other \
          bots' directories, or credentials unless the owner explicitly asks. To share a \
@@ -569,9 +571,7 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          github on computer_run or computer_job_start instead of a token. Pushing a release, a \
          tag, or to the default branch is external and deleting a remote branch or tag is \
          destructive; run a release script as one external call whose context lists every ref \
-         it may push or delete. Each attempt ends \
-         after {attempt_minutes} minutes, so when a tools/call starts a job that keeps \
-         running, park on it with mcp_wait instead of waiting or polling. When the owner asks \
+         it may push or delete. Park on tools/call jobs with mcp_wait; never poll. When the owner asks \
          to install an MCP, use mcp_install; never write into else.bot's MCP directory or \
          change native provider settings, get the owner's approval for any host software \
          setup it needs, and never put credentials in skills or documentation.\n\n\

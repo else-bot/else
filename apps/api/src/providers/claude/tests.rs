@@ -79,6 +79,7 @@ fn a_turn_is_accepted_by_its_echo_and_streams_text() {
             success: true,
             message: "Hi\n\nagain".into(),
             num_turns: None,
+            api_error: false,
         })])
     );
 }
@@ -525,6 +526,7 @@ fn info(success: bool, num_turns: Option<i64>) -> ResultInfo {
         success,
         message: "m".into(),
         num_turns,
+        api_error: false,
     }
 }
 
@@ -614,6 +616,25 @@ fn a_steered_message_is_its_own_line_and_its_echo_names_its_turn() {
 }
 
 #[test]
+fn a_notice_is_awaited_like_a_steer_and_its_echo_reports_nothing() {
+    let mut t = tracker();
+    let sent = t.notice_input("[else.bot] 5 minutes are left.").unwrap();
+    assert_eq!(sent["type"], json!("user"));
+    assert!(
+        !t.continues(&info(true, Some(1))),
+        "nothing owed before it is written"
+    );
+    t.notice_sent(&sent);
+    assert!(
+        t.continues(&info(true, Some(1))),
+        "a result before the echo"
+    );
+    let echo = json!({"type":"user","uuid":sent["uuid"],"isReplay":true});
+    assert!(t.on(&echo).unwrap().is_empty(), "not an owner message");
+    assert!(!t.continues(&info(true, Some(1))));
+}
+
+#[test]
 fn an_api_error_fails_the_turn_with_the_clis_message() {
     let mut t = tracker();
     t.on(&init(claude_home::tool_names(), connected())).unwrap();
@@ -632,12 +653,15 @@ fn an_api_error_fails_the_turn_with_the_clis_message() {
     let Some(Event::Finished(result)) = events.last() else {
         panic!("the result finishes the turn");
     };
+    let failed = TurnOutcome::Failed {
+        code: "provider_failed".into(),
+        message: failure.into(),
+    };
+    assert_eq!(t.outcome(result.clone(), None, true), failed);
     assert_eq!(
-        t.outcome(result.clone(), None, true),
-        TurnOutcome::Failed {
-            code: "provider_failed".into(),
-            message: failure.into(),
-        }
+        t.outcome(result.clone(), Some(StopCause::Deadline), true),
+        failed,
+        "an API error as the deadline fires is not the interruption"
     );
     let model_output = json!({"type":"assistant","message":{"model":"<synthetic>","content":[]}});
     assert_eq!(
@@ -729,6 +753,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         computer_control: None,
         ran_actions: Vec::new(),
         earlier_replies: Vec::new(),
+        limit_continuation: None,
         skills: None,
         mcps: None,
         handoff: None,

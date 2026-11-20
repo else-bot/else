@@ -41,6 +41,8 @@ struct SinkState {
     delivered_socials: Vec<Uuid>,
     delivered_waits: Vec<Uuid>,
     delivered_job_waits: Vec<Uuid>,
+    /// The attempt tells the provider about the limit cut before it.
+    delivers_cut: bool,
     /// A delegated task: its text updates the delegating turn's progress.
     delegated: bool,
     progress_at: Option<std::time::Instant>,
@@ -85,6 +87,7 @@ impl SqliteSink {
                 delivered_socials: input.social_setups.iter().map(|s| s.id).collect(),
                 delivered_waits: input.mcp_waits.iter().map(|w| w.id).collect(),
                 delivered_job_waits: input.computer_job_waits.iter().map(|w| w.id).collect(),
+                delivers_cut: input.limit_continuation.is_some(),
                 delegated: input.delegation.delegated_task(),
                 folded_steers: input
                     .steered
@@ -467,10 +470,29 @@ impl SinkState {
                 || waits_unseen + tasks_unseen > 0);
         let owner_unseen = if kept { 0 } else { owner_unseen };
         let unseen = tasks_unseen + waits_unseen + owner_unseen;
-        let (status, code, message) = if kept {
+        // An attempt the limit cut continues in a new one, unless a cap is
+        // reached. The owner's stop wins: the cut is the interruption it
+        // asked for.
+        let deadline = matches!(outcome, TurnOutcome::Failed { code, .. }
+            if code == crate::providers::cli::attempt::DEADLINE_CODE);
+        let cut = if deadline && current != TurnStatus::Cancelling {
+            super::limit_cuts::cut(&mut tx, self.turn_id, self.bot_id, i64::from(self.attempt))
+                .await?
+        } else {
+            None
+        };
+        let stopped = deadline && current == TurnStatus::Cancelling;
+        let continued = cut == Some(super::limit_cuts::Cut::Continued);
+        let capped = match cut {
+            Some(super::limit_cuts::Cut::Capped { continued }) => {
+                Some(crate::providers::cli::attempt::limit_message(continued))
+            }
+            _ => None,
+        };
+        let (status, code, message) = if kept || continued || stopped {
             (TurnStatus::Interrupted, None, None)
         } else {
-            (status, code, message)
+            (status, code, capped.as_deref().or(message))
         };
         let parks = (kept || current != TurnStatus::Cancelling)
             && matches!(status, TurnStatus::Completed | TurnStatus::Interrupted);
@@ -485,7 +507,7 @@ impl SinkState {
             TurnStatus::Queued
         } else if parks && pending > 0 {
             TurnStatus::Waiting
-        } else if parks && unseen > 0 {
+        } else if parks && (unseen > 0 || continued) {
             TurnStatus::Queued
         } else {
             if pending > 0 {
@@ -594,6 +616,7 @@ impl SinkState {
                     || !self.delivered_socials.is_empty()
                     || !self.delivered_waits.is_empty()
                     || !self.delivered_job_waits.is_empty()
+                    || self.delivers_cut
                     || !self.delivered_skills.is_empty()
                     || !self.delivered_handoffs.is_empty()
                 {
@@ -642,6 +665,14 @@ impl SinkState {
                             &self.delivered_job_waits,
                         )
                         .await?;
+                        if self.delivers_cut {
+                            crate::db::limit_cuts::mark_delivered(
+                                &mut tx,
+                                self.turn_id,
+                                self.attempt,
+                            )
+                            .await?;
+                        }
                         if !self.delivered.is_empty() {
                             crate::db::events::turn_changed(&mut tx, self.bot_id, self.turn_id)
                                 .await?;
@@ -681,6 +712,14 @@ impl SinkState {
                     self.fenced = false;
                     let accepted = async {
                         let mut conn = self.pool.acquire().await?;
+                        if self.delivers_cut {
+                            crate::db::limit_cuts::mark_delivered(
+                                &mut conn,
+                                self.turn_id,
+                                self.attempt,
+                            )
+                            .await?;
+                        }
                         crate::db::handoffs::transition(
                             &mut conn,
                             self.turn_id,

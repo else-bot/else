@@ -13,6 +13,7 @@ mod always_allow;
 mod assistant_backup;
 mod assistant_images;
 mod attachments;
+mod attempt_limit;
 mod backup_settings;
 mod bot_councils;
 mod bot_deletion;

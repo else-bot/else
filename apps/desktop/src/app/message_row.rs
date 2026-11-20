@@ -988,8 +988,17 @@ fn status_label(turn: &crate::model::Turn) -> (String, bool) {
         .as_ref()
         .and_then(|e| e.message.clone())
         .unwrap_or_default();
+    let continued = turn.limit_continued.map(|c| {
+        format!(
+            "Continued after the {}-minute limit ({}/{})",
+            c.minutes, c.count, c.max
+        )
+    });
     match turn.status.as_str() {
         "queued" if turn.taken_by_reply() => (String::new(), false),
+        "queued" | "preparing" | "sending" | "running" if continued.is_some() => {
+            (continued.unwrap_or_default(), false)
+        }
         "queued" => ("Queued".into(), false),
         "preparing" | "sending" | "running" => ("Working".into(), false),
         "waiting" if turn.waits_on_job() => (waiting_label(turn), false),
@@ -1259,6 +1268,30 @@ mod tests {
             turn_label(&queued(serde_json::json!("delivered"))),
             (String::new(), false)
         );
+    }
+
+    #[test]
+    fn a_turn_continued_after_the_attempt_limit_says_so_until_it_ends() {
+        let turn = |status: &str| {
+            serde_json::from_value(serde_json::json!({
+                "id": uuid::Uuid::nil(),
+                "request_id": uuid::Uuid::nil(),
+                "turn_no": 1,
+                "provider_id": "codex",
+                "status": status,
+                "error": null,
+                "effect_uncertain": false,
+                "limit_continued": { "count": 2, "max": 4, "minutes": 30 },
+            }))
+            .unwrap()
+        };
+        for status in ["queued", "running"] {
+            assert_eq!(
+                turn_label(&turn(status)),
+                ("Continued after the 30-minute limit (2/4)".into(), false)
+            );
+        }
+        assert_eq!(turn_label(&turn("completed")), (String::new(), false));
     }
 
     #[test]

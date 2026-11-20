@@ -14,6 +14,8 @@ pub(super) struct ResultInfo {
     pub(super) message: String,
     /// Model turns the CLI ran; 0 means it ended before running any.
     pub(super) num_turns: Option<i64>,
+    /// The CLI ended on an API error, not on the interruption it was sent.
+    pub(super) api_error: bool,
 }
 
 /// A tool call the model made. The CLI answers a name outside its verified
@@ -39,6 +41,8 @@ pub(super) struct Tracker {
     /// Steered turns whose message was written to the CLI and not echoed
     /// yet. Each message's UUID is its turn's ID.
     steers: HashSet<uuid::Uuid>,
+    /// else.bot's own notices written to the CLI and not echoed yet.
+    notices: HashSet<uuid::Uuid>,
 }
 
 fn malformed(what: &str) -> Violation {
@@ -88,6 +92,7 @@ impl Tracker {
             text: String::new(),
             activity: false,
             steers: HashSet::new(),
+            notices: HashSet::new(),
         }
     }
 
@@ -185,11 +190,12 @@ impl Tracker {
                     model: self.reported_model().to_owned(),
                     native_turn: self.message_uuid.clone(),
                 });
-            } else if let Some(turn) = uuid
-                .and_then(|uuid| uuid.parse().ok())
-                .filter(|turn| self.steers.remove(turn))
-            {
-                events.push(Event::Steered(turn));
+            } else if let Some(id) = uuid.and_then(|uuid| uuid.parse().ok()) {
+                if self.steers.remove(&id) {
+                    events.push(Event::Steered(id));
+                } else {
+                    self.notices.remove(&id);
+                }
             }
         }
         let prefix = format!("mcp__{SERVER_NAME}__");
@@ -312,6 +318,7 @@ fn result_info(event: &Value) -> ResultInfo {
         success,
         message,
         num_turns: event["num_turns"].as_i64(),
+        api_error: event["terminal_reason"] == "api_error",
     }
 }
 
@@ -410,10 +417,25 @@ impl Protocol for Tracker {
         self.steers.insert(steer.turn_id);
     }
 
+    /// A notice is a user line like a steered message, awaited the same way
+    /// once written.
+    fn notice_input(&self, text: &str) -> Option<Value> {
+        Some(super::user_value(
+            &uuid::Uuid::new_v4().to_string(),
+            super::message_content(&[crate::providers::prompt::Segment::Text(text.to_owned())]),
+        ))
+    }
+
+    fn notice_sent(&mut self, input: &Value) {
+        if let Some(id) = input["uuid"].as_str().and_then(|id| id.parse().ok()) {
+            self.notices.insert(id);
+        }
+    }
+
     /// A result before a written steer's echo means the CLI will answer it
     /// in one more native turn.
     fn continues(&self, info: &ResultInfo) -> bool {
-        info.success && !self.steers.is_empty()
+        info.success && !(self.steers.is_empty() && self.notices.is_empty())
     }
 
     fn outcome(
@@ -441,7 +463,7 @@ impl Protocol for Tracker {
         }
         if info.success {
             TurnOutcome::Completed
-        } else if stopping.is_some() {
+        } else if stopping.is_some() && !info.api_error {
             TurnOutcome::Interrupted
         } else {
             failed("provider_failed", info.message)

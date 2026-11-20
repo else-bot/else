@@ -126,6 +126,8 @@ pub struct TurnRecord {
     pub finished_at: Option<DateTime<Utc>>,
     pub reaction: Option<Json<Reaction>>,
     pub attempt: i32,
+    /// Attempts the attempt limit cut that the turn continued after.
+    pub limit_continuations: i64,
     /// The running reply this queued message joined
     /// ([`crate::db::steers`]).
     pub steered_into: Option<Uuid>,
@@ -169,6 +171,7 @@ pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id,
     t.owner_item_id AS source_item_id, t.provider_id, t.profile_revision, t.profile, t.status,
     t.error_code, t.error_message, t.effect_uncertain, t.created_at, t.started_at, t.finished_at, t.attempt,
     (SELECT i.reaction FROM items i WHERE i.id = t.owner_item_id) AS reaction,
+    (SELECT count(*) FROM turn_limit_cuts l WHERE l.turn_id = t.id) AS limit_continuations,
     (SELECT s.into_turn_id FROM turn_steers s WHERE s.turn_id = t.id) AS steered_into,
     (SELECT s.status FROM turn_steers s WHERE s.turn_id = t.id) AS steer_status,
     (SELECT json_object('routine_id', lower(hex(r.routine_id)), 'name', r.name, 'due_at', r.due_at,
@@ -1285,6 +1288,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         )
         .await?,
         earlier_replies: earlier_replies(&mut conn, turn_id).await?,
+        limit_continuation: crate::db::limit_cuts::undelivered(&mut conn, turn_id).await?,
     };
     let draft_tasks = crate::db::outgoing_drafts::always_approved(&mut conn, turn.bot_id).await?;
     drop(conn);

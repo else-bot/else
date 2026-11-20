@@ -17,6 +17,11 @@ pub use steer::SendError;
 use steer::Steering;
 
 pub const TURN_DEADLINE: Duration = Duration::from_secs(30 * 60);
+/// How long before [`TURN_DEADLINE`] the provider is told its time is
+/// running out.
+pub const DEADLINE_WARNING: Duration = Duration::from_secs(5 * 60);
+/// The error code of an attempt cut at [`TURN_DEADLINE`].
+pub const DEADLINE_CODE: &str = "turn_deadline";
 /// How long an interrupted provider may take to report its terminal result.
 pub const INTERRUPT_GRACE: Duration = Duration::from_secs(15);
 /// How long a parent may keep going after a tool parked its turn.
@@ -65,14 +70,23 @@ impl From<Violation> for TurnOutcome {
 }
 
 enum Phase {
-    Running { park_at: Option<Instant> },
-    Stopping { cause: StopCause, give_up: Instant },
+    /// `warn_at` is when the provider is told its time runs out, until it is.
+    Running {
+        park_at: Option<Instant>,
+        warn_at: Option<Instant>,
+    },
+    Stopping {
+        cause: StopCause,
+        give_up: Instant,
+    },
 }
 
 /// What a timer means now.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Tick {
     Wait,
+    /// Tell the provider its time runs out ([`deadline_warning`]).
+    Warn,
     /// Interrupt the provider (the attempt is now stopping).
     Interrupt,
     /// The provider did not stop: end the attempt without its result.
@@ -88,15 +102,22 @@ pub struct Lifecycle {
 
 impl Lifecycle {
     pub fn start() -> Self {
+        let deadline = Instant::now() + TURN_DEADLINE;
         Self {
-            deadline: Instant::now() + TURN_DEADLINE,
-            phase: Phase::Running { park_at: None },
+            deadline,
+            phase: Phase::Running {
+                park_at: None,
+                warn_at: Some(deadline - DEADLINE_WARNING),
+            },
         }
     }
 
     pub fn wake_at(&self) -> Instant {
         match self.phase {
-            Phase::Running { park_at } => park_at.map_or(self.deadline, |at| at.min(self.deadline)),
+            Phase::Running { park_at, warn_at } => [park_at, warn_at]
+                .into_iter()
+                .flatten()
+                .fold(self.deadline, Instant::min),
             Phase::Stopping { give_up, .. } => give_up,
         }
     }
@@ -107,7 +128,7 @@ impl Lifecycle {
 
     /// Running and not parked, so newer owner messages may join the turn.
     pub fn takes_steers(&self) -> bool {
-        matches!(self.phase, Phase::Running { park_at: None })
+        matches!(self.phase, Phase::Running { park_at: None, .. })
     }
 
     pub fn cause(&self) -> Option<StopCause> {
@@ -119,9 +140,14 @@ impl Lifecycle {
 
     /// A tool parked the turn: the provider gets [`PARK_GRACE`] to end it.
     pub fn parked(&mut self) {
-        if let Phase::Running { park_at: None } = self.phase {
+        if let Phase::Running {
+            park_at: None,
+            warn_at,
+        } = self.phase
+        {
             self.phase = Phase::Running {
                 park_at: Some(Instant::now() + PARK_GRACE),
+                warn_at,
             };
         }
     }
@@ -142,7 +168,9 @@ impl Lifecycle {
         let now = Instant::now();
         match self.phase {
             Phase::Stopping { give_up, .. } if now >= give_up => Tick::GiveUp,
-            Phase::Running { park_at: Some(at) } if now >= at => {
+            Phase::Running {
+                park_at: Some(at), ..
+            } if now >= at => {
                 tracing::info!("the provider kept going after its turn parked; interrupting");
                 self.stop(StopCause::Parked);
                 Tick::Interrupt
@@ -150,6 +178,20 @@ impl Lifecycle {
             Phase::Running { .. } if now >= self.deadline => {
                 self.stop(StopCause::Deadline);
                 Tick::Interrupt
+            }
+            Phase::Running {
+                park_at,
+                warn_at: Some(at),
+            } if now >= at => {
+                self.phase = Phase::Running {
+                    park_at,
+                    warn_at: None,
+                };
+                if park_at.is_some() {
+                    Tick::Wait
+                } else {
+                    Tick::Warn
+                }
             }
             _ => Tick::Wait,
         }
@@ -166,25 +208,50 @@ impl Lifecycle {
         }
     }
 
-    /// The outcome of a terminal result the protocol interpreted.
+    /// The outcome of a terminal result the protocol interpreted. Only a
+    /// confirmed interruption is a cut: a turn that completed or failed on
+    /// its own as the deadline fired keeps that outcome.
     pub fn settled(&self, outcome: TurnOutcome) -> TurnOutcome {
-        match (self.cause(), &outcome) {
-            (_, TurnOutcome::Uncertain { .. }) => outcome,
-            (Some(StopCause::Deadline), _) => deadline_failure(),
-            _ => outcome,
+        match (self.cause(), outcome) {
+            (Some(StopCause::Deadline), TurnOutcome::Interrupted) => deadline_failure(),
+            (_, outcome) => outcome,
         }
     }
 }
 
-/// How an attempt cut off at [`TURN_DEADLINE`] ends.
+/// How an attempt cut off at [`TURN_DEADLINE`] ends. The turn continues
+/// in a new attempt unless the owner stopped it or a cap is reached
+/// ([`crate::db::limit_cuts`]).
 pub fn deadline_failure() -> TurnOutcome {
     TurnOutcome::Failed {
-        code: "turn_deadline".into(),
-        message: format!(
-            "Stopped at the {}-minute attempt limit. Background jobs it started may still be running.",
-            TURN_DEADLINE.as_secs() / 60
-        ),
+        code: DEADLINE_CODE.into(),
+        message: limit_message(0),
     }
+}
+
+/// Why a turn failed when the limit cut it after `continued` continuations.
+pub fn limit_message(continued: i64) -> String {
+    let after = match continued {
+        0 => String::new(),
+        1 => " after continuing once".to_owned(),
+        n => format!(" after continuing {n} times"),
+    };
+    format!(
+        "Stopped at the {}-minute attempt limit{after}. Background jobs it started may still be running.",
+        TURN_DEADLINE.as_secs() / 60
+    )
+}
+
+/// What else.bot tells a running provider [`DEADLINE_WARNING`] before the
+/// limit cuts its attempt.
+pub fn deadline_warning() -> String {
+    format!(
+        "[else.bot] {} minutes are left in this attempt. Move long remaining work into background \
+         jobs (computer_job_start) and park on them with computer_job and wait: true, or write \
+         your progress so far in a reply. When the limit cuts the attempt, the request \
+         continues in a new one with that progress.",
+        DEADLINE_WARNING.as_secs() / 60
+    )
 }
 
 /// What a protocol reads from one provider message.
@@ -255,6 +322,19 @@ pub trait Protocol {
         let _ = steer;
     }
 
+    /// The input that gives the running turn else.bot's own `text`, for
+    /// [`Channel::send`]; its echo is not an owner message. `None` when this
+    /// provider takes no input mid-turn.
+    fn notice_input(&self, text: &str) -> Option<Value> {
+        let _ = text;
+        None
+    }
+
+    /// The input from [`Protocol::notice_input`] reached the provider.
+    fn notice_sent(&mut self, input: &Value) {
+        let _ = input;
+    }
+
     /// Whether the provider still owes an answer to a steered message after
     /// `terminal`, so the attempt keeps reading instead of ending.
     fn continues(&self, terminal: &Self::Terminal) -> bool {
@@ -297,6 +377,43 @@ async fn interrupt<C: Channel>(channel: &mut C, stop: &Stop) -> bool {
     tokio::select! {
         () = channel.interrupt() => true,
         () = stop.escalated() => false,
+    }
+}
+
+/// Tell the provider its attempt is about to be cut, when it takes input
+/// mid-turn, giving up at `until`. A refused or lost warning only costs the
+/// warning, since the cut attempt continues either way; a write that may be
+/// partial closes steering, as a lost steered message does.
+async fn warn<C, P>(
+    channel: &mut C,
+    protocol: &mut P,
+    steering: &mut Steering,
+    stop: &Stop,
+    until: Instant,
+) where
+    C: Channel,
+    P: Protocol<Message = C::Message>,
+{
+    if *steering == Steering::Closed {
+        return;
+    }
+    let Some(input) = protocol.notice_input(&deadline_warning()) else {
+        return;
+    };
+    let sent = tokio::select! {
+        sent = channel.send(&input) => sent,
+        () = stop.requested() => Err(SendError::Unknown("stopped while writing".into())),
+        () = tokio::time::sleep_until(until) => Err(SendError::Unknown("timed out".into())),
+    };
+    match sent {
+        Ok(()) => protocol.notice_sent(&input),
+        Err(SendError::Refused(why)) => {
+            tracing::info!(%why, "the provider refused the attempt limit warning");
+        }
+        Err(SendError::Unknown(why)) => {
+            tracing::warn!(%why, "writing the attempt limit warning failed");
+            *steering = Steering::Closed;
+        }
     }
 }
 
@@ -346,6 +463,7 @@ where
                         return Ended::Abandoned(life.abandoned(not_stopped()));
                     }
                     Tick::GiveUp => return Ended::Abandoned(life.abandoned(not_stopped())),
+                    Tick::Warn => warn(channel, protocol, &mut steering, stop, life.wake_at()).await,
                     Tick::Interrupt | Tick::Wait => {}
                 }
                 continue;
@@ -939,7 +1057,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_deadline_interrupts_and_overrides_a_terminal_result() {
+    async fn the_deadline_interrupts_and_a_confirmed_interruption_is_a_cut() {
         let mut life = Lifecycle::start();
         tokio::time::advance(TURN_DEADLINE).await;
         assert_eq!(life.on_timer(), Tick::Interrupt);
@@ -947,6 +1065,11 @@ mod tests {
             life.settled(TurnOutcome::Interrupted),
             TurnOutcome::Failed { code, .. } if code == "turn_deadline"
         ));
+        assert_eq!(
+            life.settled(TurnOutcome::Completed),
+            TurnOutcome::Completed,
+            "a turn that completed as the deadline fired is not cut"
+        );
         let unknown = TurnOutcome::Uncertain {
             message: "x".into(),
         };
@@ -956,6 +1079,70 @@ mod tests {
             TurnOutcome::Uncertain {
                 message: "no result".into()
             }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_provider_is_warned_once_five_minutes_before_the_deadline() {
+        let mut life = Lifecycle::start();
+        tokio::time::advance(Duration::from_secs(25 * 60 - 1)).await;
+        assert_eq!(life.on_timer(), Tick::Wait);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(life.on_timer(), Tick::Warn);
+        assert_eq!(life.on_timer(), Tick::Wait, "one warning per attempt");
+        assert_eq!(life.wake_at(), Instant::now() + Duration::from_secs(5 * 60));
+        tokio::time::advance(Duration::from_secs(5 * 60)).await;
+        assert_eq!(life.on_timer(), Tick::Interrupt);
+    }
+
+    /// [`Plain`] that takes else.bot's notices mid-turn.
+    struct Noticed;
+
+    impl Protocol for Noticed {
+        type Message = Value;
+        type Terminal = ();
+
+        fn on(&mut self, message: &Value) -> Result<Vec<Event<()>>, Violation> {
+            Plain.on(message)
+        }
+
+        fn outcome(&self, (): (), stopping: Option<StopCause>, accepted: bool) -> TurnOutcome {
+            Plain.outcome((), stopping, accepted)
+        }
+
+        fn notice_input(&self, text: &str) -> Option<Value> {
+            Some(json!(text))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_running_provider_gets_the_warning_before_the_deadline_cuts_it() {
+        let input = input();
+        let sink = Log::default();
+        let mut turn = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n".into()));
+        let mut channel = replay(&[json!({"kind": "accept"})]);
+        let ended = drive(
+            &mut channel,
+            &mut Noticed,
+            &mut turn,
+            &sink,
+            &Stop::default(),
+            "P",
+        )
+        .await;
+        assert!(matches!(
+            ended,
+            Ended::Abandoned(TurnOutcome::Uncertain { .. })
+        ));
+        assert_eq!(channel.interrupts, 1);
+        let [warning] = &channel.sent[..] else {
+            panic!("one warning: {:?}", channel.sent);
+        };
+        let warning = warning.as_str().unwrap();
+        assert!(
+            warning.starts_with("[else.bot] 5 minutes are left in this attempt.")
+                && warning.contains("computer_job_start"),
+            "{warning}"
         );
     }
 

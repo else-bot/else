@@ -30,7 +30,8 @@ pub fn outcomes_block(input: &TurnInput) -> String {
     result
 }
 fn outcomes_without_social(input: &TurnInput) -> String {
-    let mut text = secrets_block(input);
+    let mut text = limit_block(input);
+    text.push_str(&secrets_block(input));
     text.push_str(&skill_installs_block(input));
     text.push_str(&computer_handoffs_block(input));
     text.push_str(&mcp_waits_block(input));
@@ -115,6 +116,24 @@ fn outcomes_without_social(input: &TurnInput) -> String {
     }
     text.push('\n');
     text
+}
+
+/// The attempt before this one was cut at the attempt limit: this one
+/// picks up its work, with the jobs that may still run.
+fn limit_block(input: &TurnInput) -> String {
+    let Some(continuation) = input.limit_continuation else {
+        return String::new();
+    };
+    format!(
+        "[else.bot attempt limit] Your previous attempt on this request stopped at the \
+         {}-minute attempt limit, and else.bot continued the request in this attempt \
+         (continuation {continuation} of {}). Pick up where it stopped: check the effects of its \
+         work (files, jobs, receipts) before repeating any of it, and run long work as \
+         background jobs you park on.\n{}",
+        crate::providers::cli::attempt::TURN_DEADLINE.as_secs() / 60,
+        crate::db::limit_cuts::PER_REQUEST,
+        super::jobs_block(&input.jobs),
+    )
 }
 
 fn computer_handoffs_block(input: &TurnInput) -> String {
