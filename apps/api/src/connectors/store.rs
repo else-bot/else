@@ -18,8 +18,6 @@
 //! is a conflict. An action left dispatching by a crash becomes `uncertain`
 //! and is never replayed.
 
-use std::io::{Read, Write};
-
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::types::Json;
@@ -115,55 +113,27 @@ struct Binding {
     provider: Provider,
 }
 
-fn identity(
-    key: &SecretKey,
-    salt: &[u8; 32],
-    b: Binding,
-) -> Result<age::x25519::Identity, StoreError> {
-    let purpose = format!(
+fn purpose(b: Binding) -> String {
+    format!(
         "{PURPOSE}\0{}\0{}\0{}",
         b.account,
         b.version,
         provider_name(b.provider)
-    );
-    crate::backup::identity_for_purpose(key, salt, &purpose).map_err(|_| StoreError::Crypto)
+    )
 }
 
-struct Sealed {
-    salt: [u8; 32],
-    cipher: Vec<u8>,
-}
-
-fn seal(key: &SecretKey, b: Binding, credential: &Credential) -> Result<Sealed, StoreError> {
-    let mut salt = [0u8; 32];
-    getrandom::fill(&mut salt).map_err(|_| StoreError::Crypto)?;
-    let recipient = identity(key, &salt, b)?.to_public();
+fn seal(
+    key: &SecretKey,
+    b: Binding,
+    credential: &Credential,
+) -> Result<crate::sealed::Sealed, StoreError> {
     let plain = Zeroizing::new(serde_json::to_vec(credential).map_err(|_| StoreError::Crypto)?);
-    let encryptor =
-        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
-            .map_err(|_| StoreError::Crypto)?;
-    let mut cipher = Vec::new();
-    let mut writer = encryptor
-        .wrap_output(&mut cipher)
-        .map_err(|_| StoreError::Crypto)?;
-    writer
-        .write_all(&plain)
-        .and_then(|()| writer.finish().map(drop))
-        .map_err(|_| StoreError::Crypto)?;
-    Ok(Sealed { salt, cipher })
+    crate::sealed::seal(key, &purpose(b), &plain).map_err(|_| StoreError::Crypto)
 }
 
 fn open(key: &SecretKey, b: Binding, salt: &[u8], cipher: &[u8]) -> Result<Credential, StoreError> {
-    let salt: [u8; 32] = salt.try_into().map_err(|_| StoreError::Crypto)?;
-    let identity = identity(key, &salt, b)?;
-    let decryptor = age::Decryptor::new(cipher).map_err(|_| StoreError::Crypto)?;
-    let mut reader = decryptor
-        .decrypt(std::iter::once(&identity as &dyn age::Identity))
-        .map_err(|_| StoreError::Crypto)?;
-    let mut plain = Zeroizing::new(Vec::new());
-    reader
-        .read_to_end(&mut plain)
-        .map_err(|_| StoreError::Crypto)?;
+    let plain =
+        crate::sealed::open(key, &purpose(b), salt, cipher).map_err(|_| StoreError::Crypto)?;
     serde_json::from_slice(&plain).map_err(|_| StoreError::Crypto)
 }
 

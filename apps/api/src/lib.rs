@@ -25,6 +25,7 @@ pub mod providers;
 pub mod runtime;
 pub mod runtime_lock;
 pub mod scheduler;
+mod sealed;
 mod server_updates;
 pub mod skills;
 pub mod views;

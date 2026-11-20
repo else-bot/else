@@ -15,7 +15,6 @@
 //! value is stored.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Write};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -314,45 +313,6 @@ pub fn validate(env: &BTreeMap<String, String>) -> Result<(), SecretError> {
     Ok(())
 }
 
-fn identity(key: &SecretKey, salt: &[u8; 32]) -> Result<age::x25519::Identity, SecretError> {
-    crate::backup::identity_for_purpose(key, salt, PURPOSE)
-        .map_err(|e| SecretError::Crypto(e.to_string()))
-}
-
-fn seal(key: &SecretKey, salt: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>, SecretError> {
-    let identity = identity(key, salt)?;
-    let recipient = identity.to_public();
-    let encryptor =
-        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
-            .map_err(|e| SecretError::Crypto(e.to_string()))?;
-    let mut out = Vec::new();
-    let mut writer = encryptor
-        .wrap_output(&mut out)
-        .map_err(|e| SecretError::Crypto(e.to_string()))?;
-    writer
-        .write_all(plain)
-        .and_then(|()| writer.finish().map(|_| ()))
-        .map_err(|e| SecretError::Crypto(e.to_string()))?;
-    Ok(out)
-}
-
-fn open(
-    key: &SecretKey,
-    salt: &[u8; 32],
-    cipher: &[u8],
-) -> Result<Zeroizing<Vec<u8>>, SecretError> {
-    let identity = identity(key, salt)?;
-    let decryptor = age::Decryptor::new(cipher).map_err(|e| SecretError::Crypto(e.to_string()))?;
-    let mut reader = decryptor
-        .decrypt(std::iter::once(&identity as &dyn age::Identity))
-        .map_err(|e| SecretError::Crypto(e.to_string()))?;
-    let mut out = Zeroizing::new(Vec::new());
-    reader
-        .read_to_end(&mut out)
-        .map_err(|e| SecretError::Crypto(e.to_string()))?;
-    Ok(out)
-}
-
 /// A validated secret, encrypted and ready to write; holds no plaintext.
 pub struct Sealed {
     names: Vec<String>,
@@ -372,14 +332,13 @@ pub fn seal_env(
         ));
     }
     validate(env)?;
-    let mut salt = [0u8; 32];
-    getrandom::fill(&mut salt).map_err(|e| SecretError::Crypto(e.to_string()))?;
     let plain = Zeroizing::new(serde_json::to_vec(env).expect("a map serializes"));
-    let cipher = seal(key, &salt, &plain)?;
+    let sealed = crate::sealed::seal(key, PURPOSE, &plain)
+        .map_err(|e| SecretError::Crypto(e.to_string()))?;
     Ok(Sealed {
         names: env.keys().cloned().collect(),
-        salt,
-        cipher,
+        salt: sealed.salt,
+        cipher: sealed.cipher,
     })
 }
 
@@ -796,10 +755,8 @@ fn decrypt(
     salt: &[u8],
     cipher: &[u8],
 ) -> Result<BTreeMap<String, Zeroizing<String>>, SecretError> {
-    let salt: [u8; 32] = salt
-        .try_into()
-        .map_err(|_| SecretError::Crypto("bad salt".into()))?;
-    let plain = open(key, &salt, cipher)?;
+    let plain = crate::sealed::open(key, PURPOSE, salt, cipher)
+        .map_err(|e| SecretError::Crypto(e.to_string()))?;
     let vars: BTreeMap<String, String> =
         serde_json::from_slice(&plain).map_err(|e| SecretError::Crypto(e.to_string()))?;
     Ok(vars

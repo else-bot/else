@@ -5,26 +5,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool, types::Json};
-use std::{
-    collections::HashMap,
-    io::{Read, Write},
-};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 const COLUMNS: &str = "id,provider,remote_id,display_name,username,state,health,generation,instructions,EXISTS(SELECT 1 FROM social_triggers st WHERE st.connection_id=social_connections.id AND st.enabled AND st.wake='all') AS message_content";
-fn identity(
-    key: &SecretKey,
-    id: Uuid,
-    provider: Provider,
-    version: i64,
-    salt: &[u8; 32],
-) -> Result<age::x25519::Identity, Error> {
-    crate::backup::identity_for_purpose(
-        key,
-        salt,
-        &format!("else.bot/socials/v1\0{id}\0{}\0{version}", provider.name()),
-    )
-    .map_err(|_| Error::Crypto)
+fn purpose(id: Uuid, provider: Provider, version: i64) -> String {
+    format!("else.bot/socials/v1\0{id}\0{}\0{version}", provider.name())
 }
 fn seal(
     key: &SecretKey,
@@ -36,21 +22,9 @@ fn seal(
     if secret.kind() != provider.setup() {
         return Err(Error::Unsupported);
     }
-    let mut salt = [0; 32];
-    getrandom::fill(&mut salt).map_err(|_| Error::Crypto)?;
-    let recipient = identity(key, id, provider, version, &salt)?.to_public();
-    let encryptor =
-        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
-            .map_err(|_| Error::Crypto)?;
-    let mut cipher = Vec::new();
-    let mut writer = encryptor
-        .wrap_output(&mut cipher)
+    let sealed = crate::sealed::seal(key, &purpose(id, provider, version), secret.bytes())
         .map_err(|_| Error::Crypto)?;
-    writer
-        .write_all(secret.bytes())
-        .map_err(|_| Error::Crypto)?;
-    writer.finish().map_err(|_| Error::Crypto)?;
-    Ok((salt.to_vec(), cipher))
+    Ok((sealed.salt.to_vec(), sealed.cipher))
 }
 pub async fn credential(
     pool: &SqlitePool,
@@ -58,14 +32,8 @@ pub async fn credential(
     c: &Connection,
 ) -> Result<Credential, Error> {
     let (version,salt,cipher):(i64,Vec<u8>,Vec<u8>)=sqlx::query_as("SELECT credential_version,credential_salt,credential FROM social_connections WHERE id=?1 AND state<>'removed'").bind(c.id).fetch_one(pool).await?;
-    let salt: [u8; 32] = salt.try_into().map_err(|_| Error::Crypto)?;
-    let identity = identity(key, c.id, c.provider, version, &salt)?;
-    let decryptor = age::Decryptor::new(&cipher[..]).map_err(|_| Error::Crypto)?;
-    let mut reader = decryptor
-        .decrypt(std::iter::once(&identity as &dyn age::Identity))
+    let bytes = crate::sealed::open(key, &purpose(c.id, c.provider, version), &salt, &cipher)
         .map_err(|_| Error::Crypto)?;
-    let mut bytes = zeroize::Zeroizing::new(Vec::new());
-    reader.read_to_end(&mut bytes).map_err(|_| Error::Crypto)?;
     Credential::open(c.provider, bytes)
 }
 pub async fn connections(pool: &SqlitePool) -> Result<Vec<Connection>, Error> {
