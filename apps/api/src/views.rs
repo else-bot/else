@@ -72,6 +72,11 @@ pub fn turn_json(turn: &TurnRecord) -> Value {
         "request_id": turn.request_id,
         "turn_no": turn.turn_no,
         "attempt": turn.attempt,
+        "limit_continued": (turn.limit_continuations > 0).then(|| json!({
+            "count": turn.limit_continuations,
+            "max": crate::db::limit_cuts::PER_REQUEST,
+            "minutes": crate::providers::cli::attempt::TURN_DEADLINE.as_secs() / 60,
+        })),
         "provider_id": turn.provider_id,
         "profile_revision": turn.profile_revision,
         "status": turn.status,

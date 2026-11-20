@@ -57,6 +57,7 @@ pub(crate) fn input() -> TurnInput {
         computer_control: None,
         ran_actions: Vec::new(),
         earlier_replies: Vec::new(),
+        limit_continuation: None,
         skills: None,
         mcps: None,
         handoff: None,

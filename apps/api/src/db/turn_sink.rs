@@ -467,10 +467,36 @@ impl SinkState {
                 || waits_unseen + tasks_unseen > 0);
         let owner_unseen = if kept { 0 } else { owner_unseen };
         let unseen = tasks_unseen + waits_unseen + owner_unseen;
-        let (status, code, message) = if kept {
+        // An attempt the limit cut continues in a new one, unless the owner
+        // stopped it or a cap is reached.
+        let cut = match outcome {
+            TurnOutcome::Failed { code, .. }
+                if code == crate::providers::cli::attempt::DEADLINE_CODE
+                    && current != TurnStatus::Cancelling =>
+            {
+                Some(
+                    super::limit_cuts::cut(
+                        &mut tx,
+                        self.turn_id,
+                        self.bot_id,
+                        i64::from(self.attempt),
+                    )
+                    .await?,
+                )
+            }
+            _ => None,
+        };
+        let continued = cut == Some(super::limit_cuts::Cut::Continued);
+        let capped = match cut {
+            Some(super::limit_cuts::Cut::Capped { continued }) => {
+                Some(crate::providers::cli::attempt::limit_message(continued))
+            }
+            _ => None,
+        };
+        let (status, code, message) = if kept || continued {
             (TurnStatus::Interrupted, None, None)
         } else {
-            (status, code, message)
+            (status, code, capped.as_deref().or(message))
         };
         let parks = (kept || current != TurnStatus::Cancelling)
             && matches!(status, TurnStatus::Completed | TurnStatus::Interrupted);
@@ -485,7 +511,7 @@ impl SinkState {
             TurnStatus::Queued
         } else if parks && pending > 0 {
             TurnStatus::Waiting
-        } else if parks && unseen > 0 {
+        } else if parks && (unseen > 0 || continued) {
             TurnStatus::Queued
         } else {
             if pending > 0 {

@@ -562,6 +562,15 @@ pub struct OwnerNotice {
     pub settled_at: Option<DateTime<Utc>>,
 }
 
+/// How often the attempt limit cut a turn that continued, of how many
+/// continuations a request may take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct LimitContinued {
+    pub count: i64,
+    pub max: i64,
+    pub minutes: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Turn {
     pub id: Uuid,
@@ -570,6 +579,10 @@ pub struct Turn {
     /// The turn's latest provider attempt. Absent from older servers.
     #[serde(default)]
     pub attempt: Option<i64>,
+    /// Set once the attempt limit cut the turn and it continued. Absent
+    /// from older servers.
+    #[serde(default)]
+    pub limit_continued: Option<LimitContinued>,
     pub provider_id: String,
     pub status: String,
     pub error: Option<TurnError>,

@@ -333,6 +333,17 @@ impl Protocol for TurnEvents<'_> {
         self.steers.insert(steer.turn_id);
     }
 
+    /// A notice is a `turn/steer` request of its own; its echo carries an
+    /// ID no steered message has, so it reports nothing.
+    fn notice_input(&mut self, text: &str) -> Option<Value> {
+        Some(json!({
+            "threadId": self.thread_id,
+            "expectedTurnId": self.native_turn,
+            "clientUserMessageId": uuid::Uuid::new_v4(),
+            "input": super::turn::turn_input(&[prompt::Segment::Text(text.to_owned())], self.project),
+        }))
+    }
+
     fn outcome(&self, completed: Completed, _: Option<StopCause>, _: bool) -> TurnOutcome {
         match completed.status.as_deref() {
             Some("completed") => TurnOutcome::Completed,

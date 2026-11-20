@@ -614,6 +614,20 @@ fn a_steered_message_is_its_own_line_and_its_echo_names_its_turn() {
 }
 
 #[test]
+fn a_notice_is_awaited_like_a_steer_and_its_echo_reports_nothing() {
+    let mut t = tracker();
+    let sent = t.notice_input("[else.bot] 5 minutes are left.").unwrap();
+    assert_eq!(sent["type"], json!("user"));
+    assert!(
+        t.continues(&info(true, Some(1))),
+        "a result before the echo"
+    );
+    let echo = json!({"type":"user","uuid":sent["uuid"],"isReplay":true});
+    assert!(t.on(&echo).unwrap().is_empty(), "not an owner message");
+    assert!(!t.continues(&info(true, Some(1))));
+}
+
+#[test]
 fn an_api_error_fails_the_turn_with_the_clis_message() {
     let mut t = tracker();
     t.on(&init(claude_home::tool_names(), connected())).unwrap();
@@ -729,6 +743,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         computer_control: None,
         ran_actions: Vec::new(),
         earlier_replies: Vec::new(),
+        limit_continuation: None,
         skills: None,
         mcps: None,
         handoff: None,

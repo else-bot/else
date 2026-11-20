@@ -39,6 +39,8 @@ pub(super) struct Tracker {
     /// Steered turns whose message was written to the CLI and not echoed
     /// yet. Each message's UUID is its turn's ID.
     steers: HashSet<uuid::Uuid>,
+    /// else.bot's own notices written to the CLI and not echoed yet.
+    notices: HashSet<uuid::Uuid>,
 }
 
 fn malformed(what: &str) -> Violation {
@@ -88,6 +90,7 @@ impl Tracker {
             text: String::new(),
             activity: false,
             steers: HashSet::new(),
+            notices: HashSet::new(),
         }
     }
 
@@ -185,11 +188,12 @@ impl Tracker {
                     model: self.reported_model().to_owned(),
                     native_turn: self.message_uuid.clone(),
                 });
-            } else if let Some(turn) = uuid
-                .and_then(|uuid| uuid.parse().ok())
-                .filter(|turn| self.steers.remove(turn))
-            {
-                events.push(Event::Steered(turn));
+            } else if let Some(id) = uuid.and_then(|uuid| uuid.parse().ok()) {
+                if self.steers.remove(&id) {
+                    events.push(Event::Steered(id));
+                } else {
+                    self.notices.remove(&id);
+                }
             }
         }
         let prefix = format!("mcp__{SERVER_NAME}__");
@@ -410,10 +414,20 @@ impl Protocol for Tracker {
         self.steers.insert(steer.turn_id);
     }
 
+    /// A notice is a user line like a steered message, awaited the same way.
+    fn notice_input(&mut self, text: &str) -> Option<Value> {
+        let id = uuid::Uuid::new_v4();
+        self.notices.insert(id);
+        Some(super::user_value(
+            &id.to_string(),
+            super::message_content(&[crate::providers::prompt::Segment::Text(text.to_owned())]),
+        ))
+    }
+
     /// A result before a written steer's echo means the CLI will answer it
     /// in one more native turn.
     fn continues(&self, info: &ResultInfo) -> bool {
-        info.success && !self.steers.is_empty()
+        info.success && !(self.steers.is_empty() && self.notices.is_empty())
     }
 
     fn outcome(

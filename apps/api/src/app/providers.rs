@@ -266,6 +266,9 @@ pub struct TurnInput {
     /// bounded, for a continuation in a session that never saw them: the
     /// owner's chat folds them under the next reply.
     pub earlier_replies: Vec<String>,
+    /// Which continuation this attempt is, when the attempt limit cut the
+    /// one before it ([`crate::db::limit_cuts`]).
+    pub limit_continuation: Option<i64>,
 }
 
 /// One shared MCP as a turn lists it.

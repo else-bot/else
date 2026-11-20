@@ -121,6 +121,7 @@ pub fn export(turn: Turn) -> Value {
         computer_control: None,
         ran_actions: Vec::new(),
         earlier_replies: Vec::new(),
+        limit_continuation: None,
         skills: None,
         mcps: Some(vec![InstalledMcp {
             id: "github".into(),
