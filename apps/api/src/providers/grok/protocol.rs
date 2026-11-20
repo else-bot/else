@@ -10,10 +10,15 @@ use super::grok_home;
 use crate::app::providers::{FailureCode, TurnOutcome, Usage};
 use crate::app::tools::{DEFERRED_TOOLS, SERVER_NAME, TOOL_NAMES};
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
+use crate::providers::cli::json::Fields;
+use crate::providers::cli::stream_json;
+use crate::providers::cli::turn::ToolSet;
+
+const FIELDS: Fields = Fields("Grok");
 
 /// Grok's terminal event.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Terminal {
+pub enum Terminal {
     Result {
         success: bool,
         stop_reason: Option<String>,
@@ -31,7 +36,7 @@ enum Start {
     Unopened,
 }
 
-pub(super) struct Tracker {
+pub struct Tracker {
     model: String,
     session: String,
     expected: Vec<String>,
@@ -40,33 +45,11 @@ pub(super) struct Tracker {
     calls: HashMap<String, String>,
 }
 
-fn malformed(what: &str) -> Violation {
-    Violation::policy(format!("Grok sent a malformed {what}"))
-}
-
-fn text<'v>(value: &'v Value, what: &str) -> Result<Option<&'v str>, Violation> {
-    match value {
-        Value::Null => Ok(None),
-        Value::String(text) => Ok(Some(text)),
-        _ => Err(malformed(what)),
-    }
-}
-
-fn required<'v>(value: &'v Value, what: &str) -> Result<&'v str, Violation> {
-    text(value, what)?.ok_or_else(|| malformed(what))
-}
-
-fn list<'v>(value: &'v Value, what: &str) -> Result<&'v [Value], Violation> {
-    value
-        .as_array()
-        .map(Vec::as_slice)
-        .ok_or_else(|| malformed(what))
-}
-
 impl Tracker {
-    pub fn new(model: &str, session: &str, host: bool, mcp: bool) -> Self {
+    pub fn new(model: &str, session: &str, tools: ToolSet) -> Self {
+        let mcp = tools.elsebot();
         let mut expected: Vec<String> = grok_home::MCP_TOOLS.iter().map(|s| (*s).into()).collect();
-        if host {
+        if tools.host() {
             expected.extend(grok_home::HOST_TOOLS.iter().map(|(_, name)| (*name).into()));
         }
         Self {
@@ -100,7 +83,7 @@ impl Tracker {
     }
 
     fn check_model(&self, model: &Value) -> Result<(), Violation> {
-        match text(model, "model")? {
+        match FIELDS.text(model, "model")? {
             Some(model) if model != self.model => Err(Violation::profile(format!(
                 "Grok used {model} instead of {}.",
                 self.model
@@ -111,21 +94,22 @@ impl Tracker {
 
     fn on_init(&mut self, event: &Value) -> Result<(), Violation> {
         if self.start != Start::Pending
-            || text(&event["session_id"], "session ID")? != Some(&self.session)
+            || FIELDS.text(&event["session_id"], "session ID")? != Some(&self.session)
         {
             return Err(Violation::policy(
                 "Grok did not initialize the requested session",
             ));
         }
-        if text(&event["model"], "model")?.is_none() {
+        if FIELDS.text(&event["model"], "model")?.is_none() {
             return Err(Violation::profile("Grok did not report its model."));
         }
         // Grok 1.0.44 leaves get_command_or_subagent_output and
         // kill_command_or_subagent out of the inventory; only a tool outside
         // --tools breaks the policy.
-        let tools = list(&event["tools"], "tool inventory")?
+        let tools = FIELDS
+            .list(&event["tools"], "tool inventory")?
             .iter()
-            .map(|tool| required(tool, "tool inventory"))
+            .map(|tool| FIELDS.required(tool, "tool inventory"))
             .collect::<Result<Vec<_>, _>>()?;
         let extra: Vec<_> = tools
             .iter()
@@ -147,20 +131,8 @@ impl Tracker {
                 "Grok did not offer the tools that reach else.bot: {missing:?}"
             )));
         }
-        let servers = list(&event["mcp_servers"], "MCP inventory")?
-            .iter()
-            .map(|server| {
-                Ok((
-                    required(&server["name"], "MCP inventory")?,
-                    required(&server["status"], "MCP inventory")?,
-                ))
-            })
-            .collect::<Result<Vec<_>, Violation>>()?;
-        let valid = if self.mcp {
-            matches!(servers.as_slice(), [(name, "connected" | "pending")] if *name == SERVER_NAME)
-        } else {
-            servers.is_empty()
-        };
+        let servers = stream_json::mcp_servers(FIELDS, event)?;
+        let valid = stream_json::only_elsebot(&servers, self.mcp, &["connected", "pending"]);
         if !valid {
             return Err(Violation::policy(format!(
                 "Grok reported unexpected MCP servers: {servers:?}"
@@ -171,9 +143,9 @@ impl Tracker {
     }
 
     fn unopened(&mut self, event: &Value) -> Result<Vec<Event<Terminal>>, Violation> {
-        let kind = required(&event["type"], "event")?;
+        let kind = FIELDS.required(&event["type"], "event")?;
         if kind == "system"
-            && text(&event["subtype"], "system event")? == Some("init")
+            && FIELDS.text(&event["subtype"], "system event")? == Some("init")
             && self.start == Start::Pending
         {
             self.start = Start::Unopened;
@@ -186,14 +158,14 @@ impl Tracker {
     }
 
     fn on_assistant(&mut self, event: &Value) -> Result<(), Violation> {
-        for block in list(&event["message"]["content"], "assistant message")? {
-            match required(&block["type"], "content block")? {
+        for block in FIELDS.list(&event["message"]["content"], "assistant message")? {
+            match FIELDS.required(&block["type"], "content block")? {
                 "server_tool_use" => return Err(Violation::policy("Grok used a backend tool")),
                 "tool_use" => {}
                 _ => continue,
             }
-            let name = required(&block["name"], "tool call")?;
-            let id = required(&block["id"], "tool call")?;
+            let name = FIELDS.required(&block["name"], "tool call")?;
+            let id = FIELDS.required(&block["id"], "tool call")?;
             let tool = if name == "use_tool" {
                 let Some(target) = block["input"]["tool_name"].as_str() else {
                     return Err(Violation::policy(
@@ -229,10 +201,10 @@ impl Tracker {
         let mut parked = false;
         let blocks = match &event["message"]["content"] {
             Value::String(_) => &[],
-            content => list(content, "user message")?,
+            content => FIELDS.list(content, "user message")?,
         };
         for block in blocks {
-            let Some(id) = text(&block["tool_use_id"], "tool result")? else {
+            let Some(id) = FIELDS.text(&block["tool_use_id"], "tool result")? else {
                 continue;
             };
             parked |= self
@@ -249,11 +221,11 @@ impl Protocol for Tracker {
     type Terminal = Terminal;
 
     fn on(&mut self, event: &Value) -> Result<Vec<Event<Terminal>>, Violation> {
-        if text(&event["parent_tool_use_id"], "parent tool use")?.is_some() {
+        if stream_json::parent_tool_use(FIELDS, event)?.is_some() {
             return Err(Violation::policy("Grok ran a native subagent"));
         }
         let different = || Violation::policy("Grok reported a different native session");
-        match (self.start, text(&event["session_id"], "session ID")?) {
+        match (self.start, FIELDS.text(&event["session_id"], "session ID")?) {
             (_, Some(id)) if !id.is_empty() && id != self.session => return Err(different()),
             (Start::Unopened, _) | (Start::Pending, Some("")) => return self.unopened(event),
             (Start::Opened, Some("")) => return Err(different()),
@@ -262,7 +234,7 @@ impl Protocol for Tracker {
         self.check_model(&event["model"])?;
         self.check_model(&event["message"]["model"])?;
         self.check_model(&event["event"]["message"]["model"])?;
-        let kind = required(&event["type"], "event")?;
+        let kind = FIELDS.required(&event["type"], "event")?;
         let mut events = Vec::new();
         if let Some(terminal) = terminal(kind, event)? {
             events.extend(Usage::from_result(event).map(Event::Usage));
@@ -270,9 +242,12 @@ impl Protocol for Tracker {
             return Ok(events);
         }
         match kind {
-            "system" => match text(&event["subtype"], "system event")?.unwrap_or_default() {
+            "system" => match FIELDS
+                .text(&event["subtype"], "system event")?
+                .unwrap_or_default()
+            {
                 "init" => self.on_init(event)?,
-                sub if sub.starts_with("task_") || sub.contains("agent") => {
+                sub if stream_json::agent_activity(sub) => {
                     return Err(Violation::policy("Grok reported native agent activity"));
                 }
                 _ => {}
@@ -284,15 +259,15 @@ impl Protocol for Tracker {
                     ));
                 }
                 let inner = &event["event"];
-                match required(&inner["type"], "stream event")? {
+                match FIELDS.required(&inner["type"], "stream event")? {
                     "message_start" => events.push(Event::Accepted {
                         model: self.model.clone(),
                         native_turn: self.session.clone(),
                     }),
                     "content_block_delta"
-                        if text(&inner["delta"]["type"], "delta")? == Some("text_delta") =>
+                        if FIELDS.text(&inner["delta"]["type"], "delta")? == Some("text_delta") =>
                     {
-                        let delta = required(&inner["delta"]["text"], "text delta")?;
+                        let delta = FIELDS.required(&inner["delta"]["text"], "text delta")?;
                         events.push(Event::Text(delta.to_owned()));
                     }
                     "message_stop" => events.push(Event::EndMessage),
@@ -367,13 +342,16 @@ impl Protocol for Tracker {
 fn terminal(kind: &str, event: &Value) -> Result<Option<Terminal>, Violation> {
     Ok(Some(match kind {
         "result" => Terminal::Result {
-            success: text(&event["subtype"], "result")? == Some("success")
+            success: FIELDS.text(&event["subtype"], "result")? == Some("success")
                 && event["is_error"] == false,
-            stop_reason: text(&event["stop_reason"], "result")?.map(str::to_owned),
+            stop_reason: FIELDS
+                .text(&event["stop_reason"], "result")?
+                .map(str::to_owned),
             errors: errors(&event["errors"]),
         },
         "error" => Terminal::Error(
-            text(&event["message"], "error")?
+            FIELDS
+                .text(&event["message"], "error")?
                 .unwrap_or("Grok failed")
                 .to_owned(),
         ),

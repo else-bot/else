@@ -1,26 +1,27 @@
 use super::*;
+use crate::app::providers::{Availability, Provider, TurnInput, TurnOutcome};
 use crate::app::providers::{FailureCode, MemoryContext, SessionState};
 use crate::providers::cli::attempt::StopCause;
+use crate::providers::models::Models;
 use protocol::ResultInfo;
 
 type Emitted = Vec<Event<ResultInfo>>;
 
 impl Claude {
     fn offline(account: &str) -> Self {
-        Self {
-            models: Models::new(&DEFINITION),
-            ready: Ok(Ready {
-                host: Host::new(std::path::Path::new("/data"), std::path::Path::new("/bots")),
-                program: PathBuf::new().into(),
+        let ready = Ready {
+            host: Host::new(std::path::Path::new("/data"), std::path::Path::new("/bots")),
+            program: PathBuf::new().into(),
+            version: "2.1.999 (Claude Code)".into(),
+            login: Login {
                 config: claude_home::HostConfig {
                     dir: PathBuf::new(),
                     explicit: false,
                 },
                 account: account.into(),
-                version: "2.1.999 (Claude Code)".into(),
-            }),
-            tool_url: Some("http://127.0.0.1:1/tools/v1/mcp".into()),
-        }
+            },
+        };
+        Self::new(ClaudeCode, Ok(ready)).with_tools("http://127.0.0.1:1/tools/v1/mcp".into())
     }
 }
 
@@ -435,16 +436,12 @@ async fn profiles_need_explicit_supported_values() {
 
 #[tokio::test]
 async fn arguments_offer_only_host_and_elsebot_tools_and_resume_explicitly() {
-    let claude = Claude::detect(None, None, None, String::new())
-        .await
-        .with_tools("http://127.0.0.1:1/tools/v1/mcp".into());
     let profile = Profile {
         model: "claude-sonnet-5-5".into(),
         reasoning_effort: "medium".into(),
         service_tier: "default".into(),
     };
-    let args: Vec<String> = claude
-        .args(&profile, true, "abc", "SYSTEM", Tools::HostAndElsebot)
+    let args: Vec<String> = args(&profile, true, "abc", "SYSTEM", ToolSet::HostAndElsebot)
         .into_iter()
         .map(|a| a.into_string().unwrap())
         .collect();
@@ -460,7 +457,7 @@ async fn arguments_offer_only_host_and_elsebot_tools_and_resume_explicitly() {
         .split(',')
         .map(str::to_owned)
         .collect();
-    assert_eq!(allowed, claude.offered_tools(Tools::HostAndElsebot));
+    assert_eq!(allowed, offered_tools(ToolSet::HostAndElsebot));
     assert!(allowed.iter().all(|t| {
         claude_home::HOST_TOOLS.contains(&t.as_str()) || t.starts_with("mcp__elsebot__")
     }));

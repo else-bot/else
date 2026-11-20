@@ -18,6 +18,10 @@ use serde_json::{Value, json};
 use crate::app::providers::{FailureCode, TurnOutcome, Usage};
 use crate::app::tools::{SERVER_NAME, TOOL_NAMES};
 use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
+use crate::providers::cli::json::Fields;
+use crate::providers::cli::turn::ToolSet;
+
+const FIELDS: Fields = Fields("Cursor");
 
 /// The host shell and file tools an owner's turn may use, as
 /// `--allowed-tools` names them and as their calls report them.
@@ -43,12 +47,12 @@ const MCP_TOOLS: &[(&str, &str)] = &[
 ];
 
 /// The `--allowed-tools` value for a turn.
-pub(super) fn allowed_tools(host: bool, mcp: bool) -> String {
+pub(super) fn allowed_tools(offered: ToolSet) -> String {
     let mut tools = OWN_TOOLS.to_vec();
-    if host {
+    if offered.host() {
         tools.extend(HOST_TOOLS);
     }
-    if mcp {
+    if offered.elsebot() {
         tools.extend(MCP_TOOLS);
     }
     let names: Vec<&str> = tools.iter().map(|(flag, _)| *flag).collect();
@@ -59,9 +63,29 @@ fn reports(tools: &[(&str, &str)], kind: &str) -> bool {
     tools.iter().any(|(_, call)| *call == kind)
 }
 
+/// What [`super::Running`] reads from the CLI.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Message {
+    /// One `stream-json` event.
+    Event(Value),
+    /// The result, held until the CLI exited: its exit code, or `None`
+    /// when it did not exit in time.
+    Result {
+        event: Value,
+        exit_code: Option<i32>,
+    },
+    /// The CLI exited without a result: its exit code, or the signal that
+    /// ended it, and the tail of its stderr.
+    Exit {
+        code: Option<i32>,
+        signal: Option<i32>,
+        stderr: String,
+    },
+}
+
 /// How the CLI's turn ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Terminal {
+pub enum Terminal {
     Result {
         success: bool,
         text: String,
@@ -82,7 +106,7 @@ enum Start {
     Accepted,
 }
 
-pub(super) struct Tracker {
+pub struct Tracker {
     session: String,
     model: String,
     host: bool,
@@ -100,22 +124,6 @@ pub(super) struct Tracker {
     clean: bool,
 }
 
-fn malformed(what: &str) -> Violation {
-    Violation::policy(format!("Cursor sent a malformed {what}"))
-}
-
-fn text<'v>(value: &'v Value, what: &str) -> Result<Option<&'v str>, Violation> {
-    match value {
-        Value::Null => Ok(None),
-        Value::String(text) => Ok(Some(text)),
-        _ => Err(malformed(what)),
-    }
-}
-
-fn required<'v>(value: &'v Value, what: &str) -> Result<&'v str, Violation> {
-    text(value, what)?.ok_or_else(|| malformed(what))
-}
-
 /// The one `<kind>ToolCall` entry of a reported tool call.
 fn tool_call(event: &Value) -> Result<(&str, &Value), Violation> {
     match event["tool_call"]
@@ -123,7 +131,7 @@ fn tool_call(event: &Value) -> Result<(&str, &Value), Violation> {
         .map(|o| o.iter().collect::<Vec<_>>())
     {
         Some(entries) if entries.len() == 1 => Ok((entries[0].0.as_str(), entries[0].1)),
-        _ => Err(malformed("tool call")),
+        _ => Err(FIELDS.malformed("tool call")),
     }
 }
 
@@ -141,12 +149,12 @@ fn mcp_result(result: &Value) -> Value {
 }
 
 impl Tracker {
-    pub fn new(model: &str, session: &str, host: bool, mcp: bool) -> Self {
+    pub fn new(model: &str, session: &str, tools: ToolSet) -> Self {
         Self {
             session: session.into(),
             model: model.into(),
-            host,
-            mcp,
+            host: tools.host(),
+            mcp: tools.elsebot(),
             start: Start::Pending,
             since_flush: String::new(),
             held: None,
@@ -158,12 +166,10 @@ impl Tracker {
 
     fn on_assistant(&mut self, event: &Value) -> Result<Vec<Event<Terminal>>, Violation> {
         let mut chunk = String::new();
-        let blocks = event["message"]["content"]
-            .as_array()
-            .ok_or_else(|| malformed("assistant message"))?;
+        let blocks = FIELDS.list(&event["message"]["content"], "assistant message")?;
         for block in blocks {
-            if required(&block["type"], "content block")? == "text" {
-                chunk.push_str(required(&block["text"], "text block")?);
+            if FIELDS.required(&block["type"], "content block")? == "text" {
+                chunk.push_str(FIELDS.required(&block["text"], "text block")?);
             }
         }
         let flush = event.get("timestamp_ms").is_none() || event.get("model_call_id").is_some();
@@ -192,15 +198,15 @@ impl Tracker {
     }
 
     fn on_tool_call(&mut self, event: &Value) -> Result<Vec<Event<Terminal>>, Violation> {
-        let id = required(&event["call_id"], "tool call")?;
+        let id = FIELDS.required(&event["call_id"], "tool call")?;
         let (kind, call) = tool_call(event)?;
-        match required(&event["subtype"], "tool call")? {
+        match FIELDS.required(&event["subtype"], "tool call")? {
             "started" => {
                 self.acted = true;
                 let args = &call["args"];
                 if kind == "mcpToolCall" {
-                    let server = required(&args["providerIdentifier"], "MCP call")?;
-                    let tool = required(&args["toolName"], "MCP call")?;
+                    let server = FIELDS.required(&args["providerIdentifier"], "MCP call")?;
+                    let tool = FIELDS.required(&args["toolName"], "MCP call")?;
                     if !self.mcp || server != SERVER_NAME || !TOOL_NAMES.contains(&tool) {
                         return Err(Violation::policy(format!(
                             "Cursor called an MCP tool outside else.bot: {server}:{tool}"
@@ -208,7 +214,7 @@ impl Tracker {
                     }
                     self.calls.insert(id.to_owned(), tool.to_owned());
                 } else if kind == "getMcpToolsToolCall" {
-                    let server = text(&args["server"], "MCP listing")?;
+                    let server = FIELDS.text(&args["server"], "MCP listing")?;
                     if !self.mcp || server.is_some_and(|server| server != SERVER_NAME) {
                         return Err(Violation::policy(format!(
                             "Cursor listed MCP tools outside else.bot: {}",
@@ -238,22 +244,29 @@ impl Tracker {
 }
 
 impl Protocol for Tracker {
-    type Message = Value;
+    type Message = Message;
     type Terminal = Terminal;
 
-    fn on(&mut self, event: &Value) -> Result<Vec<Event<Terminal>>, Violation> {
-        let kind = required(&event["type"], "event")?;
-        if kind == "exit" {
-            let mut events = self.release(kind);
-            let number = |key: &str| event[key].as_i64().and_then(|n| i32::try_from(n).ok());
-            events.push(Event::Finished(Terminal::Exit {
-                code: number("code"),
-                signal: number("signal"),
-                stderr: event["stderr"].as_str().unwrap_or_default().to_owned(),
-            }));
-            return Ok(events);
-        }
-        if let Some(id) = text(&event["session_id"], "session ID")?
+    fn on(&mut self, message: &Message) -> Result<Vec<Event<Terminal>>, Violation> {
+        let (event, exit_code) = match message {
+            Message::Event(event) => (event, None),
+            Message::Result { event, exit_code } => (event, *exit_code),
+            Message::Exit {
+                code,
+                signal,
+                stderr,
+            } => {
+                let mut events = self.release("exit");
+                events.push(Event::Finished(Terminal::Exit {
+                    code: *code,
+                    signal: *signal,
+                    stderr: stderr.clone(),
+                }));
+                return Ok(events);
+            }
+        };
+        let kind = FIELDS.required(&event["type"], "event")?;
+        if let Some(id) = FIELDS.text(&event["session_id"], "session ID")?
             && id != self.session
         {
             return Err(Violation::policy("Cursor reported a different chat"));
@@ -261,9 +274,9 @@ impl Protocol for Tracker {
         let mut events = self.release(kind);
         match (kind, self.start) {
             ("system", Start::Pending)
-                if text(&event["subtype"], "system event")? == Some("init") =>
+                if FIELDS.text(&event["subtype"], "system event")? == Some("init") =>
             {
-                if text(&event["session_id"], "session ID")? != Some(&self.session) {
+                if FIELDS.text(&event["session_id"], "session ID")? != Some(&self.session) {
                     return Err(Violation::policy("Cursor did not open the requested chat"));
                 }
                 self.start = Start::Opened;
@@ -292,7 +305,7 @@ impl Protocol for Tracker {
                 return Err(Violation::policy("Cursor asked to use the web"));
             }
             ("result", _) => {
-                self.clean = event["exit_code"] == 0;
+                self.clean = exit_code == Some(0);
                 let usage = &event["usage"];
                 let count = |key: &str| usage[key].as_i64().unwrap_or(0).max(0);
                 if usage.is_object() {
@@ -306,7 +319,7 @@ impl Protocol for Tracker {
                     }));
                 }
                 events.push(Event::Finished(Terminal::Result {
-                    success: text(&event["subtype"], "result")? == Some("success")
+                    success: FIELDS.text(&event["subtype"], "result")? == Some("success")
                         && event["is_error"] == false,
                     text: event["result"].as_str().unwrap_or_default().to_owned(),
                 }));
