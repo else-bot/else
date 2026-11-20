@@ -14,6 +14,10 @@ use uuid::Uuid;
 use super::{Builder, SETTLE, TestApp};
 
 pub const GATE: &str = "[gate]";
+/// Like [`GATE`], but the reply's opening chunks ("Synthetic reply ✓ fro")
+/// reach the turn in one write before the hold, so a sink that throttles
+/// its events still reports them.
+pub const GATE_AFTER_OPENING: &str = "[gate:after-opening]";
 pub const GATE_EVERY_ATTEMPT: &str = "[gate:every-attempt]";
 
 enum Message {
@@ -61,14 +65,16 @@ impl State {
                     self.held.insert(turn, open);
                 }
             }
-            Message::Release(turn) => match self.held.remove(&turn) {
-                Some(open) => {
-                    let _ = open.send(());
-                }
-                None => {
+            Message::Release(turn) => {
+                if !self
+                    .held
+                    .remove(&turn)
+                    .is_some_and(|open| open.send(()).is_ok())
+                {
+                    // An interrupted attempt may have dropped its receiver.
                     self.released.insert(turn);
                 }
-            },
+            }
         }
     }
 }
@@ -89,6 +95,8 @@ impl Recorder {
 struct Gated<'a> {
     inner: &'a dyn TurnSink,
     gate: Option<(&'a Recorder, Uuid)>,
+    /// The opening chunks still to collect, and those collected so far.
+    opening: std::sync::Mutex<Option<(usize, String)>>,
     open: tokio::sync::OnceCell<()>,
     stop: else_api::app::providers::Stop,
 }
@@ -108,6 +116,23 @@ impl TurnSink for Gated<'_> {
         self.inner.running().await
     }
     async fn text(&self, chunk: &str) -> Result<(), Fenced> {
+        let opened = {
+            let mut opening = self.opening.lock().unwrap();
+            match opening.as_mut() {
+                Some((left, text)) => {
+                    text.push_str(chunk);
+                    *left -= 1;
+                    if *left > 0 {
+                        return Ok(());
+                    }
+                    opening.take().map(|(_, text)| text)
+                }
+                None => None,
+            }
+        };
+        if let Some(text) = opened {
+            return self.inner.text(&text).await;
+        }
         if let Some((recorder, turn)) = self.gate {
             let held = self
                 .open
@@ -120,6 +145,10 @@ impl TurnSink for Gated<'_> {
         self.inner.text(chunk).await
     }
     async fn end_message(&self) -> Result<(), Fenced> {
+        let opened = self.opening.lock().unwrap().take();
+        if let Some((_, text)) = opened {
+            self.inner.text(&text).await?;
+        }
         self.inner.end_message().await
     }
     async fn usage(&self, usage: Usage) {
@@ -140,6 +169,9 @@ impl Provider for Recorder {
     }
     fn label(&self) -> &'static str {
         self.inner.label()
+    }
+    fn project_dir(&self, bot: Uuid) -> Option<std::path::PathBuf> {
+        self.inner.project_dir(bot)
     }
     fn availability(&self) -> Availability {
         Availability::Available
@@ -167,15 +199,24 @@ impl Provider for Recorder {
             .send(Message::Record(Box::new(input.clone())))
             .await
             .unwrap();
+        let opening = input.attempt == 1 && input.text.contains(GATE_AFTER_OPENING);
         let gated = input.text.contains(GATE_EVERY_ATTEMPT)
-            || (input.text.contains(GATE) && input.attempt == 1);
+            || opening
+            || (input.attempt == 1 && input.text.contains(GATE));
         let sink = Gated {
             inner: sink,
             gate: gated.then_some((self, input.turn_id)),
+            opening: std::sync::Mutex::new(opening.then(|| (3, String::new()))),
             open: tokio::sync::OnceCell::new(),
             stop: stop.clone(),
         };
-        self.inner.run(input, &sink, stop).await
+        let outcome = self.inner.run(input, &sink, stop).await;
+        // A reply that ended inside its opening still reaches the turn.
+        let opened = sink.opening.lock().unwrap().take();
+        if let Some((_, text)) = opened {
+            let _ = sink.inner.text(&text).await;
+        }
+        outcome
     }
 }
 
