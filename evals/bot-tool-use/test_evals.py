@@ -175,6 +175,9 @@ def run(runner):
                 "email-uses-draft": ([self.call("draft_email", {"to": ["alex@example.com"],
                                                               "body": "The review is ready for Friday."})], "Draft ready."),
                 "mental-arithmetic": ([], "84"),
+                "multi-day-watch-uses-watcher": ([self.call("computer_watch_start", {
+                    "check": "./check.sh", "hours": 336, "purpose": "example-garden.com becomes available",
+                    "prompt": "Register example-garden.com, then tell the owner."})], "Watching until Dec 5."),
                 "missing-api-key": ([self.call("request_secret", {"name": "openweather", "reason": "Weather data", "env": ["OPENWEATHER_API_KEY"]})], "Private form opened."),
                 "vault-login-before-handoff": ([
                     self.call("use_tool", {"name": "computer_secrets", "arguments": {"query": "x.com"}}),

@@ -287,6 +287,15 @@ impl TurnInput {
 pub enum SavedRun {
     Routine(RoutineRun),
     Webhook(WebhookRun),
+    Watcher(WatcherRun),
+}
+
+/// The wake of a watcher that ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatcherRun {
+    pub watcher_id: Uuid,
+    pub purpose: String,
+    pub outcome: crate::app::watchers::Outcome,
 }
 
 /// The webhook wake a turn runs.

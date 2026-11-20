@@ -38,6 +38,7 @@ pub fn bot_json(bot: &BotRecord) -> Value {
         "activity": activity_json(bot),
         "sidebar_status": bot.sidebar.status(bot.active_turn_id.is_some() || bot.queued_count > 0),
         "read_state": bot.read.state(),
+        "watching": bot.watching,
         "cleanup": null,
     })
 }
@@ -115,6 +116,27 @@ pub fn item_json(item: &ItemRecord) -> Value {
         "rules_update": item.rules_update,
         "parts": item.parts.as_ref().map_or(&[][..], |parts| &parts.0[..]),
         "attempt": item.attempt,
+    })
+}
+
+/// A watcher with its schedule and what its last check saw.
+pub fn watcher_json(watcher: &crate::db::watchers::Watcher) -> Value {
+    json!({
+        "id": watcher.id,
+        "purpose": watcher.purpose,
+        "check": watcher.check_command,
+        "every_minutes": watcher.every_minutes,
+        "until": watcher.watch_until,
+        "status": watcher.status,
+        "outcome": watcher.outcome,
+        "last_status": watcher.last_status,
+        "last_checked_at": watcher.last_checked_at,
+        "next_check_at": watcher.next_check_at,
+        "last_output": watcher.last_output,
+        "checks": watcher.checks,
+        "failures": watcher.failures,
+        "created_at": watcher.created_at,
+        "created_turn_id": watcher.created_turn_id,
     })
 }
 

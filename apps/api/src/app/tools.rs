@@ -33,6 +33,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "computer_run",
     "computer_job_start",
     "computer_job",
+    "computer_watch_start",
     "computer_write_file",
     "computer_read_file",
     "computer_fetch",
@@ -88,6 +89,8 @@ pub const DEFERRED_TOOLS: &[&str] = &[
     "social_trigger_delete",
     "mail_trigger_delete",
     "computer_job_cancel",
+    "computer_watches",
+    "computer_watch_stop",
     "computer_secrets",
 ];
 pub const PARKING_TOOLS: &[&str] = &[

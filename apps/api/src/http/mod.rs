@@ -36,6 +36,7 @@ pub mod turns;
 mod usage;
 mod visual_tools;
 mod waits;
+pub mod watchers;
 pub mod webhooks;
 pub mod ws;
 
@@ -199,6 +200,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(outgoing_drafts::routes())
         .merge(routines::routes())
         .merge(webhooks::routes())
+        .merge(watchers::routes())
         .merge(rules::routes())
         .merge(maintenance::routes())
         .merge(onboarding::routes())
