@@ -293,6 +293,12 @@ pub enum MailCommand {
     FindSent {
         message_id: String,
     },
+    /// Where the message with this Message-ID is now, searched in the
+    /// Inbox, Archive, Trash, All Mail and Junk folders. Only the owner's
+    /// reader calls it, after a mail trigger's message left its folder.
+    Locate {
+        message_id: String,
+    },
     /// The whole message for the owner's reader: headers, full text, the
     /// HTML part with the images it shows, and the attachment list. Only
     /// the owner's route calls it.
@@ -339,6 +345,7 @@ impl MailCommand {
                 | Self::Read { .. }
                 | Self::OpenAttachments { .. }
                 | Self::FindSent { .. }
+                | Self::Locate { .. }
                 | Self::View { .. }
         )
     }
@@ -362,6 +369,76 @@ pub struct Cursor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Arrival {
     pub message: MessageRef,
+    pub envelope: Envelope,
+}
+
+/// What a scan learns of a new message, kept so its row still says what it
+/// was and the reader can find it by Message-ID after it moves.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Envelope {
+    /// Without angle brackets.
+    pub message_id: Option<String>,
+    pub subject: Option<String>,
+    /// The sender's name, or the address when it has none.
+    pub sender: Option<String>,
+}
+
+/// Where a mail trigger's message is now. Stored in
+/// `connector_events.location` as `arrived`, `archived`, `trashed`,
+/// `moved` or `deleted`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Place {
+    /// Where the scan found it.
+    Arrived,
+    /// In another folder. `message` is unknown when the server did not say
+    /// which UID the move gave it.
+    Moved {
+        kind: MoveKind,
+        folder: String,
+        message: Option<MessageRef>,
+    },
+    Deleted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveKind {
+    Archived,
+    Trashed,
+    Moved,
+}
+
+impl MoveKind {
+    /// The kind of a move into `folder` of the account with `config`.
+    pub fn into_folder(config: &MailConfig, folder: &str) -> Self {
+        if folder == config.archive_folder {
+            Self::Archived
+        } else if folder == config.trash_folder {
+            Self::Trashed
+        } else {
+            Self::Moved
+        }
+    }
+}
+
+impl Place {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Arrived => "arrived",
+            Self::Moved {
+                kind: MoveKind::Archived,
+                ..
+            } => "archived",
+            Self::Moved {
+                kind: MoveKind::Trashed,
+                ..
+            } => "trashed",
+            Self::Moved {
+                kind: MoveKind::Moved,
+                ..
+            } => "moved",
+            Self::Deleted => "deleted",
+        }
+    }
 }
 
 pub struct Scan {

@@ -638,10 +638,57 @@ pub struct Turn {
 }
 
 /// An email that started a turn, which the owner can open in the reader.
+/// `message` is where it arrived; the server follows it from there.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct TurnMail {
     pub account_id: Uuid,
     pub message: crate::api::MessageRef,
+    /// Absent from older servers, and for mail that arrived before them.
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub sender: Option<String>,
+    #[serde(default)]
+    pub location: MailLocation,
+}
+
+/// Where a turn's email is now, and which bot's turn put it there.
+/// Older servers send none, which reads as where it arrived.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum MailLocation {
+    #[default]
+    Arrived,
+    Archived(MailMove),
+    Trashed(MailMove),
+    Moved(MailMove),
+    Deleted(MailDeletion),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct MailMove {
+    pub folder: String,
+    pub by_bot_id: Option<Uuid>,
+    pub by_turn_id: Option<Uuid>,
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct MailDeletion {
+    pub by_bot_id: Option<Uuid>,
+    pub by_turn_id: Option<Uuid>,
+    pub at: DateTime<Utc>,
+}
+
+impl MailLocation {
+    /// The turn that moved or deleted the email, when a bot did.
+    pub fn by_turn(&self) -> Option<Uuid> {
+        match self {
+            Self::Arrived => None,
+            Self::Archived(m) | Self::Trashed(m) | Self::Moved(m) => m.by_turn_id,
+            Self::Deleted(d) => d.by_turn_id,
+        }
+    }
 }
 
 /// A job in an installed MCP that a waiting turn rechecks until it ends.

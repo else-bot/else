@@ -250,7 +250,7 @@ fn draft(d: &Draft) -> Rule {
 
 /// A Message-ID this server generates: `left@domain`, printable ASCII
 /// with no brackets, quotes or spaces.
-fn message_id(id: &str) -> bool {
+pub(crate) fn message_id(id: &str) -> bool {
     id.len() <= 255
         && id
             .split_once('@')
@@ -339,7 +339,7 @@ impl MailCommand {
                 folder_name(f)?;
                 ensure(folder(name), "name must be 1 to 512 bytes of text")
             }
-            Self::FindSent { message_id: id } => ensure(
+            Self::FindSent { message_id: id } | Self::Locate { message_id: id } => ensure(
                 message_id(id),
                 "message_id must be an addr-spec of at most 255 bytes",
             ),

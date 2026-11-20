@@ -1050,6 +1050,11 @@ async fn mail_event(
                 uid_validity: 1,
                 uid: 9,
             },
+            envelope: Envelope {
+                message_id: Some("fixture@coupons.test".into()),
+                subject: Some("Verify your email".into()),
+                sender: Some("Coupon Co".into()),
+            },
         }],
         more: false,
     };
@@ -1497,6 +1502,7 @@ async fn encrypted_backup_preserves_credentials_and_restore_cannot_run_queued_ma
                     uid_validity: 1,
                     uid: 1,
                 },
+                envelope: Default::default(),
             }],
             more: false,
         };

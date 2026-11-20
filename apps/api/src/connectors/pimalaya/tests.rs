@@ -118,6 +118,7 @@ async fn imap_fixture_serving(start_tls: bool, uid_next: u32, raw: Vec<u8>) -> I
         }
         let mut line = String::new();
         let mut ready = Some(ready);
+        let mut selected = String::new();
         loop {
             line.clear();
             if read.read_line(&mut line).await.unwrap_or(0) == 0 {
@@ -145,14 +146,28 @@ async fn imap_fixture_serving(start_tls: bool, uid_next: u32, raw: Vec<u8>) -> I
             } else {
                 recorded.lock().unwrap().push(command.into());
                 if upper.starts_with("EXAMINE ") || upper.starts_with("SELECT ") {
+                    selected = command.split_once(' ').unwrap().1.to_owned();
                     format!(
                         "* 3 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT {uid_next}] next\r\n{tag} OK selected\r\n"
                     )
+                } else if upper.starts_with("LIST ") {
+                    format!(
+                        "* LIST (\\HasNoChildren) \"/\" INBOX\r\n\
+                         * LIST (\\HasNoChildren \\All) \"/\" \"[Gmail]/All Mail\"\r\n\
+                         {tag} OK list\r\n"
+                    )
+                } else if upper.starts_with("UID SEARCH HEADER MESSAGE-ID ") {
+                    let hit = if selected.contains("All Mail") {
+                        " 42"
+                    } else {
+                        ""
+                    };
+                    format!("* SEARCH{hit}\r\n{tag} OK search\r\n")
                 } else if upper.starts_with("UID SEARCH ") {
                     format!("* SEARCH 11 12 13\r\n{tag} OK search\r\n")
                 } else if upper.starts_with("UID FETCH ") && upper.contains("ENVELOPE") {
                     format!(
-                        "* 1 FETCH (UID 11 FLAGS (\\Seen) INTERNALDATE \"16-Nov-2026 09:00:00 +0000\" ENVELOPE (\"Mon, 16 Nov 2026 10:00:00 +0100\" \"Morning\" ((NIL NIL \"a\" \"example.org\")) NIL NIL NIL NIL NIL NIL NIL))\r\n\
+                        "* 1 FETCH (UID 11 FLAGS (\\Seen) INTERNALDATE \"16-Nov-2026 09:00:00 +0000\" ENVELOPE (\"Mon, 16 Nov 2026 10:00:00 +0100\" \"Morning\" ((\"=?UTF-8?Q?Caf=C3=A9_Bot?=\" NIL \"a\" \"example.org\")) NIL NIL NIL NIL NIL NIL \"<scan-11@example.org>\"))\r\n\
                          * 2 FETCH (UID 12 FLAGS () INTERNALDATE \"16-Nov-2026 18:30:00 -0500\" ENVELOPE (NIL \"No date\" ((NIL NIL \"b\" \"example.org\")) NIL NIL NIL NIL NIL NIL NIL))\r\n\
                          * 3 FETCH (UID 13 FLAGS () INTERNALDATE \"15-Nov-2026 08:00:00 +0000\" ENVELOPE (\"sometime last week\" \"Moved in\" ((NIL NIL \"c\" \"example.org\")) NIL NIL NIL NIL NIL NIL NIL))\r\n\
                          {tag} OK fetch\r\n"
@@ -243,6 +258,24 @@ async fn uid_identity_peek_flags_move_and_bounded_arrivals() {
     .unwrap();
     assert_eq!(next.arrivals.len(), 3);
     assert_eq!(next.cursor.last_uid, 13);
+    let envelope = &next.arrivals[0].envelope;
+    assert_eq!(
+        (
+            envelope.message_id.as_deref(),
+            envelope.subject.as_deref(),
+            envelope.sender.as_deref()
+        ),
+        (
+            Some("scan-11@example.org"),
+            Some("Morning"),
+            Some("Café Bot")
+        )
+    );
+    assert_eq!(
+        next.arrivals[1].envelope.sender.as_deref(),
+        Some("b@example.org"),
+        "a sender without a name shows its address"
+    );
     let message = MessageRef {
         folder: "INBOX".into(),
         uid_validity: 77,
@@ -1284,4 +1317,43 @@ fn every_inline_html_part_gives_its_links() {
             {"text":"Reply","url":"https://hotel.test/reply"},
         ])
     );
+}
+
+#[tokio::test]
+async fn locate_searches_archive_and_trash_before_all_mail() {
+    let fixture = imap_fixture().await;
+    let mut client = Imap::connect(&fixture.endpoint, &auth(), &fixture.connector)
+        .await
+        .unwrap();
+    let config = MailConfig {
+        archive_folder: "Archive".into(),
+        trash_folder: "Trash".into(),
+        ..Provider::Gmail.config("owner@example.org".into()).unwrap()
+    };
+    let found = client
+        .locate(&config, "moved@example.org")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        found,
+        MessageRef {
+            folder: "[Gmail]/All Mail".into(),
+            uid_validity: 77,
+            uid: 42,
+        }
+    );
+    let examined: Vec<String> = fixture
+        .commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c.strip_prefix("EXAMINE ").map(str::to_owned))
+        .collect();
+    assert_eq!(
+        examined,
+        ["Archive", "Trash", "\"[Gmail]/All Mail\""],
+        "{examined:?}"
+    );
+    fixture.task.abort();
 }

@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{actor::Actor, credentials::SecretKey, scheduler::Scheduler};
+use store::Whereabouts;
 use types::*;
 
 pub fn sensitive_log_target(target: &str) -> bool {
@@ -360,13 +361,14 @@ impl ConnectorManager {
     /// One message for the owner's reader. It never marks the message read
     /// and never waits behind the account's queued commands: a message read
     /// recently comes from the cache, and any other on the owner's own
-    /// session.
+    /// session. `message` is where a mail trigger's message arrived; the
+    /// reader follows it to where it went, and searches for it by
+    /// Message-ID when it left without saying where.
     pub async fn view(
         self: &Arc<Self>,
         account_id: Uuid,
         message: MessageRef,
     ) -> Result<Value, MailError> {
-        let started = tokio::time::Instant::now();
         MailCommand::View {
             message: message.clone(),
         }
@@ -389,20 +391,79 @@ impl ConnectorManager {
             .gate()
             .enter()
             .ok_or_else(|| MailError::new("maintenance_in_progress"))?;
+        let whereabouts = store::whereabouts(&self.db, account_id, &message)
+            .await
+            .map_err(|_| MailError::new("mail_unavailable"))?;
+        let at = match whereabouts.as_ref().map(|w| &w.place) {
+            Some(Place::Deleted) => return Err(MailError::new("message_deleted")),
+            Some(Place::Moved { message, .. }) => message.clone(),
+            Some(Place::Arrived) | None => Some(message),
+        };
+        let error = match at {
+            Some(at) => match self.read_for_owner(&account, &at, epoch).await {
+                Ok(fetched) => return pimalaya::view(&fetched, &at),
+                Err(error) => error,
+            },
+            None => MailError::new("message_not_found"),
+        };
+        let Some(Whereabouts {
+            event_id,
+            message_id: Some(message_id),
+            place,
+        }) = whereabouts
+            .filter(|_| matches!(error.code, "message_not_found" | "stale_message_reference"))
+        else {
+            return Err(error);
+        };
+        let auth = self.auth(&account).await?;
+        let located = self
+            .transport
+            .execute(&account.config, &auth, &MailCommand::Locate { message_id })
+            .await?;
+        let found = serde_json::from_value::<Option<MessageRef>>(located["message"].clone())
+            .map_err(|_| MailError::new("mail_transport_failed"))?;
+        let now = match &found {
+            Some(found) => Place::Moved {
+                kind: MoveKind::into_folder(&account.config, &found.folder),
+                folder: found.folder.clone(),
+                message: Some(found.clone()),
+            },
+            None => Place::Deleted,
+        };
+        store::found(&self.db, event_id, &place, &now)
+            .await
+            .map_err(|_| MailError::new("mail_unavailable"))?;
+        let Some(found) = found else {
+            return Err(MailError::new("message_deleted"));
+        };
+        let fetched = self.read_for_owner(&account, &found, epoch).await?;
+        pimalaya::view(&fetched, &found)
+    }
+
+    /// The message at `message`, from the cache or the owner's session,
+    /// cached for the next read unless the inbox paused since `epoch`.
+    async fn read_for_owner(
+        self: &Arc<Self>,
+        account: &Account,
+        message: &MessageRef,
+        epoch: u64,
+    ) -> Result<Fetched, MailError> {
+        let started = tokio::time::Instant::now();
+        let account_id = account.id;
         let ms = |at: Duration| at.as_millis() as u64;
-        if let Some(fetched) = self.cached(&account, &message).await {
+        if let Some(fetched) = self.cached(account, message).await {
             tracing::info!(
                 %account_id,
                 path = "cached",
                 total_ms = ms(started.elapsed()),
                 "owner viewed a message"
             );
-            return pimalaya::view(&fetched, &message);
+            return Ok(fetched);
         }
         let signed_in = std::sync::Mutex::new(None);
-        let read = self.readers.read(account.id, &message, || async {
+        let read = self.readers.read(account.id, message, || async {
             let at = tokio::time::Instant::now();
-            let auth = self.auth(&account).await?;
+            let auth = self.auth(account).await?;
             let session = self.transport.reader(&account.config, &auth).await;
             *signed_in.lock().expect("unpoisoned") = Some(at.elapsed());
             session
@@ -434,10 +495,10 @@ impl ConnectorManager {
                 return Err(error);
             }
         };
-        let key = Self::cache_key(&account, &message);
+        let key = Self::cache_key(account, message);
         let stored = fetched.clone();
         self.messages.call(move |m| m.put(key, stored, epoch)).await;
-        pimalaya::view(&fetched, &message)
+        Ok(fetched)
     }
 
     fn cache_key(account: &Account, message: &MessageRef) -> cache::Key {
@@ -681,7 +742,7 @@ impl ConnectorManager {
             *rejected = Some((account.generation, AUTHENTICATION_FAILED));
         }
         if let (
-            Ok(_),
+            Ok(value),
             MailCommand::Move { message, .. }
             | MailCommand::Archive { message }
             | MailCommand::Trash { message }
@@ -690,6 +751,11 @@ impl ConnectorManager {
         {
             let key = Self::cache_key(&account, message);
             self.messages.call(move |m| m.remove(&key)).await;
+            let Caller::Bot { turn_id, .. } = command.caller;
+            let to = destination(&account.config, &command.command, value);
+            if let Err(error) = store::relocate(&self.db, id, turn_id, message, &to).await {
+                tracing::warn!(account_id = %id, ?error, "could not record where a bot moved mail");
+            }
         }
         let Some(action_id) = action_id else {
             return result;
@@ -860,6 +926,25 @@ impl ConnectorManager {
             }
         }
         stop_watch(&mut watching).await;
+    }
+}
+
+/// Where a successful move or delete left its message, from the server's
+/// reply. A move whose reply names no UID leaves only the folder known.
+fn destination(config: &MailConfig, command: &MailCommand, reply: &Value) -> Place {
+    let folder = match command {
+        MailCommand::Move { folder, .. } => folder.clone(),
+        MailCommand::Archive { .. } => config.archive_folder.clone(),
+        MailCommand::Trash { .. } => config.trash_folder.clone(),
+        _ => return Place::Deleted,
+    };
+    let message = serde_json::from_value::<MessageRef>(reply["message"].clone())
+        .ok()
+        .filter(|m| m.folder == folder);
+    Place::Moved {
+        kind: MoveKind::into_folder(config, &folder),
+        folder,
+        message,
     }
 }
 

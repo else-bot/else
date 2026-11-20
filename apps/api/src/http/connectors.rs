@@ -165,9 +165,10 @@ async fn view_message(
     let view = manager.view(id, message).await.map_err(|error| {
         use axum::http::StatusCode;
         let (status, message) = match error.code {
+            "message_deleted" => (StatusCode::NOT_FOUND, "This email was deleted."),
             "message_not_found" | "stale_message_reference" => (
                 StatusCode::NOT_FOUND,
-                "This email is no longer in that folder. It may have been moved or deleted.",
+                "This email left its folder, and the mail server did not say where it went.",
             ),
             "mail_forbidden" => (StatusCode::NOT_FOUND, "This inbox is no longer connected."),
             "mail_account_paused" => (
@@ -1076,6 +1077,7 @@ async fn tool_call(
         request.command,
         MailCommand::OpenAttachments { .. }
             | MailCommand::FindSent { .. }
+            | MailCommand::Locate { .. }
             | MailCommand::View { .. }
     ) {
         return Err(MailError::new("invalid_mail_request"));

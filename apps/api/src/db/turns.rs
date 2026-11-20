@@ -180,16 +180,58 @@ pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id,
                         'no_news', json(iif(r.report = 'no_news' AND t.status = 'completed', 'true', 'false')))
      FROM routine_runs r JOIN routines o ON o.id = r.routine_id WHERE r.turn_id = t.id) AS routine,
     (SELECT json_group_array(json_object('account_id', m.account_id, 'message',
-                json_object('folder', m.folder, 'uid_validity', m.uid_validity, 'uid', m.uid)))
-     FROM (SELECT lower(hex(d.account_id)) AS account_id, e.folder, e.uid_validity, e.uid
+                json_object('folder', m.folder, 'uid_validity', m.uid_validity, 'uid', m.uid),
+                'subject', m.subject, 'sender', m.sender,
+                'location', json(CASE m.location
+                    WHEN 'arrived' THEN json_object('state', 'arrived')
+                    WHEN 'deleted' THEN json_object('state', 'deleted', 'by_bot_id', m.by_bot_id,
+                        'by_turn_id', m.by_turn_id, 'at', m.located_at)
+                    ELSE json_object('state', m.location, 'folder', m.moved_folder,
+                        'by_bot_id', m.by_bot_id, 'by_turn_id', m.by_turn_id, 'at', m.located_at)
+                    END)))
+     FROM (SELECT lower(hex(d.account_id)) AS account_id, e.folder, e.uid_validity, e.uid,
+                  e.subject, e.sender, e.location, e.moved_folder, e.located_at,
+                  iif(e.located_turn_id IS NULL, NULL, lower(hex(e.located_turn_id))) AS by_turn_id,
+                  (SELECT lower(hex(l.bot_id)) FROM turns l WHERE l.id = e.located_turn_id) AS by_bot_id
            FROM connector_deliveries d JOIN connector_events e ON e.id = d.event_id
            WHERE d.turn_id = t.id ORDER BY e.created_at, e.uid, e.folder) m) AS mail";
 
 /// An email that started a turn, which the owner can open in the reader.
+/// `message` is where it arrived, which the reader follows to where it is.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TurnMail {
     pub account_id: Uuid,
     pub message: crate::connectors::types::MessageRef,
+    pub subject: Option<String>,
+    pub sender: Option<String>,
+    pub location: MailLocation,
+}
+
+/// Where a turn's email is now ([`crate::connectors::types::Place`]), and
+/// which bot's turn put it there when one did.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum MailLocation {
+    Arrived,
+    Archived(MailMove),
+    Trashed(MailMove),
+    Moved(MailMove),
+    Deleted(MailDeletion),
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MailMove {
+    pub folder: String,
+    pub by_bot_id: Option<Uuid>,
+    pub by_turn_id: Option<Uuid>,
+    pub at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MailDeletion {
+    pub by_bot_id: Option<Uuid>,
+    pub by_turn_id: Option<Uuid>,
+    pub at: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

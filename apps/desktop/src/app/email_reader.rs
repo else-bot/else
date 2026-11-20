@@ -9,7 +9,7 @@ use super::ElseApp;
 use crate::api::{Client, EmailMessage, EmailPerson};
 use crate::attachments::byte_size;
 use crate::controls::{Control as _, Scale, Tier};
-use crate::model::TurnMail;
+use crate::model::{MailLocation, TurnMail};
 use futures_util::FutureExt as _;
 use futures_util::future::{Either, Shared};
 use gpui_kit::assets::IconName;
@@ -40,11 +40,30 @@ const CACHED_PAGE_BYTES: usize = 192 * 1024 * 1024;
 
 enum Reading {
     Loading { slow: bool, _task: Task<()> },
-    Failed(String),
+    Failed(FetchError),
     Loaded(Arc<EmailMessage>),
 }
 
-type Fetch = Shared<Task<Result<Arc<EmailMessage>, String>>>;
+/// Why an email did not open, and whether asking again could help: not
+/// when the server looked for the email and it is gone.
+#[derive(Clone)]
+struct FetchError {
+    message: String,
+    retry: bool,
+}
+
+impl From<crate::api::ClientError> for FetchError {
+    fn from(error: crate::api::ClientError) -> Self {
+        let gone = matches!(&error, crate::api::ClientError::Api { code, .. }
+            if matches!(code.as_str(), "message_deleted" | "message_not_found" | "stale_message_reference"));
+        Self {
+            message: error.to_string(),
+            retry: !gone,
+        }
+    }
+}
+
+type Fetch = Shared<Task<Result<Arc<EmailMessage>, FetchError>>>;
 
 /// One email of one inbox on one server connection.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -97,7 +116,7 @@ impl ReaderCache {
                     .view_email(account, message)
                     .await
                     .map(Arc::new)
-                    .map_err(|error| error.to_string())
+                    .map_err(FetchError::from)
             })
             .shared();
         let cache = cx.global_mut::<Self>();
@@ -213,7 +232,10 @@ impl EmailReader {
             client,
             mails,
             index: 0,
-            reading: Reading::Failed(String::new()),
+            reading: Reading::Failed(FetchError {
+                message: String::new(),
+                retry: false,
+            }),
             shown: Shown::Html,
             html: None,
             width: None,
@@ -523,25 +545,30 @@ impl Render for EmailReader {
                     .into_any_element();
             }
             Reading::Failed(error) => {
-                let retry = self.index;
+                let index = self.index;
+                let (text, color) = if error.retry {
+                    (
+                        format!("Could not open this email. {}", error.message),
+                        theme.danger,
+                    )
+                } else {
+                    (error.message.clone(), theme.muted_foreground)
+                };
                 return v_flex()
                     .gap_2()
                     .items_start()
                     .children(navigation)
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.danger)
-                            .child(format!("Could not open this email. {error}")),
-                    )
-                    .child(
-                        Button::new("email-retry")
-                            .control(Tier::Secondary, Scale::Compact, false, cx)
-                            .label("Try again")
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.load(retry, true, cx)),
-                            ),
-                    )
+                    .child(div().text_sm().text_color(color).child(text))
+                    .when(error.retry, |this| {
+                        this.child(
+                            Button::new("email-retry")
+                                .control(Tier::Secondary, Scale::Compact, false, cx)
+                                .label("Try again")
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.load(index, true, cx)),
+                                ),
+                        )
+                    })
                     .into_any_element();
             }
             Reading::Loaded(message) => message.clone(),
@@ -875,58 +902,169 @@ impl ElseApp {
     }
 }
 
-/// The row above a mail-triggered reply: the email that woke the bot, and
-/// a button per message that opens it in the reader.
-pub(super) fn mail_banner(turn: &crate::model::Turn, cx: &mut Context<ElseApp>) -> Option<Div> {
-    if turn.mail.is_empty() {
-        return None;
-    }
-    let theme = cx.theme();
+/// The row above a mail-triggered reply: the email that woke the bot,
+/// where it is now, and a button that opens the emails still there.
+pub(super) fn mail_banner(
+    turn: &crate::model::Turn,
+    bots: &[crate::api::Bot],
+    cx: &mut Context<ElseApp>,
+) -> Option<Div> {
+    let first = turn.mail.first()?;
+    let theme = cx.theme().clone();
     let count = turn.mail.len();
-    let mails = turn.mail.clone();
-    let view = super::action_card::event_action(
-        SharedString::from(format!("view-email-{}", turn.id)),
-        if count == 1 {
-            "View email"
-        } else {
-            "View emails"
-        },
-        false,
-        cx,
-    )
-    .on_hover({
-        let app = cx.entity().downgrade();
-        let first = turn.mail[0].clone();
-        move |hovered, _, cx| {
-            if let (true, Some(app)) = (*hovered, app.upgrade()) {
-                let client = app.read(cx).client.clone();
-                drop(ReaderCache::fetch(&client, &first, false, cx));
+    let openable: Vec<TurnMail> = turn
+        .mail
+        .iter()
+        .filter(|mail| !matches!(mail.location, MailLocation::Deleted(_)))
+        .cloned()
+        .collect();
+    let (verb, object) = if count == 1 {
+        let name = |id: Option<uuid::Uuid>| {
+            id.and_then(|id| bots.iter().find(|bot| bot.id == id))
+                .map(|bot| bot.name.as_str())
+        };
+        let stamp = |at| super::message_row::short_stamp(at);
+        let verb = match &first.location {
+            MailLocation::Arrived => "New email".to_owned(),
+            MailLocation::Archived(m) | MailLocation::Trashed(m) | MailLocation::Moved(m) => {
+                place_label(&first.location, name(m.by_bot_id), &stamp(m.at))
             }
-        }
-    })
-    .on_click(cx.listener(move |app, _, window, cx| app.open_email(mails.clone(), window, cx)));
+            MailLocation::Deleted(d) => {
+                place_label(&first.location, name(d.by_bot_id), &stamp(d.at))
+            }
+        };
+        let object = first.subject.clone().or_else(|| first.sender.clone());
+        (verb, object)
+    } else {
+        (format!("{count} new emails"), places_summary(&turn.mail))
+    };
+    let view = (!openable.is_empty()).then(|| {
+        let hover = openable[0].clone();
+        super::action_card::event_action(
+            SharedString::from(format!("view-email-{}", turn.id)),
+            if openable.len() == 1 {
+                "View email"
+            } else {
+                "View emails"
+            },
+            false,
+            cx,
+        )
+        .on_hover({
+            let app = cx.entity().downgrade();
+            move |hovered, _, cx| {
+                if let (true, Some(app)) = (*hovered, app.upgrade()) {
+                    let client = app.read(cx).client.clone();
+                    drop(ReaderCache::fetch(&client, &hover, false, cx));
+                }
+            }
+        })
+        .on_click(
+            cx.listener(move |app, _, window, cx| app.open_email(openable.clone(), window, cx)),
+        )
+    });
     Some(
-        super::action_card::event_row(theme)
+        super::action_card::event_row(&theme)
             .child(super::action_card::event_icon(IconName::Mail))
-            .child(super::action_card::event_verb(
-                theme,
-                if count == 1 {
-                    "New email".to_owned()
-                } else {
-                    format!("{count} new emails")
-                },
-            ))
-            .child(super::action_card::event_end(
-                theme,
-                super::action_card::EventEnd::Actions(vec![view]),
-                super::action_card::Disclosure::None,
-            )),
+            .child(super::action_card::event_verb(&theme, verb))
+            .children(object.map(|object| super::action_card::event_object(&theme, object)))
+            .children(view.map(|view| {
+                super::action_card::event_end(
+                    &theme,
+                    super::action_card::EventEnd::Actions(vec![view]),
+                    super::action_card::Disclosure::None,
+                )
+            })),
     )
+}
+
+/// Where one email went, who moved it, and when, such as "Archived by
+/// Mail · 18:08". `stamp` is when it moved.
+fn place_label(location: &MailLocation, by: Option<&str>, stamp: &str) -> String {
+    let by = by.map(|name| format!(" by {name}")).unwrap_or_default();
+    match location {
+        MailLocation::Arrived => "New email".to_owned(),
+        MailLocation::Archived(_) => format!("Archived{by} · {stamp}"),
+        MailLocation::Trashed(_) if by.is_empty() => format!("In Trash · {stamp}"),
+        MailLocation::Trashed(_) => format!("In Trash · moved{by} · {stamp}"),
+        MailLocation::Moved(m) => format!("Moved to {}{by} · {stamp}", m.folder),
+        MailLocation::Deleted(_) => format!("Email deleted{by} · {stamp}"),
+    }
+}
+
+/// How many of a turn's emails left where they arrived, by where they
+/// went, such as "2 archived, 1 deleted"; none when all are still there.
+fn places_summary(mails: &[TurnMail]) -> Option<String> {
+    let count =
+        |want: fn(&MailLocation) -> bool| mails.iter().filter(|m| want(&m.location)).count();
+    let parts: Vec<String> = [
+        (
+            count(|l| matches!(l, MailLocation::Archived(_))),
+            "archived",
+        ),
+        (count(|l| matches!(l, MailLocation::Trashed(_))), "in Trash"),
+        (count(|l| matches!(l, MailLocation::Moved(_))), "moved"),
+        (count(|l| matches!(l, MailLocation::Deleted(_))), "deleted"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, what)| format!("{n} {what}"))
+    .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// What a bot's turn did to the emails that woke it, for a turn that
+/// wrote no reply, such as "Archived the email."
+pub(super) fn mail_outcome(turn: &crate::model::Turn) -> Option<String> {
+    let mine: Vec<&MailLocation> = turn
+        .mail
+        .iter()
+        .map(|mail| &mail.location)
+        .filter(|location| location.by_turn() == Some(turn.id))
+        .collect();
+    if let [only] = mine.as_slice() {
+        return Some(match only {
+            MailLocation::Arrived => return None,
+            MailLocation::Archived(_) => "Archived the email.".to_owned(),
+            MailLocation::Trashed(_) => "Moved the email to Trash.".to_owned(),
+            MailLocation::Moved(m) => format!("Moved the email to {}.", m.folder),
+            MailLocation::Deleted(_) => "Deleted the email.".to_owned(),
+        });
+    }
+    let count = |want: fn(&MailLocation) -> bool| mine.iter().filter(|l| want(l)).count();
+    let emails = |n: usize| match n {
+        1 => "1 email".to_owned(),
+        n => format!("{n} emails"),
+    };
+    let parts: Vec<String> = [
+        (
+            count(|l| matches!(l, MailLocation::Archived(_))),
+            "archived {}",
+        ),
+        (
+            count(|l| matches!(l, MailLocation::Trashed(_))),
+            "moved {} to Trash",
+        ),
+        (count(|l| matches!(l, MailLocation::Moved(_))), "moved {}"),
+        (
+            count(|l| matches!(l, MailLocation::Deleted(_))),
+            "deleted {}",
+        ),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, phrase)| phrase.replace("{}", &emails(n)))
+    .collect();
+    let text = parts.join(", ");
+    let mut chars = text.chars();
+    let first = chars.next()?;
+    Some(format!("{}{}.", first.to_uppercase(), chars.as_str()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Body, Html, Key, Page, Shown, area, body};
+    use super::{Body, Html, Key, Page, Shown, area, body, place_label, places_summary};
+    use crate::model::{MailDeletion, MailLocation, MailMove, TurnMail};
     use else_visual::email::Rect;
     use gpui_kit::{Bounds, point, px, size};
     use gpui_kit::{RenderImage, Task};
@@ -1007,6 +1145,137 @@ mod tests {
             body(Shown::Html, Some(&failed)),
             Body::Failed("too deep.")
         ));
+    }
+
+    fn mail(location: MailLocation) -> TurnMail {
+        TurnMail {
+            account_id: uuid::Uuid::nil(),
+            message: crate::api::MessageRef {
+                folder: "INBOX".into(),
+                uid_validity: 1,
+                uid: 9,
+            },
+            subject: Some("Verify your email".into()),
+            sender: None,
+            location,
+        }
+    }
+
+    fn moved(folder: &str, turn: Option<uuid::Uuid>) -> MailMove {
+        MailMove {
+            folder: folder.into(),
+            by_bot_id: None,
+            by_turn_id: turn,
+            at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_moved_email_says_where_it_went_and_who_moved_it() {
+        let archived = MailLocation::Archived(moved("Archive", None));
+        assert_eq!(
+            place_label(&archived, Some("Mail"), "18:08"),
+            "Archived by Mail · 18:08"
+        );
+        let trashed = MailLocation::Trashed(moved("Trash", None));
+        assert_eq!(
+            place_label(&trashed, Some("Mail"), "18:08"),
+            "In Trash · moved by Mail · 18:08"
+        );
+        assert_eq!(place_label(&trashed, None, "18:08"), "In Trash · 18:08");
+        let elsewhere = MailLocation::Moved(moved("Receipts", None));
+        assert_eq!(
+            place_label(&elsewhere, None, "18:08"),
+            "Moved to Receipts · 18:08"
+        );
+    }
+
+    #[test]
+    fn a_turns_emails_sum_up_where_they_went() {
+        let mails = [
+            mail(MailLocation::Arrived),
+            mail(MailLocation::Archived(moved("Archive", None))),
+            mail(MailLocation::Archived(moved("Archive", None))),
+            mail(MailLocation::Deleted(MailDeletion {
+                by_bot_id: None,
+                by_turn_id: None,
+                at: chrono::Utc::now(),
+            })),
+        ];
+        assert_eq!(
+            places_summary(&mails).as_deref(),
+            Some("2 archived, 1 deleted")
+        );
+        assert_eq!(places_summary(&mails[..1]), None);
+    }
+
+    /// A completed turn as the server sends it, woken by `mail`.
+    fn mail_turn(mail: serde_json::Value) -> crate::model::Turn {
+        serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-00000000000a",
+            "request_id": "00000000-0000-0000-0000-00000000000b", "turn_no": 1,
+            "provider_id": "synthetic", "status": "completed", "error": null,
+            "effect_uncertain": false, "created_at": "2026-11-20T18:00:00Z",
+            "mail": mail,
+        }))
+        .unwrap()
+    }
+
+    fn turn_email(location: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "account_id": "00000000-0000-0000-0000-000000000001",
+            "message": {"folder": "INBOX", "uid_validity": 1, "uid": 9},
+            "subject": "Verify your email", "sender": "Coupon Co", "location": location,
+        })
+    }
+
+    #[test]
+    fn a_silent_mail_turn_says_what_it_did_to_its_emails() {
+        let by_this_turn = |state: &str| {
+            turn_email(serde_json::json!({
+                "state": state, "folder": "Trash",
+                "by_bot_id": "00000000-0000-0000-0000-000000000002",
+                "by_turn_id": "00000000-0000-0000-0000-00000000000a",
+                "at": "2026-11-20T18:08:00.123+00:00",
+            }))
+        };
+        assert_eq!(
+            super::mail_outcome(&mail_turn(serde_json::json!([by_this_turn("trashed")])))
+                .as_deref(),
+            Some("Moved the email to Trash.")
+        );
+        let deleted = serde_json::json!({"state": "deleted", "by_bot_id": null,
+            "by_turn_id": "00000000-0000-0000-0000-00000000000a",
+            "at": "2026-11-20T18:08:00.123+00:00"});
+        assert_eq!(
+            super::mail_outcome(&mail_turn(serde_json::json!([
+                by_this_turn("archived"),
+                by_this_turn("archived"),
+                turn_email(deleted),
+            ])))
+            .as_deref(),
+            Some("Archived 2 emails, deleted 1 email.")
+        );
+        let elsewhere = serde_json::json!({"state": "archived", "folder": "Archive",
+            "by_bot_id": null, "by_turn_id": null, "at": "2026-11-20T18:08:00.123+00:00"});
+        assert_eq!(
+            super::mail_outcome(&mail_turn(serde_json::json!([
+                turn_email(elsewhere),
+                turn_email(serde_json::json!({"state": "arrived"})),
+            ]))),
+            None,
+            "moves by other clients are not this turn's work"
+        );
+        assert_eq!(
+            mail_turn(
+                serde_json::json!([{"account_id": "00000000-0000-0000-0000-000000000001",
+                "message": {"folder": "INBOX", "uid_validity": 1, "uid": 9}}])
+            )
+            .mail[0]
+                .location,
+            MailLocation::Arrived,
+            "an older server's email reads as where it arrived"
+        );
     }
 
     #[test]
