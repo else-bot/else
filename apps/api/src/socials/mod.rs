@@ -401,7 +401,6 @@ impl Manager {
                             _ = stop.cancelled() => (Err(Error::Inactive), true),
                             _ = changed.changed() => (Err(Error::Inactive), true),
                             _ = request.cancel.cancelled() => (Err(Error::Inactive), false),
-                            _ = self.revoked(&c, &request) => (Err(Error::Inactive), false),
                             result = self.dispatch(&c, &session, &request) => (result, false),
                         };
                         if result.is_err()
@@ -426,29 +425,6 @@ impl Manager {
         }
         while let Ok(r) = requests.try_recv() {
             r.reject();
-        }
-    }
-    async fn revoked(&self, c: &Connection, r: &Request) {
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let check = async {
-                let mut conn = self.db.acquire().await?;
-                store::authorize(
-                    &mut conn,
-                    c,
-                    r.bot,
-                    r.turn,
-                    r.operation.destination(),
-                    r.operation.mutates(),
-                    r.operation.sends(),
-                )
-                .await
-                .map(|_| ())
-            }
-            .await;
-            if check.is_err() {
-                return;
-            }
         }
     }
     async fn dispatch(
