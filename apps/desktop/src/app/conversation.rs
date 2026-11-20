@@ -67,6 +67,9 @@ pub(super) struct TranscriptRow {
     pub(super) day: Option<DateTime<Utc>>,
     pub(super) routine: Option<RoutineRow>,
     pub(super) task: Option<TaskReply>,
+    /// A reply's turn updates from before the owner message below it, which
+    /// fold under the reply.
+    pub(super) folded: Vec<Uuid>,
     pub(super) activity: Option<BotActivity>,
     /// It starts a run of its turn's messages, under its sender's name.
     pub(super) starts_run: bool,
@@ -83,6 +86,7 @@ pub(super) struct TranscriptRow {
 impl TranscriptRow {
     pub(super) fn contains(&self, key: RowKey) -> bool {
         self.key == key
+            || matches!(key, RowKey::Item(id) if self.folded.contains(&id))
             || matches!(key, RowKey::Item(id) if self.activity.as_ref().is_some_and(|activity| activity.contains(id)))
             || self
                 .task
@@ -586,6 +590,8 @@ pub(super) struct ConversationView {
     pub(super) expanded_drafts: HashSet<Uuid>,
     pub(super) expanded_questions: HashSet<Uuid>,
     pub(super) expanded_tasks: HashSet<Uuid>,
+    /// Replies whose folded earlier updates are open.
+    pub(super) expanded_folds: HashSet<Uuid>,
     /// Delegation groups whose task details are expanded.
     pub(super) expanded_councils: HashSet<Uuid>,
     pub(super) expanded_events: HashSet<Uuid>,
@@ -730,6 +736,7 @@ impl ConversationView {
             expanded_drafts: HashSet::new(),
             expanded_questions: HashSet::new(),
             expanded_tasks: HashSet::new(),
+            expanded_folds: HashSet::new(),
             expanded_councils: HashSet::new(),
             expanded_events: HashSet::new(),
             exchange_folds: HashMap::new(),
@@ -1091,6 +1098,12 @@ impl ElseApp {
         let view = self.view.as_mut()?;
         let conversation = view.conversation.as_ref()?;
         let ix = view.row_index(RowKey::Item(target))?;
+        if let RowKey::Item(reply) = view.rows[ix].key
+            && view.rows[ix].folded.contains(&target)
+        {
+            view.expanded_folds.insert(reply);
+            view.list.remeasure_items(ix..ix + 1);
+        }
         if let Some(task) = &view.rows[ix].task
             && (task.history.contains(&target)
                 || (task.kept.contains(&target) && task.reply_superseded(conversation, target))
@@ -1440,6 +1453,14 @@ impl ElseApp {
                     task: match key {
                         RowKey::Task(id) => tasks.get(&id).cloned(),
                         _ => None,
+                    },
+                    folded: match key {
+                        RowKey::Item(id) => conversation
+                            .and_then(|c| c.item(id))
+                            .and_then(|item| tasks.get(&item.turn_id)?.folds.get(&id))
+                            .cloned()
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
                     },
                     activity: None,
                     starts_run: true,
@@ -2271,6 +2292,7 @@ mod tests {
             day: None,
             routine: None,
             task: None,
+            folded: Vec::new(),
             activity: None,
             starts_run: true,
             opens_turn: None,
@@ -2612,6 +2634,7 @@ mod tests {
             day: None,
             routine: None,
             task: None,
+            folded: Vec::new(),
             activity: None,
             starts_run: true,
             opens_turn: None,

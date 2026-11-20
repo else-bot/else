@@ -1372,6 +1372,11 @@ fn an_answer_does_not_make_a_folded_update_look_like_an_attempts_end() {
     );
     let task = &task_replies(&c)[&id(20)];
     assert_eq!(task.answers, [id(3)]);
+    assert_eq!(
+        task.folds,
+        HashMap::from([(id(3), vec![id(2)])]),
+        "an update inside attempt 1 still folds, above the message"
+    );
     assert!(task.kept.is_empty(), "{:?}", task.kept);
 }
 
@@ -1427,6 +1432,11 @@ fn a_message_joining_a_parked_turn_keeps_the_turns_updates_above_it() {
     let c = conversation(items, turns);
     let task = &task_replies(&c)[&id(20)];
     assert_eq!(task.answers, [id(5)]);
+    assert_eq!(
+        task.folds,
+        HashMap::from([(id(5), vec![id(2), id(3), id(4)])]),
+        "the earlier updates fold under the reply the owner saw"
+    );
     assert_eq!(task.latest, None);
     assert!(task.history.is_empty(), "{:?}", task.history);
     assert!(task.kept.is_empty(), "{:?}", task.kept);
@@ -1466,6 +1476,7 @@ fn a_joined_turns_new_updates_count_from_the_message_live_and_reloaded() {
     let reloaded = conversation(items, turns);
     assert_eq!(task_replies(&live), task_replies(&reloaded));
     let task = &task_replies(&reloaded)[&id(20)];
+    assert_eq!(task.folds[&id(5)], [id(2), id(3), id(4)]);
     assert_eq!(task.answers, [id(5), id(7)]);
     assert_eq!(task.latest, Some(id(8)));
     assert!(task.history.is_empty(), "{:?}", task.history);
@@ -1488,4 +1499,15 @@ fn a_card_from_before_a_joined_message_stays_above_it() {
     let left = place_cards(&c, &mut tasks, vec![(id(20), card, Some(id(3)))]);
     assert_eq!(left, [(card, Some(id(3)))]);
     assert!(tasks[&id(20)].cards.is_empty());
+}
+
+#[test]
+fn a_file_from_before_a_joined_message_stays_in_view_above_it() {
+    let (mut items, turns) = parked_then_joined("waiting", 2, &[]);
+    items[2]["parts"] = json!([{"type": "file", "file": {"id": id(400), "name": "report.pdf",
+        "media_type": "application/pdf", "size": 10}}]);
+    let c = conversation(items, turns);
+    let task = &task_replies(&c)[&id(20)];
+    assert_eq!(task.answers, [id(3), id(5)]);
+    assert_eq!(task.folds[&id(5)], [id(2), id(4)]);
 }

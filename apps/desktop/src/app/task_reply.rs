@@ -281,21 +281,7 @@ impl ElseApp {
                         continue;
                     }
                 };
-                updates = updates.child(
-                    v_flex()
-                        .w_full()
-                        .min_w_0()
-                        .gap_1()
-                        .children(conversation.item(id).and_then(|item| item.created_at).map(
-                            |at| {
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(meta)
-                                    .child(super::message_row::short_stamp(at))
-                            },
-                        ))
-                        .children(self.task_message(id, conversation.reaction_for(id), cx)),
-                );
+                updates = updates.children(self.update_entry(id, cx));
             }
             updates
         });
@@ -361,6 +347,96 @@ impl ElseApp {
             card.into_any_element()
         };
         Some(card)
+    }
+
+    /// An earlier update, under the time it was written.
+    fn update_entry(&self, id: Uuid, cx: &mut Context<Self>) -> Option<Div> {
+        let conversation = self.view.as_ref()?.conversation.as_ref()?;
+        let meta = super::message_row::meta_color(cx.theme());
+        let stamp = conversation.item(id).and_then(|item| item.created_at);
+        let reaction = conversation.reaction_for(id);
+        Some(
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .children(stamp.map(|at| {
+                    div()
+                        .text_size(px(12.))
+                        .text_color(meta)
+                        .child(super::message_row::short_stamp(at))
+                }))
+                .children(self.task_message(id, reaction, cx)),
+        )
+    }
+
+    /// The updates a reply's turn wrote before the owner message below the
+    /// reply, folded under the reply's name until opened.
+    pub(super) fn render_fold(
+        &self,
+        reply: Uuid,
+        folded: &[Uuid],
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let expanded = self.view.as_ref()?.expanded_folds.contains(&reply);
+        let theme = cx.theme().clone();
+        let count = folded.len();
+        let label = format!("{count} {}", if count == 1 { "update" } else { "updates" });
+        let toggle = Button::new(SharedString::from(format!("reply-fold-{reply}")))
+            .ghost()
+            .small()
+            .focus_ring(false)
+            .cursor_pointer()
+            .toggled(expanded)
+            .h_auto()
+            .self_start()
+            .py_0p5()
+            .px_1p5()
+            .ml(px(-6.))
+            .accessibility_label(format!(
+                "{} {label}",
+                if expanded { "Collapse" } else { "Expand" }
+            ))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(12.))
+                    .text_color(super::message_row::meta_color(&theme))
+                    .child(label)
+                    .child(
+                        Icon::new(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .xsmall()
+                        .flex_none(),
+                    ),
+            )
+            .on_click(cx.listener(move |app, _, _, cx| {
+                if let Some(view) = app.view.as_mut()
+                    && !view.expanded_folds.remove(&reply)
+                {
+                    view.expanded_folds.insert(reply);
+                }
+                app.remeasure_row(RowKey::Item(reply), cx);
+            }));
+        let mut fold = v_flex().w_full().min_w_0().gap_1p5().child(toggle);
+        if expanded {
+            let mut updates = v_flex()
+                .w_full()
+                .min_w_0()
+                .gap_3()
+                .pl_3()
+                .border_l_1()
+                .border_color(theme.border);
+            for &id in folded {
+                updates = updates.children(self.update_entry(id, cx));
+            }
+            fold = fold.child(updates);
+        }
+        Some(fold)
     }
 
     fn task_message(

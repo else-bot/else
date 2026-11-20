@@ -54,6 +54,12 @@ pub(in crate::app) struct TaskReply {
     /// Replies before and after owner messages joined into the turn, each
     /// read as a bot message of its own at its place in the transcript.
     pub answers: Vec<Uuid>,
+    /// Updates from before each joined owner message, oldest first, by the
+    /// answer just above that message, where they fold.
+    pub folds: HashMap<Uuid, Vec<Uuid>>,
+    /// The newest joined owner message: the task reads after it, and what
+    /// the turn showed before it stays above it.
+    pub since: Option<Uuid>,
     pub kept: Vec<Uuid>,
     /// Files of `kept` replies that a later reply delivers again; the kept
     /// reply shows its text without them, so a file appears once.
@@ -242,6 +248,8 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                     summary: None,
                     history: Vec::new(),
                     answers: Vec::new(),
+                    folds: HashMap::new(),
+                    since: None,
                     kept: Vec::new(),
                     repeated_files: HashSet::new(),
                     cards: Vec::new(),
@@ -333,6 +341,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                 || reply.latest.is_none()
                 || !reply.history.is_empty()
                 || !reply.kept.is_empty()
+                || !reply.folds.is_empty()
                 || task_turns.contains(turn))
     });
     for reply in replies
@@ -388,7 +397,15 @@ pub(in crate::app) fn place_cards(
                 .anchor
                 .and_then(seq)
                 .is_some_and(|row| seq(after) < Some(row));
-            if turn_of(after) != Some(turn) || !before_row || task.answers.contains(&after) {
+            let before_since = task
+                .since
+                .and_then(seq)
+                .is_some_and(|since| seq(after) < Some(since));
+            if turn_of(after) != Some(turn)
+                || !before_row
+                || before_since
+                || task.answers.contains(&after)
+            {
                 return Some((key, anchor));
             }
             let attempt = match key {
@@ -422,8 +439,11 @@ pub(in crate::app) fn place_cards(
 /// segment's first reply and the reply ending that reply's attempt answer
 /// it: seq cannot tell where the provider took the message, so both stay in
 /// view. The newest segment stays the task, anchored after its message until
-/// the bot writes there, and every other reply folds into it. A finished turn
-/// that wrote nothing after its last messages ends on the reply before them.
+/// the bot writes there, and its other replies fold into it. Every earlier
+/// segment's other replies fold under its last answer, above its message, so
+/// a message joining a long turn does not read as the turn's history. A
+/// finished turn that wrote nothing after its last messages ends on the reply
+/// before them.
 fn split_answers(
     conversation: &Conversation,
     reactions: &HashMap<Uuid, crate::model::ReactionKind>,
@@ -432,6 +452,14 @@ fn split_answers(
 ) {
     let seq = |id| conversation.item(id).map_or(i64::MAX, |item| item.seq);
     let attempt = |id| conversation.item(id).and_then(|item| item.attempt);
+    let kept = |id: Uuid| {
+        reactions.contains_key(&id)
+            || conversation.item(id).is_some_and(|item| {
+                item.parts
+                    .iter()
+                    .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }))
+            })
+    };
     let mut boundaries: Vec<_> = joined.to_vec();
     let mut segments = vec![Vec::new(); boundaries.len() + 1];
     for id in reply.history.iter().copied().chain(reply.latest) {
@@ -446,9 +474,11 @@ fn split_answers(
     let Some((current, earlier)) = segments.split_last() else {
         return;
     };
+    // A reacted reply or one with a file before a message stays in view.
     let mut answers: Vec<Uuid> = earlier
         .iter()
         .filter_map(|segment| segment.last().copied())
+        .chain(earlier.iter().flatten().copied().filter(|&id| kept(id)))
         .collect();
     for segment in segments.iter().skip(1) {
         let Some(&first) = segment.first() else {
@@ -467,19 +497,22 @@ fn split_answers(
     if answers.is_empty() {
         return;
     }
+    reply.folds = earlier
+        .iter()
+        .filter_map(|segment| {
+            let folded: Vec<_> = (segment.iter().copied())
+                .filter(|id| !answers.contains(id))
+                .collect();
+            Some((*segment.last()?, folded)).filter(|(_, folded)| !folded.is_empty())
+        })
+        .collect();
+    reply.since = boundaries.last().copied();
     reply.latest = current.last().copied();
-    reply.anchor = reply.latest.or_else(|| boundaries.last().copied());
-    reply.latest_kept = reply.latest.is_some_and(|id| {
-        reactions.contains_key(&id)
-            || conversation.item(id).is_some_and(|item| {
-                item.parts
-                    .iter()
-                    .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }))
-            })
-    });
-    reply
-        .history
-        .retain(|id| !answers.contains(id) && reply.latest != Some(*id));
+    reply.anchor = reply.latest.or(reply.since);
+    reply.latest_kept = reply.latest.is_some_and(kept);
+    reply.history = (current.iter().copied())
+        .filter(|id| !answers.contains(id) && reply.latest != Some(*id))
+        .collect();
     reply.answers = answers;
 }
 
