@@ -26,6 +26,16 @@ pub enum Interrupt {
     Signal,
 }
 
+/// How writing the prompt of [`StreamAttempt::spawn_with_prompt`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Prompt {
+    /// All of it went into the pipe.
+    Written,
+    /// The CLI closed its input first, for example because it exited
+    /// signed out. Only its exit says what happened.
+    Refused,
+}
+
 pub struct StreamAttempt {
     scope: Scope,
     stdin: Option<ChildStdin>,
@@ -59,11 +69,15 @@ impl StreamAttempt {
         spec: &LaunchSpec,
         prompt: &str,
         label: &'static str,
-    ) -> std::io::Result<Self> {
+    ) -> std::io::Result<(Self, Prompt)> {
         let mut attempt = Self::start(host, spec, Stdio::piped(), Interrupt::Signal, label)?;
-        attempt.write(prompt).await?;
+        let prompt = match attempt.write(prompt).await {
+            Ok(()) => Prompt::Written,
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Prompt::Refused,
+            Err(e) => return Err(e),
+        };
         attempt.stdin = None;
-        Ok(attempt)
+        Ok((attempt, prompt))
     }
 
     fn start(
