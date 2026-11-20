@@ -208,6 +208,19 @@ impl ElseApp {
         self.show_match(window, cx);
     }
 
+    /// Shows the current match of a view shown again, if it was found or
+    /// its messages loaded while the view was warm.
+    pub(super) fn resume_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let unlanded = self
+            .view
+            .as_ref()
+            .and_then(|view| view.find.as_ref())
+            .is_some_and(|find| matches!(&find.phase, Phase::Found(found) if !found.landed));
+        if unlanded {
+            self.show_match(window, cx);
+        }
+    }
+
     /// Scrolls to the current match, unfolding what hides it, or first
     /// loads a window of messages around it.
     fn show_match(&mut self, window: &mut Window, cx: &mut Context<Self>) {

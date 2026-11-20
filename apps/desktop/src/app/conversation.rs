@@ -928,6 +928,12 @@ impl ElseApp {
                 };
                 match conversation.apply(&frame) {
                     Ok(Applied::Duplicate) => false,
+                    // The bot list stays authoritative for a warm bot's
+                    // activity: its last frames can trail the list.
+                    Ok(Applied::Changed) if !shown => {
+                        self.prune_pending(bot);
+                        false
+                    }
                     Ok(Applied::Changed) => {
                         let activity = conversation.activity.clone();
                         if activity.as_ref().is_some_and(|a| a.phase == "idle") {
@@ -938,16 +944,11 @@ impl ElseApp {
                         {
                             entry.activity = activity;
                         }
-                        if shown {
-                            self.sync_rows(window, cx);
-                            self.ensure_rules(bot, window, cx);
-                        }
+                        self.sync_rows(window, cx);
+                        self.ensure_rules(bot, window, cx);
                         false
                     }
-                    Err(_) => {
-                        self.live_command(LiveCommand::Unsubscribe { bot });
-                        true
-                    }
+                    Err(_) => true,
                 }
             }
             StreamMessage::Reset => true,
@@ -959,12 +960,29 @@ impl ElseApp {
         if !failed {
             return;
         }
+        // Dropped so the reloaded page's cursor subscribes anew, even when
+        // it equals the one asked for before.
+        self.live_command(LiveCommand::Unsubscribe { bot });
         if shown {
             self.load_conversation(window, cx);
         } else if let Some(view) = self.view_of(bot)
             && matches!(view.load, Load::Settled)
         {
             view.load = Load::Failed { _retry: None };
+        }
+    }
+
+    /// Drops `bot`'s pending sends its conversation now holds.
+    pub(super) fn prune_pending(&mut self, bot: Uuid) {
+        let view = match self.view.as_ref() {
+            Some(view) if view.bot_id == bot => Some(view),
+            _ => self.warm.get(bot),
+        };
+        if let (Some(conversation), Some(pending)) = (
+            view.and_then(|v| v.conversation.as_ref()),
+            self.pending.get_mut(&bot),
+        ) {
+            pending.retain(|p| !conversation.has_request(p.request_id));
         }
     }
 

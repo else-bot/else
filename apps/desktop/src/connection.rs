@@ -477,7 +477,7 @@ impl Shell {
             .unwrap_or_default();
         let saved = self.launch.store.as_ref().ok().map(|store| {
             crate::saved_conversations::SavedConversations::new(
-                store.saved_conversations_dir(id),
+                &store.saved_conversations_dir(id),
                 profile.origin.as_str(),
             )
         });

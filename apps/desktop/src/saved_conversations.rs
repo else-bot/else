@@ -4,8 +4,7 @@
 use std::collections::HashMap;
 use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use uuid::Uuid;
 
@@ -16,21 +15,36 @@ const MAX_PAGE_BYTES: u64 = 1024 * 1024;
 /// How many bots' pages a server keeps; the least recently saved go first.
 const KEPT_PAGES: usize = 32;
 
-/// One server connection's pages. Clones share one writer, so saves land
-/// in the order their pages were fetched and none lands once retired.
+/// One server connection's pages. Every session of a server shares one
+/// writer, so saves land in the order their pages were fetched and none
+/// lands once the server is forgotten.
 #[derive(Debug, Clone)]
 pub struct SavedConversations {
-    server: PathBuf,
     dir: PathBuf,
-    tickets: Arc<AtomicU64>,
     writer: Arc<Mutex<Writer>>,
 }
 
 #[derive(Debug, Default)]
 struct Writer {
-    retired: bool,
+    forgotten: bool,
+    next: u64,
     /// The ticket of the page last saved for each bot.
     saved: HashMap<Uuid, u64>,
+}
+
+fn writer(server: &Path) -> Arc<Mutex<Writer>> {
+    static WRITERS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<Writer>>>>> =
+        LazyLock::new(Default::default);
+    let mut writers = WRITERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    writers.entry(server.to_owned()).or_default().clone()
+}
+
+fn lock(writer: &Mutex<Writer>) -> std::sync::MutexGuard<'_, Writer> {
+    writer
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// A fetched page's place in fetch order.
@@ -40,16 +54,17 @@ pub struct Ticket(u64);
 impl SavedConversations {
     /// Pages for the server saved under `server`, reached at `origin`; a
     /// connection edited to another address starts with none.
-    pub fn new(server: PathBuf, origin: &str) -> Self {
+    pub fn new(server: &Path, origin: &str) -> Self {
         let address: String = origin
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .bytes()
+            .map(|b| match b {
+                b if b.is_ascii_alphanumeric() => char::from(b).to_string(),
+                b => format!("_{b:02x}"),
+            })
             .collect();
         Self {
             dir: server.join(address),
-            server,
-            tickets: Default::default(),
-            writer: Default::default(),
+            writer: writer(server),
         }
     }
 
@@ -67,7 +82,9 @@ impl SavedConversations {
 
     /// Takes a place in fetch order for a page just fetched.
     pub fn ticket(&self) -> Ticket {
-        Ticket(self.tickets.fetch_add(1, Ordering::Relaxed))
+        let mut writer = lock(&self.writer);
+        writer.next += 1;
+        Ticket(writer.next)
     }
 
     /// Saves `raw`, the API's response for `bot`'s latest page, readable
@@ -75,8 +92,8 @@ impl SavedConversations {
     /// saved. A page over the size limit removes the older one instead, so
     /// a stale page never stands in for it.
     pub fn save(&self, bot: Uuid, raw: &str, ticket: Ticket) -> Result<(), String> {
-        let mut writer = self.writer.lock().map_err(|_| "The page writer failed.")?;
-        if writer.retired || writer.saved.get(&bot).is_some_and(|&last| last > ticket.0) {
+        let mut writer = lock(&self.writer);
+        if writer.forgotten || writer.saved.get(&bot).is_some_and(|&last| last > ticket.0) {
             return Ok(());
         }
         writer.saved.insert(bot, ticket.0);
@@ -110,17 +127,12 @@ impl SavedConversations {
         Ok(())
     }
 
-    /// Stops saving and removes every page the server saved, under any
-    /// address.
-    pub fn retire(&self) -> Result<(), String> {
-        let mut writer = self.writer.lock().map_err(|_| "The page writer failed.")?;
-        writer.retired = true;
-        Self::forget(&self.server)
-    }
-
-    /// Removes every page saved under `server`, for a server with no
-    /// session to retire.
+    /// Removes every page saved under `server`, at any address, and
+    /// refuses later saves from its sessions.
     pub fn forget(server: &Path) -> Result<(), String> {
+        let writer = writer(server);
+        let mut writer = lock(&writer);
+        writer.forgotten = true;
         match std::fs::remove_dir_all(server) {
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
                 Err(format!("Cannot remove {}: {err}", server.display()))
@@ -166,7 +178,7 @@ mod tests {
     #[test]
     fn a_saved_page_loads_back_readable_only_by_its_owner() {
         let dir = tempfile::tempdir().unwrap();
-        let saved = SavedConversations::new(dir.path().join("server.conversations"), ORIGIN);
+        let saved = SavedConversations::new(&dir.path().join("server.conversations"), ORIGIN);
         let bot = Uuid::from_u128(1);
         assert!(saved.load(bot).is_none());
         saved.save(bot, &page("hello"), saved.ticket()).unwrap();
@@ -179,7 +191,7 @@ mod tests {
     #[test]
     fn a_page_shared_with_other_users_is_not_shown() {
         let dir = tempfile::tempdir().unwrap();
-        let saved = SavedConversations::new(dir.path().to_owned(), ORIGIN);
+        let saved = SavedConversations::new(dir.path(), ORIGIN);
         let bot = Uuid::from_u128(1);
         saved.save(bot, &page("hello"), saved.ticket()).unwrap();
         std::fs::set_permissions(saved.page(bot), std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -189,7 +201,7 @@ mod tests {
     #[test]
     fn an_oversized_page_replaces_the_saved_one_with_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let saved = SavedConversations::new(dir.path().to_owned(), ORIGIN);
+        let saved = SavedConversations::new(dir.path(), ORIGIN);
         let bot = Uuid::from_u128(1);
         saved.save(bot, &page("hello"), saved.ticket()).unwrap();
         saved
@@ -205,7 +217,7 @@ mod tests {
     #[test]
     fn a_server_keeps_only_its_most_recently_saved_pages() {
         let dir = tempfile::tempdir().unwrap();
-        let saved = SavedConversations::new(dir.path().to_owned(), ORIGIN);
+        let saved = SavedConversations::new(dir.path(), ORIGIN);
         let oldest = Uuid::from_u128(1000);
         saved.save(oldest, &page("first"), saved.ticket()).unwrap();
         let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
@@ -228,7 +240,7 @@ mod tests {
     #[test]
     fn a_page_fetched_earlier_does_not_replace_a_later_one() {
         let dir = tempfile::tempdir().unwrap();
-        let saved = SavedConversations::new(dir.path().to_owned(), ORIGIN);
+        let saved = SavedConversations::new(dir.path(), ORIGIN);
         let bot = Uuid::from_u128(1);
         let (earlier, later) = (saved.ticket(), saved.ticket());
         saved.save(bot, &page("later"), later).unwrap();
@@ -237,11 +249,11 @@ mod tests {
     }
 
     #[test]
-    fn retiring_a_server_removes_its_pages_and_refuses_later_saves() {
+    fn forgetting_a_server_removes_its_pages_and_refuses_later_saves() {
         let dir = tempfile::tempdir().unwrap();
         let server = dir.path().join("server.conversations");
-        let saved = SavedConversations::new(server.clone(), ORIGIN);
-        let elsewhere = SavedConversations::new(server.clone(), "https://other.example");
+        let saved = SavedConversations::new(&server, ORIGIN);
+        let elsewhere = SavedConversations::new(&server, "https://other.example");
         let ticket = saved.ticket();
         saved
             .save(Uuid::from_u128(1), &page("hello"), saved.ticket())
@@ -249,7 +261,7 @@ mod tests {
         elsewhere
             .save(Uuid::from_u128(2), &page("hello"), elsewhere.ticket())
             .unwrap();
-        saved.clone().retire().unwrap();
+        SavedConversations::forget(&server).unwrap();
         assert!(!server.exists(), "every address's pages are gone");
         saved
             .save(Uuid::from_u128(3), &page("late"), ticket)
@@ -264,9 +276,14 @@ mod tests {
     fn another_address_for_the_server_starts_without_pages() {
         let dir = tempfile::tempdir().unwrap();
         let bot = Uuid::from_u128(1);
-        let saved = SavedConversations::new(dir.path().to_owned(), ORIGIN);
+        let saved = SavedConversations::new(dir.path(), ORIGIN);
         saved.save(bot, &page("hello"), saved.ticket()).unwrap();
-        let moved = SavedConversations::new(dir.path().to_owned(), "https://other.example");
+        let moved = SavedConversations::new(dir.path(), "https://other.example");
         assert!(moved.load(bot).is_none());
+        let lookalike = SavedConversations::new(dir.path(), "http://127.0.0.1_7879");
+        assert!(
+            lookalike.load(bot).is_none(),
+            "distinct origins never share pages"
+        );
     }
 }

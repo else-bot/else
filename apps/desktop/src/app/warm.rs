@@ -44,11 +44,22 @@ impl<V> Warm<V> {
         self.views.remove(ix).map(|(_, view)| view)
     }
 
+    pub(super) fn get(&self, bot: Uuid) -> Option<&V> {
+        self.views
+            .iter()
+            .find(|(id, _)| *id == bot)
+            .map(|(_, view)| view)
+    }
+
     pub(super) fn get_mut(&mut self, bot: Uuid) -> Option<&mut V> {
         self.views
             .iter_mut()
             .find(|(id, _)| *id == bot)
             .map(|(_, view)| view)
+    }
+
+    pub(super) fn for_each(&mut self, f: impl FnMut(&mut V)) {
+        self.views.iter_mut().map(|(_, view)| view).for_each(f);
     }
 
     pub(super) fn contains(&self, bot: Uuid) -> bool {
@@ -139,6 +150,7 @@ impl ElseApp {
             Resume::Load => self.load_conversation(window, cx),
         }
         self.ensure_rules(bot, window, cx);
+        self.resume_find(window, cx);
     }
 
     /// Preloads `bot`'s conversation once the pointer or the quick

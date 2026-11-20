@@ -398,12 +398,6 @@ impl ElseApp {
         self.connection == Connection::Connected
     }
 
-    pub(crate) fn saved_conversations(
-        &self,
-    ) -> Option<crate::saved_conversations::SavedConversations> {
-        self.saved.clone()
-    }
-
     pub(crate) fn social_client(&self) -> Arc<Client> {
         self.client.clone()
     }
@@ -587,6 +581,7 @@ impl ElseApp {
                 self.connection = Connection::Connected;
                 self.sync_secret_forms(window, cx);
                 self.sync_social_forms(window, cx);
+                self.warm.for_each(|view| view.stream_problem = None);
                 if let Some(view) = self.view.as_mut() {
                     view.stream_problem = None;
                     if view.conversation.is_none() {
@@ -1001,6 +996,7 @@ impl ElseApp {
         if let Some(conversation) = self.view_of(bot).and_then(|v| v.conversation.as_mut()) {
             conversation.insert_item(item);
             conversation.insert_turn(turn);
+            self.prune_pending(bot);
         } else if let Some(list) = self.pending.get_mut(&bot) {
             list.retain(|p| Some(p.request_id) != item.request_id);
         }
