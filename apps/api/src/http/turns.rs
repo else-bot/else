@@ -9,21 +9,25 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
+use super::{AppState, Routes};
 use crate::app::messages::{InvalidMessage, MessagePart, Reaction, canonical_parts, validate_text};
 use crate::app::providers::Availability;
 use crate::db::turns::{self, AcceptError, SendRequest};
 use crate::views::*;
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/bots/{bot_id}/turns", post(send))
-        .route(
-            "/bots/{bot_id}/turns/by-request/{request_id}",
-            get(by_request),
-        )
-        .route("/bots/{bot_id}/cancel", post(cancel))
+pub fn routes() -> Routes {
+    // Sending stays open so its handler can queue the message for after
+    // the pause; Stop stays open so the owner can always stop a bot.
+    Routes::open(
+        Router::new()
+            .route("/bots/{bot_id}/turns", post(send))
+            .route(
+                "/bots/{bot_id}/turns/by-request/{request_id}",
+                get(by_request),
+            )
+            .route("/bots/{bot_id}/cancel", post(cancel)),
+    )
 }
 
 pub fn bot_deleted() -> ApiError {

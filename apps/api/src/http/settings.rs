@@ -5,14 +5,14 @@ use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
-use axum::routing::{get, put};
+use axum::routing::{get, patch, put};
 use axum::{Json, Router};
 use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
+use super::{AppState, Routes};
 use crate::app::providers::Availability;
 use crate::app::server_icon::{Look, MAX_PICTURE_BYTES, ServerIcon};
 use crate::db::profiles::{self, ProfileError, ProfilePatch, ProfileRecord};
@@ -26,17 +26,21 @@ pub fn is_icon_upload(method: &axum::http::Method, path: &str) -> bool {
     method == axum::http::Method::PUT && path == "/v1/settings/server/icon"
 }
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/settings/providers/{provider_id}", get(show).patch(update))
-        .route("/settings/defaults", get(show_defaults).put(set_defaults))
-        .route("/settings/server", put(name_server))
-        .route(
-            "/settings/server/icon",
-            get(show_server_icon)
-                .put(set_server_icon)
-                .layer(DefaultBodyLimit::max(MAX_ICON_BODY_BYTES)),
-        )
+pub fn routes() -> Routes {
+    Routes {
+        open: Router::new()
+            .route("/settings/providers/{provider_id}", get(show))
+            .route("/settings/defaults", get(show_defaults))
+            .route("/settings/server/icon", get(show_server_icon)),
+        gated: Router::new()
+            .route("/settings/providers/{provider_id}", patch(update))
+            .route("/settings/defaults", put(set_defaults))
+            .route("/settings/server", put(name_server))
+            .route(
+                "/settings/server/icon",
+                put(set_server_icon).layer(DefaultBodyLimit::max(MAX_ICON_BODY_BYTES)),
+            ),
+    }
 }
 
 /// A provider and a complete profile for it, as the owner's pickers send.

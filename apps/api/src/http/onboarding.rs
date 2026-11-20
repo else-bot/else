@@ -7,13 +7,13 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::AppState;
 use super::error::{ApiError, ApiJson};
 use super::settings::{ProfileChoice, choice_json, validate_choice};
+use super::{AppState, Routes};
 use crate::app::bots::BotName;
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new().route("/onboarding", post(complete))
+pub fn routes() -> Routes {
+    Routes::gated(Router::new().route("/onboarding", post(complete)))
 }
 
 #[derive(Deserialize)]

@@ -15,9 +15,9 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
 use super::mcp::{Outcome, tool_error, tool_result};
+use super::{AppState, Routes};
 use crate::app::providers::{Availability, Profile, default_profiles};
 use crate::app::routines::{
     ActiveHours, DEFAULT_TIMEZONE, InvalidRoutine, MAX_CHECK_BYTES, MAX_NAME_CHARS, MAX_PER_BOT,
@@ -28,17 +28,19 @@ use crate::db::routines::{self, By, Caller, NewRoutine, Patch, Routine, RoutineE
 use crate::grants::Grant;
 use crate::views::routine_json;
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/bots/{bot_id}/routines", get(owner_list))
-        .route(
-            "/bots/{bot_id}/routines/{routine_id}",
-            patch(owner_update).delete(owner_delete),
-        )
-        .route(
-            "/bots/{bot_id}/routines/{routine_id}/retry",
-            post(owner_retry),
-        )
+pub fn routes() -> Routes {
+    Routes {
+        open: Router::new().route("/bots/{bot_id}/routines", get(owner_list)),
+        gated: Router::new()
+            .route(
+                "/bots/{bot_id}/routines/{routine_id}",
+                patch(owner_update).delete(owner_delete),
+            )
+            .route(
+                "/bots/{bot_id}/routines/{routine_id}/retry",
+                post(owner_retry),
+            ),
+    }
 }
 
 impl From<RoutineError> for ApiError {

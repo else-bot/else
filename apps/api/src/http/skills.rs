@@ -7,15 +7,15 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiPath, SecretJson};
 use super::mcp::{Outcome, tool_error, tool_result};
+use super::{AppState, Routes};
 use crate::db::skills::{self, RequestError, Scope, SettleError, Settled, Status};
 use crate::grants::Grant;
 use crate::skills::{FetchError, valid_id};
@@ -247,13 +247,17 @@ async fn read(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     )
 }
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/settings/skills", get(list))
-        .route("/settings/skills/{id}", get(show).delete(remove))
-        .route("/bots/{bot_id}/skill-installs/{id}", get(review))
-        .route("/bots/{bot_id}/skill-installs/{id}/approve", post(approve))
-        .route("/bots/{bot_id}/skill-installs/{id}/decline", post(decline))
+pub fn routes() -> Routes {
+    Routes {
+        open: Router::new()
+            .route("/settings/skills", get(list))
+            .route("/settings/skills/{id}", get(show))
+            .route("/bots/{bot_id}/skill-installs/{id}", get(review)),
+        gated: Router::new()
+            .route("/settings/skills/{id}", delete(remove))
+            .route("/bots/{bot_id}/skill-installs/{id}/approve", post(approve))
+            .route("/bots/{bot_id}/skill-installs/{id}/decline", post(decline)),
+    }
 }
 
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {

@@ -12,9 +12,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
 use super::mcp::{Outcome, tool_error, tool_result};
+use super::{AppState, Routes};
 use crate::app::rules::{
     ChangeKind, Edit, MAX_BODY_CHARS, MAX_OWNER_WORDS_CHARS, MAX_TITLE_CHARS, Rules,
     parse_owner_words,
@@ -23,10 +23,11 @@ use crate::db::routines;
 use crate::db::rules::{self, Caller, RulesError, Saved};
 use crate::grants::Grant;
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/bots/{bot_id}/rules", get(show))
-        .route("/bots/{bot_id}/rules/restore", post(restore))
+pub fn routes() -> Routes {
+    Routes {
+        open: Router::new().route("/bots/{bot_id}/rules", get(show)),
+        gated: Router::new().route("/bots/{bot_id}/rules/restore", post(restore)),
+    }
 }
 
 impl From<RulesError> for ApiError {

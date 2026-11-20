@@ -8,12 +8,12 @@ use axum::routing::get;
 use axum::{Json, Router};
 use chrono::Utc;
 
-use super::AppState;
 use super::error::ApiError;
+use super::{AppState, Routes};
 use crate::app::usage::{self, Report};
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new().route("/usage", get(report))
+pub fn routes() -> Routes {
+    Routes::open(Router::new().route("/usage", get(report)))
 }
 
 async fn report(State(state): State<Arc<AppState>>) -> Result<Json<Report>, ApiError> {

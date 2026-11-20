@@ -16,37 +16,41 @@ use crate::computers::ComputerError;
 use crate::computers::upgrade_queue::UpgradeStatus;
 use crate::db::computer_handoffs as handoffs;
 
-use super::AppState;
 use super::error::{ApiError, ApiPath};
 use super::turns::bot_deleted;
+use super::{AppState, Routes};
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/computers", get(list))
-        .route("/computers/upgrade-all", post(upgrade_all))
-        .route("/computers/upgrade-all/cancel", post(cancel_upgrade_all))
-        .route("/bots/{bot_id}/computer", get(show))
-        .route("/bots/{bot_id}/computer/stop", post(stop))
-        .route("/bots/{bot_id}/computer/resume", post(resume))
-        .route("/bots/{bot_id}/computer/upgrade", post(upgrade))
-        .route("/bots/{bot_id}/computer/memory", post(set_memory))
-        .route("/bots/{bot_id}/desktop", get(desktop).delete(close_desktop))
-        .route(
-            "/bots/{bot_id}/desktop/stream",
-            get(super::desktop_stream::stream),
-        )
-        .route(
-            "/bots/{bot_id}/computer-handoffs/{handoff_id}/take",
-            post(take_handoff),
-        )
-        .route(
-            "/bots/{bot_id}/computer-handoffs/{handoff_id}/hand-back",
-            post(hand_back_handoff),
-        )
-        .route(
-            "/bots/{bot_id}/computer-handoffs/{handoff_id}/dismiss",
-            post(dismiss_handoff),
-        )
+pub fn routes() -> Routes {
+    Routes {
+        open: Router::new()
+            .route("/computers", get(list))
+            .route("/bots/{bot_id}/computer", get(show))
+            .route("/bots/{bot_id}/computer/stop", post(stop))
+            .route(
+                "/bots/{bot_id}/desktop/stream",
+                get(super::desktop_stream::stream),
+            ),
+        // Opening a desktop wakes the computer, so it waits like a write.
+        gated: Router::new()
+            .route("/computers/upgrade-all", post(upgrade_all))
+            .route("/computers/upgrade-all/cancel", post(cancel_upgrade_all))
+            .route("/bots/{bot_id}/computer/resume", post(resume))
+            .route("/bots/{bot_id}/computer/upgrade", post(upgrade))
+            .route("/bots/{bot_id}/computer/memory", post(set_memory))
+            .route("/bots/{bot_id}/desktop", get(desktop).delete(close_desktop))
+            .route(
+                "/bots/{bot_id}/computer-handoffs/{handoff_id}/take",
+                post(take_handoff),
+            )
+            .route(
+                "/bots/{bot_id}/computer-handoffs/{handoff_id}/hand-back",
+                post(hand_back_handoff),
+            )
+            .route(
+                "/bots/{bot_id}/computer-handoffs/{handoff_id}/dismiss",
+                post(dismiss_handoff),
+            ),
+    }
 }
 
 async fn take_handoff(

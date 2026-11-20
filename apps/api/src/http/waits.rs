@@ -11,12 +11,12 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiPath};
+use super::{AppState, Routes};
 use crate::db::waits::{self, StopError};
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new().route("/bots/{bot_id}/waits/{wait_id}/cancel", post(cancel))
+pub fn routes() -> Routes {
+    Routes::gated(Router::new().route("/bots/{bot_id}/waits/{wait_id}/cancel", post(cancel)))
 }
 
 /// Stop one wait. The bot is woken with the stop as that wait's outcome

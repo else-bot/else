@@ -10,8 +10,8 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
+use super::{AppState, Routes};
 use crate::app::messages::{self, InvalidAttachment, MAX_ATTACHMENT_BYTES};
 use crate::db::attachments::{self, StoreError};
 
@@ -27,13 +27,14 @@ pub fn is_upload(method: &axum::http::Method, path: &str) -> bool {
             .is_some_and(|bot| !bot.contains('/'))
 }
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
+pub fn routes() -> Routes {
+    Routes {
+        open: Router::new().route("/bots/{bot_id}/attachments/{attachment_id}", get(download)),
+        gated: Router::new().route(
             "/bots/{bot_id}/attachments",
             post(upload).layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY_BYTES)),
-        )
-        .route("/bots/{bot_id}/attachments/{attachment_id}", get(download))
+        ),
+    }
 }
 
 #[derive(Deserialize)]

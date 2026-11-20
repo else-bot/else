@@ -15,9 +15,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
 use super::mcp::{Outcome, tool_error, tool_result};
+use super::{AppState, Routes};
 use crate::app::routines::{MAX_NAME_CHARS, MAX_PROMPT_BYTES, RoutineName, RoutinePrompt};
 use crate::app::webhooks::{
     FASTEST_INTERVAL_MINUTES, MAX_DAILY_WAKES, MAX_PER_BOT, Pace, SLOWEST_INTERVAL_MINUTES,
@@ -29,11 +29,11 @@ use crate::grants::Grant;
 use crate::views::webhook_json;
 
 /// The owner's routes to pause, resume, and delete a bot's webhooks.
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new().route(
+pub fn routes() -> Routes {
+    Routes::gated(Router::new().route(
         "/bots/{bot_id}/webhooks/{webhook_id}",
         axum::routing::patch(owner_update).delete(owner_delete),
-    )
+    ))
 }
 
 #[derive(Deserialize)]

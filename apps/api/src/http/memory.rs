@@ -6,29 +6,33 @@ use std::sync::Arc;
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post, put};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
 use super::turns::bot_deleted;
+use super::{AppState, Routes};
 use crate::db::memory::{self, AppendError, Kind, NewEntry};
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/bots/{bot_id}/memory", get(read))
-        .route("/bots/{bot_id}/memory/corrections", post(correct))
-        .route("/bots/{bot_id}/memory/view", get(view))
-        .route("/bots/{bot_id}/memory/rebuild", post(rebuild))
-        .route("/settings/memory", get(recipe).patch(set_recipe))
-        .route("/bots/{bot_id}/memory-access", get(access))
-        .route(
-            "/bots/{bot_id}/memory-access/{target_id}",
-            put(grant).delete(revoke),
-        )
+pub fn routes() -> Routes {
+    Routes {
+        open: Router::new()
+            .route("/bots/{bot_id}/memory", get(read))
+            .route("/bots/{bot_id}/memory/view", get(view))
+            .route("/settings/memory", get(recipe))
+            .route("/bots/{bot_id}/memory-access", get(access)),
+        gated: Router::new()
+            .route("/bots/{bot_id}/memory/corrections", post(correct))
+            .route("/bots/{bot_id}/memory/rebuild", post(rebuild))
+            .route("/settings/memory", patch(set_recipe))
+            .route(
+                "/bots/{bot_id}/memory-access/{target_id}",
+                put(grant).delete(revoke),
+            ),
+    }
 }
 
 async fn bot_state(state: &AppState, bot_id: Uuid) -> Result<Option<bool>, ApiError> {

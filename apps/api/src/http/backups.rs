@@ -7,17 +7,20 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::AppState;
 use super::error::{ApiError, ApiJson};
+use super::{AppState, Routes};
 use crate::backup::service::{Backups, Snapshot};
 use crate::backup::settings::{DestinationInput, Error, LocalUpdate, Update};
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/settings/backups", get(show).put(save))
-        .route("/settings/backups/test", post(test))
-        .route("/settings/backups/run", post(run))
-        .route("/settings/backups/local", put(save_local))
+pub fn routes() -> Routes {
+    Routes {
+        open: Router::new().route("/settings/backups", get(show)),
+        gated: Router::new()
+            .route("/settings/backups", put(save))
+            .route("/settings/backups/test", post(test))
+            .route("/settings/backups/run", post(run))
+            .route("/settings/backups/local", put(save_local)),
+    }
 }
 
 fn service(state: &AppState) -> Result<&Backups, ApiError> {

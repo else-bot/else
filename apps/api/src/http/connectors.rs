@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::State,
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -9,7 +9,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::{
-    AppState,
+    AppState, Routes,
     error::{ApiError, ApiJson, ApiPath},
     mcp::{Outcome, tool_error, tool_result},
 };
@@ -18,45 +18,50 @@ use crate::{
     grants::Grant,
 };
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/connectors", get(definitions))
-        .route("/connectors/email/accounts", get(accounts).post(connect))
-        .route(
-            "/connectors/email/accounts/{account_id}",
-            get(account).patch(activate).delete(disconnect),
-        )
-        .route(
-            "/connectors/email/accounts/{account_id}/messages",
-            get(view_message),
-        )
-        .route(
-            "/connectors/email/accounts/{account_id}/credentials",
-            put(credentials),
-        )
-        .route(
-            "/connectors/email/accounts/{account_id}/config",
-            put(configure_folders),
-        )
-        .route(
-            "/connectors/email/accounts/{account_id}/bots/{bot_id}",
-            put(permissions).delete(revoke),
-        )
-        .route(
-            "/connectors/email/accounts/{account_id}/bots/{bot_id}/wake",
-            put(wake),
-        )
-        .route(
-            "/connectors/email/accounts/{account_id}/bots/{bot_id}/trigger",
-            axum::routing::delete(delete_trigger),
-        )
-        .route(
-            "/connectors/email/accounts/{account_id}/introduction",
-            post(introduction),
-        )
-        .route("/connectors/email/oauth/start", post(oauth_start))
-        .route("/connectors/email/oauth/complete", post(oauth_complete))
-        .route("/connectors/email/oauth/{request_id}", delete(oauth_cancel))
+pub fn routes() -> Routes {
+    Routes {
+        open: Router::new()
+            .route("/connectors", get(definitions))
+            .route("/connectors/email/accounts", get(accounts))
+            .route("/connectors/email/accounts/{account_id}", get(account))
+            .route(
+                "/connectors/email/accounts/{account_id}/messages",
+                get(view_message),
+            ),
+        gated: Router::new()
+            .route("/connectors/email/accounts", post(connect))
+            .route(
+                "/connectors/email/accounts/{account_id}",
+                patch(activate).delete(disconnect),
+            )
+            .route(
+                "/connectors/email/accounts/{account_id}/credentials",
+                put(credentials),
+            )
+            .route(
+                "/connectors/email/accounts/{account_id}/config",
+                put(configure_folders),
+            )
+            .route(
+                "/connectors/email/accounts/{account_id}/bots/{bot_id}",
+                put(permissions).delete(revoke),
+            )
+            .route(
+                "/connectors/email/accounts/{account_id}/bots/{bot_id}/wake",
+                put(wake),
+            )
+            .route(
+                "/connectors/email/accounts/{account_id}/bots/{bot_id}/trigger",
+                axum::routing::delete(delete_trigger),
+            )
+            .route(
+                "/connectors/email/accounts/{account_id}/introduction",
+                post(introduction),
+            )
+            .route("/connectors/email/oauth/start", post(oauth_start))
+            .route("/connectors/email/oauth/complete", post(oauth_complete))
+            .route("/connectors/email/oauth/{request_id}", delete(oauth_cancel)),
+    }
 }
 
 fn unavailable(error: store::StoreError) -> ApiError {

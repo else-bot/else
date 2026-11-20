@@ -10,16 +10,16 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::AppState;
 use super::error::{ApiError, ApiPath};
+use super::{AppState, Routes};
 use crate::db::watchers::{self, StopBy, Stopped};
 use crate::views::watcher_json;
 
-pub fn routes() -> Router<Arc<AppState>> {
-    Router::new().route(
+pub fn routes() -> Routes {
+    Routes::gated(Router::new().route(
         "/bots/{bot_id}/watchers/{watcher_id}/stop",
         post(owner_stop),
-    )
+    ))
 }
 
 /// Stop a watcher; its bot is woken once with the stop.

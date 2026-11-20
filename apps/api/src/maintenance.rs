@@ -267,35 +267,6 @@ impl Gate {
     }
 }
 
-/// Requests allowed while the gate is closed (and that need no admission):
-/// reads (except opening a desktop, which wakes a computer), Stop work,
-/// stopping a computer, sending a message (its handler queues it for after
-/// the pause), and preparing or abandoning an update (which close and
-/// reopen the gate themselves).
-pub fn allowed(method: &axum::http::Method, path: &str) -> bool {
-    use axum::http::Method;
-    if path.ends_with("/maintenance/update") {
-        return matches!(*method, Method::GET | Method::POST | Method::DELETE);
-    }
-    if path.ends_with("/maintenance/update/installation") {
-        return matches!(*method, Method::GET | Method::POST);
-    }
-    if matches!(*method, Method::GET | Method::HEAD) {
-        return !path.ends_with("/desktop");
-    }
-    *method == Method::POST
-        && (path.ends_with("/cancel") || path.ends_with("/computer/stop") || is_message_send(path))
-}
-
-/// `POST …/bots/{id}/turns`.
-fn is_message_send(path: &str) -> bool {
-    let mut segments = path.rsplit('/');
-    matches!(
-        (segments.next(), segments.next(), segments.next()),
-        (Some("turns"), Some(id), Some("bots")) if !id.is_empty()
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,19 +487,5 @@ mod tests {
         );
         assert_eq!(gate.pause(), None);
         drop(admitted);
-    }
-
-    #[test]
-    fn sending_a_message_is_allowed_while_paused() {
-        use axum::http::Method;
-        let bot = "/v1/bots/0a450d0d-a3a0-44bf-ad9a-070064df2b79";
-        assert!(allowed(&Method::POST, &format!("{bot}/turns")));
-        assert!(!allowed(&Method::POST, &format!("{bot}/attachments")));
-        assert!(
-            allowed(&Method::POST, "/bots/0a450d0d/turns"),
-            "nested routers strip /v1"
-        );
-        assert!(!allowed(&Method::POST, "/v1/turns"));
-        assert!(!allowed(&Method::POST, "/v1/bots//turns"));
     }
 }
