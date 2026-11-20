@@ -6,7 +6,7 @@ use crate::api::{
     vault_last_used,
 };
 use crate::controls::{Control as _, Scale, Tier, text_field};
-use crate::credential_fields::CredentialFields;
+use crate::credential_fields::{CredentialFields, Form};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::{StyledExt as _, h_flex};
@@ -147,7 +147,7 @@ impl View {
                     .default_value(website)
                     .placeholder("Website host, such as x.com")
             }),
-            fields: cx.new(|cx| CredentialFields::new(&env, entry.is_some(), window, cx)),
+            fields: cx.new(|cx| CredentialFields::new(&env, Form::Vault, window, cx)),
             original: entry,
         };
         self.phase = Phase::Editing(editor);

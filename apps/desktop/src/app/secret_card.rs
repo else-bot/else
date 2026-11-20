@@ -5,7 +5,7 @@
 //! disconnect, and never enter a draft, a pending message, or the chat.
 
 use crate::controls::{Control as _, Scale, Tier, text_field};
-use crate::credential_fields::{CredentialFields, FieldsChanged};
+use crate::credential_fields::{CredentialFields, FieldsChanged, Form};
 use gpui_kit::assets::IconName;
 
 use gpui_kit::component::button::Button;
@@ -41,7 +41,7 @@ impl SecretForm {
         window: &mut Window,
         cx: &mut Context<ElseApp>,
     ) -> Self {
-        let fields = cx.new(|cx| CredentialFields::new(&request.env, false, window, cx));
+        let fields = cx.new(|cx| CredentialFields::new(&request.env, Form::Requested, window, cx));
         let id = request.id;
         let subscription = cx.subscribe(&fields, move |app, _, _: &FieldsChanged, cx| {
             app.remeasure_row(RowKey::SecretRequest(id), cx);
